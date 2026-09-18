@@ -72,7 +72,14 @@ const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 #[cfg(target_os = "macos")]
 impl TokenStore for OsTokenStore {
     fn get(&self) -> Result<Option<String>, String> {
-        match security_framework::passwords::get_generic_password(SERVICE, ACCOUNT) {
+        // `generic_password(PasswordOptions::new_generic_password(..))` rather
+        // than the two-argument `get_generic_password`, which is `#[doc(hidden)]`
+        // upstream (`security-framework-3.7.0/src/passwords.rs:39`) and so a
+        // deprecation waiting to happen. Not a behaviour change: the hidden
+        // function's whole body is this call.
+        let options =
+            security_framework::passwords::PasswordOptions::new_generic_password(SERVICE, ACCOUNT);
+        match security_framework::passwords::generic_password(options) {
             Ok(bytes) => {
                 let token = String::from_utf8_lossy(&bytes).trim().to_string();
                 Ok(if token.is_empty() { None } else { Some(token) })

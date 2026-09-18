@@ -233,11 +233,6 @@ impl HubBackend {
             // has no reason to echo a header — but "has no reason to" is a
             // claim about code on the other side of a network, which is
             // exactly the reasoning this module refuses to rely on elsewhere.
-            // Scrubbed like every other scrap of text that came from outside
-            // this process. rmcp builds this message from its own dispatch and
-            // has no reason to echo a header — but "has no reason to" is a
-            // claim about code on the other side of a network, which is
-            // exactly the reasoning this module refuses to rely on elsewhere.
             let message = self.redact(
                 err.get("message")
                     .and_then(Value::as_str)
@@ -799,46 +794,169 @@ impl HubBackend {
 /// licence is not on `deny.toml`'s allow list.)
 pub struct TcpTransport;
 
-/// The TLS client config, built once. Loading the platform trust store means
-/// reading and parsing every root the machine has; doing that per request
-/// would be wasteful and, on a locked-down box, slow.
-fn tls_connector() -> Result<&'static tokio_rustls::TlsConnector, String> {
-    static CONNECTOR: std::sync::OnceLock<Result<tokio_rustls::TlsConnector, String>> =
-        std::sync::OnceLock::new();
-    CONNECTOR
-        .get_or_init(|| {
-            // Only the `ring` provider is compiled in, so rustls would pick it
-            // anyway; installing it explicitly means a future second provider
-            // cannot silently change which one is used. Same reasoning, and
-            // the same line, as `fleet_hub::tls`.
-            let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-            let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-            let found = rustls_native_certs::load_native_certs();
-            for cert in found.certs {
-                // A single unparseable root is not fatal: the store is a bag
-                // of certificates from the OS and one bad entry must not stop
-                // the app trusting the rest.
-                let _ = roots.add(cert);
-            }
-            if roots.is_empty() {
-                // Failing closed. An empty root store would reject every hub
-                // with an opaque certificate error; saying so once, here, is
-                // the difference between a diagnosable problem and a mystery.
-                return Err(format!(
-                    "no usable certificates in this machine's trust store \
-                     ({} error(s) while reading it); an https:// hub cannot be verified",
-                    found.errors.len()
-                ));
-            }
-            let config = tokio_rustls::rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
-                config,
-            )))
+/// Build the TLS client config: read the platform trust store and turn it
+/// into a connector. Blocking (file I/O, and on macOS a keychain read), so
+/// every caller goes through [`tls_connector`], which runs it on the blocking
+/// pool.
+fn build_tls_connector() -> Result<tokio_rustls::TlsConnector, String> {
+    // Only the `ring` provider is compiled in, so rustls would pick it
+    // anyway; installing it explicitly means a future second provider
+    // cannot silently change which one is used. Same reasoning, and
+    // the same line, as `fleet_hub::tls`.
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    let found = rustls_native_certs::load_native_certs();
+    for cert in found.certs {
+        // A single unparseable root is not fatal: the store is a bag
+        // of certificates from the OS and one bad entry must not stop
+        // the app trusting the rest.
+        let _ = roots.add(cert);
+    }
+    if roots.is_empty() {
+        // Failing closed. An empty root store would reject every hub
+        // with an opaque certificate error; saying so once, here, is
+        // the difference between a diagnosable problem and a mystery.
+        return Err(format!(
+            "no usable certificates in this machine's trust store \
+             ({} error(s) while reading it); an https:// hub cannot be verified",
+            found.errors.len()
+        ));
+    }
+    let config = tokio_rustls::rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
+        config,
+    )))
+}
+
+/// The TLS client config, built once and cached.
+///
+/// Two things this deliberately does NOT do:
+///
+/// - It does not load the trust store on a runtime worker.
+///   `load_native_certs` reads (and on macOS unlocks and queries) the
+///   platform store; on a locked-down or network-mounted box that is slow
+///   blocking I/O, and a runtime worker parked in it is a worker not running
+///   anyone else's future. It goes to [`tokio::task::spawn_blocking`].
+/// - It does not cache a FAILURE. A trust store that was momentarily
+///   unreadable — a keychain still locked at login, a profile not yet
+///   mounted — used to poison every https call for the lifetime of the
+///   process, so the app had to be restarted to recover from a condition that
+///   had already cleared. Only a success is remembered; a failure is retried
+///   on the next call.
+///
+/// Note that "the platform trust store" is really "the platform trust store,
+/// unless the environment says otherwise": `load_native_certs` honours
+/// `SSL_CERT_FILE` and `SSL_CERT_DIR` when they are set
+/// (`rustls-native-certs`'s `CertPaths::from_env`).
+async fn tls_connector() -> Result<&'static tokio_rustls::TlsConnector, String> {
+    static CONNECTOR: std::sync::OnceLock<tokio_rustls::TlsConnector> = std::sync::OnceLock::new();
+    if let Some(ready) = CONNECTOR.get() {
+        return Ok(ready);
+    }
+    let built = tokio::task::spawn_blocking(build_tls_connector)
+        .await
+        .map_err(|e| format!("reading this machine's trust store failed: {e}"))??;
+    // Two callers racing both build one; `get_or_init` keeps whichever
+    // arrived first and drops the other. Both are equivalent.
+    Ok(CONNECTOR.get_or_init(|| built))
+}
+
+/// Where a hub URL points, split into the pieces a hand-written request
+/// needs. One implementation for every request this app makes — `POST /mcp`
+/// and the `GET /events` stream alike — so a fix to the parsing cannot land
+/// in one and not the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    /// The host to connect to and to check the certificate against.
+    /// **Unbracketed**, so an IPv6 literal works: `url::Url::host_str` returns
+    /// `[::1]` with the brackets, which neither resolves nor parses as a
+    /// `ServerName`, and an IPv6 hub was simply unreachable before this.
+    pub host: String,
+    pub port: u16,
+    pub tls: bool,
+    /// What the `Host` header must carry. Here the brackets are REQUIRED
+    /// (`[::1]:8787`), and the port is part of it unless it is the scheme's
+    /// default — the hub's allowlist is matched against exactly this string.
+    pub authority: String,
+    /// Path plus query, ready to go on the request line.
+    pub target: String,
+}
+
+impl Endpoint {
+    /// Parse a hub URL. `extra_path` is appended to whatever path prefix the
+    /// base URL already carries (`/mcp`, `/events`), and `query` goes on as
+    /// given, without a leading `?`.
+    pub fn parse(url: &str) -> Result<Self, String> {
+        let parsed = url::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
+        let tls = match parsed.scheme() {
+            "https" => true,
+            "http" => false,
+            other => return Err(format!("{other}:// is not a hub address")),
+        };
+        let host = match parsed.host() {
+            // `to_string` on the address itself, NOT `host_str`, which keeps
+            // the URL's brackets.
+            Some(url::Host::Ipv6(v6)) => v6.to_string(),
+            Some(url::Host::Ipv4(v4)) => v4.to_string(),
+            Some(url::Host::Domain(d)) => d.to_string(),
+            None => return Err("no host in the hub URL".to_string()),
+        };
+        let port = parsed
+            .port_or_known_default()
+            .unwrap_or(if tls { 443 } else { 80 });
+        let bracketed = parsed.host_str().unwrap_or(&host);
+        let authority = match parsed.port() {
+            Some(p) => format!("{bracketed}:{p}"),
+            None => bracketed.to_string(),
+        };
+        let target = match parsed.query() {
+            Some(q) => format!("{}?{}", parsed.path(), q),
+            None => parsed.path().to_string(),
+        };
+        Ok(Self {
+            host,
+            port,
+            tls,
+            authority,
+            target,
         })
-        .as_ref()
-        .map_err(Clone::clone)
+    }
+}
+
+/// A connected stream to the hub, TLS-wrapped when the URL said `https`.
+/// Boxed because the two arms are different types and both the one-shot and
+/// the streaming caller want one name for them.
+pub type HubStream = Box<dyn Duplex>;
+
+/// `AsyncRead + AsyncWrite`, object-safe.
+pub trait Duplex: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> Duplex for T {}
+
+/// Connect to `at`, wrapping in TLS when it says so. The one place a socket
+/// to a hub is opened.
+pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
+    let tcp = tokio::net::TcpStream::connect((at.host.as_str(), at.port))
+        .await
+        .map_err(|e| format!("connect {}:{}: {e}", at.host, at.port))?;
+    if !at.tls {
+        return Ok(Box::new(tcp));
+    }
+    let connector = tls_connector().await?;
+    // The name the certificate is checked against. An IP literal is accepted
+    // by `ServerName` and matched as an IP SAN, which is what a hub reached
+    // at `https://10.0.0.5` needs.
+    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(at.host.clone())
+        .map_err(|e| format!("{} is not a valid certificate name: {e}", at.host))?;
+    let stream = connector
+        .connect(server_name, tcp)
+        .await
+        // The usual causes are an expired or self-signed certificate and a
+        // name that does not match; rustls says which, and the operator needs
+        // to hear it verbatim.
+        .map_err(|e| format!("TLS handshake with {}:{} failed: {e}", at.host, at.port))?;
+    Ok(Box::new(stream))
 }
 
 /// Largest response read from the hub, so a stray listener cannot make the
@@ -857,63 +975,29 @@ impl HubTransport for TcpTransport {
         bearer: &str,
         body: String,
     ) -> Result<HubResponse, String> {
-        let parsed = url::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
-        let tls = match parsed.scheme() {
-            "https" => true,
-            "http" => false,
-            other => return Err(format!("{other}:// is not a hub address")),
-        };
-        let host = parsed.host_str().ok_or("no host in the hub URL")?;
-        let port = parsed
-            .port_or_known_default()
-            .unwrap_or(if tls { 443 } else { 80 });
-        // `authority` is what the Host header must carry: the port is part of
-        // it unless it is the scheme's default, and the hub's allowlist is
-        // matched against exactly this string.
-        let authority = match parsed.port() {
-            Some(p) => format!("{host}:{p}"),
-            None => host.to_string(),
-        };
-        let path = parsed.path();
+        let at = Endpoint::parse(url)?;
         // `Accept` carries both types because the transport answers
         // SSE-framed; rmcp refuses a request that does not accept
         // `text/event-stream`.
         let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {authority}\r\nAuthorization: Bearer {bearer}\r\n\
+            "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
              Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            at.target,
+            at.authority,
             body.len()
         );
-        let raw = tokio::time::timeout(CALL_TIMEOUT, exchange(host, port, tls, &request))
+        let raw = tokio::time::timeout(CALL_TIMEOUT, exchange(&at, &request))
             .await
             .map_err(|_| format!("no answer within {CALL_TIMEOUT:.0?}"))??;
         split_response(&raw)
     }
 }
 
-/// Connect (wrapping in TLS when asked), write the request, read the whole
-/// answer back.
-async fn exchange(host: &str, port: u16, tls: bool, request: &str) -> Result<String, String> {
-    let tcp = tokio::net::TcpStream::connect((host, port))
-        .await
-        .map_err(|e| format!("connect {host}:{port}: {e}"))?;
-    if !tls {
-        return speak(tcp, host, port, request).await;
-    }
-    let connector = tls_connector()?;
-    // The name the certificate is checked against. An IP literal is accepted
-    // by `ServerName` and matched as an IP SAN, which is what a hub reached
-    // at `https://10.0.0.5` needs.
-    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("{host} is not a valid certificate name: {e}"))?;
-    let stream = connector
-        .connect(server_name, tcp)
-        .await
-        // The usual causes are an expired or self-signed certificate and a
-        // name that does not match; rustls says which, and the operator needs
-        // to hear it verbatim.
-        .map_err(|e| format!("TLS handshake with {host}:{port} failed: {e}"))?;
-    speak(stream, host, port, request).await
+/// Connect, write the request, read the whole answer back.
+async fn exchange(at: &Endpoint, request: &str) -> Result<String, String> {
+    let conn = connect(at).await?;
+    speak(conn, &at.host, at.port, request).await
 }
 
 /// Write `request` and read until the peer closes. Generic over the stream so
@@ -931,7 +1015,12 @@ where
         .await
         .map_err(|e| format!("send to {host}:{port}: {e}"))?;
     let mut raw = Vec::new();
-    if let Err(e) = conn.take(MAX_RESPONSE).read_to_end(&mut raw).await {
+    // One byte MORE than the cap, so "the answer was too big" is
+    // distinguishable from "the answer was exactly the cap". Truncating
+    // silently at the cap used to surface as `E_PARSE … returned unreadable
+    // JSON`, which sends whoever reads it looking for a bug in the hub's
+    // encoder rather than at a size limit.
+    if let Err(e) = conn.take(MAX_RESPONSE + 1).read_to_end(&mut raw).await {
         // A peer that closes the TCP connection without sending `close_notify`
         // makes rustls 0.23 return `UnexpectedEof` (`rustls/src/conn.rs`,
         // `(false, true) => Err(UnexpectedEof)`), and `?` here used to throw
@@ -954,10 +1043,27 @@ where
             raw.len()
         );
     }
+    if raw.len() as u64 > MAX_RESPONSE {
+        return Err(format!(
+            "{host}:{port} sent more than {} MiB; refusing to buffer it \
+             (silently truncating at the cap surfaced as unreadable JSON, \
+             which names the wrong problem)",
+            MAX_RESPONSE / (1024 * 1024)
+        ));
+    }
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
-/// Split a raw HTTP response into its status code and body.
+/// Split a raw HTTP response into its status code and body, undoing
+/// `Transfer-Encoding: chunked` when the head declares it.
+///
+/// The de-chunking is not decoration. Without it this worked only by
+/// accident: a chunk-size line is not a `data:` line, so `last_event_payload`
+/// skipped it, and the boundaries happened to align because rmcp writes one
+/// SSE frame per body frame. Nothing guarantees either, and the day a frame is
+/// split across two chunks the size line lands in the middle of a `data:`
+/// line and the JSON is quietly corrupt. (`fleet-hub/src/pair.rs` still takes
+/// the shortcut; it is the same latent bug, not a different one.)
 pub fn split_response(raw: &str) -> Result<HubResponse, String> {
     let (head, body) = raw
         .split_once("\r\n\r\n")
@@ -970,10 +1076,67 @@ pub fn split_response(raw: &str) -> Result<HubResponse, String> {
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| format!("unreadable status line: {status_line:?}"))?;
-    Ok(HubResponse {
-        status,
-        body: body.to_string(),
+    let body = if head_is_chunked(head) {
+        dechunk(body)?
+    } else {
+        body.to_string()
+    };
+    Ok(HubResponse { status, body })
+}
+
+/// Does this response head declare `Transfer-Encoding: chunked`? Header names
+/// are case-insensitive and the value may be a list (`gzip, chunked`).
+pub fn head_is_chunked(head: &str) -> bool {
+    head.lines().skip(1).any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
+        })
     })
+}
+
+/// Undo `Transfer-Encoding: chunked` over a whole body.
+///
+/// A chunk is `<hex size>[;ext]CRLF<size bytes>CRLF`, and a zero-size chunk
+/// ends the body. A body that stops mid-chunk (the peer closed early) yields
+/// what had arrived rather than an error: [`speak`] already tolerates a
+/// half-closed connection, and failing here would undo that.
+pub fn dechunk(body: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = body;
+    loop {
+        let Some((size_line, after)) = rest.split_once("\r\n") else {
+            // The body ended mid-header; whatever decoded is what there is.
+            return Ok(out);
+        };
+        // `;` introduces chunk extensions, which nothing here uses.
+        let size_token = size_line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_token, 16)
+            .map_err(|_| format!("unreadable chunk size {size_token:?}"))?;
+        if size == 0 {
+            return Ok(out);
+        }
+        if after.len() < size {
+            // Truncated final chunk: take what arrived.
+            out.push_str(after);
+            return Ok(out);
+        }
+        // A chunk size is a BYTE count, and slicing a `str` at a byte offset
+        // inside a multi-byte character panics. It cannot happen on a
+        // well-formed body, which is exactly why it must be an error rather
+        // than an unwrap: the bytes came off a network.
+        if !after.is_char_boundary(size) {
+            return Err(format!(
+                "chunk of {size} byte(s) ends inside a character; the body is \
+                 not the UTF-8 it claimed to be"
+            ));
+        }
+        out.push_str(&after[..size]);
+        // Skip the chunk's own trailing CRLF.
+        rest = after[size..].strip_prefix("\r\n").unwrap_or(&after[size..]);
+    }
 }
 
 #[cfg(test)]

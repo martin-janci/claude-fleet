@@ -34,7 +34,7 @@ fn sample_usage() -> SessionUsage {
     }
 }
 
-pub(super) fn sample_session() -> SessionRow {
+pub(crate) fn sample_session() -> SessionRow {
     SessionRow {
         id: 1,
         tmux_name: "fleet-demo".into(),
@@ -77,7 +77,7 @@ pub(super) fn sample_session() -> SessionRow {
     }
 }
 
-fn sample_host() -> HostRow {
+pub(crate) fn sample_host() -> HostRow {
     HostRow {
         alias: "trn".into(),
         ssh_alias: Some("trn.example".into()),
@@ -91,7 +91,7 @@ fn sample_host() -> HostRow {
     }
 }
 
-fn sample_account() -> AccountRow {
+pub(crate) fn sample_account() -> AccountRow {
     AccountRow {
         uuid: "acct-uuid".into(),
         email: Some("a@example.com".into()),
@@ -115,7 +115,7 @@ fn sample_event() -> SessionEvent {
     }
 }
 
-fn sample_task() -> TaskRow {
+pub(crate) fn sample_task() -> TaskRow {
     TaskRow {
         id: 1,
         requester_session_id: Some(2),
@@ -132,7 +132,7 @@ fn sample_task() -> TaskRow {
     }
 }
 
-fn sample_project_row() -> ProjectRow {
+pub(crate) fn sample_project_row() -> ProjectRow {
     ProjectRow {
         id: 1,
         owner: "owner".into(),
@@ -143,7 +143,7 @@ fn sample_project_row() -> ProjectRow {
     }
 }
 
-fn sample_worktree_row() -> WorktreeRow {
+pub(crate) fn sample_worktree_row() -> WorktreeRow {
     WorktreeRow {
         id: 1,
         project_id: 2,

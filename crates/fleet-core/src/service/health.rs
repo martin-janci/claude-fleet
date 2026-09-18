@@ -4,8 +4,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-#[derive(Serialize, Deserialize, Default)]
-#[serde(default)]
+/// Deliberately **not** `#[serde(default)]`, unlike the list-row types the
+/// hub client deserialises.
+///
+/// Those need it because `ok_json_compact` strips null keys recursively, so
+/// absent is the normal encoding of `None` on the wire. `Health` has no
+/// `Option` field at all — nor do its nested `UsageTotals` / `DayUsage` — and
+/// `fleet_health` serialises with `ok_json`, which strips nothing. A
+/// container default would therefore buy nothing and cost the loudness: `{}`
+/// would parse into a perfectly zeroed health panel (`stuck: 0`, `ghosts: 0`,
+/// `context_red: 0`, `hosts_total: 0`) rather than failing, so a renamed
+/// field, a wrapper object or an older hub would read as a *healthy* fleet.
+/// [`tests::a_partial_health_is_rejected_rather_than_zeroed`] pins that.
+///
+/// `Default` went with it: nothing derived it (`health_check`'s poisoned-lock
+/// arm writes every field out), and leaving it would invite the attribute
+/// back.
+#[derive(Serialize, Deserialize)]
 pub struct Health {
     pub version: String,
     pub db_ready: bool,
@@ -433,5 +448,54 @@ mod tests {
         assert_eq!(h.sessions_total, 0);
         assert_eq!(h.hosts_total, 0);
         assert!(h.by_status.is_empty());
+    }
+
+    /// The hub client deserialises `fleet_health`'s answer into this type. A
+    /// `Health` that arrives short of a field must be an ERROR, not a
+    /// silently zeroed fleet: `stuck: 0, ghosts: 0, context_red: 0` is the
+    /// most reassuring thing this app can say, and it must never be said on
+    /// the strength of a field that was not there.
+    ///
+    /// This is the pin on the container `#[serde(default)]` that used to sit
+    /// on `Health`. Put it back and every case below parses.
+    #[test]
+    fn a_partial_health_is_rejected_rather_than_zeroed() {
+        for body in [
+            // The whole answer missing — a wrapper object, a 200 with `{}`.
+            "{}",
+            // One renamed field. Everything else is present and right, which
+            // is what makes a default so quiet here.
+            r#"{"version":"1","db_ready":true,"schema_version":32,
+                "hosts_reachable":1,"hosts_total":1,"sessions_total":3,
+                "by_status":{},"ghosts":0,"context_red":0,
+                "stuckCount":2,
+                "usage_by_host":{},"usage_by_day":[]}"#,
+        ] {
+            let parsed = serde_json::from_str::<Health>(body);
+            assert!(
+                parsed.is_err(),
+                "an incomplete Health must fail to parse, not read as a \
+                 healthy fleet; {body} parsed"
+            );
+        }
+        // And a complete one still parses, so the assertion above is about
+        // the missing field and not about the shape in general.
+        let whole = serde_json::to_string(&Health {
+            version: "1".into(),
+            db_ready: true,
+            schema_version: 32,
+            hosts_reachable: 1,
+            hosts_total: 2,
+            sessions_total: 3,
+            by_status: BTreeMap::new(),
+            ghosts: 4,
+            context_red: 5,
+            stuck: 6,
+            usage_by_host: BTreeMap::new(),
+            usage_by_day: Vec::new(),
+        })
+        .expect("Health serialises");
+        let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");
+        assert_eq!(back.stuck, 6);
     }
 }

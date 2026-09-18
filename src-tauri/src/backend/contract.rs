@@ -77,4 +77,7 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 
 #[cfg(test)]
 #[path = "tests_contract.rs"]
-mod tests;
+// `pub(crate)` so the event-bridge tests can build their rows from the
+// SAME fully-populated samples this module pins. Two sets of fixtures for
+// one set of row types is how one of them goes stale.
+pub(crate) mod tests;

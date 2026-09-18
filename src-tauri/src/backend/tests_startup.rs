@@ -27,6 +27,9 @@ impl FleetTasks for Recorder {
     fn start_account_usage_tick(&self) {
         self.0.lock().unwrap().push("account_usage_tick");
     }
+    fn start_event_bridge(&self) {
+        self.0.lock().unwrap().push("event_bridge");
+    }
 }
 
 fn remote() -> Backend {
@@ -49,11 +52,12 @@ fn a_hub_client_starts_none_of_the_three() {
     start_background_tasks(&remote(), &recorder);
     assert_eq!(
         recorder.started(),
-        Vec::<&str>::new(),
-        "a desktop pointed at a hub started a background task. Two processes \
-         reconciling one fleet is the failure this whole mode exists to \
-         prevent — and unlike most bugs it is silent, because both halves \
-         appear to work."
+        vec!["event_bridge"],
+        "a desktop pointed at a hub started a fleet-owning background task. \
+         Two processes reconciling one fleet is the failure this whole mode \
+         exists to prevent — and unlike most bugs it is silent, because both \
+         halves appear to work. The event bridge is the one task a client DOES \
+         run: it only reads the hub's stream."
     );
 }
 
@@ -68,7 +72,8 @@ fn a_standalone_app_starts_all_three() {
         recorder.started(),
         vec!["control_api", "reconcile_tick", "account_usage_tick"],
         "standalone must keep its control API, its reconcile tick and its \
-         usage poll"
+         usage poll — and must NOT start the hub event bridge, because there \
+         is no hub and its own event bus already drives the stores"
     );
 }
 
@@ -92,6 +97,7 @@ fn lib_rs_cannot_start_a_background_task_behind_this_modules_back() {
         "spawn_reconcile_tick(",
         "spawn_account_usage_tick(",
         "maybe_start_mcp(",
+        "spawn_event_bridge(",
     ] {
         assert!(
             !lib.contains(forbidden),
@@ -112,9 +118,9 @@ fn lib_rs_cannot_start_a_background_task_behind_this_modules_back() {
     );
 }
 
-/// And the real implementation holds each of the three exactly once — so a
-/// second reconcile tick cannot be added beside the first inside the one file
-/// that is allowed to spawn them.
+/// And the real implementation holds each of them exactly once — so a second
+/// reconcile tick cannot be added beside the first inside the one file that is
+/// allowed to spawn them.
 #[test]
 fn the_real_tasks_module_spawns_each_of_the_three_exactly_once() {
     let tasks = include_str!("../bootstrap/tasks.rs");
@@ -122,6 +128,7 @@ fn the_real_tasks_module_spawns_each_of_the_three_exactly_once() {
         ("spawn_reconcile_tick(", "the reconcile tick"),
         ("spawn_account_usage_tick(", "the account-usage poll"),
         ("maybe_start_mcp(", "the embedded control API"),
+        ("spawn_event_bridge(", "the hub event bridge"),
     ] {
         assert_eq!(
             tasks.matches(call).count(),

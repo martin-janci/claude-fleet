@@ -824,3 +824,206 @@ fn a_real_read_error_is_not_swallowed_even_with_bytes_in_hand() {
     .expect_err("a reset is not a clean end of response");
     assert!(e.contains("read from hub.example.com:443"), "{e}");
 }
+
+// --- the endpoint ------------------------------------------------------------
+
+/// One parse for every request this app makes, so a fix lands once.
+#[test]
+fn an_endpoint_splits_a_hub_url_into_what_a_hand_written_request_needs() {
+    let at = Endpoint::parse("https://fleet.example.com/mcp").expect("a hub URL");
+    assert_eq!(at.host, "fleet.example.com");
+    assert_eq!(at.port, 443, "https defaults to 443");
+    assert!(at.tls);
+    assert_eq!(
+        at.authority, "fleet.example.com",
+        "no port in the Host header when it is the scheme's default — the \
+         hub's allowlist is matched against exactly this string"
+    );
+    assert_eq!(at.target, "/mcp");
+
+    let at = Endpoint::parse("http://hub.example.com:4180/fleet/events").expect("a hub URL");
+    assert_eq!(at.port, 4180);
+    assert!(!at.tls);
+    assert_eq!(
+        at.authority, "hub.example.com:4180",
+        "a non-default port is"
+    );
+    assert_eq!(at.target, "/fleet/events");
+
+    assert!(Endpoint::parse("ftp://hub.example.com").is_err());
+    assert!(Endpoint::parse("not a url").is_err());
+}
+
+/// An IPv6-literal hub was simply unreachable: `host_str()` keeps the URL's
+/// brackets, and `[::1]` neither resolves nor parses as a certificate name,
+/// so `https://[::1]:8787` failed before a single byte went out. The `Host`
+/// header is the one place the brackets belong.
+#[test]
+fn an_ipv6_literal_hub_connects_and_still_sends_a_bracketed_host_header() {
+    let at = Endpoint::parse("https://[2001:db8::1]:8787/mcp").expect("an IPv6 hub URL");
+    assert_eq!(
+        at.host, "2001:db8::1",
+        "the connect and SNI name must be unbracketed"
+    );
+    assert_eq!(at.port, 8787);
+    assert_eq!(
+        at.authority, "[2001:db8::1]:8787",
+        "the Host header keeps the brackets"
+    );
+    // And the unbracketed form really is what rustls accepts as a name.
+    assert!(
+        tokio_rustls::rustls::pki_types::ServerName::try_from(at.host.clone()).is_ok(),
+        "an IP literal is matched against an IP SAN"
+    );
+    assert!(
+        tokio_rustls::rustls::pki_types::ServerName::try_from("[2001:db8::1]".to_string()).is_err(),
+        "the bracketed form is what used to be passed, and it is rejected"
+    );
+    // Loopback too, since that is the tunnelled setup docs/hub.md describes.
+    let at = Endpoint::parse("http://[::1]:8787/events").expect("a loopback IPv6 hub URL");
+    assert_eq!(at.host, "::1");
+    assert_eq!(at.authority, "[::1]:8787");
+}
+
+// --- chunked framing ---------------------------------------------------------
+
+#[test]
+fn a_chunked_body_is_rejoined() {
+    let raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+               5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+    assert_eq!(split_response(raw).expect("a response").body, "hello world");
+}
+
+/// The shortcut this replaces worked only because a chunk-size line is not a
+/// `data:` line and rmcp happened to write one frame per body frame. Split a
+/// frame across two chunks and the size line lands INSIDE a `data:` line.
+#[test]
+fn a_chunk_boundary_inside_a_data_line_no_longer_corrupts_the_payload() {
+    let payload = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"[]"}]}}"#;
+    let frame = format!("event: message\ndata: {payload}\n\n");
+    let cut = frame.len() / 2;
+    let (a, b) = frame.split_at(cut);
+    let raw = format!(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+         {:x}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n",
+        a.len(),
+        b.len()
+    );
+    let body = split_response(&raw).expect("a response").body;
+    assert_eq!(body, frame, "the two chunks are rejoined byte for byte");
+    assert_eq!(
+        fleet_core::mcp::wire::last_event_payload(&body),
+        payload,
+        "and the envelope reads back whole"
+    );
+}
+
+#[test]
+fn a_body_that_did_not_declare_chunked_is_left_alone() {
+    let raw = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n5\r\nx";
+    assert_eq!(
+        split_response(raw).expect("a response").body,
+        "5\r\nx",
+        "what looks like a chunk header is body when nothing declared chunking"
+    );
+}
+
+#[test]
+fn the_transfer_encoding_header_is_matched_case_insensitively_and_in_a_list() {
+    for head in [
+        "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked",
+    ] {
+        assert!(head_is_chunked(head), "{head:?}");
+    }
+    for head in [
+        "HTTP/1.1 200 OK\r\nContent-Length: 3",
+        // The status line is skipped, so a reason phrase cannot match.
+        "HTTP/1.1 200 Transfer-Encoding: chunked",
+        "HTTP/1.1 200 OK\r\nX-Note: Transfer-Encoding: chunked",
+    ] {
+        assert!(!head_is_chunked(head), "{head:?}");
+    }
+}
+
+/// A peer that dies mid-chunk leaves what arrived, matching `speak`'s own
+/// tolerance for a half-close. Refusing here would undo that.
+#[test]
+fn a_truncated_chunked_body_yields_what_arrived() {
+    assert_eq!(dechunk("5\r\nhel").expect("partial"), "hel");
+    assert_eq!(
+        dechunk("5\r\nhello\r\n6\r\n wor").expect("partial"),
+        "hello wor"
+    );
+}
+
+#[test]
+fn an_unreadable_chunk_size_is_an_error_not_a_guess() {
+    let e = dechunk("zz\r\nxx").expect_err("zz is not hex");
+    assert!(e.contains("chunk size"), "{e}");
+}
+
+/// A chunk size is a BYTE count. Slicing a `str` at a byte offset inside a
+/// character panics, and these bytes came off a network.
+#[test]
+fn a_chunk_that_ends_inside_a_character_is_an_error_not_a_panic() {
+    // "ä" is two bytes; claim a chunk of one.
+    let e = dechunk("1\r\nä\r\n0\r\n\r\n").expect_err("that cut a character in half");
+    assert!(e.contains("inside a character"), "{e}");
+}
+
+// --- the trust store, loaded off the runtime and never cached as a failure ---
+
+/// `load_native_certs` is blocking file I/O — and on macOS a keychain query,
+/// which can be slow or prompt. Calling it straight from an `async fn` parks a
+/// runtime worker, and there are only as many workers as cores.
+///
+/// A source assertion rather than a behavioural one because the defect is a
+/// *thread*, and nothing in-process can observe which thread a blocking read
+/// happened on. It is the same shape as
+/// `startup::tests::lib_rs_cannot_start_a_background_task_behind_this_modules_back`,
+/// and it catches the regression that matters: someone calling the builder
+/// directly again.
+#[test]
+fn the_trust_store_is_never_loaded_on_a_runtime_worker() {
+    let src = include_str!("remote.rs");
+    let calls: Vec<&str> = src
+        .lines()
+        .filter(|l| l.contains("build_tls_connector") && !l.trim_start().starts_with("//"))
+        .collect();
+    assert_eq!(
+        calls.len(),
+        2,
+        "expected exactly the definition and the spawn_blocking call, got: {calls:#?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|l| l.contains("spawn_blocking(build_tls_connector)")),
+        "the only call must go through spawn_blocking: {calls:#?}"
+    );
+    assert!(
+        !src.contains("load_native_certs()") || src.matches("load_native_certs()").count() == 1,
+        "the platform trust store is read in one place only"
+    );
+}
+
+/// The `OnceLock` holds a `TlsConnector`, not a `Result<TlsConnector, _>`.
+///
+/// That distinction is the whole of the second half of the finding: a trust
+/// store that was momentarily unreadable — a keychain still locked just after
+/// login, a profile not yet mounted — used to poison every https call for the
+/// life of the process, so the app had to be restarted to recover from a
+/// condition that had already cleared. A cell that cannot hold an error cannot
+/// cache one; the type is the guarantee, and this test is what stops the type
+/// quietly widening again.
+#[test]
+fn a_failed_trust_store_read_is_not_remembered() {
+    let src = include_str!("remote.rs");
+    assert!(
+        src.contains("static CONNECTOR: std::sync::OnceLock<tokio_rustls::TlsConnector>"),
+        "CONNECTOR must not be a OnceLock<Result<..>>: a cached failure \
+         survives the condition that caused it, and only a restart clears it"
+    );
+}

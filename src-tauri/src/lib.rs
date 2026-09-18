@@ -68,6 +68,11 @@ pub fn run() {
     let tunnels = std::sync::Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new());
     let tunnels_for_exit = std::sync::Arc::clone(&tunnels);
     let tunnels_for_setup = std::sync::Arc::clone(&tunnels);
+    // Cancelled on window destroy, so the hub event bridge's socket does not
+    // keep a background task alive after quit. Standalone mode never starts
+    // the bridge, so nothing observes it there.
+    let shutdown_token = tokio_util::sync::CancellationToken::new();
+    let shutdown_for_exit = shutdown_token.clone();
     // SEC-9: the only local paths `upload_to_session` may read are the ones
     // the OS drag-drop handed the window (recorded below in the window /
     // webview event handlers).
@@ -90,8 +95,13 @@ pub fn run() {
                 fleet_core::rt::install(tokio::runtime::Handle::current());
             });
             let handle = app.handle().clone();
-            let bus: std::sync::Arc<dyn fleet_core::events::EventBus> =
+            // Built concretely and then coerced, rather than built as the
+            // trait object: the hub event bridge needs the concrete type. Both
+            // handles are the same bus, so a hub event and a local one go down
+            // one channel to one drain thread.
+            let frontend_bus =
                 std::sync::Arc::new(crate::app_events::AppHandleEventBus::new(handle));
+            let bus: std::sync::Arc<dyn fleet_core::events::EventBus> = frontend_bus.clone();
             // Kept alongside the clone moved into `Store` below: the account
             // usage poller and its commands emit `account_usage:updated`
             // straight through the bus, not through a `Store` row mutation
@@ -200,6 +210,9 @@ pub fn run() {
                     guards: guards.clone(),
                     usage_cache: std::sync::Arc::clone(&usage_cache),
                     bus: bus_for_usage,
+                    frontend: std::sync::Arc::clone(&frontend_bus),
+                    remote: backend.remote().cloned(),
+                    shutdown: shutdown_token.clone(),
                 },
             );
             Ok(())
@@ -339,6 +352,7 @@ pub fn run() {
                 use tauri::Manager;
                 ssh_client_for_exit.shutdown_all();
                 tunnels_for_exit.stop_all();
+                shutdown_for_exit.cancel();
                 if let Some(runtime) = window.try_state::<Mutex<fleet_core::mcp::McpRuntime>>() {
                     if let Ok(mut rt) = runtime.lock() {
                         rt.stop();

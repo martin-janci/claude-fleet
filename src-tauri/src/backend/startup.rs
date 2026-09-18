@@ -47,13 +47,20 @@ pub trait FleetTasks {
     fn start_reconcile_tick(&self);
     /// The 60s account-usage poll.
     fn start_account_usage_tick(&self);
+    /// The hub's event stream, re-emitted as the frontend's own row events.
+    /// The mirror image of the three above: it is the ONLY background task a
+    /// hub client runs, and a standalone app must not run it — there is no hub
+    /// to subscribe to, and its own event bus already drives the stores.
+    fn start_event_bridge(&self);
 }
 
 /// Start exactly the background tasks this backend is entitled to run.
 ///
-/// Standalone: all three. Pointed at a hub: **none**, and the early return is
-/// the whole point — every statement below it is unreachable for a client,
-/// and a test proves it rather than a comment asserting it.
+/// Standalone: the three fleet-owning ones, and not the event bridge — there
+/// is no hub to subscribe to. Pointed at a hub: **only** the event bridge, and
+/// the early return is the whole point, because every statement below it is
+/// unreachable for a client and a test proves it rather than a comment
+/// asserting it.
 pub fn start_background_tasks(backend: &Backend, tasks: &dyn FleetTasks) {
     if !backend.owns_the_fleet() {
         // Deliberately no token in this line. `base_url` carries no userinfo
@@ -64,9 +71,14 @@ pub fn start_background_tasks(backend: &Backend, tasks: &dyn FleetTasks) {
                 hub = %cfg.base_url,
                 client = %cfg.client_name,
                 "remote backend: skipping the reconcile tick, the account-usage \
-                 poll and the embedded control API — the hub owns this fleet"
+                 poll and the embedded control API — the hub owns this fleet; \
+                 following its event stream instead"
             );
         }
+        // The one thing a client DOES start. Without it a hub-client desktop
+        // renders whatever it listed at startup and then never changes: the
+        // local event bus has nothing to emit, because nothing local mutates.
+        tasks.start_event_bridge();
         return;
     }
     tracing::info!(

@@ -12,7 +12,11 @@
 //! what makes `&self` possible, and each of these runs at most once per
 //! process anyway.
 
+use crate::app_events::AppHandleEventBus;
+use crate::backend::events::{spawn_event_bridge, EventBridge, HubResync, HubSse, RealDelay};
+use crate::backend::remote::HubBackend;
 use crate::backend::startup::FleetTasks;
+use crate::backend::RemoteConfig;
 use crate::bootstrap::mcp::maybe_start_mcp;
 use fleet_core::events::EventBus;
 use fleet_core::service::account_usage::UsageCache;
@@ -31,6 +35,17 @@ pub(crate) struct RealFleetTasks {
     pub guards: mcp::McpGuards,
     pub usage_cache: Arc<Mutex<UsageCache>>,
     pub bus: Arc<dyn EventBus>,
+    /// The same bus, concretely. The hub event bridge hands it
+    /// `(&'static str, Value)` pairs directly — the trait object above only
+    /// exposes `emit(&RowChange)`, and remote mode has no local row to build
+    /// a `RowChange` from. Both ends feed one channel; see
+    /// `app_events::AppHandleEventBus`.
+    pub frontend: Arc<AppHandleEventBus>,
+    /// `Some` only when this app is a window onto a hub.
+    pub remote: Option<RemoteConfig>,
+    /// Cancelled when the app stops, so the bridge's socket does not hold a
+    /// shutdown open.
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl FleetTasks for RealFleetTasks {
@@ -71,5 +86,32 @@ impl FleetTasks for RealFleetTasks {
             Arc::clone(&self.usage_cache),
             Arc::clone(&self.bus),
         );
+    }
+
+    /// Task 4: follow the hub's `GET /events` and re-emit every frame as the
+    /// frontend event a local `RowChange` would have produced.
+    ///
+    /// The only background task a hub client runs, and the reason it is not
+    /// optional: in remote mode nothing local mutates, so the local event bus
+    /// never fires and the UI would render whatever it listed at startup and
+    /// then sit frozen.
+    fn start_event_bridge(&self) {
+        let Some(cfg) = self.remote.clone() else {
+            // `start_background_tasks` only calls this in remote mode; a
+            // standalone app reaching here would be a routing bug, not a
+            // reason to open a socket to nowhere.
+            tracing::error!("[hub events] asked to bridge events with no hub configured");
+            return;
+        };
+        let hub = Arc::new(HubBackend::new(cfg.clone()));
+        let sink = Arc::clone(&self.frontend);
+        let bridge = EventBridge::new(
+            Arc::new(HubSse::new(cfg)),
+            Arc::clone(&sink) as Arc<dyn crate::backend::events::RemoteEventSink>,
+            Arc::new(HubResync::new(hub, sink)),
+            Arc::new(RealDelay),
+            self.shutdown.clone(),
+        );
+        spawn_event_bridge(bridge);
     }
 }

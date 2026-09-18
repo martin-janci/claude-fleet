@@ -16,6 +16,7 @@
 //! and makes it observable.
 
 pub mod contract;
+pub mod events;
 pub mod remote;
 pub mod routing;
 pub mod startup;
