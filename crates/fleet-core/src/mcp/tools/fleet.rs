@@ -159,5 +159,145 @@ impl FleetTools {
         ok_json(&res)
     }
 
+    // ---- paired clients ----
+
+    #[tool(description = "Mint a single-use pairing code for a new client \
+        device (a phone, a laptop browser) and return the URL to show as a QR. \
+        The code — not a token — travels in the URL FRAGMENT, so no proxy or \
+        access log ever sees it; the device posts it to the hub's /pair once \
+        and gets a token of its own back. name must be 1-64 characters with no \
+        control characters and must not be one a live client already holds. \
+        mode is full (drive sessions fleet-wide) or readonly (observe only); \
+        fleet-admin tools are out of a client's reach either way. Codes live \
+        in memory only, so a hub restart invalidates every outstanding one. \
+        Master token only. Returns JSON { url, code, expires_in_s, name, mode }.")]
+    // The master-only gate is `enforce_admin` in `call_tool` (`pair_client`
+    // is in `guard::ADMIN_TOOLS`), so no caller extractor is needed here.
+    pub(super) async fn pair_client(
+        &self,
+        Parameters(p): Parameters<PairClientParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Validate BEFORE auditing: the name reaches a `tracing` line, and a
+        // refused mint must not be able to put a line break (or an ANSI
+        // escape) into the hub's log through it. The validator also returns
+        // the trimmed form, which is what gets stored.
+        let name = crate::store::validate_client_name(&p.name).map_err(to_mcp_err)?;
+        let mode = p.mode.unwrap_or_else(|| "full".to_string());
+        crate::store::validate_client_mode(&mode).map_err(to_mcp_err)?;
+        audit(
+            "pair_client",
+            &format!("name={name} mode={mode} ttl_s={:?}", p.ttl_s),
+        );
+        let ttl = pair_ttl(p.ttl_s);
+        // Both reads under one lock, released before the mint.
+        let base = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            // A code minted for a name a live client already holds could only
+            // ever fail at redemption (the partial unique index), wasting the
+            // code and the walk to the phone. Refuse it here instead.
+            let taken = s
+                .active_client_tokens()
+                .map_err(to_mcp_err)?
+                .into_iter()
+                .any(|c| c.name == name);
+            if taken {
+                return Err(mcp_err(
+                    codes::E_EXISTS,
+                    format!(
+                        "a live client named '{name}' already exists — revoke_client it first, \
+                         or pair under another name"
+                    ),
+                    None,
+                ));
+            }
+            crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
+        };
+        let req = self.guards.pairings.mint(&name, &mode, ttl);
+        ok_json(&serde_json::json!({
+            "url": crate::mcp::pair_url(&base.url, &req.code),
+            "code": req.code,
+            "expires_in_s": ttl.as_secs(),
+            "name": req.name,
+            "mode": req.mode,
+        }))
+    }
+
+    #[tool(description = "List the paired client devices and what each one's \
+        token may do. The stored token digest is never returned — a client's \
+        token exists in plaintext only in the one /pair response that minted \
+        it. include_revoked also returns clients whose token was revoked \
+        (kept for the audit trail). Read-only, but master token only: the \
+        list names every paired device, so it is not a phone's to read. \
+        Returns JSON rows of \
+        { id, name, mode, created_at, last_seen_at, revoked_at }.")]
+    pub(super) async fn list_clients(
+        &self,
+        Parameters(p): Parameters<ListClientsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "list_clients",
+            &format!("include_revoked={}", p.include_revoked),
+        );
+        let rows = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.list_client_tokens(p.include_revoked)
+                .map_err(to_mcp_err)?
+        };
+        let out: Vec<ClientSummary> = rows.into_iter().map(ClientSummary::from).collect();
+        ok_json(&out)
+    }
+
+    #[tool(description = "Revoke a paired client's token by name. Its next \
+        request is refused (the auth layer only resolves live rows) and the \
+        name becomes free to pair again; the row itself is kept, revoked, for \
+        the audit trail. E_NOTFOUND when no live client holds that name. \
+        Master token only. Returns the revoked row as JSON.")]
+    pub(super) async fn revoke_client(
+        &self,
+        Parameters(p): Parameters<RevokeClientParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // A revoke takes any name — even one no client holds — so there is
+        // nothing to validate first. `escape_debug` is what keeps a line
+        // break or an ANSI escape in a bogus name out of the log line.
+        audit("revoke_client", &format!("name={}", p.name.escape_debug()));
+        let row = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.revoke_client_token(&p.name).map_err(to_mcp_err)?
+        };
+        tracing::info!(client = %row.name, "[mcp] revoked a client token");
+        ok_json(&ClientSummary::from(row))
+    }
+
     // ---- workspace repair ----
+}
+
+/// How long a pairing code stays valid: the caller's `ttl_s` clamped to
+/// 30 s…1 h, or [`crate::mcp::pairing::DEFAULT_TTL`] when it names none. The
+/// upper bound is what keeps "mint one and leave it running" from becoming a
+/// standing invitation; the lower bound leaves time to walk to the phone.
+fn pair_ttl(ttl_s: Option<u64>) -> std::time::Duration {
+    const MIN: u64 = 30;
+    const MAX: u64 = 60 * 60;
+    match ttl_s {
+        None => crate::mcp::pairing::DEFAULT_TTL,
+        Some(s) => std::time::Duration::from_secs(s.clamp(MIN, MAX)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pair_ttl;
+    use std::time::Duration;
+
+    #[test]
+    fn pair_ttl_defaults_and_clamps() {
+        assert_eq!(pair_ttl(None), Duration::from_secs(600));
+        assert_eq!(pair_ttl(Some(60)), Duration::from_secs(60));
+        assert_eq!(pair_ttl(Some(0)), Duration::from_secs(30), "floor");
+        assert_eq!(
+            pair_ttl(Some(u64::MAX)),
+            Duration::from_secs(3600),
+            "ceiling"
+        );
+    }
 }

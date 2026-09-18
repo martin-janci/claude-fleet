@@ -470,6 +470,22 @@ pub struct HostTokenRow {
     pub mode: String,
 }
 
+/// One paired client token (migration 032): a phone, a laptop browser. Unlike
+/// `HostTokenRow`, only the SHA-256 of the token is stored — the plaintext is
+/// shown once at pairing and never needs to be displayed again. `mode` is
+/// `full` or `readonly`, mirroring `HostTokenRow::mode`. `revoked_at` is
+/// `None` for a live token; a revoked row keeps its name for the audit trail.
+#[derive(Debug, Clone)]
+pub struct ClientTokenRow {
+    pub id: i64,
+    pub name: String,
+    pub token_sha256: String,
+    pub mode: String,
+    pub created_at: i64,
+    pub last_seen_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+}
+
 /// One inter-session message (migration 015). The store is the source of
 /// truth; pane delivery, if requested, happens separately and best-effort.
 #[derive(Debug, Clone, serde::Serialize)]

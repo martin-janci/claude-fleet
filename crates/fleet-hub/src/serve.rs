@@ -3,11 +3,11 @@
 
 use crate::config::{resolve, resolve_data_dir, HubOptions, Resolved};
 use crate::out;
-use fleet_core::events::NoopEventBus;
+use fleet_core::events::{BroadcastEventBus, EventBus, NoopEventBus};
 use fleet_core::mcp::{self, settings::ensure_master_token, McpGuards};
 use fleet_core::service::hub::{
     SETTING_ALLOWED_HOSTS, SETTING_ALLOW_PLAINTEXT, SETTING_BIND, SETTING_LOCAL_HOST,
-    SETTING_PUBLIC_URL,
+    SETTING_PUBLIC_URL, SETTING_TLS, SETTING_TLS_CERT, SETTING_TLS_KEY,
 };
 use fleet_core::service::projects::LOCAL_HOST;
 use fleet_core::store::Store;
@@ -18,7 +18,24 @@ use std::sync::{Arc, Mutex};
 /// Open (creating when missing) `<data-dir>/state.db`. The data dir is the
 /// only option resolved without the store: everything else reads its stored
 /// `hub.*` values.
-fn open_store(opts: &HubOptions, env: &HashMap<String, String>) -> Result<Store, String> {
+///
+/// [`open_store_with_bus`] with the silent bus — every one-shot subcommand
+/// (`init`, `token`, `ssh-key`, `healthcheck`, `pair`). Only `serve` has
+/// subscribers to fan events out to.
+pub(crate) fn open_store(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<Store, String> {
+    open_store_with_bus(opts, env, Arc::new(NoopEventBus))
+}
+
+/// Open (creating when missing) `<data-dir>/state.db`, publishing row changes
+/// to `bus`.
+pub(crate) fn open_store_with_bus(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+    bus: Arc<dyn EventBus>,
+) -> Result<Store, String> {
     let data_dir = resolve_data_dir(opts, env);
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("create data dir {}: {e}", data_dir.display()))?;
@@ -41,7 +58,7 @@ fn open_store(opts: &HubOptions, env: &HashMap<String, String>) -> Result<Store,
         }
     }
     let db_path = data_dir.join("state.db");
-    let store = Store::open_with_bus(&db_path, Arc::new(NoopEventBus)).map_err(|e| {
+    let store = Store::open_with_bus(&db_path, bus).map_err(|e| {
         format!(
             "failed to open the claude-fleet database at {}: {e}\n\
              If the file is corrupt, deleting it resets all hub state — hosts, projects and sessions are re-discovered.",
@@ -57,8 +74,9 @@ fn open_store(opts: &HubOptions, env: &HashMap<String, String>) -> Result<Store,
 fn resolve_with_store(
     opts: &HubOptions,
     env: &HashMap<String, String>,
+    bus: Arc<dyn EventBus>,
 ) -> Result<(Resolved, Arc<Mutex<Store>>), String> {
-    let store = open_store(opts, env)?;
+    let store = open_store_with_bus(opts, env, bus)?;
     let resolved = {
         let settings = |k: &str| store.get_setting(k).ok().flatten();
         resolve(opts, env, &settings)?
@@ -89,6 +107,16 @@ fn persist(store: &Mutex<Store>, r: &Resolved) -> Result<(), String> {
         SETTING_ALLOW_PLAINTEXT,
         if r.allow_plaintext { "true" } else { "false" },
     )?;
+    set(SETTING_TLS, r.tls.as_str())?;
+    // "" for "none given", like every other optional value here: `resolve`
+    // reads an empty setting as unset.
+    let path = |p: &Option<std::path::PathBuf>| {
+        p.as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    };
+    set(SETTING_TLS_CERT, &path(&r.tls_cert))?;
+    set(SETTING_TLS_KEY, &path(&r.tls_key))?;
     if !r.local_host {
         // A state.db copied from a desktop carries a `local` row. Hide it so
         // nothing lists it, and mark it unreachable so nothing counts or polls
@@ -119,7 +147,7 @@ pub fn init(
     env: &HashMap<String, String>,
     regenerate: bool,
 ) -> Result<ExitCode, String> {
-    let (r, store) = resolve_with_store(opts, env)?;
+    let (r, store) = resolve_with_store(opts, env, Arc::new(NoopEventBus))?;
     persist(&store, &r)?;
     let token = {
         let s = store
@@ -152,7 +180,22 @@ pub fn token(
     // Only the data dir matters here: `token` serves nothing, so the bind /
     // plaintext checks in `resolve` do not apply. It never creates a data dir
     // or a database: a token minted into a fresh one is not the hub's.
-    existing_db(&resolve_data_dir(opts, env))?;
+    let db = existing_db(&resolve_data_dir(opts, env))?;
+    // `token show` against a hub that is RUNNING is the common case, and this
+    // binary may be newer than the daemon's: read the stored token read-only
+    // and unmigrated, so printing it cannot reshape the live database. Only
+    // the two paths that must WRITE — `regenerate`, and minting the first
+    // token into a database that has none — open it for real.
+    if !regenerate {
+        if let Some(token) = Store::open_read_only(&db)
+            .ok()
+            .and_then(|s| mcp::settings::McpSettings::read(&s).ok())
+            .and_then(|cfg| cfg.token)
+        {
+            out::line(&token);
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
     let s = open_store(opts, env)?;
     if regenerate {
         s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())
@@ -163,7 +206,7 @@ pub fn token(
 }
 
 /// `<data-dir>/state.db` when it exists; `token` must never create one.
-fn existing_db(data_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+pub(crate) fn existing_db(data_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let db = data_dir.join("state.db");
     if db.is_file() {
         Ok(db)
@@ -228,8 +271,16 @@ const HEALTHZ_MARKER: &str = "fleet-hub ok";
 /// restarted on every read, so a peer that dripped a byte at a time — or
 /// stalled after each of connect, write and read — could hold the probe open
 /// for multiples of the budget and outlive Docker's own `--timeout`.
-async fn probe(addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<String, String> {
-    match tokio::time::timeout(timeout, probe_exchange(addr)).await {
+///
+/// `tls` must match how the hub serves: a hub terminating TLS answers a
+/// plaintext probe with an alert or a dropped connection, and a plaintext hub
+/// cannot complete a handshake. The whole budget covers the handshake too.
+async fn probe(
+    addr: std::net::SocketAddr,
+    timeout: std::time::Duration,
+    tls: bool,
+) -> Result<String, String> {
+    match tokio::time::timeout(timeout, probe_exchange(addr, tls)).await {
         Ok(r) => r,
         Err(_) => Err(format!(
             "{addr} did not answer within {:.0?}",
@@ -238,12 +289,32 @@ async fn probe(addr: std::net::SocketAddr, timeout: std::time::Duration) -> Resu
     }
 }
 
-/// The connect-write-read exchange itself; [`probe`] puts the deadline on it.
-async fn probe_exchange(addr: std::net::SocketAddr) -> Result<String, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut conn = tokio::net::TcpStream::connect(addr)
+/// Connect (handshaking when `tls`), then run the exchange; [`probe`] puts the
+/// deadline on the whole thing.
+async fn probe_exchange(addr: std::net::SocketAddr, tls: bool) -> Result<String, String> {
+    let tcp = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| format!("connect {addr}: {e}"))?;
+    if !tls {
+        return exchange(tcp, addr).await;
+    }
+    // The server's certificate is issued for its public domain, so it can
+    // never match `127.0.0.1`; `insecure_probe_client` is why that is fine
+    // for a liveness probe. The name below is only what goes in SNI.
+    let name = rustls_pki_types::ServerName::IpAddress(addr.ip().into());
+    let conn = crate::tls::insecure_probe_client()
+        .connect(name, tcp)
+        .await
+        .map_err(|e| format!("TLS handshake with {addr}: {e}"))?;
+    exchange(conn, addr).await
+}
+
+/// The write-read half, over whatever transport [`probe_exchange`] opened.
+async fn exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    mut conn: S,
+    addr: std::net::SocketAddr,
+) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let req = format!("GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     conn.write_all(req.as_bytes())
         .await
@@ -276,10 +347,20 @@ async fn probe_exchange(addr: std::net::SocketAddr) -> Result<String, String> {
 }
 
 /// `fleet-hub healthcheck`: probe the local listener without opening the
-/// store (it runs next to a live `serve`). Port: flag > `FLEET_HUB_PORT` >
-/// default; the stored `mcp.port` is deliberately not read.
+/// store (it runs next to a live `serve`).
+///
+/// Port: flag > `FLEET_HUB_PORT` > default; the stored `mcp.port` is
+/// deliberately not read. **TLS is resolved the same way** — flag >
+/// `FLEET_HUB_TLS` > `off` — and the stored `hub.tls` likewise is not read,
+/// because reading it would mean opening `state.db` from a second process
+/// while `serve` holds it, which is exactly what this subcommand promises not
+/// to do. That costs nothing in the setup this exists for: the Dockerfile's
+/// `CMD ["fleet-hub", "healthcheck"]` inherits the container's environment,
+/// so `FLEET_HUB_TLS=cert` reaches the probe as it reaches `serve`. A hub
+/// configured only by stored settings needs `--tls` (or the env) on the probe.
 pub async fn healthcheck(
     port: Option<u16>,
+    tls: Option<String>,
     env: &HashMap<String, String>,
 ) -> Result<ExitCode, String> {
     let port = match (port, env.get("FLEET_HUB_PORT")) {
@@ -290,8 +371,13 @@ pub async fn healthcheck(
             .map_err(|e| format!("FLEET_HUB_PORT '{v}': {e}"))?,
         (None, None) => mcp::DEFAULT_PORT,
     };
+    let mode = match (tls, env.get("FLEET_HUB_TLS")) {
+        (Some(v), _) => crate::config::TlsMode::parse(v.trim())?,
+        (None, Some(v)) => crate::config::TlsMode::parse(v.trim())?,
+        (None, None) => crate::config::TlsMode::default(),
+    };
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let status = probe(addr, HEALTHCHECK_TIMEOUT)
+    let status = probe(addr, HEALTHCHECK_TIMEOUT, mode.terminates_tls())
         .await
         .map_err(|e| format!("unhealthy: {e}"))?;
     out::line(&format!("healthy: {status}"));
@@ -393,7 +479,11 @@ fn write_public_key(path: &std::path::Path, text: &[u8]) -> Result<(), String> {
 }
 
 pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<ExitCode, String> {
-    let (r, store) = resolve_with_store(opts, env)?;
+    // The one store in the process that publishes: `serve` is where a paired
+    // client can be listening on `GET /events`. Every other subcommand is a
+    // one-shot with no subscribers and keeps the silent bus.
+    let bus = Arc::new(BroadcastEventBus::default());
+    let (r, store) = resolve_with_store(opts, env, Arc::clone(&bus) as Arc<dyn EventBus>)?;
     match fleet_core::logging::init_in_with(&r.log_dir, true) {
         Ok(dir) => tracing::info!(log_dir = %dir.display(), "file logging on"),
         Err(e) => {
@@ -432,16 +522,30 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
 
     warn_if_confirm_destructive(&store);
 
-    let (shutdown, serve_task) = mcp::start_with_handle(
+    // Before the listener exists: a hub told to serve TLS that cannot build an
+    // acceptor must exit 1 with the reason, never fall back to plaintext on
+    // the port a client expects to be encrypted.
+    let tls = crate::tls::acceptor(&r)?;
+    let addr = std::net::SocketAddr::from((r.bind, r.port));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("could not bind {addr}: {e}"))?;
+
+    let (shutdown, serve_task) = mcp::start_with_listener(
         Arc::clone(&store),
         Arc::clone(&ssh),
         Arc::clone(&reg),
         Arc::clone(&tunnels),
         guards,
-        r.bind,
-        r.port,
+        listener,
         token,
         r.allowed_hosts.clone(),
+        // One fresh subscription per `GET /events` connection.
+        Some({
+            let bus = Arc::clone(&bus);
+            Arc::new(move || bus.subscribe()) as fleet_core::mcp::EventSubscriber
+        }),
+        tls,
     )
     .await?;
     if let Err(e) = fleet_core::service::provision::reestablish_tunnels(&store, &tunnels, &base) {
@@ -453,6 +557,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         bind = %r.bind,
         port = r.port,
         local_host = r.local_host,
+        tls = r.tls.as_str(),
         "fleet-hub serving"
     );
 
@@ -464,7 +569,10 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         Arc::clone(&store),
         Arc::clone(&ssh),
         usage_cache,
-        Arc::new(NoopEventBus),
+        // The same bus the store publishes to: `account_usage:updated` is a
+        // tick-borne event, not a store write, and a client following
+        // `/events` wants it like any other.
+        Arc::clone(&bus) as Arc<dyn EventBus>,
     );
 
     wait_for_signal().await?;
@@ -538,6 +646,9 @@ mod tests {
             local_host,
             allow_plaintext: false,
             log_dir: "/unused/logs".into(),
+            tls: crate::config::TlsMode::Off,
+            tls_cert: None,
+            tls_key: None,
         }
     }
 
@@ -611,7 +722,8 @@ mod tests {
             bind: Some("0.0.0.0".into()),
             ..HubOptions::default()
         };
-        let (r, _store) = resolve_with_store(&opts, &HashMap::new()).unwrap();
+        let (r, _store) =
+            resolve_with_store(&opts, &HashMap::new(), Arc::new(NoopEventBus)).unwrap();
         assert_eq!(r.public_url.as_deref(), Some("https://fleet.example.com"));
     }
 
@@ -656,13 +768,14 @@ mod tests {
             data_dir: Some(dir.path().to_path_buf()),
             ..HubOptions::default()
         };
-        let (back, _s) = resolve_with_store(&opts, &HashMap::new()).unwrap();
+        let (back, _s) =
+            resolve_with_store(&opts, &HashMap::new(), Arc::new(NoopEventBus)).unwrap();
         assert!(back.allow_plaintext);
         assert_eq!(back.bind.to_string(), "0.0.0.0");
         // And `FLEET_HUB_ALLOW_PLAINTEXT=0` turns it off again.
         let off: HashMap<String, String> =
             [("FLEET_HUB_ALLOW_PLAINTEXT".to_string(), "0".to_string())].into();
-        assert!(resolve_with_store(&opts, &off).is_err());
+        assert!(resolve_with_store(&opts, &off, Arc::new(NoopEventBus)).is_err());
     }
 
     #[test]
@@ -727,7 +840,7 @@ mod tests {
             b"HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\n\
               content-length: 13\r\nconnection: close\r\n\r\nfleet-hub ok\n",
         );
-        let status = probe(addr, HEALTHCHECK_TIMEOUT).await.unwrap();
+        let status = probe(addr, HEALTHCHECK_TIMEOUT, false).await.unwrap();
         assert_eq!(status, "HTTP/1.1 200 OK");
         let req = server.join().unwrap();
         assert!(req.starts_with("GET /healthz HTTP/1.1\r\n"), "{req}");
@@ -749,7 +862,7 @@ mod tests {
             b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 5\r\n\
               connection: close\r\n\r\nhello",
         );
-        let err = probe(addr, HEALTHCHECK_TIMEOUT).await.unwrap_err();
+        let err = probe(addr, HEALTHCHECK_TIMEOUT, false).await.unwrap_err();
         assert!(err.contains("fleet-hub"), "{err}");
         server.join().unwrap();
     }
@@ -767,7 +880,7 @@ mod tests {
             drop(conn);
         });
         let started = std::time::Instant::now();
-        let err = probe(addr, HEALTHCHECK_TIMEOUT).await.unwrap_err();
+        let err = probe(addr, HEALTHCHECK_TIMEOUT, false).await.unwrap_err();
         let elapsed = started.elapsed();
         assert!(
             elapsed < std::time::Duration::from_secs(5),
@@ -795,7 +908,7 @@ mod tests {
         });
         let budget = std::time::Duration::from_millis(300);
         let started = std::time::Instant::now();
-        assert!(probe(addr, budget).await.is_err());
+        assert!(probe(addr, budget, false).await.is_err());
         let elapsed = started.elapsed();
         assert!(
             elapsed < budget * 4,
@@ -811,7 +924,7 @@ mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap()
         };
-        assert!(probe(closed, HEALTHCHECK_TIMEOUT).await.is_err());
+        assert!(probe(closed, HEALTHCHECK_TIMEOUT, false).await.is_err());
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -819,9 +932,112 @@ mod tests {
             let (mut conn, _) = listener.accept().unwrap();
             conn.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").unwrap();
         });
-        let err = probe(addr, HEALTHCHECK_TIMEOUT).await.unwrap_err();
+        let err = probe(addr, HEALTHCHECK_TIMEOUT, false).await.unwrap_err();
         assert!(err.contains("SSH-2.0"), "{err}");
         server.join().unwrap();
+    }
+
+    /// The Dockerfile runs `fleet-hub healthcheck` against the hub's own port.
+    /// With `FLEET_HUB_TLS=cert` that port speaks only TLS, so a probe that
+    /// cannot must report the container permanently unhealthy — and the TLS
+    /// probe must succeed where it does.
+    #[tokio::test]
+    async fn the_probe_speaks_tls_when_the_hub_does() {
+        use fleet_core::events::NoopEventBus;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (cert, key, _) = crate::tls::tests::self_signed(dir.path());
+        let tls = crate::tls::acceptor(&crate::tls::tests::cert_resolved(cert, key))
+            .unwrap()
+            .expect("cert mode");
+
+        let store =
+            Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown, task) = mcp::start_with_listener(
+            Arc::new(Mutex::new(store)),
+            Arc::new(fleet_core::ssh::SshClient::new()),
+            fleet_core::cancel::CancellationRegistry::new(),
+            Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new()),
+            McpGuards::new(Arc::new(|_: &fleet_core::mcp::guard::ConfirmRequest| {})),
+            listener,
+            "test-token".to_string(),
+            vec![],
+            None,
+            Some(tls),
+        )
+        .await
+        .unwrap();
+
+        // The TLS probe reaches /healthz despite the certificate naming a
+        // public domain rather than 127.0.0.1 (verification is off by design).
+        let status = probe(addr, HEALTHCHECK_TIMEOUT, true).await.unwrap();
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+
+        // The plaintext probe — today's `fleet-hub healthcheck` — does not.
+        let err = probe(addr, HEALTHCHECK_TIMEOUT, false).await.unwrap_err();
+        assert!(
+            !err.is_empty(),
+            "a plaintext probe of a TLS hub must report unhealthy"
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+    }
+
+    /// ... and the other way round: a plaintext hub answers the plaintext
+    /// probe, which is the unchanged default.
+    #[tokio::test]
+    async fn the_plaintext_probe_still_answers_a_plaintext_hub() {
+        let (addr, server) = one_shot(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\n\
+              content-length: 13\r\nconnection: close\r\n\r\nfleet-hub ok\n",
+        );
+        assert_eq!(
+            probe(addr, HEALTHCHECK_TIMEOUT, false).await.unwrap(),
+            "HTTP/1.1 200 OK"
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn healthcheck_resolves_tls_from_the_flag_then_the_env() {
+        // No hub is listening, so every call fails — what is asserted is HOW
+        // it fails, which says which transport the probe chose.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let env = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        // A bad value is named, from the flag and from the env alike.
+        let e = healthcheck(Some(port), Some("yes".into()), &env(&[]))
+            .await
+            .unwrap_err();
+        assert!(e.contains("--tls"), "{e}");
+        let e = healthcheck(Some(port), None, &env(&[("FLEET_HUB_TLS", "yes")]))
+            .await
+            .unwrap_err();
+        assert!(e.contains("--tls"), "{e}");
+        // The flag beats the env.
+        assert!(
+            healthcheck(
+                Some(port),
+                Some("off".into()),
+                &env(&[("FLEET_HUB_TLS", "yes")])
+            )
+            .await
+            .unwrap_err()
+            .contains("unhealthy"),
+            "the flag's `off` must win over the env's garbage"
+        );
     }
 
     #[test]

@@ -159,7 +159,8 @@ pub(super) fn enforce_mode(caller: &Caller, tool: &str) -> Result<(), McpError> 
 }
 
 /// Host-binding gate for identity-bearing tools: a per-host caller may only
-/// act as / read sessions on its own host. Master callers pass.
+/// act as / read sessions on its own host. The master token and a paired
+/// client both pass — neither carries a `host_alias`, so they are unbound.
 pub(super) fn require_host(
     caller: &Caller,
     session_host: &str,
@@ -351,7 +352,14 @@ pub(super) fn find_audit_session(store: &Store, args: Option<&JsonObject>) -> Op
 
 /// Persist an audit row for a tool call into `session_events` (kind
 /// `mcp_call`). Best-effort: every failure is swallowed so it can never block
-/// the call. Free-text arguments are redacted by [`guard::redact_args`].
+/// the call. Free-text arguments are redacted by [`guard::redact_args`], and
+/// the summary it produces is LOSSY by design: prompt and message bodies
+/// never reach the row, only their length.
+///
+/// The whole detail — not just the summary — goes through
+/// [`guard::scrub_line`], because the caller label is interpolated too and a
+/// paired client's name is the one part of it this fleet did not author. A
+/// line break there could otherwise forge a second audit record.
 pub(super) fn persist_audit(
     store: &Mutex<Store>,
     tool: &str,
@@ -368,21 +376,45 @@ pub(super) fn persist_audit(
     } else {
         format!("{tool} by {}: {summary}", caller.label())
     };
-    let _ = s.insert_session_event(session_id, "mcp_call", Some(&detail));
+    let _ = s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)));
 }
 
 /// Describe the origin of a delivered prompt for the untrusted-content marker.
+/// A paired client is named as such: its text is not the controller's, and
+/// the receiving agent should see where it really came from.
+///
+/// The result is always ONE line. Client names are validated at pairing
+/// (`store::validate_client_name`), but this is the last line of defence for
+/// a row that predates that check: a CR/LF here would close the marker early
+/// and place attacker-chosen text above a marked prompt, where the receiving
+/// agent would read it as fleet's own words. Every control character goes,
+/// not only CR/LF — and with them `U+2028`, `U+2029` and `U+0085`, which
+/// `char::is_control` does not cover but a renderer or an LLM may well read
+/// as a line break.
 pub(super) fn marker_origin(caller: &Caller) -> String {
-    match &caller.host_alias {
-        Some(h) => format!("an agent on host {h}"),
-        None => "the fleet controller".to_string(),
-    }
+    let origin = match (&caller.host_alias, &caller.client) {
+        (Some(h), _) => format!("an agent on host {h}"),
+        (None, Some(c)) => format!("the paired client {}", c.name),
+        (None, None) => "the fleet controller".to_string(),
+    };
+    origin
+        .chars()
+        .map(|c| {
+            if crate::store::breaks_a_line(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// Prefix `text` with the untrusted-content marker unless the caller is the
 /// master token AND asked for `raw` delivery. A per-host caller asking for
 /// `raw` is refused outright (`E_FORBIDDEN`) rather than silently marked, so
-/// an agent cannot believe it delivered unmarked text.
+/// an agent cannot believe it delivered unmarked text. A paired client is not
+/// the master ([`Caller::is_master`] checks `client` too), so it is refused
+/// here as well: text typed on a phone always reaches an agent marked.
 pub(super) fn apply_marker(
     text: String,
     from: &str,
@@ -406,8 +438,10 @@ pub(super) fn apply_marker(
 }
 
 /// Fleet-admin gate: `provision_hosts` / `add_host` / `remove_host` /
-/// `hide_host` / `apply_sync` / `set_secret` are master-only, whatever the
-/// host token's mode.
+/// `hide_host` / `apply_sync` / `set_secret` and the client-credential tools
+/// (`pair_client` / `revoke_client` / `list_clients`) are master-only,
+/// whatever the host token's mode — and whatever a paired client's mode,
+/// since [`Caller::is_master`] is false for a client too.
 pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError> {
     if guard::is_admin_tool(tool) && !caller.is_master() {
         return Err(mcp_err(
@@ -491,6 +525,34 @@ pub(super) struct SessionWithController {
     pub(super) is_controller: bool,
     #[serde(flatten)]
     pub(super) row: crate::store::SessionRow,
+}
+
+/// A paired client as the control API reports it. Built field by field from
+/// [`crate::store::ClientTokenRow`] on purpose: `token_sha256` is the one
+/// column that must never leave the hub, and a `#[serde(skip)]` on the row
+/// would be one derive away from leaking it through some other serializer.
+/// Adding a column to the row therefore cannot silently publish it here.
+#[derive(serde::Serialize)]
+pub(super) struct ClientSummary {
+    pub(super) id: i64,
+    pub(super) name: String,
+    pub(super) mode: String,
+    pub(super) created_at: i64,
+    pub(super) last_seen_at: Option<i64>,
+    pub(super) revoked_at: Option<i64>,
+}
+
+impl From<crate::store::ClientTokenRow> for ClientSummary {
+    fn from(r: crate::store::ClientTokenRow) -> Self {
+        Self {
+            id: r.id,
+            name: r.name,
+            mode: r.mode,
+            created_at: r.created_at,
+            last_seen_at: r.last_seen_at,
+            revoked_at: r.revoked_at,
+        }
+    }
 }
 
 /// Slim row returned by `list_sessions` when `summary: true` (the default).
@@ -836,6 +898,7 @@ pub(super) const LIFECYCLE_TOOLS: &[&str] = &[
     "apply_sync",
     "refresh_projects",
     "session_transcript",
+    "session_conversation",
     "usage_report",
     "broadcast_prompt",
 ];
@@ -853,17 +916,20 @@ pub(super) const QUICK_TOOLS: &[&str] = &[
     "inbox",
     "list_accounts",
     "list_assets",
+    "list_clients",
     "list_hosts",
     "list_projects",
     "list_sessions",
     "list_tasks",
     "list_worktrees",
+    "pair_client",
     "peek_session",
     "peer_status",
     "register_self",
     "related_sessions",
     "remove_host",
     "rename_session",
+    "revoke_client",
     "set_secret",
     "repo_branches",
     "repo_changes",

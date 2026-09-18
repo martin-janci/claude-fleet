@@ -105,7 +105,13 @@ every 30 s, so `docker compose ps` shows the hub as `healthy` (or
 `unhealthy`) in its STATUS column. The check sends one `GET /healthz` to
 `127.0.0.1` on `FLEET_HUB_PORT` (default `4180`) and passes only when the
 answer is an HTTP status line with the body `fleet-hub ok` — so an unrelated
-process holding the port no longer reads as a healthy hub.
+process holding the port no longer reads as a healthy hub. It reads
+`FLEET_HUB_TLS` the same way, so when the hub terminates TLS itself the probe
+speaks TLS too (certificate verification off: the certificate names a public
+domain, and this is a liveness check to `127.0.0.1` carrying no credential).
+`fleet-hub healthcheck --tls off|cert` overrides that explicitly. Neither the
+port nor the TLS mode is read from `state.db`: the probe runs beside a live
+`serve` and never opens the database.
 
 `/healthz` is the one route that needs no bearer token and no `Host`
 allowlist entry, because it reveals nothing: it never opens `state.db` and
@@ -150,6 +156,135 @@ untouched. The previous file is saved as `settings.json.fleet-bak` first.
 **After provisioning, restart Claude Code on each host** to pick up the new
 MCP server entry (the skill files and hooks are picked up live).
 
+## Pair a phone
+
+A *client* is a device that drives the fleet without being a fleet host: a
+phone, a tablet, a browser on a laptop that is not provisioned. It gets its
+own token — not the master one — which you can see, name and revoke.
+
+On the hub, with the daemon running:
+
+```bash
+fleet-hub pair --name phone
+```
+
+That prints a QR code, the URL under it, and how long the code is good for:
+
+```
+█▀▀▀▀▀█ ▀▄█▀▄ █▀▀▀▀▀█
+…
+https://fleet.example.com/pair#ABCDEFGH
+
+client:  phone (full)
+expires: in 600 s — the code works once, and a hub restart voids it
+Scan it with the claude-fleet app on the device you are pairing.
+```
+
+Scan it with the device's camera. The page it lands on says what to do and
+nothing else — no JavaScript, no auto-redeem. The app on the device posts the
+code to the hub's `/pair` once and gets a token of its own back.
+
+What travels in that QR is a **pairing code**, not a token: eight characters,
+single-use, and it lives in the URL *fragment*, which a browser never sends —
+so no proxy, access log or scroll-back of your terminal ever holds a
+credential. Codes live in the hub's memory only, so restarting the daemon
+voids every outstanding one. Mint a new one and walk back to the phone.
+
+Two options:
+
+```bash
+fleet-hub pair --name kiosk --mode readonly   # observe only; the default is full
+fleet-hub pair --name phone --ttl 120         # seconds the code stays valid (30–3600)
+```
+
+Pairing needs a **running** hub (`fleet-hub serve`): the code only means
+something inside the process that will redeem it. `fleet-hub pair` reads the
+master token out of the data dir, resolves the port the same way `serve` does
+(`--port`, `FLEET_HUB_PORT`, the stored setting, then the default) and calls
+the hub's own `/mcp` on loopback — so run it on the hub's machine, as the user
+the daemon runs as.
+
+**Changing the public URL needs a restart.** The `hub` field in the `/pair`
+response — the base URL the freshly paired device will talk to — is a snapshot
+taken when the server started, while the URL inside the QR is read fresh on
+every mint. So after changing `hub.public_url` (a `--public-url` run, or the
+stored setting) on a *running* hub, a phone can be sent to the new address by
+the QR and then handed the old one to talk to. Restart `fleet-hub serve`
+before pairing anything, and the two agree again.
+
+## Clients
+
+```bash
+fleet-hub client list
+fleet-hub client list --include-revoked
+fleet-hub client revoke phone
+```
+
+`client list` prints one line per client, newest first:
+
+```
+NAME   MODE      CREATED            LAST SEEN          REVOKED
+phone  full      2026-09-17 09:20Z  2026-09-18 07:41Z  -
+kiosk  readonly  2026-09-17 09:12Z  -                  -
+```
+
+The token itself is never shown again: only its SHA-256 is stored, and the
+plaintext exists in the one `/pair` response that minted it. Lost it? Revoke
+the client and pair again under the same name.
+
+What a client may do:
+
+- **`full`** — whole-fleet *session* control: list, spawn, steer, kill, read
+  transcripts, follow the event stream. The same reach a `full` per-host
+  token has.
+- **`readonly`** — the observing tools only (`list_*`, `capture_session`,
+  `session_transcript`, `session_conversation`, `session_history`, `repo_*`,
+  `wait_for_*`, …). Anything that sends, kills, deletes or writes answers
+  `E_FORBIDDEN`.
+- **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
+  `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `pair_client`,
+  `revoke_client` and `list_clients` are master-token only, so a paired phone
+  can neither re-provision the fleet nor pair a second device nor revoke your
+  own client — nor even enumerate the other devices you have paired.
+- A prompt typed on a phone always reaches an agent **marked** as untrusted
+  input, naming the client it came from. `raw: true` is the master token's
+  alone.
+
+`revoke` takes effect on the client's very next request — the auth layer only
+resolves live rows — and an open event stream ends within one heartbeat
+(15 s). The row is kept, revoked, for the audit trail, and the name becomes
+free to pair again:
+
+```
+revoked phone (paired 2026-09-17 09:12Z); its next request is refused and the name is free again
+```
+
+## Events
+
+A client that has listed what it needs does not have to poll for changes:
+
+```
+GET /events            Authorization: Bearer <token>
+GET /events?kinds=session,host
+```
+
+is a server-sent-event stream of every row change the hub makes — the same
+events the desktop UI repaints from. Each frame is named after the change
+(`session:created`, `session:updated`, `session:killed`, `host:probed`,
+`task:updated`, …) and carries the same JSON payload the desktop receives;
+the stream opens with a `ready` frame naming the kinds it will carry, and
+sends a comment line every 15 s so a phone's NAT, a tunnel or a proxy in
+between keeps the connection open. `?kinds=` filters on the part of the name
+before the `:`. An unrecognised kind (`sessions` for `session`, say) is
+dropped from the filter and logged as a warning by the hub, and it is missing
+from the `ready` frame's `kinds` — which is how you spot the typo instead of
+watching a stream that never says anything.
+
+The stream sits behind the same bearer token as `/mcp` (a change stream names
+sessions, hosts, projects and prompts), and a caller may hold eight of them at
+once. A subscriber that falls far enough behind gets one `lagged` frame and
+the stream closes — reconnect and re-list rather than assume continuity.
+
 ## Bare binary
 
 Prefer running without Docker, or need it as a system service:
@@ -191,7 +326,9 @@ data dir (or run as a user who cannot see it) they exit 1 with
 --data-dir)` instead of minting a token nothing uses.
 
 Put it behind your own TLS-terminating proxy (the same role Caddy plays in
-the Docker setup) and set `FLEET_HUB_PUBLIC_URL`. Or skip the public URL
+the Docker setup) and set `FLEET_HUB_PUBLIC_URL` — or let the hub terminate
+TLS itself with `--tls cert`, which needs no proxy at all (see *Single binary
+with its own certificate* below). Or skip the public URL
 entirely and bind loopback, reaching it over Tailscale or an SSH tunnel of
 your own: with no public URL configured, the hub behaves exactly like the
 desktop app — it binds `127.0.0.1` and opens a reverse SSH tunnel to every
@@ -201,6 +338,69 @@ public URL (for example the machine's Tailscale address,
 `FLEET_HUB_ALLOW_PLAINTEXT=1`): the hub refuses any non-loopback bind that
 is not fronted by an `https://` public URL unless plaintext is explicitly
 allowed.
+
+## Single binary with its own certificate
+
+Caddy (or any other TLS-terminating proxy) is still the documented default —
+it renews certificates for you and the compose file wires it up. But the hub
+can also terminate TLS itself, which is what you want when a second container
+or a second daemon is one thing too many: one binary, one port, reachable
+from a phone.
+
+`--tls cert` serves an HTTPS listener from a certificate and key you supply:
+
+```bash
+fleet-hub serve \
+  --bind 0.0.0.0 --port 443 \
+  --public-url https://fleet.example.com \
+  --tls cert \
+  --tls-cert /etc/fleet-hub/tls/fullchain.pem \
+  --tls-key  /etc/fleet-hub/tls/privkey.pem
+```
+
+- `--tls-cert` is a PEM **chain**, leaf certificate first, issuers after it
+  (certbot's `fullchain.pem`, or the `.crt` bundle your CA hands you).
+- `--tls-key` is the matching PEM private key (PKCS#8, PKCS#1 or SEC1),
+  readable by the user the hub runs as and by nobody else.
+- The two are loaded and checked **before** the listener is bound. A missing
+  file, a file with no `CERTIFICATE` block, or a key that does not match the
+  certificate exits 1 naming the file. The hub never falls back to plaintext
+  on a port a client expects to be encrypted.
+- With TLS on, a non-loopback bind no longer needs `--allow-plaintext`:
+  terminating TLS *is* the protection that refusal asks for.
+- Nothing renews the certificate for you. Point the flags at the files your
+  renewal tool writes (certbot, your CA's client, a mounted secret) and
+  restart the hub after each renewal — the PEM pair is read once at startup.
+- The hub warns (it does not refuse) when the key file is readable by group
+  or others; `chmod 600` it.
+- `--tls cert` requires `--public-url` to be an `https://` address. Hooks post
+  to the public URL and a paired client is sent back to it, so a hub that
+  terminates TLS and advertises `http://` — or advertises nothing, which
+  falls back to `http://127.0.0.1:<port>` — would point every one of them at
+  a port that will not answer plaintext.
+
+Settings are persisted before the certificate is loaded, the same ordering the
+bind failure already has. So a run refused for a bad `--tls-cert`/`--tls-key`
+path has already stored `hub.tls=cert` and those paths: the next bare
+`fleet-hub serve` fails the same way until you correct the paths (or pass
+`--tls off`, which stores `off` again).
+
+Binding port 443 as an unprivileged user needs a capability: uncomment the
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` lines in
+`deploy/hub/fleet-hub.service` (they are off by default — with a proxy in
+front the hub binds a high port and needs nothing). Otherwise bind a high
+port and forward to it.
+
+### `--tls auto` (ACME) is not built
+
+`--tls auto` — a certificate the hub obtains and renews itself over ACME — is
+a recognised value, but it is **not available in this build** and exits 1
+saying so. The implementation would be `rustls-acme`, which reaches the ACME
+directory through `async-web-client` and so depends unconditionally on
+`webpki-roots`, published under `CDLA-Permissive-2.0`. That licence is not in
+this repository's `deny.toml` allowlist, so the crate is not in the tree at
+all. Until that allowlist decision is made, use `--tls cert` with a renewal
+tool, or keep a proxy in front.
 
 ## Configuration
 
@@ -220,16 +420,20 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--local-host true\|false` | `FLEET_HUB_LOCAL_HOST` | `hub.local_host` | `false` |
 | `--allow-plaintext` | `FLEET_HUB_ALLOW_PLAINTEXT` (`1`/`true` or `0`/`false`) | `hub.allow_plaintext` | off |
 | `--log-dir` | `FLEET_HUB_LOG_DIR` | — | `<data-dir>/logs` |
+| `--tls off\|auto\|cert` | `FLEET_HUB_TLS` | `hub.tls` | `off` (`auto` is refused — see above) |
+| `--tls-cert` | `FLEET_HUB_TLS_CERT` | `hub.tls_cert` | unset (required by `--tls cert`) |
+| `--tls-key` | `FLEET_HUB_TLS_KEY` | `hub.tls_key` | unset (required by `--tls cert`) |
 
 `--allow-plaintext` permits a non-loopback bind that is not fronted by an
 `https://` public URL — one with an `http://` public URL or with none at all
 (a private network such as Tailscale, or a container-internal hop). Without
 it, a routable bind (anything but loopback) is refused at startup unless the
 public URL is `https://`: `refusing to serve plaintext http on <bind>: use an
-https:// public URL, bind to 127.0.0.1 behind a TLS proxy, or pass
---allow-plaintext`. The compose setup does not need it: the hub binds
-`0.0.0.0` on the compose network with the `https://` public URL Caddy
-serves.
+https:// public URL, terminate TLS in the hub itself with --tls cert, bind to
+127.0.0.1 behind a TLS proxy, or pass --allow-plaintext`. The compose setup
+does not need it: the hub binds `0.0.0.0` on the compose network with the
+`https://` public URL Caddy serves. Nor does `--tls cert` (see *Single binary
+with its own certificate* above) — the hub is then the thing terminating TLS.
 
 Like the other values, the allowance is saved (`hub.allow_plaintext`), so a
 later bare `fleet-hub serve` keeps it. The flag can only turn it on; to turn
@@ -301,10 +505,33 @@ at whichever one provisioned it last.
   for the hub itself, a per-host token for every provisioned host (see
   `control-api.md` → *Per-host tokens*). Every request needs
   `Authorization: Bearer <token>`.
-- **TLS.** The hub itself speaks plain HTTP; put TLS in front of it. The
-  Docker setup does this with Caddy (automatic certificates via its domain,
-  `deploy/hub/Caddyfile`); the bare-binary setup needs your own proxy (or a
-  loopback bind reached over Tailscale/SSH, with no public URL at all).
+- **Client tokens.** A paired device holds a third kind of token: named,
+  revocable, `full` or `readonly`, never the master and never fleet admin.
+  Only its SHA-256 is stored. What crosses the room in the QR is a
+  single-use, minutes-long pairing *code* in a URL fragment — not a token —
+  and `POST /pair`, the one unauthenticated route besides `/healthz`, is
+  rate-limited to one attempt per address every six seconds. See *Pair a
+  phone* and *Clients* above.
+- **A reverse proxy in front of the hub must APPEND to `X-Forwarded-For`.**
+  That per-address budget keys on the request's TCP peer, except when the peer
+  is a loopback or private address — the compose topology, where the peer is
+  Caddy — in which case it believes the **last** parseable hop in
+  `X-Forwarded-For`, i.e. the address that proxy saw. A proxy that *replaces*
+  the header appends the real client and is correct; one that forwards a
+  client-supplied header verbatim, or sets the header from a client-controlled
+  value, would let a caller choose its own bucket — spend someone else's
+  budget, or dodge its own. Caddy's `reverse_proxy` appends by default
+  (`deploy/hub/Caddyfile` relies on it); if you front the hub with something
+  else, check that it does too.
+- **TLS.** Two ways, and the hub defaults to neither doing it itself: put TLS
+  in front of it, or let it terminate TLS with `--tls cert`. The Docker setup
+  takes the first road with Caddy (automatic certificates via its domain,
+  `deploy/hub/Caddyfile`); the bare-binary setup either needs your own proxy,
+  or runs `--tls cert` with a certificate and key you supply and renew (see
+  *Single binary with its own certificate* above) — or binds loopback and is
+  reached over Tailscale/SSH, with no public URL at all. Whichever you pick,
+  a routable bind serving plaintext is refused unless you pass
+  `--allow-plaintext`.
 - **`state.db` permissions.** Written `0600` on the hub's machine, same as
   the desktop.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
@@ -336,6 +563,18 @@ at whichever one provisioned it last.
   `https://` in front of a TLS proxy, bind `127.0.0.1`, or pass
   `--allow-plaintext` for a private-network or container-internal
   plaintext hop.
+- **`no hub is answering on 127.0.0.1:<port> — start fleet-hub serve first`**
+  from `pair` / `client list` / `client revoke` — these three drive the
+  *running* hub, not the database. Start the daemon, and point the command at
+  the same data dir and port it runs with (`--data-dir`, `--port`, or the
+  `FLEET_HUB_*` env the unit sets).
+- **The phone says the pairing code is invalid** — a code is single-use, it
+  expires (10 minutes by default), and a hub restart voids every outstanding
+  one. Mint a fresh one with `fleet-hub pair`. A `429` instead means the
+  address has spent its attempt budget: one every six seconds.
+- **`fleet-hub pair` refuses with `E_EXISTS`** — a live client already holds
+  that name. `fleet-hub client revoke <name>` first, or pair under another
+  name; a revoked row does not block the name.
 - **`could not bind`** — another process already holds the configured
   `--bind`/`--port`. Pick a different port, or find and stop what's using
   it.

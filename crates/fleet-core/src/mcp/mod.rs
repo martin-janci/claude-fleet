@@ -8,8 +8,11 @@
 mod auth;
 #[cfg(test)]
 mod doc_gen;
+pub mod events_route;
 pub mod guard;
 pub mod hooks;
+mod listener;
+pub mod pairing;
 pub mod settings;
 mod tools;
 
@@ -27,7 +30,10 @@ pub use auth::normalize_allowed_hosts;
 pub use auth::Caller;
 #[cfg(test)]
 pub use auth::TokenMode;
+pub use events_route::{EventSubscriber, EventsState};
 pub use guard::{ConfirmNotify, PendingConfirms, RateLimiter};
+pub use listener::{NoTls, TlsAcceptor};
+pub use pairing::{pair_url, PairingRequest, PendingPairings};
 pub use tools::FleetTools;
 
 /// `settings` table keys for the control API.
@@ -91,6 +97,13 @@ pub struct McpGuards {
     pub confirms: Arc<PendingConfirms>,
     /// Surfaces a confirmation request to the desktop (`mcp:confirm-required`).
     pub notify: ConfirmNotify,
+    /// Outstanding pairing codes. It lives here because the two halves of a
+    /// pairing sit on opposite sides of the server: the tool that mints a
+    /// code reaches it through `FleetTools`' guards, the unauthenticated
+    /// `/pair` route that redeems it through its own state. One registry,
+    /// one write path. Like the confirmations it outlives a server restart,
+    /// so a code minted before a port change is still good.
+    pub pairings: Arc<PendingPairings>,
 }
 
 impl McpGuards {
@@ -99,6 +112,7 @@ impl McpGuards {
             rate: Arc::new(RateLimiter::new()),
             confirms: Arc::new(PendingConfirms::new()),
             notify,
+            pairings: Arc::new(PendingPairings::new()),
         }
     }
 }
@@ -152,17 +166,23 @@ async fn authorize(
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     use axum::http::StatusCode;
     // Sync lock, released before the next `.await` — never held across one.
-    let host_tokens = {
+    // `active_client_tokens` drops revoked pairings, so a revoked client token
+    // simply stops resolving on the next request.
+    let (host_tokens, client_tokens) = {
         let s = state
             .store
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        s.list_host_tokens().unwrap_or_default()
+        (
+            s.list_host_tokens().unwrap_or_default(),
+            s.active_client_tokens().unwrap_or_default(),
+        )
     };
     let caller = match auth::check_request(
         request.headers(),
         &state.master,
         &host_tokens,
+        &client_tokens,
         &state.allowed_hosts,
     ) {
         Ok(c) => c,
@@ -176,8 +196,10 @@ async fn authorize(
         Err(StatusCode::UNAUTHORIZED)
             if request.uri().path() == "/hook" && state.allowed_hosts.is_empty() =>
         {
+            // No host rows and no client rows are passed: only the master
+            // token can satisfy this legacy path.
             query_token(request.uri().query())
-                .and_then(|t| auth::resolve_token(t, &state.master, &[]))
+                .and_then(|t| auth::resolve_token(t, &state.master, &[], &[]))
                 .ok_or_else(|| {
                     tracing::warn!("[mcp] rejected /hook request: no valid token");
                     StatusCode::UNAUTHORIZED
@@ -189,6 +211,20 @@ async fn authorize(
             return Err(status);
         }
     };
+    // Liveness for the pairing UI ("last seen"). Best-effort and rate-limited
+    // in the store (at most one write a minute per client); a second brief
+    // sync lock, again released before the `.await` below.
+    if let Some(client) = caller.client.as_ref() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Ok(s) = state.store.lock() {
+            if let Err(e) = s.touch_client_token(client.id, now) {
+                tracing::debug!(error = %e.message, "[mcp] could not touch client token");
+            }
+        }
+    }
     request.extensions_mut().insert(caller);
     Ok(next.run(request).await)
 }
@@ -216,12 +252,14 @@ async fn healthz() -> impl axum::response::IntoResponse {
 }
 
 /// Build the axum app: `/mcp` (rmcp service) and `/hook` behind [`authorize`],
-/// plus the unauthenticated `/healthz` liveness route. Shared by `start` and
-/// the routing test.
+/// plus the unauthenticated `/healthz` liveness and `/pair` exchange routes.
+/// Shared by `start` and the routing test.
 fn build_app(
     mcp_service: axum::routing::MethodRouter<hooks::HookState>,
     hook_state: hooks::HookState,
     auth_state: AuthState,
+    pair_state: pairing::PairState,
+    events_state: EventsState,
 ) -> axum::Router {
     // The MCP streamable-HTTP service is mounted with `route_service` at the
     // exact `/mcp` path — NOT `nest_service("/", …)` under `nest("/mcp", …)`.
@@ -233,13 +271,41 @@ fn build_app(
         .route("/mcp", mcp_service)
         .route("/hook", axum::routing::post(hooks::handle_hook))
         .with_state(hook_state)
+        // `/events` carries its own state, so it is a second router merged in
+        // BEFORE the `authorize` layer — which is what puts the change stream
+        // behind the same bearer token as `/mcp`, unlike `/healthz` and
+        // `/pair` below. See `events_route`.
+        .merge(
+            axum::Router::new()
+                .route("/events", axum::routing::get(events_route::handle_events))
+                .with_state(events_state),
+        )
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize));
-    // `/healthz` is registered on a SEPARATE router merged after the layered
-    // one: in axum 0.8 `.layer` wraps only the routes added before it, so
-    // merging afterwards is what keeps the liveness probe outside `authorize`
-    // while every other route stays behind it.
+    // `/healthz` and `/pair` are registered on a SEPARATE router merged after
+    // the layered one: in axum 0.8 `.layer` wraps only the routes added
+    // before it, so merging afterwards is what keeps these two outside
+    // `authorize` while every other route stays behind it.
+    //
+    // `/pair` is unauthenticated on purpose and it is NOT a second liveness
+    // probe: it is how a client gets its first credential, so it cannot be
+    // made to present one. What stands in for the bearer token is the pairing
+    // code — single-use, minutes-long, minted by a master-token holder at a
+    // terminal, compared in constant time and rate-limited per address (see
+    // [`pairing::handle_pair`]). It is also outside the `Host`/`Origin`
+    // allowlist, like `/healthz`: a phone scanning a QR may well reach the
+    // hub by a name nobody listed, and the code — not the Host header — is
+    // what authorizes the exchange.
     axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))
+        .route(
+            "/pair",
+            // GET is the page a camera scan lands on (static, no JavaScript,
+            // no secret — the code lives in the fragment, which the browser
+            // never sends); POST is the exchange itself.
+            axum::routing::get(pairing::handle_pair_page)
+                .post(pairing::handle_pair)
+                .with_state(pair_state),
+        )
         .merge(authorized)
 }
 
@@ -309,6 +375,9 @@ pub async fn start(
         port,
         token,
         allowed_hosts,
+        // The desktop streams row changes to its own frontend over Tauri
+        // events, not over HTTP: `/events` there answers 503.
+        None,
     )
     .await
     .map(|(shutdown, _serve)| shutdown)
@@ -329,18 +398,88 @@ pub async fn start_with_handle(
     port: u16,
     token: String,
     allowed_hosts: Vec<String>,
+    // Hands `GET /events` a fresh subscription per connection. `None` on a
+    // server whose store does not publish to a broadcast bus (the desktop),
+    // where `/events` answers 503.
+    events: Option<EventSubscriber>,
 ) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
     let addr = SocketAddr::from((bind, port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("could not bind {addr}: {e}"))?;
+    start_with_listener(
+        store,
+        ssh,
+        reg,
+        tunnels,
+        guards,
+        listener,
+        token,
+        allowed_hosts,
+        events,
+        None::<NoTls>,
+    )
+    .await
+}
+
+/// [`start_with_handle`] on a listener the caller has already bound, and —
+/// when `tls` is `Some` — behind the caller's TLS acceptor.
+///
+/// This is the variant `fleet-hub` uses to serve HTTPS from the daemon itself:
+/// the TLS stack stays in the hub (see [`listener`]), and everything below the
+/// accept loop is the same server the desktop runs. The plain-HTTP path is
+/// unchanged — `axum::serve` is still handed the `TcpListener` directly.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_with_listener<A: TlsAcceptor>(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<SshClient>,
+    reg: Arc<CancellationRegistry>,
+    tunnels: Arc<crate::service::tunnel::TunnelSupervisor>,
+    guards: McpGuards,
+    listener: tokio::net::TcpListener,
+    token: String,
+    allowed_hosts: Vec<String>,
+    events: Option<EventSubscriber>,
+    tls: Option<A>,
+) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
+    // The bound address, not a requested one: with the listener already open
+    // there is nothing left to guess, and an ephemeral (`:0`) bind reports the
+    // port it actually got. For every caller that named a port this is the
+    // address it asked for.
+    let addr = listener
+        .local_addr()
+        .map_err(|e| format!("could not read the listening address: {e}"))?;
+    let port = addr.port();
 
     let shutdown = CancellationToken::new();
     let serve_shutdown = shutdown.clone();
+    // Where a freshly paired client is told to come back. The public URL when
+    // one is configured, else this server's own loopback base on the port it
+    // actually bound (not the stored `mcp.port`, which a `--port` flag can
+    // override). A malformed stored URL falls back to loopback rather than
+    // failing the start: an unusable `hub` field is better than no hub.
+    let base_url = {
+        let public = store
+            .lock()
+            .ok()
+            .and_then(|s| s.get_setting(crate::service::hub::SETTING_PUBLIC_URL).ok())
+            .flatten()
+            .filter(|u| !u.trim().is_empty());
+        let loopback = || crate::service::hub::HubBase::loopback(port).url;
+        match public {
+            Some(u) => crate::service::hub::HubBase::public(&u, port)
+                .map(|b| b.url)
+                .unwrap_or_else(|_| loopback()),
+            None => loopback(),
+        }
+    };
     // Normalized once and shared: fleet's `authorize` layer and rmcp's own
     // Host check must admit exactly the same hosts.
     let allowed_hosts = auth::normalize_allowed_hosts(&allowed_hosts);
     let serve_task = crate::rt::spawn(async move {
+        // Taken before `store` is moved into `FleetTools` below: `/events`
+        // re-reads it to notice a client revoked mid-stream.
+        let events_store = Arc::clone(&store);
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
@@ -350,15 +489,62 @@ pub async fn start_with_handle(
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
         };
+        let pair_state = pairing::PairState::new(
+            Arc::clone(&store),
+            Arc::clone(&guards.pairings),
+            Arc::clone(&guards.rate),
+            base_url,
+        );
         let tools = FleetTools::new(store, ssh, reg, tunnels, guards);
         let service = streamable_service(tools, serve_shutdown.child_token(), &allowed_hosts);
-        let app = build_app(axum::routing::any_service(service), hook_state, auth_state);
+        let app = build_app(
+            axum::routing::any_service(service),
+            hook_state,
+            auth_state,
+            pair_state,
+            // The stream ends itself when the server stops, so an attached
+            // client never holds the graceful drain open.
+            EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token()),
+        );
 
-        tracing::info!("[mcp] control API listening on http://{addr}/mcp");
-        let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+        let scheme = if tls.is_some() { "https" } else { "http" };
+        tracing::info!("[mcp] control API listening on {scheme}://{addr}/mcp");
+        // `into_make_service_with_connect_info` is what puts the peer address
+        // in the request extensions, which is what `/pair` keys its
+        // per-address attempt budget on.
+        let shutdown_signal = async move {
             serve_shutdown.cancelled().await;
-        });
-        if let Err(e) = serve.await {
+        };
+        let result = match tls {
+            // Unchanged: the `TcpListener` goes straight to axum.
+            None => {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(shutdown_signal)
+                .await
+            }
+            Some(acceptor) => match listener::TlsListener::spawn(listener, acceptor) {
+                Err(e) => {
+                    tracing::error!(error = %e, "[mcp] could not take over the listener");
+                    return;
+                }
+                // `tap_io` is a no-op here; it is how axum lets a custom
+                // listener keep `SocketAddr` as its connect info (the
+                // `Connected` impl is written against `TapIo`).
+                Ok(tls_listener) => {
+                    use axum::serve::ListenerExt as _;
+                    axum::serve(
+                        tls_listener.tap_io(|_| {}),
+                        app.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(shutdown_signal)
+                    .await
+                }
+            },
+        };
+        if let Err(e) = result {
             tracing::error!(error = %e, "[mcp] server error");
         }
         tracing::info!("[mcp] control API stopped");
@@ -406,6 +592,11 @@ mod tests {
             let s = store.lock().unwrap();
             s.upsert_host("mefistos").unwrap();
             s.upsert_host_token("mefistos", "host-tok").unwrap();
+            s.insert_client_token("phone", &auth::sha256_hex("client-tok"), "full")
+                .unwrap();
+            s.insert_client_token("old", &auth::sha256_hex("revoked-tok"), "full")
+                .unwrap();
+            s.revoke_client_token("old").unwrap();
         }
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
@@ -416,14 +607,37 @@ mod tests {
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
         };
-        let app = build_app(any(|| async { "MCP_OK" }), hook_state, auth_state);
+        // The pairing registry the test mints into and `/pair` redeems from.
+        let pairings = Arc::new(pairing::PendingPairings::new());
+        let mut pair_state = pairing::PairState::new(
+            Arc::clone(&store),
+            Arc::clone(&pairings),
+            Arc::new(RateLimiter::new()),
+            "https://fleet.example.com".to_string(),
+        );
+        // Every request below comes from 127.0.0.1, so the production
+        // one-attempt-per-6s budget would refuse the second one. The budget
+        // gets its own app at the end of this test.
+        pair_state.attempt_interval = std::time::Duration::ZERO;
+        let app = build_app(
+            any(|| async { "MCP_OK" }),
+            hook_state,
+            auth_state,
+            pair_state,
+            EventsState::disabled(),
+        );
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -496,6 +710,129 @@ mod tests {
             "expected 405 for POST /healthz:\n{health_post}"
         );
 
+        // ---- `/pair`: the other unauthenticated route ----
+        // Pull `"<key>":"<value>"` out of a raw HTTP response.
+        fn json_field(resp: &str, key: &str) -> String {
+            let needle = format!("\"{key}\":\"");
+            let at = resp
+                .find(&needle)
+                .unwrap_or_else(|| panic!("no {key} in:\n{resp}"))
+                + needle.len();
+            let rest = &resp[at..];
+            rest[..rest.find('"').expect("closing quote")].to_string()
+        }
+        // Everything after the header block.
+        fn body_of(resp: &str) -> &str {
+            resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
+        }
+        let pair_req = |code: &str, host: &str| {
+            let body = format!("{{\"code\":\"{code}\"}}");
+            format!(
+                "POST /pair HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+
+        // A minted code is redeemed with NO Authorization header and from a
+        // Host nobody allowlisted — a phone that scanned a QR knows neither.
+        let minted = pairings.mint("kiosk", "readonly", std::time::Duration::from_secs(600));
+        let paired = round_trip(addr, &pair_req(&minted.code, "phone.invalid")).await;
+        assert!(
+            paired.contains("200 OK"),
+            "expected 200 on /pair with a minted code:\n{paired}"
+        );
+        let paired_token = json_field(&paired, "token");
+        assert_eq!(paired_token.len(), 64, "a 256-bit token:\n{paired}");
+        assert!(
+            paired_token
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "the token must be LOWERCASE hex — the stored digest is, and an \
+             uppercase one would never match:\n{paired}"
+        );
+        // The one response that ever carries the plaintext token must not be
+        // written to a proxy or browser cache.
+        assert!(
+            paired
+                .to_ascii_lowercase()
+                .contains("cache-control: no-store"),
+            "the token response must be no-store:\n{paired}"
+        );
+        assert_eq!(json_field(&paired, "name"), "kiosk");
+        assert_eq!(json_field(&paired, "mode"), "readonly");
+        assert_eq!(json_field(&paired, "hub"), "https://fleet.example.com");
+        // The code never comes back in the answer.
+        assert!(
+            !paired.contains(&minted.code),
+            "the pairing code must not be echoed:\n{paired}"
+        );
+
+        // A camera scan opens `GET /pair`, which must explain what to do
+        // rather than answer 405. No secret is in it: the code lives in the
+        // URL fragment, which a browser never sends.
+        let page = round_trip(
+            addr,
+            "GET /pair HTTP/1.1\r\nHost: phone.invalid\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            page.contains("200 OK"),
+            "expected 200 on GET /pair:\n{page}"
+        );
+        assert!(
+            page.to_ascii_lowercase().contains("text/html"),
+            "GET /pair must answer HTML:\n{page}"
+        );
+        assert!(
+            !page.to_ascii_lowercase().contains("<script"),
+            "the pairing page must carry no JavaScript:\n{page}"
+        );
+
+        // Used, never-minted and expired are one and the same answer.
+        let reused = round_trip(addr, &pair_req(&minted.code, "127.0.0.1")).await;
+        let unknown = round_trip(addr, &pair_req("ZZZZZZZZ", "127.0.0.1")).await;
+        let stale = pairings.mint("late", "full", std::time::Duration::from_millis(1));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let expired = round_trip(addr, &pair_req(&stale.code, "127.0.0.1")).await;
+        for (what, resp) in [
+            ("a used code", &reused),
+            ("an unknown code", &unknown),
+            ("an expired code", &expired),
+        ] {
+            assert!(resp.contains("404"), "expected 404 for {what}:\n{resp}");
+        }
+        assert_eq!(
+            body_of(&reused),
+            r#"{"error":"invalid code"}"#,
+            "the refusal body must carry no detail:\n{reused}"
+        );
+        assert_eq!(
+            body_of(&unknown),
+            body_of(&reused),
+            "an unknown code must be indistinguishable from a used one"
+        );
+        assert_eq!(
+            body_of(&expired),
+            body_of(&reused),
+            "an expired code must be indistinguishable from a used one"
+        );
+
+        // The token `/pair` handed out actually authenticates `/mcp`.
+        let as_client = round_trip(addr, &post("/mcp", Some(&paired_token), None, "{}")).await;
+        assert!(
+            as_client.contains("200 OK"),
+            "the paired token must authorize /mcp:\n{as_client}"
+        );
+        // A garbage body is a 400, not a 500 and not a hint about codes.
+        let junk = "POST /pair HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+                    Content-Length: 5\r\nConnection: close\r\n\r\nnope!";
+        let junk_resp = round_trip(addr, junk).await;
+        assert!(
+            junk_resp.contains("400"),
+            "expected 400 for a malformed /pair body:\n{junk_resp}"
+        );
+
         // Valid master token reaches the mounted service (proves /mcp routes, no panic).
         let ok = round_trip(addr, &post("/mcp", Some("s3cret"), None, "{}")).await;
         assert!(ok.contains("200 OK"), "expected 200 on /mcp, got:\n{ok}");
@@ -548,6 +885,46 @@ mod tests {
             hook_hq.contains("401"),
             "per-host token must not authorize via query:\n{hook_hq}"
         );
+        // A paired client's token authorizes /mcp…
+        let client_ok = round_trip(addr, &post("/mcp", Some("client-tok"), None, "{}")).await;
+        assert!(
+            client_ok.contains("200 OK"),
+            "client token must pass on /mcp:\n{client_ok}"
+        );
+        // …and the `authorize` middleware's liveness touch actually reached
+        // the store: the "phone" row's `last_seen_at` moved off its initial
+        // `None`.
+        {
+            let s = store.lock().unwrap();
+            let phone = s
+                .list_client_tokens(true)
+                .unwrap()
+                .into_iter()
+                .find(|c| c.name == "phone")
+                .expect("phone client token row");
+            assert!(
+                phone.last_seen_at.is_some(),
+                "authorize() must touch last_seen_at for a client request"
+            );
+        }
+        // …a revoked one never does (the store filters it out)…
+        let revoked = round_trip(addr, &post("/mcp", Some("revoked-tok"), None, "{}")).await;
+        assert!(
+            revoked.contains("401"),
+            "a revoked client token must be refused:\n{revoked}"
+        );
+        // …and a client is refused on /hook, in the header form…
+        let hook_client = round_trip(addr, &post("/hook", Some("client-tok"), None, stop)).await;
+        assert!(
+            hook_client.contains("403"),
+            "a client must not report hook events:\n{hook_client}"
+        );
+        // …and in the legacy query form (master-token-only path).
+        let hook_cq = round_trip(addr, &post("/hook?token=client-tok", None, None, stop)).await;
+        assert!(
+            hook_cq.contains("401"),
+            "a client token must not authorize via query:\n{hook_cq}"
+        );
         // …and /mcp never accepts a query token.
         let mcp_q = round_trip(addr, &post("/mcp?token=s3cret", None, None, "{}")).await;
         assert!(
@@ -580,10 +957,21 @@ mod tests {
         };
         let auth_state2 = AuthState {
             master: Arc::new("s3cret".to_string()),
-            store,
+            store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec!["fleet.example.com".to_string()]),
         };
-        let app2 = build_app(any(|| async { "MCP_OK" }), hook_state2, auth_state2);
+        let app2 = build_app(
+            any(|| async { "MCP_OK" }),
+            hook_state2,
+            auth_state2,
+            pairing::PairState::new(
+                Arc::clone(&store),
+                Arc::new(pairing::PendingPairings::new()),
+                Arc::new(RateLimiter::new()),
+                "https://fleet.example.com".to_string(),
+            ),
+            EventsState::disabled(),
+        );
         let listener2 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -611,6 +999,69 @@ mod tests {
         assert!(
             other_resp.contains("403"),
             "expected 403 for non-allowlisted Host:\n{other_resp}"
+        );
+
+        // A third app with the PRODUCTION attempt budget: guessing codes is
+        // throttled per address, whether or not the code is any good. Served
+        // with connect-info, which is what makes the peer address available
+        // for the bucket key.
+        let hook_state3 = hooks::HookState {
+            store: Arc::clone(&store),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let auth_state3 = AuthState {
+            master: Arc::new("s3cret".to_string()),
+            store: Arc::clone(&store),
+            allowed_hosts: Arc::new(vec![]),
+        };
+        let limited_pairings = Arc::new(pairing::PendingPairings::new());
+        let app3 = build_app(
+            any(|| async { "MCP_OK" }),
+            hook_state3,
+            auth_state3,
+            pairing::PairState::new(
+                store,
+                Arc::clone(&limited_pairings),
+                Arc::new(RateLimiter::new()),
+                "https://fleet.example.com".to_string(),
+            ),
+            EventsState::disabled(),
+        );
+        let listener3 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr3 = listener3.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener3,
+                app3.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let first = round_trip(addr3, &pair_req("ZZZZZZZZ", "127.0.0.1")).await;
+        assert!(
+            first.contains("404"),
+            "the first guess is answered, not throttled:\n{first}"
+        );
+        // Even a GOOD code is refused inside the window: the budget is spent
+        // before the code is looked at.
+        let good = limited_pairings.mint("phone2", "full", std::time::Duration::from_secs(600));
+        let throttled = round_trip(addr3, &pair_req(&good.code, "127.0.0.1")).await;
+        assert!(
+            throttled.contains("429"),
+            "expected 429 on the second attempt from one address:\n{throttled}"
+        );
+        assert!(
+            throttled.to_ascii_lowercase().contains("retry-after:"),
+            "a 429 must say when to come back:\n{throttled}"
+        );
+        // Throttled means untouched: the code is still good afterwards.
+        assert!(
+            limited_pairings.consume(&good.code).is_some(),
+            "a throttled attempt must not spend the code"
         );
     }
 
@@ -657,21 +1108,39 @@ mod tests {
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
         };
+        let guards = McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {}));
+        let pair_state = pairing::PairState::new(
+            Arc::clone(&store),
+            Arc::clone(&guards.pairings),
+            Arc::clone(&guards.rate),
+            "https://fleet.example.com".to_string(),
+        );
         let tools = FleetTools::new(
             store,
             Arc::new(SshClient::new()),
             crate::cancel::CancellationRegistry::new(),
             Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
-            McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+            guards,
         );
         let service = streamable_service(tools, CancellationToken::new(), &allowed_hosts);
-        let app = build_app(axum::routing::any_service(service), hook_state, auth_state);
+        let app = build_app(
+            axum::routing::any_service(service),
+            hook_state,
+            auth_state,
+            pair_state,
+            EventsState::disabled(),
+        );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         addr
@@ -782,6 +1251,394 @@ mod tests {
         assert!(r.contains("403"), "public Host, empty allowlist:\n{r}");
     }
 
+    /// The desktop embeds the same server but opens its store with the
+    /// frontend's own bus, so there is nothing to stream: `/events` must say
+    /// so in as many words rather than 404 (which reads as "wrong URL") or
+    /// hang on an empty stream.
+    #[tokio::test]
+    async fn events_is_unavailable_without_a_bus() {
+        let addr = serve_real_tools().await;
+        let r = raw_round_trip(addr, &get_events(Some("s3cret"), "")).await;
+        assert!(r.contains("503"), "expected 503 without a bus:\n{r}");
+        assert!(
+            r.contains(events_route::NOT_ENABLED),
+            "expected the documented reason:\n{r}"
+        );
+    }
+
+    /// `GET /events` with the master token and an optional raw query string.
+    fn get_events(auth: Option<&str>, query: &str) -> String {
+        let mut h = format!(
+            "GET /events{query} HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+             Accept: text/event-stream\r\n"
+        );
+        if let Some(a) = auth {
+            h.push_str(&format!("Authorization: Bearer {a}\r\n"));
+        }
+        h.push_str("\r\n");
+        h
+    }
+
+    /// The same app shape as [`serve_real_tools`], with an event source
+    /// wired to `bus` — what `fleet-hub serve` builds.
+    async fn serve_with_events(
+        bus: &Arc<crate::events::BroadcastEventBus>,
+    ) -> std::net::SocketAddr {
+        serve_with_events_every(bus, events_route::KEEPALIVE_INTERVAL).await
+    }
+
+    /// [`serve_with_events`] with a shortened heartbeat.
+    async fn serve_with_events_every(
+        bus: &Arc<crate::events::BroadcastEventBus>,
+        keepalive: std::time::Duration,
+    ) -> std::net::SocketAddr {
+        serve_events_app(
+            bus,
+            keepalive,
+            CancellationToken::new(),
+            Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+        )
+        .await
+        .0
+    }
+
+    /// [`serve_with_events`], also taking the server's shutdown token and the
+    /// store the route re-reads, and handing back the route state so a test
+    /// can watch a stream slot free up.
+    async fn serve_events_app(
+        bus: &Arc<crate::events::BroadcastEventBus>,
+        keepalive: std::time::Duration,
+        stop: CancellationToken,
+        store: Arc<Mutex<Store>>,
+    ) -> (std::net::SocketAddr, EventsState) {
+        use axum::routing::any;
+        use std::net::Ipv4Addr;
+        let hook_state = hooks::HookState {
+            store: Arc::clone(&store),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let auth_state = AuthState {
+            master: Arc::new("s3cret".to_string()),
+            store: Arc::clone(&store),
+            allowed_hosts: Arc::new(vec![]),
+        };
+        let pair_state = pairing::PairState::new(
+            Arc::clone(&store),
+            Arc::new(pairing::PendingPairings::new()),
+            Arc::new(RateLimiter::new()),
+            "https://fleet.example.com".to_string(),
+        );
+        let subscribe: EventSubscriber = {
+            let bus = Arc::clone(bus);
+            Arc::new(move || bus.subscribe())
+        };
+        let events_state = EventsState::enabled(subscribe, Arc::clone(&store))
+            .with_keepalive(keepalive)
+            .with_shutdown(stop);
+        let app = build_app(
+            any(|| async { "MCP_OK" }),
+            hook_state,
+            auth_state,
+            pair_state,
+            events_state.clone(),
+        );
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        (addr, events_state)
+    }
+
+    /// One open SSE connection, read incrementally: unlike `raw_round_trip`
+    /// the server never closes a stream, so the test reads until it has seen
+    /// what it is waiting for and then drops the socket.
+    struct SseConn {
+        sock: tokio::net::TcpStream,
+        seen: String,
+    }
+
+    impl SseConn {
+        async fn open(addr: std::net::SocketAddr, auth: Option<&str>, query: &str) -> Self {
+            use tokio::io::AsyncWriteExt;
+            let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+            sock.write_all(get_events(auth, query).as_bytes())
+                .await
+                .unwrap();
+            Self {
+                sock,
+                seen: String::new(),
+            }
+        }
+
+        /// Read until `needle` shows up, or fail after 2 s — a hang must fail
+        /// the test, not block the suite.
+        async fn wait_for(&mut self, needle: &str) -> &str {
+            use tokio::io::AsyncReadExt;
+            let deadline = std::time::Duration::from_secs(2);
+            let read = tokio::time::timeout(deadline, async {
+                let mut tmp = [0u8; 4096];
+                while !self.seen.contains(needle) {
+                    match self.sock.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => self.seen.push_str(&String::from_utf8_lossy(&tmp[..n])),
+                        Err(_) => break,
+                    }
+                }
+            })
+            .await;
+            assert!(
+                read.is_ok() && self.seen.contains(needle),
+                "waited for {needle:?}; stream so far:\n{}",
+                self.seen
+            );
+            &self.seen
+        }
+    }
+
+    /// The stream itself: authenticated, `text/event-stream`, a `ready` frame
+    /// first, then one frame per change emitted AFTER the subscription — the
+    /// whole reason a phone can stop polling.
+    #[tokio::test]
+    async fn events_streams_changes_emitted_after_subscribing() {
+        use crate::events::{BroadcastEventBus, EventBus};
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+
+        let mut sse = SseConn::open(addr, Some("s3cret"), "").await;
+        let head = sse.wait_for("event: ready").await.to_string();
+        assert!(head.contains("200 OK"), "expected 200:\n{head}");
+        assert!(
+            head.to_ascii_lowercase().contains("text/event-stream"),
+            "expected an SSE content type:\n{head}"
+        );
+        // The ready frame carries the server version and its clock, so a
+        // reconnecting client can tell a restart from a hiccup.
+        assert!(
+            head.contains(crate::app_version::get()) && head.contains("\"now\""),
+            "the ready frame must carry version and now:\n{head}"
+        );
+
+        // Emitted only now, with the subscription already live.
+        bus.session_killed(42);
+        let frame = sse.wait_for("event: session:killed").await.to_string();
+        assert!(
+            frame.contains(r#"data: {"id":42}"#),
+            "the payload must be the frontend's:\n{frame}"
+        );
+
+        // `?kinds=host` drops a session change and passes a host one.
+        let mut filtered = SseConn::open(addr, Some("s3cret"), "?kinds=host").await;
+        filtered.wait_for("event: ready").await;
+        bus.session_killed(43);
+        bus.host_removed("box");
+        let seen = filtered.wait_for("event: host:removed").await.to_string();
+        assert!(
+            !seen.contains("session:killed"),
+            "?kinds=host must drop session events:\n{seen}"
+        );
+        assert!(
+            seen.contains(r#"data: {"alias":"box"}"#),
+            "the host payload:\n{seen}"
+        );
+
+        // A stream is not a public resource: no token, no stream.
+        let unauth = raw_round_trip(addr, &get_events(None, "")).await;
+        assert!(
+            unauth.contains("401"),
+            "expected 401 without a token:\n{unauth}"
+        );
+        // Nor does a token in the URL open one (it would land in proxy logs).
+        let via_query = raw_round_trip(addr, &get_events(None, "?token=s3cret")).await;
+        assert!(
+            via_query.contains("401"),
+            "a query token must not open a stream:\n{via_query}"
+        );
+    }
+
+    /// A subscriber that falls behind the ring is told how much it missed and
+    /// the stream ends — the bus never waits for it. The emits below run
+    /// without an await, so the server task cannot drain between them.
+    #[tokio::test]
+    async fn a_lagging_stream_is_told_and_closed() {
+        use crate::events::{BroadcastEventBus, EventBus};
+        let bus = Arc::new(BroadcastEventBus::new(2));
+        let addr = serve_with_events(&bus).await;
+        let mut sse = SseConn::open(addr, Some("s3cret"), "").await;
+        sse.wait_for("event: ready").await;
+
+        for i in 0..50 {
+            bus.emit(&crate::events::RowChange::SessionKilled(i));
+        }
+        let seen = sse.wait_for("event: lagged").await.to_string();
+        assert!(
+            seen.contains(r#""skipped":"#),
+            "the lagged frame must say how many were missed:\n{seen}"
+        );
+        // …and the stream ENDED rather than streaming on with a hole in it:
+        // the chunked body is terminated (the socket itself stays up — HTTP
+        // keep-alive — so EOF is not the signal to look for).
+        let ended = sse.wait_for("\r\n0\r\n\r\n").await.to_string();
+        assert!(
+            ended.rfind("event: lagged") < ended.rfind("\r\n0\r\n\r\n"),
+            "the lagged frame must be the last one:\n{ended}"
+        );
+    }
+
+    /// An idle stream sends a comment line on the keep-alive interval, which
+    /// is what holds the connection open through a phone's NAT, the reverse
+    /// tunnel and any proxy in between. Production waits
+    /// [`events_route::KEEPALIVE_INTERVAL`]; this asks for 50 ms and watches
+    /// it arrive.
+    #[tokio::test]
+    async fn an_idle_stream_sends_a_heartbeat() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events_every(&bus, std::time::Duration::from_millis(50)).await;
+        let mut sse = SseConn::open(addr, Some("s3cret"), "").await;
+        sse.wait_for("event: ready").await;
+        // Nothing is emitted: what arrives next can only be the heartbeat.
+        let seen = sse.wait_for(":\n\n").await.to_string();
+        assert!(
+            !seen.contains("event: session"),
+            "no change was emitted; only a heartbeat may follow:\n{seen}"
+        );
+    }
+
+    /// A stream is an in-flight request that never ends on its own, and
+    /// axum's graceful shutdown waits for in-flight requests: an attached
+    /// client must not hold a stopping hub open for its whole drain timeout.
+    #[tokio::test]
+    async fn a_stream_ends_when_the_server_stops() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let stop = CancellationToken::new();
+        let (addr, _state) = serve_events_app(
+            &bus,
+            events_route::KEEPALIVE_INTERVAL,
+            stop.child_token(),
+            Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+        )
+        .await;
+        let mut sse = SseConn::open(addr, Some("s3cret"), "").await;
+        sse.wait_for("event: ready").await;
+        stop.cancel();
+        // The chunked body is terminated, promptly — no drain timeout.
+        sse.wait_for("\r\n0\r\n\r\n").await;
+    }
+
+    /// `authorize` runs once, at connect; a stream then outlives it. So a
+    /// paired client's stream re-checks the store and ends when its row stops
+    /// being live — otherwise a revoked phone would keep receiving the whole
+    /// fleet change feed until it chose to disconnect.
+    #[tokio::test]
+    async fn a_revoked_clients_stream_ends_at_the_next_heartbeat() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_client_token("phone", &auth::sha256_hex("client-tok"), "full")
+                .unwrap();
+        }
+        let (addr, state) = serve_events_app(
+            &bus,
+            std::time::Duration::from_millis(50),
+            CancellationToken::new(),
+            Arc::clone(&store),
+        )
+        .await;
+
+        let mut sse = SseConn::open(addr, Some("client-tok"), "").await;
+        sse.wait_for("event: ready").await;
+        assert_eq!(state.active("client:phone"), 1, "the stream holds a slot");
+
+        store.lock().unwrap().revoke_client_token("phone").unwrap();
+
+        // The body ends — within a heartbeat, not when the device feels like
+        // disconnecting.
+        sse.wait_for("\r\n0\r\n\r\n").await;
+        // …and the slot it held comes back.
+        let freed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.active("client:phone") != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            freed.is_ok(),
+            "the permit must be released when the stream ends"
+        );
+    }
+
+    /// Streams are capped per caller like the long-polling tools: the ninth
+    /// concurrent one from the same token is refused, and told when to retry.
+    #[tokio::test]
+    async fn the_ninth_concurrent_stream_from_one_caller_is_refused() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        // A short heartbeat, so the server writes to a dropped connection
+        // soon enough for the test to observe the slot come back.
+        let (addr, state) = serve_events_app(
+            &bus,
+            std::time::Duration::from_millis(50),
+            CancellationToken::new(),
+            Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+        )
+        .await;
+        let mut held = Vec::new();
+        for _ in 0..guard::MAX_LONG_POLLS_PER_CALLER {
+            let mut c = SseConn::open(addr, Some("s3cret"), "").await;
+            c.wait_for("event: ready").await;
+            held.push(c);
+        }
+        let refused = raw_round_trip(addr, &get_events(Some("s3cret"), "")).await;
+        assert!(
+            refused.contains("429"),
+            "expected 429 for the ninth stream:\n{refused}"
+        );
+        assert!(
+            refused.to_ascii_lowercase().contains("retry-after: 1"),
+            "a 429 must say when to come back:\n{refused}"
+        );
+        assert!(
+            refused.contains(events_route::TOO_MANY_STREAMS),
+            "expected the documented reason:\n{refused}"
+        );
+        assert_eq!(state.active("master"), guard::MAX_LONG_POLLS_PER_CALLER);
+
+        // The third leg the cap rests on: axum drops the body when the client
+        // goes away, which drops the permit — so hanging up frees a slot.
+        held.pop();
+        let freed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if state.active("master") < guard::MAX_LONG_POLLS_PER_CALLER {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(freed.is_ok(), "a hung-up stream must release its slot");
+        let again = SseConn::open(addr, Some("s3cret"), "")
+            .await
+            .wait_for("event: ready")
+            .await
+            .to_string();
+        assert!(
+            again.contains("200 OK"),
+            "the freed slot must be usable:\n{again}"
+        );
+    }
+
     /// The transitional `/hook?token=<master>` form is a desktop/loopback
     /// affordance only: a server with a Host allowlist (a public hub) refuses
     /// it like any request without a bearer header.
@@ -853,6 +1710,7 @@ mod tests {
             port,
             "tok".into(),
             vec![],
+            None,
         )
         .await
         .expect("bind 127.0.0.2");

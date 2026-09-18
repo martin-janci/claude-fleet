@@ -213,6 +213,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/031_asset_sync.sql"),
         already_applied: Some(asset_inventory_has_managed),
     },
+    // `CREATE TABLE IF NOT EXISTS` plus two `CREATE UNIQUE INDEX IF NOT
+    // EXISTS`, safe to re-run.
+    Migration::plain(32, include_str!("../../migrations/032_client_tokens.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -381,6 +384,7 @@ mod tests {
         "catalog_secrets",
         "catalog_secrets_host",
         "sync_runs",
+        "client_tokens",
     ];
 
     #[test]
@@ -1253,7 +1257,10 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 31, "schema_version should be 31 after migration");
+        assert_eq!(
+            v, LATEST_SCHEMA_VERSION,
+            "schema_version should be current after migration"
+        );
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

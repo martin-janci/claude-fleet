@@ -101,6 +101,85 @@ port or token change, or a reverse-tunnel bounce therefore needs no reconnect
 on the client side — the next call simply works. Responses are SSE-framed so a
 long poll keeps receiving a keep-alive every 15 s.
 
+### Endpoints
+
+| Path | Auth | What it is |
+|---|---|---|
+| `POST /mcp` | bearer | The MCP transport. `GET` is not served (`405`). |
+| `POST /hook` | bearer (per-host) | Claude Code's hook events — see *Hook contract*. |
+| `GET /healthz` | none | Liveness: `fleet-hub ok`. Outside the Host allowlist. |
+| `GET` / `POST /pair` | **none, by design** | The pairing exchange (below). Outside the Host allowlist. |
+| `GET /events` | bearer | The row-change stream (below). |
+
+### `/pair` — how a client gets its first credential
+
+`pair_client` (master token only) mints a single-use **code** — eight
+Crockford-base32 characters from the CSPRNG, held in the server's memory, not
+in `state.db` — and returns
+`{ url, code, expires_in_s, name, mode }`. The `url` is
+`<public-url>/pair#<code>`: the code rides in the URL **fragment**, which a
+browser never sends, so a QR of that URL can be photographed off a terminal
+without a proxy or an access log ever seeing the secret. `GET /pair` is the
+inert page a camera scan lands on — no JavaScript, no auto-redeem — and
+`POST /pair` with `{"code":"…"}` is the exchange itself, answering
+`{ hub, mode, name, token }` with `Cache-Control: no-store`. That response is
+the only place the client token ever exists in plaintext; the store keeps its
+SHA-256.
+
+It is the one route besides `/healthz` that carries no bearer token — a
+device being paired has none yet — and it is outside the `Host`/`Origin`
+allowlist too, since a phone may reach the hub by a name nobody listed. What
+stands in for the token is the code: single-use (a replay answers `404`),
+minutes-long (`ttl_s`, clamped 30 s…1 h, default 10 min), compared in constant
+time, voided wholesale by a restart, and rate-limited to **one attempt per
+source address every six seconds** (`429` with `Retry-After` otherwise). The
+address is the request's peer, or the last parseable `X-Forwarded-For` hop
+when the peer is a loopback/private address — i.e. plausibly the reverse proxy
+in front.
+
+Nothing token-shaped is logged anywhere on this path: not the presented code,
+not the minted token, not its hash.
+
+The desktop app embeds the **same** router, so it serves `/pair` too, and that
+route is not merely decorative there: `pair_client` is one of the shared tools,
+so a desktop master token can mint a code and redeem it against the desktop's
+own loopback `/pair`, creating a real row in the desktop's `client_tokens`.
+That is not an escalation — minting is master-token-only and the desktop binds
+`127.0.0.1`, so the exchange never leaves the machine — but it is worth saying
+plainly rather than assuming the desktop's `/pair` can only answer `404`. The
+desktop simply has no UI for it; client access is a `fleet-hub` feature, and
+`fleet-hub pair` is how you are meant to reach it.
+
+### `/events` — the row-change stream
+
+`GET /events` is a server-sent-event stream of every row change the store
+emits after the connection opened — the same
+events the desktop UI repaints from. It sits **behind** the bearer token (a
+change stream names sessions, hosts, projects and prompts, so it needs what
+`/mcp` needs), and a client that is revoked mid-stream has its stream ended at
+the next heartbeat.
+
+- Each frame is `event: <name>` + `data: <json>` where `<name>` is the event
+  (`session:created`, `session:updated`, `session:killed`, `host:probed`,
+  `task:updated`, `account_usage:updated`, `asset_inventory:updated`,
+  `catalog:loaded`, `sync:progress`, …) and the payload is the same JSON the
+  desktop frontend receives.
+- The first frame is `ready`, carrying `{ version, now, kinds }` — the kinds
+  this stream will actually deliver.
+- `?kinds=session,host` filters on the part of the name before the `:`. An
+  unrecognised value is dropped and logged (and is absent from `ready`'s
+  `kinds`), so a typo is visible rather than producing a silent stream.
+- A comment line every 15 s keeps the connection alive through a phone's NAT,
+  a reverse tunnel and any proxy in between.
+- A caller may hold **8** concurrent streams (`429` beyond that, on its own
+  budget — parking phone streams never costs an agent its `wait_for_session`
+  slots), and a subscriber that falls more than 256 events behind gets one
+  `lagged` frame and is disconnected: reconnect and re-list rather than
+  assume continuity.
+- The desktop app has no event source to stream from, so `/events` there
+  answers `503 events are not enabled on this server`. The `fleet-hub` daemon
+  serves it.
+
 ## Tools
 
 The authoritative per-tool documentation — description and parameter list for
@@ -158,9 +237,18 @@ Index by area (names only; see the reference for details):
   Assets tab, which auto-commits every save; no MCP tools. Sessions may edit
   the catalog repo directly and commit with `catalog:` prefixed messages,
   which the app picks up on its next catalog load.
-- **Orchestration** — `wait_for_session`, `session_transcript`, `run_prompt`,
-  `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
-  `set_session_tags`.
+- **Orchestration** — `wait_for_session`, `session_transcript`,
+  `session_conversation`, `run_prompt`, `dispatch_task`, `wait_for_task`,
+  `list_tasks`, `cancel_task`, `set_session_tags`.
+- **Paired clients** — `pair_client` (mint a single-use pairing code and the
+  URL to show as a QR; master token only), `list_clients` (the paired devices
+  and what each one's token may do — the stored token digest is never
+  returned; a read, but master token only, since it enumerates every paired
+  device), `revoke_client` (revoke one by name; master token only). A
+  paired client is never the master, so every tool in this group — like the
+  rest of fleet admin — stays out of a phone's reach. The `fleet-hub pair`,
+  `fleet-hub client list` and `fleet-hub client revoke` commands are thin
+  wrappers around these three.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →
@@ -230,7 +318,13 @@ reads the session's Claude Code JSONL transcript
 turn (or every turn after `since_turn`) as plain text: text blocks verbatim,
 one `[tool_use] Name(...)` line per tool call, no thinking. The file is found through the `transcript_path` Claude Code reports in every hook when fleet has one, else under the session's physical cwd (symlinks resolved on the host with `pwd -P`), else by the session id under `~/.claude/projects/*/` (which also covers Claude truncating encoded directory names longer than 200 characters). `E_INVALID_STATE`
 when the row has no `claude_session_id` yet, `E_NO_TRANSCRIPT` when the file
-does not exist. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
+does not exist. `session_conversation { session_id, turns? }` reads the same
+transcript but returns it as structured turns — `{ turns: [{ prompt, at,
+ended_at, items: [{ kind: "text", text } | { kind: "tool", summary, error }] }],
+truncated }` — the same shape the desktop's Conversation tab renders, for a
+client that wants the exchange's structure rather than one flat blob.
+`turns` defaults to 10 and is capped at 100; the character budget scales with
+it. Same errors as `session_transcript`. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
 raw? }` composes the three: deliver, wait for `turn_seq` to grow, return
 `{ turn_seq, status, transcript }`. It refuses (`E_INVALID_STATE`) a session that is not between turns (`claude_status` idle, completed or stopped): mid-turn, the previous turn's `Stop` would satisfy the wait and return the old reply.
 
@@ -354,6 +448,15 @@ at user level would block every other http hook on the host.
   binds identity-bearing tools (`register_self`, `send_message`, `inbox`) to
   that host and can be set `readonly` (mutating tools → `E_FORBIDDEN`). See
   *Per-host tokens* above.
+- **Paired clients.** A phone or browser holds a named, revocable client
+  token (`full` or `readonly`) obtained through `/pair`; only its SHA-256 is
+  stored. A client is never the master and never reaches fleet admin, so it
+  cannot pair another device or revoke the operator's own client, and it
+  cannot deliver an unmarked prompt (`raw: true` is the master token's
+  alone — text typed on a phone always reaches an agent marked, naming the
+  client it came from). `revoke_client` takes effect on the next request, and
+  an open `/events` stream ends at the next heartbeat. See `hub.md` →
+  *Clients*.
 - **DNS-rebinding defense.** Requests carrying a non-loopback `Origin` or
   `Host` header are rejected with `403` before the token is even checked — a
   remote page cannot reach the server by rebinding its domain to `127.0.0.1`.

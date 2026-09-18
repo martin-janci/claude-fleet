@@ -62,6 +62,7 @@ pub const READONLY_TOOLS: &[&str] = &[
     // task reads observe state without changing it.
     "wait_for_session",
     "session_transcript",
+    "session_conversation",
     "wait_for_task",
     "list_tasks",
     // Estimated token usage / cost roll-up (Wave 5 G1).
@@ -73,6 +74,14 @@ pub const READONLY_TOOLS: &[&str] = &[
     // the controller's catalog repo working tree and is therefore mutating.
     "list_assets",
     "scan_assets",
+    // Paired clients: listing them observes who holds a credential and
+    // changes nothing, so it belongs here — but it is ALSO in
+    // [`ADMIN_TOOLS`], the only tool in both lists. The two answer different
+    // questions: `ADMIN_TOOLS` decides WHO may call it (the master alone),
+    // this list decides whether a *readonly* token may, and a read that
+    // mutates nothing must not be classed as a mutation just because it is
+    // master-only. Minting and revoking are admin and mutating — below.
+    "list_clients",
 ];
 
 pub fn is_readonly_tool(name: &str) -> bool {
@@ -105,7 +114,13 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// per-host token — even in `full` mode — must not be able to re-provision,
 /// rotate, add or remove other hosts, or it could lock the whole fleet out.
 /// `full` therefore means whole-fleet *session* control (send / kill /
-/// new_session across hosts stay allowed by design), not fleet admin.
+/// new_session across hosts stay allowed by design), not fleet admin. A
+/// paired client token is refused these too, whatever its mode — it is never
+/// the master ([`crate::mcp::Caller::is_master`] is false for a client).
+///
+/// Being here is about WHO may call a tool, not about whether it writes:
+/// `list_clients` is master-only *and* read-only, so it appears in
+/// [`READONLY_TOOLS`] too.
 pub const ADMIN_TOOLS: &[&str] = &[
     "provision_hosts",
     "add_host",
@@ -118,6 +133,18 @@ pub const ADMIN_TOOLS: &[&str] = &[
     // master token keeps a per-host token from setting values another
     // host's assets would pick up.
     "set_secret",
+    // Client credentials: minting one hands out fleet access and revoking
+    // one takes it away. A per-host token must not be able to issue itself a
+    // second identity, and a paired phone must not be able to pair another
+    // phone or revoke the operator's own client.
+    "pair_client",
+    "revoke_client",
+    // Listing them is the same surface read from the other side: it names
+    // every paired device, its mode, when it was paired and when it was last
+    // seen. A phone must not be able to enumerate the operator's other
+    // devices, so the whole client group is master-only. It mutates nothing,
+    // so it stays in [`READONLY_TOOLS`] as well — see the note there.
+    "list_clients",
 ];
 
 pub fn is_admin_tool(name: &str) -> bool {
@@ -136,10 +163,26 @@ pub fn broadcast_interval(raw: Option<String>) -> Duration {
 
 /// One-slot token bucket per key: a call is allowed when at least `interval`
 /// has elapsed since the key's last allowed call. Keys are caller labels
-/// (`master`, `host:<alias>`), so one chatty agent cannot starve another.
+/// (`master`, `host:<alias>`, `client:<name>`) and, since `/pair`, source
+/// addresses (`pair:<ip>`) — so one chatty agent cannot starve another.
+///
+/// The map is BOUNDED: `/pair` is unauthenticated, which made the key space
+/// remote-chosen for the first time, so every call drops entries older than
+/// the longest interval ever passed to [`RateLimiter::check`]. Past that age
+/// an entry can refuse nothing, so dropping it changes no decision; what it
+/// buys is that the map only ever holds the sources seen inside one interval
+/// instead of every source seen since the process started.
 #[derive(Default)]
 pub struct RateLimiter {
-    last: Mutex<HashMap<String, Instant>>,
+    last: Mutex<Buckets>,
+}
+
+#[derive(Default)]
+struct Buckets {
+    entries: HashMap<String, Instant>,
+    /// The largest `interval` any caller has asked for. An entry younger than
+    /// this may still refuse a call, so eviction may not touch it.
+    max_interval: Duration,
 }
 
 impl RateLimiter {
@@ -153,18 +196,36 @@ impl RateLimiter {
         self.check_at(key, Instant::now(), interval)
     }
 
+    /// Entries currently held. Test-only: the map is internal state, but its
+    /// SIZE is a property — see `rate_limiter_evicts_entries_older_than…`.
+    /// (`is_empty` would mean nothing here: an empty limiter refuses nothing.)
+    #[cfg(test)]
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .len()
+    }
+
     pub fn check_at(&self, key: &str, now: Instant, interval: Duration) -> Result<(), Duration> {
-        let mut last = self
+        let mut b = self
             .last
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(prev) = last.get(key) {
+        if let Some(prev) = b.entries.get(key) {
             let elapsed = now.saturating_duration_since(*prev);
             if elapsed < interval {
                 return Err(interval - elapsed);
             }
         }
-        last.insert(key.to_string(), now);
+        b.max_interval = b.max_interval.max(interval);
+        // Evict before inserting, so the fresh entry is never a candidate.
+        let horizon = b.max_interval;
+        b.entries
+            .retain(|_, t| now.saturating_duration_since(*t) < horizon);
+        b.entries.insert(key.to_string(), now);
         Ok(())
     }
 }
@@ -466,8 +527,34 @@ const REDACT_KEYS: &[&str] = &["prompt", "body", "content", "start_command"];
 const SKIP_KEYS: &[&str] = &["confirm_nonce", "value"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
+/// Replace every character that could end a line downstream — see
+/// [`breaks_a_line`](crate::store::breaks_a_line) — with a space.
+///
+/// The audit trail is a sequence of one-line records, so every value
+/// interpolated into one goes through here: the argument summary below, and
+/// the caller label the persisted record is built from (a paired client's
+/// name is the one part of a label that is not this fleet's own words).
+pub fn scrub_line(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if crate::store::breaks_a_line(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// One-line, key-sorted `k=v` summary of tool arguments with free-text
 /// values replaced by `<N chars>` and the whole thing capped.
+///
+/// **One line** is a promise, not a description: this summary is persisted as
+/// a `session_events` row and printed in a log line, and the audit row is
+/// written BEFORE a tool validates anything — so an argument that never
+/// reaches a validator still reaches here. Anything that
+/// [`breaks_a_line`](crate::store::breaks_a_line) is therefore replaced with
+/// a space, so an unvalidated `name` cannot forge a second audit line.
 pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) -> String {
     let Some(map) = args else {
         return String::new();
@@ -494,7 +581,7 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
         };
         parts.push(format!("{k}={rendered}"));
     }
-    let joined = parts.join(" ");
+    let joined = scrub_line(&parts.join(" "));
     if joined.chars().count() > SUMMARY_MAX_CHARS {
         let mut s: String = joined.chars().take(SUMMARY_MAX_CHARS).collect();
         s.push('…');
@@ -577,6 +664,7 @@ mod tests {
         for t in [
             "wait_for_session",
             "session_transcript",
+            "session_conversation",
             "wait_for_task",
             "list_tasks",
         ] {
@@ -693,6 +781,44 @@ mod tests {
         assert!(rl.check_at("host:a", t0, Duration::ZERO).is_ok());
     }
 
+    /// `/pair` gave the limiter an UNAUTHENTICATED, remote-chosen key space
+    /// (one per source address), so the map must not grow for the life of the
+    /// process: every call drops entries older than the longest interval ever
+    /// passed to `check` — past that age an entry can refuse nothing.
+    #[test]
+    fn rate_limiter_evicts_entries_older_than_the_longest_interval() {
+        let rl = RateLimiter::new();
+        let t0 = Instant::now();
+        let short = Duration::from_secs(6);
+        assert!(rl.check_at("pair:1.2.3.4", t0, short).is_ok());
+        assert_eq!(rl.len(), 1);
+        // 7 s later the first address can no longer be refused, so it goes.
+        assert!(rl
+            .check_at("pair:5.6.7.8", t0 + Duration::from_secs(7), short)
+            .is_ok());
+        assert_eq!(rl.len(), 1, "the stale entry must have been evicted");
+        // The LONGEST interval seen is what bounds eviction — a 30 s bucket
+        // must not be dropped after 7 s just because another key uses 6 s.
+        let long = Duration::from_secs(30);
+        assert!(rl
+            .check_at("master", t0 + Duration::from_secs(7), long)
+            .is_ok());
+        assert!(rl
+            .check_at("pair:9.9.9.9", t0 + Duration::from_secs(20), short)
+            .is_ok());
+        assert_eq!(rl.len(), 3, "nothing is older than 30 s yet");
+        assert!(
+            rl.check_at("master", t0 + Duration::from_secs(20), long)
+                .is_err(),
+            "an entry inside its own interval still refuses"
+        );
+        // Past the longest interval everything but the fresh key is gone.
+        assert!(rl
+            .check_at("pair:0.0.0.1", t0 + Duration::from_secs(60), short)
+            .is_ok());
+        assert_eq!(rl.len(), 1);
+    }
+
     #[test]
     fn confirm_nonce_round_trip_is_single_use_and_tool_bound() {
         let pc = PendingConfirms::new();
@@ -774,10 +900,18 @@ mod tests {
             "hide_host",
             "apply_sync",
             "set_secret",
+            // Client credentials (Task 5): minting or revoking one is fleet
+            // admin, so neither a per-host token nor a paired phone reaches it.
+            "pair_client",
+            "revoke_client",
         ] {
             assert!(is_admin_tool(t), "{t}");
             assert!(!is_readonly_tool(t), "{t}");
         }
+        // Listing them is master-only too — it enumerates every paired
+        // device — but it is a read, so it is the one tool in BOTH lists.
+        assert!(is_admin_tool("list_clients"));
+        assert!(is_readonly_tool("list_clients"));
         for t in [
             "kill_session",
             "send_prompt",
@@ -876,6 +1010,26 @@ mod tests {
             let a = serde_json::json!({ k: "xyz" });
             assert_eq!(redact_args(a.as_object()), format!("{k}=<3 chars>"));
         }
+    }
+
+    /// The audit row is written before any tool validates its arguments, so
+    /// an unvalidated value must not be able to end the line and forge a
+    /// second one. Control characters AND the three separators
+    /// `char::is_control` misses become spaces.
+    #[test]
+    fn redact_args_keeps_the_summary_on_one_line() {
+        let args = serde_json::json!({
+            "name": "phone\npair_client by master: name=evil",
+            "host_alias": "a\u{2028}b\u{2029}c\u{0085}d\u{1b}[31me",
+        });
+        let s = redact_args(args.as_object());
+        assert!(!s.contains('\n'), "{s:?}");
+        assert!(
+            !s.chars().any(crate::store::breaks_a_line),
+            "a line-breaking character survived: {s:?}"
+        );
+        assert!(s.contains("name=phone pair_client by master"), "{s:?}");
+        assert!(s.contains("host_alias=a b c d [31me"), "{s:?}");
     }
 
     #[test]

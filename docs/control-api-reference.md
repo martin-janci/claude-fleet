@@ -101,6 +101,12 @@ List the cached Claude accounts seen across hosts. Returns JSON.
 
 List the asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets found on hosts and catalog parse problems. Requires catalog_configure + catalog_load in the app. Returns JSON.
 
+### `list_clients`
+
+List the paired client devices and what each one's token may do. The stored token digest is never returned — a client's token exists in plaintext only in the one /pair response that minted it. include_revoked also returns clients whose token was revoked (kept for the audit trail). Read-only, but master token only: the list names every paired device, so it is not a phone's to read. Returns JSON rows of { id, name, mode, created_at, last_seen_at, revoked_at }.
+
+Parameters: `include_revoked`
+
 ### `list_hosts`
 
 List all registered hosts with their reachability, claude/tmux versions, and linked account. Returns JSON.
@@ -152,6 +158,12 @@ Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `
 Create a plain-shell tmux session on a host (no Claude Code in the pane — an interactive login shell). Same project/worktree plumbing as new_session, plus an optional start_command that runs once before the shell drops to an interactive prompt; the pane stays alive after it exits so you can attach or send-keys to it. Steer it with send_prompt (typed text + Enter) and read it with capture_session.
 
 Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
+
+### `pair_client`
+
+Mint a single-use pairing code for a new client device (a phone, a laptop browser) and return the URL to show as a QR. The code — not a token — travels in the URL FRAGMENT, so no proxy or access log ever sees it; the device posts it to the hub's /pair once and gets a token of its own back. name must be 1-64 characters with no control characters and must not be one a live client already holds. mode is full (drive sessions fleet-wide) or readonly (observe only); fleet-admin tools are out of a client's reach either way. Codes live in memory only, so a hub restart invalidates every outstanding one. Master token only. Returns JSON { url, code, expires_in_s, name, mode }.
+
+Parameters: `mode`, `name`, `ttl_s`
 
 ### `peek_session`
 
@@ -277,6 +289,12 @@ Restart a tmux session (kill and recreate it in the same place). Use when the Cl
 
 Parameters: `force`, `host_alias`, `name`, `session_id`
 
+### `revoke_client`
+
+Revoke a paired client's token by name. Its next request is refused (the auth layer only resolves live rows) and the name becomes free to pair again; the row itself is kept, revoked, for the audit trail. E_NOTFOUND when no live client holds that name. Master token only. Returns the revoked row as JSON.
+
+Parameters: `name`
+
 ### `run_prompt`
 
 send_prompt + wait_for_session(turn_gt) + session_transcript in one call: deliver the prompt, wait up to timeout_s (default 120, max 600) for the turn to complete, and return JSON { turn_seq, status: satisfied | timeout, transcript } where transcript is the reply as plain text (null with transcript_error when it cannot be read). Marked as untrusted unless raw=true (master token only). Address the session with session_id.
@@ -306,6 +324,12 @@ Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `su
 Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only). Returns JSON { delivered, session_id, turn_seq_before }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three).
 
 Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
+
+### `session_conversation`
+
+Read a session's recent conversation as structured turns: each turn carries the human prompt, its timestamp, the turn's end timestamp, and items that are either assistant text or a one-line tool summary (flagged when that tool call failed). turns defaults to 10 and is capped at 100; the character budget scales with it. Prefer this over session_transcript when you want the shape of the exchange rather than one flat blob. Read-only. Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet).
+
+Parameters: `session_id`, `turns`
 
 ### `session_history`
 

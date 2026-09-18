@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Result};
 use std::sync::Arc;
 
 mod catalog;
+mod clients;
 mod hosts_accounts;
 mod projects;
 mod reconcile;
@@ -21,6 +22,9 @@ mod test_support;
 mod timeline;
 mod usage;
 
+pub use clients::{
+    breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
+};
 pub use rows::*;
 
 pub struct Store {
@@ -34,6 +38,38 @@ impl Store {
         let store = Self { conn, bus };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Open an EXISTING database read-only and **without migrating it**.
+    ///
+    /// For a one-shot reader that runs beside a live daemon — `fleet-hub
+    /// pair`, `fleet-hub client …`, `fleet-hub token show` — where
+    /// [`Store::open_with_bus`] would run *this binary's* migrations against
+    /// the database the daemon has open. A CLI newer than the running daemon
+    /// must not reshape the schema under it, so this open cannot: the
+    /// connection is `SQLITE_OPEN_READ_ONLY` and nothing is applied.
+    ///
+    /// Only reads are valid on the result; a write returns SQLite's
+    /// "attempt to write a readonly database".
+    ///
+    /// `SQLITE_OPEN_NO_MUTEX` (SQLite's multi-thread mode: no mutex around
+    /// the connection itself) is safe here ONLY because of what these callers
+    /// are — one-shot CLI subcommands that open the file, read a couple of
+    /// `settings` rows on one thread, and exit. Nothing shares this
+    /// connection between threads. A `Store` opened this way must therefore
+    /// not be handed to the server, the event bus, or anything else that
+    /// would use it concurrently; the long-lived paths go through
+    /// [`Store::open_with_bus`], whose `Store` lives behind a
+    /// `std::sync::Mutex` (see the crate's store conventions).
+    pub fn open_read_only(path: &std::path::Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        Ok(Self {
+            conn,
+            bus: Arc::new(crate::events::NoopEventBus),
+        })
     }
 
     #[cfg(test)]
