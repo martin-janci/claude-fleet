@@ -291,10 +291,19 @@ impl Store {
             // `lost_ttl_cutoff` is `None`, `exempt` is empty and `?2` never
             // appears, so `not_in`'s bare `?`s fall back to ?2.. exactly as
             // before this feature existed.
+            // `COALESCE(..., 0)`: `lost_reason` is NULL on every row ghosted
+            // before migration 034 introduced the column. SQL's
+            // three-valued logic would otherwise make `lost_reason IN (...)`
+            // evaluate to NULL, the inner AND chain NULL, and `NOT NULL`
+            // NULL again — which `WHERE` treats as "leave this row out of
+            // the reaped set", wrongly exempting it. Coalescing the inner
+            // expression to `0` (false) before negating makes a NULL
+            // `lost_reason` explicitly NOT exempt, preserving today's
+            // one-cycle reap for every pre-migration row after an upgrade.
             let exempt = if lost_ttl_cutoff.is_some() {
-                " AND NOT (claude_session_id IS NOT NULL \
-                           AND lost_reason IN ('host_reboot','tmux_server_gone') \
-                           AND lost_at >= ?2)"
+                " AND NOT COALESCE((claude_session_id IS NOT NULL \
+                                    AND lost_reason IN ('host_reboot','tmux_server_gone') \
+                                    AND lost_at >= ?2), 0)"
             } else {
                 ""
             };
@@ -1314,13 +1323,14 @@ mod tests {
     /// Seed a row directly as already-ghost (bypassing Phase 1) with the
     /// given `lost_at` / `lost_reason` / `claude_session_id`, so a single
     /// `apply_host_reconcile` pass exercises Phase 2's exemption straight
-    /// away.
+    /// away. `lost_reason: None` writes SQL `NULL`, matching a row ghosted
+    /// before migration 034 introduced the column.
     fn seed_ghost_row(
         store: &Store,
         host: &str,
         name: &str,
         lost_at: i64,
-        lost_reason: &str,
+        lost_reason: Option<&str>,
         claude_session_id: Option<&str>,
     ) -> i64 {
         let id = store
@@ -1350,7 +1360,7 @@ mod tests {
             "alpha",
             "s1",
             now - 100,
-            "host_reboot",
+            Some("host_reboot"),
             Some("uuid-a"),
         );
         for ts in [now, now + 10] {
@@ -1412,7 +1422,7 @@ mod tests {
         store.upsert_host("alpha").unwrap();
         let now = 2_000_000;
         let cutoff = now - TTL_SECS;
-        let id = seed_ghost_row(&store, "alpha", "s1", now - 100, "host_reboot", None);
+        let id = seed_ghost_row(&store, "alpha", "s1", now - 100, Some("host_reboot"), None);
         for ts in [now, now + 10] {
             store
                 .apply_host_reconcile(HostReconcile {
@@ -1439,7 +1449,7 @@ mod tests {
             "alpha",
             "s1",
             cutoff - 1,
-            "host_reboot",
+            Some("host_reboot"),
             Some("uuid-a"),
         );
         for ts in [now, now + 10] {
@@ -1467,7 +1477,7 @@ mod tests {
             "alpha",
             "s1",
             now - 100,
-            "host_reboot",
+            Some("host_reboot"),
             Some("uuid-a"),
         );
         for ts in [now, now + 10] {
@@ -1482,6 +1492,117 @@ mod tests {
         assert!(
             store.get_session_by_id(id).unwrap().is_none(),
             "a None cutoff means no exemption at all — today's behaviour"
+        );
+    }
+
+    #[test]
+    fn a_resumable_row_and_a_missing_row_are_judged_correctly_alongside_a_kept_live_row() {
+        // The other tests above all pass an EMPTY `keep`, so `not_in` is the
+        // empty string and never appears in the SQL — they can't catch
+        // `exempt` drifting to AFTER `not_in` in the query text, which would
+        // let a non-empty `not_in`'s bare `?`s claim `?2` before `exempt`'s
+        // explicit `?2` does (misbinding the cutoff to a keep name, or
+        // erroring on the parameter count once a real keep set is in play).
+        // This test exercises `exempt` and a non-empty `not_in` together.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+
+        let kept_id = store
+            .upsert_session("keep-me", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let resumable_id = seed_ghost_row(
+            &store,
+            "alpha",
+            "resumable",
+            now - 100,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        let missing_id = seed_ghost_row(&store, "alpha", "gone", now - 100, Some("missing"), None);
+
+        store
+            .apply_host_reconcile(HostReconcile {
+                lost_ttl_cutoff: Some(cutoff),
+                keep: &["keep-me".to_string()],
+                ..empty_probe("alpha", now)
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.get_session_by_id(kept_id).unwrap().unwrap().status,
+            "running",
+            "the kept live row must stay running alongside an active TTL cutoff"
+        );
+        assert!(
+            store.get_session_by_id(resumable_id).unwrap().is_some(),
+            "the resumable ghost must survive alongside a non-empty keep set"
+        );
+        assert!(
+            store.get_session_by_id(missing_id).unwrap().is_none(),
+            "the 'missing' ghost must still be reaped alongside a non-empty keep set"
+        );
+    }
+
+    #[test]
+    fn a_pre_migration_ghost_row_with_null_lost_reason_is_reaped() {
+        // Rows ghosted before migration 034 added `lost_reason` have it
+        // NULL. SQL three-valued logic must not let that NULL silently
+        // exempt them: `lost_reason IN (...)` on NULL is NULL, so an
+        // un-coalesced `NOT (... AND NULL AND ...)` is NULL too, and a
+        // `WHERE` clause treats NULL as "leave this row out of the reaped
+        // set" — i.e. wrongly exempting it. This would be a behaviour
+        // change for every pre-migration row after an upgrade, which the
+        // plan forbids.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(&store, "alpha", "s1", now - 100, None, Some("uuid-a"));
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a NULL lost_reason (a pre-migration row) must not be silently \
+             exempted; it keeps today's one-cycle reap"
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_row_exactly_at_the_ttl_cutoff_survives() {
+        // Pins the `>=` boundary: `lost_at == cutoff` must be inclusive.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            cutoff,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_some(),
+            "lost_at exactly at the cutoff must survive (inclusive >=)"
         );
     }
 }
