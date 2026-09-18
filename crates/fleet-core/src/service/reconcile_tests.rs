@@ -198,11 +198,13 @@ impl Fleet {
 
     /// Session row events (`session:created|updated|killed:<id>`) emitted
     /// since the last call; host/project events are dropped.
+    /// Session ROW events only; the timeline's `session:event` pushes are
+    /// asserted through [`Self::timeline`].
     fn session_row_events(&self) -> Vec<String> {
         self.bus
             .take()
             .into_iter()
-            .filter(|e| e.starts_with("session:"))
+            .filter(|e| e.starts_with("session:") && !e.starts_with("session:event:"))
             .collect()
     }
 

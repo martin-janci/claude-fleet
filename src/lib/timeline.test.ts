@@ -15,6 +15,7 @@ const ev = (id: number, kind: string, detail: string | null = null): SessionEven
   at: 1_700_000_000 + id,
   kind,
   detail,
+  claude_session_id: null,
 });
 
 describe('eventCategory', () => {

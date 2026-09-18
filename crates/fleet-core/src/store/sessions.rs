@@ -344,14 +344,18 @@ impl Store {
         Ok(())
     }
 
-    /// Record the Claude Code session id minted for a session. Reconcile's
+    /// Record the Claude Code session id fleet launched this session with
+    /// (create / recreate / move / review). Opens that conversation with
+    /// source `fleet` via [`Self::rebind_conversation`], which closes any
+    /// previous one as `replaced` and resets the context. Reconcile's
     /// `upsert_session` never writes this column, so the value survives
     /// reconciliation.
-    pub fn set_claude_session_id(&self, id: i64, uuid: &str) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE sessions SET claude_session_id=?1 WHERE id=?2",
-            rusqlite::params![uuid, id],
-        )?;
+    pub fn set_claude_session_id(
+        &self,
+        id: i64,
+        uuid: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.rebind_conversation(id, uuid, StartSource::Fleet, None, None)?;
         Ok(())
     }
 
@@ -1726,7 +1730,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.last_playbook_at, Some(555));
-        assert_eq!(bus.take(), vec![format!("session:updated:{id}")]);
+        assert_eq!(
+            bus.take(),
+            vec![
+                format!("session:event:{id}:playbook_applied"),
+                format!("session:updated:{id}")
+            ]
+        );
         let events = s.list_session_events(id, 10).unwrap();
         assert!(events
             .iter()

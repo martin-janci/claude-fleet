@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 mod catalog;
 mod clients;
+mod conversations;
 mod hosts_accounts;
 mod layers;
 mod projects;
@@ -26,6 +27,7 @@ mod usage;
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
 };
+pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
 pub use rows::*;
 
@@ -172,7 +174,9 @@ impl Store {
     /// (`insert_message`, `insert_session_event`, …) atomically without
     /// `_in_tx` twins. Must not be nested, and `f` must not call a helper
     /// that opens its own transaction (`BEGIN` inside `BEGIN` errors). Bus
-    /// emission is unaffected — none of the helpers this is meant for emit.
+    /// emission is NOT deferred: `insert_session_event` pushes `session:event`
+    /// as it runs, so keep such writes last in `f`, where only a failed
+    /// commit can still undo them.
     pub fn atomically<F, R>(&self, f: F) -> Result<R, crate::ipc_error::IpcError>
     where
         F: FnOnce(&Store) -> Result<R, crate::ipc_error::IpcError>,

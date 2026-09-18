@@ -671,6 +671,13 @@ pub(super) async fn new_session_inner(
             );
         } else {
             row.claude_session_id = Some(cid.clone());
+            // The rebind reset the context; return what the event carried.
+            if let Ok(Some(fresh)) = s.get_session_by_id(row.id) {
+                row.context = fresh.context;
+                row.context_pct = fresh.context_pct;
+                row.current_activity = fresh.current_activity;
+                row.last_prompt = fresh.last_prompt;
+            }
         }
     }
     if derived_friendly.is_some() {

@@ -13,7 +13,8 @@
 
 use crate::service::account_usage::AccountUsageSnapshot;
 use crate::store::{
-    AccountRow, AssetInventoryRow, HostRow, ProjectRow, SessionRow, TaskRow, WorktreeRow,
+    AccountRow, AssetInventoryRow, HostRow, ProjectRow, SessionEvent, SessionRow, TaskRow,
+    WorktreeRow,
 };
 use serde::Serialize;
 
@@ -27,6 +28,11 @@ pub enum RowChange {
     SessionCreated(SessionRow),
     SessionUpdated(SessionRow),
     SessionKilled(i64),
+    /// A timeline event was appended (migration 013/034). Carries the row.
+    SessionEventAdded(SessionEvent),
+    /// A session's conversation list changed (opened / closed / reopened).
+    /// Payload is the session id only; the UI refetches the small list.
+    ConversationsChanged(i64),
     HostAdded(HostRow),
     HostProbed(HostRow),
     HostRemoved(String),
@@ -107,6 +113,8 @@ impl RowChange {
             RowChange::SessionCreated(_) => "session:created",
             RowChange::SessionUpdated(_) => "session:updated",
             RowChange::SessionKilled(_) => "session:killed",
+            RowChange::SessionEventAdded(_) => "session:event",
+            RowChange::ConversationsChanged(_) => "session:conversations",
             RowChange::HostAdded(_) => "host:added",
             RowChange::HostProbed(_) => "host:probed",
             RowChange::HostRemoved(_) => "host:removed",
@@ -133,6 +141,8 @@ impl RowChange {
         match self {
             RowChange::SessionCreated(r) | RowChange::SessionUpdated(r) => to_value(r),
             RowChange::SessionKilled(id) => to_value(&SessionKilledPayload { id: *id }),
+            RowChange::SessionEventAdded(e) => to_value(e),
+            RowChange::ConversationsChanged(id) => serde_json::json!({ "session_id": id }),
             RowChange::HostAdded(r) | RowChange::HostProbed(r) => to_value(r),
             RowChange::HostRemoved(alias) => to_value(&HostRemovedPayload {
                 alias: alias.clone(),
@@ -169,6 +179,14 @@ pub trait EventBus: Send + Sync {
     }
     fn session_killed(&self, id: i64) {
         self.emit(&RowChange::SessionKilled(id));
+    }
+    /// See [`RowChange::SessionEventAdded`].
+    fn session_event_added(&self, e: &SessionEvent) {
+        self.emit(&RowChange::SessionEventAdded(e.clone()));
+    }
+    /// See [`RowChange::ConversationsChanged`].
+    fn conversations_changed(&self, session_id: i64) {
+        self.emit(&RowChange::ConversationsChanged(session_id));
     }
     fn host_added(&self, row: &HostRow) {
         self.emit(&RowChange::HostAdded(row.clone()));
@@ -347,6 +365,9 @@ impl EventBus for BroadcastEventBus {
 #[cfg(test)]
 pub(crate) struct RecordingEventBus {
     pub events: std::sync::Mutex<Vec<String>>,
+    /// Bare [`RowChange::name`]s in emit order, for assertions that only
+    /// care which kinds of event fired.
+    names: std::sync::Mutex<Vec<&'static str>>,
 }
 
 #[cfg(test)]
@@ -354,10 +375,16 @@ impl RecordingEventBus {
     pub fn new() -> Self {
         Self {
             events: std::sync::Mutex::new(Vec::new()),
+            names: std::sync::Mutex::new(Vec::new()),
         }
     }
     pub fn take(&self) -> Vec<String> {
+        self.names.lock().unwrap().clear();
         std::mem::take(&mut *self.events.lock().unwrap())
+    }
+    /// Every event name recorded since the last [`Self::take`].
+    pub fn names(&self) -> Vec<&'static str> {
+        self.names.lock().unwrap().clone()
     }
 }
 
@@ -368,7 +395,10 @@ impl EventBus for RecordingEventBus {
     fn emit(&self, e: &RowChange) {
         let key = match e {
             RowChange::SessionCreated(r) | RowChange::SessionUpdated(r) => r.id.to_string(),
-            RowChange::SessionKilled(id) | RowChange::WorktreeRemoved(id) => id.to_string(),
+            RowChange::SessionKilled(id)
+            | RowChange::WorktreeRemoved(id)
+            | RowChange::ConversationsChanged(id) => id.to_string(),
+            RowChange::SessionEventAdded(ev) => format!("{}:{}", ev.session_id, ev.kind),
             RowChange::HostAdded(r) | RowChange::HostProbed(r) => r.alias.clone(),
             RowChange::HostRemoved(alias) => alias.clone(),
             RowChange::AccountUpserted(r) => r.uuid.clone(),
@@ -388,6 +418,7 @@ impl EventBus for RecordingEventBus {
                 format!("{}:{}:{}/{}", p.host_alias, p.harness, p.done, p.total)
             }
         };
+        self.names.lock().unwrap().push(e.name());
         self.events
             .lock()
             .unwrap()
@@ -402,10 +433,12 @@ mod tests {
     /// The frontend event names, in `src/lib/events.ts` `RowEvent` order.
     /// These strings are what the frontend `listen`s to, so a rename on one
     /// side without the other silently drops the event.
-    const FRONTEND_EVENT_NAMES: [&str; 16] = [
+    const FRONTEND_EVENT_NAMES: [&str; 18] = [
         "session:created",
         "session:updated",
         "session:killed",
+        "session:event",
+        "session:conversations",
         "host:added",
         "host:probed",
         "host:removed",
@@ -453,6 +486,7 @@ mod tests {
         };
         let cases: Vec<(RowChange, &str)> = vec![
             (RowChange::SessionKilled(1), "session:killed"),
+            (RowChange::ConversationsChanged(1), "session:conversations"),
             (RowChange::HostRemoved("h".into()), "host:removed"),
             (
                 RowChange::AccountUpserted(AccountRow::default()),
@@ -570,6 +604,8 @@ mod tests {
                 RowChange::SessionCreated(_) => pinned_name!("session:created"),
                 RowChange::SessionUpdated(_) => pinned_name!("session:updated"),
                 RowChange::SessionKilled(_) => pinned_name!("session:killed"),
+                RowChange::SessionEventAdded(_) => pinned_name!("session:event"),
+                RowChange::ConversationsChanged(_) => pinned_name!("session:conversations"),
                 RowChange::HostAdded(_) => pinned_name!("host:added"),
                 RowChange::HostProbed(_) => pinned_name!("host:probed"),
                 RowChange::HostRemoved(_) => pinned_name!("host:removed"),
@@ -589,6 +625,7 @@ mod tests {
         // `RowChange::name` really is the name pinned above.
         for c in [
             RowChange::SessionKilled(1),
+            RowChange::ConversationsChanged(1),
             RowChange::HostRemoved("h".into()),
             RowChange::AccountUpserted(AccountRow::default()),
             RowChange::WorktreeRemoved(1),
@@ -629,6 +666,10 @@ mod tests {
         assert_eq!(
             RowChange::SessionKilled(7).payload(),
             serde_json::json!({ "id": 7 })
+        );
+        assert_eq!(
+            RowChange::ConversationsChanged(4).payload(),
+            serde_json::json!({ "session_id": 4 })
         );
         assert_eq!(
             RowChange::WorktreeRemoved(3).payload(),

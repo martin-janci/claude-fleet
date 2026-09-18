@@ -19,18 +19,39 @@ impl Store {
         kind: &str,
         detail: Option<&str>,
     ) -> Result<(), crate::ipc_error::IpcError> {
+        self.insert_session_event_for(session_id, None, kind, detail)
+    }
+
+    /// [`Self::insert_session_event`] tagged with the conversation it belongs
+    /// to. Emits `session:event` with the inserted row.
+    pub fn insert_session_event_for(
+        &self,
+        session_id: i64,
+        claude_session_id: Option<&str>,
+        kind: &str,
+        detail: Option<&str>,
+    ) -> Result<(), crate::ipc_error::IpcError> {
         let at = now_unix();
         self.conn.execute(
-            "INSERT INTO session_events (session_id, at, kind, detail) \
-                 VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![session_id, at, kind, detail],
+            "INSERT INTO session_events (session_id, at, kind, detail, claude_session_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![session_id, at, kind, detail, claude_session_id],
         )?;
+        let id = self.conn.last_insert_rowid();
         self.conn.execute(
             "DELETE FROM session_events WHERE session_id=?1 AND id NOT IN (\
                    SELECT id FROM session_events WHERE session_id=?1 \
                    ORDER BY at DESC, id DESC LIMIT ?2)",
             rusqlite::params![session_id, SESSION_EVENTS_CAP],
         )?;
+        self.bus.session_event_added(&SessionEvent {
+            id,
+            session_id,
+            at,
+            kind: kind.to_string(),
+            detail: detail.map(String::from),
+            claude_session_id: claude_session_id.map(String::from),
+        });
         Ok(())
     }
 
