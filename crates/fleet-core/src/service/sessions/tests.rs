@@ -945,6 +945,126 @@ async fn probe_reports_a_failed_mtime_call_as_none() {
     assert_eq!(probe.agent_mtimes, None);
 }
 
+/// Scriptable executor for the identity probe tests: a fixed session list
+/// and a configurable `host_identity` answer, nothing else scripted. Reused
+/// by later reboot-safety-net tests (Task 6) — construct with the
+/// `sessions`/`identity` you need and nothing more; every other `TmuxExec`
+/// method is a trivial stub, same as `ScriptedTmux`.
+struct IdentityTmux {
+    sessions: Vec<crate::tmux::TmuxSession>,
+    identity: Option<crate::tmux::HostIdentity>,
+}
+
+#[async_trait::async_trait]
+impl TmuxExec for IdentityTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        Ok(self.sessions.clone())
+    }
+    async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+        vec![]
+    }
+    async fn host_identity(&self) -> Option<crate::tmux::HostIdentity> {
+        self.identity.clone()
+    }
+}
+
+#[tokio::test]
+async fn a_probe_records_the_host_identity_only_when_the_list_succeeded() {
+    let id = crate::tmux::HostIdentity {
+        boot_id: Some("b".into()),
+        tmux_server_pid: Some(9),
+    };
+    let probe = probe_with_timeout(
+        host_row("mefistos"),
+        Box::new(IdentityTmux {
+            sessions: vec![],
+            identity: Some(id.clone()),
+        }),
+        std::time::Duration::from_secs(5),
+        None,
+    )
+    .await;
+    assert_eq!(probe.identity, Some(id));
+}
+
+#[tokio::test]
+async fn a_probe_drops_the_host_identity_when_list_sessions_fails() {
+    // The identity read sits behind the same `tmux_result.is_ok()` guard as
+    // `account`: a host we could not reach must never contribute an
+    // identity reading (Task 6 would otherwise mistake a dead probe for a
+    // fresh "no tmux server" signal).
+    struct FailingListTmux {
+        identity: Option<crate::tmux::HostIdentity>,
+    }
+    #[async_trait::async_trait]
+    impl TmuxExec for FailingListTmux {
+        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+            Err(IpcError::new(codes::E_SSH, "unreachable"))
+        }
+        async fn new_session(
+            &self,
+            _n: &str,
+            _c: &std::path::Path,
+            _p: &str,
+        ) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+            vec![]
+        }
+        async fn host_identity(&self) -> Option<crate::tmux::HostIdentity> {
+            self.identity.clone()
+        }
+    }
+    let probe = probe_with_timeout(
+        host_row("mefistos"),
+        Box::new(FailingListTmux {
+            identity: Some(crate::tmux::HostIdentity {
+                boot_id: Some("b".into()),
+                tmux_server_pid: Some(9),
+            }),
+        }),
+        std::time::Duration::from_secs(5),
+        None,
+    )
+    .await;
+    assert!(probe.result.is_err());
+    assert_eq!(probe.identity, None);
+}
+
 #[test]
 fn failed_mtime_call_keeps_an_old_blocked_bg_agent_blocked() {
     // Spec §2: a failed transcript probe leaves agents active. With the
@@ -1790,6 +1910,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         intel: PaneIntelMap::new(),
         account: None,
         pr_info: PrInfoMap::new(),
+        identity: None,
         started_at: now_unix(),
     };
     // 2. `new_session` creates the tmux session and runs its own
@@ -1836,6 +1957,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         intel: PaneIntelMap::new(),
         account: None,
         pr_info: PrInfoMap::new(),
+        identity: None,
         started_at: now_unix() + 5,
     };
     let mut s = store.lock().unwrap();
@@ -2410,6 +2532,7 @@ fn reconcile_linking(
         intel: PaneIntelMap::new(),
         account: None,
         pr_info: PrInfoMap::new(),
+        identity: None,
         started_at: now_unix(),
     };
     // Two ticks: the second must keep the link, not null it.

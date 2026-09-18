@@ -145,6 +145,14 @@ pub(super) struct HostProbe {
     /// left untouched, never cleared. `local` always carries `None` here
     /// (it is synced by `service::hosts::sync_local_account` instead).
     pub(super) account: Option<crate::service::hosts::OauthAccount>,
+    /// This pass's read of the host's boot identity (`TmuxExec::host_identity`),
+    /// read under the same `tmux_result.is_ok()` guard as `account`. `None`
+    /// when `list_sessions` failed, the whole probe timed out, or the
+    /// executor could not tell (Task 6 consumes this to distinguish "host
+    /// rebooted" from "could not tell").
+    // Not read yet outside tests: the writer (Task 6) is the consumer.
+    #[allow(dead_code)]
+    pub(super) identity: Option<crate::tmux::HostIdentity>,
     /// Unix-epoch second the probe STARTED. Forwarded as
     /// `HostReconcile::probe_started_at` so the writer never ghosts a row that
     /// a newer probe (e.g. `new_session`'s own reconcile) stamped after this
@@ -840,6 +848,13 @@ pub(super) async fn probe_with_timeout(
         } else {
             None
         };
+        // Boot identity feeds the reboot-safety-net writer (Task 6): only
+        // trustworthy when we actually reached the host this pass.
+        let identity = if tmux_result.is_ok() {
+            tmux.host_identity().await
+        } else {
+            None
+        };
         // Transcript mtimes feed the inactive-bg-agent rule; one host call,
         // only when this pass saw a background agent.
         let bg_ids: Vec<String> = agent_rows
@@ -857,10 +872,17 @@ pub(super) async fn probe_with_timeout(
             Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
             Err(_) => PaneIntelMap::new(),
         };
-        (tmux_result, agent_rows, agent_mtimes, intel, account)
+        (
+            tmux_result,
+            agent_rows,
+            agent_mtimes,
+            intel,
+            account,
+            identity,
+        )
     };
     let mut probe = match tokio::time::timeout(timeout, probe).await {
-        Ok((result, agent_rows, agent_mtimes, intel, account)) => HostProbe {
+        Ok((result, agent_rows, agent_mtimes, intel, account, identity)) => HostProbe {
             host,
             result,
             agent_rows,
@@ -868,6 +890,7 @@ pub(super) async fn probe_with_timeout(
             intel,
             pr_info: PrInfoMap::new(),
             account,
+            identity,
             started_at,
         },
         Err(_elapsed) => {
@@ -884,6 +907,7 @@ pub(super) async fn probe_with_timeout(
                 intel: PaneIntelMap::new(),
                 pr_info: PrInfoMap::new(),
                 account: None,
+                identity: None,
                 started_at,
             };
         }

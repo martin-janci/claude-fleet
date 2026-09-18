@@ -236,8 +236,8 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
     }
 
     // What actually crossed the wire for alpha: list → agents → the
-    // `~/.claude.json` account read → one pane capture per live session,
-    // each as a single quoted `bash -lc` word.
+    // `~/.claude.json` account read → the boot-identity read → one pane
+    // capture per live session, each as a single quoted `bash -lc` word.
     let scripts: Vec<String> = fake
         .calls_for("alpha")
         .iter()
@@ -253,6 +253,7 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
             LIST_SCRIPT.to_string(),
             "claude agents --json 2>/dev/null || echo '[]'".to_string(),
             crate::service::hosts::OAUTH_ACCOUNT_SCRIPT.to_string(),
+            crate::tmux::HOST_IDENTITY_SCRIPT.to_string(),
             "tmux capture-pane -t '=alpha-live:' -S '-8' -p".to_string(),
         ]
     );
