@@ -1020,6 +1020,38 @@ mod tests {
         a_change_cuts_the_live_agent_off(|s| s.delete_host("laptop").unwrap()).await;
     }
 
+    /// Between beats the check that holds is the router's: the first call
+    /// routed to a host whose live agent's token was just rotated closes
+    /// that socket WITHOUT sending it anything — the path by which a
+    /// rotation used to hand its new token to the connection it revokes.
+    #[tokio::test]
+    async fn a_call_after_a_rotation_never_reaches_the_live_socket() {
+        let hub = hub().await;
+        hub.store
+            .lock()
+            .unwrap()
+            .set_host_transport("laptop", "agent")
+            .unwrap();
+        let ssh =
+            crate::ssh::SshClient::with_agents(Arc::clone(&hub.registry), Arc::clone(&hub.store));
+        let mut ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
+        hub.store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "rotated-token")
+            .unwrap();
+
+        let err = crate::ssh::SshExec::run(&ssh, "laptop", &["echo", "secret"], PATIENCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, crate::ipc_error::codes::E_AGENT_OFFLINE);
+        assert_eq!(
+            next_frame(&mut ws).await,
+            None,
+            "the socket closes with nothing sent down it"
+        );
+    }
+
     /// The other side of the same check: a beat with the token unchanged
     /// keeps the connection, or the check would be cutting everyone off.
     #[tokio::test]
