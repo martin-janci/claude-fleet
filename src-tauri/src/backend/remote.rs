@@ -98,6 +98,32 @@ impl HubBackend {
         text.replace(&self.cfg.token, "<redacted>")
     }
 
+    /// [`Self::redact`] over a whole JSON tree — every string value and every
+    /// object key, at any depth.
+    ///
+    /// Recursing over the parsed value rather than redacting its serialised
+    /// text is deliberate: `to_string` escapes a token containing a quote or a
+    /// backslash, and a search for the raw token would then miss it. Walking
+    /// the tree compares against the unescaped strings, so no token spelling
+    /// can slip past.
+    fn redact_value(&self, value: &Value) -> Value {
+        if self.cfg.token.is_empty() {
+            return value.clone();
+        }
+        match value {
+            Value::String(s) => Value::String(self.redact(s)),
+            Value::Array(items) => {
+                Value::Array(items.iter().map(|v| self.redact_value(v)).collect())
+            }
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .map(|(k, v)| (self.redact(k), self.redact_value(v)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
     /// Call one tool and deserialise its result into `T`.
     pub async fn call<T: DeserializeOwned>(&self, tool: &str, args: Value) -> Result<T, IpcError> {
         let text = self.call_text(tool, args).await?;
@@ -202,10 +228,21 @@ impl HubBackend {
         // arguments rmcp could not bind. That is this client disagreeing with
         // the hub about the contract, not something the user did.
         if let Some(err) = envelope.get("error") {
-            let message = err
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("no message");
+            // Scrubbed like every other scrap of text that came from outside
+            // this process. rmcp builds this message from its own dispatch and
+            // has no reason to echo a header — but "has no reason to" is a
+            // claim about code on the other side of a network, which is
+            // exactly the reasoning this module refuses to rely on elsewhere.
+            // Scrubbed like every other scrap of text that came from outside
+            // this process. rmcp builds this message from its own dispatch and
+            // has no reason to echo a header — but "has no reason to" is a
+            // claim about code on the other side of a network, which is
+            // exactly the reasoning this module refuses to rely on elsewhere.
+            let message = self.redact(
+                err.get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no message"),
+            );
             return Err(IpcError::new(
                 codes::E_INTERNAL,
                 format!("the hub refused the {tool} call: {message}"),
@@ -267,7 +304,12 @@ impl HubBackend {
                 let err = IpcError::new(code, message);
                 return match sc.get("details") {
                     Some(Value::Null) | None => err,
-                    Some(d) => err.with_details(d.clone()),
+                    // `details` is the one piece of a tool error that crosses
+                    // the IPC boundary structurally — `IpcError` derives
+                    // `Serialize`, so this reaches the frontend rather than
+                    // only a `Debug` line. It gets the same scrubbing its
+                    // `code` and `message` siblings already had.
+                    Some(d) => err.with_details(self.redact_value(d)),
                 };
             }
         }
@@ -889,10 +931,29 @@ where
         .await
         .map_err(|e| format!("send to {host}:{port}: {e}"))?;
     let mut raw = Vec::new();
-    conn.take(MAX_RESPONSE)
-        .read_to_end(&mut raw)
-        .await
-        .map_err(|e| format!("read from {host}:{port}: {e}"))?;
+    if let Err(e) = conn.take(MAX_RESPONSE).read_to_end(&mut raw).await {
+        // A peer that closes the TCP connection without sending `close_notify`
+        // makes rustls 0.23 return `UnexpectedEof` (`rustls/src/conn.rs`,
+        // `(false, true) => Err(UnexpectedEof)`), and `?` here used to throw
+        // away a body that had already arrived in full. That is a spurious
+        // failure against any hub or proxy that half-closes, and it is a
+        // regression the plain-HTTP path does not have.
+        //
+        // This is the standard shape for HTTP-over-TLS with
+        // `Connection: close`: the response is framed by the connection
+        // ending, so bytes already read ARE the response. An empty buffer is
+        // still a real failure — nothing arrived. And only `UnexpectedEof` is
+        // forgiven: a reset mid-body leaves a TRUNCATED response, which must
+        // not be parsed as if it were whole.
+        if e.kind() != std::io::ErrorKind::UnexpectedEof || raw.is_empty() {
+            return Err(format!("read from {host}:{port}: {e}"));
+        }
+        tracing::debug!(
+            "{host}:{port} closed without close_notify after {} byte(s); \
+             treating the response as complete",
+            raw.len()
+        );
+    }
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 

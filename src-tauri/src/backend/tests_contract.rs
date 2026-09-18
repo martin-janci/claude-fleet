@@ -524,6 +524,57 @@ fn the_three_fields_where_absent_means_fine_keep_their_names() {
     }
 }
 
+/// The Task 2 review's NIT 10: `#[serde(default)]` on a **`Vec`** is the same
+/// falsely-reassuring shape as the three `Option`s above, and the report's
+/// blast-radius list missed it.
+///
+/// `WorktreeOccupancy::occupants` is the one that bites: empty means "no live
+/// session is using this worktree", which the UI reads as *free to delete*. A
+/// rename there turns an occupied worktree into a deletable one — the same
+/// class of harm as a ghost rendering as live, arrived at through a different
+/// serde attribute.
+#[test]
+fn the_empty_vec_defaults_that_read_as_good_news_keep_their_names() {
+    for (ty, keys, field, consequence) in [
+        (
+            "WorktreeOccupancy",
+            wire_keys(&sample_occupancy()),
+            "occupants",
+            "empty means \"no live session is using this worktree\", which the \
+             UI offers as free to delete — so a rename makes an OCCUPIED \
+             worktree look deletable",
+        ),
+        (
+            "SessionRow",
+            wire_keys(&sample_session()),
+            "tags",
+            "empty means \"untagged\", so every tag filter silently matches \
+             nothing and the sidebar looks merely unlabelled",
+        ),
+        (
+            "ProjectTreeRow",
+            wire_keys(&sample_project_tree()),
+            "worktrees",
+            "empty means \"this project has no worktrees\", which is a normal \
+             state and therefore invisible",
+        ),
+        (
+            "ConvTurn",
+            wire_keys(&sample_conversation().turns.into_iter().next().unwrap()),
+            "items",
+            "empty means \"the assistant said nothing this turn\", so the \
+             Conversation tab renders a prompt with no reply",
+        ),
+    ] {
+        assert!(
+            keys.contains(&field.to_string()),
+            "{ty} no longer sends `{field}` under that name. Like the three \
+             Option fields above this does not fail to parse and is not \
+             visibly wrong — {consequence}. Keys actually sent: {keys:?}"
+        );
+    }
+}
+
 /// The hazard itself, demonstrated rather than asserted away.
 ///
 /// A round-trip test cannot catch this, which is the entire reason the tests

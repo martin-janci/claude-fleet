@@ -581,12 +581,42 @@ fn no_error_and_no_debug_output_ever_carries_the_token() {
                 "content": [{ "type": "text", "text": "leaked cl_s3cret-token" }],
             },
         }))),
+        // The Task 2 review found these two, and both were real leaks: every
+        // other external-text path here was scrubbed and these were not, so
+        // the claim that "every scrap of text that originates outside this
+        // process is now scrubbed" was false. A JSON-RPC protocol error's
+        // message…
+        Ok(sse(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": { "code": -32602, "message": "bad request: Bearer cl_s3cret-token" },
+        }))),
+        // …and a tool error's structured `details`, which is the worse of the
+        // two: `IpcError` derives `Serialize`, so `details` crosses the IPC
+        // boundary into the frontend rather than merely appearing in a Debug
+        // line. Nested, inside an array, and once as an object *key*, so a
+        // shallow scrub of the top level would not be enough.
+        Ok(tool_error(
+            codes::E_INVALID,
+            "bad request",
+            json!({
+                "echoed": "cl_s3cret-token",
+                "candidates": ["cl_s3cret-token", { "cl_s3cret-token": "as a key" }],
+            }),
+        )),
     ];
     for answer in answers {
         let fake = Fake::answering(answer);
         let b = backend(&fake);
         let err = block_on(b.list_sessions(false)).expect_err("an error");
-        let shown = format!("{err:?} {} {}", err.code, err.message);
+        // `details` is rendered separately: it is the field that actually
+        // reaches the frontend, so relying on `{err:?}` alone would miss it
+        // the day the Debug impl stops printing it.
+        let details = err
+            .details
+            .as_ref()
+            .map(|d| d.to_string())
+            .unwrap_or_default();
+        let shown = format!("{err:?} {} {} {details}", err.code, err.message);
         assert!(
             !shown.contains("cl_s3cret-token"),
             "an error leaked the token: {shown}"
@@ -676,4 +706,121 @@ fn a_raw_http_response_is_split_into_its_status_and_body() {
     assert_eq!(r.status, 500);
 
     assert!(split_response("").is_err());
+}
+
+// --- a peer that half-closes -------------------------------------------------
+//
+// The Task 2 review's finding 6. rustls 0.23 reports a TCP close with no
+// `close_notify` as `UnexpectedEof`, and `speak` used to `?` that — discarding
+// a body that had already arrived. Nothing exercised it, because the one live
+// test points at crates.io, which does send `close_notify`.
+
+/// Hands back `body` (in whatever chunks the reader's buffer allows), then
+/// fails with `kind` instead of reporting a clean end of stream — which is
+/// what a peer that drops the connection without `close_notify` looks like.
+struct HalfClosing {
+    body: Vec<u8>,
+    kind: std::io::ErrorKind,
+}
+
+impl tokio::io::AsyncRead for HalfClosing {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if !self.body.is_empty() {
+            // Never more than the buffer has room for; `put_slice` panics
+            // rather than truncating, and `read_to_end` grows its buffer
+            // between calls.
+            let n = self.body.len().min(buf.remaining());
+            let rest = self.body.split_off(n);
+            buf.put_slice(&self.body);
+            self.body = rest;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        // Deliberately an error rather than `Ok(())` with nothing written:
+        // zero bytes IS a clean EOF, which is the case this test is not about.
+        std::task::Poll::Ready(Err(std::io::Error::new(self.kind, "peer went away")))
+    }
+}
+
+impl tokio::io::AsyncWrite for HalfClosing {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+fn half_closing(body: &str, kind: std::io::ErrorKind) -> HalfClosing {
+    HalfClosing {
+        body: body.as_bytes().to_vec(),
+        kind,
+    }
+}
+
+const ONE_RESPONSE: &str = "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n\
+                            event: message\ndata: {\"a\":1}\n\n";
+
+/// A hub or proxy that closes the TCP connection without `close_notify` has
+/// still answered. Throwing the answer away turns a working hub into
+/// `E_HUB_UNREACHABLE` for no reason, and the plain-HTTP path has no
+/// equivalent failure — so this was a regression the TLS work introduced.
+#[test]
+fn a_peer_that_half_closes_still_yields_the_response_it_already_sent() {
+    let raw = block_on(speak(
+        half_closing(ONE_RESPONSE, std::io::ErrorKind::UnexpectedEof),
+        "hub.example.com",
+        443,
+        "GET / HTTP/1.1\r\n\r\n",
+    ))
+    .expect("a complete response must survive a missing close_notify");
+    assert_eq!(raw, ONE_RESPONSE);
+    // And it still parses, which is the thing the caller actually needs.
+    assert_eq!(split_response(&raw).expect("a response").status, 200);
+}
+
+/// The other half: an `UnexpectedEof` with nothing read is a real failure and
+/// must stay one. Otherwise a hub that never answered would surface as an
+/// empty body and a confusing parse error instead of "it did not answer".
+#[test]
+fn an_unexpected_eof_with_nothing_read_is_still_a_failure() {
+    let e = block_on(speak(
+        half_closing("", std::io::ErrorKind::UnexpectedEof),
+        "hub.example.com",
+        443,
+        "GET / HTTP/1.1\r\n\r\n",
+    ))
+    .expect_err("nothing arrived, so this is not a response");
+    assert!(e.contains("read from hub.example.com:443"), "{e}");
+}
+
+/// And only `UnexpectedEof` is forgiven. A connection reset mid-body means
+/// the bytes in hand are a *truncated* response, which must not be parsed as
+/// if it were whole.
+#[test]
+fn a_real_read_error_is_not_swallowed_even_with_bytes_in_hand() {
+    let e = block_on(speak(
+        half_closing(ONE_RESPONSE, std::io::ErrorKind::ConnectionReset),
+        "hub.example.com",
+        443,
+        "GET / HTTP/1.1\r\n\r\n",
+    ))
+    .expect_err("a reset is not a clean end of response");
+    assert!(e.contains("read from hub.example.com:443"), "{e}");
 }

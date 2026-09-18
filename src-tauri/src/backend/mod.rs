@@ -18,6 +18,7 @@
 pub mod contract;
 pub mod remote;
 pub mod routing;
+pub mod startup;
 pub mod token_store;
 
 use fleet_core::store::Store;
@@ -32,6 +33,51 @@ pub const REMOTE_URL_KEY: &str = "hub.remote_url";
 pub const CLIENT_NAME_KEY: &str = "hub.client_name";
 /// What Settings shows before pairing has told us otherwise.
 const DEFAULT_CLIENT_NAME: &str = "desktop";
+/// Opt-in for sending the client token over plain `http://` to a host that is
+/// **not** loopback. Mirrors the hub's own `--allow-plaintext`
+/// (`docs/hub.md`), which refuses to serve a routable bind in the clear
+/// without being told to.
+///
+/// The asymmetry this closes: the hub makes plaintext an explicit, named,
+/// saved decision; before this key the desktop made it invisible. Someone who
+/// typed `http://` instead of `https://` in Settings got a working app that
+/// put a fleet-control bearer token on the wire in the clear on every call,
+/// forever, with nothing ever saying so.
+pub const ALLOW_PLAINTEXT_KEY: &str = "hub.allow_plaintext";
+
+/// `Some(reason)` when reaching this hub would put the bearer token on the
+/// wire in the clear — plain `http://` to anything but a loopback address.
+/// `None` for `https://`, and for `http://` to loopback, which is the tunnelled
+/// or port-forwarded setup and needs no ceremony.
+///
+/// Public because pairing (Task 5) hits `POST /pair` with a URL the user just
+/// typed, *before* any token is stored and therefore before [`Backend::resolve`]
+/// has ever seen it. That path must ask the same question, and must ask it
+/// with the same answer.
+pub fn plaintext_risk(base_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(base_url).ok()?;
+    if parsed.scheme() != "http" {
+        return None;
+    }
+    let loopback = match parsed.host() {
+        // RFC 6761: `localhost` and anything under it resolve to loopback.
+        Some(url::Host::Domain(d)) => {
+            let d = d.to_ascii_lowercase();
+            d == "localhost" || d.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if loopback {
+        return None;
+    }
+    Some(format!(
+        "{base_url} is plain http to a host that is not loopback, so this \
+         app's client token — a credential for the whole fleet — would cross \
+         the network in the clear on every call"
+    ))
+}
 
 /// Everything the remote path needs: where the hub is, what to authenticate
 /// with, and what this client is called there.
@@ -96,6 +142,7 @@ impl Backend {
                 Ok(s) => (
                     s.get_setting(REMOTE_URL_KEY),
                     s.get_setting(CLIENT_NAME_KEY),
+                    s.get_setting(ALLOW_PLAINTEXT_KEY),
                 ),
                 Err(_) => {
                     // The hub URL cannot be read, so we cannot know whether
@@ -151,6 +198,29 @@ impl Backend {
                 }
             }
         };
+        // Plain http to anything but loopback puts the client token on the
+        // wire in the clear. The hub itself refuses that without
+        // `--allow-plaintext`; this is the client half of the same decision,
+        // and it is made BEFORE the token is read so that a mistyped scheme
+        // never reaches a request.
+        let plaintext = plaintext_risk(&base_url);
+        let allowed = matches!(
+            settings.2.as_ref().ok().and_then(|v| v.as_deref()),
+            Some("true" | "1" | "yes")
+        );
+        if let Some(risk) = &plaintext {
+            if !allowed {
+                return Resolution {
+                    backend: Backend::Local,
+                    warning: Some(format!(
+                        "{risk}; staying standalone — use https://, or set \
+                         {ALLOW_PLAINTEXT_KEY}=true if this hop really is \
+                         already private (a tunnel, a VPN, a container network)"
+                    )),
+                };
+            }
+        }
+
         let token = match tokens.get() {
             Ok(Some(t)) => t,
             Ok(None) => {
@@ -179,13 +249,19 @@ impl Backend {
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| DEFAULT_CLIENT_NAME.to_string());
+        // An accepted plaintext hub still says so on every launch. The
+        // opt-in makes it a decision; the warning keeps it from becoming
+        // something nobody remembers deciding.
+        let warning = plaintext.map(|risk| {
+            format!("{risk} — allowed by {ALLOW_PLAINTEXT_KEY}, so this is deliberate")
+        });
         Resolution {
             backend: Backend::Remote(RemoteConfig {
                 base_url,
                 token,
                 client_name,
             }),
-            warning: None,
+            warning,
         }
     }
 
@@ -303,12 +379,17 @@ mod tests {
         assert_eq!(cfg.client_name, "laptop");
     }
 
+    /// This used to read `http://10.0.0.5:8787`. It is `https` now because
+    /// plain http to a routable host became an explicit opt-in
+    /// ([`ALLOW_PLAINTEXT_KEY`]) — a change this test caught when it went red,
+    /// which is what it should do. Its subject is the client-name fallback,
+    /// not the scheme; the plaintext gate has its own tests below.
     #[test]
     fn the_client_name_falls_back_when_pairing_never_recorded_one() {
-        let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "http://10.0.0.5:8787")]);
+        let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "https://10.0.0.5:8787")]);
         let resolved = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("t"));
         let cfg = resolved.backend.remote().expect("remote");
-        assert_eq!(cfg.base_url, "http://10.0.0.5:8787");
+        assert_eq!(cfg.base_url, "https://10.0.0.5:8787");
         assert_eq!(cfg.client_name, "desktop");
     }
 
@@ -508,6 +589,90 @@ mod tests {
         );
         // The probe really does detect Serialize when it is there.
         assert!(Probe::<String>(std::marker::PhantomData).is_serialize());
+    }
+
+    /// The Task 2 review's finding 3. Loopback is the tunnelled or
+    /// port-forwarded hub and needs no ceremony; anything else on plain http
+    /// puts a fleet-wide credential on the wire in the clear.
+    #[test]
+    fn plaintext_is_a_risk_everywhere_except_loopback() {
+        for safe in [
+            "https://fleet.example.com",
+            "https://10.0.0.5:8443",
+            "http://127.0.0.1:8787",
+            "http://127.0.0.5:8787",
+            "http://localhost:8787",
+            "http://LOCALHOST:8787",
+            "http://hub.localhost:8787",
+            "http://[::1]:8787",
+        ] {
+            assert_eq!(plaintext_risk(safe), None, "for {safe}");
+        }
+        for risky in [
+            "http://fleet.example.com",
+            "http://10.0.0.5:8787",
+            "http://[2001:db8::1]:8787",
+            // Not loopback: a name that merely *contains* localhost.
+            "http://localhost.evil.example.com",
+        ] {
+            let risk = plaintext_risk(risky).unwrap_or_else(|| panic!("{risky} must be a risk"));
+            assert!(risk.contains("in the clear"), "for {risky}: {risk}");
+        }
+    }
+
+    #[test]
+    fn a_plaintext_hub_is_refused_until_it_is_opted_into() {
+        let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "http://fleet.example.com")]);
+        let resolved = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("cl_tok"));
+        assert_eq!(
+            resolved.backend,
+            Backend::Local,
+            "plain http to a routable host must not carry the token silently"
+        );
+        let warning = resolved.warning.expect("a warning");
+        assert!(warning.contains("in the clear"), "{warning}");
+        assert!(
+            warning.contains(ALLOW_PLAINTEXT_KEY),
+            "the warning must name the opt-in, or the user cannot act on it: {warning}"
+        );
+    }
+
+    /// Opting in works, and still says so every launch — the point is that it
+    /// is a decision someone made, not that it goes quiet afterwards.
+    #[test]
+    fn an_opted_in_plaintext_hub_connects_and_keeps_saying_so() {
+        for value in ["true", "1", "yes"] {
+            let (_dir, store) = store_with(&[
+                (REMOTE_URL_KEY, "http://fleet.example.com"),
+                (ALLOW_PLAINTEXT_KEY, value),
+            ]);
+            let resolved =
+                Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("cl_tok"));
+            assert!(resolved.backend.is_remote(), "for {value}");
+            let warning = resolved.warning.expect("an opted-in hub still warns");
+            assert!(warning.contains("deliberate"), "for {value}: {warning}");
+        }
+    }
+
+    /// A loopback hub is the tunnelled setup `docs/hub.md` describes. It must
+    /// keep working with no setting at all, or the opt-in becomes a tax on
+    /// the normal development case.
+    #[test]
+    fn a_loopback_plaintext_hub_needs_no_opt_in_and_no_warning() {
+        let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "http://127.0.0.1:8787")]);
+        let resolved = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("cl_tok"));
+        assert!(resolved.backend.is_remote());
+        assert_eq!(resolved.warning, None);
+    }
+
+    /// The refusal happens before the token is read, so a mistyped scheme
+    /// cannot put it into a request even once.
+    #[test]
+    fn a_plaintext_refusal_never_carries_the_token() {
+        let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "http://fleet.example.com")]);
+        let resolved =
+            Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("s3cret-token"));
+        assert!(!format!("{resolved:?}").contains("s3cret-token"));
     }
 
     #[test]

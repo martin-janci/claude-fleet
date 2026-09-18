@@ -11,10 +11,8 @@ use bootstrap::env::{
     appdata_dir, backfill_locale_for_gui_launch, backfill_path_for_gui_launch, env_looks_complete,
     import_login_shell_env,
 };
-use bootstrap::mcp::maybe_start_mcp;
 use bootstrap::singleton::kill_other_instances;
 use commands::cancel::cancel_command;
-use fleet_core::service::tick::{spawn_account_usage_tick, spawn_reconcile_tick};
 use fleet_core::store::Store;
 use pty::PtyState;
 use std::sync::Mutex;
@@ -181,62 +179,29 @@ pub fn run() {
                 &backend,
             )));
             app.manage(backend.clone());
-            // `owns_the_fleet()` rather than `!is_remote()`: the three tasks
-            // below are what "owning the fleet" MEANS, and a unit test pins
-            // the predicate (`backend::tests::only_a_standalone_app_owns_the_
-            // fleet`). Anything hoisted out of this `else` branch starts a
-            // second reconcile loop against a fleet the hub already manages.
-            if !backend.owns_the_fleet() {
-                // Deliberately no token in this line. `base_url` carries no
-                // userinfo either — `normalise_base_url` strips it, because
-                // this line is logged and `collect_diagnostics` ships the log
-                // tail to support.
-                let cfg = backend.remote().expect("not owning the fleet means remote");
-                tracing::info!(
-                    hub = %cfg.base_url,
-                    client = %cfg.client_name,
-                    "remote backend: skipping the reconcile tick, the account-usage \
-                     poll and the embedded control API — the hub owns this fleet"
-                );
-            } else {
-                tracing::info!(
-                    "standalone backend: local database and SSH; starting the reconcile \
-                     tick and the account-usage poll"
-                );
-                // Start the MCP control API if the user has enabled it (off by
-                // default). Reuses the same Store / SshClient / registry as the UI.
-                maybe_start_mcp(
-                    app.handle(),
-                    &store,
-                    &ssh_client_for_setup,
-                    &reg_for_setup,
-                    &tunnels_for_setup,
-                    &guards,
-                );
-                // Task H: proactive background reconcile tick. A Tauri-runtime
-                // spawned interval drives `service::sessions::reconcile_now` on the same
-                // managed Store/SshClient the commands use, so fleet state stays
-                // fresh without the UI having to poll. Reconcile is Tauri-free
-                // (events flow through the store's EventBus), so the loop needs no
-                // AppHandle. Interval comes from settings (`reconcile.interval_secs`,
-                // default 20; 0 disables). A `try_lock` guard skips a tick if the
-                // previous reconcile is still running so slow passes can't stack.
-                spawn_reconcile_tick(
-                    std::sync::Arc::clone(&store),
-                    std::sync::Arc::clone(&ssh_client_for_setup),
-                );
-                // Task 4: independent 60s account-usage poll loop. Deliberately
-                // separate from the reconcile tick above (which `reconcile
-                // .interval_secs=0` can disable entirely) so usage keeps polling
-                // on its own cadence; `service::account_usage`'s 5-minute floor
-                // still caps real requests to one per account.
-                spawn_account_usage_tick(
-                    std::sync::Arc::clone(&store),
-                    std::sync::Arc::clone(&ssh_client_for_setup),
-                    std::sync::Arc::clone(&usage_cache),
-                    bus_for_usage,
-                );
-            }
+            // Which background tasks this process may run is decided in
+            // `backend::startup`, not here, and the real spawns live in
+            // `bootstrap::tasks`. Both moved out of this closure because
+            // nothing can test it — it needs a live `tauri::App` — and the
+            // Task 2 review showed what an untestable guard was worth: it
+            // hoisted `spawn_reconcile_tick` out of the old `else` so both
+            // modes started it, and all 91 tests still passed.
+            //
+            // `lib.rs` may no longer name any of the three; a test asserts
+            // that, which is what makes that exact refactor fail now.
+            backend::startup::start_background_tasks(
+                &backend,
+                &bootstrap::tasks::RealFleetTasks {
+                    app: app.handle().clone(),
+                    store: std::sync::Arc::clone(&store),
+                    ssh: std::sync::Arc::clone(&ssh_client_for_setup),
+                    reg: std::sync::Arc::clone(&reg_for_setup),
+                    tunnels: std::sync::Arc::clone(&tunnels_for_setup),
+                    guards: guards.clone(),
+                    usage_cache: std::sync::Arc::clone(&usage_cache),
+                    bus: bus_for_usage,
+                },
+            );
             Ok(())
         })
         .manage(Mutex::new(PtyState::new()))
