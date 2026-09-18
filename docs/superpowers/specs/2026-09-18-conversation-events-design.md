@@ -111,9 +111,8 @@ curl -sS -m 5 -o /dev/null -X POST \
   SessionStart entry with a warning. The fallback rebind (1.4) still covers
   those hosts.
 
-Re-provisioning is needed to pick up the new entries. The Settings → Hooks
-status (existing) shows "outdated" when an installed set differs from
-`FLEET_HOOK_EVENTS`, and `provision_hosts` refreshes it.
+Hosts pick up the new entries on the next `provision_hosts`; the local host
+on app start.
 
 ### 1.2 Payload and routing (`mcp/hooks.rs`, `service/hooks.rs`)
 
@@ -310,9 +309,12 @@ never keeps an old number after a reset.
 ### 1.7 Tasks
 
 `service/tasks.rs` no longer fails a task when the worker's
-`claude_session_id` changes *through a rebind with source `clear`, `resume` or
-`compact`*. A change through `recreate_session` (source `fleet`) still fails it,
-as today. The check reads the newest `conversation_started` event's source.
+`claude_session_id` changes *through a rebind with source `clear | resume |
+compact`*. A change through `recreate_session` (source `fleet`) still fails it,
+as today. The check reads the newest `conversation_started` event's source. A
+tolerated switch re-stamps the task's `worker_claude_session_id` onto the new
+id, so the next check compares against the conversation the worker is
+actually on.
 
 ### 1.8 API surface
 
