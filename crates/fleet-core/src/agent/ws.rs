@@ -48,6 +48,7 @@
 use super::registry::{AgentHello, AgentRegistry, ConnId};
 use crate::mcp::auth::TokenMode;
 use crate::mcp::Caller;
+use crate::store::Store;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
@@ -103,6 +104,9 @@ pub struct AgentWsState {
     /// `None` on a server that routes nothing; the route then answers
     /// [`NOT_ENABLED`] rather than upgrading a socket nothing would read.
     registry: Option<Arc<AgentRegistry>>,
+    /// Where each live connection's token is re-checked, on every beat: the
+    /// upgrade is the only other place it is looked at.
+    store: Option<Arc<Mutex<Store>>>,
     limits: Limits,
 }
 
@@ -174,11 +178,16 @@ impl Ticker {
 }
 
 impl AgentWsState {
-    /// A route that registers connections on `registry`, or refuses them all
-    /// when there is none.
-    pub fn new(registry: Option<Arc<AgentRegistry>>) -> Self {
+    /// A route that registers connections on `registry` and keeps checking
+    /// their tokens against `store`, or refuses them all when there is none.
+    pub fn new(enabled: Option<(Arc<AgentRegistry>, Arc<Mutex<Store>>)>) -> Self {
+        let (registry, store) = match enabled {
+            Some((r, s)) => (Some(r), Some(s)),
+            None => (None, None),
+        };
         Self {
             registry,
+            store,
             limits: Limits {
                 beats: BeatSource::Every(HEARTBEAT),
                 frame_cap: MAX_FRAME_BYTES,
@@ -211,9 +220,10 @@ impl AgentWsState {
 pub(crate) async fn handle_agent(
     State(state): State<AgentWsState>,
     Extension(caller): Extension<Caller>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some(registry) = state.registry.clone() else {
+    let (Some(registry), Some(store)) = (state.registry.clone(), state.store.clone()) else {
         return (StatusCode::SERVICE_UNAVAILABLE, NOT_ENABLED).into_response();
     };
     // The alias comes from the TOKEN, never from the request: an agent cannot
@@ -232,23 +242,46 @@ pub(crate) async fn handle_agent(
         tracing::warn!(host = %alias, "[agent] refused an upgrade: readonly host token");
         return (StatusCode::FORBIDDEN, READONLY_HOST).into_response();
     }
+    // What this connection authenticated with, kept so a later rotation,
+    // narrowing or removal of the host's token cuts it off. The `authorize`
+    // layer already accepted this exact header, so it is present.
+    let Some(token) =
+        crate::mcp::auth::bearer_token(headers.get(axum::http::header::AUTHORIZATION))
+    else {
+        return (StatusCode::FORBIDDEN, NOT_A_HOST).into_response();
+    };
+    let session = Session {
+        registry,
+        store,
+        alias,
+        credential: crate::mcp::auth::sha256_hex(token),
+    };
     let limits = state.limits;
     // Started here, before the `101` goes out, so the hello deadline counts
     // from the upgrade and no beat after it can be missed.
     let hello_deadline = limits.beats.ticker();
     ws.max_frame_size(limits.frame_cap)
         .max_message_size(limits.frame_cap)
-        .on_upgrade(move |socket| serve(socket, registry, alias, limits, hello_deadline))
+        .on_upgrade(move |socket| serve(socket, session, limits, hello_deadline))
+}
+
+/// Who a connection is, and what it must keep proving.
+struct Session {
+    registry: Arc<AgentRegistry>,
+    store: Arc<Mutex<Store>>,
+    alias: String,
+    /// SHA-256 of the host token the upgrade presented.
+    credential: String,
 }
 
 /// One connection, from the upgrade to the deregistration.
-async fn serve(
-    socket: WebSocket,
-    registry: Arc<AgentRegistry>,
-    alias: String,
-    limits: Limits,
-    hello_deadline: Ticker,
-) {
+async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadline: Ticker) {
+    let Session {
+        registry,
+        store,
+        alias,
+        credential,
+    } = session;
     let (mut sink, mut stream) = socket.split();
     let hello = match first_hello(&mut stream, hello_deadline).await {
         Ok(h) => h,
@@ -270,7 +303,7 @@ async fn serve(
     // Subscribed BEFORE the registration is visible, so no beat after it is
     // missed.
     let ticker = limits.beats.ticker();
-    let conn_id = registry.connect(&alias, hello, tx);
+    let conn_id = registry.connect_bound(&alias, hello, tx, credential.clone());
     tracing::info!(host = %alias, conn = conn_id, "[agent] connected");
 
     let budgets = Arc::new(Mutex::new(Budgets::default()));
@@ -282,10 +315,17 @@ async fn serve(
         alias.clone(),
         conn_id,
     ));
+    let who = Registered {
+        registry: &registry,
+        store: &store,
+        alias: &alias,
+        conn_id,
+        credential: &credential,
+    };
     // Whichever ends first ends the connection: the reader when the agent
     // goes (or goes quiet), the writer when the registry lets go of it.
     let writer_done = tokio::select! {
-        () = read_loop(&mut stream, &registry, &alias, conn_id, &budgets, &ping_tx, ticker) => false,
+        () = read_loop(&mut stream, who, &budgets, &ping_tx, ticker) => false,
         _ = &mut writer => true,
     };
 
@@ -395,17 +435,32 @@ async fn write_loop(
     let _ = sink.close().await;
 }
 
+/// A registered connection, as the read loop needs to know it.
+struct Registered<'a> {
+    registry: &'a AgentRegistry,
+    store: &'a Mutex<Store>,
+    alias: &'a str,
+    conn_id: ConnId,
+    /// SHA-256 of the token it authenticated with.
+    credential: &'a str,
+}
+
 /// Read frames and hand them to the registry, pinging an idle agent and
 /// dropping one that has gone quiet.
 async fn read_loop(
     stream: &mut SplitStream<WebSocket>,
-    registry: &AgentRegistry,
-    alias: &str,
-    conn_id: ConnId,
+    who: Registered<'_>,
     budgets: &Mutex<Budgets>,
     pings: &mpsc::UnboundedSender<HubFrame>,
     mut ticker: Ticker,
 ) {
+    let Registered {
+        registry,
+        store,
+        alias,
+        conn_id,
+        credential,
+    } = who;
     // Beats in a row with nothing heard. The `hello` does not count: silence
     // is measured from the registration.
     let mut missed = 0;
@@ -422,6 +477,17 @@ async fn read_loop(
         };
         match step {
             Step::Beat => {
+                // The upgrade is the only other place the token is looked at.
+                // A rotation, a `readonly` or a removal since then ends the
+                // connection here, within one beat, even if nothing is ever
+                // routed to it again.
+                if !super::router::credential_is_current(store, alias, credential) {
+                    tracing::warn!(
+                        host = %alias, conn = conn_id,
+                        "[agent] its token was rotated, narrowed or removed; dropping"
+                    );
+                    return;
+                }
                 missed = if std::mem::take(&mut heard) {
                     0
                 } else {
@@ -637,7 +703,7 @@ mod tests {
                 .unwrap();
         }
         let registry = AgentRegistry::new();
-        let state = AgentWsState::new(Some(Arc::clone(&registry)));
+        let state = AgentWsState::new(Some((Arc::clone(&registry), Arc::clone(&store))));
         serve(store, tune(state), registry).await
     }
 
@@ -910,6 +976,65 @@ mod tests {
             .set_host_token_mode("laptop", "full")
             .unwrap();
         let _ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
+    }
+
+    // ── a token that changes under a live connection ─────────────────────
+    //
+    // The token is checked at the upgrade; these are the changes that come
+    // after it. Each must cut the LIVE connection off, not only the next
+    // dial: a rotation is how an operator answers a stolen token.
+
+    /// Connect as laptop, apply `change` to the store, fire one beat, and
+    /// expect the hub to close the socket and deregister it.
+    async fn a_change_cuts_the_live_agent_off(change: impl FnOnce(&Store)) {
+        let hub = hub().await;
+        let mut ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
+        change(&hub.store.lock().unwrap());
+        hub.beat();
+        assert!(
+            closed_by_hub(&mut ws).await,
+            "the live connection outlived the change to its token"
+        );
+        wait_until("laptop leaves the registry", || {
+            !hub.registry.connected("laptop")
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rotating_a_host_token_cuts_its_live_agent_off() {
+        a_change_cuts_the_live_agent_off(|s| {
+            s.upsert_host_token("laptop", "rotated-token").unwrap()
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_host_token_set_readonly_cuts_its_live_agent_off() {
+        a_change_cuts_the_live_agent_off(|s| s.set_host_token_mode("laptop", "readonly").unwrap())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn removing_the_host_cuts_its_live_agent_off() {
+        a_change_cuts_the_live_agent_off(|s| s.delete_host("laptop").unwrap()).await;
+    }
+
+    /// The other side of the same check: a beat with the token unchanged
+    /// keeps the connection, or the check would be cutting everyone off.
+    #[tokio::test]
+    async fn an_unchanged_token_keeps_its_connection_across_beats() {
+        let hub = hub().await;
+        let mut ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
+        for _ in 0..3 {
+            hub.beat();
+            match next_frame(&mut ws).await {
+                Some(HubFrame::Ping { id }) => send(&mut ws, &AgentFrame::Pong { id }).await,
+                other => panic!("expected a ping, got {other:?}"),
+            }
+            barrier(&mut ws).await;
+        }
+        assert!(hub.registry.connected("laptop"));
     }
 
     /// A server that routes nothing (the desktop builds `SshClient::new()`)

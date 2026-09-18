@@ -54,6 +54,11 @@ struct Connection {
     outbound: mpsc::UnboundedSender<HubFrame>,
     /// Request id → the caller waiting for its `result`/`pong`.
     pending: DashMap<String, oneshot::Sender<AgentFrame>>,
+    /// What this connection authenticated with — the SHA-256 of the host
+    /// token it presented — so a later change to that host's token can be
+    /// recognised as revoking THIS connection. `None` for an owner that
+    /// authenticated some other way (the in-process fake).
+    credential: Option<String>,
 }
 
 impl Connection {
@@ -87,6 +92,29 @@ impl AgentRegistry {
         hello: AgentHello,
         outbound: mpsc::UnboundedSender<HubFrame>,
     ) -> ConnId {
+        self.register(alias, hello, outbound, None)
+    }
+
+    /// [`AgentRegistry::connect`] for a connection that authenticated with a
+    /// host token: `credential` is that token's SHA-256, which
+    /// [`AgentRegistry::evict_stale`] checks against the store.
+    pub fn connect_bound(
+        &self,
+        alias: &str,
+        hello: AgentHello,
+        outbound: mpsc::UnboundedSender<HubFrame>,
+        credential: String,
+    ) -> ConnId {
+        self.register(alias, hello, outbound, Some(credential))
+    }
+
+    fn register(
+        &self,
+        alias: &str,
+        hello: AgentHello,
+        outbound: mpsc::UnboundedSender<HubFrame>,
+        credential: Option<String>,
+    ) -> ConnId {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let conn = Arc::new(Connection {
             id,
@@ -94,6 +122,7 @@ impl AgentRegistry {
             connected_at: now_unix(),
             outbound,
             pending: DashMap::new(),
+            credential,
         });
         if let Some(previous) = self.conns.insert(alias.to_string(), conn) {
             previous.abort_pending();
@@ -108,6 +137,27 @@ impl AgentRegistry {
         if let Some((_, live)) = gone {
             live.abort_pending();
         }
+    }
+
+    /// Drop `alias`'s live connection if the credential it authenticated
+    /// with is no longer current, as judged by `current`. Returns whether it
+    /// did. A connection with no credential is left alone.
+    ///
+    /// This is what makes revocation reach a connection that is already
+    /// open: the token is checked at the upgrade, and the upgrade is long
+    /// past by the time an operator rotates, narrows or removes it.
+    pub fn evict_stale(&self, alias: &str, current: impl Fn(&str) -> bool) -> bool {
+        let Some(live) = self.live(alias) else {
+            return false;
+        };
+        let Some(credential) = live.credential.as_deref() else {
+            return false;
+        };
+        if current(credential) {
+            return false;
+        }
+        self.disconnect(alias, live.id);
+        true
     }
 
     /// Is an agent connected for this host?
@@ -233,8 +283,6 @@ impl AgentRegistry {
         self.conns.get(alias).map(|e| Arc::clone(e.value()))
     }
 
-    /// How many requests are waiting on this host's connection. Test-only: it
-    /// is how a leaked slot (a timed-out or abandoned call) becomes visible.
     /// Which connection is live for `alias`. Test-only: it is how an
     /// end-to-end test knows a reconnect has REPLACED the old connection,
     /// which `connected(alias)` cannot tell it.
@@ -243,6 +291,8 @@ impl AgentRegistry {
         self.live(alias).map(|c| c.id)
     }
 
+    /// How many requests are waiting on this host's connection. Test-only: it
+    /// is how a leaked slot (a timed-out or abandoned call) becomes visible.
     #[cfg(test)]
     pub(crate) fn pending_len(&self, alias: &str) -> usize {
         self.live(alias).map(|c| c.pending.len()).unwrap_or(0)

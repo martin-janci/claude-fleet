@@ -532,6 +532,8 @@ pub async fn start_with_listener<A: TlsAcceptor>(
         // registers on the very registry this client routes agent hosts
         // through. `None` when the embedder built an SSH-only client.
         let agent_registry = ssh.agent_registry().cloned();
+        // Each live agent connection's token is re-checked against the store.
+        let agents_store = Arc::clone(&store);
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
@@ -561,7 +563,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             // connection registered here is the one `AgentTransport` dispatches
             // to. `None` on an SSH-only client (the desktop): `/agent` then
             // answers 503 rather than upgrading a socket nothing would read.
-            crate::agent::ws::AgentWsState::new(agent_registry),
+            crate::agent::ws::AgentWsState::new(agent_registry.map(|r| (r, agents_store))),
         );
 
         let scheme = if tls.is_some() { "https" } else { "http" };

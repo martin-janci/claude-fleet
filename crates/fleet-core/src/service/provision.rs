@@ -156,6 +156,12 @@ pub fn commit_host_token(
     s.upsert_host_token(host, token)
 }
 
+/// Is `host` reached through a `fleet-agent`?
+fn routes_to_agent(store: &Mutex<Store>, host: &str) -> Result<bool, IpcError> {
+    let s = lock(store)?;
+    Ok(s.agent_host_alias(host)?.as_deref() == Some(host))
+}
+
 /// Provision ONE host end to end with its own token: resolve/mint → write
 /// files → persist the token → ensure the tunnel (remote host, loopback hub) → mark
 /// provisioned. Shared by [`provision_hosts`] and the per-host Rotate action.
@@ -168,6 +174,31 @@ pub async fn provision_host_with_token(
     rotate: bool,
 ) -> Result<(), IpcError> {
     let (token, minted) = resolve_host_token(store, host, rotate)?;
+    if minted && routes_to_agent(store, host)? {
+        // An agent host's new token cannot go the usual way. The usual way
+        // writes it to the host FIRST and commits after, so a failed write
+        // never strands a host on a token it never received — but for an
+        // agent host "writing it to the host" means sending it over the agent
+        // connection, which authenticated with the token being replaced. A
+        // rotation is how an operator answers a stolen token, so that
+        // connection may be the thief's.
+        //
+        // So: commit first, which revokes the old token and with it the live
+        // connection (`HostRouter::agent_alias` drops it before anything else
+        // is sent; the endpoint drops it on its next beat), and send nothing.
+        // The operator hands the new token to the host out of band.
+        commit_host_token(store, host, &token, true)?;
+        return Err(IpcError::new(
+            codes::E_AGENT_REINSTALL,
+            format!(
+                "{host} is an agent host: its new token was saved but NOT sent over the agent \
+                 connection, which authenticated with the old one and has been cut off. Print it \
+                 on the hub with `fleet-hub agent-token {host}`, install it on the host with \
+                 `fleet-agent install --token-file -`, then provision {host} again to rewrite \
+                 its hooks"
+            ),
+        ));
+    }
     provision_one(ssh, host, base, &token).await?;
     commit_host_token(store, host, &token, minted)?;
     // A public hub is reached directly; only a loopback hub needs the
@@ -1534,6 +1565,67 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(uploaded.iter().all(|u| u.contains(&up_token.token)));
         tunnels.stop_all();
+    }
+
+    /// An AGENT host's rotation is the answer to a stolen token, and the
+    /// thief may be the agent that is connected. So the new token must never
+    /// travel over that connection: it is committed FIRST, which revokes the
+    /// old one, and nothing is sent to the host at all. The operator hands
+    /// the new token to the host out of band, as the error says.
+    #[tokio::test]
+    async fn rotating_an_agent_host_never_sends_the_new_token_over_its_live_connection() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("laptop", Some("laptop")).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            s.upsert_host_token("laptop", "old-token").unwrap();
+        }
+        let reg = crate::agent::AgentRegistry::new();
+        let ssh = crate::ssh::SshClient::with_agents(Arc::clone(&reg), Arc::clone(&store));
+        // Connected with the OLD token, answering everything as a host would.
+        let agent = crate::agent::fake::FakeAgent::connect_with_token(
+            &reg,
+            "laptop",
+            "old-token",
+            crate::agent::fake::answer_with(0, b"", b""),
+        );
+
+        let err =
+            provision_host_with_token(&store, &ssh, &quiet_tunnels(), "laptop", &base(), true)
+                .await
+                .unwrap_err();
+
+        let new = store
+            .lock()
+            .unwrap()
+            .get_host_token("laptop")
+            .unwrap()
+            .unwrap();
+        assert_ne!(new.token, "old-token", "the rotation is committed");
+        assert_eq!(new.mode, "full");
+        assert!(
+            agent.sent().is_empty(),
+            "nothing may be sent over the connection being revoked: {:?}",
+            agent.sent()
+        );
+        assert_eq!(err.code, codes::E_AGENT_REINSTALL, "{err:?}");
+        assert!(
+            err.message.contains("fleet-hub agent-token laptop")
+                && err.message.contains("fleet-agent install"),
+            "it tells the operator how to deliver the token: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains(&new.token),
+            "the error is not a place to print a secret"
+        );
+        // And the old connection is refused from here on.
+        let refused = crate::ssh::SshExec::run(&ssh, "laptop", &["true"], Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, codes::E_AGENT_OFFLINE);
+        assert!(agent.sent().is_empty());
     }
 
     #[tokio::test]

@@ -63,8 +63,8 @@ async fn hub() -> Hub {
     // `serve.rs` arranges; taken from `registry` rather than read back out of
     // the client, so a client that routes nothing fails the CALLS below, not
     // this fixture.
-    let state =
-        AgentWsState::new(Some(Arc::clone(&registry))).with_manual_beats(Arc::clone(&beats));
+    let state = AgentWsState::new(Some((Arc::clone(&registry), Arc::clone(&store))))
+        .with_manual_beats(Arc::clone(&beats));
     let app = crate::mcp::test_app(store, MASTER, state);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -43,8 +43,33 @@ impl FakeAgent {
         hello: AgentHello,
         policy: Policy,
     ) -> Self {
+        Self::start(registry, alias, hello, None, policy)
+    }
+
+    /// A fake agent that authenticated with `token`, as the `/agent`
+    /// endpoint registers a real one, so revoking the token can reach it.
+    pub fn connect_with_token(
+        registry: &Arc<AgentRegistry>,
+        alias: &str,
+        token: &str,
+        policy: Policy,
+    ) -> Self {
+        let credential = crate::mcp::auth::sha256_hex(token);
+        Self::start(registry, alias, hello(), Some(credential), policy)
+    }
+
+    fn start(
+        registry: &Arc<AgentRegistry>,
+        alias: &str,
+        hello: AgentHello,
+        credential: Option<String>,
+        policy: Policy,
+    ) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let conn_id = registry.connect(alias, hello, tx);
+        let conn_id = match credential {
+            Some(c) => registry.connect_bound(alias, hello, tx, c),
+            None => registry.connect(alias, hello, tx),
+        };
         let sent = Arc::new(Mutex::new(Vec::new()));
         let task = tokio::spawn({
             let registry = Arc::clone(registry);

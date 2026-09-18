@@ -47,9 +47,24 @@ impl HostRouter {
     /// is the behaviour every host had before this router existed, and a
     /// process whose store mutex is poisoned has worse problems than one
     /// misrouted command.
+    ///
+    /// Before it answers, a live connection for that alias whose token is no
+    /// longer current is dropped (see [`credential_is_current`]). So the call
+    /// that follows either reaches an agent holding the host's CURRENT full
+    /// token or fails `E_AGENT_OFFLINE` — nothing is ever sent over a
+    /// connection that a rotation, a `readonly` or a removal has revoked, not
+    /// even in the heartbeat before the endpoint notices. That is what keeps a
+    /// rotation from handing its new token to the connection it revokes.
     pub fn agent_alias(&self, host: &str) -> Option<String> {
-        let store = self.store.lock().ok()?;
-        store.agent_host_alias(host).ok().flatten()
+        let alias = {
+            let store = self.store.lock().ok()?;
+            store.agent_host_alias(host).ok().flatten()?
+        };
+        // The guard above is released: the check takes the lock itself.
+        self.agent
+            .registry()
+            .evict_stale(&alias, |c| credential_is_current(&self.store, &alias, c));
+        Some(alias)
     }
 
     /// The transport agent-routed hosts are delegated to.
@@ -58,10 +73,31 @@ impl HostRouter {
     }
 }
 
+/// Is `credential` — the SHA-256 of the token an agent connection
+/// authenticated with — still a token that may BE `alias`'s agent?
+///
+/// Yes only while the host's token row still holds that exact token in
+/// `full` mode. A rotation replaces the token, `readonly` narrows it, and
+/// removing the host deletes the row; each one makes this false. A poisoned
+/// store answers no: when in doubt, a connection that receives every command
+/// for a host is cut off.
+pub(crate) fn credential_is_current(store: &Mutex<Store>, alias: &str, credential: &str) -> bool {
+    let Ok(s) = store.lock() else {
+        return false;
+    };
+    match s.get_host_token(alias) {
+        Ok(Some(row)) => {
+            row.mode == "full" && crate::mcp::auth::sha256_hex(&row.token) == credential
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::agent::fake::{self, FakeAgent};
     use crate::agent::AgentRegistry;
+    use crate::ipc_error::codes;
     use crate::ssh::{SshClient, SshExec};
     use crate::store::Store;
     use std::sync::{Arc, Mutex};
@@ -154,6 +190,63 @@ mod tests {
     fn a_client_built_without_agents_routes_nothing() {
         let ssh = SshClient::new();
         assert_eq!(ssh.agent_route("laptop"), None);
+    }
+
+    // ── a revoked credential never gets another frame ─────────────────────
+    //
+    // The endpoint re-checks each connection's token on every heartbeat;
+    // this is the check with no window at all: a call for a host whose live
+    // agent authenticated with a token that is no longer current is refused
+    // BEFORE anything is sent, and the connection is dropped.
+
+    async fn a_change_stops_the_next_call(change: impl FnOnce(&Store)) {
+        let (ssh, reg, store) = hub_client(&[("laptop", None, "agent")]);
+        store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "t1")
+            .unwrap();
+        let agent =
+            FakeAgent::connect_with_token(&reg, "laptop", "t1", fake::answer_with(0, b"", b""));
+        let a = script();
+        ssh.run("laptop", &args(&a), CONNECT).await.unwrap();
+        assert_eq!(agent.sent().len(), 1, "a current token is served");
+
+        change(&store.lock().unwrap());
+        let started = std::time::Instant::now();
+        let err = ssh.run("laptop", &args(&a), CONNECT).await.unwrap_err();
+        assert_eq!(err.code, codes::E_AGENT_OFFLINE, "{err:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(
+            agent.sent().len(),
+            1,
+            "nothing more was sent: {:?}",
+            agent.sent()
+        );
+        assert!(!reg.connected("laptop"), "and the stale connection is gone");
+    }
+
+    #[tokio::test]
+    async fn a_rotated_token_gets_no_further_frame() {
+        a_change_stops_the_next_call(|s| s.upsert_host_token("laptop", "t2").unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn a_readonly_token_gets_no_further_frame() {
+        a_change_stops_the_next_call(|s| s.set_host_token_mode("laptop", "readonly").unwrap())
+            .await;
+    }
+
+    /// Removing and re-adding the alias turns routing back on; the old
+    /// connection must not be what it routes to.
+    #[tokio::test]
+    async fn a_removed_and_readded_host_does_not_reach_the_old_agent() {
+        a_change_stops_the_next_call(|s| {
+            s.delete_host("laptop").unwrap();
+            s.insert_host("laptop", None).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+        })
+        .await;
     }
 
     // ── the seven methods ─────────────────────────────────────────────────

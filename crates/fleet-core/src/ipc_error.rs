@@ -61,6 +61,11 @@ pub mod codes {
     /// a frame that does not answer the request, or a body that will not
     /// decode. Distinct from `E_AGENT_OFFLINE` — the connection is up.
     pub const E_AGENT_PROTOCOL: &str = "E_AGENT_PROTOCOL";
+    /// An agent host's token was just minted or rotated. It is NOT sent to the
+    /// host over the agent connection — that connection authenticated with
+    /// the token being replaced — so the operator must hand it to the host
+    /// out of band (`fleet-hub agent-token`, then `fleet-agent install`).
+    pub const E_AGENT_REINSTALL: &str = "E_AGENT_REINSTALL";
     /// A host probe (version / reachability check) failed.
     pub const E_PROBE: &str = "E_PROBE";
     /// Host provisioning (bootstrap script) failed.
