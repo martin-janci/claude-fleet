@@ -92,6 +92,41 @@ pub fn read_script(
     claude_session_id: &str,
     max_bytes: usize,
 ) -> String {
+    let mut s = locate_script(tmux_name, stored_path, fallback_dir, claude_session_id);
+    s.push_str(&format!("tail -c {max_bytes} \"$f\"\n"));
+    s
+}
+
+/// The bash script that prints the transcript lines mentioning
+/// `tool_use_id` (a fixed-string grep), at most `max_bytes` of them. A
+/// missing id prints nothing and still exits 0; a missing transcript exits
+/// 4 as in [`read_script`]. `tool_use_id` is validated by the caller
+/// (`validate::tool_use_id`) and quoted here.
+pub fn tool_lines_script(
+    tmux_name: Option<&str>,
+    stored_path: Option<&str>,
+    fallback_dir: Option<&str>,
+    claude_session_id: &str,
+    tool_use_id: &str,
+    max_bytes: usize,
+) -> String {
+    let mut s = locate_script(tmux_name, stored_path, fallback_dir, claude_session_id);
+    s.push_str(&format!(
+        "{{ grep -F -- {} \"$f\" || true; }} | head -c {max_bytes}\n",
+        quote(tool_use_id)
+    ));
+    s
+}
+
+/// The shared prefix of [`read_script`] / [`tool_lines_script`]: locate the
+/// transcript (resolution order documented on [`read_script`]) and leave it
+/// in `$f`, or print the `NO_TRANSCRIPT` sentinel on stderr and `exit 4`.
+fn locate_script(
+    tmux_name: Option<&str>,
+    stored_path: Option<&str>,
+    fallback_dir: Option<&str>,
+    claude_session_id: &str,
+) -> String {
     let tmux_q = quote(tmux_name.unwrap_or(""));
     // Exact pane target: a bare name would let tmux prefix-match another session.
     let tmux_target_q = quote(&crate::tmux::exact_pane(tmux_name.unwrap_or("")));
@@ -123,7 +158,6 @@ if [ -z "$f" ]; then
   done
 fi
 if [ -z "$f" ]; then printf '{NO_TRANSCRIPT} %s\n' "$id" >&2; exit 4; fi
-tail -c {max_bytes} "$f"
 "#
     )
 }
@@ -1003,6 +1037,166 @@ pub async fn fetch_conversation_for_row(
     Ok(conv)
 }
 
+/// Cap on every text field of a [`ToolDetail`] (chars; "…" appended when cut).
+pub const TOOL_DETAIL_MAX_CHARS: usize = 8_000;
+/// Most bytes of matching transcript lines [`fetch_tool_detail`] reads.
+pub const TOOL_DETAIL_READ_BYTES: usize = 2 * 1_048_576;
+
+/// One tool call's input and result, read on demand (`session_tool_detail`)
+/// so the conversation poll never carries them.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ToolDetail {
+    pub id: String,
+    pub name: String,
+    /// Pretty JSON of the input, ≤ 8 000 chars ("…" when cut).
+    pub input: String,
+    /// Edit / MultiEdit / Write: the file path and the before/after text,
+    /// each ≤ 8 000 chars; None for other tools.
+    pub edit: Option<EditDetail>,
+    /// Bash: the full command (≤ 8 000 chars); None otherwise.
+    pub command: Option<String>,
+    /// Result text (string or joined text blocks), ≤ 8 000 chars; None until it arrives.
+    pub result: Option<String>,
+    pub is_error: bool,
+}
+
+/// The file change of an Edit / MultiEdit / Write call.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct EditDetail {
+    pub file_path: String,
+    pub old: String,
+    pub new: String,
+}
+
+/// PURE: [`EditDetail`] for a file-editing tool's `input`; `None` for other
+/// tools. MultiEdit joins its edits' strings with `"\n…\n"`; Write has an
+/// empty `old`.
+fn edit_detail(name: &str, input: &serde_json::Value) -> Option<EditDetail> {
+    let str_of = |v: &serde_json::Value, k: &str| {
+        v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    };
+    let (old, new) = match name {
+        "Edit" => (str_of(input, "old_string"), str_of(input, "new_string")),
+        "MultiEdit" => {
+            let edits: &[serde_json::Value] = input
+                .get("edits")
+                .and_then(|e| e.as_array())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let join = |k: &str| {
+                edits
+                    .iter()
+                    .map(|e| str_of(e, k))
+                    .collect::<Vec<_>>()
+                    .join("\n…\n")
+            };
+            (join("old_string"), join("new_string"))
+        }
+        "Write" => (String::new(), str_of(input, "content")),
+        _ => return None,
+    };
+    Some(EditDetail {
+        file_path: str_of(input, "file_path"),
+        old: cap_chars(&old, TOOL_DETAIL_MAX_CHARS),
+        new: cap_chars(&new, TOOL_DETAIL_MAX_CHARS),
+    })
+}
+
+/// PURE: the detail of tool call `id` from transcript JSONL `lines` (the
+/// whole file or just the lines mentioning the id). `None` when no
+/// `tool_use` block has that id. Unparseable lines (a cut last line) and
+/// blocks of other ids are skipped.
+pub fn parse_tool_detail(lines: &str, id: &str) -> Option<ToolDetail> {
+    let mut detail: Option<ToolDetail> = None;
+    let mut result: Option<(Option<String>, bool)> = None;
+    for line in lines.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(blocks) = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for b in blocks {
+            match b.get("type").and_then(|t| t.as_str()) {
+                Some("tool_use")
+                    if detail.is_none() && b.get("id").and_then(|x| x.as_str()) == Some(id) =>
+                {
+                    let name = b
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let input = b.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                    let pretty = serde_json::to_string_pretty(&input).unwrap_or_default();
+                    let command = (name == "Bash")
+                        .then(|| input.get("command").and_then(|c| c.as_str()))
+                        .flatten()
+                        .map(|c| cap_chars(c, TOOL_DETAIL_MAX_CHARS));
+                    detail = Some(ToolDetail {
+                        id: id.to_string(),
+                        edit: edit_detail(&name, &input),
+                        name,
+                        input: cap_chars(&pretty, TOOL_DETAIL_MAX_CHARS),
+                        command,
+                        result: None,
+                        is_error: false,
+                    });
+                }
+                Some("tool_result")
+                    if b.get("tool_use_id").and_then(|x| x.as_str()) == Some(id) =>
+                {
+                    let is_error = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
+                    result = Some((tool_result_text(b), is_error));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut d = detail?;
+    if let Some((text, is_error)) = result {
+        // A result with no text blocks (e.g. only an image) still arrived.
+        d.result = Some(cap_chars(&text.unwrap_or_default(), TOOL_DETAIL_MAX_CHARS));
+        d.is_error = is_error;
+    }
+    Some(d)
+}
+
+/// `session_tool_detail`: the input and result of one tool call of the
+/// row's current conversation (or the earlier one `claude_session_id`
+/// names), grepped from its transcript on the host. Errors: `E_INVALID`
+/// (bad id / not one of the row's conversations), `E_INVALID_STATE`,
+/// `E_NO_TRANSCRIPT`, `E_NOTFOUND` (the call is not in the transcript),
+/// transport codes. The store lock is never held across the read.
+pub async fn fetch_tool_detail(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    row: &SessionRow,
+    claude_session_id: Option<&str>,
+    tool_use_id: &str,
+) -> Result<ToolDetail, IpcError> {
+    crate::validate::tool_use_id(tool_use_id)?;
+    let args = match claude_session_id {
+        Some(id) => resolve_args_for(store, row, id, CONV_TURNS, CONV_MAX_CHARS)?,
+        None => resolve_args(store, row, CONV_TURNS, CONV_MAX_CHARS)?,
+    };
+    validate_args(&args)?;
+    let script = tool_lines_script(
+        args.tmux_name.as_deref(),
+        args.transcript_path.as_deref(),
+        args.cwd.as_deref(),
+        &args.claude_session_id,
+        tool_use_id,
+        TOOL_DETAIL_READ_BYTES,
+    );
+    let lines = read_tail(&args, &script, ssh).await?;
+    parse_tool_detail(&lines, tool_use_id)
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "tool call not in transcript"))
+}
+
 /// Most timeline events [`fetch_conversation_for_row`] attaches to a
 /// `Conversation` for the UI (the `session_conversation` Tauri command).
 pub const CONV_EVENTS_LIMIT_UI: i64 = 200;
@@ -1010,14 +1204,21 @@ pub const CONV_EVENTS_LIMIT_UI: i64 = 200;
 /// small so an assistant's context is not flooded.
 pub const CONV_EVENTS_LIMIT_MCP: i64 = 50;
 
-/// Validate `args` and build the script that prints the last `max_bytes` of
-/// its transcript. Errors: `E_INVALID` (bad id / host / pane name).
-fn tail_script(args: &TranscriptArgs, max_bytes: usize) -> Result<String, IpcError> {
+/// Validate the values of `args` that are interpolated into a read script.
+/// Errors: `E_INVALID` (bad id / host / pane name).
+fn validate_args(args: &TranscriptArgs) -> Result<(), IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::claude_session_id(&args.claude_session_id)?;
     if let Some(name) = args.tmux_name.as_deref() {
         crate::validate::tmux_name_addressable(name)?;
     }
+    Ok(())
+}
+
+/// Validate `args` and build the script that prints the last `max_bytes` of
+/// its transcript. Errors: `E_INVALID` (bad id / host / pane name).
+fn tail_script(args: &TranscriptArgs, max_bytes: usize) -> Result<String, IpcError> {
+    validate_args(args)?;
     Ok(read_script(
         args.tmux_name.as_deref(),
         args.transcript_path.as_deref(),
@@ -2515,5 +2716,200 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, "E_NO_TRANSCRIPT");
+    }
+
+    #[test]
+    fn tool_use_id_validation() {
+        assert!(crate::validate::tool_use_id("toolu_01AbC-9").is_ok());
+        for bad in ["", "a b", "x;rm", &"a".repeat(101), "toolu_$x"] {
+            assert!(crate::validate::tool_use_id(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn detail_of_an_edit_with_its_result() {
+        let lines = jl(&[
+            tool_use(
+                "t",
+                "toolu_2",
+                "Edit",
+                serde_json::json!({"file_path":"/w/a.rs","old_string":"let a = 1;","new_string":"let a = 2;"}),
+            ),
+            tool_result(
+                "t",
+                "toolu_2",
+                serde_json::json!("The file /w/a.rs has been updated."),
+                false,
+            ),
+        ]);
+        let d = parse_tool_detail(&lines, "toolu_2").unwrap();
+        assert_eq!(d.name, "Edit");
+        assert_eq!(
+            d.edit,
+            Some(EditDetail {
+                file_path: "/w/a.rs".into(),
+                old: "let a = 1;".into(),
+                new: "let a = 2;".into()
+            })
+        );
+        assert_eq!(
+            d.result.as_deref(),
+            Some("The file /w/a.rs has been updated.")
+        );
+        assert!(!d.is_error);
+        assert_eq!(d.command, None);
+    }
+
+    #[test]
+    fn detail_of_a_failed_bash_and_of_a_pending_call() {
+        let lines = jl(&[
+            tool_use(
+                "t",
+                "toolu_1",
+                "Bash",
+                serde_json::json!({"command":"cargo test"}),
+            ),
+            tool_result(
+                "t",
+                "toolu_1",
+                serde_json::json!([{"type":"text","text":"error: 2 failed"}]),
+                true,
+            ),
+            tool_use(
+                "t",
+                "toolu_9",
+                "Read",
+                serde_json::json!({"file_path":"/x"}),
+            ),
+        ]);
+        let d = parse_tool_detail(&lines, "toolu_1").unwrap();
+        assert_eq!(d.command.as_deref(), Some("cargo test"));
+        assert_eq!(d.result.as_deref(), Some("error: 2 failed"));
+        assert!(d.is_error);
+        let p = parse_tool_detail(&lines, "toolu_9").unwrap();
+        assert_eq!(p.result, None);
+        assert!(p.input.contains("\"file_path\""));
+        assert_eq!(parse_tool_detail(&lines, "toolu_missing"), None);
+    }
+
+    #[test]
+    fn detail_text_is_capped() {
+        let big = "y".repeat(20_000);
+        let lines = jl(&[
+            tool_use(
+                "t",
+                "toolu_5",
+                "Bash",
+                serde_json::json!({"command": big.clone()}),
+            ),
+            tool_result("t", "toolu_5", serde_json::json!(big), false),
+        ]);
+        let d = parse_tool_detail(&lines, "toolu_5").unwrap();
+        assert_eq!(d.command.unwrap().chars().count(), 8_001);
+        assert_eq!(d.result.unwrap().chars().count(), 8_001);
+        assert!(d.input.chars().count() <= 8_001);
+    }
+
+    #[test]
+    fn detail_of_multiedit_and_write() {
+        let lines = jl(&[
+            tool_use(
+                "t",
+                "toolu_m",
+                "MultiEdit",
+                serde_json::json!({"file_path":"/w/b.rs","edits":[
+                {"old_string":"a","new_string":"b"},{"old_string":"c","new_string":"d"}]}),
+            ),
+            tool_use(
+                "t",
+                "toolu_w",
+                "Write",
+                serde_json::json!({"file_path":"/w/c.rs","content":"fn main() {}"}),
+            ),
+        ]);
+        let m = parse_tool_detail(&lines, "toolu_m").unwrap();
+        assert_eq!(
+            m.edit,
+            Some(EditDetail {
+                file_path: "/w/b.rs".into(),
+                old: "a\n…\nc".into(),
+                new: "b\n…\nd".into()
+            })
+        );
+        let w = parse_tool_detail(&lines, "toolu_w").unwrap();
+        assert_eq!(
+            w.edit,
+            Some(EditDetail {
+                file_path: "/w/c.rs".into(),
+                old: "".into(),
+                new: "fn main() {}".into()
+            })
+        );
+        assert_eq!(w.command, None);
+    }
+
+    #[test]
+    fn detail_ignores_a_truncated_line_and_other_ids_that_share_a_prefix() {
+        // `grep -F toolu_1` also matches `toolu_12`, and `head -c` may cut
+        // the last line mid-JSON.
+        let lines = format!(
+            "{}\n{}\n{{\"type\":\"user\",\"mess",
+            tool_use(
+                "t",
+                "toolu_12",
+                "Bash",
+                serde_json::json!({"command":"other"})
+            ),
+            tool_use(
+                "t",
+                "toolu_1",
+                "Bash",
+                serde_json::json!({"command":"mine"})
+            ),
+        );
+        let d = parse_tool_detail(&lines, "toolu_1").unwrap();
+        assert_eq!(d.command.as_deref(), Some("mine"));
+        assert_eq!(d.result, None);
+    }
+
+    #[test]
+    fn the_tool_lines_script_quotes_the_id_and_greps_fixed_strings() {
+        let s = tool_lines_script(
+            None,
+            Some("/h/.claude/projects/x/a.jsonl"),
+            None,
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "toolu_1",
+            262_144,
+        );
+        assert!(s.contains("grep -F -- 'toolu_1'"));
+        assert!(s.contains("head -c 262144"));
+    }
+
+    #[test]
+    fn the_tool_lines_script_prints_matching_lines_and_succeeds_on_no_match() {
+        let home = tempfile::tempdir().unwrap();
+        let proj = home.path().join(".claude/projects/-x");
+        let text = jl(&[
+            tool_use("t", "toolu_a", "Bash", serde_json::json!({"command":"ls"})),
+            asst("unrelated"),
+        ]);
+        write_transcript(&proj, &text);
+        let hit = run_script(
+            home.path(),
+            &tool_lines_script(None, None, None, SID, "toolu_a", 1024),
+        );
+        assert!(hit.status.success());
+        let out = String::from_utf8_lossy(&hit.stdout);
+        assert!(
+            out.contains("toolu_a") && !out.contains("unrelated"),
+            "{out}"
+        );
+        let miss = run_script(
+            home.path(),
+            &tool_lines_script(None, None, None, SID, "toolu_zz", 1024),
+        );
+        assert!(miss.status.success(), "a missing id is not a shell failure");
+        assert!(miss.stdout.is_empty());
     }
 }

@@ -6,6 +6,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   sessionConversation,
   listConversations,
+  toolDetail,
   sameConversation,
   isPinned,
   emptyStateText,
@@ -102,6 +103,24 @@ describe('listConversations', () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     await listConversations(7, 5);
     expect(mockedInvoke).toHaveBeenCalledWith('session_conversations', { args: { session_id: 7, limit: 5 } });
+  });
+});
+
+describe('toolDetail', () => {
+  it('invokes session_tool_detail with the session and tool ids', async () => {
+    const detail = { id: 'toolu_1', name: 'Bash', input: '{}', edit: null, command: 'ls', result: null, is_error: false };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue(detail);
+    const r = await toolDetail(7, 'toolu_1');
+    expect(mockedInvoke).toHaveBeenCalledWith('session_tool_detail', { args: { session_id: 7, tool_use_id: 'toolu_1' } });
+    expect(r).toEqual({ ok: true, value: detail });
+  });
+
+  it('passes an earlier conversation id', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    await toolDetail(7, 'toolu_1', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+    expect(mockedInvoke).toHaveBeenCalledWith('session_tool_detail', {
+      args: { session_id: 7, tool_use_id: 'toolu_1', claude_session_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' },
+    });
   });
 });
 

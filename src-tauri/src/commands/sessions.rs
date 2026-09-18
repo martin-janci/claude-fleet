@@ -350,6 +350,47 @@ pub async fn session_conversation(
     .await
 }
 
+#[derive(serde::Deserialize)]
+pub struct SessionToolDetailArgs {
+    pub session_id: i64,
+    pub tool_use_id: String,
+    /// Look in this earlier conversation of the session instead of the
+    /// current one.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
+}
+
+/// The input (edit before/after, Bash command, or pretty JSON) and result
+/// of one tool call, read on demand from the session's transcript — the
+/// Conversation tab's poll never carries them. Each text is capped at 8 000
+/// chars. Errors: `E_NOTFOUND` (session, or tool call not in the
+/// transcript), `E_INVALID` (bad tool id / not one of the session's
+/// conversations), `E_INVALID_STATE`, `E_NO_TRANSCRIPT`, transport codes.
+#[tauri::command]
+pub async fn session_tool_detail(
+    args: SessionToolDetailArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::transcript::ToolDetail, IpcError> {
+    let row = {
+        let s = lock(&store)?;
+        s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+            IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {} not found", args.session_id),
+            )
+        })?
+    };
+    fleet_core::service::transcript::fetch_tool_detail(
+        &store,
+        &ssh,
+        &row,
+        args.claude_session_id.as_deref(),
+        &args.tool_use_id,
+    )
+    .await
+}
+
 // ── Activity probe (live indicator) ─────────────────────────────────────────
 
 #[derive(serde::Deserialize)]

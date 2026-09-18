@@ -234,6 +234,7 @@ pub fn run() {
             commands::sessions::session_history,
             commands::sessions::session_conversations,
             commands::sessions::session_conversation,
+            commands::sessions::session_tool_detail,
             commands::sessions::session_activity,
             commands::sessions::restart_session,
             commands::sessions::send_prompt,

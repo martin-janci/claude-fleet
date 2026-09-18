@@ -107,6 +107,44 @@ export function listConversations(sessionId: number, limit = 50): Promise<Result
   });
 }
 
+/** The file change of an Edit / MultiEdit / Write call (`session_tool_detail`). */
+export interface EditDetail {
+  file_path: string;
+  old: string;
+  new: string;
+}
+
+/** One tool call's input and result, read on demand (`session_tool_detail`).
+ *  Every text is capped at 8 000 chars ("…" when cut). */
+export interface ToolDetail {
+  id: string;
+  name: string;
+  /** Pretty JSON of the input. */
+  input: string;
+  /** Edit / MultiEdit / Write only. */
+  edit: EditDetail | null;
+  /** Bash only: the full command. */
+  command: string | null;
+  /** Null until the result arrives. */
+  result: string | null;
+  is_error: boolean;
+}
+
+/** The input and result of tool call `toolUseId`; `claudeSessionId` looks in
+ *  an earlier conversation of the session. */
+export function toolDetail(
+  sessionId: number,
+  toolUseId: string,
+  claudeSessionId?: string,
+): Promise<Result<ToolDetail>> {
+  const args: { session_id: number; tool_use_id: string; claude_session_id?: string } = {
+    session_id: sessionId,
+    tool_use_id: toolUseId,
+  };
+  if (claudeSessionId !== undefined) args.claude_session_id = claudeSessionId;
+  return invokeCmd<ToolDetail>('session_tool_detail', { args });
+}
+
 /** Deep (JSON) equality — used to decide whether a poll result actually changed. */
 export function sameConversation(a: Conversation | null, b: Conversation): boolean {
   if (a === null) return false;
