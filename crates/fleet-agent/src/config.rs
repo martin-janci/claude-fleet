@@ -110,27 +110,63 @@ pub fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
 /// and renamed over `path` — so an existing file, whatever its mode, never
 /// receives the token, and a crash leaves either the old file or the new one.
 pub fn write(path: &Path, config: &Config, owner: Option<(u32, u32)>) -> Result<(), ConfigError> {
-    use std::io::Write as _;
     let io = |e| ConfigError::Io(path.into(), e);
     let dir = match path.parent() {
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => Path::new("."),
     };
-    if !dir.exists() {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
+    // Written for oneself (the user scope): private. Written by root for the
+    // run-as user (the system scope): root owns what it creates, so the
+    // directory must let that user through, or the agent can never open its
+    // own config. The file is 0600 and that user's either way; the directory
+    // only has to be passable.
+    let created = create_dirs(dir, if owner.is_some() { 0o755 } else { 0o700 }).map_err(io)?;
+    let result = write_into(dir, path, config, owner);
+    if result.is_err() {
+        // A refused or failed write leaves no directory of ours behind.
+        for d in created.iter().rev() {
+            let _ = std::fs::remove_dir(d);
+        }
+    }
+    result
+}
+
+/// Create every missing directory on the way to `dir`, each set to exactly
+/// `mode`, and return them, outermost first. The mode is applied explicitly
+/// after the create: `DirBuilder::mode` is filtered by the umask, and under
+/// a CIS-style 027 (which `sudo` keeps) the system directory came out 0750,
+/// which the run-as user cannot pass (the re-review's NEW-3). Directories
+/// only: this never opens a file.
+fn create_dirs(dir: &Path, mode: u32) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let missing: Vec<&Path> = dir
+        .ancestors()
+        .filter(|d| !d.as_os_str().is_empty())
+        .take_while(|d| !d.exists())
+        .collect();
+    let mut created = Vec::new();
+    for d in missing.into_iter().rev() {
+        std::fs::create_dir(d)?;
+        created.push(d.to_path_buf());
         #[cfg(unix)]
         {
-            use std::os::unix::fs::DirBuilderExt;
-            // Written for oneself (the user scope): private. Written by root
-            // for the run-as user (the system scope): root owns what it
-            // creates, so the directory must let that user through, or the
-            // agent can never open its own config. The file is 0600 and that
-            // user's either way; the directory only has to be passable.
-            builder.mode(if owner.is_some() { 0o755 } else { 0o700 });
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(mode))?;
         }
-        builder.create(dir).map_err(io)?;
     }
+    #[cfg(not(unix))]
+    let _ = mode;
+    Ok(created)
+}
+
+/// [`write`], once the directory exists.
+fn write_into(
+    dir: &Path,
+    path: &Path,
+    config: &Config,
+    owner: Option<(u32, u32)>,
+) -> Result<(), ConfigError> {
+    use std::io::Write as _;
+    let io = |e| ConfigError::Io(path.into(), e);
     #[cfg(unix)]
     if let Some((uid, gid)) = owner {
         reachable_by(dir, uid, gid).map_err(ConfigError::Invalid)?;
@@ -219,7 +255,15 @@ mod tests {
             !helper.contains("set_permissions"),
             "create_private must not chmod: the mode belongs to the create call"
         );
-        let rest = src.replacen(helper, "", 1);
+        // The one other place a mode is set: directories, never a file.
+        let dirs = fn_body(src, "create_dirs");
+        for file_api in ["File", "OpenOptions", "fs::write", "fs::copy"] {
+            assert!(
+                !dirs.contains(file_api),
+                "create_dirs must only make directories, but uses `{file_api}`"
+            );
+        }
+        let rest = src.replacen(helper, "", 1).replacen(dirs, "", 1);
         for forbidden in [
             "File::create",
             "File::options",
@@ -237,7 +281,7 @@ mod tests {
             );
         }
         assert!(
-            fn_body(src, "write").contains("create_private(&tmp)"),
+            fn_body(src, "write_into").contains("create_private(&tmp)"),
             "write() must create its temp file with create_private"
         );
     }
@@ -363,6 +407,78 @@ mod tests {
         );
         // Its own owner is fine.
         write(&path, &cfg(), Some(me())).unwrap();
+    }
+
+    /// NEW-3 (re-review): the directory modes above must not depend on the
+    /// umask. `DirBuilder::mode` is filtered by it, so under a CIS-style 027
+    /// (which `sudo` keeps) the system directory came out 0750, the run-as
+    /// user could not pass, and every system install was refused.
+    ///
+    /// The umask is process-wide, so the test re-runs this binary, filtered
+    /// to itself, and the inner run sets it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_directory_modes_do_not_depend_on_the_umask() {
+        const PROBE: &str = "FLEET_AGENT_UMASK_PROBE";
+        const NAME: &str = "config::tests::the_directory_modes_do_not_depend_on_the_umask";
+        if std::env::var_os(PROBE).is_some() {
+            for umask in [0o027, 0o077] {
+                // SAFETY: no preconditions; this inner run is one thread.
+                unsafe { libc::umask(umask) };
+                let dir = tempfile::tempdir().unwrap();
+                let system = dir.path().join("etc/fleet-agent/config.json");
+                write(&system, &cfg(), Some(me())).unwrap();
+                assert_eq!(
+                    (mode_of(system.parent().unwrap()), mode_of(&system)),
+                    (0o755, 0o600),
+                    "system scope under umask {umask:04o}"
+                );
+                let user = dir.path().join("home/fleet-agent/config.json");
+                write(&user, &cfg(), None).unwrap();
+                assert_eq!(
+                    mode_of(user.parent().unwrap()),
+                    0o700,
+                    "user scope under umask {umask:04o}"
+                );
+            }
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(PROBE, "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            said.contains("1 passed"),
+            "the inner run ran the probe: {said}"
+        );
+    }
+
+    /// NEW-3 (re-review): an install refused because its owner could not
+    /// reach the config leaves no directory it created behind.
+    #[test]
+    fn a_refused_write_removes_the_directories_it_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = locked.join("new/deeper/config.json");
+        let stranger = (me().0.wrapping_add(4242), me().1.wrapping_add(4242));
+        let err = write(&path, &cfg(), Some(stranger))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot reach"), "{err}");
+        assert!(
+            !locked.join("new").exists(),
+            "left behind: {:?}",
+            std::fs::read_dir(&locked).unwrap().collect::<Vec<_>>()
+        );
     }
 
     #[test]
