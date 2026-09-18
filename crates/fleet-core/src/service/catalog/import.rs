@@ -174,6 +174,9 @@ fn header(
             original_path: Some(original.to_string_lossy().to_string()),
             symlink_target: symlink.map(|p| p.to_string_lossy().to_string()),
         }),
+        // `install_as` is set by importer logic in a follow-up task; this
+        // constructor exists only to keep `Header` fully populated here.
+        install_as: None,
         targets: BTreeMap::new(),
     }
 }

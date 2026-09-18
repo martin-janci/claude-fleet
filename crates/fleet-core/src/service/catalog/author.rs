@@ -43,6 +43,7 @@ pub fn template(kind: Kind, name: &str) -> Asset {
         description: description.to_string(),
         tags: Vec::new(),
         source: None,
+        install_as: None,
         targets: Default::default(),
     };
     match kind {
@@ -182,6 +183,7 @@ impl LintReport {
 /// rather than a guess.
 const VALIDATE_FIELDS: &[&str] = &[
     "name",
+    "install_as",
     "description",
     "allowed_tools",
     "tools",
@@ -433,6 +435,10 @@ pub fn lint(
 
     if kind == Kind::Skill && !body_empty && !asset.body.lines().any(|l| l.starts_with('#')) {
         report.warn("body", "body.md has no markdown heading");
+    }
+
+    if asset.header.install_as.as_deref() == Some(asset.header.name.as_str()) {
+        report.warn("install_as", "install_as equals name");
     }
 
     report
@@ -1200,6 +1206,20 @@ mod tests {
         let report = lint_of(&a);
         assert_eq!(fields(&report.warnings), vec!["body"]);
         assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn lint_warns_when_install_as_equals_name() {
+        let mut a = clean_skill();
+        a.header.install_as = Some(a.header.name.clone());
+        let report = lint_of(&a);
+        assert_eq!(fields(&report.warnings), vec!["install_as"]);
+        assert!(report.warnings[0].message.contains("equals name"));
+
+        // A different install_as is not warned about.
+        let mut a = clean_skill();
+        a.header.install_as = Some("other_name".into());
+        assert!(lint_of(&a).warnings.is_empty());
     }
 
     #[test]
