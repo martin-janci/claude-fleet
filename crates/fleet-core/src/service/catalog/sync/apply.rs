@@ -467,11 +467,7 @@ fn keep_removal(rm: &ManifestMerge, adds: &[ConfigMerge]) -> bool {
 /// needs in order to uninstall it, and — via `merge_value`'s hash — which
 /// catalog pin fleet last applied, so the next plan can tell a pin change
 /// from a CLI that landed on the wrong version (see `plan::plugin_op`).
-fn plugin_entry(
-    target: &PluginTarget,
-    merge_value: &serde_json::Value,
-    now: i64,
-) -> ManifestEntry {
+fn plugin_entry(target: &PluginTarget, merge_value: &serde_json::Value, now: i64) -> ManifestEntry {
     ManifestEntry {
         hash: String::new(),
         files: Vec::new(),
