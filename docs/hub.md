@@ -284,8 +284,11 @@ routed to it.
 - **A `readonly` token is refused at `/agent`** (`403`). An agent receives
   every command the hub runs on its host, which is more than "readonly"
   promises. **Rotating does not fix this: the new token keeps the old mode.**
-  Set the host's token mode to `full` instead, then restart the agent.
-  `fleet-hub agent-token` warns on stderr when a token is not `full`.
+  Set the host's token mode to `full` instead, then restart the agent. The
+  mode is set by the desktop's `set_host_token_mode`, in the database that
+  holds the token; `fleet-hub` has no command for it. A token that
+  `fleet-hub agent-token` mints for a host that had none is `full`, and the
+  command warns on stderr when a token is not.
 
 ### Limits, and what is still open
 
@@ -317,6 +320,9 @@ routed to it.
   - `install` does not check who can write to the directory holding the
     `fleet-agent` binary. Put it somewhere only root (or the run-as user)
     can write.
+  - A command's output is cut at 200 MiB, and the caller is not told: the
+    agent flags the cut, but the hub's command interface has nowhere to
+    carry the flag, so a cut answer looks complete.
 
 ## Pair a phone
 
@@ -727,7 +733,8 @@ at whichever one provisioned it last.
   - `403 … readonly` means the token mode is not `full`, and rotating will
     not fix it;
   - `403 … not an agent host` means the host is not on the agent transport;
-  - `429` means the host already holds two connections;
+  - `429` means the host already holds two connections, or the hub holds
+    64 in all;
   - `invalid peer certificate` means pass `--ca-file`;
   - `refusing the plain hub` means use `https://`.
 - **`401`** — wrong or missing token. Confirm the client sends
