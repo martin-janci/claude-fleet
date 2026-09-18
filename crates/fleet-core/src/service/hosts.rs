@@ -37,7 +37,9 @@ pub struct AddHostArgs {
     /// SSH config alias used to reach the host (from `~/.ssh/config`).
     pub ssh_alias: String,
     /// `"ssh"` (the default) or `"agent"` — how the host is reached.
-    /// `Store::set_host_transport` rejects anything else.
+    /// Anything else is rejected before the host is persisted. An `"agent"`
+    /// host is added without an SSH probe: it is reachable only through a
+    /// `fleet-agent` that has yet to dial in.
     #[serde(default)]
     pub transport: Option<String>,
 }
@@ -64,8 +66,20 @@ pub async fn add_host(
             ));
         }
     }
-    // Probe first; we don't want to persist a host we can't talk to.
-    let (reachable, claude_ver, tmux_ver, account) = probe(ssh, &args.ssh_alias).await?;
+    // An agent host is, by definition, one the hub cannot dial — that is the
+    // whole reason it needs an agent — so an SSH probe must not be the price
+    // of admission. Nor can the agent dial in first: the per-host token it
+    // authenticates with is minted against the row this call creates. So the
+    // row is persisted unprobed and `reachable=false`, and reachability
+    // arrives from the agent registry — through the router, which needs the
+    // row to exist — on the first `probe_host` or reconcile pass after the
+    // agent connects.
+    let (reachable, claude_ver, tmux_ver, account) = if args.transport.as_deref() == Some("agent") {
+        (false, None, None, None)
+    } else {
+        // Probe first; we don't want to persist a host we can't talk to.
+        probe(ssh, &args.ssh_alias).await?
+    };
     {
         let s = lock(store)?;
         s.insert_host(&args.alias, Some(&args.ssh_alias))?;
@@ -1117,19 +1131,19 @@ mod tests {
         assert_eq!(calls[0].script().as_deref(), Some(PROBE_SCRIPT));
     }
 
-    /// NOTE: this passes only because `fake_fleet()` fakes the SSH probe to
-    /// succeed. `add_host` still runs `probe(ssh, &args.ssh_alias).await?`
-    /// *before* anything is persisted (see `add_host`'s body), so today
-    /// `add_host { transport: "agent" }` only succeeds for a host that is
-    /// ALSO SSH-reachable — the one case that does not need an agent. This
-    /// is not proof an unreachable agent host can be added; that needs
-    /// Task 4/5 (route reachability through the agent registry instead of an
-    /// SSH probe when `transport == "agent"`). Ledgered as deferred, not a
-    /// Task 1 defect.
+    /// The feature's headline case: a laptop behind NAT. The hub cannot dial
+    /// it — that is *why* it needs an agent — so an SSH probe must not be the
+    /// price of admission. Nor can the agent dial in first: the per-host
+    /// token it authenticates with is minted against the row this call
+    /// creates. So an agent host is persisted unprobed and `reachable=false`,
+    /// and its reachability comes from the agent registry (through the
+    /// router, which needs the row to exist) on the first `probe_host` or
+    /// reconcile pass after the agent connects.
     #[tokio::test]
-    async fn add_host_persists_an_explicit_agent_transport_when_the_ssh_probe_succeeds() {
+    async fn add_host_persists_an_agent_host_the_hub_cannot_reach() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
         let fake = fake_fleet();
+        fake.unreachable("gamma.example");
         let row = add_host(
             AddHostArgs {
                 alias: "gamma".into(),
@@ -1140,8 +1154,19 @@ mod tests {
             &fake,
         )
         .await
-        .expect("reachable host is added");
+        .expect("an agent host is added without an SSH probe");
         assert_eq!(row.transport, "agent");
+        assert!(!row.reachable, "no agent has connected yet");
+        assert!(
+            row.last_pinged_at.is_some(),
+            "the add is still a probe stamp"
+        );
+        assert!(
+            fake.calls().is_empty(),
+            "an agent host is never SSH-probed: {:?}",
+            fake.calls()
+        );
+        assert!(host_row(&store, "gamma").is_some(), "the row is persisted");
     }
 
     #[tokio::test]

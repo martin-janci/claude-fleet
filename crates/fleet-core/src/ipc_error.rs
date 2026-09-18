@@ -187,6 +187,38 @@ pub mod codes {
     /// with no value. The message lists the NAMES only, never a value. Set
     /// them (`catalog_set_secret`) or re-apply with `force_partial`.
     pub const E_SECRET_MISSING: &str = "E_SECRET_MISSING";
+
+    /// Every code a *transport* raises when a command did not reach, or did
+    /// not come back from, the host — over SSH or over an agent.
+    ///
+    /// The single list the service layer branches on, so the two transports
+    /// cannot drift apart: an agent host that times out must report the same
+    /// thing an SSH host that times out reports, and `E_AGENT_OFFLINE` must
+    /// not fall through a branch that `E_SSH` is caught by. Codes about the
+    /// *work* (`E_REPO_MISSING`, `E_TMUX`…) are deliberately absent.
+    pub const TRANSPORT_FAILURES: [&str; 5] = [
+        E_SSH,
+        E_SSH_TIMEOUT,
+        E_TIMEOUT,
+        E_AGENT_OFFLINE,
+        E_AGENT_PROTOCOL,
+    ];
+
+    /// Did the transport, rather than the command, fail? See
+    /// [`TRANSPORT_FAILURES`].
+    pub fn is_transport_failure(code: &str) -> bool {
+        TRANSPORT_FAILURES.contains(&code)
+    }
+
+    /// The transport failures under which the command **may already have
+    /// run**: it was sent and its outcome is unknown, rather than never
+    /// having left. `E_SSH` and `E_AGENT_OFFLINE` are the two that mean no
+    /// connection, so they are excluded — a caller doing something
+    /// non-idempotent (`gh repo create`, a billed usage request) can safely
+    /// treat those as "nothing happened" and retry elsewhere.
+    pub fn may_have_run(code: &str) -> bool {
+        matches!(code, E_SSH_TIMEOUT | E_TIMEOUT | E_AGENT_PROTOCOL)
+    }
 }
 
 #[derive(Debug, Serialize)]

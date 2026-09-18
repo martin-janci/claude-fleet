@@ -506,7 +506,15 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     };
     let base = r.base()?;
 
-    let ssh = Arc::new(fleet_core::ssh::SshClient::new());
+    // Routed, not SSH-only: a host row whose `transport` is `'agent'` is
+    // reached through the `fleet-agent` connected for it, every other host
+    // over SSH exactly as before. The registry comes back out of
+    // `ssh.agent_registry()` for the `/agent` endpoint to register on. The
+    // desktop builds `SshClient::new()` instead and routes nothing.
+    let ssh = Arc::new(fleet_core::ssh::SshClient::with_agents(
+        fleet_core::agent::AgentRegistry::new(),
+        Arc::clone(&store),
+    ));
     let reg = fleet_core::cancel::CancellationRegistry::new();
     let tunnels = Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new());
     // No desktop to approve a destructive-call confirmation: log it. The

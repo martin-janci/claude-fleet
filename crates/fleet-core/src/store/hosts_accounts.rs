@@ -129,6 +129,26 @@ impl Store {
         rows.collect()
     }
 
+    /// The fleet alias of the **agent** host addressed by `key`, or `None` if
+    /// `key` names no agent host (including an alias with no row at all).
+    ///
+    /// `key` is whatever the service layer handed the transport as its `host`
+    /// argument. That is the fleet alias everywhere except `service::hosts`,
+    /// which probes a host by its `ssh_alias`, so both columns are matched —
+    /// and the *fleet alias* is what comes back, because that is the name an
+    /// agent registers under. An exact `alias` match outranks an `ssh_alias`
+    /// one, so a row that happens to name another host's alias as its
+    /// `ssh_alias` cannot divert that host's calls to its own agent.
+    pub fn agent_host_alias(&self, key: &str) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .prepare_cached(
+                "SELECT alias FROM hosts WHERE transport='agent' AND (alias=?1 OR ssh_alias=?1) \
+                 ORDER BY (alias=?1) DESC LIMIT 1",
+            )?
+            .query_row([key], |r| r.get(0))
+            .optional()
+    }
+
     pub fn insert_host(&self, alias: &str, ssh_alias: Option<&str>) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO hosts (alias, ssh_alias, reachable, hidden) VALUES (?1, ?2, 0, 0)
