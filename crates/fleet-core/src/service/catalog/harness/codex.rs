@@ -28,7 +28,17 @@ const CONFIG_FILES: &[&str] = &[CODEX_CONFIG_PATH, CODEX_MANIFEST_PATH];
 
 pub struct Codex;
 
-fn skill_file(name: &str, description: &str, body: &str, plan: &mut RenderPlan) {
+/// `name` is the catalog name that stays in the `SKILL.md` frontmatter;
+/// `install_name` (`Asset::install_name()`) is the identifier the skill
+/// directory is derived from, so an `install_as` renders under the host
+/// identifier while the frontmatter still names the catalog asset.
+fn skill_file(
+    name: &str,
+    install_name: &str,
+    description: &str,
+    body: &str,
+    plan: &mut RenderPlan,
+) {
     let fm = frontmatter(&[
         ("name", serde_yaml::Value::String(name.to_string())),
         (
@@ -39,7 +49,7 @@ fn skill_file(name: &str, description: &str, body: &str, plan: &mut RenderPlan) 
     let text = format!("{fm}{body}");
     plan.note_placeholders(&text);
     plan.files.push(FileWrite {
-        path: format!("{CODEX_SKILLS_DIR}/{name}/SKILL.md"),
+        path: format!("{CODEX_SKILLS_DIR}/{install_name}/SKILL.md"),
         bytes: text.into_bytes(),
     });
 }
@@ -149,8 +159,14 @@ impl Harness for Codex {
                         triggers.join(", ")
                     );
                 }
-                skill_file(&asset.header.name, &description, &asset.body, &mut plan);
-                let dir = format!("{CODEX_SKILLS_DIR}/{}", asset.header.name);
+                skill_file(
+                    &asset.header.name,
+                    asset.install_name(),
+                    &description,
+                    &asset.body,
+                    &mut plan,
+                );
+                let dir = format!("{CODEX_SKILLS_DIR}/{}", asset.install_name());
                 for r in &asset.resources {
                     let rel = r.rel_path.strip_prefix("resources/").unwrap_or(&r.rel_path);
                     plan.files.push(FileWrite {
@@ -162,6 +178,7 @@ impl Harness for Codex {
             AssetSpec::Agent { .. } if t.render_as.as_deref() == Some("skill") => {
                 skill_file(
                     &asset.header.name,
+                    asset.install_name(),
                     &asset.header.description,
                     &asset.body,
                     &mut plan,
@@ -199,7 +216,7 @@ impl Harness for Codex {
                 plan.note_placeholders(&value.to_string());
                 plan.merges.push(ConfigMerge {
                     file: CODEX_CONFIG_PATH.into(),
-                    json_path: vec!["mcp_servers".into(), asset.header.name.clone()],
+                    json_path: vec!["mcp_servers".into(), asset.install_name().to_string()],
                     mode: MergeMode::Set,
                     value,
                 });
@@ -383,6 +400,26 @@ mod tests {
     }
 
     #[test]
+    fn skill_renders_under_install_as() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: skill\nname: s\ndescription: d\ninstall_as: foo_bar\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let plan = Codex.render(&a).unwrap();
+        assert_eq!(plan.files[0].path, "~/.codex/skills/foo_bar/SKILL.md");
+        let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
+        let yaml = text.split("---\n").nth(1).expect("frontmatter block");
+        let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("valid yaml");
+        assert_eq!(
+            map.get("name").and_then(|v| v.as_str()),
+            Some("s"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn skill_triggers_fold_into_description() {
         // Asserts the semantic value of `description` via a YAML parse
         // rather than pinning the exact quoting `serde_yaml` chooses to
@@ -426,6 +463,16 @@ mod tests {
     }
 
     #[test]
+    fn mcp_server_merges_under_install_as() {
+        let a = Asset::from_yaml(None, "kind: mcp_server\nname: docs\ndescription: d\ntransport: http\nurl: u\ninstall_as: claude_ai_Docs\n").unwrap();
+        let plan = Codex.render(&a).unwrap();
+        assert_eq!(
+            plan.merges[0].json_path,
+            vec!["mcp_servers", "claude_ai_Docs"]
+        );
+    }
+
+    #[test]
     fn hooks_and_plugins_are_unsupported_agents_unless_render_as_skill() {
         let hook = Asset::from_yaml(None, "kind: hook\nname: h\ndescription: d\nevent: stop\naction: { type: command, command: x }\n").unwrap();
         assert!(Codex.render(&hook).is_err());
@@ -444,6 +491,26 @@ mod tests {
         assert_eq!(
             plan.warnings,
             vec!["agent rendered as a codex skill (targets.codex.render_as)"]
+        );
+    }
+
+    #[test]
+    fn agent_as_skill_renders_under_install_as() {
+        let mut as_skill = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ninstall_as: foo_bar\ntargets:\n  codex:\n    render_as: skill\n",
+        )
+        .unwrap();
+        as_skill.body = "prompt\n".into();
+        let plan = Codex.render(&as_skill).unwrap();
+        assert_eq!(plan.files[0].path, "~/.codex/skills/foo_bar/SKILL.md");
+        let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
+        let yaml = text.split("---\n").nth(1).expect("frontmatter block");
+        let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("valid yaml");
+        assert_eq!(
+            map.get("name").and_then(|v| v.as_str()),
+            Some("pm"),
+            "{text}"
         );
     }
 
