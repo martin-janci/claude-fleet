@@ -461,11 +461,17 @@ fn keep_removal(rm: &ManifestMerge, adds: &[ConfigMerge]) -> bool {
     })
 }
 
-/// The manifest entry recorded for a plugin action. A plugin ref has no
-/// rendered plan to hash (the CLI does the installing), so the entry exists
-/// to say "fleet manages this" and to carry the `<plugin>@<marketplace>`
-/// key a later removal needs in order to uninstall it.
-fn plugin_entry(target: &PluginTarget, now: i64) -> ManifestEntry {
+/// The manifest entry recorded for a plugin action. A plugin ref writes no
+/// files (the CLI does the installing), so the entry exists to say "fleet
+/// manages this", to carry the `<plugin>@<marketplace>` key a later removal
+/// needs in order to uninstall it, and — via `merge_value`'s hash — which
+/// catalog pin fleet last applied, so the next plan can tell a pin change
+/// from a CLI that landed on the wrong version (see `plan::plugin_op`).
+fn plugin_entry(
+    target: &PluginTarget,
+    merge_value: &serde_json::Value,
+    now: i64,
+) -> ManifestEntry {
     ManifestEntry {
         hash: String::new(),
         files: Vec::new(),
@@ -476,9 +482,22 @@ fn plugin_entry(target: &PluginTarget, now: i64) -> ManifestEntry {
                 format!("{}@{}", target.plugin, target.marketplace_name),
             ],
             mode: MergeMode::Subset,
-            value_hash: String::new(),
+            value_hash: value_hash(merge_value),
         }],
         synced_at: now,
+    }
+}
+
+/// The plugin merge value to hash into the manifest entry when the action
+/// carries no plan. Must equal exactly what `harness::claude`'s render
+/// produces for this target's pin (`[{"version": v}]`) or `latest` (`[{}]`),
+/// since a later plan reads the manifest's hash as "the pin fleet last
+/// applied" to decide `plugin_update` vs `blocked` (`plan::plugin_op`).
+fn plugin_fallback_value(target: &PluginTarget) -> serde_json::Value {
+    if target.version == "latest" {
+        serde_json::json!([{}])
+    } else {
+        serde_json::json!([{"version": target.version}])
     }
 }
 
@@ -1251,7 +1270,18 @@ fn build_manifest(plan: &HostPlan, work: &[Work], now: i64) -> Option<Manifest> 
             | ActionOp::PluginInstall
             | ActionOp::PluginUpdate => {
                 let entry = match (&action.plugin, &action.plan) {
-                    (Some(target), _) => plugin_entry(target, now),
+                    (Some(target), plan) => {
+                        // The planner attaches the render plan to every
+                        // plugin action that reaches here; the fallback
+                        // mirrors `harness::claude`'s render in case it ever
+                        // does not, so the hash stays correct either way.
+                        let merge_value = plan
+                            .as_ref()
+                            .and_then(|p| p.inner().merges.first())
+                            .map(|m| m.value.clone())
+                            .unwrap_or_else(|| plugin_fallback_value(target));
+                        plugin_entry(target, &merge_value, now)
+                    }
                     (None, Some(secret_plan)) => {
                         Manifest::entry_for(&secret_plan.inner().hash(), secret_plan.inner(), now)
                     }
@@ -1274,6 +1304,7 @@ fn build_manifest(plan: &HostPlan, work: &[Work], now: i64) -> Option<Manifest> 
 mod tests {
     use super::*;
     use crate::service::catalog::harness::claude::Claude;
+    use crate::service::catalog::model::Asset;
     use crate::service::catalog::repo::{self, Catalog};
     use crate::service::catalog::sync::plan::{self, PlanFilter};
 
@@ -1485,6 +1516,90 @@ mod tests {
             Some("nope")
         );
         assert_eq!(plugin_error(&serde_json::json!({"success": true})), None);
+    }
+
+    /// The planner now attaches the rendered merge to every plugin action
+    /// (install, adopt, update) so the applier can hash it into the
+    /// manifest entry — this is what lets `plan::plugin_op` later tell a
+    /// pin change from a CLI that landed on the wrong version.
+    #[test]
+    fn plugin_manifest_entry_carries_the_rendered_pin_hash() {
+        let yaml = "kind: plugin_ref\nname: sp\ndescription: d\nharness: claude\nmarketplace: { name: mk, source: github, repo: o/r }\nplugin: sp\nversion: \"6.3.0\"\n";
+        let catalog = Catalog {
+            assets: vec![Asset::from_yaml(None, yaml).unwrap()],
+            ..Default::default()
+        };
+        let work = vec![Work {
+            outcome: Some(DONE),
+            detail: None,
+        }];
+        let pinned_hash = value_hash(&serde_json::json!([{"version": "6.3.0"}]));
+
+        // Install: nothing on the host yet.
+        let hp = plan::compute_host_plan(
+            &catalog,
+            &Claude,
+            "local",
+            &HostSnapshot::default(),
+            &Manifest::default(),
+            &BTreeMap::new(),
+            &PlanFilter::default(),
+        );
+        assert_eq!(hp.actions[0].op, ActionOp::PluginInstall);
+        assert!(
+            hp.actions[0].plan.is_some(),
+            "the planner attaches the render plan to a plugin action"
+        );
+        let manifest = build_manifest(&hp, &work, 1_000).expect("install writes an entry");
+        assert_eq!(
+            manifest.assets.get("plugin_ref/sp").unwrap().merges[0].value_hash,
+            pinned_hash
+        );
+
+        // Adopt: already installed at the pinned version, not yet managed.
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            PLUGINS_PATH.to_string(),
+            serde_json::json!({"plugins": {"sp@mk": [{"version": "6.3.0"}]}}),
+        );
+        let hp = plan::compute_host_plan(
+            &catalog,
+            &Claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &BTreeMap::new(),
+            &PlanFilter::default(),
+        );
+        assert_eq!(hp.actions[0].op, ActionOp::Adopt);
+        let manifest = build_manifest(&hp, &work, 1_000).expect("adopt writes an entry");
+        assert_eq!(
+            manifest.assets.get("plugin_ref/sp").unwrap().merges[0].value_hash,
+            pinned_hash
+        );
+
+        // Update: installed at another version, never synced before.
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            PLUGINS_PATH.to_string(),
+            serde_json::json!({"plugins": {"sp@mk": [{"version": "5.0.0"}]}}),
+        );
+        let hp = plan::compute_host_plan(
+            &catalog,
+            &Claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &BTreeMap::new(),
+            &PlanFilter::default(),
+        );
+        assert_eq!(hp.actions[0].op, ActionOp::PluginUpdate);
+        let manifest = build_manifest(&hp, &work, 1_000).expect("update writes an entry");
+        assert_eq!(
+            manifest.assets.get("plugin_ref/sp").unwrap().merges[0].value_hash,
+            pinned_hash,
+            "the entry records the catalog's pin, not the version the CLI landed on"
+        );
     }
 
     #[test]

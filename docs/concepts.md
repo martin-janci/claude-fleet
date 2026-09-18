@@ -36,7 +36,9 @@ backups before overwriting or removing files and keeps the three newest
 backups of each file. Config merges (JSON for Claude
 Code, TOML for Codex) are applied on the controller and written through the
 secure 0600 path; plugins are installed via `claude plugin install` on the
-host. A per-harness managed manifest (`~/.claude/.fleet-assets.json` and
+host. A pinned plugin is updated through the harness CLI only when the
+catalog's pin changes; `latest` refs are never updated automatically. A
+per-harness managed manifest (`~/.claude/.fleet-assets.json` and
 `~/.codex/.fleet-assets.json`) records what fleet installed, so only managed
 assets are ever removed. Secrets referenced as `${NAME}` in assets are resolved
 at apply time from the fleet database (global with per-host override) and never

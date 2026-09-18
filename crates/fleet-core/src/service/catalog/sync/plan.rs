@@ -7,7 +7,9 @@
 //! `sync::plan_sync` drives this module, wired to the `catalog_plan_sync`
 //! Tauri command and the `plan_sync` MCP tool.
 
-use super::super::harness::{json_get, ConfigMerge, Harness, HostSnapshot, MergeMode, RenderPlan};
+use super::super::harness::{
+    json_get, value_hash, ConfigMerge, Harness, HostSnapshot, MergeMode, RenderPlan,
+};
 use super::super::inventory::merge_satisfied;
 use super::super::model::{sha256_hex, Asset, AssetSpec, Kind};
 use super::super::repo::Catalog;
@@ -37,9 +39,10 @@ pub enum ActionOp {
     /// A manifest entry whose asset is no longer in the catalog.
     Remove,
     PluginInstall,
-    /// Reserved; v1 never schedules automatic plugin updates. A `latest` ref
+    /// A pinned plugin ref whose catalog pin changed since fleet last
+    /// applied it: `claude plugin update` is scheduled once. A `latest` ref
     /// whose plugin is installed at any version counts as satisfied (see
-    /// `plugin_op`), so nothing produces this op yet.
+    /// `plugin_op`), so it never reaches this op.
     PluginUpdate,
     /// Nothing to do.
     Noop,
@@ -249,11 +252,15 @@ fn expected_for<'a>(
 ///    object. Absent ⇒ `PluginInstall`. Present and *matching* ⇒ `Noop` if
 ///    the manifest names it, else `Adopt`; a `latest` ref matches any
 ///    installed version (the host's record says what is installed, never
-///    what the marketplace now offers, and v1 never re-installs
-///    speculatively — hence nothing produces `PluginUpdate` yet), and a
-///    pinned ref matches when the record carries its version. Present and
-///    pinned to a *different* version ⇒ `Blocked`: the CLI cannot install a
-///    specific version.
+///    what the marketplace now offers, so a `latest` ref never reaches
+///    `PluginUpdate`), and a pinned ref matches when the record carries its
+///    version. Present and pinned to a *different* version: the manifest's
+///    recorded `value_hash` for the plugin merge (see `plugin_op`) decides
+///    whether fleet already tried this exact pin — absent, empty (a legacy
+///    entry), or for a *different* pin ⇒ `PluginUpdate` (schedule one
+///    `claude plugin update`); already recorded for *this* pin ⇒ `Blocked`:
+///    the CLI landed on another version and there is nothing more to try
+///    automatically.
 /// 4. Every other kind, against the *substituted* plan: `present` when at
 ///    least one planned file exists in the snapshot or at least one merge's
 ///    `json_path` resolves (an `AppendUnique` merge points at a shared
@@ -452,11 +459,12 @@ fn action_for(
         };
     }
 
-    let in_manifest = manifest.assets.contains_key(&Manifest::key(kind, &name));
+    let manifest_entry = manifest.assets.get(&Manifest::key(kind, &name));
+    let in_manifest = manifest_entry.is_some();
 
     // Rule 3.
     if let Some(target) = &plugin {
-        let (op, reason) = plugin_op(plan, snap, target, in_manifest);
+        let (op, reason) = plugin_op(plan, snap, target, manifest_entry);
         return Action {
             op,
             reason,
@@ -465,6 +473,15 @@ fn action_for(
             secrets: resolved,
             expected,
             secret_files,
+            // The applier needs the rendered merge's value to hash into the
+            // manifest entry (`plugin_entry` in `apply.rs`); a plugin ref has
+            // no files to write, so this carries no secrets, only the value.
+            plan: match op {
+                ActionOp::PluginInstall | ActionOp::PluginUpdate | ActionOp::Adopt => {
+                    Some(sub.plan.clone())
+                }
+                _ => None,
+            },
             ..blank()
         };
     }
@@ -513,7 +530,7 @@ fn action_for(
             None,
         )
     } else {
-        match manifest.assets.get(&Manifest::key(kind, &name)) {
+        match manifest_entry {
             Some(entry) if entry.hash == plan.hash() => (
                 ActionOp::Overwrite,
                 Some("edited on host; the catalog has not changed".into()),
@@ -539,9 +556,7 @@ fn action_for(
 
     // Rule 8.
     let remove_entry = match op {
-        ActionOp::Create | ActionOp::Update | ActionOp::Overwrite => {
-            manifest.assets.get(&Manifest::key(kind, &name)).cloned()
-        }
+        ActionOp::Create | ActionOp::Update | ActionOp::Overwrite => manifest_entry.cloned(),
         _ => None,
     };
 
@@ -569,7 +584,7 @@ fn plugin_op(
     plan: &RenderPlan,
     snap: &HostSnapshot,
     target: &PluginTarget,
-    in_manifest: bool,
+    entry: Option<&ManifestEntry>,
 ) -> (ActionOp, Option<String>) {
     let Some(merge) = plan.merges.first() else {
         return (ActionOp::Noop, None);
@@ -594,10 +609,10 @@ fn plugin_op(
     // ref renders `[{}]`, which any record satisfies — deliberately, since
     // the host's record says what is installed, never what the marketplace
     // now offers, so fleet cannot tell a stale copy from a current one and
-    // v1 does not re-install speculatively.
+    // never re-installs speculatively.
     if merge_satisfied(snap, merge) {
         return (
-            if in_manifest {
+            if entry.is_some() {
                 ActionOp::Noop
             } else {
                 ActionOp::Adopt
@@ -614,13 +629,36 @@ fn plugin_op(
         .and_then(|rec| rec.get("version"))
         .and_then(|v| v.as_str())
         .unwrap_or("an unknown version");
-    (
-        ActionOp::Blocked,
-        Some(format!(
-            "installed {installed}, catalog pins {}; the CLI cannot pin versions",
-            target.version
-        )),
-    )
+
+    // Pinned but not satisfied: has fleet already tried this exact pin? The
+    // manifest's recorded hash for the plugin merge says so — absent, an
+    // empty legacy hash (written before this hash existed), or a hash for a
+    // *different* pin all mean "not yet", so retry once via `claude plugin
+    // update`. A hash that already matches this render means an earlier
+    // sync tried this same pin and the CLI landed elsewhere; give up rather
+    // than loop forever.
+    let recorded_hash = entry
+        .and_then(|e| e.merges.iter().find(|m| m.file == merge.file))
+        .map(|m| m.value_hash.as_str());
+    let current_hash = value_hash(&merge.value);
+    let already_tried = matches!(recorded_hash, Some(h) if !h.is_empty() && h == current_hash);
+    if already_tried {
+        (
+            ActionOp::Blocked,
+            Some(format!(
+                "installed {installed}, catalog pins {}; the CLI cannot pin versions",
+                target.version
+            )),
+        )
+    } else {
+        (
+            ActionOp::PluginUpdate,
+            Some(format!(
+                "catalog pin changed to {} (installed {installed})",
+                target.version
+            )),
+        )
+    }
 }
 
 /// Tally every host's actions by `ActionOp::as_str()`. Ops with no actions
@@ -725,6 +763,33 @@ mod tests {
     const MCP: &str = "kind: mcp_server\nname: fleet\ndescription: d\ntransport: http\nurl: https://example/mcp\nheaders:\n  Authorization: \"Bearer ${FLEET_MCP_TOKEN}\"\n";
     const PLUGIN: &str = "kind: plugin_ref\nname: sp\ndescription: d\nharness: claude\nmarketplace: { name: mk, source: github, repo: o/r }\nplugin: sp\nversion: \"6.3.0\"\n";
     const PLUGIN_LATEST: &str = "kind: plugin_ref\nname: sp\ndescription: d\nharness: claude\nmarketplace: { name: mk, source: github, repo: o/r }\nplugin: sp\nversion: latest\n";
+
+    /// A `plugin_ref` catalog YAML pinned to `version`.
+    fn plugin_yaml(version: &str) -> String {
+        format!(
+            "kind: plugin_ref\nname: sp\ndescription: d\nharness: claude\nmarketplace: {{ name: mk, source: github, repo: o/r }}\nplugin: sp\nversion: \"{version}\"\n"
+        )
+    }
+
+    /// A manifest naming `plugin_ref/sp` with `value_hash` recorded for its
+    /// `PLUGINS_PATH` merge — what `plugin_entry` (apply.rs) would have
+    /// written after an earlier sync.
+    fn plugin_manifest(hash: &str) -> Manifest {
+        let mut m = Manifest::default();
+        m.assets.insert(
+            "plugin_ref/sp".into(),
+            ManifestEntry {
+                merges: vec![ManifestMerge {
+                    file: crate::service::catalog::harness::claude::PLUGINS_PATH.into(),
+                    json_path: vec!["plugins".into(), "sp@mk".into()],
+                    mode: MergeMode::Subset,
+                    value_hash: hash.to_string(),
+                }],
+                ..Default::default()
+            },
+        );
+        m
+    }
 
     fn asset(yaml: &str) -> Asset {
         let mut a = Asset::from_yaml(None, yaml).unwrap();
@@ -845,10 +910,15 @@ mod tests {
         assert!(s.plan.is_some(), "a create carries the plan to write");
         assert_eq!(s.files, vec!["~/.claude/skills/s/SKILL.md".to_string()]);
         assert_eq!(s.expected["~/.claude/skills/s/SKILL.md"], None);
-        // The plugin action names its target, never a file.
+        // The plugin action names its target, never a file, but still
+        // carries the rendered merge so the applier can hash it into the
+        // manifest entry.
         let sp = act(&hp, "sp");
         assert!(sp.files.is_empty());
-        assert!(sp.plan.is_none(), "plugin ops shell out; no plan to write");
+        assert!(
+            sp.plan.is_some(),
+            "plugin ops shell out, but the render plan rides along for the manifest write"
+        );
         let t = sp.plugin.as_ref().unwrap();
         assert_eq!(
             (t.plugin.as_str(), t.marketplace_repo.as_str()),
@@ -1091,9 +1161,9 @@ mod tests {
         );
     }
 
-    /// A `latest` ref is satisfied by whatever version is installed: v1 has
-    /// no way to tell a stale copy from a current one, so it never schedules
-    /// a re-install (`ActionOp::PluginUpdate` is reserved and unreachable).
+    /// A `latest` ref is satisfied by whatever version is installed: fleet
+    /// has no way to tell a stale copy from a current one, so it never
+    /// schedules a re-install — `ActionOp::PluginUpdate` never fires for it.
     #[test]
     fn a_latest_plugin_ref_matches_any_installed_version() {
         let mut snap = HostSnapshot::default();
@@ -1125,7 +1195,7 @@ mod tests {
 
         assert!(
             !hp.actions.iter().any(|a| a.op == ActionOp::PluginUpdate),
-            "v1 never schedules an automatic plugin update"
+            "latest never schedules an automatic plugin update"
         );
     }
 
@@ -1142,19 +1212,16 @@ mod tests {
         );
         assert_eq!(act(&hp, "sp").op, ActionOp::PluginInstall);
 
-        // Installed at another version, catalog pins one: unpinnable.
+        // Installed at another version, catalog pins one, and fleet already
+        // tried this exact pin (the manifest's recorded hash matches the
+        // current render): unpinnable, stays blocked.
         let mut snap = HostSnapshot::default();
         snap.configs.insert(
             crate::service::catalog::harness::claude::PLUGINS_PATH.into(),
             json!({"plugins": {"sp@mk": [{"version": "5.0.0"}]}}),
         );
-        let hp = plan_for(
-            &catalog,
-            &Claude,
-            &snap,
-            &Manifest::default(),
-            &secrets_map(),
-        );
+        let manifest = plugin_manifest(&value_hash(&json!([{"version": "6.3.0"}])));
+        let hp = plan_for(&catalog, &Claude, &snap, &manifest, &secrets_map());
         let a = act(&hp, "sp");
         assert_eq!(a.op, ActionOp::Blocked);
         let reason = a.reason.as_deref().unwrap();
@@ -1200,6 +1267,85 @@ mod tests {
         assert_eq!(act(&hp, "sp").op, ActionOp::Adopt);
         let hp = plan_for(
             &catalog_of(&[PLUGIN_LATEST]),
+            &Claude,
+            &snap,
+            &manifest_with(&[("plugin_ref/sp", "x")]),
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "sp").op, ActionOp::Noop);
+    }
+
+    /// The catalog's pin moved on since the last sync (the manifest still
+    /// carries the old pin's hash): schedule one `claude plugin update`.
+    #[test]
+    fn pin_change_schedules_a_plugin_update() {
+        let catalog = catalog_of(&[&plugin_yaml("6.0.0")]);
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            crate::service::catalog::harness::claude::PLUGINS_PATH.into(),
+            json!({"plugins": {"sp@mk": [{"version": "5.0.0"}]}}),
+        );
+        let manifest = plugin_manifest(&value_hash(&json!([{"version": "5.0.0"}])));
+        let hp = plan_for(&catalog, &Claude, &snap, &manifest, &secrets_map());
+        let a = act(&hp, "sp");
+        assert_eq!(a.op, ActionOp::PluginUpdate, "{:?}", a.reason);
+        let reason = a.reason.as_deref().unwrap();
+        assert!(reason.contains("catalog pin changed to 6.0.0"), "{reason}");
+    }
+
+    /// The manifest already recorded *this* pin's hash and the host still
+    /// differs: fleet already tried once, so it gives up rather than retry
+    /// forever.
+    #[test]
+    fn unchanged_pin_stays_blocked() {
+        let catalog = catalog_of(&[&plugin_yaml("6.0.0")]);
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            crate::service::catalog::harness::claude::PLUGINS_PATH.into(),
+            json!({"plugins": {"sp@mk": [{"version": "5.0.0"}]}}),
+        );
+        let manifest = plugin_manifest(&value_hash(&json!([{"version": "6.0.0"}])));
+        let hp = plan_for(&catalog, &Claude, &snap, &manifest, &secrets_map());
+        let a = act(&hp, "sp");
+        assert_eq!(a.op, ActionOp::Blocked, "{:?}", a.reason);
+    }
+
+    /// A manifest entry written before `value_hash` existed carries an
+    /// empty hash. Treated the same as "never tried this pin": update once.
+    #[test]
+    fn legacy_empty_hash_updates_once() {
+        let catalog = catalog_of(&[&plugin_yaml("6.0.0")]);
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            crate::service::catalog::harness::claude::PLUGINS_PATH.into(),
+            json!({"plugins": {"sp@mk": [{"version": "5.0.0"}]}}),
+        );
+        let manifest = plugin_manifest("");
+        let hp = plan_for(&catalog, &Claude, &snap, &manifest, &secrets_map());
+        assert_eq!(act(&hp, "sp").op, ActionOp::PluginUpdate);
+    }
+
+    /// A `latest` ref is always satisfied by whatever is installed, so it
+    /// never reaches the pin-change decision at all.
+    #[test]
+    fn latest_never_updates() {
+        let catalog = catalog_of(&[PLUGIN_LATEST]);
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            crate::service::catalog::harness::claude::PLUGINS_PATH.into(),
+            json!({"plugins": {"sp@mk": [{"version": "1.2.3"}]}}),
+        );
+        let hp = plan_for(
+            &catalog,
+            &Claude,
+            &snap,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "sp").op, ActionOp::Adopt);
+
+        let hp = plan_for(
+            &catalog,
             &Claude,
             &snap,
             &manifest_with(&[("plugin_ref/sp", "x")]),
