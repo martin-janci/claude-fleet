@@ -841,6 +841,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_removes_a_dropped_plugin_only_on_an_unlayered_host() {
         // The `layered` flag must reach the planner per host: an unassigned
@@ -892,6 +893,7 @@ mod tests {
         assert_eq!(gone_op(&layered), Some(ActionOp::Noop));
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn assigning_a_layer_that_drops_an_installed_asset_plans_its_removal() {
         // The destructive half of layering: a host that fleet already synced
