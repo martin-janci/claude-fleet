@@ -63,6 +63,19 @@ impl FleetTools {
         ok_json(&hosts::list_hosts(&self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(
+        description = "Which agent hosts (transport \"agent\") have a fleet-agent \
+        connected, since when (unix seconds), which agent version, host name and \
+        OS. Offline agent hosts are listed with connected=false; a call for one \
+        fails fast with E_AGENT_OFFLINE. enabled=false on a server that accepts \
+        no agents (the desktop). Returns JSON."
+    )]
+    pub(super) async fn agent_status(&self) -> Result<CallToolResult, McpError> {
+        audit("agent_status", "");
+        let registry = self.ssh.agent_registry().map(|r| r.as_ref());
+        ok_json(&hosts::agent_status(&self.store, registry).map_err(to_mcp_err)?)
+    }
+
     #[tool(description = "Discover SSH hosts from the user's ~/.ssh/config. \
         These are candidates for add_host. Returns JSON.")]
     pub(super) async fn discover_hosts(&self) -> Result<CallToolResult, McpError> {
@@ -77,8 +90,13 @@ impl FleetTools {
         ok_json(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
     }
 
-    #[tool(description = "Register a new SSH host. Probes it first; only \
-        persists the host if it is reachable. Returns the host row as JSON.")]
+    #[tool(
+        description = "Register a new host. transport is \"ssh\" (the default: \
+        probed first, persisted only if reachable) or \"agent\" (a host the hub \
+        cannot reach, which runs fleet-agent and dials in: persisted unprobed and \
+        unreachable until its agent connects; get its token on the hub with \
+        `fleet-hub agent-token <alias>`). Returns the host row as JSON."
+    )]
     pub(super) async fn add_host(
         &self,
         Parameters(args): Parameters<hosts::AddHostArgs>,

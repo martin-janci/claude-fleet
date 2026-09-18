@@ -23,6 +23,73 @@ pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
     s.list_hosts().map_err(IpcError::from)
 }
 
+/// One agent host, as `agent_status` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AgentHostStatus {
+    pub alias: String,
+    /// A `fleet-agent` is connected for this host right now.
+    pub connected: bool,
+    /// Unix seconds the live connection was registered; `None` when offline.
+    pub connected_at: Option<i64>,
+    pub agent_version: Option<String>,
+    pub host_name: Option<String>,
+    pub os: Option<String>,
+}
+
+/// What `agent_status` answers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AgentStatusReport {
+    /// This server accepts agent connections (a hub). `false` on the desktop,
+    /// which reaches every host over SSH.
+    pub enabled: bool,
+    /// Every host on the agent transport, connected or not, by alias.
+    pub hosts: Vec<AgentHostStatus>,
+}
+
+/// Which agent hosts have a `fleet-agent` connected, since when, and which
+/// version — every host whose transport is `agent`, so an offline one is
+/// listed too.
+pub fn agent_status(
+    store: &Mutex<Store>,
+    registry: Option<&crate::agent::AgentRegistry>,
+) -> Result<AgentStatusReport, IpcError> {
+    let agent_hosts: Vec<String> = {
+        let s = lock(store)?;
+        s.list_hosts()?
+            .into_iter()
+            .filter(|h| h.transport == "agent")
+            .map(|h| h.alias)
+            .collect()
+    };
+    let live = registry.map(|r| r.snapshot()).unwrap_or_default();
+    let mut hosts: Vec<AgentHostStatus> = agent_hosts
+        .into_iter()
+        .map(|alias| match live.iter().find(|a| a.alias == alias) {
+            Some(a) => AgentHostStatus {
+                alias,
+                connected: true,
+                connected_at: Some(a.connected_at),
+                agent_version: Some(a.agent_version.clone()),
+                host_name: Some(a.host_name.clone()),
+                os: Some(a.os.clone()),
+            },
+            None => AgentHostStatus {
+                alias,
+                connected: false,
+                connected_at: None,
+                agent_version: None,
+                host_name: None,
+                os: None,
+            },
+        })
+        .collect();
+    hosts.sort_by(|a, b| a.alias.cmp(&b.alias));
+    Ok(AgentStatusReport {
+        enabled: registry.is_some(),
+        hosts,
+    })
+}
+
 pub fn list_accounts(store: &Mutex<Store>) -> Result<Vec<crate::store::AccountRow>, IpcError> {
     let s = lock(store)?;
     s.list_accounts().map_err(IpcError::from)
@@ -637,6 +704,48 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn agent_status_lists_every_agent_host_connected_or_not() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            for (alias, transport) in [("laptop", "agent"), ("desk", "agent"), ("mefistos", "ssh")]
+            {
+                s.insert_host(alias, Some(alias)).unwrap();
+                s.set_host_transport(alias, transport).unwrap();
+            }
+        }
+        let reg = crate::agent::AgentRegistry::new();
+        let _agent = crate::agent::fake::FakeAgent::connect(
+            &reg,
+            "laptop",
+            crate::agent::fake::answer_exit(0),
+        );
+
+        let report = agent_status(&store, Some(&reg)).unwrap();
+        assert!(report.enabled);
+        let aliases: Vec<_> = report.hosts.iter().map(|h| h.alias.as_str()).collect();
+        assert_eq!(aliases, ["desk", "laptop"], "agent hosts only, by alias");
+        let laptop = &report.hosts[1];
+        assert!(laptop.connected);
+        assert!(laptop.connected_at.is_some());
+        assert_eq!(laptop.agent_version.as_deref(), Some("9.9.9"));
+        assert_eq!(laptop.host_name.as_deref(), Some("fake-host"));
+        let desk = &report.hosts[0];
+        assert!(!desk.connected);
+        assert_eq!(
+            (desk.connected_at, desk.agent_version.as_deref()),
+            (None, None)
+        );
+
+        // The desktop routes nothing: the agent hosts are still listed, all
+        // offline, and it says it is not accepting agents at all.
+        let desktop = agent_status(&store, None).unwrap();
+        assert!(!desktop.enabled);
+        assert!(desktop.hosts.iter().all(|h| !h.connected));
+        assert_eq!(desktop.hosts.len(), 2);
+    }
 
     #[test]
     fn parse_tmux_version_extracts_version() {

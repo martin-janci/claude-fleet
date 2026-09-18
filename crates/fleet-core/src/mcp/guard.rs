@@ -36,6 +36,7 @@ pub const CONFIRM_TTL: Duration = Duration::from_secs(10 * 60);
 pub const READONLY_TOOLS: &[&str] = &[
     "fleet_health",
     "list_hosts",
+    "agent_status",
     "discover_hosts",
     "list_accounts",
     "probe_host",

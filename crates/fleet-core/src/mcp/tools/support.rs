@@ -918,6 +918,7 @@ pub(super) const QUICK_TOOLS: &[&str] = &[
     "list_assets",
     "list_clients",
     "list_hosts",
+    "agent_status",
     "list_projects",
     "list_sessions",
     "list_tasks",

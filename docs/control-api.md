@@ -196,7 +196,8 @@ Index by area (names only; see the reference for details):
 - **Fleet & hosts** — `fleet_health`, `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `probe_host`, `hide_host`, `provision_hosts`,
-  `list_accounts`.
+  `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
+  connected; see *Agent hosts* below).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `list_worktrees`, `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
