@@ -1090,6 +1090,12 @@ const SAME_IN_BOTH_MODES: &[(&str, &str)] = &[
          unauthenticated route, and not an MCP tool at all",
     ),
     (
+        "hub_connection",
+        "reports whether THIS process's event stream to the hub is up. \
+         Asking the hub would be circular, and the answer matters most \
+         exactly when the hub cannot be reached",
+    ),
+    (
         "hub_disconnect",
         "forgets this machine's own token and setting. It revokes nothing on \
          the hub: only an operator can, and a paired client is refused \

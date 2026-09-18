@@ -266,6 +266,39 @@ async fn drive(
     (sink, resync, delay, opens)
 }
 
+/// Records every connection state the bridge reported.
+#[derive(Default)]
+struct StateLog {
+    seen: StdMutex<Vec<crate::backend::connection::HubConnection>>,
+}
+
+impl crate::backend::connection::ConnectionReporter for StateLog {
+    fn report(&self, state: crate::backend::connection::HubConnection) {
+        self.seen.lock().unwrap().push(state);
+    }
+}
+
+/// `drive`, also recording the connection states reported.
+async fn drive_reporting(
+    script: Vec<Connection>,
+) -> Vec<crate::backend::connection::HubConnection> {
+    let cancel = CancellationToken::new();
+    let stream = ScriptedStream::new(script, cancel.clone());
+    let log = Arc::new(StateLog::default());
+    EventBridge::new(
+        stream,
+        Arc::new(Recorder::default()),
+        Arc::new(CountingResync::default()),
+        Arc::new(FakeDelay::default()),
+        cancel,
+    )
+    .reporting_to(log.clone())
+    .run()
+    .await;
+    let seen = log.seen.lock().unwrap().clone();
+    seen
+}
+
 /// The script every "one event" test uses: one connection carrying `body`.
 async fn one_connection(body: Vec<String>) -> Arc<Recorder> {
     drive(vec![Connection::Delivers(body)]).await.0
@@ -766,6 +799,102 @@ async fn a_quiet_connection_that_stayed_up_counts_as_working() {
             FIRST_BACKOFF * 2
         ],
         "75 s of heartbeats is a stream that worked"
+    );
+}
+
+// --- SF-8: the banner's signal ------------------------------------------------
+//
+// The design says a dropped stream reconnects "showing a banner while
+// disconnected". Every one of these transitions used to reach the log and
+// nothing else.
+
+#[tokio::test]
+async fn an_open_stream_reports_connected_and_a_dropped_one_reconnecting() {
+    use crate::backend::connection::HubConnection as C;
+    let states = drive_reporting(vec![Connection::Delivers(vec![
+        ready(),
+        frame_for(&RowChange::SessionKilled(1)),
+    ])])
+    .await;
+    assert_eq!(states[0], C::Connected, "{states:?}");
+    match &states[1] {
+        C::Reconnecting {
+            attempt: 1,
+            retry_in_secs: 1,
+            reason,
+        } => assert!(reason.contains("closed"), "{reason}"),
+        other => panic!("expected reconnecting #1 in 1 s, got {other:?}"),
+    }
+}
+
+/// A hub that will not accept a connection is OFFLINE, and the attempt number
+/// and the wait grow with the backoff so the banner can say how long.
+#[tokio::test]
+async fn a_hub_that_refuses_is_offline_with_a_growing_attempt_and_its_reason() {
+    use crate::backend::connection::HubConnection as C;
+    let states = drive_reporting(vec![
+        Connection::Fails("connect hub.example.com:443: connection refused"),
+        Connection::Fails("connect hub.example.com:443: connection refused"),
+    ])
+    .await;
+    // The third Offline is the spent script's own refusal; only the two
+    // scripted ones are about this hub.
+    let offline: Vec<(u32, u64, String)> = states
+        .iter()
+        .filter_map(|s| match s {
+            C::Offline {
+                attempt,
+                retry_in_secs,
+                reason,
+            } => Some((*attempt, *retry_in_secs, reason.clone())),
+            _ => None,
+        })
+        .take(2)
+        .collect();
+    assert_eq!(
+        offline.iter().map(|(a, r, _)| (*a, *r)).collect::<Vec<_>>(),
+        [(1, 1), (2, 2)],
+        "{states:?}"
+    );
+    assert!(
+        offline
+            .iter()
+            .all(|(_, _, why)| why.contains("connection refused")),
+        "{offline:?}"
+    );
+}
+
+/// The attempt count is "since it last worked": a stream that delivered
+/// starts the count over, so the banner does not say "attempt 9" after a
+/// single blip on a fleet that has been fine all day.
+#[tokio::test]
+async fn a_stream_that_worked_starts_the_attempt_count_over() {
+    use crate::backend::connection::HubConnection as C;
+    let states = drive_reporting(vec![
+        Connection::Fails("refused"),
+        Connection::Fails("refused"),
+        Connection::Delivers(vec![frame_for(&RowChange::SessionKilled(1))]),
+    ])
+    .await;
+    let attempts: Vec<u32> = states
+        .iter()
+        .filter_map(|s| match s {
+            C::Offline { attempt, .. } | C::Reconnecting { attempt, .. } => Some(*attempt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(attempts[..3], [1, 2, 1], "{states:?}");
+}
+
+/// A hub client's bridge is always watched: without this the banner would
+/// quietly never appear, and every test above would still pass.
+#[test]
+fn the_production_bridge_reports_its_connection_state() {
+    let src = include_str!("../bootstrap/tasks.rs");
+    assert!(
+        src.contains(".reporting_to("),
+        "bootstrap/tasks.rs builds the EventBridge without a connection \
+         reporter, so the disconnected banner can never show"
     );
 }
 

@@ -136,6 +136,41 @@ describe('health in remote mode', () => {
   });
 });
 
+// SF-8: the banner. Only a hub client has a live link to lose.
+describe('the disconnected banner', () => {
+  it('a hub client asks for its connection state and shows the banner while down', async () => {
+    const { inv, restore } = await routeInvoke((cmd) =>
+      cmd === 'hub_status'
+        ? remote
+        : cmd === 'hub_connection'
+          ? { state: 'offline', attempt: 1, retry_in_secs: 1, reason: 'connection refused' }
+          : undefined,
+    );
+    try {
+      render(App);
+      const banner = await screen.findByTestId('hub-connection-banner');
+      expect(banner.textContent).toContain('connection refused');
+      expect(inv.mock.calls.some((c) => c[0] === 'hub_connection')).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a standalone app neither asks nor shows one', async () => {
+    const { inv, restore } = await routeInvoke((cmd) =>
+      cmd === 'hub_status' ? STANDALONE : undefined,
+    );
+    try {
+      render(App);
+      await waitFor(() => expect(screen.getByText(/schema/)).toBeInTheDocument());
+      expect(inv.mock.calls.some((c) => c[0] === 'hub_connection')).toBe(false);
+      expect(screen.queryByTestId('hub-connection-banner')).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe('the commands the UI calls unprompted', () => {
   // Requirement (a). `list_account_usage` is guarded on the backend now, so
   // calling it in remote mode returns E_LOCAL_ONLY — an error toast on every

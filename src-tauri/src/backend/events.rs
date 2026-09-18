@@ -42,6 +42,7 @@
 //! behind its ring) is simply another reason to reconnect. See
 //! [`FleetResync`] for what a resync can and cannot restore.
 
+use super::connection::{ConnectionReporter, HubConnection, NoReporter};
 use super::remote::{connect, Endpoint, HubBackend};
 use super::RemoteConfig;
 use fleet_core::events::EVENT_NAMES;
@@ -195,6 +196,8 @@ enum StreamEnd {
         /// overflows, and the next connection opens `lagged` — reset on that
         /// and the loop feeds itself at one second.
         delivered: bool,
+        /// Why it ended, for the disconnected banner.
+        why: String,
     },
 }
 
@@ -217,6 +220,9 @@ pub struct EventBridge {
     resync: Arc<dyn FleetResync>,
     delay: Arc<dyn Delay>,
     cancel: CancellationToken,
+    /// Told every transition, so the interface can show a banner while the
+    /// stream is down. See [`super::connection`].
+    status: Arc<dyn ConnectionReporter>,
 }
 
 impl EventBridge {
@@ -233,7 +239,16 @@ impl EventBridge {
             resync,
             delay,
             cancel,
+            status: Arc::new(NoReporter),
         }
+    }
+
+    /// Report connection state to `status`. The production bridge always
+    /// does (`bootstrap/tasks.rs`, held there by a source test); a test about
+    /// something else need not.
+    pub fn reporting_to(mut self, status: Arc<dyn ConnectionReporter>) -> Self {
+        self.status = status;
+        self
     }
 
     /// Run until `cancel` fires. Never returns of its own accord: a hub that
@@ -241,12 +256,15 @@ impl EventBridge {
     /// desktop showing a frozen fleet with nothing to say why.
     pub async fn run(&self) {
         let mut backoff = FIRST_BACKOFF;
+        // Retries since the stream last worked — what the banner counts.
+        let mut attempt: u32 = 0;
         loop {
             if self.cancel.is_cancelled() {
                 return;
             }
             match self.stream.open().await {
                 Ok(body) => {
+                    self.status.report(HubConnection::Connected);
                     // A fresh subscription replays nothing, so everything that
                     // happened while this client was detached is missing.
                     // Re-list BEFORE reading a frame, so that whatever the hub
@@ -255,10 +273,20 @@ impl EventBridge {
                     self.resync.resync().await;
                     match self.pump(body).await {
                         StreamEnd::Cancelled => return,
-                        // A connection that carried nothing is not a working
-                        // connection, whatever the socket said.
-                        StreamEnd::Gap { delivered: false } => {}
-                        StreamEnd::Gap { delivered: true } => backoff = FIRST_BACKOFF,
+                        StreamEnd::Gap { delivered, why } => {
+                            // A connection that carried nothing is not a
+                            // working connection, whatever the socket said.
+                            if delivered {
+                                backoff = FIRST_BACKOFF;
+                                attempt = 0;
+                            }
+                            attempt = attempt.saturating_add(1);
+                            self.status.report(HubConnection::Reconnecting {
+                                attempt,
+                                retry_in_secs: backoff.as_secs(),
+                                reason: why,
+                            });
+                        }
                     }
                 }
                 Err(e) => {
@@ -267,6 +295,12 @@ impl EventBridge {
                         retry_in = ?backoff,
                         "[hub events] could not open the hub's event stream"
                     );
+                    attempt = attempt.saturating_add(1);
+                    self.status.report(HubConnection::Offline {
+                        attempt,
+                        retry_in_secs: backoff.as_secs(),
+                        reason: e,
+                    });
                 }
             }
             if self.cancel.is_cancelled() {
@@ -296,6 +330,7 @@ impl EventBridge {
                     tracing::info!("[hub events] the hub closed the event stream; reconnecting");
                     return StreamEnd::Gap {
                         delivered: row_events || stayed_up(),
+                        why: "the hub closed the event stream".to_string(),
                     };
                 }
                 Ok(Err(e)) => {
@@ -305,6 +340,7 @@ impl EventBridge {
                     );
                     return StreamEnd::Gap {
                         delivered: row_events || stayed_up(),
+                        why: format!("the event stream failed: {e}"),
                     };
                 }
                 Err(_) => {
@@ -315,6 +351,10 @@ impl EventBridge {
                     );
                     return StreamEnd::Gap {
                         delivered: row_events || stayed_up(),
+                        why: format!(
+                            "the event stream went silent for {}s, not even the hub's keep-alive",
+                            IDLE_TIMEOUT.as_secs()
+                        ),
                     };
                 }
             };
@@ -326,6 +366,7 @@ impl EventBridge {
                     Delivery::EndOfStream => {
                         return StreamEnd::Gap {
                             delivered: stayed_up(),
+                            why: "this window fell behind the hub's event stream".to_string(),
                         }
                     }
                 }

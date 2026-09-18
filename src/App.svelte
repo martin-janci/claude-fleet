@@ -44,6 +44,8 @@
   import McpConfirmDialog from './lib/McpConfirmDialog.svelte';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
   import { hubStatus, loadHubStatus } from './lib/hub';
+  import { startHubConnection } from './lib/hub_connection';
+  import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
@@ -142,6 +144,8 @@
     // be an error toast on every launch for a panel that does not apply), and
     // the footer names the hub it is a window onto.
     await loadHubStatus();
+    // Only a hub client has a live link to lose; see HubConnectionBanner.
+    if (get(hubStatus).remote) void startHubConnection();
     const hr0 = await healthCheck();
     if (hr0.ok) {
       health = hr0.value;
@@ -511,6 +515,9 @@
   />
 {/if}
 
+{#if $hubStatus.remote}
+  <HubConnectionBanner hubUrl={$hubStatus.url} />
+{/if}
 <main class="layout" style="grid-template-columns: {gridTemplate};">
   {#if sidebarCollapsed}
     <button

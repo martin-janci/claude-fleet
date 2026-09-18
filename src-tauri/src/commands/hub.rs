@@ -102,6 +102,15 @@ pub async fn hub_pair(
     .await
 }
 
+/// Whether this window's live link to the hub is up, for a window that
+/// mounted after the last `hub:connection` event. See `backend::connection`.
+#[tauri::command]
+pub fn hub_connection(
+    status: State<'_, Arc<crate::backend::connection::HubConnectionStatus>>,
+) -> crate::backend::connection::HubConnection {
+    status.current()
+}
+
 /// Forget the pairing. **Revokes nothing** — see the module docs.
 #[tauri::command]
 pub fn hub_disconnect(

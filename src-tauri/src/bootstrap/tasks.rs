@@ -13,6 +13,7 @@
 //! process anyway.
 
 use crate::app_events::AppHandleEventBus;
+use crate::backend::connection::{ConnectionReporter, HubConnectionStatus};
 use crate::backend::events::{spawn_event_bridge, EventBridge, HubResync, HubSse, RealDelay};
 use crate::backend::remote::HubBackend;
 use crate::backend::startup::FleetTasks;
@@ -46,6 +47,9 @@ pub(crate) struct RealFleetTasks {
     /// Cancelled when the app stops, so the bridge's socket does not hold a
     /// shutdown open.
     pub shutdown: tokio_util::sync::CancellationToken,
+    /// Where the bridge reports whether its stream is up; managed state, so
+    /// the `hub_connection` command reads the same value.
+    pub hub_link: Arc<HubConnectionStatus>,
 }
 
 impl FleetTasks for RealFleetTasks {
@@ -111,7 +115,10 @@ impl FleetTasks for RealFleetTasks {
             Arc::new(HubResync::new(hub, sink)),
             Arc::new(RealDelay),
             self.shutdown.clone(),
-        );
+        )
+        // The disconnected banner's signal; the same status `hub_connection`
+        // answers from.
+        .reporting_to(Arc::clone(&self.hub_link) as Arc<dyn ConnectionReporter>);
         spawn_event_bridge(bridge);
     }
 }

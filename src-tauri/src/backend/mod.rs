@@ -15,6 +15,7 @@
 //! Nothing routes through [`Backend`] yet — this module only makes the choice
 //! and makes it observable.
 
+pub mod connection;
 pub mod contract;
 pub mod events;
 pub mod pairing;

@@ -195,6 +195,18 @@ pub fn run() {
                 &backend,
             )));
             app.manage(backend.clone());
+            // Whether this window's live link to the hub is up — the
+            // disconnected banner. Standalone it never moves off
+            // `Standalone`; a hub client's bridge reports into it.
+            let hub_link = std::sync::Arc::new(match backend.remote() {
+                Some(cfg) => backend::connection::HubConnectionStatus::remote(
+                    std::sync::Arc::clone(&frontend_bus)
+                        as std::sync::Arc<dyn backend::events::RemoteEventSink>,
+                    &cfg.token,
+                ),
+                None => backend::connection::HubConnectionStatus::standalone(),
+            });
+            app.manage(std::sync::Arc::clone(&hub_link));
             // Which background tasks this process may run is decided in
             // `backend::startup`, not here, and the real spawns live in
             // `bootstrap::tasks`. Both moved out of this closure because
@@ -219,6 +231,7 @@ pub fn run() {
                     frontend: std::sync::Arc::clone(&frontend_bus),
                     remote: backend.remote().cloned(),
                     shutdown: shutdown_token.clone(),
+                    hub_link,
                 },
             );
             Ok(())
@@ -315,6 +328,7 @@ pub fn run() {
             commands::hub::hub_status,
             commands::hub::hub_pair,
             commands::hub::hub_disconnect,
+            commands::hub::hub_connection,
             commands::onboarding::check_local_prereqs,
             commands::onboarding::tunnel_status,
             commands::assets::catalog_config,
