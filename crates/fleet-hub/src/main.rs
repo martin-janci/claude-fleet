@@ -4,6 +4,7 @@ mod config;
 mod out;
 mod pair;
 mod serve;
+mod tls;
 
 use clap::{Parser, Subcommand};
 use config::HubOptions;
@@ -139,6 +140,27 @@ mod tests {
             "--allow-plaintext",
         ])
         .unwrap();
+        // The TLS flags, global like the rest.
+        let Cmd::Serve { opts } = Cli::try_parse_from([
+            "fleet-hub",
+            "serve",
+            "--tls",
+            "cert",
+            "--tls-cert",
+            "/etc/tls.crt",
+            "--tls-key",
+            "/etc/tls.key",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("serve --tls did not parse");
+        };
+        assert_eq!(opts.tls.as_deref(), Some("cert"));
+        assert_eq!(opts.tls_cert, Some("/etc/tls.crt".into()));
+        assert_eq!(opts.tls_key, Some("/etc/tls.key".into()));
+        // `auto` parses — `config::resolve` is what refuses it, with a reason.
+        Cli::try_parse_from(["fleet-hub", "init", "--tls", "auto"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "show"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "regenerate"]).unwrap();
         for argv in [

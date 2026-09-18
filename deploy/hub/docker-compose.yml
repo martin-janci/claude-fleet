@@ -1,3 +1,21 @@
+# Caddy in front is the default: it obtains and renews the certificate for
+# you. The alternative is one container instead of two — drop the `caddy`
+# service, publish the hub's own port, and let it terminate TLS with a
+# certificate you supply:
+#
+#   fleet-hub:
+#     ports: ["443:443"]
+#     environment:
+#       FLEET_HUB_BIND: 0.0.0.0
+#       FLEET_HUB_PORT: "443"
+#       FLEET_HUB_TLS: cert
+#       FLEET_HUB_TLS_CERT: /etc/fleet-hub/tls/fullchain.pem
+#       FLEET_HUB_TLS_KEY: /etc/fleet-hub/tls/privkey.pem
+#     volumes:
+#       - ./tls:/etc/fleet-hub/tls:ro
+#
+# Nothing then renews the pair for you; restart the hub after each renewal.
+# `FLEET_HUB_TLS=auto` (ACME in the hub itself) is refused — see docs/hub.md.
 services:
   fleet-hub:
     image: ghcr.io/martin-janci/fleet-hub:latest

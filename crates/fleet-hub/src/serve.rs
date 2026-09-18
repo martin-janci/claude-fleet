@@ -7,7 +7,7 @@ use fleet_core::events::{BroadcastEventBus, EventBus, NoopEventBus};
 use fleet_core::mcp::{self, settings::ensure_master_token, McpGuards};
 use fleet_core::service::hub::{
     SETTING_ALLOWED_HOSTS, SETTING_ALLOW_PLAINTEXT, SETTING_BIND, SETTING_LOCAL_HOST,
-    SETTING_PUBLIC_URL,
+    SETTING_PUBLIC_URL, SETTING_TLS, SETTING_TLS_CERT, SETTING_TLS_KEY,
 };
 use fleet_core::service::projects::LOCAL_HOST;
 use fleet_core::store::Store;
@@ -107,6 +107,16 @@ fn persist(store: &Mutex<Store>, r: &Resolved) -> Result<(), String> {
         SETTING_ALLOW_PLAINTEXT,
         if r.allow_plaintext { "true" } else { "false" },
     )?;
+    set(SETTING_TLS, r.tls.as_str())?;
+    // "" for "none given", like every other optional value here: `resolve`
+    // reads an empty setting as unset.
+    let path = |p: &Option<std::path::PathBuf>| {
+        p.as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    };
+    set(SETTING_TLS_CERT, &path(&r.tls_cert))?;
+    set(SETTING_TLS_KEY, &path(&r.tls_key))?;
     if !r.local_host {
         // A state.db copied from a desktop carries a `local` row. Hide it so
         // nothing lists it, and mark it unreachable so nothing counts or polls
@@ -454,14 +464,22 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
 
     warn_if_confirm_destructive(&store);
 
-    let (shutdown, serve_task) = mcp::start_with_handle(
+    // Before the listener exists: a hub told to serve TLS that cannot build an
+    // acceptor must exit 1 with the reason, never fall back to plaintext on
+    // the port a client expects to be encrypted.
+    let tls = crate::tls::acceptor(&r)?;
+    let addr = std::net::SocketAddr::from((r.bind, r.port));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("could not bind {addr}: {e}"))?;
+
+    let (shutdown, serve_task) = mcp::start_with_listener(
         Arc::clone(&store),
         Arc::clone(&ssh),
         Arc::clone(&reg),
         Arc::clone(&tunnels),
         guards,
-        r.bind,
-        r.port,
+        listener,
         token,
         r.allowed_hosts.clone(),
         // One fresh subscription per `GET /events` connection.
@@ -469,6 +487,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             let bus = Arc::clone(&bus);
             Arc::new(move || bus.subscribe()) as fleet_core::mcp::EventSubscriber
         }),
+        tls,
     )
     .await?;
     if let Err(e) = fleet_core::service::provision::reestablish_tunnels(&store, &tunnels, &base) {
@@ -480,6 +499,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         bind = %r.bind,
         port = r.port,
         local_host = r.local_host,
+        tls = r.tls.as_str(),
         "fleet-hub serving"
     );
 
@@ -568,6 +588,9 @@ mod tests {
             local_host,
             allow_plaintext: false,
             log_dir: "/unused/logs".into(),
+            tls: crate::config::TlsMode::Off,
+            tls_cert: None,
+            tls_key: None,
         }
     }
 

@@ -12,6 +12,13 @@ pub const SETTING_ALLOWED_HOSTS: &str = "hub.allowed_hosts";
 pub const SETTING_LOCAL_HOST: &str = "hub.local_host";
 /// Written by `fleet-hub` only: whether a plaintext routable bind is allowed.
 pub const SETTING_ALLOW_PLAINTEXT: &str = "hub.allow_plaintext";
+/// Written by `fleet-hub` only: how the daemon terminates TLS itself —
+/// `off` (a proxy in front) or `cert` (an operator-supplied PEM pair).
+pub const SETTING_TLS: &str = "hub.tls";
+/// Written by `fleet-hub` only: the PEM certificate chain for `hub.tls=cert`.
+pub const SETTING_TLS_CERT: &str = "hub.tls_cert";
+/// Written by `fleet-hub` only: the PEM private key for `hub.tls=cert`.
+pub const SETTING_TLS_KEY: &str = "hub.tls_key";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubBase {

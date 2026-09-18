@@ -3,13 +3,67 @@
 use clap::Args;
 use fleet_core::service::hub::{
     HubBase, SETTING_ALLOWED_HOSTS, SETTING_ALLOW_PLAINTEXT, SETTING_BIND, SETTING_LOCAL_HOST,
-    SETTING_PUBLIC_URL,
+    SETTING_PUBLIC_URL, SETTING_TLS, SETTING_TLS_CERT, SETTING_TLS_KEY,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
 pub const DEFAULT_BIND: &str = "127.0.0.1";
+
+/// How `serve` terminates TLS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TlsMode {
+    /// Plaintext http. Something in front — Caddy in `deploy/hub`, or nothing
+    /// at all on loopback — is responsible for TLS. The documented default.
+    #[default]
+    Off,
+    /// A certificate obtained and renewed automatically over ACME.
+    /// **Not built into this binary** — see [`ACME_UNAVAILABLE`].
+    Auto,
+    /// A PEM certificate chain and private key the operator supplies.
+    Cert,
+}
+
+/// Why `--tls auto` is refused rather than served.
+///
+/// `rustls-acme` reaches the ACME directory through `async-web-client`, which
+/// depends unconditionally on `webpki-roots` (the Mozilla root store) under
+/// `CDLA-Permissive-2.0`. That licence is not in `deny.toml`'s allowlist, and
+/// widening the allowlist is not this binary's call — so the ACME stack is not
+/// a dependency at all and `auto` has no implementation to fall back on.
+/// It stays a *recognised* value so that the operator who asked for it reads
+/// this instead of clap's "invalid value for --tls".
+pub const ACME_UNAVAILABLE: &str = "--tls auto (automatic ACME certificates) is not available in \
+     this build: rustls-acme pulls webpki-roots, whose CDLA-Permissive-2.0 licence is not in \
+     deny.toml's allowlist. Use --tls cert with --tls-cert/--tls-key, or terminate TLS in a \
+     proxy in front of the hub (see docs/hub.md).";
+
+impl TlsMode {
+    fn parse(v: &str) -> Result<Self, String> {
+        match v {
+            "off" => Ok(Self::Off),
+            "auto" => Ok(Self::Auto),
+            "cert" => Ok(Self::Cert),
+            other => Err(format!("--tls must be off, auto or cert, got '{other}'")),
+        }
+    }
+
+    /// What `persist` writes back, so a later bare `serve` keeps the mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Cert => "cert",
+        }
+    }
+
+    /// True when the hub itself terminates TLS, which is the protection the
+    /// plaintext refusal asks for.
+    pub fn terminates_tls(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
 
 /// Options shared by `init`, `serve` and `token`. Env names are spelled out so
 /// `--help` shows them; the precedence itself is applied in [`resolve`].
@@ -41,6 +95,15 @@ pub struct HubOptions {
     /// Log directory [env: FLEET_HUB_LOG_DIR] [default: <data-dir>/logs]
     #[arg(long, global = true)]
     pub log_dir: Option<PathBuf>,
+    /// Terminate TLS in the hub itself: off (a proxy in front does it) or cert (supply --tls-cert and --tls-key) [env: FLEET_HUB_TLS] [default: off]
+    #[arg(long, global = true)]
+    pub tls: Option<String>,
+    /// PEM certificate chain for --tls cert, leaf first [env: FLEET_HUB_TLS_CERT]
+    #[arg(long, global = true)]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key for --tls cert (PKCS#8, PKCS#1 or SEC1) [env: FLEET_HUB_TLS_KEY]
+    #[arg(long, global = true)]
+    pub tls_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +125,12 @@ pub struct Resolved {
     /// a later bare `serve` keeps the allowance it was started with.
     pub allow_plaintext: bool,
     pub log_dir: PathBuf,
+    /// How the hub itself terminates TLS (flag > env > `hub.tls` > off).
+    pub tls: TlsMode,
+    /// The PEM pair for [`TlsMode::Cert`]; both `Some` whenever `tls` is
+    /// `Cert`, both `None` otherwise (`resolve` refuses anything between).
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
 }
 
 impl Resolved {
@@ -200,9 +269,76 @@ pub fn resolve(
         Some(v) => return Err(format!("local_host must be true or false, got '{v}'")),
     };
 
-    // Only an https:// public URL means TLS sits in front of a routable bind;
-    // an http:// one, or none at all, is plaintext on the wire.
-    let tls_in_front = base.public && base.url.starts_with("https://");
+    let tls = match pick(
+        "--tls",
+        opts.tls.clone(),
+        env,
+        "FLEET_HUB_TLS",
+        settings(SETTING_TLS),
+    )? {
+        Some(v) => TlsMode::parse(&v)?,
+        None => TlsMode::default(),
+    };
+    if tls == TlsMode::Auto {
+        return Err(ACME_UNAVAILABLE.to_string());
+    }
+    let path_opt =
+        |option: &str, flag: &Option<PathBuf>, env_key: &str, setting: Option<String>| {
+            pick(
+                option,
+                flag.as_ref().map(|p| p.display().to_string()),
+                env,
+                env_key,
+                setting,
+            )
+            .map(|v| v.map(PathBuf::from))
+        };
+    let tls_cert = path_opt(
+        "--tls-cert",
+        &opts.tls_cert,
+        "FLEET_HUB_TLS_CERT",
+        settings(SETTING_TLS_CERT),
+    )?;
+    let tls_key = path_opt(
+        "--tls-key",
+        &opts.tls_key,
+        "FLEET_HUB_TLS_KEY",
+        settings(SETTING_TLS_KEY),
+    )?;
+    let (tls_cert, tls_key) = match tls {
+        TlsMode::Cert => {
+            let missing: Vec<&str> = [("--tls-cert", &tls_cert), ("--tls-key", &tls_key)]
+                .iter()
+                .filter(|(_, v)| v.is_none())
+                .map(|(name, _)| *name)
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "--tls cert needs {}: point it at the PEM certificate chain and its private key",
+                    missing.join(" and ")
+                ));
+            }
+            (tls_cert, tls_key)
+        }
+        // Carrying half a configuration forward would make `--tls off` look
+        // like it was serving the pair it is not.
+        _ => (None, None),
+    };
+    // The public URL is what hosts POST hooks to and what a paired phone is
+    // sent back to. A hub that terminates TLS and then hands out an `http://`
+    // URL sends every one of them to a port that will not speak plaintext.
+    if tls.terminates_tls() && base.public && !base.url.starts_with("https://") {
+        return Err(format!(
+            "--tls {} serves https, but the public URL is {}: change it to https://",
+            tls.as_str(),
+            base.url
+        ));
+    }
+
+    // Either an https:// public URL (a proxy terminates in front of a routable
+    // bind) or the hub's own TLS means nothing crosses the wire in the clear;
+    // an http:// public URL, or none at all, is plaintext.
+    let tls_in_front = (base.public && base.url.starts_with("https://")) || tls.terminates_tls();
     // The flag is a presence flag (it can only turn the allowance on); the
     // env can say either, so `FLEET_HUB_ALLOW_PLAINTEXT=0` turns off a stored
     // `hub.allow_plaintext=true`.
@@ -224,7 +360,8 @@ pub fn resolve(
     if !bind.is_loopback() && !tls_in_front && !allow_plaintext {
         return Err(format!(
             "refusing to serve plaintext http on {bind}: use an https:// public URL, \
-             bind to 127.0.0.1 behind a TLS proxy, or pass --allow-plaintext"
+             terminate TLS in the hub itself with --tls cert, bind to 127.0.0.1 behind a \
+             TLS proxy, or pass --allow-plaintext"
         ));
     }
 
@@ -244,6 +381,9 @@ pub fn resolve(
         local_host,
         allow_plaintext,
         log_dir,
+        tls,
+        tls_cert,
+        tls_key,
     })
 }
 
@@ -268,16 +408,158 @@ mod tests {
     }
 
     fn opts() -> HubOptions {
-        HubOptions {
-            data_dir: None,
-            bind: None,
-            port: None,
-            public_url: None,
-            allowed_host: vec![],
-            local_host: None,
-            allow_plaintext: false,
-            log_dir: None,
-        }
+        HubOptions::default()
+    }
+
+    /// `--tls cert` with both halves pointing somewhere (the paths are not
+    /// opened by `resolve`; `tls::acceptor` is what reads them).
+    fn cert_opts() -> HubOptions {
+        let mut o = opts();
+        o.tls = Some("cert".into());
+        o.tls_cert = Some("/etc/fleet/tls.crt".into());
+        o.tls_key = Some("/etc/fleet/tls.key".into());
+        o
+    }
+
+    #[test]
+    fn tls_defaults_to_off_and_changes_nothing() {
+        let r = resolve(&opts(), &env(&[]), &|_| None).unwrap();
+        assert_eq!(r.tls, TlsMode::Off);
+        assert_eq!(r.tls_cert, None);
+        assert_eq!(r.tls_key, None);
+        // Today's behaviour, unchanged: loopback is fine, a routable bind
+        // without https still demands the flag.
+        let mut o = opts();
+        o.bind = Some("0.0.0.0".into());
+        o.tls = Some("off".into());
+        let e = resolve(&o, &env(&[]), &|_| None).unwrap_err();
+        assert!(e.contains("--allow-plaintext"), "{e}");
+    }
+
+    #[test]
+    fn tls_auto_is_refused_because_acme_is_not_in_this_build() {
+        // The ACME stack (`rustls-acme` -> `async-web-client` -> `webpki-roots`)
+        // carries CDLA-Permissive-2.0, which `deny.toml` does not allow, so
+        // `auto` is not built. It stays a recognised value so the operator gets
+        // this explanation instead of a clap "invalid value".
+        let mut o = opts();
+        o.tls = Some("auto".into());
+        let e = resolve(&o, &env(&[]), &|_| None).unwrap_err();
+        assert!(e.contains("--tls auto"), "{e}");
+        assert!(e.contains("not available in this build"), "{e}");
+        assert!(e.contains("--tls cert"), "names the way forward: {e}");
+
+        // The brief's two `auto` refusals are subsumed by this one: no
+        // `--acme-email` can make it work, and neither can a domain.
+        let mut with_domain = o.clone();
+        with_domain.public_url = Some("https://fleet.example.com".into());
+        assert!(resolve(&with_domain, &env(&[]), &|_| None).is_err());
+        // ... including the IP-literal public URL ACME could never issue for.
+        let mut ip = o.clone();
+        ip.public_url = Some("https://203.0.113.9".into());
+        assert!(resolve(&ip, &env(&[]), &|_| None).is_err());
+
+        // From the env and from a stored setting too, not just the flag.
+        let e = resolve(&opts(), &env(&[("FLEET_HUB_TLS", "auto")]), &|_| None).unwrap_err();
+        assert!(e.contains("--tls auto"), "{e}");
+        let e = resolve(&opts(), &env(&[]), &|k| {
+            (k == "hub.tls").then(|| "auto".to_string())
+        })
+        .unwrap_err();
+        assert!(e.contains("--tls auto"), "{e}");
+    }
+
+    #[test]
+    fn tls_cert_needs_both_halves() {
+        let mut o = opts();
+        o.tls = Some("cert".into());
+        let e = resolve(&o, &env(&[]), &|_| None).unwrap_err();
+        assert!(e.contains("--tls-cert"), "{e}");
+        assert!(e.contains("--tls-key"), "{e}");
+
+        o.tls_cert = Some("/etc/fleet/tls.crt".into());
+        let e = resolve(&o, &env(&[]), &|_| None).unwrap_err();
+        assert!(e.contains("--tls-key"), "{e}");
+        assert!(!e.contains("--tls-cert"), "only the missing half: {e}");
+
+        o.tls_cert = None;
+        o.tls_key = Some("/etc/fleet/tls.key".into());
+        let e = resolve(&o, &env(&[]), &|_| None).unwrap_err();
+        assert!(e.contains("--tls-cert"), "{e}");
+        assert!(!e.contains("--tls-key"), "only the missing half: {e}");
+
+        let r = resolve(&cert_opts(), &env(&[]), &|_| None).unwrap();
+        assert_eq!(r.tls, TlsMode::Cert);
+        assert_eq!(r.tls_cert, Some(PathBuf::from("/etc/fleet/tls.crt")));
+        assert_eq!(r.tls_key, Some(PathBuf::from("/etc/fleet/tls.key")));
+    }
+
+    #[test]
+    fn tls_replaces_allow_plaintext_on_a_routable_bind() {
+        // The refusal exists to stop tokens crossing a network in the clear.
+        // Terminating TLS in the hub is exactly that protection, so it must
+        // not also demand the flag that waives it.
+        let mut o = cert_opts();
+        o.bind = Some("0.0.0.0".into());
+        let r = resolve(&o, &env(&[]), &|_| None).unwrap();
+        assert_eq!(r.tls, TlsMode::Cert);
+        assert!(!r.allow_plaintext, "nothing was waived");
+        // ... with no public URL at all either.
+        o.public_url = Some("https://fleet.example.com".into());
+        assert!(resolve(&o, &env(&[]), &|_| None).is_ok());
+    }
+
+    #[test]
+    fn tls_with_an_http_public_url_is_refused() {
+        // Hooks post to the public URL and a paired phone is sent back to it.
+        // Terminating TLS and then handing out http:// points every one of
+        // them at a port that will not answer plaintext.
+        let mut o = cert_opts();
+        o.public_url = Some("http://fleet.example.com".into());
+        let e = resolve(&o, &env(&[]), &|_| None).unwrap_err();
+        assert!(e.contains("https://"), "{e}");
+        o.public_url = Some("https://fleet.example.com".into());
+        assert!(resolve(&o, &env(&[]), &|_| None).is_ok());
+        // With `--tls off` an http:// public URL is still fine (a private
+        // network, a container-internal hop) — that rule is unchanged.
+        let mut off = opts();
+        off.public_url = Some("http://fleet.example.com".into());
+        assert!(resolve(&off, &env(&[]), &|_| None).is_ok());
+    }
+
+    #[test]
+    fn tls_flag_beats_env_beats_setting_and_bad_values_name_the_option() {
+        let settings = |k: &str| match k {
+            "hub.tls" => Some("cert".to_string()),
+            "hub.tls_cert" => Some("/s/tls.crt".to_string()),
+            "hub.tls_key" => Some("/s/tls.key".to_string()),
+            _ => None,
+        };
+        let r = resolve(&opts(), &env(&[]), &settings).unwrap();
+        assert_eq!(r.tls, TlsMode::Cert);
+        assert_eq!(r.tls_cert, Some(PathBuf::from("/s/tls.crt")));
+
+        let e = env(&[
+            ("FLEET_HUB_TLS", "cert"),
+            ("FLEET_HUB_TLS_CERT", "/e/tls.crt"),
+            ("FLEET_HUB_TLS_KEY", "/e/tls.key"),
+        ]);
+        let r = resolve(&opts(), &e, &settings).unwrap();
+        assert_eq!(r.tls_cert, Some(PathBuf::from("/e/tls.crt")));
+        assert_eq!(r.tls_key, Some(PathBuf::from("/e/tls.key")));
+
+        let r = resolve(&cert_opts(), &e, &settings).unwrap();
+        assert_eq!(r.tls_cert, Some(PathBuf::from("/etc/fleet/tls.crt")));
+
+        // The env turns a stored `cert` back off.
+        let r = resolve(&opts(), &env(&[("FLEET_HUB_TLS", "off")]), &settings).unwrap();
+        assert_eq!(r.tls, TlsMode::Off);
+
+        let mut bad = opts();
+        bad.tls = Some("yes".into());
+        let err = resolve(&bad, &env(&[]), &|_| None).unwrap_err();
+        assert!(err.contains("--tls"), "{err}");
+        assert!(err.contains("yes"), "{err}");
     }
 
     #[test]

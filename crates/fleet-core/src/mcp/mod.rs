@@ -11,6 +11,7 @@ mod doc_gen;
 pub mod events_route;
 pub mod guard;
 pub mod hooks;
+mod listener;
 pub mod pairing;
 pub mod settings;
 mod tools;
@@ -31,6 +32,7 @@ pub use auth::Caller;
 pub use auth::TokenMode;
 pub use events_route::{EventSubscriber, EventsState};
 pub use guard::{ConfirmNotify, PendingConfirms, RateLimiter};
+pub use listener::{NoTls, TlsAcceptor};
 pub use pairing::{pair_url, PairingRequest, PendingPairings};
 pub use tools::FleetTools;
 
@@ -405,6 +407,49 @@ pub async fn start_with_handle(
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("could not bind {addr}: {e}"))?;
+    start_with_listener(
+        store,
+        ssh,
+        reg,
+        tunnels,
+        guards,
+        listener,
+        token,
+        allowed_hosts,
+        events,
+        None::<NoTls>,
+    )
+    .await
+}
+
+/// [`start_with_handle`] on a listener the caller has already bound, and —
+/// when `tls` is `Some` — behind the caller's TLS acceptor.
+///
+/// This is the variant `fleet-hub` uses to serve HTTPS from the daemon itself:
+/// the TLS stack stays in the hub (see [`listener`]), and everything below the
+/// accept loop is the same server the desktop runs. The plain-HTTP path is
+/// unchanged — `axum::serve` is still handed the `TcpListener` directly.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_with_listener<A: TlsAcceptor>(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<SshClient>,
+    reg: Arc<CancellationRegistry>,
+    tunnels: Arc<crate::service::tunnel::TunnelSupervisor>,
+    guards: McpGuards,
+    listener: tokio::net::TcpListener,
+    token: String,
+    allowed_hosts: Vec<String>,
+    events: Option<EventSubscriber>,
+    tls: Option<A>,
+) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
+    // The bound address, not a requested one: with the listener already open
+    // there is nothing left to guess, and an ephemeral (`:0`) bind reports the
+    // port it actually got. For every caller that named a port this is the
+    // address it asked for.
+    let addr = listener
+        .local_addr()
+        .map_err(|e| format!("could not read the listening address: {e}"))?;
+    let port = addr.port();
 
     let shutdown = CancellationToken::new();
     let serve_shutdown = shutdown.clone();
@@ -462,18 +507,44 @@ pub async fn start_with_handle(
             EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token()),
         );
 
-        tracing::info!("[mcp] control API listening on http://{addr}/mcp");
+        let scheme = if tls.is_some() { "https" } else { "http" };
+        tracing::info!("[mcp] control API listening on {scheme}://{addr}/mcp");
         // `into_make_service_with_connect_info` is what puts the peer address
         // in the request extensions, which is what `/pair` keys its
         // per-address attempt budget on.
-        let serve = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
+        let shutdown_signal = async move {
             serve_shutdown.cancelled().await;
-        });
-        if let Err(e) = serve.await {
+        };
+        let result = match tls {
+            // Unchanged: the `TcpListener` goes straight to axum.
+            None => {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(shutdown_signal)
+                .await
+            }
+            Some(acceptor) => match listener::TlsListener::spawn(listener, acceptor) {
+                Err(e) => {
+                    tracing::error!(error = %e, "[mcp] could not take over the listener");
+                    return;
+                }
+                // `tap_io` is a no-op here; it is how axum lets a custom
+                // listener keep `SocketAddr` as its connect info (the
+                // `Connected` impl is written against `TapIo`).
+                Ok(tls_listener) => {
+                    use axum::serve::ListenerExt as _;
+                    axum::serve(
+                        tls_listener.tap_io(|_| {}),
+                        app.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(shutdown_signal)
+                    .await
+                }
+            },
+        };
+        if let Err(e) = result {
             tracing::error!(error = %e, "[mcp] server error");
         }
         tracing::info!("[mcp] control API stopped");

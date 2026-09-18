@@ -191,7 +191,9 @@ data dir (or run as a user who cannot see it) they exit 1 with
 --data-dir)` instead of minting a token nothing uses.
 
 Put it behind your own TLS-terminating proxy (the same role Caddy plays in
-the Docker setup) and set `FLEET_HUB_PUBLIC_URL`. Or skip the public URL
+the Docker setup) and set `FLEET_HUB_PUBLIC_URL` — or let the hub terminate
+TLS itself with `--tls cert`, which needs no proxy at all (see *Single binary
+with its own certificate* below). Or skip the public URL
 entirely and bind loopback, reaching it over Tailscale or an SSH tunnel of
 your own: with no public URL configured, the hub behaves exactly like the
 desktop app — it binds `127.0.0.1` and opens a reverse SSH tunnel to every
@@ -201,6 +203,56 @@ public URL (for example the machine's Tailscale address,
 `FLEET_HUB_ALLOW_PLAINTEXT=1`): the hub refuses any non-loopback bind that
 is not fronted by an `https://` public URL unless plaintext is explicitly
 allowed.
+
+## Single binary with its own certificate
+
+Caddy (or any other TLS-terminating proxy) is still the documented default —
+it renews certificates for you and the compose file wires it up. But the hub
+can also terminate TLS itself, which is what you want when a second container
+or a second daemon is one thing too many: one binary, one port, reachable
+from a phone.
+
+`--tls cert` serves an HTTPS listener from a certificate and key you supply:
+
+```bash
+fleet-hub serve \
+  --bind 0.0.0.0 --port 443 \
+  --public-url https://fleet.example.com \
+  --tls cert \
+  --tls-cert /etc/fleet-hub/tls/fullchain.pem \
+  --tls-key  /etc/fleet-hub/tls/privkey.pem
+```
+
+- `--tls-cert` is a PEM **chain**, leaf certificate first, issuers after it
+  (certbot's `fullchain.pem`, or the `.crt` bundle your CA hands you).
+- `--tls-key` is the matching PEM private key (PKCS#8, PKCS#1 or SEC1),
+  readable by the user the hub runs as and by nobody else.
+- The two are loaded and checked **before** the listener is bound. A missing
+  file, a file with no `CERTIFICATE` block, or a key that does not match the
+  certificate exits 1 naming the file. The hub never falls back to plaintext
+  on a port a client expects to be encrypted.
+- With TLS on, a non-loopback bind no longer needs `--allow-plaintext`:
+  terminating TLS *is* the protection that refusal asks for.
+- Nothing renews the certificate for you. Point the flags at the files your
+  renewal tool writes (certbot, your CA's client, a mounted secret) and
+  restart the hub after each renewal — the PEM pair is read once at startup.
+
+Binding port 443 as an unprivileged user needs a capability: uncomment the
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` lines in
+`deploy/hub/fleet-hub.service` (they are off by default — with a proxy in
+front the hub binds a high port and needs nothing). Otherwise bind a high
+port and forward to it.
+
+### `--tls auto` (ACME) is not built
+
+`--tls auto` — a certificate the hub obtains and renews itself over ACME — is
+a recognised value, but it is **not available in this build** and exits 1
+saying so. The implementation would be `rustls-acme`, which reaches the ACME
+directory through `async-web-client` and so depends unconditionally on
+`webpki-roots`, published under `CDLA-Permissive-2.0`. That licence is not in
+this repository's `deny.toml` allowlist, so the crate is not in the tree at
+all. Until that allowlist decision is made, use `--tls cert` with a renewal
+tool, or keep a proxy in front.
 
 ## Configuration
 
@@ -220,16 +272,20 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--local-host true\|false` | `FLEET_HUB_LOCAL_HOST` | `hub.local_host` | `false` |
 | `--allow-plaintext` | `FLEET_HUB_ALLOW_PLAINTEXT` (`1`/`true` or `0`/`false`) | `hub.allow_plaintext` | off |
 | `--log-dir` | `FLEET_HUB_LOG_DIR` | — | `<data-dir>/logs` |
+| `--tls off\|auto\|cert` | `FLEET_HUB_TLS` | `hub.tls` | `off` (`auto` is refused — see above) |
+| `--tls-cert` | `FLEET_HUB_TLS_CERT` | `hub.tls_cert` | unset (required by `--tls cert`) |
+| `--tls-key` | `FLEET_HUB_TLS_KEY` | `hub.tls_key` | unset (required by `--tls cert`) |
 
 `--allow-plaintext` permits a non-loopback bind that is not fronted by an
 `https://` public URL — one with an `http://` public URL or with none at all
 (a private network such as Tailscale, or a container-internal hop). Without
 it, a routable bind (anything but loopback) is refused at startup unless the
 public URL is `https://`: `refusing to serve plaintext http on <bind>: use an
-https:// public URL, bind to 127.0.0.1 behind a TLS proxy, or pass
---allow-plaintext`. The compose setup does not need it: the hub binds
-`0.0.0.0` on the compose network with the `https://` public URL Caddy
-serves.
+https:// public URL, terminate TLS in the hub itself with --tls cert, bind to
+127.0.0.1 behind a TLS proxy, or pass --allow-plaintext`. The compose setup
+does not need it: the hub binds `0.0.0.0` on the compose network with the
+`https://` public URL Caddy serves. Nor does `--tls cert` (see *Single binary
+with its own certificate* above) — the hub is then the thing terminating TLS.
 
 Like the other values, the allowance is saved (`hub.allow_plaintext`), so a
 later bare `fleet-hub serve` keeps it. The flag can only turn it on; to turn
