@@ -236,6 +236,66 @@ pub fn agent_token(
     Ok(ExitCode::SUCCESS)
 }
 
+/// `fleet-hub host-token-mode <host> <full|readonly>`: set a provisioned
+/// host's control-API token mode, the headless counterpart of the desktop's
+/// `set_host_token_mode`.
+///
+/// It exists because a `readonly` token is refused at `/agent` and **a
+/// rotation keeps the mode**, so `agent-token --rotate` cannot undo it:
+/// without this, a hub with no desktop beside it had no way back to a working
+/// agent. Writes to the same database `agent-token` writes to, so the running
+/// hub picks it up on its next check — within a heartbeat, or at once for the
+/// next call routed to that host.
+pub fn host_token_mode(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+    host: &str,
+    mode: &str,
+) -> Result<ExitCode, String> {
+    // Both arguments are checked before the database is opened, so a typo in
+    // either one cannot be reported as a problem with the host's token.
+    let mode = match mode {
+        "full" | "readonly" => mode,
+        other => {
+            return Err(format!(
+                "token mode must be 'full' or 'readonly', got '{other}'"
+            ))
+        }
+    };
+    // `host_alias_syntax`, not `host_alias`: the `local` guard the latter adds
+    // is about running commands on the hub's own machine, which setting a
+    // stored mode does not do.
+    fleet_core::validate::host_alias_syntax(host).map_err(|e| e.message)?;
+    // Like `token` and `agent-token`: never create a data dir or a database.
+    // A mode set in a fresh one would belong to no hub.
+    existing_db(&resolve_data_dir(opts, env))?;
+    let store = open_store(opts, env)?;
+    store
+        .set_host_token_mode(host, mode)
+        .map_err(|e| e.message)?;
+    // Only for the note below; a host row that has gone missing under a token
+    // that has not is not this command's problem to report.
+    let agent_host = store
+        .get_host_row(host)
+        .ok()
+        .flatten()
+        .is_some_and(|h| h.transport == "agent");
+    if agent_host {
+        out::error(&match mode {
+            "readonly" => format!(
+                "note: {host} is an agent host, and /agent refuses a readonly token — \
+                 any agent connected now is cut off within a heartbeat"
+            ),
+            _ => format!(
+                "note: an agent on {host} that was being refused reconnects by itself \
+                 within about a minute; restarting it only hurries that along"
+            ),
+        });
+    }
+    out::line(&format!("{host}: token mode is now {mode}"));
+    Ok(ExitCode::SUCCESS)
+}
+
 /// `<data-dir>/state.db` when it exists; `token` must never create one.
 pub(crate) fn existing_db(data_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let db = data_dir.join("state.db");
@@ -853,6 +913,71 @@ mod tests {
             ..HubOptions::default()
         };
         assert!(agent_token(&missing, &HashMap::new(), "laptop", false).is_err());
+        assert!(!dir.path().join("elsewhere").exists());
+    }
+
+    #[test]
+    fn host_token_mode_flips_a_readonly_token_back_to_full() {
+        // The command that exists because `/agent` refuses a `readonly`
+        // token and rotating keeps the mode: a hub operator with no desktop
+        // has to be able to set it back.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        {
+            let s = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+            s.insert_host("laptop", Some("laptop")).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            s.upsert_host_token("laptop", "t0").unwrap();
+            s.set_host_token_mode("laptop", "readonly").unwrap();
+            s.insert_host("untokened", Some("untokened")).unwrap();
+        }
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        let mode_of = |host: &str| {
+            Store::open_read_only(&db)
+                .unwrap()
+                .get_host_token(host)
+                .unwrap()
+                .map(|t| t.mode)
+        };
+        assert_eq!(mode_of("laptop").as_deref(), Some("readonly"));
+
+        assert!(host_token_mode(&opts, &HashMap::new(), "laptop", "full").is_ok());
+        assert_eq!(mode_of("laptop").as_deref(), Some("full"));
+        // The token itself is untouched: this is not a rotation, so an agent
+        // already holding it keeps working.
+        assert_eq!(
+            Store::open_read_only(&db)
+                .unwrap()
+                .get_host_token("laptop")
+                .unwrap()
+                .unwrap()
+                .token,
+            "t0"
+        );
+
+        // And back, so it is the mode that is set rather than a one-way fix.
+        assert!(host_token_mode(&opts, &HashMap::new(), "laptop", "readonly").is_ok());
+        assert_eq!(mode_of("laptop").as_deref(), Some("readonly"));
+
+        // An unknown mode is refused by name, and changes nothing.
+        let err = host_token_mode(&opts, &HashMap::new(), "laptop", "Full").unwrap_err();
+        assert!(err.contains("full") && err.contains("readonly"), "{err}");
+        assert_eq!(mode_of("laptop").as_deref(), Some("readonly"));
+
+        // A host with no token at all, and a host that does not exist.
+        assert!(host_token_mode(&opts, &HashMap::new(), "untokened", "full").is_err());
+        assert!(mode_of("untokened").is_none());
+        assert!(host_token_mode(&opts, &HashMap::new(), "nobody", "full").is_err());
+
+        // Like `token` and `agent-token`: never create a data dir or a database.
+        let missing = HubOptions {
+            data_dir: Some(dir.path().join("elsewhere")),
+            ..HubOptions::default()
+        };
+        assert!(host_token_mode(&missing, &HashMap::new(), "laptop", "full").is_err());
         assert!(!dir.path().join("elsewhere").exists());
     }
 

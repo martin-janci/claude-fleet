@@ -294,11 +294,19 @@ routed to it.
 - **A `readonly` token is refused at `/agent`** (`403`). An agent receives
   every command the hub runs on its host, which is more than "readonly"
   promises. **Rotating does not fix this: the new token keeps the old mode.**
-  Set the host's token mode to `full` instead, then restart the agent. The
-  mode is set by the desktop's `set_host_token_mode`, in the database that
-  holds the token; `fleet-hub` has no command for it. A token that
-  `fleet-hub agent-token` mints for a host that had none is `full`, and the
-  command warns on stderr when a token is not.
+  Set the host's token mode to `full` instead:
+
+  ```bash
+  fleet-hub host-token-mode laptop full     # …and `readonly` to narrow it again
+  ```
+
+  That touches only the mode, not the token, so nothing has to be
+  re-installed on the host. A refused agent is retrying with a backoff
+  capped at a minute, so it reconnects by itself; restarting it only hurries
+  that along. The desktop does the same thing through
+  `set_host_token_mode`. A token that `fleet-hub agent-token` mints for a
+  host that had none is `full`, and the command warns on stderr when a
+  token is not.
 
 ### Limits, and what is still open
 
@@ -498,8 +506,9 @@ sudo -u fleet env FLEET_HUB_DATA_DIR=/var/lib/fleet-hub fleet-hub token show
 ```
 
 `init` and `serve` open `<data-dir>/state.db`, creating it when missing.
-`token show` and `token regenerate` never create one: pointed at the wrong
-data dir (or run as a user who cannot see it) they exit 1 with
+`token show`, `token regenerate`, `agent-token` and `host-token-mode` never
+create one: pointed at the wrong data dir (or run as a user who cannot see
+it) they exit 1 with
 `no hub database at <data-dir>/state.db; run fleet-hub init first (or pass
 --data-dir)` instead of minting a token nothing uses.
 
@@ -726,7 +735,8 @@ at whichever one provisioned it last.
   every SSH host with a new per-host token. An **agent** host's token is
   rotated out of band instead (`fleet-hub agent-token <host> --rotate`, then
   re-install the agent). See *A host that cannot be reached*. Rotating a
-  `readonly` token keeps it `readonly`.
+  `readonly` token keeps it `readonly`; `fleet-hub host-token-mode <host>
+  full` is what widens it again.
 
 ## Troubleshooting
 
@@ -741,7 +751,7 @@ at whichever one provisioned it last.
   - `hub refused: 401` means the token is wrong, rotated or revoked
     (re-install with `fleet-hub agent-token <host>`);
   - `403 … readonly` means the token mode is not `full`, and rotating will
-    not fix it;
+    not fix it — run `fleet-hub host-token-mode <host> full`;
   - `403 … not an agent host` means the host is not on the agent transport;
   - `429` means the host already holds two connections, or the hub holds
     64 in all;
