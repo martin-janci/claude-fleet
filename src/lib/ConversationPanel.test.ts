@@ -5,22 +5,25 @@ import { get } from 'svelte/store';
 
 vi.mock('./conversation', async () => {
   const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
-  return { ...actual, sessionConversation: vi.fn(), sessionActivity: vi.fn() };
+  return { ...actual, sessionConversation: vi.fn(), sessionActivity: vi.fn(), listConversations: vi.fn() };
 });
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
 });
-import { sessionConversation, sessionActivity, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
+import { sessionConversation, sessionActivity, listConversations, type ConversationSummary, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, type SessionRow } from './sessions';
 import { composerPresets, resetComposerPresets } from './composer_presets';
 import { composerDrafts } from './conversation';
 import { openPathRequest } from './app_views';
+import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_events';
+import type { SessionEvent } from './timeline';
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
 const mockedAct = sessionActivity as unknown as ReturnType<typeof vi.fn>;
+const mockedList = listConversations as unknown as ReturnType<typeof vi.fn>;
 
 function session(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -71,6 +74,8 @@ beforeEach(() => {
   mockedConv.mockReset();
   mockedSend.mockReset();
   mockedAct.mockReset();
+  mockedList.mockReset();
+  mockedList.mockResolvedValue({ ok: true, value: [] });
   mockedAct.mockResolvedValue({ ok: false, error: { code: 'E_INVALID_STATE', message: 'no pane' } });
   composerDrafts.clear();
   resetComposerPresets();
@@ -301,7 +306,7 @@ describe('ConversationPanel', () => {
     await rerender({ session: session({ id: 2 }), visible: true });
     await tick();
     expect(mockedConv).toHaveBeenCalledTimes(2);
-    expect(mockedConv).toHaveBeenLastCalledWith(2, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(2, undefined, undefined);
   });
 
   it('does not render an empty quote block for a turn without a prompt', async () => {
@@ -997,22 +1002,22 @@ describe('ConversationPanel load older', () => {
     mockedConv.mockReturnValue(ok(conv({ truncated: true })));
     const { rerender } = render(ConversationPanel, { session: session(), visible: true });
     await settle();
-    expect(mockedConv).toHaveBeenLastCalledWith(1, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(1, undefined, undefined);
 
     await fireEvent.click(screen.getByTestId('conv-load-older'));
     await settle();
-    expect(mockedConv).toHaveBeenLastCalledWith(1, 20);
+    expect(mockedConv).toHaveBeenLastCalledWith(1, 20, undefined);
     await fireEvent.click(screen.getByTestId('conv-load-older'));
     await settle();
-    expect(mockedConv).toHaveBeenLastCalledWith(1, 30);
+    expect(mockedConv).toHaveBeenLastCalledWith(1, 30, undefined);
 
     vi.advanceTimersByTime(CONVERSATION_POLL_MS);
     await settle();
-    expect(mockedConv).toHaveBeenLastCalledWith(1, 30);
+    expect(mockedConv).toHaveBeenLastCalledWith(1, 30, undefined);
 
     await rerender({ session: session({ id: 2 }), visible: true });
     await settle();
-    expect(mockedConv).toHaveBeenLastCalledWith(2, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(2, undefined, undefined);
   });
 
   it('offers Load older only when the read was truncated', async () => {
@@ -1212,7 +1217,7 @@ describe('ConversationPanel second review-round fixes', () => {
       await fireEvent.click(screen.getByTestId('conv-load-older'));
       await settle();
     }
-    expect(mockedConv).toHaveBeenLastCalledWith(1, CONV_MAX_TURNS);
+    expect(mockedConv).toHaveBeenLastCalledWith(1, CONV_MAX_TURNS, undefined);
     expect(screen.queryByTestId('conv-load-older')).toBeNull();
     expect(screen.getByText(/Older turns not shown/)).toBeTruthy();
   });
@@ -1364,5 +1369,290 @@ describe('ConversationPanel final review fixes', () => {
     const buttons = screen.getAllByTestId('md-path');
     expect(buttons.map((b) => b.textContent)).toEqual(['src/lib/bar.ts']);
     expect(document.querySelector('a.md-link button')).toBeNull();
+  });
+});
+
+function summary(over: Partial<ConversationSummary> = {}): ConversationSummary {
+  return {
+    id: 1, session_id: 1, claude_session_id: 'aaa', transcript_path: null, started_at: 1_789_000_000,
+    ended_at: 1_789_000_500, start_source: 'fleet', end_reason: 'clear', model: null, first_prompt: 'earlier ask',
+    turns: 3, compactions: 0, current: false, ...over,
+  };
+}
+function listOk(value: ConversationSummary[]) {
+  return Promise.resolve({ ok: true as const, value });
+}
+function event(over: Partial<SessionEvent> = {}): SessionEvent {
+  return { id: 1, session_id: 1, at: 0, kind: 'notification', detail: null, claude_session_id: 'sess-abc', ...over };
+}
+const TURN1_AT = '2026-09-13T10:00:00.000Z';
+const TURN1_SECS = Date.parse(TURN1_AT) / 1000;
+
+describe('ConversationPanel conversations', () => {
+  it('renders the header with the current conversation and the context meter', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true, ended_at: null, start_source: 'startup', turns: 1 })]));
+    render(ConversationPanel, {
+      session: session({ context_pct: 21, context_tokens: 42_000, context_window: 200_000, context_stale: false } as Partial<SessionRow>),
+      visible: true,
+    });
+    await settle();
+    expect(mockedList).toHaveBeenCalledWith(1);
+    const header = screen.getByTestId('conv-header');
+    expect(header.textContent).toContain('Current');
+    expect(header.contains(screen.getByTestId('conv-ctx'))).toBe(true);
+    expect(screen.getByTestId('conv-ctx').textContent).toContain('42k / 200k · 21%');
+    // the composer no longer carries its own meter
+    expect(screen.getByTestId('conv-composer').querySelector('[data-testid="conv-ctx"]')).toBeNull();
+  });
+
+  it('switches to an earlier conversation read-only and back', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(
+      listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true, ended_at: null, start_source: 'clear', turns: 1 }), summary({ id: 1, claude_session_id: 'aaa' })]),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-viewing-banner')).toBeNull();
+
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    const earlier = screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!;
+    await fireEvent.click(earlier);
+    await settle();
+    expect(mockedConv).toHaveBeenLastCalledWith(1, undefined, 'aaa');
+    expect(screen.getByTestId('conv-viewing-banner').textContent).toContain('Viewing an earlier conversation');
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByTestId('conv-composer-send') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('conv-composer-status').textContent).toContain('go back to current to send');
+
+    const calls = mockedConv.mock.calls.length;
+    vi.advanceTimersByTime(QUIET_POLL_MS * 2);
+    await settle();
+    expect(mockedConv.mock.calls.length).toBe(calls);
+
+    await fireEvent.click(screen.getByTestId('conv-back-current'));
+    await settle();
+    expect(mockedConv.mock.calls.length).toBe(calls + 1);
+    expect(mockedConv.mock.calls.at(-1)![2]).toBeUndefined();
+    expect(screen.queryByTestId('conv-viewing-banner')).toBeNull();
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).disabled).toBe(false);
+  });
+
+  it('follows a /clear: new claude_session_id resets the thread and shows the notice', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(listOk([summary({ id: 1, claude_session_id: 'aaa', current: true, ended_at: null })]));
+    const { rerender } = render(ConversationPanel, { session: session({ claude_session_id: 'aaa' }), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'half-typed' } });
+    expect(screen.queryByTestId('conv-switch-notice')).toBeNull();
+
+    mockedConv.mockClear();
+    mockedList.mockReturnValue(
+      listOk([summary({ id: 2, claude_session_id: 'bbb', current: true, ended_at: null, start_source: 'clear', turns: 0 }), summary({ id: 1, claude_session_id: 'aaa' })]),
+    );
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'fresh start', at: null, ended_at: null, items: [] }] })));
+    await rerender({ session: session({ claude_session_id: 'bbb' }), visible: true });
+    await settle();
+    await settle();
+    expect(mockedConv).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('fresh start')).toBeTruthy();
+    expect(screen.queryByText('fix the bug')).toBeNull();
+    expect(screen.getByTestId('conv-switch-notice').textContent).toContain('New conversation (/clear)');
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('half-typed');
+
+    // View previous opens the earlier conversation read-only
+    await fireEvent.click(screen.getByTestId('conv-view-previous'));
+    await settle();
+    expect(mockedConv).toHaveBeenLastCalledWith(1, undefined, 'aaa');
+    expect(screen.getByTestId('conv-viewing-banner')).toBeTruthy();
+  });
+
+  it('the switch notice is dismissable', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(listOk([summary({ claude_session_id: 'bbb', current: true, start_source: 'resume' })]));
+    const { rerender } = render(ConversationPanel, { session: session({ claude_session_id: 'aaa' }), visible: true });
+    await settle();
+    await rerender({ session: session({ claude_session_id: 'bbb' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-switch-notice').textContent).toContain('New conversation (/resume)');
+    await fireEvent.click(screen.getByTestId('conv-switch-dismiss'));
+    expect(screen.queryByTestId('conv-switch-notice')).toBeNull();
+  });
+
+  it('does not show the notice on first mount or on a session switch', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(listOk([summary({ claude_session_id: 'aaa', current: true, start_source: 'clear' })]));
+    const { rerender } = render(ConversationPanel, { session: session({ id: 1, claude_session_id: 'aaa' }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-switch-notice')).toBeNull();
+    await rerender({ session: session({ id: 2, claude_session_id: 'zzz' }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-switch-notice')).toBeNull();
+    // a first id appearing on a session that had none is not a switch either
+    await rerender({ session: session({ id: 3, claude_session_id: null }), visible: true });
+    await settle();
+    await rerender({ session: session({ id: 3, claude_session_id: 'yyy' }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-switch-notice')).toBeNull();
+    expect(mockedConv).toHaveBeenLastCalledWith(3, undefined, undefined);
+  });
+
+  it('while viewing an earlier conversation, a new id only lights the switcher dot', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true }), summary({ id: 1, claude_session_id: 'aaa' })]));
+    const { rerender } = render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    await fireEvent.click(screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!);
+    await settle();
+    expect(screen.queryByTestId('conv-switcher-dot')).toBeNull();
+    const calls = mockedConv.mock.calls.length;
+
+    await rerender({ session: session({ claude_session_id: 'new-one' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-switcher-dot')).toBeTruthy();
+    expect(screen.getByTestId('conv-viewing-banner')).toBeTruthy();
+    expect(screen.queryByTestId('conv-switch-notice')).toBeNull();
+    expect(mockedConv.mock.calls.length).toBe(calls);
+
+    await fireEvent.click(screen.getByTestId('conv-back-current'));
+    await settle();
+    expect(screen.queryByTestId('conv-switcher-dot')).toBeNull();
+  });
+
+  it('renders compact, command and interrupt items', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: null,
+              at: TURN1_AT,
+              ended_at: null,
+              items: [
+                { kind: 'command', name: '/model', args: 'opus', output: 'Set model to opus' },
+                { kind: 'compact', trigger: 'auto', pre_tokens: 180_000, summary: 'S' },
+                { kind: 'interrupt', during_tool: true },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    // a null-prompt turn opening with a command renders no prompt block
+    expect(screen.queryByTestId('conv-prompt')).toBeNull();
+    const cmd = screen.getByTestId('conv-command');
+    expect(cmd.textContent).toContain('/model opus');
+    expect(cmd.textContent).toContain('Set model to opus');
+    const compact = screen.getByTestId('conv-compact') as HTMLDetailsElement;
+    expect(compact.querySelector('summary')!.textContent).toContain('Compacted (auto) · was 180k tokens');
+    expect(compact.open).toBe(false);
+    expect(screen.getByTestId('conv-interrupt').textContent).toContain('Interrupted during a tool call');
+  });
+
+  it('clamps a long command output behind Show more; a compact without summary says so', async () => {
+    const long = Array.from({ length: 12 }, (_, i) => `line ${i}`).join('\n');
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: null,
+              at: TURN1_AT,
+              ended_at: null,
+              items: [
+                { kind: 'command', name: '/cost', args: null, output: long },
+                { kind: 'compact', trigger: null, pre_tokens: null, summary: null },
+                { kind: 'interrupt', during_tool: false },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const cmd = screen.getByTestId('conv-command');
+    expect(cmd.querySelector('code')!.textContent).toBe('/cost');
+    expect(cmd.querySelector('pre')!.classList.contains('clamped')).toBe(true);
+    await fireEvent.click(screen.getByTestId('conv-command-toggle'));
+    expect(cmd.querySelector('pre')!.classList.contains('clamped')).toBe(false);
+    const compact = screen.getByTestId('conv-compact');
+    expect(compact.querySelector('summary')!.textContent!.trim()).toBe('Compacted (unknown)');
+    expect(compact.textContent).toContain('Summary not in the loaded tail.');
+    expect(screen.getByTestId('conv-interrupt').textContent!.trim()).toBe('Interrupted');
+  });
+
+  it('interleaves timeline events and appends pushed ones', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            { prompt: 'first ask', at: TURN1_AT, ended_at: null, items: [{ kind: 'text', text: 'a' }] },
+            { prompt: 'second ask', at: new Date((TURN1_SECS + 600) * 1000).toISOString(), ended_at: null, items: [{ kind: 'text', text: 'b' }] },
+          ],
+          events: [event({ id: 5, at: TURN1_SECS + 60, kind: 'stop_failure', detail: 'rate_limit: slow down' })],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'blocked' }), visible: true });
+    await settle();
+    const prompts = screen.getAllByTestId('conv-prompt');
+    const failed = screen.getByTestId('conv-event');
+    expect(failed.textContent).toContain('Turn failed: rate limit');
+    expect(failed.textContent).toContain('slow down');
+    expect(failed.getAttribute('data-tone')).toBe('error');
+    expect(prompts[0].compareDocumentPosition(failed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(failed.compareDocumentPosition(prompts[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const calls = mockedConv.mock.calls.length;
+    dispatchTimelineEvents([event({ id: 9, at: TURN1_SECS + 700, kind: 'notification', detail: 'permission_prompt', claude_session_id: 'other' })]);
+    await settle();
+    expect(screen.getAllByTestId('conv-event')).toHaveLength(1);
+
+    dispatchTimelineEvents([event({ id: 10, at: TURN1_SECS + 700, kind: 'notification', detail: 'permission_prompt' })]);
+    await settle();
+    const rows = screen.getAllByTestId('conv-event');
+    expect(rows).toHaveLength(2);
+    expect(rows[1].textContent).toContain('Waiting for permission');
+    expect(rows[1].getAttribute('data-tone')).toBe('warn');
+    expect(mockedConv.mock.calls.length).toBe(calls);
+  });
+
+  it('refreshes the conversation list on session:conversations', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const { unmount } = render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(mockedList).toHaveBeenCalledTimes(1);
+    dispatchConversationsChanged([1]);
+    await settle();
+    expect(mockedList).toHaveBeenCalledTimes(2);
+    dispatchConversationsChanged([2]);
+    await settle();
+    expect(mockedList).toHaveBeenCalledTimes(2);
+    unmount();
+    dispatchConversationsChanged([1]);
+    await settle();
+    expect(mockedList).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows "Transcript no longer on host" for a vanished earlier transcript', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true }), summary({ id: 1, claude_session_id: 'aaa' })]));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    await fireEvent.click(screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!);
+    await settle();
+    expect(screen.getByTestId('conv-empty').textContent).toBe('Transcript no longer on host');
+    mockedConv.mockReturnValue(ok(conv()));
+    await fireEvent.click(screen.getByTestId('conv-back-current'));
+    await settle();
+    expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
   });
 });
