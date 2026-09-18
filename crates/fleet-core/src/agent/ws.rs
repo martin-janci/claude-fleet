@@ -158,9 +158,20 @@ pub struct AgentWsState {
 
 /// Open connections per host and in total, each held by a [`Slot`] for the
 /// life of its `serve`.
-#[derive(Default)]
 pub(crate) struct Slots {
     held: Mutex<HashMap<String, usize>>,
+    per_host: usize,
+    total: usize,
+}
+
+impl Default for Slots {
+    fn default() -> Self {
+        Self {
+            held: Mutex::default(),
+            per_host: MAX_CONNECTIONS_PER_HOST,
+            total: MAX_CONNECTIONS,
+        }
+    }
 }
 
 impl Slots {
@@ -168,11 +179,11 @@ impl Slots {
     fn take(self: &Arc<Self>, alias: &str) -> Option<Slot> {
         let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
         let total: usize = held.values().sum();
-        if total >= MAX_CONNECTIONS {
+        if total >= self.total {
             return None;
         }
         let mine = held.entry(alias.to_string()).or_default();
-        if *mine >= MAX_CONNECTIONS_PER_HOST {
+        if *mine >= self.per_host {
             return None;
         }
         *mine += 1;
@@ -302,6 +313,18 @@ impl AgentWsState {
     #[cfg(test)]
     pub(crate) fn slots(&self) -> Arc<Slots> {
         Arc::clone(&self.slots)
+    }
+
+    /// Smaller connection limits, so a test can reach the hub-wide one
+    /// without dialling 64 sockets.
+    #[cfg(test)]
+    pub(crate) fn with_connection_limits(mut self, per_host: usize, total: usize) -> Self {
+        self.slots = Arc::new(Slots {
+            held: Mutex::default(),
+            per_host,
+            total,
+        });
+        self
     }
 
     /// Heartbeats fired by the test through `beats`, instead of by a clock.
@@ -1266,6 +1289,17 @@ mod tests {
         dial(hub.addr, Some(LAPTOP_TOKEN))
             .await
             .expect("a slot is free again");
+    }
+
+    /// The hub-wide limit holds across hosts, whatever each host holds.
+    #[tokio::test]
+    async fn the_hub_holds_only_so_many_agent_connections_in_all() {
+        let hub = hub_with(|s| s.with_connection_limits(2, 3)).await;
+        let _a = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("one");
+        let _b = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("two");
+        let _c = dial(hub.addr, Some(DESK_TOKEN)).await.expect("three");
+        let (status, _) = dial_refused(hub.addr, DESK_TOKEN).await;
+        assert_eq!(status, 429, "desk holds one, but the hub holds three");
     }
 
     /// A replaced connection is torn down even while its writer is stuck
