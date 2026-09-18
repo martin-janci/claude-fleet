@@ -1,6 +1,6 @@
-use crate::ipc_error::{codes, IpcError};
-use crate::shell::quote;
-use crate::ssh::SshClient;
+use fleet_core::ipc_error::{codes, IpcError};
+use fleet_core::shell::quote;
+use fleet_core::ssh::SshClient;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -262,8 +262,8 @@ pub fn pty_open(
     ssh: State<'_, std::sync::Arc<SshClient>>,
 ) -> Result<(), IpcError> {
     // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
-    crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name(&args.session_name)?;
+    fleet_core::validate::host_alias(&args.host_alias)?;
+    fleet_core::validate::tmux_name(&args.session_name)?;
 
     let pty_system = native_pty_system();
     let pair = pty_system

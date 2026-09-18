@@ -9,14 +9,15 @@
 //! confirmation toggle (`confirm_destructive` on `mcp_configure`) and its
 //! answer path (`mcp_confirm`, `mcp_pending_confirms`).
 
-use crate::cancel::CancellationRegistry;
-use crate::ipc_error::lock;
-use crate::ipc_error::{codes, IpcError};
-use crate::mcp::settings::{configured_port, ensure_master_token, McpSettings};
-use crate::mcp::{self, McpGuards, McpRuntime};
-use crate::service::hooks_install;
-use crate::ssh::SshClient;
-use crate::store::Store;
+use fleet_core::cancel::CancellationRegistry;
+use fleet_core::ipc_error::lock;
+use fleet_core::ipc_error::{codes, IpcError};
+use fleet_core::mcp::settings::{ensure_master_token, McpSettings};
+use fleet_core::mcp::{self, McpGuards, McpRuntime};
+use fleet_core::service::hooks_install;
+use fleet_core::service::hub::HubBase;
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -91,7 +92,7 @@ pub async fn mcp_configure(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
     runtime: State<'_, Mutex<McpRuntime>>,
-    tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
+    tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
     guards: State<'_, McpGuards>,
 ) -> Result<McpStatus, IpcError> {
     // 1. Persist the requested settings.
@@ -136,18 +137,31 @@ pub async fn mcp_configure(
             Arc::clone(&reg),
             Arc::clone(&tunnels),
             guards.inner().clone(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port,
             token,
+            Vec::new(),
         )
         .await;
+        // Best-effort: the server is already up, so a bad `hub.public_url`
+        // must not abort before its shutdown handle is recorded below.
+        let base = match lock(&store).and_then(|s| HubBase::read(&s)) {
+            Ok(base) => Some(base),
+            Err(e) => {
+                tracing::warn!(error = %e, "[mcp] cannot resolve the hub base URL");
+                None
+            }
+        };
         let mut rt = lock(&runtime)?;
         match result {
             Ok(shutdown) => {
                 // Re-establish tunnels for already-provisioned hosts (best-effort).
-                if let Err(e) =
-                    crate::service::provision::reestablish_tunnels(&store, &tunnels, port)
-                {
-                    tracing::warn!(error = %e, "[mcp] re-establishing host tunnels failed");
+                if let Some(base) = &base {
+                    if let Err(e) =
+                        fleet_core::service::provision::reestablish_tunnels(&store, &tunnels, base)
+                    {
+                        tracing::warn!(error = %e, "[mcp] re-establishing host tunnels failed");
+                    }
                 }
                 rt.set_running(shutdown);
             }
@@ -158,8 +172,8 @@ pub async fn mcp_configure(
         // Q8 / R10: a local host with no fleet hook never reports turns, so
         // `turn_seq` never moves. Enabling the API installs it (best-effort,
         // same idempotent merge as the Settings button, user hooks kept).
-        if started {
-            hooks_install::auto_install_local_hook(&store, port);
+        if let (true, Some(base)) = (started, &base) {
+            hooks_install::auto_install_local_hook(&store, base);
         }
     }
 
@@ -172,14 +186,14 @@ pub async fn provision_hosts(
     rotate: Option<bool>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
-    tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
-) -> Result<Vec<crate::service::provision::HostProvisionResult>, IpcError> {
-    let port = configured_port(&*lock(&store)?)?;
-    crate::service::provision::provision_hosts(
+    tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
+) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
+    let base = HubBase::read(&*lock(&store)?)?;
+    fleet_core::service::provision::provision_hosts(
         &store,
         &*ssh,
         &tunnels,
-        port,
+        &base,
         rotate.unwrap_or(false),
     )
     .await
@@ -199,8 +213,8 @@ pub struct HostTokenInfo {
     pub created_at: i64,
 }
 
-impl From<crate::store::HostTokenRow> for HostTokenInfo {
-    fn from(r: crate::store::HostTokenRow) -> Self {
+impl From<fleet_core::store::HostTokenRow> for HostTokenInfo {
+    fn from(r: fleet_core::store::HostTokenRow) -> Self {
         Self {
             host_alias: r.host_alias,
             mode: r.mode,
@@ -238,7 +252,7 @@ pub fn set_host_token_mode(
     mode: String,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<HostTokenInfo, IpcError> {
-    crate::validate::host_alias(&host_alias)?;
+    fleet_core::validate::host_alias(&host_alias)?;
     let mode = parse_mode(&mode)?;
     let s = lock(&store)?;
     s.set_host_token_mode(&host_alias, mode)?;
@@ -255,16 +269,16 @@ pub async fn rotate_host_token(
     host_alias: String,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
-    tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
+    tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
 ) -> Result<HostTokenInfo, IpcError> {
-    crate::validate::host_alias(&host_alias)?;
-    let port = configured_port(&*lock(&store)?)?;
-    crate::service::provision::provision_host_with_token(
+    fleet_core::validate::host_alias(&host_alias)?;
+    let base = HubBase::read(&*lock(&store)?)?;
+    fleet_core::service::provision::provision_host_with_token(
         &store,
         &*ssh,
         &tunnels,
         &host_alias,
-        port,
+        &base,
         true,
     )
     .await?;
@@ -333,8 +347,9 @@ pub fn install_fleet_hook(
         ));
     }
 
-    let port = McpSettings::read(&*lock(&store)?)?.port;
+    // Token first: with no master token it refuses with `E_NO_TOKEN`.
     let token = hooks_install::local_hook_token(&store)?;
+    let base = HubBase::read(&*lock(&store)?)?;
 
     {
         let rt = lock(&runtime)?;
@@ -347,11 +362,11 @@ pub fn install_fleet_hook(
     }
 
     let settings_path = hooks_install::local_settings_path()?;
-    hooks_install::install_hook_at(&settings_path, port, &token)?;
+    hooks_install::install_hook_at(&settings_path, &base.hook_url(), &token)?;
 
     Ok(format!(
         "Hook installed at {} (http hook, bearer header)\nSettings written to {}",
-        hooks_install::hook_url(port),
+        base.hook_url(),
         settings_path.display()
     ))
 }
@@ -369,7 +384,7 @@ mod tests {
 
     #[test]
     fn host_token_info_never_carries_the_token() {
-        let info = HostTokenInfo::from(crate::store::HostTokenRow {
+        let info = HostTokenInfo::from(fleet_core::store::HostTokenRow {
             host_alias: "mefistos".into(),
             token: "s3cret".into(),
             created_at: 7,

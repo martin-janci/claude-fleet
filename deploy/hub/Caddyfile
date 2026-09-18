@@ -1,0 +1,9 @@
+{$FLEET_HUB_DOMAIN} {
+    reverse_proxy fleet-hub:4180 {
+        # Keeps the upstream Host loopback, so the hub accepts the request
+        # regardless of how its own Host/Origin allowlist is configured.
+        header_up Host 127.0.0.1:4180
+        # Long polls (wait_for_session, run_prompt) stream keep-alives.
+        flush_interval -1
+    }
+}

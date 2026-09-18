@@ -1,11 +1,11 @@
 //! Tauri IPC wrappers for the first-run onboarding checklist. Read-only; not
 //! exposed as MCP tools (so control-api-reference.md needs no regeneration).
 
-use crate::ipc_error::IpcError;
-use crate::service::hosts;
-use crate::service::onboarding::{self, LocalPrereqs, TunnelStatusRow};
-use crate::service::tunnel::TunnelSupervisor;
-use crate::store::Store;
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::hosts;
+use fleet_core::service::onboarding::{self, LocalPrereqs, TunnelStatusRow};
+use fleet_core::service::tunnel::TunnelSupervisor;
+use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 

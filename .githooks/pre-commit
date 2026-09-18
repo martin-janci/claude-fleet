@@ -8,8 +8,13 @@
 # Disable it again with `git config --unset core.hooksPath`, or skip a single
 # commit with `git commit --no-verify`.
 #
-#   staged path matches src-tauri/, deny.toml, rust-toolchain.toml
-#       -> cargo fmt --check, cargo clippy --all-targets -- -D warnings
+#   staged path matches src-tauri/, crates/, Cargo.toml, Cargo.lock, deny.toml,
+#   rust-toolchain.toml
+#       -> cargo fmt --all --check, cargo clippy --workspace --all-targets -- -D warnings
+#          On a box without the Tauri system libs (no gtk+-3.0 via pkg-config),
+#          falls back to cargo clippy -p fleet-core -p fleet-hub --all-targets
+#          -- -D warnings instead, so a headless fleet-hub-only change lints
+#          clean without them.
 #   staged path matches src/, package.json, pnpm-lock.yaml, pnpm-workspace.yaml,
 #   vite/vitest/svelte/tsconfig config files or index.html
 #       -> scripts/ci-local.sh --frontend-only  (install, check, test, build, audit)
@@ -32,16 +37,22 @@ run_rust=0
 run_frontend=0
 while IFS= read -r path; do
   case "$path" in
-    src-tauri/*|deny.toml|rust-toolchain.toml) run_rust=1 ;;
+    src-tauri/*|crates/*|Cargo.toml|Cargo.lock|deny.toml|rust-toolchain.toml) run_rust=1 ;;
     src/*|package.json|pnpm-lock.yaml|pnpm-workspace.yaml) run_frontend=1 ;;
     vite.config.ts|vitest.config.ts|vitest.setup.ts|svelte.config.js|tsconfig.json|index.html) run_frontend=1 ;;
   esac
 done <<< "$staged"
 
 if [[ "$run_rust" == 1 ]]; then
-  echo "pre-commit: rust files staged -> cargo fmt --check, cargo clippy"
-  cargo fmt --manifest-path src-tauri/Cargo.toml --check
-  cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+  if ! pkg-config --exists gtk+-3.0 2>/dev/null; then
+    echo "pre-commit: no Tauri system libs (gtk+-3.0); linting fleet-core + fleet-hub only"
+    cargo fmt --all --check
+    cargo clippy -p fleet-core -p fleet-hub --all-targets -- -D warnings
+  else
+    echo "pre-commit: rust files staged -> cargo fmt --check, cargo clippy"
+    cargo fmt --all --check
+    cargo clippy --workspace --all-targets -- -D warnings
+  fi
 fi
 if [[ "$run_frontend" == 1 ]]; then
   echo "pre-commit: frontend files staged -> scripts/ci-local.sh --frontend-only"

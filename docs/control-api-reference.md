@@ -1,5 +1,5 @@
 <!-- GENERATED FILE — do not edit by hand.
-     Regenerate with: REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current -->
+     Regenerate with: REGEN_DOCS=1 cargo test -p fleet-core reference_is_current -->
 
 # claude-fleet Control API — Tool Reference
 
@@ -101,9 +101,19 @@ List the cached Claude accounts seen across hosts. Returns JSON.
 
 List the asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets found on hosts and catalog parse problems. Requires catalog_configure + catalog_load in the app. Returns JSON.
 
+### `list_clients`
+
+List the paired client devices and what each one's token may do. The stored token digest is never returned — a client's token exists in plaintext only in the one /pair response that minted it. include_revoked also returns clients whose token was revoked (kept for the audit trail). Read-only, but master token only: the list names every paired device, so it is not a phone's to read. Returns JSON rows of { id, name, mode, created_at, last_seen_at, revoked_at }.
+
+Parameters: `include_revoked`
+
 ### `list_hosts`
 
 List all registered hosts with their reachability, claude/tmux versions, and linked account. Returns JSON.
+
+### `list_layers`
+
+List the catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app. Returns JSON.
 
 ### `list_projects`
 
@@ -153,6 +163,12 @@ Create a plain-shell tmux session on a host (no Claude Code in the pane — an i
 
 Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
 
+### `pair_client`
+
+Mint a single-use pairing code for a new client device (a phone, a laptop browser) and return the URL to show as a QR. The code — not a token — travels in the URL FRAGMENT, so no proxy or access log ever sees it; the device posts it to the hub's /pair once and gets a token of its own back. name must be 1-64 characters with no control characters and must not be one a live client already holds. mode is full (drive sessions fleet-wide) or readonly (observe only); fleet-admin tools are out of a client's reach either way. Codes live in memory only, so a hub restart invalidates every outstanding one. Master token only. Returns JSON { url, code, expires_in_s, name, mode }.
+
+Parameters: `mode`, `name`, `ttl_s`
+
 ### `peek_session`
 
 Deprecated: use session_transcript. Returns the session's last assistant turn from its transcript. Address it with session_id OR claude_session_id (+ host_alias while the fleet row does not exist yet).
@@ -177,9 +193,13 @@ Re-probe a registered host's reachability and versions. Returns the updated host
 
 Parameters: `alias`
 
+### `propose_layers`
+
+Propose an initial layer split from the last scan, grouping assets by the exact set of hosts they are installed on. The largest group becomes 'core'; assets on a single host are returned separately for triage. Read-only: writes nothing. Returns JSON.
+
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks, and this fleet's MCP server entry (with a per-host bearer token) into every reachable host's ~/.claude.json (reverse SSH tunnel for remote hosts). rotate=true mints fresh per-host tokens. Returns a per-host status list; each host must restart Claude to load the server.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks, and this fleet's MCP server entry (with a per-host bearer token) into every reachable host's ~/.claude.json (reverse SSH tunnel for remote hosts when the hub is loopback-only; a hub with a public URL is reached directly). rotate=true mints fresh per-host tokens. Returns a per-host status list; each host must restart Claude to load the server.
 
 Parameters: `rotate`
 
@@ -191,7 +211,7 @@ Parameters: `force`, `session_id`
 
 ### `refresh_projects`
 
-Rescan the local projects directory for new or removed repositories and worktrees. Returns the fresh project list.
+Rescan the local projects directory for new or removed repositories and worktrees. Returns the fresh project list. On a hub with hub.local_host off it returns E_NOTFOUND: that hub has no local projects directory to scan.
 
 ### `register_self`
 
@@ -271,11 +291,23 @@ List a session's worktree files (tracked + untracked, gitignore respected). Retu
 
 Parameters: `session_id`
 
+### `resolve_preview`
+
+Compute the effective asset set for one host after its role and contexts are resolved, with provenance: which layer introduced each asset, which layers overrode it, and which layer excluded anything missing. Nothing is written. Requires catalog_configure + catalog_load in the app. Returns JSON.
+
+Parameters: `host_alias`
+
 ### `restart_session`
 
 Restart a tmux session (kill and recreate it in the same place). Use when the Claude REPL is wedged but tmux and the worktree are fine — an in-place relaunch, cheaper than recreate_session. Returns the updated session row as JSON. Address the session with session_id OR host_alias + name.
 
 Parameters: `force`, `host_alias`, `name`, `session_id`
+
+### `revoke_client`
+
+Revoke a paired client's token by name. Its next request is refused (the auth layer only resolves live rows) and the name becomes free to pair again; the row itself is kept, revoked, for the audit trail. E_NOTFOUND when no live client holds that name. Master token only. Returns the revoked row as JSON.
+
+Parameters: `name`
 
 ### `run_prompt`
 
@@ -307,6 +339,12 @@ Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then 
 
 Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
+### `session_conversation`
+
+Read a session's recent conversation as structured turns: each turn carries the human prompt, its timestamp, the turn's end timestamp, and items that are either assistant text or a one-line tool summary (flagged when that tool call failed). turns defaults to 10 and is capped at 100; the character budget scales with it. Prefer this over session_transcript when you want the shape of the exchange rather than one flat blob. Read-only. Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet).
+
+Parameters: `session_id`, `turns`
+
 ### `session_history`
 
 Return the recorded event timeline for a session (status changes, prompts, stuck, kills). Newest-first; pass `limit` to cap (default 50). Returns the events as JSON.
@@ -330,6 +368,12 @@ Parameters: `confirm_nonce`, `content`, `host_alias`
 Set the session's friendly display name (shown when the user toggles friendly names on). Called once per task by the in-session agent — short (3–6 words). Empty string clears. Returns the updated row. Address the session with session_id OR host_alias + tmux_name.
 
 Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
+
+### `set_host_layers`
+
+Replace a host's layer assignment: one optional role plus context layers in application order. Edits fleet state only, never catalog files. Requires catalog_configure + catalog_load in the app. Master token only. Returns the host's new assignment as JSON.
+
+Parameters: `contexts`, `host_alias`, `role`
 
 ### `set_secret`
 
@@ -459,6 +503,13 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::assets::catalog_load`
 - `commands::assets::catalog_list_assets`
 - `commands::assets::catalog_get_asset`
+- `commands::assets::catalog_list_layers`
+- `commands::assets::catalog_resolve_preview`
+- `commands::assets::catalog_propose_layers`
+- `commands::assets::catalog_set_host_layers`
+- `commands::assets::catalog_layer_template`
+- `commands::assets::catalog_write_layer`
+- `commands::assets::catalog_delete_layer`
 - `commands::assets::catalog_import_host`
 - `commands::assets::assets_scan_hosts`
 - `commands::assets::assets_inventory`

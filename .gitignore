@@ -18,5 +18,8 @@ vite.config.ts.timestamp-*
 # local Claude Code settings (machine-specific, e.g. CARGO_TARGET_DIR on CargoSD)
 .claude/settings.local.json
 
+# cargo workspace target dir (root Cargo.toml)
+/target/
+
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/

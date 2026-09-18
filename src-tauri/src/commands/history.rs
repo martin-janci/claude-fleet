@@ -2,13 +2,13 @@
 //! one commit's metadata + changed files, and a file's diff within a commit.
 //! Thin wrappers over `service::repo_read`.
 
-use crate::ipc_error::IpcError;
-use crate::service::repo::SessionIdArgs;
-use crate::service::repo_read::{
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::repo::SessionIdArgs;
+use fleet_core::service::repo_read::{
     self, Branch, Commit, CommitDetail, FileDiff, RepoCommitArgs, RepoCommitDiffArgs, RepoLogArgs,
 };
-use crate::ssh::SshClient;
-use crate::store::Store;
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 

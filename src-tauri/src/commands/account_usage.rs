@@ -2,12 +2,12 @@
 //! `service::account_usage_poll`; the fetch itself is
 //! `service::account_usage` (security-reviewed, untouched here).
 
-use crate::events::EventBus;
-use crate::ipc_error::IpcError;
-use crate::service::account_usage::{AccountUsageSnapshot, UsageCache};
-use crate::service::account_usage_poll;
-use crate::ssh::SshClient;
-use crate::store::Store;
+use fleet_core::events::EventBus;
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::account_usage::{AccountUsageSnapshot, UsageCache};
+use fleet_core::service::account_usage_poll;
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tauri::State;

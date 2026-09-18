@@ -2,10 +2,10 @@
 //! lives in `service::tasks`; these only adapt `tauri::State`. The desktop
 //! is the master caller, so no per-host scoping applies here.
 
-use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
-use crate::service::tasks;
-use crate::store::{Store, TaskRow};
+use fleet_core::ipc_error::lock;
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::tasks;
+use fleet_core::store::{Store, TaskRow};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
