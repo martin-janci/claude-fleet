@@ -15,6 +15,11 @@
 #       - ./tls:/etc/fleet-hub/tls:ro
 #
 # Nothing then renews the pair for you; restart the hub after each renewal.
+# The image's HEALTHCHECK (`fleet-hub healthcheck`) inherits this environment,
+# and reads FLEET_HUB_PORT and FLEET_HUB_TLS from it — so it probes over TLS
+# exactly when the hub serves it. Set them on the service, not only in a
+# `command:` override, or the probe speaks the wrong protocol and the
+# container reads as permanently unhealthy.
 # `FLEET_HUB_TLS=auto` (ACME in the hub itself) is refused — see docs/hub.md.
 services:
   fleet-hub:

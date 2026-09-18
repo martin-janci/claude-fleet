@@ -67,6 +67,9 @@ enum Cmd {
         /// Port to probe [env: FLEET_HUB_PORT] [default: 4180]
         #[arg(long)]
         port: Option<u16>,
+        /// Whether the hub terminates TLS, so the probe speaks it too: off or cert [env: FLEET_HUB_TLS] [default: off]
+        #[arg(long)]
+        tls: Option<String>,
     },
 }
 
@@ -113,7 +116,7 @@ async fn main() -> ExitCode {
             ClientCmd::Revoke { name } => pair::client_revoke(&opts, &env, &name).await,
         },
         Cmd::SshKey => serve::ssh_key(),
-        Cmd::Healthcheck { port } => serve::healthcheck(port, &env).await,
+        Cmd::Healthcheck { port, tls } => serve::healthcheck(port, tls, &env).await,
     };
     match result {
         Ok(code) => code,
@@ -240,14 +243,21 @@ mod tests {
         assert!(Cli::try_parse_from(["fleet-hub", "client", "revoke"]).is_err());
         Cli::try_parse_from(["fleet-hub", "ssh-key"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "healthcheck"]).unwrap();
-        let Cmd::Healthcheck { port } =
-            Cli::try_parse_from(["fleet-hub", "healthcheck", "--port", "4190"])
-                .unwrap()
-                .cmd
+        let Cmd::Healthcheck { port, tls } = Cli::try_parse_from([
+            "fleet-hub",
+            "healthcheck",
+            "--port",
+            "4190",
+            "--tls",
+            "cert",
+        ])
+        .unwrap()
+        .cmd
         else {
             panic!("healthcheck --port did not parse");
         };
         assert_eq!(port, Some(4190));
+        assert_eq!(tls.as_deref(), Some("cert"));
         assert!(Cli::try_parse_from(["fleet-hub", "bogus"]).is_err());
     }
 }

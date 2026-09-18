@@ -40,7 +40,8 @@ pub const ACME_UNAVAILABLE: &str = "--tls auto (automatic ACME certificates) is 
      proxy in front of the hub (see docs/hub.md).";
 
 impl TlsMode {
-    fn parse(v: &str) -> Result<Self, String> {
+    /// Also used by `healthcheck`, which resolves the mode without a store.
+    pub(crate) fn parse(v: &str) -> Result<Self, String> {
         match v {
             "off" => Ok(Self::Off),
             "auto" => Ok(Self::Auto),
@@ -324,14 +325,27 @@ pub fn resolve(
         // like it was serving the pair it is not.
         _ => (None, None),
     };
-    // The public URL is what hosts POST hooks to and what a paired phone is
-    // sent back to. A hub that terminates TLS and then hands out an `http://`
-    // URL sends every one of them to a port that will not speak plaintext.
-    if tls.terminates_tls() && base.public && !base.url.starts_with("https://") {
+    // The public URL is what hosts POST hooks to and what `mcp/mod.rs` hands a
+    // freshly paired client as its `hub` base. A hub that terminates TLS must
+    // therefore advertise an `https://` URL, and it must advertise one at all:
+    // with no public URL the base falls back to `HubBase::loopback`, i.e.
+    // `http://127.0.0.1:<port>` — a plaintext URL for a port that now speaks
+    // only TLS, so every hook POST and every paired client is pointed at
+    // something that will not answer. Rewriting that fallback to
+    // `https://127.0.0.1` would not help: a certificate is issued for a
+    // domain, so verification would fail for every client anyway.
+    if tls.terminates_tls() && !(base.public && base.url.starts_with("https://")) {
+        let found = if base.public {
+            format!("the public URL is {}", base.url)
+        } else {
+            "no public URL is set, so hooks and paired clients would be sent to \
+             the loopback base http://127.0.0.1"
+                .to_string()
+        };
         return Err(format!(
-            "--tls {} serves https, but the public URL is {}: change it to https://",
+            "--tls {} serves https, but {found}: set --public-url to the \
+             https:// address this certificate is issued for",
             tls.as_str(),
-            base.url
         ));
     }
 
@@ -411,13 +425,15 @@ mod tests {
         HubOptions::default()
     }
 
-    /// `--tls cert` with both halves pointing somewhere (the paths are not
-    /// opened by `resolve`; `tls::acceptor` is what reads them).
+    /// A complete `--tls cert` configuration: both PEM halves (the paths are
+    /// not opened by `resolve`; `tls::acceptor` is what reads them) and the
+    /// `https://` public URL that TLS now requires.
     fn cert_opts() -> HubOptions {
         let mut o = opts();
         o.tls = Some("cert".into());
         o.tls_cert = Some("/etc/fleet/tls.crt".into());
         o.tls_key = Some("/etc/fleet/tls.key".into());
+        o.public_url = Some("https://fleet.example.com".into());
         o
     }
 
@@ -504,27 +520,50 @@ mod tests {
         let r = resolve(&o, &env(&[]), &|_| None).unwrap();
         assert_eq!(r.tls, TlsMode::Cert);
         assert!(!r.allow_plaintext, "nothing was waived");
-        // ... with no public URL at all either.
-        o.public_url = Some("https://fleet.example.com".into());
-        assert!(resolve(&o, &env(&[]), &|_| None).is_ok());
     }
 
     #[test]
-    fn tls_with_an_http_public_url_is_refused() {
-        // Hooks post to the public URL and a paired phone is sent back to it.
-        // Terminating TLS and then handing out http:// points every one of
-        // them at a port that will not answer plaintext.
-        let mut o = cert_opts();
-        o.public_url = Some("http://fleet.example.com".into());
-        let e = resolve(&o, &env(&[]), &|_| None).unwrap_err();
-        assert!(e.contains("https://"), "{e}");
-        o.public_url = Some("https://fleet.example.com".into());
-        assert!(resolve(&o, &env(&[]), &|_| None).is_ok());
-        // With `--tls off` an http:// public URL is still fine (a private
-        // network, a container-internal hop) — that rule is unchanged.
+    fn tls_needs_an_https_public_url() {
+        // Hooks post to the public URL and a paired phone is sent back to it,
+        // so a hub that terminates TLS and advertises anything else points
+        // every one of them at a port that will not answer plaintext.
+
+        // http:// — the obvious case.
+        let mut http = cert_opts();
+        http.public_url = Some("http://fleet.example.com".into());
+        let e = resolve(&http, &env(&[]), &|_| None).unwrap_err();
+        assert!(e.contains("--tls cert"), "{e}");
+        assert!(e.contains("--public-url"), "{e}");
+        assert!(e.contains("http://fleet.example.com"), "{e}");
+
+        // No public URL at all — the base then falls back to
+        // `http://127.0.0.1:<port>`, which is the same failure one branch over.
+        let mut none = cert_opts();
+        none.public_url = None;
+        let e = resolve(&none, &env(&[]), &|_| None).unwrap_err();
+        assert!(e.contains("--tls cert"), "{e}");
+        assert!(e.contains("--public-url"), "{e}");
+        assert!(
+            e.contains("127.0.0.1"),
+            "names what would be advertised: {e}"
+        );
+        // ... on a loopback bind too, where the plaintext rule never fired.
+        let mut loopback = none.clone();
+        loopback.bind = Some("127.0.0.1".into());
+        assert!(resolve(&loopback, &env(&[]), &|_| None).is_err());
+
+        // The sibling case: with the https:// public URL it resolves.
+        let r = resolve(&cert_opts(), &env(&[]), &|_| None).unwrap();
+        assert_eq!(r.tls, TlsMode::Cert);
+        assert_eq!(r.public_url.as_deref(), Some("https://fleet.example.com"));
+
+        // With `--tls off` an http:// public URL, and none at all, are both
+        // still fine (a private network, a container-internal hop, loopback +
+        // reverse tunnels) — that rule is unchanged.
         let mut off = opts();
         off.public_url = Some("http://fleet.example.com".into());
         assert!(resolve(&off, &env(&[]), &|_| None).is_ok());
+        assert!(resolve(&opts(), &env(&[]), &|_| None).is_ok());
     }
 
     #[test]
@@ -533,6 +572,8 @@ mod tests {
             "hub.tls" => Some("cert".to_string()),
             "hub.tls_cert" => Some("/s/tls.crt".to_string()),
             "hub.tls_key" => Some("/s/tls.key".to_string()),
+            // TLS requires one; a stored `cert` comes with a stored URL too.
+            "hub.public_url" => Some("https://fleet.example.com".to_string()),
             _ => None,
         };
         let r = resolve(&opts(), &env(&[]), &settings).unwrap();

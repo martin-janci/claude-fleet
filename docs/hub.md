@@ -105,7 +105,13 @@ every 30 s, so `docker compose ps` shows the hub as `healthy` (or
 `unhealthy`) in its STATUS column. The check sends one `GET /healthz` to
 `127.0.0.1` on `FLEET_HUB_PORT` (default `4180`) and passes only when the
 answer is an HTTP status line with the body `fleet-hub ok` — so an unrelated
-process holding the port no longer reads as a healthy hub.
+process holding the port no longer reads as a healthy hub. It reads
+`FLEET_HUB_TLS` the same way, so when the hub terminates TLS itself the probe
+speaks TLS too (certificate verification off: the certificate names a public
+domain, and this is a liveness check to `127.0.0.1` carrying no credential).
+`fleet-hub healthcheck --tls off|cert` overrides that explicitly. Neither the
+port nor the TLS mode is read from `state.db`: the probe runs beside a live
+`serve` and never opens the database.
 
 `/healthz` is the one route that needs no bearer token and no `Host`
 allowlist entry, because it reveals nothing: it never opens `state.db` and
@@ -236,6 +242,19 @@ fleet-hub serve \
 - Nothing renews the certificate for you. Point the flags at the files your
   renewal tool writes (certbot, your CA's client, a mounted secret) and
   restart the hub after each renewal — the PEM pair is read once at startup.
+- The hub warns (it does not refuse) when the key file is readable by group
+  or others; `chmod 600` it.
+- `--tls cert` requires `--public-url` to be an `https://` address. Hooks post
+  to the public URL and a paired client is sent back to it, so a hub that
+  terminates TLS and advertises `http://` — or advertises nothing, which
+  falls back to `http://127.0.0.1:<port>` — would point every one of them at
+  a port that will not answer plaintext.
+
+Settings are persisted before the certificate is loaded, the same ordering the
+bind failure already has. So a run refused for a bad `--tls-cert`/`--tls-key`
+path has already stored `hub.tls=cert` and those paths: the next bare
+`fleet-hub serve` fails the same way until you correct the paths (or pass
+`--tls off`, which stores `off` again).
 
 Binding port 443 as an unprivileged user needs a capability: uncomment the
 `AmbientCapabilities=CAP_NET_BIND_SERVICE` lines in

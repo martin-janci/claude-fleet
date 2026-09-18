@@ -79,6 +79,7 @@ fn from_pem(cert: &Path, key: &Path) -> Result<tokio_rustls::TlsAcceptor, String
     }
     let private = PrivateKeyDer::from_pem_file(key)
         .map_err(|e| format!("--tls-key {}: {e}", key.display()))?;
+    warn_if_key_is_readable_by_others(key);
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
@@ -96,10 +97,108 @@ fn from_pem(cert: &Path, key: &Path) -> Result<tokio_rustls::TlsAcceptor, String
     Ok(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)))
 }
 
+/// Say so — once, at startup — when the private key is readable by anyone but
+/// its owner. Never fatal: the hub may legitimately run on a mounted secret or
+/// a file it does not own, and refusing to start over a permission bit would
+/// be worse than serving with a warning in the journal.
+#[cfg(unix)]
+fn warn_if_key_is_readable_by_others(key: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(key) else {
+        return;
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        tracing::warn!(
+            path = %key.display(),
+            mode = format!("{mode:04o}"),
+            "the TLS private key is readable by group or others; chmod 600 it"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_key_is_readable_by_others(_key: &Path) {}
+
+/// A TLS client that does **not** verify the server's certificate, for
+/// `fleet-hub healthcheck`.
+///
+/// Deliberate, and safe only because of what the probe is: an unauthenticated
+/// `GET /healthz` to `127.0.0.1` on this machine, carrying no credential and
+/// reading one fixed string back. It is a liveness check, not an
+/// authentication one — and the certificate a TLS hub presents is issued for
+/// its public domain, which `127.0.0.1` will never match, so verification
+/// could only ever fail. Nothing else in the hub uses this.
+pub fn insecure_probe_client() -> tokio_rustls::TlsConnector {
+    use tokio_rustls::rustls::ClientConfig;
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyServerCert))
+        .with_no_client_auth();
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+}
+
+/// The verifier behind [`insecure_probe_client`]. See its doc comment for why
+/// asserting validity is the right answer here and nowhere else.
+#[derive(Debug)]
+struct AcceptAnyServerCert;
+
+impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls_pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls_pki_types::UnixTime,
+    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
+    {
+        Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        tokio_rustls::rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+// `pub(crate)` so `serve`'s healthcheck tests can reuse `self_signed` and
+// `cert_resolved` rather than mint a second certificate helper.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// A complete `--tls cert` [`Resolved`], for tests that want the acceptor.
+    pub(crate) fn cert_resolved(cert: PathBuf, key: PathBuf) -> Resolved {
+        resolved(TlsMode::Cert, Some(cert), Some(key))
+    }
 
     fn resolved(tls: TlsMode, cert: Option<PathBuf>, key: Option<PathBuf>) -> Resolved {
         Resolved {
@@ -121,7 +220,7 @@ mod tests {
     /// A CA and a `localhost` leaf signed by it, written as PEM into `dir`.
     /// Returns the chain path, the key path, and the CA in DER for the test
     /// client's trust store.
-    fn self_signed(dir: &Path) -> (PathBuf, PathBuf, CertificateDer<'static>) {
+    pub(crate) fn self_signed(dir: &Path) -> (PathBuf, PathBuf, CertificateDer<'static>) {
         use rcgen::{
             BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
         };
@@ -151,6 +250,23 @@ mod tests {
         assert!(acceptor(&resolved(TlsMode::Off, None, None))
             .unwrap()
             .is_none());
+    }
+
+    /// A world-readable private key is warned about, never fatal: the hub may
+    /// legitimately run on a mounted secret it does not own.
+    #[cfg(unix)]
+    #[test]
+    fn a_loosely_permissioned_key_still_starts() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (cert, key, _) = self_signed(dir.path());
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(acceptor(&cert_resolved(cert.clone(), key.clone()))
+            .unwrap()
+            .is_some());
+        // And 0600 is the quiet path.
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(acceptor(&cert_resolved(cert, key)).unwrap().is_some());
     }
 
     #[test]

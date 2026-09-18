@@ -50,6 +50,14 @@ impl TlsAcceptor for NoTls {
 /// connections when a flood arrives.
 const HANDSHAKE_BACKLOG: usize = 64;
 
+/// How long a connection has to finish its handshake before it is dropped.
+///
+/// Without it, a peer that opens a TCP connection and then sends nothing holds
+/// a task and a file descriptor until the TCP stack gives up — minutes, and
+/// trivially repeatable. A real ClientHello arrives in one round trip, so this
+/// is generous by orders of magnitude for anything legitimate.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// An `axum::serve::Listener` yielding connections `A` has already wrapped.
 pub struct TlsListener<A: TlsAcceptor> {
     local_addr: SocketAddr,
@@ -84,15 +92,22 @@ impl<A: TlsAcceptor> TlsListener<A> {
                 let tx = tx.clone();
                 let acceptor = Arc::clone(&acceptor);
                 crate::rt::spawn(async move {
-                    match acceptor.accept(stream).await {
-                        Ok(conn) => {
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                        Ok(Ok(conn)) => {
                             // An `Err` here means the server is gone; the
                             // connection is dropped with it.
                             let _ = tx.send((conn, peer)).await;
                         }
                         // Routine: port scanners, plain-http requests to the
                         // https port, clients that reject our certificate.
-                        Err(e) => tracing::debug!(%peer, error = %e, "[mcp] TLS handshake failed"),
+                        Ok(Err(e)) => {
+                            tracing::debug!(%peer, error = %e, "[mcp] TLS handshake failed")
+                        }
+                        Err(_) => tracing::debug!(
+                            %peer,
+                            timeout_secs = HANDSHAKE_TIMEOUT.as_secs(),
+                            "[mcp] TLS handshake timed out"
+                        ),
                     }
                 });
             }
@@ -213,6 +228,45 @@ mod tests {
             }
             Ok(stream)
         }
+    }
+
+    /// Never completes, standing in for a peer that opens a connection and
+    /// then never sends a ClientHello.
+    struct NeverCompletes;
+
+    impl TlsAcceptor for NeverCompletes {
+        type Conn = TcpStream;
+        async fn accept(&self, stream: TcpStream) -> std::io::Result<TcpStream> {
+            // Hold the connection open so the timeout, not a drop, is what
+            // ends it.
+            let _held = stream;
+            std::future::pending().await
+        }
+    }
+
+    /// Without [`HANDSHAKE_TIMEOUT`] such a peer holds a task and a file
+    /// descriptor until the TCP stack gives up — minutes, and free to repeat.
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_that_never_handshakes_is_hung_up_on() {
+        let (l, addr) = bound().await;
+        let mut listener = TlsListener::spawn(l, NeverCompletes).unwrap();
+        let mut silent = TcpStream::connect(addr).await.unwrap();
+
+        // The server closing its end is what the client sees as a 0-byte read.
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(HANDSHAKE_TIMEOUT * 3, silent.read(&mut buf))
+            .await
+            .expect("the hub must hang up on a peer that never handshakes")
+            .unwrap();
+        assert_eq!(n, 0, "the connection must be closed, not left open");
+
+        // Nothing was handed to axum, and the listener is still accepting.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+        assert!(TcpStream::connect(addr).await.is_ok(), "still listening");
     }
 
     #[tokio::test]
