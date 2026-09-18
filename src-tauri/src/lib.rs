@@ -171,6 +171,15 @@ pub fn run() {
             // desktop pointed at a hub must not become a second brain
             // reconciling and mutating the same fleet.
             let backend = Backend::resolve(&store, &OsTokenStore::new(data_dir.clone()));
+            // Two managed values, one decision. `Backend` is the resolved
+            // answer (what this block branches on below); `FleetBackend` is
+            // what the commands hold — the same answer plus the `HubBackend`
+            // to call when it is remote. Built once here so that every
+            // command shares one client, and so that nothing can re-resolve
+            // the mode mid-run.
+            app.manage(std::sync::Arc::new(backend::FleetBackend::from_resolved(
+                &backend,
+            )));
             app.manage(backend.clone());
             // `owns_the_fleet()` rather than `!is_remote()`: the three tasks
             // below are what "owning the fleet" MEANS, and a unit test pins

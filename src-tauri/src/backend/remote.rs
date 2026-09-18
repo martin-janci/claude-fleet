@@ -26,6 +26,7 @@
 use super::RemoteConfig;
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::transcript::Conversation;
+use fleet_core::service::{bg_sessions, move_session, repo_read, safe_kill, sessions, worktrees};
 use fleet_core::store::{AccountRow, HostRow, SessionEvent, SessionRow, TaskRow};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -410,6 +411,329 @@ impl HubBackend {
     /// `commands::health::health_check`.
     pub async fn fleet_health(&self) -> Result<fleet_core::service::health::Health, IpcError> {
         self.call("fleet_health", json!({})).await
+    }
+}
+
+// --- the repo-browsing reads -------------------------------------------------
+//
+// The eight `commands/history.rs` + `commands/files.rs` reads. Task 2 left
+// them out to keep its `fleet-core` diff reviewable; their return types gained
+// `Deserialize` in Task 3.
+//
+// Unlike the list tools above, every tool in `mcp::tools::repo` answers
+// through plain `ok_json`, so nulls are still on the wire and these types
+// carry NO `#[serde(default)]`. A renamed field fails loudly here. See the
+// note on `service::repo_read`'s wire types.
+
+impl HubBackend {
+    /// `commands::history::repo_log`. The desktop's `all`/`limit`/`skip` are
+    /// concrete where the tool's are optional, so they are forwarded as given
+    /// rather than omitted: the tool's own defaults (`all: true`, `limit: 50`)
+    /// differ from the desktop's, and letting them apply would quietly change
+    /// what the History view shows.
+    pub async fn repo_log(
+        &self,
+        args: &repo_read::RepoLogArgs,
+    ) -> Result<Vec<repo_read::Commit>, IpcError> {
+        self.call(
+            "repo_log",
+            json!({
+                "session_id": args.session_id,
+                "all": args.all,
+                "limit": args.limit,
+                "skip": args.skip,
+            }),
+        )
+        .await
+    }
+
+    /// `commands::history::repo_branches`.
+    pub async fn repo_branches(&self, session_id: i64) -> Result<Vec<repo_read::Branch>, IpcError> {
+        self.call("repo_branches", json!({ "session_id": session_id }))
+            .await
+    }
+
+    /// `commands::history::repo_commit`.
+    pub async fn repo_commit(
+        &self,
+        session_id: i64,
+        hash: &str,
+    ) -> Result<repo_read::CommitDetail, IpcError> {
+        self.call(
+            "repo_commit",
+            json!({ "session_id": session_id, "hash": hash }),
+        )
+        .await
+    }
+
+    /// `commands::history::repo_commit_diff`.
+    pub async fn repo_commit_diff(
+        &self,
+        session_id: i64,
+        hash: &str,
+        path: &str,
+    ) -> Result<repo_read::FileDiff, IpcError> {
+        self.call(
+            "repo_commit_diff",
+            json!({ "session_id": session_id, "hash": hash, "path": path }),
+        )
+        .await
+    }
+
+    /// `commands::files::repo_changes`.
+    pub async fn repo_changes(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<repo_read::ChangedFile>, IpcError> {
+        self.call("repo_changes", json!({ "session_id": session_id }))
+            .await
+    }
+
+    /// `commands::files::repo_tree`.
+    pub async fn repo_tree(&self, session_id: i64) -> Result<repo_read::RepoTree, IpcError> {
+        self.call("repo_tree", json!({ "session_id": session_id }))
+            .await
+    }
+
+    /// `commands::files::repo_file`.
+    pub async fn repo_file(
+        &self,
+        session_id: i64,
+        path: &str,
+    ) -> Result<repo_read::FileContent, IpcError> {
+        self.call(
+            "repo_file",
+            json!({ "session_id": session_id, "path": path }),
+        )
+        .await
+    }
+
+    /// `commands::files::repo_diff`.
+    pub async fn repo_diff(
+        &self,
+        session_id: i64,
+        path: &str,
+    ) -> Result<repo_read::FileDiff, IpcError> {
+        self.call(
+            "repo_diff",
+            json!({ "session_id": session_id, "path": path }),
+        )
+        .await
+    }
+}
+
+// --- the mutations -----------------------------------------------------------
+//
+// Only the ones whose desktop arguments map **one to one** onto the tool's
+// parameters. Where they do not, the command refuses with `E_LOCAL_ONLY`
+// rather than calling a tool that would drop a field: `new_session` is the
+// case that matters (`kind`, `start_command` and `friendly_name` have no
+// counterpart in `NewSessionParams`, and a shell session is a different tool
+// entirely). A silent argument mismatch on a *mutation* is the worst failure
+// this module can have, so the rule is parity or refusal.
+//
+// Every one of these tools answers with `ok_json` of the same type the local
+// service call returns, so the mapping stays a deserialisation.
+
+impl HubBackend {
+    /// `commands::sessions::send_prompt`.
+    ///
+    /// **The prompt arrives marked.** `apply_marker` wraps every prompt from a
+    /// non-master caller in the untrusted-input marker, and a paired client is
+    /// never the master (`mcp::tools::support::apply_marker`, whose own doc
+    /// comment says "text typed on a phone always reaches an agent marked").
+    /// That is the hub's client model working as designed, not a defect here —
+    /// but it is a visible difference from standalone and belongs in the docs.
+    pub async fn send_prompt(&self, args: &sessions::SendPromptArgs) -> Result<(), IpcError> {
+        let _: Value = self
+            .call(
+                "send_prompt",
+                json!({
+                    "host_alias": args.host_alias,
+                    "tmux_name": args.tmux_name,
+                    "prompt": args.prompt,
+                    "submit": args.submit,
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// `commands::sessions::kill_session`. Answers the killed session's id.
+    pub async fn kill_session(&self, args: &sessions::KillSessionArgs) -> Result<i64, IpcError> {
+        self.call(
+            "kill_session",
+            json!({
+                "host_alias": args.host_alias,
+                "name": args.name,
+                "force": args.force,
+            }),
+        )
+        .await
+    }
+
+    /// `commands::sessions::safe_kill_session`.
+    pub async fn safe_kill_session(
+        &self,
+        args: &safe_kill::SafeKillSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        self.call(
+            "safe_kill_session",
+            json!({ "host_alias": args.host_alias, "tmux_name": args.tmux_name }),
+        )
+        .await
+    }
+
+    /// `commands::sessions::rename_session`.
+    pub async fn rename_session(
+        &self,
+        args: &sessions::RenameSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        self.call(
+            "rename_session",
+            json!({
+                "host_alias": args.host_alias,
+                "old_name": args.old_name,
+                "new_name": args.new_name,
+            }),
+        )
+        .await
+    }
+
+    /// `commands::sessions::set_session_friendly_name` — the tool is called
+    /// `set_friendly_name`, one of the two places the vocabularies differ.
+    pub async fn set_session_friendly_name(
+        &self,
+        args: &sessions::SetFriendlyNameArgs,
+    ) -> Result<SessionRow, IpcError> {
+        self.call(
+            "set_friendly_name",
+            json!({
+                "host_alias": args.host_alias,
+                "tmux_name": args.tmux_name,
+                "friendly_name": args.friendly_name,
+            }),
+        )
+        .await
+    }
+
+    /// `commands::sessions::restart_session`.
+    pub async fn restart_session(
+        &self,
+        args: &sessions::RestartSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        self.call(
+            "restart_session",
+            json!({
+                "host_alias": args.host_alias,
+                "name": args.name,
+                "force": args.force,
+            }),
+        )
+        .await
+    }
+
+    /// `commands::sessions::spawn_review`.
+    pub async fn spawn_review(
+        &self,
+        args: &sessions::SpawnReviewArgs,
+    ) -> Result<SessionRow, IpcError> {
+        self.call(
+            "spawn_review",
+            json!({
+                "source_session_id": args.source_session_id,
+                "prompt": args.prompt,
+            }),
+        )
+        .await
+    }
+
+    /// `commands::sessions::recreate_session`.
+    pub async fn recreate_session(
+        &self,
+        args: &sessions::RecreateSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        self.call(
+            "recreate_session",
+            json!({ "session_id": args.session_id, "force": args.force }),
+        )
+        .await
+    }
+
+    /// `commands::sessions::dismiss_ghost_session`. The tool answers
+    /// `{"dismissed": id}` where the command answers `()`; the body is read
+    /// and discarded so a tool error still surfaces.
+    pub async fn dismiss_ghost_session(&self, session_id: i64) -> Result<(), IpcError> {
+        let _: Value = self
+            .call("dismiss_ghost_session", json!({ "session_id": session_id }))
+            .await?;
+        Ok(())
+    }
+
+    /// `commands::sessions::new_bg_session`.
+    pub async fn new_bg_session(
+        &self,
+        args: &bg_sessions::NewBgSessionArgs,
+    ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
+        self.call(
+            "new_bg_session",
+            json!({
+                "host_alias": args.host_alias,
+                "name": args.name,
+                "prompt": args.prompt,
+            }),
+        )
+        .await
+    }
+
+    /// `commands::move_session::move_session`.
+    pub async fn move_session(
+        &self,
+        args: &move_session::MoveSessionArgs,
+    ) -> Result<move_session::MoveReport, IpcError> {
+        self.call(
+            "move_session",
+            json!({
+                "session_id": args.session_id,
+                "target_host_alias": args.target_host_alias,
+                "keep_source": args.keep_source,
+            }),
+        )
+        .await
+    }
+
+    /// `commands::worktrees::delete_worktree`. The tool answers prose, so the
+    /// text is read (which is what surfaces a tool error) and discarded.
+    pub async fn delete_worktree(
+        &self,
+        args: &worktrees::DeleteWorktreeArgs,
+    ) -> Result<(), IpcError> {
+        self.call_text(
+            "delete_worktree",
+            json!({ "worktree_id": args.worktree_id, "force": args.force }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// `commands::tasks::cancel_task`.
+    pub async fn cancel_task(&self, task_id: i64) -> Result<TaskRow, IpcError> {
+        self.call("cancel_task", json!({ "task_id": task_id }))
+            .await
+    }
+
+    /// `commands::projects::refresh_projects`.
+    pub async fn refresh_projects(
+        &self,
+    ) -> Result<Vec<fleet_core::service::projects::ProjectTreeRow>, IpcError> {
+        self.call("refresh_projects", json!({})).await
+    }
+
+    /// `commands::hosts::probe_host`. Re-probing a host is a read of the
+    /// fleet's state, not fleet administration, so a paired client may do it
+    /// (`add_host` / `remove_host` / `hide_host` are the master-only ones).
+    pub async fn probe_host(&self, alias: &str) -> Result<HostRow, IpcError> {
+        self.call("probe_host", json!({ "alias": alias })).await
     }
 }
 

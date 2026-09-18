@@ -1,0 +1,1002 @@
+//! Does every command honour the resolved backend?
+//!
+//! Four questions, four groups of tests:
+//!
+//! 1. **Remote mode calls the right tool with the right arguments.** Each
+//!    routed command is driven through its `routed::` function against a fake
+//!    transport. The `Store` handed in is a real one, so "the hub's answer
+//!    came back" is also the proof that the local path was not taken.
+//! 2. **Standalone mode still runs the local service call**, asserted per
+//!    command rather than assumed — that is the "standalone behaviour must
+//!    not change" constraint.
+//! 3. **A local-only command refuses with `E_LOCAL_ONLY`** and names where to
+//!    go instead.
+//! 4. **Nothing falls through unclassified.** `every_command_has_a_verdict`
+//!    reads `lib.rs`'s `generate_handler!` list and fails on any command that
+//!    neither routes nor guards nor is on an explicit exception list. That is
+//!    the test that matters six months from now: a command quietly left on
+//!    the local path in remote mode does not fail — it SSHes into a host with
+//!    this machine's keys and mutates a fleet the hub also manages.
+
+use super::*;
+use crate::backend::remote;
+use crate::commands;
+use fleet_core::events::NoopEventBus;
+use fleet_core::ipc_error::codes;
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
+
+// ── the doubles ─────────────────────────────────────────────────────────────
+
+/// Records every request and answers with one scripted payload.
+///
+/// A second, smaller copy of `tests_remote.rs`'s fake: that one lives inside
+/// `remote.rs`'s private test module and answers a queue of raw responses,
+/// which is what *it* is testing. This one only needs "what tool, what
+/// arguments".
+struct Fake {
+    body: String,
+    seen: Mutex<Vec<String>>,
+}
+
+impl Fake {
+    /// Answers every call with `payload` as the tool's JSON, SSE-framed the
+    /// way `POST /mcp` does (see `tests_remote.rs` for the provenance of the
+    /// framing).
+    fn answering(payload: &str) -> Arc<Self> {
+        Arc::new(Self {
+            body: format!(
+                "event: message\ndata: {}\n\n",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": { "content": [{ "type": "text", "text": payload }] },
+                })
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// `(tool, arguments)` of the single call it was given.
+    fn only_call(&self) -> (String, Value) {
+        let seen = self.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "expected exactly one hub call: {seen:?}");
+        let v: Value = serde_json::from_str(&seen[0]).expect("a JSON-RPC body");
+        assert_eq!(v["method"], "tools/call");
+        (
+            v["params"]["name"].as_str().expect("a tool").to_string(),
+            v["params"]["arguments"].clone(),
+        )
+    }
+
+    fn was_not_called(&self) {
+        let seen = self.seen.lock().unwrap();
+        assert!(
+            seen.is_empty(),
+            "this path reached the hub and must not have: {seen:?}"
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl remote::HubTransport for Fake {
+    async fn post_json(
+        &self,
+        _url: &str,
+        _bearer: &str,
+        body: String,
+    ) -> Result<remote::HubResponse, String> {
+        self.seen.lock().unwrap().push(body);
+        Ok(remote::HubResponse {
+            status: 200,
+            body: self.body.clone(),
+        })
+    }
+}
+
+fn cfg() -> RemoteConfig {
+    RemoteConfig {
+        base_url: "https://hub.example.com".into(),
+        token: "cl_s3cret-token".into(),
+        client_name: "laptop".into(),
+    }
+}
+
+fn remote_backend(fake: &Arc<Fake>) -> FleetBackend {
+    FleetBackend::remote_over(cfg(), fake.clone())
+}
+
+/// A real on-disk store; `Store`'s in-memory constructor is fleet-core-test
+/// only.
+fn store() -> (tempfile::TempDir, Mutex<Store>) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
+    (dir, Mutex::new(store))
+}
+
+fn ssh() -> Arc<SshClient> {
+    Arc::new(SshClient::new())
+}
+
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f)
+}
+
+/// A minimal but complete `SessionRow`, null-stripped the way the hub leaves
+/// one. Nothing in the local store ever looks like this.
+const SESSION_PAYLOAD: &str = r#"{"id":42,"tmux_name":"from-the-hub","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}"#;
+const HOST_PAYLOAD: &str = r#"{"alias":"trn","reachable":true,"hidden":false,"provisioned":true}"#;
+const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
+
+/// One row of the tables below: what to run, the tool it must name, and the
+/// arguments it must send.
+type Case = (
+    &'static str,
+    Value,
+    &'static str,
+    Box<dyn Fn(&FleetBackend, &Mutex<Store>, &Arc<SshClient>)>,
+);
+
+fn check(cases: Vec<Case>) {
+    for (tool, want_args, payload, run) in cases {
+        let fake = Fake::answering(payload);
+        let (_dir, st) = store();
+        run(&remote_backend(&fake), &st, &ssh());
+        let (got_tool, got_args) = fake.only_call();
+        assert_eq!(got_tool, tool, "wrong tool for {tool}");
+        assert_eq!(got_args, want_args, "wrong arguments for {tool}");
+    }
+}
+
+// ── 1. remote mode calls the right tool with the right arguments ────────────
+
+/// Every routed read, as one table: the tool it must name and the arguments
+/// it must send. A table rather than eighteen near-identical tests because
+/// the thing under test *is* a mapping, and a mapping reads best as one.
+#[test]
+fn every_routed_read_names_its_tool_and_arguments() {
+    use fleet_core::service::repo::SessionIdArgs;
+    use fleet_core::service::repo_read::{
+        RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs,
+    };
+    use fleet_core::service::sessions::RelatedSessionsArgs;
+    use fleet_core::service::worktrees::ListWorktreesArgs;
+
+    check(vec![
+        (
+            "list_sessions",
+            json!({ "summary": false, "force": true, "include_lost": true }),
+            "[]",
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::sessions::routed::list_sessions(
+                    b,
+                    Some(true),
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "related_sessions",
+            json!({ "session_id": 7 }),
+            "[]",
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::sessions::routed::related_sessions(
+                    b,
+                    RelatedSessionsArgs { session_id: 7 },
+                    s,
+                ));
+            }),
+        ),
+        (
+            "list_hosts",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::hosts::routed::list_hosts(b, s));
+            }),
+        ),
+        (
+            "list_accounts",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::hosts::routed::list_accounts(b, s));
+            }),
+        ),
+        (
+            "list_projects",
+            json!({ "summary": false }),
+            "[]",
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::projects::routed::list_projects(b, s));
+            }),
+        ),
+        (
+            "refresh_projects",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::projects::routed::refresh_projects(b, s));
+            }),
+        ),
+        (
+            "list_worktrees",
+            json!({ "project_id": 4 }),
+            "[]",
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::worktrees::routed::list_worktrees(
+                    b,
+                    ListWorktreesArgs {
+                        project_id: Some(4),
+                    },
+                    s,
+                ));
+            }),
+        ),
+        (
+            "list_tasks",
+            json!({ "requester_session_id": 2, "state": "running", "limit": 9 }),
+            "[]",
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::tasks::routed::list_tasks(
+                    b,
+                    Some(2),
+                    Some("running".into()),
+                    Some(9),
+                    s,
+                ));
+            }),
+        ),
+        (
+            "session_history",
+            // The clamp runs on this side, so the hub is asked for the same
+            // window the local store would have returned: 10_000 -> 500.
+            json!({ "session_id": 7, "limit": 500 }),
+            "[]",
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::sessions::routed::session_history(
+                    b,
+                    commands::sessions::SessionHistoryArgs {
+                        session_id: 7,
+                        limit: Some(10_000),
+                    },
+                    s,
+                ));
+            }),
+        ),
+        (
+            "session_conversation",
+            json!({ "session_id": 7, "turns": 5 }),
+            r#"{"turns":[],"truncated":false}"#,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::sessions::routed::session_conversation(
+                    b,
+                    commands::sessions::SessionConversationArgs {
+                        session_id: 7,
+                        turns: Some(5),
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "repo_log",
+            json!({ "session_id": 7, "all": true, "limit": 25, "skip": 50 }),
+            "[]",
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::history::routed::repo_log(
+                    b,
+                    RepoLogArgs {
+                        session_id: 7,
+                        all: true,
+                        limit: 25,
+                        skip: 50,
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "repo_branches",
+            json!({ "session_id": 7 }),
+            "[]",
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::history::routed::repo_branches(
+                    b,
+                    SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "repo_commit",
+            json!({ "session_id": 7, "hash": "abc123" }),
+            r#"{"hash":"abc123","subject":"s","body":"","author":"a","date":"d","files":[]}"#,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::history::routed::repo_commit(
+                    b,
+                    RepoCommitArgs {
+                        session_id: 7,
+                        hash: "abc123".into(),
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "repo_commit_diff",
+            json!({ "session_id": 7, "hash": "abc123", "path": "src/lib.rs" }),
+            r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::history::routed::repo_commit_diff(
+                    b,
+                    RepoCommitDiffArgs {
+                        session_id: 7,
+                        hash: "abc123".into(),
+                        path: "src/lib.rs".into(),
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "repo_changes",
+            json!({ "session_id": 7 }),
+            "[]",
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::files::routed::repo_changes(
+                    b,
+                    SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "repo_tree",
+            json!({ "session_id": 7 }),
+            r#"{"entries":[],"truncated":false}"#,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::files::routed::repo_tree(
+                    b,
+                    SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "repo_file",
+            json!({ "session_id": 7, "path": "src/lib.rs" }),
+            r#"{"path":"src/lib.rs","content":"","truncated":false,"binary":false,"is_dir":false,"size":0}"#,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::files::routed::repo_file(
+                    b,
+                    RepoFileArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "repo_diff",
+            json!({ "session_id": 7, "path": "src/lib.rs" }),
+            r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::files::routed::repo_diff(
+                    b,
+                    RepoFileArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+    ]);
+}
+
+/// The same for every routed mutation. Kept separate from the reads because
+/// the cost of a wrong argument here is not a wrong screen — it is a wrong
+/// action on somebody's fleet.
+#[test]
+fn every_routed_mutation_names_its_tool_and_arguments() {
+    use fleet_core::service::bg_sessions::NewBgSessionArgs;
+    use fleet_core::service::hosts::HostAliasArgs;
+    use fleet_core::service::move_session::MoveSessionArgs;
+    use fleet_core::service::safe_kill::SafeKillSessionArgs;
+    use fleet_core::service::sessions::{
+        DismissGhostSessionArgs, KillSessionArgs, RecreateSessionArgs, RenameSessionArgs,
+        RestartSessionArgs, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
+    };
+    use fleet_core::service::worktrees::DeleteWorktreeArgs;
+
+    check(vec![
+        (
+            "send_prompt",
+            json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "go", "submit": true }),
+            r#"{"delivered":true}"#,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::sessions::routed::send_prompt(
+                    b,
+                    SendPromptArgs {
+                        host_alias: "trn".into(),
+                        tmux_name: "demo".into(),
+                        prompt: "go".into(),
+                        submit: true,
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "kill_session",
+            json!({ "host_alias": "trn", "name": "demo", "force": true }),
+            "7",
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::sessions::routed::kill_session(
+                    b,
+                    KillSessionArgs {
+                        host_alias: "trn".into(),
+                        name: "demo".into(),
+                        force: true,
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "safe_kill_session",
+            json!({ "host_alias": "trn", "tmux_name": "demo" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::sessions::routed::safe_kill_session(
+                    b,
+                    SafeKillSessionArgs {
+                        host_alias: "trn".into(),
+                        tmux_name: "demo".into(),
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "rename_session",
+            json!({ "host_alias": "trn", "old_name": "a", "new_name": "b" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::sessions::routed::rename_session(
+                    b,
+                    RenameSessionArgs {
+                        host_alias: "trn".into(),
+                        old_name: "a".into(),
+                        new_name: "b".into(),
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            // The one place the two vocabularies differ: the command is
+            // `set_session_friendly_name`, the tool is `set_friendly_name`.
+            "set_friendly_name",
+            json!({ "host_alias": "trn", "tmux_name": "demo", "friendly_name": "the demo" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::sessions::routed::set_session_friendly_name(
+                    b,
+                    SetFriendlyNameArgs {
+                        host_alias: "trn".into(),
+                        tmux_name: "demo".into(),
+                        friendly_name: "the demo".into(),
+                    },
+                    s,
+                ));
+            }),
+        ),
+        (
+            "restart_session",
+            json!({ "host_alias": "trn", "name": "demo", "force": false }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::sessions::routed::restart_session(
+                    b,
+                    RestartSessionArgs {
+                        host_alias: "trn".into(),
+                        name: "demo".into(),
+                        force: false,
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "spawn_review",
+            json!({ "source_session_id": 7, "prompt": "review it" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::sessions::routed::spawn_review(
+                    b,
+                    SpawnReviewArgs {
+                        source_session_id: 7,
+                        prompt: "review it".into(),
+                        call_id: None,
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "recreate_session",
+            json!({ "session_id": 7, "force": false }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::sessions::routed::recreate_session(
+                    b,
+                    RecreateSessionArgs {
+                        session_id: 7,
+                        force: false,
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "dismiss_ghost_session",
+            json!({ "session_id": 7 }),
+            r#"{"dismissed":7}"#,
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::sessions::routed::dismiss_ghost_session(
+                    b,
+                    DismissGhostSessionArgs { session_id: 7 },
+                    s,
+                ));
+            }),
+        ),
+        (
+            "new_bg_session",
+            json!({ "host_alias": "trn", "name": "worker", "prompt": "go" }),
+            r#"{"claude_session_id":"abc"}"#,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::sessions::routed::new_bg_session(
+                    b,
+                    NewBgSessionArgs {
+                        host_alias: "trn".into(),
+                        name: "worker".into(),
+                        prompt: "go".into(),
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "delete_worktree",
+            json!({ "worktree_id": 3, "force": true }),
+            "worktree deleted",
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::worktrees::routed::delete_worktree(
+                    b,
+                    DeleteWorktreeArgs {
+                        worktree_id: 3,
+                        force: true,
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+        (
+            "cancel_task",
+            json!({ "task_id": 11 }),
+            TASK_PAYLOAD,
+            Box::new(|b, s, _| {
+                let _ = block_on(commands::tasks::routed::cancel_task(b, 11, s));
+            }),
+        ),
+        (
+            "probe_host",
+            json!({ "alias": "trn" }),
+            HOST_PAYLOAD,
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::hosts::routed::probe_host(
+                    b,
+                    HostAliasArgs {
+                        alias: "trn".into(),
+                    },
+                    s,
+                    h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ));
+            }),
+        ),
+        (
+            "move_session",
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false }),
+            "{}",
+            Box::new(|b, s, h| {
+                let _ = block_on(commands::move_session::routed::move_session(
+                    b,
+                    MoveSessionArgs {
+                        session_id: 7,
+                        target_host_alias: "hetzner".into(),
+                        keep_source: false,
+                    },
+                    s,
+                    h,
+                ));
+            }),
+        ),
+    ]);
+}
+
+/// The answer the UI gets in remote mode is the hub's, deserialised
+/// unchanged — not merged with, and not falling back to, the local database.
+#[test]
+fn a_routed_read_answers_the_hub_and_not_the_local_database() {
+    let fake = Fake::answering(&format!("[{SESSION_PAYLOAD}]"));
+    let (_dir, st) = store();
+    // Something in the local store that must NOT come back.
+    st.lock().unwrap().upsert_host("trn").unwrap();
+
+    let rows = block_on(commands::sessions::routed::list_sessions(
+        &remote_backend(&fake),
+        None,
+        &st,
+        &ssh(),
+    ))
+    .expect("the hub's rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, 42);
+    assert_eq!(rows[0].tmux_name, "from-the-hub");
+    assert_eq!(rows[0].host_alias, "hetzner");
+}
+
+/// `force` is the sidebar's Refresh button. Standalone it reconciles here;
+/// pointed at a hub it must make the HUB reconcile, not this app — a desktop
+/// reconciling a fleet it does not own is the double-brain failure.
+#[test]
+fn refresh_asks_whoever_owns_the_fleet_to_reconcile() {
+    for (force, want) in [(Some(true), true), (Some(false), false), (None, false)] {
+        let fake = Fake::answering("[]");
+        let (_dir, st) = store();
+        let _ = block_on(commands::sessions::routed::list_sessions(
+            &remote_backend(&fake),
+            force,
+            &st,
+            &ssh(),
+        ));
+        let (_, args) = fake.only_call();
+        assert_eq!(args["force"], json!(want), "for force={force:?}");
+    }
+}
+
+// ── 2. standalone mode still runs the local service call ────────────────────
+
+/// The store-backed reads answer from the store. This is the "standalone
+/// behaviour must not change" constraint, asserted per command.
+#[test]
+fn standalone_reads_still_come_from_the_local_store() {
+    let (_dir, st) = store();
+    st.lock().unwrap().upsert_host("trn").unwrap();
+
+    let local = FleetBackend::local();
+    assert!(!local.is_remote());
+
+    let hosts = block_on(commands::hosts::routed::list_hosts(&local, &st)).expect("hosts");
+    assert_eq!(hosts.len(), 1, "the seeded host must come back");
+    assert_eq!(hosts[0].alias, "trn");
+
+    let accounts = block_on(commands::hosts::routed::list_accounts(&local, &st)).expect("accounts");
+    assert!(accounts.is_empty());
+
+    let projects =
+        block_on(commands::projects::routed::list_projects(&local, &st)).expect("projects");
+    assert!(projects.is_empty());
+
+    let tasks = block_on(commands::tasks::routed::list_tasks(
+        &local, None, None, None, &st,
+    ))
+    .expect("tasks");
+    assert!(tasks.is_empty());
+
+    let events = block_on(commands::sessions::routed::session_history(
+        &local,
+        commands::sessions::SessionHistoryArgs {
+            session_id: 1,
+            limit: None,
+        },
+        &st,
+    ))
+    .expect("history");
+    assert!(events.is_empty());
+}
+
+/// The SSH-backed reads take the local path too. Proof without a network:
+/// the local path resolves the session id against the store first and answers
+/// `E_NOTFOUND` for an unknown one — an error only it can produce, since the
+/// hub arm would have returned the fake's payload instead.
+#[test]
+fn standalone_ssh_backed_reads_take_the_local_path() {
+    use fleet_core::service::repo::SessionIdArgs;
+    let (_dir, st) = store();
+    let local = FleetBackend::local();
+
+    for (what, err) in [
+        (
+            "repo_changes",
+            block_on(commands::files::routed::repo_changes(
+                &local,
+                SessionIdArgs { session_id: 999 },
+                &st,
+                &ssh(),
+            ))
+            .err(),
+        ),
+        (
+            "repo_branches",
+            block_on(commands::history::routed::repo_branches(
+                &local,
+                SessionIdArgs { session_id: 999 },
+                &st,
+                &ssh(),
+            ))
+            .err(),
+        ),
+        (
+            "session_conversation",
+            block_on(commands::sessions::routed::session_conversation(
+                &local,
+                commands::sessions::SessionConversationArgs {
+                    session_id: 999,
+                    turns: None,
+                },
+                &st,
+                &ssh(),
+            ))
+            .err(),
+        ),
+    ] {
+        let err = err.unwrap_or_else(|| panic!("{what}: an unknown session must not reach a host"));
+        assert_eq!(err.code, codes::E_NOTFOUND, "for {what}: {}", err.message);
+    }
+}
+
+// ── 3. the local-only refusals ──────────────────────────────────────────────
+
+#[test]
+fn a_local_only_command_is_a_no_op_when_standalone() {
+    assert!(FleetBackend::local()
+        .local_only("catalog_push", "do it there")
+        .is_ok());
+}
+
+#[test]
+fn a_local_only_command_refuses_in_remote_mode_and_says_where_to_go() {
+    let fake = Fake::answering("[]");
+    let err = remote_backend(&fake)
+        .local_only("provision_hosts", "provision from the hub with `fleet-hub`")
+        .expect_err("a local-only command must refuse");
+    assert_eq!(err.code, codes::E_LOCAL_ONLY);
+    assert!(err.message.contains("provision_hosts"), "{}", err.message);
+    assert!(
+        err.message.contains("provision from the hub"),
+        "the message must name what to do instead: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("hub.example.com"),
+        "and which hub is in the way: {}",
+        err.message
+    );
+    fake.was_not_called();
+}
+
+/// The refusal message carries the hub's URL, so it is an outward string and
+/// gets the same scrutiny as every other one in this module.
+#[test]
+fn a_refusal_never_carries_the_token() {
+    let fake = Fake::answering("[]");
+    let err = remote_backend(&fake)
+        .local_only("catalog_push", "push from the hub")
+        .unwrap_err();
+    assert!(!format!("{err:?}").contains("cl_s3cret-token"), "{err:?}");
+    assert!(!format!("{:?}", remote_backend(&fake)).contains("cl_s3cret-token"));
+}
+
+// ── 4. nothing falls through unclassified ───────────────────────────────────
+
+/// Commands that are deliberately the same in both modes, each with its
+/// reason. Anything not routed, not guarded and not on this list fails
+/// [`every_command_has_a_verdict`].
+const SAME_IN_BOTH_MODES: &[(&str, &str)] = &[
+    (
+        "collect_diagnostics",
+        "describes THIS process — its log tail, its tunnels, its SSH counters \
+         — and is the first thing asked for when remote mode misbehaves",
+    ),
+    (
+        "open_log_folder",
+        "this app's own log folder, which it has either way",
+    ),
+    (
+        "cancel_command",
+        "the cancellation registry is this process's, and the call it cancels \
+         is one this process started",
+    ),
+    (
+        "mcp_confirm",
+        "answers this process's own confirm queue, which is empty in remote \
+         mode — answering nothing is correct",
+    ),
+    ("mcp_pending_confirms", "the same queue, the same reason"),
+    (
+        "health_check",
+        "cannot route: it returns a bare Health, not a Result, so it has \
+         nowhere to put E_HUB_UNREACHABLE, and giving it one would change \
+         what App.svelte can receive. Deferred to Task 5, which owns the \
+         frontend — see commands/health.rs",
+    ),
+    (
+        "pty_write",
+        "acts on whatever is attached; with pty_open refused nothing ever is, \
+         so E_PTY_CLOSED is the true answer",
+    ),
+    ("pty_resize", "the same as pty_write"),
+    ("pty_drain", "the same as pty_write"),
+    (
+        "pty_close",
+        "the same as pty_write — guarding it would make closing fail",
+    ),
+];
+
+/// **The test that matters six months from now.**
+///
+/// Reads the `generate_handler!` list out of `lib.rs` and checks that every
+/// command in it has a verdict: it either routes on the backend, refuses with
+/// `local_only`, or is named in [`SAME_IN_BOTH_MODES`] with a reason.
+///
+/// Source-scanning is a blunt instrument, and this is the one place it earns
+/// its keep. What it guards against is not a wrong answer but a *missing
+/// decision*: a command added later, wired into the handler list, and left
+/// running the local service path — which in remote mode means SSHing into
+/// hosts with this machine's keys and mutating a fleet the hub also manages.
+#[test]
+fn every_command_has_a_verdict() {
+    let lib = include_str!("../lib.rs");
+    let handlers = lib
+        .split_once("generate_handler![")
+        .expect("lib.rs must still register its commands with generate_handler!")
+        .1
+        .split_once("])")
+        .expect("an unterminated generate_handler! list")
+        .0;
+
+    // `commands::sessions::list_sessions` -> ("commands/sessions.rs", "list_sessions")
+    // `pty::pty_open`                     -> ("pty.rs", "pty_open")
+    // `cancel_command`                    -> ("lib.rs", "cancel_command")
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for raw in handlers.split(',') {
+        let path = raw.trim();
+        if path.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = path.split("::").collect();
+        let name = (*parts.last().unwrap()).to_string();
+        let file = match parts.as_slice() {
+            ["commands", module, _] => format!("commands/{module}.rs"),
+            ["pty", _] => "pty.rs".to_string(),
+            [_] => "lib.rs".to_string(),
+            other => panic!("unexpected handler entry {other:?}"),
+        };
+        entries.push((file, name));
+    }
+    assert!(
+        entries.len() > 90,
+        "only {} handlers parsed — the parser broke, not the code",
+        entries.len()
+    );
+
+    let sources: std::collections::BTreeMap<&str, &str> = SOURCES.iter().copied().collect();
+    let mut unclassified = Vec::new();
+    for (file, name) in &entries {
+        if SAME_IN_BOTH_MODES.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        let src = sources
+            .get(file.as_str())
+            .unwrap_or_else(|| panic!("add {file} to SOURCES in tests_routing.rs"));
+        let start = src
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("{name} is registered but not defined in {file}"));
+        // This command's body, up to wherever the next one begins.
+        let rest = &src[start..];
+        let body = match rest.find("#[tauri::command]") {
+            Some(i) => &rest[..i],
+            None => rest,
+        };
+        if !body.contains("routed::") && !body.contains("local_only(") {
+            unclassified.push(format!("{file}::{name}"));
+        }
+    }
+
+    assert!(
+        unclassified.is_empty(),
+        "these commands neither route on the backend nor refuse with \
+         E_LOCAL_ONLY, so in remote mode they silently run against THIS \
+         machine's database and SSH keys, on a fleet the hub also \
+         manages:\n  {}\n\nGive each one a verdict: route it through a \
+         `routed::` function, guard it with `backend.local_only(...)`, or add \
+         it to SAME_IN_BOTH_MODES with the reason.",
+        unclassified.join("\n  ")
+    );
+}
+
+/// Every source file [`every_command_has_a_verdict`] needs to read.
+const SOURCES: &[(&str, &str)] = &[
+    (
+        "commands/account_usage.rs",
+        include_str!("../commands/account_usage.rs"),
+    ),
+    ("commands/assets.rs", include_str!("../commands/assets.rs")),
+    (
+        "commands/diagnostics.rs",
+        include_str!("../commands/diagnostics.rs"),
+    ),
+    ("commands/files.rs", include_str!("../commands/files.rs")),
+    ("commands/health.rs", include_str!("../commands/health.rs")),
+    (
+        "commands/history.rs",
+        include_str!("../commands/history.rs"),
+    ),
+    ("commands/hosts.rs", include_str!("../commands/hosts.rs")),
+    ("commands/mcp.rs", include_str!("../commands/mcp.rs")),
+    (
+        "commands/move_session.rs",
+        include_str!("../commands/move_session.rs"),
+    ),
+    ("commands/mutate.rs", include_str!("../commands/mutate.rs")),
+    (
+        "commands/onboarding.rs",
+        include_str!("../commands/onboarding.rs"),
+    ),
+    (
+        "commands/projects.rs",
+        include_str!("../commands/projects.rs"),
+    ),
+    (
+        "commands/sessions.rs",
+        include_str!("../commands/sessions.rs"),
+    ),
+    ("commands/tasks.rs", include_str!("../commands/tasks.rs")),
+    ("commands/upload.rs", include_str!("../commands/upload.rs")),
+    (
+        "commands/worktrees.rs",
+        include_str!("../commands/worktrees.rs"),
+    ),
+    ("pty.rs", include_str!("../pty.rs")),
+    ("lib.rs", include_str!("../lib.rs")),
+];

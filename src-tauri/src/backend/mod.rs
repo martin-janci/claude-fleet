@@ -15,10 +15,13 @@
 //! Nothing routes through [`Backend`] yet — this module only makes the choice
 //! and makes it observable.
 
+pub mod contract;
 pub mod remote;
+pub mod routing;
 pub mod token_store;
 
 use fleet_core::store::Store;
+pub use routing::FleetBackend;
 use std::sync::Mutex;
 pub use token_store::{OsTokenStore, TokenStore};
 

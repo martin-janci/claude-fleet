@@ -71,6 +71,14 @@ fn insert_before_log_tail(text: &mut String, section: &str) {
 /// Build the redacted plain-text diagnostics bundle (see
 /// `service::diagnostics`), plus the SSH ControlMaster reset counters.
 /// Reads cached state only; no network.
+///
+/// **Not guarded in remote mode, deliberately.** The rule elsewhere in
+/// `commands/` is that a command answering from the local `Store` refuses
+/// when a hub owns the fleet, because the local database is not that fleet.
+/// This bundle is the exception: it describes *this process* — its log tail,
+/// its tunnels, its SSH counters, its own database — and it is the first
+/// thing anyone asks for when remote mode misbehaves. Refusing it would make
+/// the mode that most needs a bug report the one that cannot produce one.
 #[tauri::command]
 pub fn collect_diagnostics(
     app: tauri::AppHandle,
@@ -105,6 +113,8 @@ pub fn collect_diagnostics(
 
 /// Open the log folder in the OS file manager. Returns the folder path so
 /// the UI can also show it (and offer a copy) when opening fails.
+///
+/// Same in both modes: the folder is this app's, and it has one either way.
 #[tauri::command]
 pub fn open_log_folder(app: tauri::AppHandle) -> Result<String, IpcError> {
     use tauri_plugin_opener::OpenerExt;

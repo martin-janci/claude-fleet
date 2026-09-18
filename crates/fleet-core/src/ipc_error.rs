@@ -189,6 +189,16 @@ pub mod codes {
     /// app shows the last snapshot and a banner; it never falls back to
     /// managing the fleet itself, which would make two brains for one fleet.
     pub const E_HUB_UNREACHABLE: &str = "E_HUB_UNREACHABLE";
+    /// Remote (hub-client) mode: the command only makes sense against a fleet
+    /// this process owns, and no hub tool does it. Three families — things
+    /// about *this machine* (the PTY, SSH tunnels, the local prerequisites
+    /// check), fleet administration a paired client is refused by design
+    /// (`add_host`, `provision_hosts`, secrets, asset sync), and asset-catalog
+    /// authoring, which edits a git checkout only the owning machine has.
+    ///
+    /// The message always names what to do instead: run it on the hub, or in
+    /// a standalone app. Never returned in standalone mode.
+    pub const E_LOCAL_ONLY: &str = "E_LOCAL_ONLY";
 }
 
 #[derive(Debug, Serialize)]

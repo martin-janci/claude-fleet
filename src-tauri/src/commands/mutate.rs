@@ -1,6 +1,14 @@
 //! Tauri commands for the mutating git operations of the Files tab. Thin
 //! wrappers over `service::repo_mutate`.
+//!
+//! None of the ten has a hub tool: the control API exposes the repo *reads*
+//! (`mcp::tools::repo`) and deliberately no writes, because a git mutation on
+//! a session's worktree is the agent's business and a remote client staging
+//! or committing under it would race whatever it is doing. So all ten refuse
+//! in remote mode. They run over this machine's SSH connection, which a
+//! hub-client desktop has no reason to have.
 
+use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::repo::SessionIdArgs;
 use fleet_core::service::repo_mutate::{
@@ -17,9 +25,16 @@ use tauri::State;
 #[tauri::command]
 pub async fn repo_checkout(
     args: CheckoutArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "repo_checkout",
+        "the hub exposes no git-write tool — a remote client must not stage \
+         or commit under a running agent; do it in the session, or from a \
+         standalone app",
+    )?;
     repo_mutate::repo_checkout(args, &store, &ssh).await
 }
 
@@ -27,9 +42,16 @@ pub async fn repo_checkout(
 #[tauri::command]
 pub async fn repo_checkout_commit(
     args: CheckoutCommitArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "repo_checkout_commit",
+        "the hub exposes no git-write tool — a remote client must not stage \
+         or commit under a running agent; do it in the session, or from a \
+         standalone app",
+    )?;
     repo_mutate::repo_checkout_commit(args, &store, &ssh).await
 }
 
@@ -38,9 +60,16 @@ pub async fn repo_checkout_commit(
 #[tauri::command]
 pub async fn repo_create_branch(
     args: CreateBranchArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "repo_create_branch",
+        "the hub exposes no git-write tool — a remote client must not stage \
+         or commit under a running agent; do it in the session, or from a \
+         standalone app",
+    )?;
     repo_mutate::repo_create_branch(args, &store, &ssh).await
 }
 
@@ -48,9 +77,16 @@ pub async fn repo_create_branch(
 #[tauri::command]
 pub async fn repo_delete_branch(
     args: DeleteBranchArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "repo_delete_branch",
+        "the hub exposes no git-write tool — a remote client must not stage \
+         or commit under a running agent; do it in the session, or from a \
+         standalone app",
+    )?;
     repo_mutate::repo_delete_branch(args, &store, &ssh).await
 }
 
@@ -58,9 +94,16 @@ pub async fn repo_delete_branch(
 #[tauri::command]
 pub async fn repo_stage(
     args: StageArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "repo_stage",
+        "the hub exposes no git-write tool — a remote client must not stage \
+         or commit under a running agent; do it in the session, or from a \
+         standalone app",
+    )?;
     repo_mutate::repo_stage(args, &store, &ssh).await
 }
 
@@ -68,9 +111,16 @@ pub async fn repo_stage(
 #[tauri::command]
 pub async fn repo_unstage(
     args: StageArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "repo_unstage",
+        "the hub exposes no git-write tool — a remote client must not stage \
+         or commit under a running agent; do it in the session, or from a \
+         standalone app",
+    )?;
     repo_mutate::repo_unstage(args, &store, &ssh).await
 }
 
@@ -78,9 +128,16 @@ pub async fn repo_unstage(
 #[tauri::command]
 pub async fn repo_commit_create(
     args: CommitCreateArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "repo_commit_create",
+        "the hub exposes no git-write tool — a remote client must not stage \
+         or commit under a running agent; do it in the session, or from a \
+         standalone app",
+    )?;
     repo_mutate::repo_commit_create(args, &store, &ssh).await
 }
 
@@ -88,9 +145,16 @@ pub async fn repo_commit_create(
 #[tauri::command]
 pub async fn repo_fetch(
     args: SessionIdArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "repo_fetch",
+        "the hub exposes no git-write tool — a remote client must not stage \
+         or commit under a running agent; do it in the session, or from a \
+         standalone app",
+    )?;
     repo_mutate::repo_fetch(args, &store, &ssh).await
 }
 
@@ -98,9 +162,16 @@ pub async fn repo_fetch(
 #[tauri::command]
 pub async fn repo_pull(
     args: SessionIdArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "repo_pull",
+        "the hub exposes no git-write tool — a remote client must not stage \
+         or commit under a running agent; do it in the session, or from a \
+         standalone app",
+    )?;
     repo_mutate::repo_pull(args, &store, &ssh).await
 }
 
@@ -108,8 +179,15 @@ pub async fn repo_pull(
 #[tauri::command]
 pub async fn repo_push(
     args: PushArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "repo_push",
+        "the hub exposes no git-write tool — a remote client must not stage \
+         or commit under a running agent; do it in the session, or from a \
+         standalone app",
+    )?;
     repo_mutate::repo_push(args, &store, &ssh).await
 }
