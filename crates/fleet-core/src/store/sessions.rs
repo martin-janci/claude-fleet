@@ -124,6 +124,7 @@ impl Store {
                kind=excluded.kind,
                status='running',
                lost_at=NULL,
+               lost_reason=NULL,
                claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
                claude_status=COALESCE(excluded.claude_status, claude_status),
                idle_since={idle}
@@ -594,7 +595,7 @@ impl Store {
     /// the host — for both ghost and live (RAM/wedged) recreates.
     pub fn restore_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         self.conn.execute(
-            "UPDATE sessions SET status='running', lost_at=NULL WHERE id=?1",
+            "UPDATE sessions SET status='running', lost_at=NULL, lost_reason=NULL WHERE id=?1",
             rusqlite::params![id],
         )?;
         self.emit_session(id)
@@ -1019,11 +1020,19 @@ mod tests {
     fn mark_host_sessions_lost_ghosts_unseen_rows_and_keeps_every_identity_field() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("h").unwrap();
-        // Two live tmux rows on "h", one carrying a claude_session_id; keep "b".
+        let pid = s.upsert_project("o", "r", "/tmp/r").unwrap();
+        let wid = s
+            .upsert_worktree(pid, "main", "/tmp/r", Some("main"))
+            .unwrap();
+        // Two live tmux rows on "h", one carrying a claude_session_id, a
+        // friendly_name, a last_prompt, and a project/worktree; keep "b".
         let a = s
-            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .upsert_session("a", "h", Some(pid), Some(wid), 1, 1, "running", None)
             .unwrap();
         s.set_claude_session_id(a, "abc").unwrap();
+        s.set_friendly_name("h", "a", Some("My Friendly Name"))
+            .unwrap();
+        s.set_last_prompt(a, "do the thing").unwrap();
         s.upsert_session("b", "h", None, None, 1, 1, "running", None)
             .unwrap();
 
@@ -1036,6 +1045,10 @@ mod tests {
         assert_eq!(a_row.status, "ghost");
         assert_eq!(a_row.lost_at, Some(500));
         assert_eq!(a_row.claude_session_id.as_deref(), Some("abc"));
+        assert_eq!(a_row.friendly_name.as_deref(), Some("My Friendly Name"));
+        assert_eq!(a_row.last_prompt.as_deref(), Some("do the thing"));
+        assert_eq!(a_row.project_id, Some(pid));
+        assert_eq!(a_row.worktree_id, Some(wid));
         assert_eq!(
             lost_reason_of(&s, a_row.id),
             Some("host_reboot".to_string())
@@ -1064,9 +1077,50 @@ mod tests {
             "the tmux row is ghosted"
         );
         assert_eq!(
+            lost_reason_of(&s, tmux_id),
+            Some("tmux_server_gone".to_string())
+        );
+        assert_eq!(
             s.get_session_by_id(bg_id).unwrap().unwrap().status,
             "running",
             "a tmux restart does not kill a claude --bg agent"
+        );
+    }
+
+    #[test]
+    fn mark_host_sessions_lost_is_idempotent_and_does_not_re_stamp_an_already_lost_row() {
+        // Task 6 calls this on every pass while a tmux server stays down, so a
+        // second call must never clobber the first ghosting's lost_at/lost_reason
+        // — that is exactly what the `status!='ghost'` guard in the UPDATE buys.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let a = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        let first = s
+            .mark_host_sessions_lost("h", "host_reboot", &[], 500)
+            .unwrap();
+        assert_eq!(first.len(), 1);
+
+        let second = s
+            .mark_host_sessions_lost("h", "tmux_server_gone", &[], 900)
+            .unwrap();
+        assert!(
+            second.is_empty(),
+            "an already-ghosted row must not be re-stamped; got {second:?}"
+        );
+
+        let row = s.get_session_by_id(a).unwrap().unwrap();
+        assert_eq!(
+            row.lost_at,
+            Some(500),
+            "lost_at must stay at the first stamp"
+        );
+        assert_eq!(
+            lost_reason_of(&s, a),
+            Some("host_reboot".to_string()),
+            "lost_reason must stay the FIRST reason, not be overwritten by the second call"
         );
     }
 
@@ -1241,6 +1295,36 @@ mod tests {
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert_eq!(row.status, "running");
         assert_eq!(row.lost_at, None);
+    }
+
+    #[test]
+    fn upsert_bg_session_resurrection_also_clears_lost_reason() {
+        // The pane-less pruner (ghost_and_clean, shared with Phase 1) now
+        // stamps lost_reason='missing' on ghosting. A live row must never
+        // carry a stale reason once the agent reappears — PR 2 will surface
+        // lost_reason on the wire, and a "running" row with a leftover
+        // reason would be a lie.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        let id = s
+            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100, "bg")
+            .unwrap();
+        s.ghost_and_clean_bg_sessions("alpha", &[], 200).unwrap();
+        assert_eq!(
+            lost_reason_of(&s, id),
+            Some("missing".to_string()),
+            "precondition: the ghost carries a reason"
+        );
+
+        s.upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 300, "bg")
+            .unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(
+            lost_reason_of(&s, id),
+            None,
+            "a revived bg row must not keep the old lost_reason"
+        );
     }
 
     #[test]
@@ -1584,6 +1668,35 @@ mod tests {
         assert!(
             evts.iter().any(|e| e.starts_with("session:updated:")),
             "restore must emit session:updated; got: {evts:?}"
+        );
+    }
+
+    #[test]
+    fn restore_session_also_clears_lost_reason() {
+        // `recreate_session` calls this after rebuilding the tmux session on
+        // the host. A row lost with a recorded reason (e.g. `host_reboot`)
+        // must not keep carrying it once it's manually restored — a live row
+        // carries no reason.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        let id = s
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.mark_host_sessions_lost("alpha", "host_reboot", &[], 999)
+            .unwrap();
+        assert_eq!(
+            lost_reason_of(&s, id),
+            Some("host_reboot".to_string()),
+            "precondition: the ghost carries a reason"
+        );
+
+        let row = s.restore_session(id).unwrap().expect("row must exist");
+        assert_eq!(row.status, "running");
+        assert_eq!(row.lost_at, None);
+        assert_eq!(
+            lost_reason_of(&s, id),
+            None,
+            "a manually restored row must not keep the old lost_reason"
         );
     }
 
