@@ -22,6 +22,7 @@
   import SubagentBlock from './SubagentBlock.svelte';
   import CopyButton from './CopyButton.svelte';
   import { findMatches, turnIndex, rowKey } from './conversation_nav';
+  import { detectMac } from './terminal_keys';
   import {
     sessionConversation,
     listConversations,
@@ -70,7 +71,9 @@
     session,
     visible,
     onOpenTerminal,
-  }: { session: SessionRow; visible: boolean; onOpenTerminal?: () => void } = $props();
+    // Find is Cmd+F on macOS (Ctrl+F moves the caret there), Ctrl+F elsewhere.
+    isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator),
+  }: { session: SessionRow; visible: boolean; onOpenTerminal?: () => void; isMac?: boolean } = $props();
 
   let conv = $state<Conversation | null>(null);
   let errorCode = $state<string | null>(null);
@@ -426,6 +429,10 @@
         : indicator.label
       : null,
   );
+  // In the template, `turnLive` marks the last turn of the current
+  // conversation while the indicator shows anything (working, blocked on a
+  // prompt in the terminal, or just sent): an unfinished tool call there is
+  // pending, not dead, so it keeps its running clock.
   // The conversation tool details are read from.
   const detailCid = $derived(viewing ?? session.claude_session_id);
 
@@ -495,7 +502,10 @@
     const el = root;
     if (!el) return;
     function onKey(e: KeyboardEvent) {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return;
+      const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+      if (!mod || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return;
+      // Nothing to search while the thread is loading or empty.
+      if (!threadShown) return;
       e.preventDefault();
       void openFind();
     }
@@ -546,7 +556,14 @@
       for (const el of Array.from(scroller.querySelectorAll<HTMLElement>('[data-row-key]'))) {
         const key = el.dataset.rowKey ?? '';
         if (!keys.has(key)) continue;
-        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        // Only the conversation's own text: not button labels (Copy, Show
+        // more, a tool row's chrome), times or other controls.
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+          acceptNode: (n) =>
+            n.parentElement?.closest('button, time, input, textarea, select, [role="button"]')
+              ? NodeFilter.FILTER_REJECT
+              : NodeFilter.FILTER_ACCEPT,
+        });
         for (let n = walker.nextNode(); n && all.length < HL_MAX_RANGES; n = walker.nextNode()) {
           const text = (n.textContent ?? '').toLowerCase();
           for (let at = text.indexOf(q); at !== -1 && all.length < HL_MAX_RANGES; at = text.indexOf(q, at + q.length)) {
@@ -580,7 +597,7 @@
     }
   }
   $effect(() => {
-    if (turnsOpen) turnsList?.focus();
+    if (turnsOpen) turnsList?.querySelector('button')?.focus();
   });
   // Close the list on an outside pointerdown (as ConversationHeader does).
   $effect(() => {
@@ -653,6 +670,8 @@
       : emptyStateText(errorCode, !!session.claude_session_id),
   );
   const canPrompt = $derived(!hasNoPane(session));
+  // The scroller (and so the thread) is on screen: find has something to search.
+  const threadShown = $derived(!(empty && !(pending && viewing === null)) && !loading);
 
   // Keep the unsent text across tab switches (the panel unmounts).
   $effect(() => {
@@ -936,15 +955,15 @@
                 type="button"
                 class="tb-btn"
                 data-testid="conv-turns-button"
-                aria-haspopup="listbox"
                 aria-expanded={turnsOpen}
                 bind:this={turnsButton}
                 onclick={() => (turnsOpen = !turnsOpen)}>{turnEntries.length} turn{turnEntries.length === 1 ? '' : 's'}</button
               >
               {#if turnsOpen}
-                <ul class="turn-index" role="listbox" aria-label="Turns" tabindex="-1" data-testid="conv-turn-index" bind:this={turnsList} onkeydown={onTurnsKey}>
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <ul class="turn-index" aria-label="Turns" data-testid="conv-turn-index" bind:this={turnsList} onkeydown={onTurnsKey}>
                   {#each turnEntries as t (t.rowKey)}
-                    <li role="option" aria-selected="false">
+                    <li>
                       <button type="button" data-testid="conv-turn-index-item" onclick={() => pickTurn(t.rowKey)}>
                         <span class="ti-label">{t.label}</span>
                         {#if t.at}<time datetime={t.at}>{relativeTime(t.at, nowMs)}</time>{/if}
@@ -992,6 +1011,7 @@
             {@const i = row.index}
             {@const isLast = i === conv.turns.length - 1}
             {@const turnRunning = isLast && viewing === null && indicator?.kind === 'working'}
+            {@const turnLive = isLast && viewing === null && indicator !== null}
             {@const groups = groupItems(turn.items)}
             {@const duration = turnRunning ? null : turnDuration(turn.at, turn.ended_at)}
             <section
@@ -1030,13 +1050,13 @@
                       <span class="copy-slot text-copy"><CopyButton text={g.text} /></span>
                     </div>
                   {:else if g.kind === 'tools' && g.tools.length === 1}
-                    <ToolLine line={g.tools[0]} sessionId={session.id} claudeSessionId={detailCid} {nowMs} live={turnRunning} />
+                    <ToolLine line={g.tools[0]} sessionId={session.id} claudeSessionId={detailCid} {nowMs} live={turnLive} />
                   {:else if g.kind === 'tools'}
                     <details class="tools" class:has-err={g.tools.some((t) => t.error)} use:autoOpen={turnRunning && j === groups.length - 1} data-testid="conv-tools">
                       <summary>{toolGroupLabel(g.tools)}</summary>
                       <div class="tools-body">
                         {#each g.tools as line, k (k)}
-                          <ToolLine {line} sessionId={session.id} claudeSessionId={detailCid} {nowMs} live={turnRunning} />
+                          <ToolLine {line} sessionId={session.id} claudeSessionId={detailCid} {nowMs} live={turnLive} />
                         {/each}
                       </div>
                     </details>
@@ -1062,7 +1082,7 @@
                   {:else if g.kind === 'interrupt'}
                     <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
                   {:else if g.kind === 'subagent'}
-                    <SubagentBlock item={g} {nowMs} live={turnRunning} />
+                    <SubagentBlock item={g} {nowMs} live={turnLive} />
                   {/if}
                 {/each}
                 {#if duration}

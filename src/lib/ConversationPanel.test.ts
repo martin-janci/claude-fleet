@@ -2007,6 +2007,10 @@ describe('ConversationPanel find, copy and turn index', () => {
       const all = registry.get('conv-find')!.ranges.map((r) => r.toString().toLowerCase());
       expect(all).toEqual(['parser', 'parser']);
       expect(registry.get('conv-find-current')!.ranges).toHaveLength(1);
+      // Control labels (the Copy buttons, times) are not painted.
+      await fireEvent.input(screen.getByTestId('conv-find-input'), { target: { value: 'copy' } });
+      await settle();
+      expect(registry.get('conv-find')?.ranges ?? []).toHaveLength(0);
       await fireEvent.click(screen.getByTestId('conv-find-close'));
       await settle();
       expect(registry.size).toBe(0);
@@ -2016,11 +2020,72 @@ describe('ConversationPanel find, copy and turn index', () => {
     }
   });
 
+  it('on macOS find is Cmd+F; Ctrl+F in the composer keeps its caret meaning', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true, isMac: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input');
+    const ctrl = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+    box.dispatchEvent(ctrl);
+    await settle();
+    expect(ctrl.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+    const cmd = new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true });
+    box.dispatchEvent(cmd);
+    await settle();
+    expect(cmd.defaultPrevented).toBe(true);
+    expect(screen.getByTestId('conv-find')).toBeTruthy();
+  });
+
+  it('elsewhere find is Ctrl+F, not Cmd+F', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true, isMac: false });
+    await settle();
+    const cmd = new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true });
+    screen.getByTestId('conv-scroller').dispatchEvent(cmd);
+    await settle();
+    expect(cmd.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+  });
+
+  it('the shortcut does nothing while there is no thread on screen', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    render(ConversationPanel, { session: session(), visible: true, isMac: false });
+    await settle();
+    expect(screen.getByTestId('conv-empty')).toBeTruthy();
+    const ev = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+    screen.getByTestId('conv-composer-input').dispatchEvent(ev);
+    await settle();
+    expect(ev.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+  });
+
+  it('while blocked on a prompt the last turn\'s pending tool call keeps running, not "no result"', async () => {
+    const at = new Date(Date.now() - 3_000).toISOString();
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            { prompt: 'a', at, ended_at: null, items: [tool('Bash(sleep)', { id: 't1', name: 'Bash', target: 'sleep', done: false, at })] },
+            { prompt: 'b', at, ended_at: null, items: [tool('Bash(rm x)', { id: 't2', name: 'Bash', target: 'rm x', done: false, at })] },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'blocked' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-blocked')).toBeTruthy();
+    const rows = screen.getAllByTestId('conv-tool');
+    expect(rows[0].textContent).toContain('no result');
+    expect(rows[1].textContent).toMatch(/running \d+s/);
+    expect(rows[1].textContent).not.toContain('no result');
+  });
+
   it('the find bar closes with its close button', async () => {
     mockedConv.mockReturnValue(ok(threeTurns()));
     render(ConversationPanel, { session: session(), visible: true });
     await settle();
-    await fireEvent.keyDown(screen.getByTestId('conv-composer-input'), { key: 'f', metaKey: true });
+    await fireEvent.keyDown(screen.getByTestId('conv-composer-input'), { key: 'f', ctrlKey: true });
     await settle();
     await fireEvent.input(screen.getByTestId('conv-find-input'), { target: { value: 'nothing like this' } });
     await settle();
