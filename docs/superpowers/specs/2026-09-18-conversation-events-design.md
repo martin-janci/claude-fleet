@@ -429,6 +429,13 @@ prepends the event, instead of refetching on field changes. The field-based
 
 ## Phase 3 — Detail UX
 
+**Status: implemented.** Tool detail (input/result) is fetched lazily per
+call through the `session_tool_detail` Tauri command — a grep of one
+`tool_use` id, capped at 8 000 chars, never part of the poll payload — rather
+than being carried in `ConvItem`. Find in conversation (§3.3) uses the CSS
+Custom Highlight API where the browser supports it, falling back to a row
+outline otherwise.
+
 ### 3.1 Tool calls
 
 - One compact line per call: icon, verb and target ("Edit
