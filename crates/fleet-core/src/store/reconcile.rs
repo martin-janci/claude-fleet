@@ -140,6 +140,7 @@ impl Store {
                worktree_key=COALESCE(excluded.worktree_key, worktree_key),
                status=CASE WHEN status='ghost' THEN 'running' ELSE status END,
                lost_at=NULL,
+               lost_reason=NULL,
                claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
                claude_status={new_status},
                effort_level=COALESCE(excluded.effort_level, effort_level),
@@ -289,7 +290,7 @@ impl Store {
                 ""
             };
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='missing'
                  WHERE host_alias=?2 AND status!='ghost' AND {kind_filter}{guard}{not_in}
                  RETURNING id"
             );

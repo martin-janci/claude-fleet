@@ -193,6 +193,65 @@ impl Store {
         Ok(())
     }
 
+    /// One-shot: mark every non-ghost row of `host_alias` NOT in `keep_names`
+    /// as lost, recording WHY (`reason`, one of `host_reboot` /
+    /// `tmux_server_gone` / `missing`). Called by the reboot/vanished-tmux
+    /// detector (Task 6) instead of waiting out the normal one-cycle ghost
+    /// grace, so the resume path can tell a reboot apart from a routine probe
+    /// miss.
+    ///
+    /// `reason == "tmux_server_gone"` only ghosts tmux-backed rows
+    /// ([`KIND_TMUX`]) — a tmux restart does not kill a `claude --bg` agent,
+    /// so those rows are left alone. Any other reason (namely `host_reboot`)
+    /// ghosts every kind, since a reboot kills bg agents too.
+    ///
+    /// Mirrors [`Self::ghost_and_clean_bg_sessions`]'s shape: its own
+    /// `unchecked_transaction`, collect the affected rows, commit, and only
+    /// THEN emit one `SessionUpdated` per row.
+    pub fn mark_host_sessions_lost(
+        &self,
+        host_alias: &str,
+        reason: &str,
+        keep_names: &[String],
+        now: i64,
+    ) -> Result<Vec<SessionRow>, rusqlite::Error> {
+        // A tmux restart does not kill `claude --bg` agents; a reboot does.
+        let kind_filter = if reason == "tmux_server_gone" {
+            KIND_TMUX
+        } else {
+            "1=1"
+        };
+        let not_in = if keep_names.is_empty() {
+            String::new()
+        } else {
+            format!(" AND tmux_name NOT IN ({})", in_clause(keep_names.len()))
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        let sql = format!(
+            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2
+             WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}{not_in}
+             RETURNING id"
+        );
+        let head: Vec<&dyn rusqlite::ToSql> = vec![&now, &reason, &host_alias];
+        let params = params_then(&head, keep_names);
+        let ids: Vec<i64> = tx
+            .prepare(&sql)?
+            .query_map(params.as_slice(), |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = Vec::new();
+        for id in &ids {
+            if let Some(row) = fetch_session_by_id(&tx, *id)? {
+                rows.push(row);
+            }
+        }
+        tx.commit()?;
+        for row in &rows {
+            self.bus
+                .emit_change(&RowChange::SessionUpdated(row.clone()));
+        }
+        Ok(rows)
+    }
+
     /// User-initiated removal of an agent row (`claude agents --json`, not a
     /// tmux session) from the list: records `claude_session_id` as dismissed
     /// as of `now` in `dismissed_agents`, then hard-deletes its `sessions`
@@ -942,6 +1001,133 @@ mod tests {
         );
         s.ghost_and_clean_bg_sessions("local", &[], 20).unwrap();
         assert!(s.get_session("bg:e1", "local").unwrap().is_none());
+    }
+
+    /// `lost_reason` deliberately has no field on `SessionRow` yet (PR 2) —
+    /// read it straight off the connection.
+    fn lost_reason_of(s: &Store, id: i64) -> Option<String> {
+        s.conn_ref()
+            .query_row(
+                "SELECT lost_reason FROM sessions WHERE id=?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn mark_host_sessions_lost_ghosts_unseen_rows_and_keeps_every_identity_field() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        // Two live tmux rows on "h", one carrying a claude_session_id; keep "b".
+        let a = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(a, "abc").unwrap();
+        s.upsert_session("b", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        let rows = s
+            .mark_host_sessions_lost("h", "host_reboot", &["b".to_string()], 500)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+
+        let a_row = s.get_session("a", "h").unwrap().unwrap();
+        assert_eq!(a_row.status, "ghost");
+        assert_eq!(a_row.lost_at, Some(500));
+        assert_eq!(a_row.claude_session_id.as_deref(), Some("abc"));
+        assert_eq!(
+            lost_reason_of(&s, a_row.id),
+            Some("host_reboot".to_string())
+        );
+        assert_eq!(s.get_session("b", "h").unwrap().unwrap().status, "running");
+    }
+
+    #[test]
+    fn a_tmux_restart_does_not_mark_background_agents_lost() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        // One live tmux row + one live `bg` row on "h".
+        let tmux_id = s
+            .upsert_session("work-a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let bg_id = s
+            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
+            .unwrap();
+
+        s.mark_host_sessions_lost("h", "tmux_server_gone", &[], 500)
+            .unwrap();
+
+        assert_eq!(
+            s.get_session_by_id(tmux_id).unwrap().unwrap().status,
+            "ghost",
+            "the tmux row is ghosted"
+        );
+        assert_eq!(
+            s.get_session_by_id(bg_id).unwrap().unwrap().status,
+            "running",
+            "a tmux restart does not kill a claude --bg agent"
+        );
+    }
+
+    #[test]
+    fn a_reboot_marks_background_agents_lost_too() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        // Same seed as the tmux-restart case: one tmux row + one bg row.
+        let tmux_id = s
+            .upsert_session("work-a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let bg_id = s
+            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
+            .unwrap();
+
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 500)
+            .unwrap();
+
+        assert_eq!(
+            s.get_session_by_id(tmux_id).unwrap().unwrap().status,
+            "ghost"
+        );
+        assert_eq!(
+            s.get_session_by_id(bg_id).unwrap().unwrap().status,
+            "ghost",
+            "a reboot kills bg agents too"
+        );
+        assert_eq!(lost_reason_of(&s, bg_id), Some("host_reboot".to_string()));
+    }
+
+    #[test]
+    fn phase_one_ghosting_records_missing_and_a_resurrection_clears_it() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        // apply_host_reconcile with an empty keep ⇒ the row is ghost with
+        // lost_reason 'missing'.
+        s.apply_host_reconcile(empty_probe("h", 100)).unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "ghost");
+        assert_eq!(lost_reason_of(&s, id), Some("missing".to_string()));
+
+        // Upserting it live again (the tmux session reappears) ⇒ lost_reason NULL.
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[ReconcileSession {
+                tmux_name: "a",
+                created_at: 1,
+                last_activity_at: 2,
+                ..Default::default()
+            }],
+            keep: &["a".to_string()],
+            ..empty_probe("h", 200)
+        })
+        .unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(row.lost_at, None);
+        assert_eq!(lost_reason_of(&s, id), None);
     }
 
     #[test]
