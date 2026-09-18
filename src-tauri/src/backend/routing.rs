@@ -84,6 +84,12 @@ impl FleetBackend {
             Backend::Remote(cfg) => Self {
                 hub: Some(HubBackend::new(cfg.clone())),
             },
+            // NOT `local()`: that is the standalone arm of every command,
+            // which would manage the hub's fleet from here. See
+            // `HubBackend::unavailable`.
+            Backend::Unavailable(hub) => Self {
+                hub: Some(HubBackend::unavailable(hub.clone())),
+            },
         }
     }
 
@@ -118,14 +124,18 @@ impl FleetBackend {
     pub fn local_only(&self, what: &str, instead: &str) -> Result<(), IpcError> {
         match self.hub() {
             None => Ok(()),
-            Some(hub) => Err(IpcError::new(
-                codes::E_LOCAL_ONLY,
-                format!(
-                    "{what} is not available while this desktop is a window onto \
-                     {}; {instead}",
-                    hub.config().base_url
-                ),
-            )),
+            // A configured hub this launch cannot use: "do it on the hub" is
+            // not the problem, the hub is, so say that instead.
+            Some(hub) => Err(hub.unavailable_error(what).unwrap_or_else(|| {
+                IpcError::new(
+                    codes::E_LOCAL_ONLY,
+                    format!(
+                        "{what} is not available while this desktop is a window onto \
+                         {}; {instead}",
+                        hub.config().base_url
+                    ),
+                )
+            })),
         }
     }
 }

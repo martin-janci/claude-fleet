@@ -26,6 +26,7 @@ const remote: HubStatus = {
   allow_plaintext: false,
   warning: null,
   restart_required: false,
+  unavailable: null,
 };
 
 beforeEach(() => {
@@ -118,6 +119,26 @@ describe('hubBlock', () => {
     const said = hubBlock('catalog_config', remote)!;
     expect(said).not.toMatch(/no authoring tool|exposes no tool/);
     expect(said).toContain('list_assets');
+  });
+});
+
+// F1: a hub is configured but this launch could not use it. The backend owns
+// nothing in that state and refuses what these controls would do, so they are
+// disabled — with the real reason, not a claim that some hub owns the fleet.
+describe('hubBlock, configured hub unavailable', () => {
+  const unavailable: HubStatus = {
+    ...STANDALONE,
+    configured_url: 'https://fleet.example.com',
+    unavailable: 'https://fleet.example.com is configured but no client token is stored',
+  };
+
+  it('blocks every action, naming the reason and Settings', () => {
+    for (const action of HUB_ACTIONS) {
+      const why = hubBlock(action, unavailable);
+      expect(why, action).not.toBeNull();
+      expect(why, action).toContain('no client token is stored');
+      expect(why!.toLowerCase(), action).toContain('settings');
+    }
   });
 });
 

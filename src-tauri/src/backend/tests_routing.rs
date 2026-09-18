@@ -178,6 +178,12 @@ fn check(cases: Vec<Case>) {
 /// the thing under test *is* a mapping, and a mapping reads best as one.
 #[test]
 fn every_routed_read_names_its_tool_and_arguments() {
+    check(routed_read_cases());
+}
+
+/// The table [`every_routed_read_names_its_tool_and_arguments`] runs; also run against a configured hub this
+/// launch cannot use, which must refuse every row.
+fn routed_read_cases() -> Vec<Case> {
     use fleet_core::service::repo::SessionIdArgs;
     use fleet_core::service::repo_read::{
         RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs,
@@ -185,7 +191,7 @@ fn every_routed_read_names_its_tool_and_arguments() {
     use fleet_core::service::sessions::RelatedSessionsArgs;
     use fleet_core::service::worktrees::ListWorktreesArgs;
 
-    check(vec![
+    vec![
         (
             "list_sessions",
             json!({ "summary": false, "force": true, "include_lost": true }),
@@ -436,7 +442,7 @@ fn every_routed_read_names_its_tool_and_arguments() {
                 .map(|_| ())
             }),
         ),
-    ]);
+    ]
 }
 
 /// The same for every routed mutation. Kept separate from the reads because
@@ -444,6 +450,12 @@ fn every_routed_read_names_its_tool_and_arguments() {
 /// action on somebody's fleet.
 #[test]
 fn every_routed_mutation_names_its_tool_and_arguments() {
+    check(routed_mutation_cases());
+}
+
+/// The table [`every_routed_mutation_names_its_tool_and_arguments`] runs; also run against a configured hub this
+/// launch cannot use, which must refuse every row.
+fn routed_mutation_cases() -> Vec<Case> {
     use fleet_core::service::bg_sessions::NewBgSessionArgs;
     use fleet_core::service::hosts::HostAliasArgs;
     use fleet_core::service::move_session::MoveSessionArgs;
@@ -454,7 +466,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
     };
     use fleet_core::service::worktrees::DeleteWorktreeArgs;
 
-    check(vec![
+    vec![
         (
             "send_prompt",
             json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "go", "submit": true }),
@@ -690,7 +702,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                 .map(|_| ())
             }),
         ),
-    ]);
+    ]
 }
 
 /// The answer the UI gets in remote mode is the hub's, deserialised
@@ -936,6 +948,67 @@ fn standalone_ssh_backed_reads_take_the_local_path() {
         let err = err.unwrap_or_else(|| panic!("{what}: an unknown session must not reach a host"));
         assert_eq!(err.code, codes::E_NOTFOUND, "for {what}: {}", err.message);
     }
+}
+
+// ── 2b. a configured hub this launch cannot use ─────────────────────────────
+
+/// What `lib.rs` builds when `hub.remote_url` is set but the hub cannot be
+/// used — here, the final review's likely real trigger, a locked keychain.
+fn unavailable_backend() -> FleetBackend {
+    FleetBackend::from_resolved(&Backend::Unavailable(super::super::UnavailableHub {
+        url: Some("https://hub.example.com".into()),
+        reason: "cannot read the client token for https://hub.example.com (the keychain \
+                 is locked)"
+            .into(),
+    }))
+}
+
+/// F1, the command half. Starting no tick is not enough: a routed command
+/// that fell back to its standalone arm would still SSH into the hub's hosts
+/// with this machine's keys, and `list_sessions` would run a reconcile pass of
+/// its own when the cache is stale. Every routed read and every routed
+/// mutation refuses instead, names the reason, and never reaches a network.
+#[test]
+fn a_configured_but_unavailable_hub_refuses_every_routed_command() {
+    let backend = unavailable_backend();
+    for (tool, _, _, run) in routed_read_cases()
+        .into_iter()
+        .chain(routed_mutation_cases())
+    {
+        let (_dir, st) = store();
+        let err = run(&backend, &st, &ssh()).expect_err(&format!(
+            "{tool} ran with a configured hub this launch cannot use; its local \
+             arm would manage the hub's fleet from this machine"
+        ));
+        assert_eq!(err.code, codes::E_HUB_UNAVAILABLE, "{tool}: {err:?}");
+        assert!(
+            err.message.contains("the keychain is locked"),
+            "{tool}: the refusal must carry the reason: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("Settings"),
+            "{tool}: and where to fix it: {}",
+            err.message
+        );
+    }
+}
+
+/// And the local-only commands, which in a working hub client say "do it on
+/// the hub", say what is actually wrong instead.
+#[test]
+fn a_configured_but_unavailable_hub_refuses_local_only_commands_with_the_reason() {
+    let err = unavailable_backend()
+        .local_only("provision_hosts", "provision from the hub with `fleet-hub`")
+        .expect_err("nothing may run against the hub's fleet from here");
+    assert_eq!(err.code, codes::E_HUB_UNAVAILABLE);
+    assert!(err.message.contains("provision_hosts"), "{}", err.message);
+    assert!(
+        err.message.contains("the keychain is locked"),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("Settings"), "{}", err.message);
 }
 
 // ── 3. the local-only refusals ──────────────────────────────────────────────

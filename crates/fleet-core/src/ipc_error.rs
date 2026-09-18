@@ -189,6 +189,13 @@ pub mod codes {
     /// app shows the last snapshot and a banner; it never falls back to
     /// managing the fleet itself, which would make two brains for one fleet.
     pub const E_HUB_UNREACHABLE: &str = "E_HUB_UNREACHABLE";
+    /// Remote (hub-client) mode: a hub is configured, but this launch could
+    /// not use it — no stored client token, a keychain that would not open,
+    /// plain `http://` without the opt-in, a URL that does not parse. The app
+    /// then owns nothing and refuses every fleet command with this code and
+    /// the reason, rather than quietly managing the hub's fleet itself. The
+    /// fix is in Settings → Hub: pair again, or Disconnect.
+    pub const E_HUB_UNAVAILABLE: &str = "E_HUB_UNAVAILABLE";
     /// Pairing: the hub URL is plain `http://` to a host that is not
     /// loopback, so the client token this pairing is about to mint — a
     /// credential for the whole fleet — would cross the network in the clear

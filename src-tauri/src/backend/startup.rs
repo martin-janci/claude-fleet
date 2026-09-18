@@ -23,7 +23,11 @@
 //!
 //! - [`tests::a_hub_client_starts_none_of_the_three`] drives this function
 //!   with a recording double and asserts nothing was started in remote mode.
-//!   Hoisting a call above the guard *inside* this function fails it.
+//!   Hoisting a call above the guard *inside* this function fails it. The
+//!   `..._starts_nothing` tests do the same for a hub that is configured but
+//!   cannot be used, one per way that can happen, and they go through
+//!   `Backend::resolve` first — the final review found the door there, not
+//!   here.
 //! - [`tests::lib_rs_cannot_start_a_background_task_behind_this_modules_back`]
 //!   asserts `lib.rs` contains no direct call to any of the three. Doing what
 //!   the reviewer did — calling `spawn_reconcile_tick` in `lib.rs` — fails
@@ -57,16 +61,19 @@ pub trait FleetTasks {
 /// Start exactly the background tasks this backend is entitled to run.
 ///
 /// Standalone: the three fleet-owning ones, and not the event bridge — there
-/// is no hub to subscribe to. Pointed at a hub: **only** the event bridge, and
-/// the early return is the whole point, because every statement below it is
-/// unreachable for a client and a test proves it rather than a comment
-/// asserting it.
+/// is no hub to subscribe to. Pointed at a hub: **only** the event bridge.
+/// Pointed at a hub this launch cannot use: **nothing at all** — there is no
+/// stream to follow, and the fleet is still the hub's.
+///
+/// A `match` rather than an `if`, so that a fourth kind of backend cannot be
+/// added without someone deciding here what it may start.
 pub fn start_background_tasks(backend: &Backend, tasks: &dyn FleetTasks) {
-    if !backend.owns_the_fleet() {
-        // Deliberately no token in this line. `base_url` carries no userinfo
-        // either — `normalise_base_url` strips it, because this line is logged
-        // and `collect_diagnostics` ships the log tail to support.
-        if let Some(cfg) = backend.remote() {
+    match backend {
+        Backend::Remote(cfg) => {
+            // Deliberately no token in this line. `base_url` carries no
+            // userinfo either — `normalise_base_url` strips it, because this
+            // line is logged and `collect_diagnostics` ships the log tail to
+            // support.
             tracing::info!(
                 hub = %cfg.base_url,
                 client = %cfg.client_name,
@@ -74,20 +81,33 @@ pub fn start_background_tasks(backend: &Backend, tasks: &dyn FleetTasks) {
                  poll and the embedded control API — the hub owns this fleet; \
                  following its event stream instead"
             );
+            // The one thing a client DOES start. Without it a hub-client
+            // desktop renders whatever it listed at startup and then never
+            // changes: the local event bus has nothing to emit, because
+            // nothing local mutates.
+            tasks.start_event_bridge();
         }
-        // The one thing a client DOES start. Without it a hub-client desktop
-        // renders whatever it listed at startup and then never changes: the
-        // local event bus has nothing to emit, because nothing local mutates.
-        tasks.start_event_bridge();
-        return;
+        Backend::Unavailable(hub) => {
+            // The final review's F1. This used to be `Local`, which starts
+            // all three below: an app the operator had pointed at a hub
+            // became a second brain for it whenever the keychain was locked
+            // at launch.
+            tracing::warn!(
+                "hub unavailable: starting no reconcile tick, no account-usage \
+                 poll, no embedded control API and no event stream — {}",
+                hub.explain()
+            );
+        }
+        Backend::Local => {
+            tracing::info!(
+                "standalone backend: local database and SSH; starting the \
+                 reconcile tick and the account-usage poll"
+            );
+            tasks.start_control_api();
+            tasks.start_reconcile_tick();
+            tasks.start_account_usage_tick();
+        }
     }
-    tracing::info!(
-        "standalone backend: local database and SSH; starting the reconcile \
-         tick and the account-usage poll"
-    );
-    tasks.start_control_api();
-    tasks.start_reconcile_tick();
-    tasks.start_account_usage_tick();
 }
 
 #[cfg(test)]

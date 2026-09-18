@@ -528,6 +528,34 @@ until you revoke it (`fleet-hub client revoke <name>`) — a paired client is
 refused `revoke_client` by design, so the app could not do it even if it
 tried. For a lost laptop, revoke on the hub.
 
+### When the configured hub cannot be used
+
+If a hub is configured but a launch cannot use it, the desktop **owns
+nothing** until that is fixed. It does not fall back to standalone. The
+causes are:
+
+- no client token is stored;
+- the token cannot be read, for example because the macOS keychain was locked
+  at launch or its prompt was denied;
+- the URL is plain `http://` to a host that is not loopback, and
+  `hub.allow_plaintext` is not set;
+- `hub.remote_url` does not parse;
+- the settings cannot be read, but a client token is stored, which proves the
+  app was paired.
+
+In that state it runs no reconcile tick, no account-usage poll, no embedded
+control API and no event stream. Every fleet command is refused with
+`E_HUB_UNAVAILABLE` and the reason. A red banner at the top of the window
+names the hub and the reason, with a button to Settings → Hub. There you can
+pair again, or Disconnect to go back to standalone. Either takes effect at the
+next launch.
+
+Falling back to standalone would be the dangerous choice. You pointed the app
+at a hub, so the fleet is the hub's. An app that quietly started reconciling
+it again would be a second brain for the same hosts, and that is the failure
+this mode exists to prevent. With no `hub.remote_url` at all, the app is
+standalone exactly as before.
+
 ### What is different from standalone
 
 - **Live, from the hub.** The desktop follows the hub's `GET /events` and
@@ -600,7 +628,9 @@ the missing parameters, route it then.
 
 ### Going back
 
-Disconnect in Settings and restart. The desktop's own `state.db` is untouched
+Disconnect in Settings and restart. Disconnect is also offered while the
+configured hub cannot be used (see above), so a half-finished pairing can
+always be cleared. The desktop's own `state.db` is untouched
 throughout — pointing it at a hub is a view change, not a data move — so it
 resumes managing whatever it managed before. Nothing migrates in either
 direction; see *Migrating from the desktop* above for moving a database

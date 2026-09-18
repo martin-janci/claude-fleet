@@ -15,7 +15,7 @@
   import { createDrainLoop } from './terminal_drain';
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
   import { createMouseController } from './terminal_mouse';
-  import { hubStatus, hubBlock } from './hub';
+  import { hubStatus, hubBlock, ownsTheFleet } from './hub';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -716,7 +716,7 @@
   }
 </script>
 
-{#if $hubStatus.remote}
+{#if !ownsTheFleet($hubStatus)}
   <!-- The spec's named non-goal. The PTY attaches a local `ssh`/`tmux`
        process; a hub client would need the hub to stream a pane, which is its
        own design. `pty_open` is guarded on the backend, so mounting the

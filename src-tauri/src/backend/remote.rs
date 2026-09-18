@@ -23,7 +23,7 @@
 //! is never logged, never formatted into an error, and [`RemoteConfig`]'s
 //! hand-written `Debug` redacts it.
 
-use super::RemoteConfig;
+use super::{RemoteConfig, UnavailableHub};
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::transcript::Conversation;
 use fleet_core::service::{bg_sessions, move_session, repo_read, safe_kill, sessions, worktrees};
@@ -59,6 +59,9 @@ pub trait HubTransport: Send + Sync {
 pub struct HubBackend {
     cfg: RemoteConfig,
     transport: Arc<dyn HubTransport>,
+    /// Set for a hub that is configured but that this launch cannot use:
+    /// every call is refused with this, before the transport is touched.
+    unavailable: Option<UnavailableHub>,
 }
 
 /// Redacting by construction: [`RemoteConfig`]'s own `Debug` hides the token,
@@ -78,7 +81,50 @@ impl HubBackend {
     }
 
     pub fn with_transport(cfg: RemoteConfig, transport: Arc<dyn HubTransport>) -> Self {
-        Self { cfg, transport }
+        Self {
+            cfg,
+            transport,
+            unavailable: None,
+        }
+    }
+
+    /// A hub that is configured but that this launch cannot use.
+    ///
+    /// Why a `HubBackend` at all, rather than no hub: every routed command is
+    /// `match backend.hub() { Some(h) => …, None => <the standalone call> }`,
+    /// and the standalone arm is exactly what must not run — it would SSH
+    /// into the hub's hosts with this machine's keys, and `list_sessions`
+    /// would reconcile on its own. Presenting a hub that refuses every call
+    /// sends all of them down the hub arm, where they fail with the reason,
+    /// without one command changing.
+    ///
+    /// It holds no token and its transport cannot send anything, so there is
+    /// nothing to leak and no request to make even if the refusal in
+    /// [`Self::call_text`] were ever bypassed.
+    pub fn unavailable(hub: UnavailableHub) -> Self {
+        Self {
+            cfg: RemoteConfig {
+                base_url: hub
+                    .url
+                    .clone()
+                    .unwrap_or_else(|| "the configured hub".to_string()),
+                token: String::new(),
+                client_name: String::new(),
+            },
+            transport: Arc::new(NoTransport),
+            unavailable: Some(hub),
+        }
+    }
+
+    /// The refusal for a command run while the configured hub cannot be
+    /// used, or `None` for a working client. `what` names the command.
+    pub fn unavailable_error(&self, what: &str) -> Option<IpcError> {
+        self.unavailable.as_ref().map(|hub| {
+            IpcError::new(
+                codes::E_HUB_UNAVAILABLE,
+                format!("{what} was not run: {}", hub.explain()),
+            )
+        })
     }
 
     pub fn config(&self) -> &RemoteConfig {
@@ -141,6 +187,9 @@ impl HubBackend {
     /// Call one tool and return its result text unparsed — for the tools that
     /// answer prose rather than JSON (`session_transcript`, `capture_session`).
     pub async fn call_text(&self, tool: &str, args: Value) -> Result<String, IpcError> {
+        if let Some(refused) = self.unavailable_error(tool) {
+            return Err(refused);
+        }
         let body = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -784,6 +833,22 @@ impl HubBackend {
     /// (`add_host` / `remove_host` / `hide_host` are the master-only ones).
     pub async fn probe_host(&self, alias: &str) -> Result<HostRow, IpcError> {
         self.call("probe_host", json!({ "alias": alias })).await
+    }
+}
+
+/// The transport of a hub this launch cannot use: it sends nothing. See
+/// [`HubBackend::unavailable`].
+struct NoTransport;
+
+#[async_trait::async_trait]
+impl HubTransport for NoTransport {
+    async fn post_json(
+        &self,
+        _url: &str,
+        _bearer: &str,
+        _body: String,
+    ) -> Result<HubResponse, String> {
+        Err("no request was sent: the configured hub cannot be used by this launch".into())
     }
 }
 

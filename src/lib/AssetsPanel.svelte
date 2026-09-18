@@ -16,7 +16,7 @@
   import LintAllDialog from './LintAllDialog.svelte';
   import PromptDialog from './PromptDialog.svelte';
   import { authorSessionOpened, clearAuthorSessionOpened } from './AuthorSessionDialog.svelte';
-  import { hubStatus, hubBlock } from './hub';
+  import { hubStatus, hubBlock, ownsTheFleet } from './hub';
 
   let { visible }: { visible: boolean } = $props();
 
@@ -77,7 +77,7 @@
   const catalogBlocked = $derived(hubBlock('catalog_config', $hubStatus));
 
   onMount(async () => {
-    if ($hubStatus.remote) return;
+    if (!ownsTheFleet($hubStatus)) return;
     const c = await loadCatalogConfig();
     if (c.ok && c.value) {
       await reload(false);

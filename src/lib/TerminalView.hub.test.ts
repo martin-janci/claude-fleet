@@ -58,6 +58,7 @@ const remote: HubStatus = {
   allow_plaintext: false,
   warning: null,
   restart_required: false,
+  unavailable: null,
 };
 
 const session = makeSession({});

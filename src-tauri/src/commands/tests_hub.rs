@@ -147,6 +147,46 @@ fn a_configured_but_inactive_hub_reports_the_reason_and_asks_for_a_restart() {
     assert!(warning.contains("no client token"), "{warning}");
 }
 
+/// F1: a hub is configured and THIS launch could not use it, so this process
+/// owns nothing. The frontend needs that as a state of its own — the reason,
+/// separate from `warning` — because it is what puts the banner up, keeps the
+/// refused fleet commands from being called, and shows Disconnect.
+#[test]
+fn a_configured_hub_this_launch_cannot_use_is_reported_as_unavailable() {
+    let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "https://fleet.example.com")]);
+    let tokens = InMemoryTokenStore::failing("the keychain is locked");
+    let running = Backend::resolve(&store, &tokens);
+    let got = logic::status(&running, &store, &tokens).unwrap();
+    assert!(!got.remote, "it is not talking to the hub");
+    assert_eq!(got.url, None);
+    let why = got
+        .unavailable
+        .expect("the reason this process owns nothing must reach the window");
+    assert!(why.contains("the keychain is locked"), "{why}");
+    assert!(why.contains("fleet.example.com"), "{why}");
+    assert_eq!(
+        got.configured_url.as_deref(),
+        Some("https://fleet.example.com")
+    );
+    assert!(!got.restart_required, "nothing changed since launch");
+}
+
+/// Standalone and a working client are never "unavailable".
+#[test]
+fn only_an_unusable_configured_hub_is_reported_as_unavailable() {
+    let (_dir, store) = store_with(&[]);
+    let got = logic::status(&Backend::Local, &store, &InMemoryTokenStore::empty()).unwrap();
+    assert_eq!(got.unavailable, None);
+    let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "https://fleet.example.com")]);
+    let got = logic::status(
+        &remote("https://fleet.example.com"),
+        &store,
+        &InMemoryTokenStore::with_token("cl_live"),
+    )
+    .unwrap();
+    assert_eq!(got.unavailable, None);
+}
+
 /// Requirement (d)(ii): an opted-in plaintext hub says so wherever the hub is
 /// named, on every launch, not once in a log line nobody reads.
 #[test]

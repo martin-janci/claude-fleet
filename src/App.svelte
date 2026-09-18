@@ -44,6 +44,7 @@
   import McpConfirmDialog from './lib/McpConfirmDialog.svelte';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
   import { hubStatus, loadHubStatus } from './lib/hub';
+  import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection } from './lib/hub_connection';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
@@ -144,6 +145,11 @@
     // be an error toast on every launch for a panel that does not apply), and
     // the footer names the hub it is a window onto.
     await loadHubStatus();
+    // A hub is configured but this launch could not use it. The backend owns
+    // nothing and refuses every fleet command, so each load below would only
+    // add an error toast under the banner that already explains all of them.
+    // The window shows that banner and the way to Settings, and nothing else.
+    if (get(hubStatus).unavailable) return;
     // Only a hub client has a live link to lose; see HubConnectionBanner.
     if (get(hubStatus).remote) void startHubConnection();
     const hr0 = await healthCheck();
@@ -215,6 +221,8 @@
   let lastFocusFetch = 0;
   const FOCUS_FETCH_INTERVAL_MS = 30_000;
   function onFocus() {
+    // Refused while the configured hub cannot be used; see onMount.
+    if (get(hubStatus).unavailable) return;
     const now = Date.now();
     if (now - lastFocusFetch < FOCUS_FETCH_INTERVAL_MS) return;
     lastFocusFetch = now;
@@ -518,6 +526,12 @@
 {#if $hubStatus.remote}
   <HubConnectionBanner hubUrl={$hubStatus.url} />
 {/if}
+{#if $hubStatus.unavailable}
+  <HubUnavailableBanner
+    reason={$hubStatus.unavailable}
+    hubUrl={$hubStatus.configured_url}
+    onsettings={() => settingsOpen.set(true)} />
+{/if}
 <main class="layout" style="grid-template-columns: {gridTemplate};">
   {#if sidebarCollapsed}
     <button
@@ -688,6 +702,15 @@
          this app's — `health_check` routes to the hub's `fleet_health`. The
          badge beside it is what says whose. -->
     <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'} · schema {health.schema_version}</span>
+  {:else if $hubStatus.unavailable}
+    <!-- Not "connecting…": nothing is, and nothing will until Settings. -->
+    <button
+      type="button"
+      class="hub-badge err"
+      data-testid="footer-hub-unavailable"
+      title={$hubStatus.unavailable}
+      onclick={() => settingsOpen.set(true)}>hub unavailable — managing no fleet</button
+    >
   {:else}
     <span class="muted">connecting…</span>
   {/if}

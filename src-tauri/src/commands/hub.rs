@@ -56,12 +56,17 @@ pub struct HubStatus {
     /// `hub.allow_plaintext`: this operator decided to send the client token
     /// over plain http to a routable host.
     pub allow_plaintext: bool,
-    /// Why a configured hub is not in use, or why the one in use is risky.
+    /// Why a configured hub is not in use, or why the one in use is risky —
+    /// for the stored configuration, as the next launch would resolve it.
     /// The same string `Backend::resolve` logs — it belongs in front of a
     /// person, not only in a log file.
     pub warning: Option<String>,
     /// The stored configuration no longer matches the running mode.
     pub restart_required: bool,
+    /// Set when a hub is configured but this launch could not use it, with
+    /// the reason. This process then owns NOTHING — no reconcile tick, no
+    /// usage poll, no control API — and refuses every fleet command.
+    pub unavailable: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -167,6 +172,10 @@ pub(crate) mod logic {
             allow_plaintext,
             warning: stored.warning,
             restart_required: &stored.backend != backend,
+            // What THIS process is doing, like `remote`: a hub fixed since
+            // launch is still unavailable here until the restart, which
+            // `restart_required` says.
+            unavailable: backend.unavailable().map(|hub| hub.reason.clone()),
         })
     }
 

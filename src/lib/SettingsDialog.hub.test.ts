@@ -30,6 +30,7 @@ const remote: HubStatus = {
   allow_plaintext: false,
   warning: null,
   restart_required: false,
+  unavailable: null,
 };
 
 /** Route invoke by command, with per-test overrides. */
@@ -291,5 +292,65 @@ describe('the panels that do not apply to a hub client', () => {
     expect(screen.getByTestId('projects-section')).toBeInTheDocument();
     expect(screen.getByTestId('automation-section')).toBeInTheDocument();
     expect(screen.queryByTestId('projects-remote')).toBeNull();
+  });
+});
+
+// F1: a configured hub this launch could not use. The Hub section used to say
+// "This app runs its own fleet" here — the opposite of the truth, and the
+// Disconnect that could clear a leftover pairing was hidden.
+describe('the Hub section, configured but unavailable', () => {
+  const unavailable: HubStatus = {
+    ...STANDALONE,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    warning: 'https://fleet.example.com is configured but no client token is stored',
+    unavailable: 'https://fleet.example.com is configured but no client token is stored',
+  };
+
+  beforeEach(() => {
+    hubStatus.set(unavailable);
+  });
+
+  it('says why, and does not claim this app runs its own fleet', async () => {
+    route();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    const why = await screen.findByTestId('hub-unavailable-reason');
+    expect(why.textContent).toContain('no client token is stored');
+    expect(why.textContent).toContain('fleet.example.com');
+    expect(screen.queryByTestId('hub-empty')).toBeNull();
+    expect(screen.queryByTestId('hub-connected')).toBeNull();
+  });
+
+  it('offers Disconnect, so a leftover pairing can always be cleared', async () => {
+    const inv = route({
+      hub_disconnect: { ...unavailable, configured_url: null, warning: null, restart_required: true },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('hub-disconnect'));
+    await waitFor(() =>
+      expect(inv.mock.calls.some((c) => c[0] === 'hub_disconnect')).toBe(true),
+    );
+    expect(await screen.findByTestId('hub-restart')).toBeInTheDocument();
+  });
+
+  it('offers to pair again, prefilled with the configured URL', async () => {
+    route();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    const url = (await screen.findByTestId('hub-url')) as HTMLInputElement;
+    expect(url.value).toBe('https://fleet.example.com');
+    expect(screen.getByTestId('hub-code')).toBeInTheDocument();
+  });
+
+  // This process runs no control API and no tick, and the backend refuses
+  // the commands behind these panels — same as a working hub client.
+  it('does not call the commands the backend refuses in this state', async () => {
+    const inv = route();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await screen.findByTestId('hub-section');
+    await tick();
+    await tick();
+    for (const cmd of ['mcp_status', 'get_fleet_settings']) {
+      expect(inv.mock.calls.some((c) => c[0] === cmd), cmd).toBe(false);
+    }
   });
 });

@@ -42,6 +42,15 @@ export interface HubStatus {
   warning: string | null;
   /** The stored configuration no longer matches the running mode. */
   restart_required: boolean;
+  /**
+   * Set when a hub is configured but THIS launch could not use it (no stored
+   * token, a keychain that would not open, plain http without the opt-in, a
+   * URL that does not parse), with the reason. The backend then owns nothing
+   * — no reconcile tick, no usage poll, no control API — and refuses every
+   * fleet command, rather than quietly becoming a second brain for the hub's
+   * fleet. `remote` is false in this state: nothing is talking to a hub.
+   */
+  unavailable: string | null;
 }
 
 export const STANDALONE: HubStatus = {
@@ -54,6 +63,7 @@ export const STANDALONE: HubStatus = {
   allow_plaintext: false,
   warning: null,
   restart_required: false,
+  unavailable: null,
 };
 
 /**
@@ -160,11 +170,27 @@ export type HubAction = keyof typeof REASONS;
 export const HUB_ACTIONS = Object.keys(REASONS) as HubAction[];
 
 /**
+ * Whether this process owns its fleet — standalone, and not pointed at a hub,
+ * working or not. Everything that fetches or shows a fleet-owner-only panel
+ * asks this rather than `!status.remote`, because a configured hub this launch
+ * cannot use is not a hub client and is not standalone either: it owns
+ * nothing.
+ */
+export function ownsTheFleet(status: HubStatus = get(hubStatus)): boolean {
+  return !status.remote && !status.unavailable;
+}
+
+/**
  * Why `action` is unavailable from this window, or `null` when it is
  * available. `null` in standalone mode, always: nothing here may change what
  * a standalone app does.
  */
 export function hubBlock(action: HubAction, status: HubStatus = get(hubStatus)): string | null {
+  if (status.unavailable) {
+    // Not "do it on the hub": the hub is the problem, and every action is
+    // refused until it is fixed.
+    return `Not available: ${status.unavailable}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub.`;
+  }
   if (!status.remote) return null;
   const where = status.url ?? 'the hub';
   return `${REASONS[action]}. Do it on the hub (${where}).`;

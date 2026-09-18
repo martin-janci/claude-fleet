@@ -15,6 +15,7 @@ const remote: HubStatus = {
   allow_plaintext: false,
   warning: null,
   restart_required: false,
+  unavailable: null,
 };
 
 /** Route `invoke` by command on top of the global setup mock. */
@@ -225,6 +226,73 @@ describe('the commands the UI calls unprompted', () => {
       expect(names.indexOf('hub_status')).toBeLessThan(names.lastIndexOf('list_sessions'));
     } finally {
       restore();
+    }
+  });
+});
+
+// F1 of the final review. A hub is configured (`hub.remote_url` is set) but
+// this launch could not use it: no stored token, a keychain that would not
+// open, plain http without the opt-in, a URL that does not parse. The backend
+// now owns NOTHING in that state — no reconcile tick, no usage poll, no
+// control API — so the window must say why, where it cannot be missed, and
+// lead to the place it can be fixed.
+describe('a configured hub this launch cannot use', () => {
+  const unavailable: HubStatus = {
+    ...STANDALONE,
+    configured_url: 'https://fleet.example.com',
+    warning:
+      'cannot read the client token for https://fleet.example.com (the keychain is locked)',
+    unavailable:
+      'cannot read the client token for https://fleet.example.com (the keychain is locked)',
+  };
+
+  it('says so at the top of the window, with the reason and the way to Settings', async () => {
+    const { restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? unavailable : undefined));
+    try {
+      render(App);
+      const banner = await screen.findByTestId('hub-unavailable');
+      expect(banner.getAttribute('role')).toBe('alert');
+      expect(banner.textContent).toContain('fleet.example.com');
+      expect(banner.textContent).toContain('the keychain is locked');
+      // It must not read as a working standalone app: it runs no fleet.
+      expect(banner.textContent!.toLowerCase()).toContain('not managing');
+      expect(screen.getByTestId('hub-unavailable-settings')).toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+
+  // Every fleet command is refused in this state, so asking would put a
+  // wall of identical error toasts under the banner that already explains
+  // them.
+  it('does not ask the refused fleet commands for anything', async () => {
+    const { inv, restore } = await routeInvoke((cmd) =>
+      cmd === 'hub_status' ? unavailable : undefined,
+    );
+    try {
+      render(App);
+      await screen.findByTestId('hub-unavailable');
+      await new Promise((r) => setTimeout(r, 0));
+      const asked = inv.mock.calls.map((c) => c[0] as string);
+      for (const cmd of ['health_check', 'list_account_usage', 'hub_connection', 'list_tasks']) {
+        expect(asked, cmd).not.toContain(cmd);
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('is absent in standalone and in a working hub client', async () => {
+    for (const status of [STANDALONE, remote]) {
+      const { restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? status : undefined));
+      try {
+        const { unmount } = render(App);
+        await waitFor(() => expect(screen.getByText(/schema|connecting/)).toBeInTheDocument());
+        expect(screen.queryByTestId('hub-unavailable')).toBeNull();
+        unmount();
+      } finally {
+        restore();
+      }
     }
   });
 });

@@ -40,7 +40,7 @@
     type ProjectsLayout,
   } from './fleet_settings';
   import { refreshProjects } from './projects';
-  import { hubStatus, hubPair, hubDisconnect, hubBlock } from './hub';
+  import { hubStatus, hubPair, hubDisconnect, hubBlock, ownsTheFleet } from './hub';
   import {
     attentionIdleMinutes,
     notificationPermission,
@@ -75,6 +75,10 @@
   // the click — and, just as importantly, their `onMount` fetches are not made
   // at all, or opening Settings would raise two error toasts every time.
   const isRemote = $derived($hubStatus.remote);
+  // Not the same thing: a configured hub this launch cannot use is not a hub
+  // client, but it owns no fleet either, and the backend refuses the same
+  // panels. See `ownsTheFleet`.
+  const ownsFleet = $derived(ownsTheFleet($hubStatus));
   let hubUrlDraft = $state('');
   let hubCode = $state('');
   let hubAllowPlaintext = $state(false);
@@ -121,7 +125,7 @@
 
   onMount(async () => {
     hubUrlDraft = $hubStatus.configured_url ?? '';
-    if ($hubStatus.remote) {
+    if (!ownsTheFleet($hubStatus)) {
       // Neither of these applies to a hub client, and both are guarded on
       // the backend. Asking anyway would put two error toasts on the screen
       // every time Settings is opened.
@@ -382,6 +386,34 @@
           paired client is refused <code>revoke_client</code> by design, so
           this app could not do it even if it tried.
         </p>
+      {:else if $hubStatus.unavailable}
+        <!-- A hub is configured and this launch could not use it. Saying
+             "This app runs its own fleet" here, as this section used to, was
+             the opposite of the truth: it runs NO fleet until this is fixed. -->
+        <p class="err" data-testid="hub-unavailable-reason">
+          ⚠ This app is set to use
+          {#if $hubStatus.configured_url}<code>{$hubStatus.configured_url}</code>{:else}a hub{/if},
+          but this launch cannot: {$hubStatus.unavailable}.
+        </p>
+        <p class="hook-desc">
+          Until that is fixed it manages no fleet at all — no reconcile tick, no
+          control API, every fleet action refused — rather than quietly
+          managing the hub's hosts behind the hub's back. Pair again below, or
+          Disconnect to go back to running this app's own fleet. Either takes
+          effect at the next launch.
+        </p>
+        <div class="mcp-field">
+          <button
+            class="hook-btn"
+            onclick={doDisconnect}
+            disabled={hubBusy}
+            data-testid="hub-disconnect">Disconnect</button>
+        </div>
+        <p class="hook-desc" data-testid="hub-disconnect-note">
+          Disconnect forgets the URL and any client token <em>on this
+          machine</em>. It <strong>does not revoke</strong> anything on the hub:
+          an operator does that with <code>fleet-hub client revoke</code>.
+        </p>
       {:else}
         <p class="mcp-blurb" data-testid="hub-empty">
           This app runs its own fleet: its own database, its own reconcile
@@ -452,7 +484,7 @@
       {/if}
     </section>
 
-    {#if isRemote}
+    {#if !ownsFleet}
       <section class="block" data-testid="projects-remote-section">
         <div class="section-header"><h4>Projects</h4></div>
         <p class="hook-desc" data-testid="projects-remote">
@@ -640,7 +672,7 @@
       </div>
     </section>
 
-    {#if isRemote}
+    {#if !ownsFleet}
       <section class="block" data-testid="automation-remote-section">
         <div class="section-header"><h4>Automation</h4></div>
         <p class="hook-desc" data-testid="automation-remote">

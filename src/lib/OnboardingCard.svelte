@@ -14,7 +14,7 @@
     type TunnelStatusRow,
     type StepId,
   } from './onboarding';
-  import { hubStatus, hubBlock } from './hub';
+  import { hubStatus, hubBlock, ownsTheFleet } from './hub';
 
   // Parent supplies actions that open existing dialogs.
   let { onaddhost, onnewsession }: { onaddhost: () => void; onnewsession: () => void } =
@@ -38,7 +38,7 @@
 
   // Refresh backend snapshots on mount and whenever hosts change.
   async function refreshSnapshots() {
-    if ($hubStatus.remote) return;
+    if (!ownsTheFleet($hubStatus)) return;
     const [p, t, m] = await Promise.all([checkLocalPrereqs(), tunnelStatus(), mcpStatus()]);
     if (p.ok) prereqs = p.value;
     if (t.ok) tunnels = t.value;

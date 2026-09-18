@@ -12,8 +12,12 @@
 //! deliberately not re-read later: a mode flip mid-run would leave half the
 //! app talking to a hub and half to the local store.
 //!
-//! Nothing routes through [`Backend`] yet — this module only makes the choice
-//! and makes it observable.
+//! There is a third answer, and it is the one that matters most: a hub is
+//! configured but this launch cannot use it ([`Backend::Unavailable`]). The
+//! app then owns **nothing** — no tick, no usage poll, no control API, and
+//! every fleet command refused with the reason — until the operator pairs
+//! again or disconnects. Falling back to standalone there would make it a
+//! second brain for the hub's fleet.
 
 pub mod connection;
 pub mod contract;
@@ -109,6 +113,18 @@ impl std::fmt::Debug for RemoteConfig {
 pub enum Backend {
     Local,
     Remote(RemoteConfig),
+    Unavailable(UnavailableHub),
+}
+
+/// A hub is configured — `hub.remote_url` is set, or a stored client token
+/// proves this app was paired — but this launch cannot use it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnavailableHub {
+    /// The configured hub, normalised. `None` when the stored value is not a
+    /// usable URL, or could not be read at all.
+    pub url: Option<String>,
+    /// Why this launch cannot use it, in words a person can act on.
+    pub reason: String,
 }
 
 /// The outcome of resolution: the backend plus, when a hub *was* configured
@@ -120,14 +136,51 @@ pub struct Resolution {
     pub warning: Option<String>,
 }
 
+impl Resolution {
+    /// A configured hub this launch cannot use. The warning is the reason plus
+    /// what it costs, because the reason alone ("no client token is stored")
+    /// does not say that this app is now managing nothing.
+    fn unavailable(url: Option<String>, reason: String) -> Self {
+        let hub = UnavailableHub { url, reason };
+        Resolution {
+            warning: Some(hub.explain()),
+            backend: Backend::Unavailable(hub),
+        }
+    }
+}
+
+impl UnavailableHub {
+    /// The reason, and what it means for this process. Used for the startup
+    /// log line, the Settings warning and every refused command alike, so the
+    /// three can never disagree.
+    pub fn explain(&self) -> String {
+        format!(
+            "{} — this app is set to use a hub, so it is managing no fleet of its \
+             own until that is fixed: pair again, or Disconnect, in Settings → Hub",
+            self.reason
+        )
+    }
+}
+
 impl Backend {
     /// Decide once, at startup, from the stored setting and the stored token.
     ///
-    /// Falling back to `Local` is the safe direction for every failure except
-    /// one: a half-paired app (a URL with no token) would silently go back to
-    /// managing hosts itself, which is exactly the double-brain problem. That
-    /// case is `Local` too — the app cannot talk to the hub without a token —
-    /// but it warns loudly so the operator can finish or undo the pairing.
+    /// Three outcomes, and the third is the one that matters:
+    ///
+    /// - no `hub.remote_url` → [`Backend::Local`], the ordinary standalone app;
+    /// - a usable hub → [`Backend::Remote`];
+    /// - a hub is configured but this launch cannot use it (no stored token, a
+    ///   keychain that would not open, plain http without the opt-in, a URL
+    ///   that does not parse) → [`Backend::Unavailable`], which owns
+    ///   **nothing**.
+    ///
+    /// That last case used to fall back to `Local`, with the reason in the log
+    /// and nowhere a person would see it. `Local` starts the reconcile tick,
+    /// the usage poll and the embedded control API, so an app someone had
+    /// pointed at a hub quietly became a second brain for the hub's fleet —
+    /// the one failure the remote mode exists to prevent, and the likely
+    /// trigger is as ordinary as a locked macOS keychain at launch. Falling
+    /// back is never safe here; owning nothing and saying why is.
     pub fn resolve(store: &Mutex<Store>, tokens: &dyn TokenStore) -> Backend {
         let resolved = Self::resolve_detail(store, tokens);
         if let Some(warning) = &resolved.warning {
@@ -148,37 +201,17 @@ impl Backend {
                     s.get_setting(ALLOW_PLAINTEXT_KEY),
                 ),
                 Err(_) => {
-                    // The hub URL cannot be read, so we cannot know whether
-                    // this app was paired — except that a stored client token
-                    // is proof that it was. Falling back to standalone *while
-                    // paired* is the one failure the design says must never
-                    // happen quietly: this process would start managing hosts
-                    // the hub is also managing.
-                    let was_paired = matches!(tokens.get(), Ok(Some(_)));
-                    return Resolution {
-                        backend: Backend::Local,
-                        warning: Some(if was_paired {
-                            "the settings store was poisoned and this app WAS PAIRED with a hub \
-                             (a client token is stored); it is falling back to standalone, so it \
-                             may now manage hosts the hub also manages — restart it, and do not \
-                             leave it running"
-                                .into()
-                        } else {
-                            "the settings store was poisoned; staying standalone".into()
-                        }),
-                    };
+                    return Self::unreadable_settings("the settings store was poisoned", tokens)
                 }
             }
         };
         let raw_url = match settings.0 {
             Ok(v) => v.unwrap_or_default(),
             Err(e) => {
-                return Resolution {
-                    backend: Backend::Local,
-                    warning: Some(format!(
-                        "cannot read {REMOTE_URL_KEY}: {e}; staying standalone"
-                    )),
-                }
+                return Self::unreadable_settings(
+                    &format!("cannot read {REMOTE_URL_KEY}: {e}"),
+                    tokens,
+                )
             }
         };
         let raw_url = raw_url.trim();
@@ -189,16 +222,17 @@ impl Backend {
                 warning: None,
             };
         }
+        // From here a hub IS configured, so every early return is
+        // `Unavailable` and never `Local`.
         let base_url = match normalise_base_url(raw_url) {
             Ok(u) => u,
             Err(why) => {
-                return Resolution {
-                    backend: Backend::Local,
-                    warning: Some(format!(
-                        "{REMOTE_URL_KEY} is not a usable hub address ({why}); \
-                         staying standalone — fix it in Settings"
-                    )),
-                }
+                // The raw value is not repeated: a URL that failed to parse can
+                // still carry `user:pass@`, and this text is logged and shown.
+                return Resolution::unavailable(
+                    None,
+                    format!("{REMOTE_URL_KEY} is not a usable hub address ({why})"),
+                );
             }
         };
         // Plain http to anything but loopback puts the client token on the
@@ -213,36 +247,25 @@ impl Backend {
         );
         if let Some(risk) = &plaintext {
             if !allowed {
-                return Resolution {
-                    backend: Backend::Local,
-                    warning: Some(format!(
-                        "{risk}; staying standalone — use https://, or set \
-                         {ALLOW_PLAINTEXT_KEY}=true if this hop really is \
-                         already private (a tunnel, a VPN, a container network)"
-                    )),
-                };
+                return Resolution::unavailable(
+                    Some(base_url),
+                    format!(
+                        "{risk}. Use https://, or set {ALLOW_PLAINTEXT_KEY}=true if this hop \
+                         really is already private (a tunnel, a VPN, a container network)"
+                    ),
+                );
             }
         }
 
         let token = match tokens.get() {
             Ok(Some(t)) => t,
             Ok(None) => {
-                return Resolution {
-                    backend: Backend::Local,
-                    warning: Some(format!(
-                        "{base_url} is configured but no client token is stored; \
-                         staying standalone — pair again in Settings, or clear the \
-                         hub URL to keep managing this fleet locally"
-                    )),
-                }
+                let reason = format!("{base_url} is configured but no client token is stored");
+                return Resolution::unavailable(Some(base_url), reason);
             }
             Err(e) => {
-                return Resolution {
-                    backend: Backend::Local,
-                    warning: Some(format!(
-                        "cannot read the client token for {base_url} ({e}); staying standalone"
-                    )),
-                }
+                let reason = format!("cannot read the client token for {base_url} ({e})");
+                return Resolution::unavailable(Some(base_url), reason);
             }
         };
         let client_name = settings
@@ -268,6 +291,31 @@ impl Backend {
         }
     }
 
+    /// The hub URL cannot be read, so whether this app was paired is not
+    /// known from the settings — except that a stored client token is proof
+    /// that it was. Only a token store that answers "none" proves it was not;
+    /// one that cannot be read proves nothing, and guessing standalone is the
+    /// guess that makes two brains.
+    fn unreadable_settings(what: &str, tokens: &dyn TokenStore) -> Resolution {
+        match tokens.get() {
+            Ok(None) => Resolution {
+                backend: Backend::Local,
+                warning: Some(format!("{what}; staying standalone")),
+            },
+            Ok(Some(_)) => Resolution::unavailable(
+                None,
+                format!("{what}, and this app WAS PAIRED with a hub (a client token is stored)"),
+            ),
+            Err(e) => Resolution::unavailable(
+                None,
+                format!(
+                    "{what}, and the client token store cannot be read either ({e}), so \
+                     this app may be paired with a hub"
+                ),
+            ),
+        }
+    }
+
     pub fn is_remote(&self) -> bool {
         matches!(self, Backend::Remote(_))
     }
@@ -278,11 +326,9 @@ impl Backend {
     /// tick and the embedded MCP server. Pointed at a hub it is **not**, and
     /// must run none of them: two reconcile passes over one fleet means two
     /// sets of hooks fighting over which URL a host reports to, and two
-    /// databases drifting apart.
-    ///
-    /// This exists as a named predicate rather than an `if backend.is_remote()`
-    /// at each site so that the decision is one testable thing. Every one of
-    /// the three startup tasks is behind it in `lib.rs`.
+    /// databases drifting apart. Pointed at a hub it cannot use it is not
+    /// either — the operator said the hub owns this fleet, and a failure to
+    /// reach it does not change whose fleet it is.
     pub fn owns_the_fleet(&self) -> bool {
         matches!(self, Backend::Local)
     }
@@ -290,8 +336,16 @@ impl Backend {
     /// The remote configuration, or `None` when standalone.
     pub fn remote(&self) -> Option<&RemoteConfig> {
         match self {
-            Backend::Local => None,
+            Backend::Local | Backend::Unavailable(_) => None,
             Backend::Remote(cfg) => Some(cfg),
+        }
+    }
+
+    /// The configured hub this launch cannot use, if that is the state.
+    pub fn unavailable(&self) -> Option<&UnavailableHub> {
+        match self {
+            Backend::Unavailable(hub) => Some(hub),
+            _ => None,
         }
     }
 }
@@ -396,18 +450,45 @@ mod tests {
         assert_eq!(cfg.client_name, "desktop");
     }
 
+    /// The final review's F1: every "configured but cannot be used" case
+    /// below used to resolve `Local`, which starts the reconcile tick — a
+    /// second brain for the hub's fleet. They resolve `Unavailable` now, which
+    /// owns nothing (see `startup`'s tests for the tasks themselves).
+    fn assert_unavailable(resolved: &Resolution, url: Option<&str>, context: &str) {
+        match &resolved.backend {
+            Backend::Unavailable(hub) => {
+                assert_eq!(hub.url.as_deref(), url, "{context}");
+                assert!(
+                    resolved
+                        .warning
+                        .as_deref()
+                        .is_some_and(|w| w.contains(&hub.reason)),
+                    "{context}: the reason must reach the warning a person sees: {:?}",
+                    resolved.warning
+                );
+            }
+            other => panic!(
+                "{context}: a configured hub this launch cannot use resolved to \
+                 {other:?}; anything but Unavailable either talks to a hub it \
+                 should not or makes this app a second brain for the hub's fleet"
+            ),
+        }
+        assert!(!resolved.backend.owns_the_fleet(), "{context}");
+        assert!(!resolved.backend.is_remote(), "{context}");
+    }
+
     #[test]
-    fn a_hub_url_with_no_token_resolves_local_and_says_why() {
+    fn a_hub_url_with_no_token_is_unavailable_and_says_why() {
         let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "https://fleet.example.com")]);
         let resolved = Backend::resolve_detail(&store, &InMemoryTokenStore::empty());
-        assert_eq!(resolved.backend, Backend::Local);
+        assert_unavailable(&resolved, Some("https://fleet.example.com"), "no token");
         let warning = resolved.warning.expect("a half-paired app must warn");
         assert!(warning.contains("no client token"), "{warning}");
         assert!(warning.contains("fleet.example.com"), "{warning}");
     }
 
     #[test]
-    fn an_unusable_hub_url_resolves_local_and_says_why() {
+    fn an_unusable_hub_url_is_unavailable_and_says_why() {
         for value in [
             "not a url",
             "ftp://fleet.example.com",
@@ -416,18 +497,20 @@ mod tests {
         ] {
             let (_dir, store) = store_with(&[(REMOTE_URL_KEY, value)]);
             let resolved = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("t"));
-            assert_eq!(resolved.backend, Backend::Local, "for {value:?}");
+            assert_unavailable(&resolved, None, &format!("for {value:?}"));
             let warning = resolved.warning.expect("an unusable URL must warn");
             assert!(warning.contains(REMOTE_URL_KEY), "for {value:?}: {warning}");
         }
     }
 
+    /// The likely real trigger for F1: a locked macOS keychain at launch, or
+    /// a keychain prompt the user denied.
     #[test]
-    fn a_token_store_failure_resolves_local_and_says_why() {
+    fn a_token_store_failure_is_unavailable_and_says_why() {
         let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "https://fleet.example.com")]);
         let resolved =
             Backend::resolve_detail(&store, &InMemoryTokenStore::failing("keychain locked"));
-        assert_eq!(resolved.backend, Backend::Local);
+        assert_unavailable(&resolved, Some("https://fleet.example.com"), "keychain");
         let warning = resolved.warning.expect("a keychain failure must warn");
         assert!(warning.contains("keychain locked"), "{warning}");
     }
@@ -530,6 +613,14 @@ mod tests {
              embedded MCP server — two hubs managing one fleet is the failure \
              this whole mode exists to prevent"
         );
+        assert!(
+            !Backend::Unavailable(UnavailableHub {
+                url: Some("https://fleet.example.com".into()),
+                reason: "no client token is stored".into(),
+            })
+            .owns_the_fleet(),
+            "a configured hub this launch cannot use leaves the app owning nothing"
+        );
     }
 
     /// A poisoned store mutex used to drop a *paired* app back to standalone
@@ -548,18 +639,24 @@ mod tests {
         assert!(store.lock().is_err(), "the mutex must really be poisoned");
 
         let paired = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("cl_tok"));
-        assert_eq!(paired.backend, Backend::Local);
+        assert_unavailable(&paired, None, "poisoned, paired");
         let warning = paired.warning.expect("a warning");
-        let said = warning.to_lowercase();
         assert!(
-            said.contains("was paired") && said.contains("also manages"),
+            warning.to_lowercase().contains("was paired"),
             "a paired app must be told what just happened: {warning}"
         );
         assert!(!warning.contains("cl_tok"), "{warning}");
 
+        // A token that cannot be read does not prove the app was never
+        // paired, so it is the same refusal rather than a guess.
+        let unknown =
+            Backend::resolve_detail(&store, &InMemoryTokenStore::failing("keychain locked"));
+        assert_unavailable(&unknown, None, "poisoned, token unreadable");
+
         // An app that was never paired gets the plain message; there is no
-        // second fleet for it to collide with.
+        // second fleet for it to collide with, so it stays standalone.
         let never = Backend::resolve_detail(&store, &InMemoryTokenStore::empty());
+        assert_eq!(never.backend, Backend::Local);
         let warning = never.warning.expect("a warning");
         assert!(!warning.to_lowercase().contains("was paired"), "{warning}");
     }
@@ -627,11 +724,9 @@ mod tests {
     fn a_plaintext_hub_is_refused_until_it_is_opted_into() {
         let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "http://fleet.example.com")]);
         let resolved = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("cl_tok"));
-        assert_eq!(
-            resolved.backend,
-            Backend::Local,
-            "plain http to a routable host must not carry the token silently"
-        );
+        // Plain http to a routable host must not carry the token silently —
+        // and must not turn the app into a second brain either.
+        assert_unavailable(&resolved, Some("http://fleet.example.com"), "plaintext");
         let warning = resolved.warning.expect("a warning");
         assert!(warning.contains("in the clear"), "{warning}");
         assert!(

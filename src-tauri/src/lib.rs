@@ -172,12 +172,13 @@ pub fn run() {
                 fleet_core::service::account_usage::UsageCache::new(),
             ));
             app.manage(std::sync::Arc::clone(&usage_cache));
-            // Standalone, or a window onto a `fleet-hub`? Decided once, here,
-            // from `hub.remote_url` plus the client token kept outside the
-            // database. No command routes through it yet — but the decision
-            // already governs what this process starts below, because a
-            // desktop pointed at a hub must not become a second brain
-            // reconciling and mutating the same fleet.
+            // Standalone, a window onto a `fleet-hub`, or configured for a hub
+            // this launch cannot use? Decided once, here, from
+            // `hub.remote_url` plus the client token kept outside the
+            // database. It governs what this process starts below and what
+            // every command does, because a desktop pointed at a hub — usable
+            // or not — must not become a second brain reconciling and
+            // mutating the same fleet.
             // Managed, not built and dropped: `commands::hub` writes to the
             // same store when the user pairs or disconnects, and there must
             // be exactly one implementation of "where the token lives".
