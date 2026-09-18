@@ -44,6 +44,14 @@ const OPS_KINDS = new Set([
 
 /** Which chip an event kind belongs to. `status_change` into `failed` or
  *  `blocked` counts as an error; any other status change is a turn edge. */
+const TURN_KINDS = new Set([
+  'conversation_started',
+  'conversation_ended',
+  'compact_started',
+  'compact_done',
+  'turn_done',
+]);
+
 export function eventCategory(e: Pick<SessionEvent, 'kind' | 'detail'>): EventCategory {
   const k = e.kind;
   if (k === 'stuck' || k.endsWith('_failed') || k.includes('error')) return 'errors';
@@ -51,6 +59,7 @@ export function eventCategory(e: Pick<SessionEvent, 'kind' | 'detail'>): EventCa
     const d = (e.detail ?? '').toLowerCase();
     return /\b(failed|blocked)\b/.test(d) ? 'errors' : 'turns';
   }
+  if (TURN_KINDS.has(k)) return 'turns';
   if (k.startsWith('prompt')) return 'prompts';
   if (
     OPS_KINDS.has(k) ||

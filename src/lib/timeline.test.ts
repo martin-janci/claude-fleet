@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { render } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import {
   eventCategory,
   filterEvents,
@@ -36,6 +38,14 @@ describe('eventCategory', () => {
     expect(eventCategory(ev(7, 'safe_kill_requested'))).toBe('ops');
     expect(eventCategory(ev(8, 'mcp_call'))).toBe('ops');
     expect(eventCategory(ev(9, 'task_started'))).toBe('ops');
+  });
+
+  it('maps conversation lifecycle and turn/compact kinds to turns', () => {
+    expect(eventCategory(ev(1, 'conversation_started'))).toBe('turns');
+    expect(eventCategory(ev(2, 'conversation_ended'))).toBe('turns');
+    expect(eventCategory(ev(3, 'compact_started'))).toBe('turns');
+    expect(eventCategory(ev(4, 'compact_done'))).toBe('turns');
+    expect(eventCategory(ev(5, 'turn_done'))).toBe('turns');
   });
 
   it('puts unknown kinds in other', () => {
@@ -82,5 +92,43 @@ describe('formatting', () => {
     // Today: time only. Another day: the same time with a date prefix.
     expect(eventTime(earlier, now).endsWith(eventTime(today, now))).toBe(true);
     expect(eventTime(earlier, now).length).toBeGreaterThan(eventTime(today, now).length);
+  });
+});
+
+// Timeline.svelte's push path. Kept in this file rather than a separately
+// cased `Timeline.test.ts`: this checkout's filesystem is case-insensitive
+// (APFS default), so a differently-cased sibling silently collides with this
+// one instead of coexisting (confirmed while drafting this test — a `Write`
+// to `Timeline.test.ts` overwrote this file in place).
+vi.mock('./timeline', async () => {
+  const actual = await vi.importActual<typeof import('./timeline')>('./timeline');
+  return { ...actual, sessionHistory: vi.fn() };
+});
+
+describe('Timeline component', () => {
+  it('prepends a pushed event for its session without refetching', async () => {
+    const { default: Timeline } = await import('./Timeline.svelte');
+    const { sessionHistory } = await import('./timeline');
+    const { dispatchTimelineEvents } = await import('./live_events');
+
+    const evc = (id: number, kind: string, session_id = 7) =>
+      ({ id, session_id, at: 1_789_000_000 + id, kind, detail: null, claude_session_id: 'a' });
+
+    vi.mocked(sessionHistory).mockResolvedValue({
+      ok: true,
+      value: [evc(1, 'turn_done')],
+    } as never);
+    render(Timeline, { sessionId: 7 });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(sessionHistory).toHaveBeenCalledTimes(1);
+    dispatchTimelineEvents([evc(2, 'compact_done'), evc(3, 'turn_done', 8)]);
+    await tick();
+    const kinds = Array.from(document.querySelectorAll('li.ev')).map((li) =>
+      li.getAttribute('data-kind'),
+    );
+    expect(kinds).toEqual(['compact_done', 'turn_done']);
+    expect(sessionHistory).toHaveBeenCalledTimes(1);
   });
 });

@@ -366,6 +366,12 @@ actually on.
 
 ## Phase 2 — Conversations UI
 
+**Status: implemented.** Inline compaction (§2.2) renders from the transcript's
+`compact` item, not from `compact_started` / `compact_done` events — the
+events drive the timeline and the header's `compacting` status chip, the
+transcript item carries the summary shown inline. `api_error` system entries
+are not rendered; `stop_failure` events already cover failed turns.
+
 ### 2.1 Header
 
 A single sticky bar above the transcript:

@@ -14,6 +14,11 @@
     type EventCategory,
     type SessionEvent,
   } from './timeline';
+  import { onTimelineEvent } from './live_events';
+
+  // Matches the backend's SESSION_EVENTS_CAP (store/rows.rs): the pushed-event
+  // list is capped the same way the fetched one is.
+  const EVENTS_CAP = 500;
 
   let {
     sessionId,
@@ -59,6 +64,20 @@
       }
       void load(id);
     });
+  });
+
+  // Live push (Q9 phase 2): prepend events the backend fans out for this
+  // session instead of waiting on the next `refreshKey` refetch. Depends only
+  // on `sessionId` — registering inside `untrack` so reading/writing `events`
+  // below doesn't retrigger this effect.
+  $effect(() => {
+    const id = sessionId;
+    return untrack(() =>
+      onTimelineEvent(id, (e) => {
+        if (events.some((x) => x.id === e.id)) return;
+        events = [e, ...events].slice(0, EVENTS_CAP);
+      }),
+    );
   });
 
   function toggle(c: EventCategory) {
