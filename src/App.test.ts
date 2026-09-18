@@ -154,7 +154,6 @@ describe('App: the Conversation tab', () => {
     inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
       if (cmd === 'list_sessions') return [work, noId, bg, ext];
       if (cmd === 'session_conversation') return { turns: [], truncated: false };
-      if (cmd === 'session_conversations') return [];
       if (cmd === 'repo_changes') return [];
       if (cmd === 'repo_tree') return { entries: [], truncated: false };
       return original ? original(cmd, ...rest) : null;

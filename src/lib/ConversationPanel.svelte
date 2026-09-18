@@ -204,13 +204,14 @@
     const mine = ++listSeq;
     const r = await listConversations(id);
     if (mine !== listSeq || session.id !== id) return;
-    // A failed read keeps the list we had.
-    if (r.ok) conversations = r.value;
+    // A failed (or malformed) read keeps the list we had.
+    if (r.ok && Array.isArray(r.value)) conversations = r.value;
   }
 
-  /** Drop the thread on screen (conversation, scroll, send and probe state);
-   *  the draft is the caller's business. */
-  function resetThread() {
+  /** Drop the conversation on screen: content, live events, errors,
+   *  expansions, scroll state and the turn window; a fetch in flight is
+   *  made stale. */
+  function resetView() {
     seq++;
     conv = null;
     pushed = [];
@@ -221,6 +222,12 @@
     unseen = 0;
     turnsWanted = undefined;
     loadingOlder = false;
+  }
+
+  /** resetView plus the send and probe state of the current conversation;
+   *  the draft is the caller's business. */
+  function resetThread() {
+    resetView();
     pending = null;
     setProbe(null);
     probeSeq++;
@@ -276,16 +283,7 @@
     const leavingForNewer = id === null && newerAvailable;
     viewing = id;
     switchNotice = null;
-    seq++;
-    conv = null;
-    pushed = [];
-    errorCode = null;
-    errorMsg = null;
-    expanded = new Set();
-    atBottom = true;
-    unseen = 0;
-    turnsWanted = undefined;
-    loadingOlder = false;
+    resetView();
     if (id === null) newerAvailable = false;
     // The current conversation moved on while we were away: a prompt still
     // shown pending belonged to the old one.
@@ -318,10 +316,13 @@
 
   const events = $derived(mergeEvents(conv?.events ?? [], pushed));
   const lastEvent = $derived(lastEventLabel(events, nowMs));
+  // The notice waits for a list that knows the new conversation: before
+  // that its source is unknown and "View previous" would pick from a stale
+  // list.
   const noticeSource = $derived(
     switchNotice === null
       ? null
-      : (conversations.find((c) => c.claude_session_id === switchNotice!.cid)?.start_source ?? 'unknown'),
+      : (conversations.find((c) => c.claude_session_id === switchNotice!.cid)?.start_source ?? null),
   );
 
   // Poll while shown, and refetch at once when it becomes shown again (not
@@ -395,6 +396,10 @@
       pending: pending !== null,
       optimistic,
     }),
+  );
+
+  const thread = $derived(
+    conv ? buildThread(conv.turns, events, { blocked: viewing === null && indicator?.kind === 'blocked' }, conv.truncated) : [],
   );
 
   // One probe in flight at a time (a wedged host must not stack ssh
@@ -720,7 +725,7 @@
           </p>
         {/if}
         {#if conv}
-          {#each buildThread(conv.turns, events, { blocked: viewing === null && indicator?.kind === 'blocked' }, conv.truncated) as row (row.kind === 'turn' ? `t${row.index}` : `e${row.event.id}`)}
+          {#each thread as row (row.kind === 'turn' ? `t${row.index}` : `e${row.event.id}`)}
             {#if row.kind === 'event'}
               <div class="event" data-testid="conv-event" data-tone={row.event.tone}>
                 <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time>{timeAgo(row.event.at, nowMs)}</time>
@@ -807,9 +812,8 @@
             </div>
           </section>
         {/if}
-        {#if viewing !== null}
-          <!-- an earlier conversation: no live indicator -->
-        {:else if indicator?.kind === 'blocked'}
+        {#if viewing === null}
+        {#if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">
             <div class="blocked-text">
               <strong>Claude is waiting for you in the terminal{indicator.waiting === 'permission' ? ' (permission)' : indicator.waiting === 'input' ? ' (input)' : ''}.</strong>
@@ -824,6 +828,7 @@
             <span class="pulse" aria-hidden="true"><i></i><i></i><i></i></span>
             <span class="indicator-label">{indicator.kind === 'sent' ? 'Sent, waiting for Claude…' : indicator.label}</span>
           </div>
+        {/if}
         {/if}
       </div>
     </div>

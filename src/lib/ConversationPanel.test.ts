@@ -1412,7 +1412,7 @@ describe('ConversationPanel conversations', () => {
     mockedList.mockReturnValue(
       listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true, ended_at: null, start_source: 'clear', turns: 1 }), summary({ id: 1, claude_session_id: 'aaa' })]),
     );
-    render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
+    const { rerender } = render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
     await settle();
     expect(screen.queryByTestId('conv-viewing-banner')).toBeNull();
 
@@ -1428,6 +1428,10 @@ describe('ConversationPanel conversations', () => {
 
     const calls = mockedConv.mock.calls.length;
     vi.advanceTimersByTime(QUIET_POLL_MS * 2);
+    await settle();
+    expect(mockedConv.mock.calls.length).toBe(calls);
+    // a Stop hook on the current conversation does not refetch the earlier one
+    await rerender({ session: session({ claude_status: 'idle', turn_seq: 7 }), visible: true });
     await settle();
     expect(mockedConv.mock.calls.length).toBe(calls);
 
@@ -1467,6 +1471,32 @@ describe('ConversationPanel conversations', () => {
     await settle();
     expect(mockedConv).toHaveBeenLastCalledWith(1, undefined, 'aaa');
     expect(screen.getByTestId('conv-viewing-banner')).toBeTruthy();
+  });
+
+  it('the switch notice waits for a list that knows the new conversation', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(listOk([summary({ claude_session_id: 'aaa', current: true })]));
+    const { rerender } = render(ConversationPanel, { session: session({ claude_session_id: 'aaa' }), visible: true });
+    await settle();
+    // the reloaded list does not carry bbb yet
+    await rerender({ session: session({ claude_session_id: 'bbb' }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-switch-notice')).toBeNull();
+    mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'bbb', current: true, start_source: 'clear' }), summary({ claude_session_id: 'aaa' })]));
+    dispatchConversationsChanged([1]);
+    await settle();
+    expect(screen.getByTestId('conv-switch-notice').textContent).toContain('New conversation (/clear)');
+  });
+
+  it('a malformed conversation list is ignored and the panel still renders', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(Promise.resolve({ ok: true as const, value: null }));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-header')).toBeTruthy();
+    expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    expect(screen.queryAllByTestId('conv-switcher-item')).toHaveLength(0);
   });
 
   it('the switch notice is dismissable', async () => {
