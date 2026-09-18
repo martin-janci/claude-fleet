@@ -237,31 +237,60 @@ pub(crate) mod logic {
 
         let client = pairing::redeem(transport, &base_url, &code).await?;
 
-        // From here the code is spent: it cannot be presented twice. So a
-        // failure below must leave NOTHING behind — a token no launch will
-        // ever read is worse than no token, because the hub's client list
-        // says this machine is paired and nobody can tell it is not.
-        tokens.set(&client.token).map_err(|e| {
+        // From here the code is spent: it cannot be presented twice.
+        //
+        // A pairing writes two stores that no transaction spans — the token
+        // in the keychain or the 0600 file, the settings in `state.db` — so a
+        // crash can land between any two writes, and every state in between
+        // is one a launch may start from. The order makes each of them safe:
+        //
+        // 1. Forget any previous hub's token. From here until step 3 there is
+        //    no token at all, and a configured URL with no token resolves
+        //    `Unavailable`: it owns nothing, says why, and offers Disconnect.
+        // 2. Write the settings, the URL last.
+        // 3. Store the new token — beside the URL of the hub that issued it.
+        //
+        // The old order stored the token first. A crash then left it beside
+        // the previous hub's URL, and the next launch presented hub B's
+        // bearer token to hub A; or beside no URL at all, where no launch
+        // reads it and no screen offers to clear it.
+        let previous = read_settings(store);
+        tokens.clear().map_err(|e| {
             IpcError::new(
                 codes::E_IO,
                 format!(
-                    "paired with {base_url}, but this machine's secure storage refused \
-                     the token ({e}) — the code is spent, so mint a fresh one on the hub \
-                     and try again"
+                    "paired with {base_url}, but this machine's secure storage would not \
+                     forget the previous token ({e}), so nothing was changed here — the \
+                     code is spent, so mint a fresh one on the hub and try again"
                 ),
             )
         })?;
-        let written = write_settings(store, &base_url, &client.name, args.allow_plaintext);
-        if let Err(e) = written {
-            // Roll back rather than strand it.
-            let _ = tokens.clear();
+        if let Err(e) = write_settings(store, &base_url, &client.name, args.allow_plaintext) {
+            // Best effort: the store that just failed may fail again, and
+            // with no token stored every state it leaves is safe anyway.
+            let _ = restore_settings(store, &previous);
             return Err(IpcError::new(
                 codes::E_IO,
                 format!(
                     "paired with {base_url}, but the settings could not be saved ({}) — \
-                     nothing was kept. The code is spent, so mint a fresh one on the hub \
-                     and try again.",
+                     no token was kept. If this app was paired with a hub before, it now \
+                     has no token for that one either, and the next launch will say so. \
+                     The code is spent, so mint a fresh one on the hub and try again.",
                     e.message
+                ),
+            ));
+        }
+        if let Err(e) = tokens.set(&client.token) {
+            // Put the settings back: a first pairing leaves no trace, and a
+            // re-pairing leaves the previous hub configured with no token,
+            // which the next launch reports rather than acts on.
+            let _ = restore_settings(store, &previous);
+            return Err(IpcError::new(
+                codes::E_IO,
+                format!(
+                    "paired with {base_url}, but this machine's secure storage refused \
+                     the token ({e}), so the settings were put back and nothing was kept \
+                     — the code is spent, so mint a fresh one on the hub and try again"
                 ),
             ));
         }
@@ -273,6 +302,9 @@ pub(crate) mod logic {
         Ok(out)
     }
 
+    /// The URL is written LAST: until it is, the next launch still sees
+    /// the previous URL (or none), and with no token stored — `pair` has
+    /// cleared it — either is safe.
     fn write_settings(
         store: &Mutex<Store>,
         base_url: &str,
@@ -280,12 +312,41 @@ pub(crate) mod logic {
         allow_plaintext: bool,
     ) -> Result<(), IpcError> {
         let s = lock(store)?;
-        s.set_setting(REMOTE_URL_KEY, base_url)?;
         s.set_setting(CLIENT_NAME_KEY, client_name)?;
         s.set_setting(
             ALLOW_PLAINTEXT_KEY,
             if allow_plaintext { "true" } else { "false" },
         )?;
+        s.set_setting(REMOTE_URL_KEY, base_url)?;
+        Ok(())
+    }
+
+    /// The three hub settings as stored before a pairing, so a failed one
+    /// can put them back. Absent reads as blank, which is what `resolve`
+    /// already treats as "no hub".
+    fn read_settings(store: &Mutex<Store>) -> [(&'static str, String); 3] {
+        let read = |key| {
+            store
+                .lock()
+                .ok()
+                .and_then(|s| s.get_setting(key).ok().flatten())
+                .unwrap_or_default()
+        };
+        [
+            (CLIENT_NAME_KEY, read(CLIENT_NAME_KEY)),
+            (ALLOW_PLAINTEXT_KEY, read(ALLOW_PLAINTEXT_KEY)),
+            (REMOTE_URL_KEY, read(REMOTE_URL_KEY)),
+        ]
+    }
+
+    fn restore_settings(
+        store: &Mutex<Store>,
+        previous: &[(&'static str, String); 3],
+    ) -> Result<(), IpcError> {
+        let s = lock(store)?;
+        for (key, value) in previous {
+            s.set_setting(key, value)?;
+        }
         Ok(())
     }
 

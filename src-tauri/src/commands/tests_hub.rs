@@ -579,3 +579,203 @@ fn a_paired_client_is_not_kept_anywhere() {
     assert_no_serialize(&c);
     assert!(!format!("{c:?}").contains("cl_t"));
 }
+
+// --- the half-paired window --------------------------------------------------
+//
+// The final review's NIT-1. A pairing is two stores — the token in the
+// keychain or 0600 file, the URL in `state.db` — and no transaction spans
+// both, so a crash can land between any two writes. These record the pair
+// (hub.remote_url, token) after every token write, and require each one to be
+// a state the NEXT launch handles safely:
+//
+// - a token only ever sits beside the URL of the hub that issued it, or a
+//   crash there presents one hub's bearer token to another hub;
+// - never a token with no URL, which the next launch ignores (standalone) and
+//   no screen offers to clear.
+//
+// A URL with NO token is safe by construction since F1: it resolves
+// `Unavailable`, owns nothing, and Settings offers Disconnect. So the only
+// question is where the token writes fall.
+
+/// A token store that snapshots `hub.remote_url` every time the token
+/// changes, and whose `set` can be made to fail.
+struct Watching<'a> {
+    store: &'a Mutex<Store>,
+    token: Mutex<Option<String>>,
+    set_fails: bool,
+    seen: Mutex<Vec<(String, Option<String>)>>,
+}
+
+impl<'a> Watching<'a> {
+    fn new(store: &'a Mutex<Store>, token: Option<&str>) -> Self {
+        Self {
+            store,
+            token: Mutex::new(token.map(str::to_string)),
+            set_fails: false,
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn url(&self) -> String {
+        self.store
+            .lock()
+            .ok()
+            .and_then(|s| s.get_setting(REMOTE_URL_KEY).ok().flatten())
+            .unwrap_or_default()
+    }
+
+    fn record(&self) {
+        let snapshot = (self.url(), self.token.lock().unwrap().clone());
+        self.seen.lock().unwrap().push(snapshot);
+    }
+
+    fn seen(&self) -> Vec<(String, Option<String>)> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl TokenStore for Watching<'_> {
+    fn get(&self) -> Result<Option<String>, String> {
+        Ok(self.token.lock().unwrap().clone())
+    }
+    fn set(&self, token: &str) -> Result<(), String> {
+        if self.set_fails {
+            return Err("the keychain refused the write".into());
+        }
+        *self.token.lock().unwrap() = Some(token.to_string());
+        self.record();
+        Ok(())
+    }
+    fn clear(&self) -> Result<(), String> {
+        *self.token.lock().unwrap() = None;
+        self.record();
+        Ok(())
+    }
+}
+
+const HUB_A: &str = "https://a.example.com";
+const HUB_B: &str = "https://b.example.com";
+
+/// Re-pairing from hub A to hub B, with a crash anywhere in between, must
+/// never leave B's token beside A's URL — the next launch would present B's
+/// bearer token to A — nor A's beside B's.
+#[test]
+fn re_pairing_never_puts_one_hubs_token_beside_another_hubs_url() {
+    let (_dir, store) = store_with(&[(REMOTE_URL_KEY, HUB_A), (CLIENT_NAME_KEY, "laptop")]);
+    let tokens = Watching::new(&store, Some("cl_token_from_a"));
+    block_on(logic::pair(
+        &Fake::ok("cl_token_from_b", "laptop", "full"),
+        &Backend::Local,
+        &store,
+        &tokens,
+        args(HUB_B, "ABCD1234"),
+    ))
+    .unwrap();
+
+    let seen = tokens.seen();
+    // The previous token goes FIRST, while A is still the configured hub.
+    // Snapshots are taken only at token writes, so this is what shows no
+    // settings write happened while A's token was still stored: otherwise a
+    // crash after the URL write leaves A's token beside B's URL.
+    assert_eq!(
+        seen.first(),
+        Some(&(HUB_A.to_string(), None)),
+        "A's token must be forgotten before any setting changes: {seen:?}"
+    );
+    for (url, token) in &seen {
+        match token.as_deref() {
+            None => {}
+            Some("cl_token_from_b") => assert_eq!(
+                url, HUB_B,
+                "B's token sat beside {url}; a crash here sends it there: {seen:?}"
+            ),
+            Some("cl_token_from_a") => assert_eq!(
+                url, HUB_A,
+                "A's token sat beside {url}; a crash here sends it there: {seen:?}"
+            ),
+            Some(other) => panic!("an unexpected token {other:?}: {seen:?}"),
+        }
+    }
+    assert_eq!(
+        seen.last(),
+        Some(&(HUB_B.to_string(), Some("cl_token_from_b".to_string()))),
+        "and it does end paired with B"
+    );
+}
+
+/// A first pairing interrupted between the two stores must not leave a
+/// token with no URL: the next launch would ignore it and run standalone, and
+/// no screen offers to clear a token that is not configured.
+#[test]
+fn a_first_pairing_never_leaves_a_token_with_no_url() {
+    let (_dir, store) = store_with(&[]);
+    let tokens = Watching::new(&store, None);
+    block_on(logic::pair(
+        &Fake::ok("cl_new_token", "laptop", "full"),
+        &Backend::Local,
+        &store,
+        &tokens,
+        args(HUB_B, "ABCD1234"),
+    ))
+    .unwrap();
+
+    let seen = tokens.seen();
+    for (url, token) in &seen {
+        assert!(
+            token.is_none() || !url.is_empty(),
+            "a token was stored with no hub URL beside it: {seen:?}"
+        );
+    }
+    assert_eq!(tokens.get().unwrap().as_deref(), Some("cl_new_token"));
+}
+
+/// The token is written last, so its failure is the one failure that finds
+/// the settings already saved. It puts them back as they were: a first
+/// pairing leaves no trace, and nothing is left for the next launch to find.
+#[test]
+fn a_token_that_cannot_be_stored_puts_the_settings_back() {
+    let (_dir, store) = store_with(&[]);
+    let mut tokens = Watching::new(&store, None);
+    tokens.set_fails = true;
+    let e = block_on(logic::pair(
+        &Fake::ok("cl_new_token", "laptop", "full"),
+        &Backend::Local,
+        &store,
+        &tokens,
+        args(HUB_B, "ABCD1234"),
+    ))
+    .expect_err("a refused token must fail the pairing");
+    assert!(e.message.to_lowercase().contains("mint"), "{}", e.message);
+    assert!(!e.message.contains("cl_new_token"), "{}", e.message);
+    assert_eq!(tokens.get().unwrap(), None);
+    let resolved = Backend::resolve_detail(&store, &tokens);
+    assert_eq!(
+        resolved.backend,
+        Backend::Local,
+        "a failed first pairing must leave the app as it was: {:?}",
+        resolved.warning
+    );
+}
+
+/// Disconnect clears a pairing whatever state it is in — including the
+/// configured-but-unavailable one, where the token may be stranded and the
+/// Hub section is the only place to clear it.
+#[test]
+fn disconnect_clears_a_pairing_this_launch_could_not_use() {
+    let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "http://fleet.example.com")]);
+    let tokens = InMemoryTokenStore::with_token("cl_stranded");
+    let running = Backend::resolve(&store, &tokens);
+    assert!(
+        running.unavailable().is_some(),
+        "plaintext without the opt-in"
+    );
+
+    let got = logic::disconnect(&running, &store, &tokens).unwrap();
+    assert_eq!(tokens.get().unwrap(), None);
+    assert_eq!(got.configured_url, None);
+    assert!(got.restart_required, "the next launch is standalone again");
+    assert_eq!(
+        Backend::resolve_detail(&store, &tokens).backend,
+        Backend::Local
+    );
+}
