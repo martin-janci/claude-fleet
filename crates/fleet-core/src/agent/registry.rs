@@ -76,10 +76,14 @@ impl Connection {
     }
 }
 
+/// Is `credential` still current for `alias`? See [`AgentRegistry::verify_with`].
+type Verifier = Box<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
 /// Alias → the one live agent connection for that host.
 pub struct AgentRegistry {
     conns: DashMap<String, Arc<Connection>>,
     next_id: AtomicU64,
+    verifier: std::sync::OnceLock<Verifier>,
 }
 
 impl AgentRegistry {
@@ -87,7 +91,22 @@ impl AgentRegistry {
         Arc::new(Self {
             conns: DashMap::new(),
             next_id: AtomicU64::new(1),
+            verifier: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Judge every connection's credential with `current(alias, credential)`
+    /// before anything is sent over it. The hub installs this once, with the
+    /// store behind it (`SshClient::with_agents`); a later call is ignored.
+    ///
+    /// **Why here, and not only in the router.** The router used to check
+    /// the live connection and then `request` looked the connection up AGAIN
+    /// to send on, so a stale connection registering between the two (a
+    /// pre-rotation upgrade saying hello late) received a frame whose check
+    /// it never passed (the re-review's NEW-1). Checked here, the connection
+    /// that was judged is the very `Arc` the frame is written to.
+    pub fn verify_with(&self, current: impl Fn(&str, &str) -> bool + Send + Sync + 'static) {
+        let _ = self.verifier.set(Box::new(current));
     }
 
     /// Register a live connection for `alias`, replacing (and aborting) any
@@ -102,8 +121,8 @@ impl AgentRegistry {
     }
 
     /// [`AgentRegistry::connect`] for a connection that authenticated with a
-    /// host token: `credential` is that token's SHA-256, which
-    /// [`AgentRegistry::evict_stale`] checks against the store.
+    /// host token: `credential` is that token's SHA-256, which the verifier
+    /// ([`AgentRegistry::verify_with`]) checks before every send.
     pub fn connect_bound(
         &self,
         alias: &str,
@@ -146,25 +165,25 @@ impl AgentRegistry {
         }
     }
 
-    /// Drop `alias`'s live connection if the credential it authenticated
-    /// with is no longer current, as judged by `current`. Returns whether it
-    /// did. A connection with no credential is left alone.
+    /// The live connection for `alias`, if its credential is still current.
+    /// One whose credential is stale is dropped on the spot, so nothing is
+    /// ever sent over it; one with no credential (the in-process fake), or a
+    /// registry with no verifier installed, is taken as it is.
     ///
     /// This is what makes revocation reach a connection that is already
     /// open: the token is checked at the upgrade, and the upgrade is long
     /// past by the time an operator rotates, narrows or removes it.
-    pub fn evict_stale(&self, alias: &str, current: impl Fn(&str) -> bool) -> bool {
-        let Some(live) = self.live(alias) else {
-            return false;
+    fn live_current(&self, alias: &str) -> Option<Arc<Connection>> {
+        let live = self.live(alias)?;
+        let (Some(credential), Some(current)) = (live.credential.as_deref(), self.verifier.get())
+        else {
+            return Some(live);
         };
-        let Some(credential) = live.credential.as_deref() else {
-            return false;
-        };
-        if current(credential) {
-            return false;
+        if current(alias, credential) {
+            return Some(live);
         }
         self.disconnect(alias, live.id);
-        true
+        None
     }
 
     /// Fires when connection `conn` for `alias` stops being the live one. An
@@ -215,7 +234,7 @@ impl AgentRegistry {
         timeout: Duration,
     ) -> Result<AgentFrame, IpcError> {
         let id = frame_id(&frame).to_string();
-        let conn = self.live(alias).ok_or_else(|| offline(alias))?;
+        let conn = self.live_current(alias).ok_or_else(|| offline(alias))?;
         let (tx, rx) = oneshot::channel();
         // Claim the slot, or refuse. A plain `insert` evicted the sitting
         // tenant, and `PendingGuard::drop` then removed the *replacement's*
@@ -276,7 +295,7 @@ impl AgentRegistry {
     /// Send a frame that has no answer (`cancel`). Fire and forget: the agent
     /// may already have finished, and an id it does not know is a no-op there.
     pub fn send(&self, alias: &str, frame: HubFrame) -> Result<(), IpcError> {
-        let conn = self.live(alias).ok_or_else(|| offline(alias))?;
+        let conn = self.live_current(alias).ok_or_else(|| offline(alias))?;
         conn.outbound.send(frame).map_err(|_| offline(alias))
     }
 

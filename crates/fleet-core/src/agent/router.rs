@@ -33,7 +33,14 @@ pub struct HostRouter {
 }
 
 impl HostRouter {
+    /// Also installs the credential check on the transport's registry, so
+    /// every frame routed through it goes only to a connection whose token
+    /// is still current.
     pub fn new(agent: Arc<AgentTransport>, store: Arc<Mutex<Store>>) -> Arc<Self> {
+        let judge = Arc::clone(&store);
+        agent
+            .registry()
+            .verify_with(move |alias, credential| credential_is_current(&judge, alias, credential));
         Arc::new(Self { agent, store })
     }
 
@@ -48,23 +55,19 @@ impl HostRouter {
     /// process whose store mutex is poisoned has worse problems than one
     /// misrouted command.
     ///
-    /// Before it answers, a live connection for that alias whose token is no
-    /// longer current is dropped (see [`credential_is_current`]). So the call
-    /// that follows either reaches an agent holding the host's CURRENT full
-    /// token or fails `E_AGENT_OFFLINE` — nothing is ever sent over a
-    /// connection that a rotation, a `readonly` or a removal has revoked, not
-    /// even in the heartbeat before the endpoint notices. That is what keeps a
-    /// rotation from handing its new token to the connection it revokes.
+    /// Whether the connection is still entitled to the call is NOT decided
+    /// here: the registry judges the credential of the exact connection it
+    /// sends on ([`AgentRegistry::verify_with`](super::AgentRegistry::verify_with),
+    /// installed by [`HostRouter::new`] with [`credential_is_current`]). So
+    /// the call that follows either reaches an agent holding the host's
+    /// CURRENT full token or fails `E_AGENT_OFFLINE` — nothing is ever sent
+    /// over a connection that a rotation, a `readonly` or a removal has
+    /// revoked, not even in the heartbeat before the endpoint notices. That
+    /// is what keeps a rotation from handing its new token to the connection
+    /// it revokes.
     pub fn agent_alias(&self, host: &str) -> Option<String> {
-        let alias = {
-            let store = self.store.lock().ok()?;
-            store.agent_host_alias(host).ok().flatten()?
-        };
-        // The guard above is released: the check takes the lock itself.
-        self.agent
-            .registry()
-            .evict_stale(&alias, |c| credential_is_current(&self.store, &alias, c));
-        Some(alias)
+        let store = self.store.lock().ok()?;
+        store.agent_host_alias(host).ok().flatten()
     }
 
     /// The transport agent-routed hosts are delegated to.
@@ -275,6 +278,53 @@ mod tests {
             s.set_host_transport("laptop", "agent").unwrap();
         })
         .await;
+    }
+
+    /// NEW-1 (re-review): the check and the send must be about the SAME
+    /// connection. The route is checked against whatever is live; a stale
+    /// connection that registers after that check (a pre-rotation upgrade
+    /// saying hello late) must not receive the frame the check let through.
+    #[tokio::test]
+    async fn the_connection_that_was_checked_is_the_one_sent_on() {
+        let (ssh, reg, store) = hub_client(&[("laptop", None, "agent")]);
+        store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "t2")
+            .unwrap();
+        let _legit =
+            FakeAgent::connect_with_token(&reg, "laptop", "t2", fake::answer_with(0, b"", b""));
+        // Step one of every routed call: the check. The live agent is current.
+        let alias = ssh.agent_route("laptop").expect("routed");
+        // A connection that authenticated with the rotated-out token lands.
+        let thief = FakeAgent::connect_with_token(
+            &reg,
+            "laptop",
+            "t1",
+            fake::answer_with(0, b"thief", b""),
+        );
+        // Step two: the send.
+        let err = reg
+            .request(
+                &alias,
+                fleet_proto::HubFrame::Exec {
+                    id: "routed".into(),
+                    argv: vec!["true".into()],
+                    stdin: None,
+                    timeout_ms: 1_000,
+                    cap_bytes: None,
+                },
+                WALL,
+            )
+            .await
+            .expect_err("a frame reached a connection whose token is stale");
+        assert_eq!(err.code, codes::E_AGENT_OFFLINE, "{err:?}");
+        assert!(
+            thief.sent().is_empty(),
+            "sent to the stale connection: {:?}",
+            thief.sent()
+        );
+        assert!(!reg.connected("laptop"), "and the stale connection is gone");
     }
 
     // ── the seven methods ─────────────────────────────────────────────────

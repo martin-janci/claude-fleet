@@ -489,7 +489,26 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
     // Subscribed BEFORE the registration is visible, so no beat after it is
     // missed.
     let ticker = limits.beats.ticker();
+    // The token is judged again at the hello, immediately before the
+    // registration and once more right after it. The upgrade may be a
+    // heartbeat old by now: a connection upgraded before a rotation and
+    // saying hello after it must not register, because registering REPLACES
+    // the live connection — the agent the operator just reinstalled on the
+    // new token (the re-review's NEW-1). The second check catches a rotation
+    // that commits between the first and the registration.
+    let stale = || !super::router::credential_is_current(&store, &alias, &credential);
+    if stale() {
+        tracing::warn!(host = %alias, "[agent] refused a hello: its token is no longer current");
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
+        return;
+    }
     let conn_id = registry.connect_bound(&alias, hello, tx, credential.clone());
+    if stale() {
+        tracing::warn!(host = %alias, conn = conn_id, "[agent] its token changed as it registered; dropping");
+        registry.disconnect(&alias, conn_id);
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
+        return;
+    }
     // Fires when this stops being the live connection, so the socket can be
     // torn down even while the writer is stuck in a send.
     let gone = registry.gone(&alias, conn_id);
@@ -1613,6 +1632,40 @@ mod tests {
         hub.beat();
         assert!(closed_by_hub(&mut ws).await, "the hub must hang up");
         assert!(!hub.registry.connected("laptop"));
+    }
+
+    /// NEW-1 (re-review): a connection upgraded with a token that has since
+    /// been rotated must not register when it finally says hello. It would
+    /// replace — and so knock off — the agent reinstalled on the new token.
+    #[tokio::test]
+    async fn a_hello_after_a_rotation_does_not_register() {
+        let hub = hub().await;
+        // Upgraded with the current token, silent for now.
+        let mut stale = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("upgrade");
+        hub.store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "rotated-token")
+            .unwrap();
+        let mut legit = connected_as(&hub, "rotated-token", "laptop", "legit").await;
+        send(&mut stale, &hello_as("stale")).await;
+        assert!(
+            closed_by_hub(&mut stale).await,
+            "the stale hello is hung up on"
+        );
+        let live: Vec<String> = hub
+            .registry
+            .snapshot()
+            .into_iter()
+            .map(|s| s.agent_version)
+            .collect();
+        assert_eq!(
+            live,
+            vec!["legit".to_string()],
+            "the reinstalled agent stays live"
+        );
+        // And its socket is still open: a barrier round-trips.
+        barrier(&mut legit).await;
     }
 
     /// Flood `ws` with `frame` (already framed, masked with a zero key) as
