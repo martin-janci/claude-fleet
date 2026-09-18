@@ -237,4 +237,54 @@ describe('createDrainLoop', () => {
     expect(ticks).toHaveLength(1);
     expect(loop.pending()).toBe(false);
   });
+  it('a stale tick landing does not let bumpDrain start a second loop', async () => {
+    // Two attaches' ticks overlap: the first is still in flight when a restart
+    // claims the loop. When it finally lands it must not clear the loop's
+    // in-flight state, or a keystroke would run a second, concurrent drainOnce
+    // against the same screen (the backend hands out disjoint chunks).
+    let attached = true;
+    const resolvers: Array<(value: boolean) => void> = [];
+    const loop = createDrainLoop({
+      drainOnce: () => new Promise<boolean>((resolve) => resolvers.push(resolve)),
+      attached: () => attached,
+    });
+
+    loop.start();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect(resolvers).toHaveLength(1); // tick A in flight
+
+    loop.stop();
+    loop.start();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect(resolvers).toHaveLength(2); // tick B in flight, A still pending
+
+    resolvers[0](false); // the stale tick lands
+    await Promise.resolve();
+    loop.bumpDrain();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS * 2);
+    expect(resolvers).toHaveLength(2); // no third tick while B is in flight
+
+    resolvers[1](false); // B lands and reschedules normally
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect(resolvers).toHaveLength(3);
+    attached = false;
+  });
+
+  it('reports a rejected tick through onError', async () => {
+    const errors: unknown[] = [];
+    let attached = true;
+    const loop = createDrainLoop({
+      drainOnce: async () => {
+        throw new Error('boom');
+      },
+      attached: () => attached,
+      onError: (e) => errors.push(e),
+    });
+
+    loop.start();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect((errors[0] as Error).message).toBe('boom');
+    attached = false;
+    await vi.advanceTimersByTimeAsync(DRAIN_MAX_MS);
+  });
 });

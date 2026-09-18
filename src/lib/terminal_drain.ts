@@ -15,6 +15,9 @@ export interface DrainHost {
   drainOnce(): Promise<boolean>;
   /** Still attached: a screen exists and the PTY is open. */
   attached(): boolean;
+  /** A tick threw. The loop keeps polling; this only reports it, so the
+   *  component can tell the user instead of leaving it in the console. */
+  onError?(error: unknown): void;
 }
 
 export function createDrainLoop(host: DrainHost) {
@@ -23,6 +26,11 @@ export function createDrainLoop(host: DrainHost) {
   // A tick is between `drainOnce()` and its `finally`. `drainTimer` is null for
   // that whole window, so it alone cannot tell a dead loop from a live one.
   let running = false;
+  // Identifies the tick that currently owns the loop. A tick left over from a
+  // previous attach must not clear `running` or reschedule on behalf of the
+  // tick that replaced it — that window let `bumpDrain` start a second,
+  // concurrent loop against the same screen.
+  let runToken = 0;
   // A bump arrived while that tick was in flight — honour it when the tick
   // reschedules, instead of letting the idle back-off swallow the keystroke.
   let bumpedWhileRunning = false;
@@ -40,6 +48,7 @@ export function createDrainLoop(host: DrainHost) {
    *  screen to say so, and only a manual reattach brought it back. */
   async function runDrain() {
     drainTimer = null;
+    const mine = ++runToken;
     running = true;
     bumpedWhileRunning = false;
     let got = false;
@@ -47,7 +56,10 @@ export function createDrainLoop(host: DrainHost) {
       got = await host.drainOnce();
     } catch (e) {
       console.error('[terminal] drain tick failed', e);
+      host.onError?.(e);
     } finally {
+      // A newer tick owns the loop: leave its state and its reschedule alone.
+      if (mine !== runToken) return;
       running = false;
       drainDelay =
         got || bumpedWhileRunning

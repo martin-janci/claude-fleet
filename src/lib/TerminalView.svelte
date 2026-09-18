@@ -73,6 +73,9 @@
    *  spinner during the upload. */
   let dragOver = $state(false);
   let uploading = $state(false);
+  /** Uploads still running for the current attach. Counted, not a flag: two
+   *  drops in a row would otherwise clear the overlay when the first finishes. */
+  let uploadsInFlight = 0;
   /** Selection endpoints in 0-based grid cells; null when nothing selected.
    *  Held in component state so the drain re-render can't wipe it (unlike the
    *  old window.getSelection() path). */
@@ -147,9 +150,22 @@
     overflowed: boolean;
   }
 
+  /** One terminal-failure toast per attach: a broken chunk usually repeats on
+   *  every redraw, and the drain loop now survives it, so the user would
+   *  otherwise never learn why the pane looks wrong. Reset by openTerm. */
+  let reportedTerminalError = false;
+
+  function reportTerminalError(error: unknown) {
+    if (reportedTerminalError) return;
+    reportedTerminalError = true;
+    const detail = error instanceof Error ? error.message : String(error);
+    push({ kind: 'error', message: `Terminal output could not be rendered: ${detail}` });
+  }
+
   const drain = createDrainLoop({
     drainOnce,
     attached: () => !!screen && ptyOpen,
+    onError: reportTerminalError,
   });
   const { bumpDrain } = drain;
 
@@ -241,6 +257,7 @@
     // machine where those paths don't exist.
     const target = { tmux_name: currentSession, host_alias: currentHost };
     const gen = openGeneration;
+    uploadsInFlight += 1;
     uploading = true;
     try {
       const remote = await invoke<string[]>('upload_to_session', {
@@ -263,7 +280,8 @@
     } finally {
       // closeTerm already cleared the overlay for a pane that moved on — and a
       // newer upload may own it by now.
-      if (gen === openGeneration) uploading = false;
+      uploadsInFlight = Math.max(0, uploadsInFlight - 1);
+      if (gen === openGeneration) uploading = uploadsInFlight > 0;
     }
   }
 
@@ -359,6 +377,8 @@
     if (!container) return;
     const target = { tmux_name: sess.tmux_name, host_alias: sess.host_alias };
     opening = true;
+    // A fresh attach may render fine: let it report a parser failure again.
+    reportedTerminalError = false;
     /** Set when this open stood down as stale instead of running to a
      *  conclusion for `target`. The coalesced request then has to run even
      *  when it names the same session — leaving and coming straight back to
@@ -589,7 +609,10 @@
     // region — so the Screen can't be repaired from the stream. Drop it and
     // re-attach: a fresh attach re-sends all of that and redraws.
     if (result.overflowed) {
-      void openTerm();
+      // Re-attach as a self-heal, not as a fresh user-initiated open: the
+      // budget must keep counting, or a session that overflows repeatedly
+      // would reconnect for ever and never raise the banner.
+      void openTerm(true);
       return false;
     }
     if (result.bytes > 0) {
@@ -601,6 +624,7 @@
         // rest of the tick (query replies, the EOF handling below) with it —
         // and the loop keeps polling, so the next tmux redraw repairs it.
         console.error('[terminal] screen.write failed', e);
+        reportTerminalError(e);
       }
       renderVersion++;
       // Answer any terminal queries (DSR cursor position, DA) the output
@@ -705,6 +729,7 @@
     if (imeInput) imeInput.value = '';
     // The overlay and the error belong to the pane that is going away; an
     // upload still in flight checks the generation before it touches either.
+    uploadsInFlight = 0;
     uploading = false;
     openError = null;
 
