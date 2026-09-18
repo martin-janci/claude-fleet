@@ -44,7 +44,13 @@
     if (mine !== seq) return;
     loading = false;
     if (r.ok) {
-      events = Array.isArray(r.value) ? r.value : [];
+      const fetched = Array.isArray(r.value) ? r.value : [];
+      // A pushed event newer than anything the fetch saw arrived while it
+      // was in flight: keep it rather than overwrite it with the older read.
+      const known = new Set(fetched.map((e) => e.id));
+      const newest = fetched.reduce((m, e) => Math.max(m, e.id), -Infinity);
+      const live = events.filter((e) => !known.has(e.id) && e.id > newest);
+      events = [...live, ...fetched].slice(0, EVENTS_CAP);
       error = null;
     } else {
       error = r.error.message;

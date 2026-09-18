@@ -131,4 +131,30 @@ describe('Timeline component', () => {
     expect(kinds).toEqual(['compact_done', 'turn_done']);
     expect(sessionHistory).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps a pushed event that arrives while a fetch is in flight', async () => {
+    const { default: Timeline } = await import('./Timeline.svelte');
+    const { sessionHistory } = await import('./timeline');
+    const { dispatchTimelineEvents } = await import('./live_events');
+
+    const evc = (id: number, kind: string) =>
+      ({ id, session_id: 9, at: 1_789_000_000 + id, kind, detail: null, claude_session_id: 'a' });
+
+    let resolve!: (v: unknown) => void;
+    vi.mocked(sessionHistory).mockReset();
+    vi.mocked(sessionHistory).mockReturnValue(new Promise((r) => (resolve = r)) as never);
+    render(Timeline, { sessionId: 9 });
+    await tick();
+    // The fetch started before event 2 was recorded, so its result lacks it.
+    dispatchTimelineEvents([evc(2, 'compact_done')]);
+    await tick();
+    resolve({ ok: true, value: [evc(1, 'turn_done')] });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const kinds = Array.from(document.querySelectorAll('li.ev')).map((li) =>
+      li.getAttribute('data-kind'),
+    );
+    expect(kinds).toEqual(['compact_done', 'turn_done']);
+  });
 });

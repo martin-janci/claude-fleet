@@ -1686,3 +1686,68 @@ describe('ConversationPanel conversations', () => {
     expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
   });
 });
+
+describe('ConversationPanel final phase-2 review fixes', () => {
+  const turn = (text?: string) =>
+    [{ prompt: 'first ask', at: TURN1_AT, ended_at: null, items: text ? [{ kind: 'text' as const, text }] : [] }];
+
+  it('a pushed event carried by a later read follows the backend from then on', async () => {
+    const ev10 = event({ id: 10, at: TURN1_SECS + 60, kind: 'notification', detail: 'permission_prompt' });
+    mockedConv.mockReturnValue(ok(conv({ turns: turn() })));
+    const { rerender } = render(ConversationPanel, { session: session({ turn_seq: 1 }), visible: true });
+    await settle();
+    dispatchTimelineEvents([ev10]);
+    await settle();
+    expect(screen.getAllByTestId('conv-event')).toHaveLength(1);
+    // the next read carries it: the pushed copy is dropped
+    mockedConv.mockReturnValue(ok(conv({ turns: turn('a'), events: [ev10] })));
+    await rerender({ session: session({ turn_seq: 2 }), visible: true });
+    await settle();
+    expect(screen.getAllByTestId('conv-event')).toHaveLength(1);
+    // a later read no longer carries it: nothing keeps it alive
+    mockedConv.mockReturnValue(ok(conv({ turns: turn('b'), events: [] })));
+    await rerender({ session: session({ turn_seq: 3 }), visible: true });
+    await settle();
+    expect(screen.queryAllByTestId('conv-event')).toHaveLength(0);
+  });
+
+  it('going back to the current conversation drops the old probe reading', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true }), summary({ id: 1, claude_session_id: 'aaa' })]));
+    mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (3s)' } });
+    render(ConversationPanel, { session: session({ claude_status: 'working', turn_seq: 1 }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    await fireEvent.click(screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!);
+    await settle();
+    // the next probe hangs: only the old reading could show a spinner
+    mockedAct.mockReturnValue(new Promise(() => {}));
+    await fireEvent.click(screen.getByTestId('conv-back-current'));
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).not.toContain('Cooking');
+  });
+
+  it('an inline event carries a machine-readable time', async () => {
+    mockedConv.mockReturnValue(
+      ok(conv({ turns: turn('a'), events: [event({ id: 5, at: TURN1_SECS + 60, kind: 'stop_failure', detail: 'rate_limit: x' })] })),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const time = screen.getByTestId('conv-event').querySelector('time')!;
+    expect(time.getAttribute('datetime')).toBe(new Date((TURN1_SECS + 60) * 1000).toISOString());
+  });
+
+  it('a switch with an unknown source says just "New conversation"', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'bbb', current: true, start_source: 'unknown' }), summary({ claude_session_id: 'aaa' })]));
+    const { rerender } = render(ConversationPanel, { session: session({ claude_session_id: 'aaa' }), visible: true });
+    await settle();
+    await rerender({ session: session({ claude_session_id: 'bbb' }), visible: true });
+    await settle();
+    const notice = screen.getByTestId('conv-switch-notice').textContent!;
+    expect(notice).toContain('New conversation');
+    expect(notice).not.toContain('(');
+  });
+});

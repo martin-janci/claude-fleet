@@ -33,6 +33,7 @@
   let open = $state(false);
   let menu: HTMLUListElement | undefined = $state();
   let wrap: HTMLDivElement | undefined = $state();
+  let button: HTMLButtonElement | undefined = $state();
 
   const entries = $derived(switcherEntries(conversations));
   const shown = $derived(
@@ -42,18 +43,32 @@
   );
   const title = $derived(shown ? conversationTitle(shown) : viewing === null ? 'Current' : 'Earlier conversation');
   const meter = $derived(viewing === null ? contextMeter(session) : null);
-  const model = $derived((session.model ?? shown?.model ?? '').replace(/^claude-/, ''));
+  // An earlier conversation shows its own model; the current one prefers the
+  // row's live value.
+  const model = $derived(
+    ((viewing === null ? (session.model ?? shown?.model) : (shown?.model ?? session.model)) ?? '').replace(/^claude-/, ''),
+  );
   const status = $derived(viewing === null ? statusChip(session) : null);
 
   function pick(c: ConversationSummary) {
     open = false;
     onSelect(c.current ? null : c.claude_session_id);
   }
+  /** The entry highlighted and aria-selected: the viewed conversation, or
+   *  the current one when viewing it. */
+  const isSelected = (c: ConversationSummary) =>
+    viewing === null ? c.current : c.claude_session_id === viewing;
   function onItemKey(e: KeyboardEvent, c: ConversationSummary) {
-    if (e.key === 'Enter') pick(c);
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      pick(c);
+    }
   }
   function onMenuKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') open = false;
+    if (e.key === 'Escape') {
+      open = false;
+      button?.focus();
+    }
   }
   $effect(() => {
     if (open) menu?.focus();
@@ -77,15 +92,17 @@
       data-testid="conv-switcher"
       aria-haspopup="listbox"
       aria-expanded={open}
+      bind:this={button}
       onclick={() => (open = !open)}
-      >{title}{#if newerAvailable}<span class="dot" data-testid="conv-switcher-dot" title="A newer conversation started"></span>{/if}<span class="caret">▾</span></button
+      >{title}{#if newerAvailable}<span class="dot" role="img" aria-label="newer conversation available" data-testid="conv-switcher-dot" title="A newer conversation started"></span>{/if}<span class="caret">▾</span></button
     >
     {#if open}
       <ul class="menu" role="listbox" tabindex="-1" data-testid="conv-switcher-menu" bind:this={menu} onkeydown={onMenuKey}>
         {#each entries as c (c.id)}
           <li
             role="option"
-            aria-selected={viewing === null ? c.current : c.claude_session_id === viewing}
+            aria-selected={isSelected(c)}
+            class:selected={isSelected(c)}
             data-testid="conv-switcher-item"
             data-current={c.current}
             onclick={() => pick(c)}
@@ -196,7 +213,7 @@
     font-size: 0.8rem;
   }
   .menu li:hover,
-  .menu li[data-current='true'] {
+  .menu li.selected {
     background: color-mix(in srgb, var(--accent) 12%, var(--bg));
   }
   .menu .t {

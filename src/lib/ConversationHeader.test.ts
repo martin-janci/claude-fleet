@@ -65,4 +65,56 @@ describe('ConversationHeader', () => {
     render(ConversationHeader, { session: session(), conversations: [], viewing: null, lastEvent: null, newerAvailable: false, onSelect: vi.fn() });
     expect(screen.getByTestId('conv-switcher').textContent).toContain('Current');
   });
+
+  it('shows the viewed conversation\'s model while viewing an earlier one', () => {
+    const l = [list[0], conv({ model: 'claude-sonnet-4' })];
+    render(ConversationHeader, { session: session(), conversations: l, viewing: 'aaa', lastEvent: null, newerAvailable: false, onSelect: vi.fn() });
+    expect(screen.getByTestId('conv-model').textContent).toBe('sonnet-4');
+  });
+
+  it('highlights and aria-selects the viewed entry, the current one otherwise', async () => {
+    const { unmount } = render(ConversationHeader, { session: session(), conversations: list, viewing: 'aaa', lastEvent: null, newerAvailable: false, onSelect: vi.fn() });
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    let items = screen.getAllByTestId('conv-switcher-item');
+    expect(items.map((i) => i.getAttribute('aria-selected'))).toEqual(['false', 'true']);
+    expect(items.map((i) => i.classList.contains('selected'))).toEqual([false, true]);
+    unmount();
+    render(ConversationHeader, { session: session(), conversations: list, viewing: null, lastEvent: null, newerAvailable: false, onSelect: vi.fn() });
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    items = screen.getAllByTestId('conv-switcher-item');
+    expect(items.map((i) => i.getAttribute('aria-selected'))).toEqual(['true', 'false']);
+    expect(items.map((i) => i.classList.contains('selected'))).toEqual([true, false]);
+  });
+
+  it('gives the newer dot an accessible label', () => {
+    render(ConversationHeader, { session: session(), conversations: list, viewing: 'aaa', lastEvent: null, newerAvailable: true, onSelect: vi.fn() });
+    expect(screen.getByTestId('conv-switcher-dot').getAttribute('aria-label')).toBe('newer conversation available');
+    expect(screen.getByRole('button', { name: /newer conversation available/ })).toBeTruthy();
+  });
+
+  it('Escape returns focus to the switcher button', async () => {
+    render(ConversationHeader, { session: session(), conversations: list, viewing: null, lastEvent: null, newerAvailable: false, onSelect: vi.fn() });
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    await fireEvent.keyDown(screen.getByTestId('conv-switcher-menu'), { key: 'Escape' });
+    expect(screen.queryByTestId('conv-switcher-menu')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('conv-switcher'));
+  });
+
+  it('Space selects an option like Enter', async () => {
+    const onSelect = vi.fn();
+    render(ConversationHeader, { session: session(), conversations: list, viewing: null, lastEvent: null, newerAvailable: false, onSelect });
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    await fireEvent.keyDown(screen.getAllByTestId('conv-switcher-item')[1], { key: ' ' });
+    expect(onSelect).toHaveBeenCalledWith('aaa');
+    expect(screen.queryByTestId('conv-switcher-menu')).toBeNull();
+  });
+
+  it('an outside pointerdown closes the switcher, an inside one does not', async () => {
+    render(ConversationHeader, { session: session(), conversations: list, viewing: null, lastEvent: null, newerAvailable: false, onSelect: vi.fn() });
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    await fireEvent.pointerDown(screen.getAllByTestId('conv-switcher-item')[0]);
+    expect(screen.getByTestId('conv-switcher-menu')).toBeTruthy();
+    await fireEvent.pointerDown(document.body);
+    expect(screen.queryByTestId('conv-switcher-menu')).toBeNull();
+  });
 });

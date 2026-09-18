@@ -42,8 +42,6 @@ const OPS_KINDS = new Set([
   'message_sent',
 ]);
 
-/** Which chip an event kind belongs to. `status_change` into `failed` or
- *  `blocked` counts as an error; any other status change is a turn edge. */
 const TURN_KINDS = new Set([
   'conversation_started',
   'conversation_ended',
@@ -52,6 +50,8 @@ const TURN_KINDS = new Set([
   'turn_done',
 ]);
 
+/** Which chip an event kind belongs to. `status_change` into `failed` or
+ *  `blocked` counts as an error; any other status change is a turn edge. */
 export function eventCategory(e: Pick<SessionEvent, 'kind' | 'detail'>): EventCategory {
   const k = e.kind;
   if (k === 'stuck' || k.endsWith('_failed') || k.includes('error')) return 'errors';

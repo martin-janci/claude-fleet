@@ -188,6 +188,10 @@
         if (!pinned && !opts.older) unseen += newItemCount(conv, r.value);
         conv = r.value;
         if (viewing === null && pending && transcriptCarries(conv, pending)) pending = null;
+        // Pushed events the read now carries are the backend's to keep (or
+        // age out); holding copies would grow `pushed` without bound.
+        const carried = new Set((conv.events ?? []).map((e) => e.id));
+        if (pushed.some((e) => carried.has(e.id))) pushed = pushed.filter((e) => !carried.has(e.id));
         if (pinned) {
           await tick();
           scrollToBottom();
@@ -284,7 +288,12 @@
     viewing = id;
     switchNotice = null;
     resetView();
-    if (id === null) newerAvailable = false;
+    if (id === null) {
+      newerAvailable = false;
+      // A reading taken before we left is not the current state any more.
+      setProbe(null);
+      probeSeq++;
+    }
     // The current conversation moved on while we were away: a prompt still
     // shown pending belonged to the old one.
     if (leavingForNewer) {
@@ -696,7 +705,7 @@
     </div>
   {:else if switchNotice && noticeSource}
     <div class="switch-notice" data-testid="conv-switch-notice" role="status">
-      New conversation ({SOURCE_LABELS[noticeSource]}) ·
+      New conversation{#if noticeSource !== 'unknown'}{` (${SOURCE_LABELS[noticeSource]})`}{/if} ·
       <button type="button" class="linkish" data-testid="conv-view-previous" onclick={viewPrevious}>View previous</button>
       <button type="button" class="dismiss" aria-label="Dismiss" data-testid="conv-switch-dismiss" onclick={() => (switchNotice = null)}>×</button>
     </div>
@@ -728,7 +737,7 @@
           {#each thread as row (row.kind === 'turn' ? `t${row.index}` : `e${row.event.id}`)}
             {#if row.kind === 'event'}
               <div class="event" data-testid="conv-event" data-tone={row.event.tone}>
-                <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time>{timeAgo(row.event.at, nowMs)}</time>
+                <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time datetime={new Date(row.event.at * 1000).toISOString()}>{timeAgo(row.event.at, nowMs)}</time>
               </div>
             {:else}
             {@const turn = row.turn}
