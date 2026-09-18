@@ -140,8 +140,15 @@ pub fn parse_mtimes(stdout: &str) -> std::collections::HashMap<String, i64> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HostIdentity {
     /// Kernel boot id — `/proc/sys/kernel/random/boot_id` (the HOST's, even
-    /// inside a container), else `sysctl -n kern.boottime` (macOS), else
-    /// `uptime -s`. `None` when none of them produced anything.
+    /// inside a container), else `sysctl -n kern.bootsessionuuid` (macOS): a
+    /// UUID stable for the whole boot. `None` when neither produced anything.
+    /// Deliberately NOT `kern.boottime` or `uptime -s`: both render their
+    /// timestamp in the local timezone, so the same boot prints a different
+    /// string under a different `TZ` (or across a DST change, or after NTP
+    /// steps the clock) — a later task reads any change in this string as a
+    /// reboot and marks every session on the host lost, so a
+    /// timezone-flavored "identity" is worse than none. Do not reintroduce
+    /// them.
     pub boot_id: Option<String>,
     /// Pid of the tmux server. `None` ⇒ no tmux server is running.
     pub tmux_server_pid: Option<i64>,
@@ -149,7 +156,15 @@ pub struct HostIdentity {
 
 /// Prints `boot=<id>` and `tmuxpid=<pid or empty>`. Never fails: every
 /// command is guarded, so a non-zero exit means the transport failed.
-pub const HOST_IDENTITY_SCRIPT: &str = "printf 'boot=%s\\n' \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.boottime 2>/dev/null || uptime -s 2>/dev/null)\"; printf 'tmuxpid=%s\\n' \"$(tmux display-message -p '#{pid}' 2>/dev/null)\"";
+///
+/// The boot id source is deliberately just `/proc/sys/kernel/random/boot_id`
+/// (Linux) falling back to `sysctl -n kern.bootsessionuuid` (macOS) — both
+/// are per-boot identifiers with no wall-clock rendering. `kern.boottime`
+/// and `uptime -s` were rejected: both print a local-time timestamp, so the
+/// same boot yields a different "boot id" under a different `TZ`, across a
+/// DST change, or after NTP steps the clock, and a spurious change is read
+/// downstream as a reboot that marks every session on the host lost.
+pub const HOST_IDENTITY_SCRIPT: &str = "printf 'boot=%s\\n' \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.bootsessionuuid 2>/dev/null)\"; printf 'tmuxpid=%s\\n' \"$(tmux display-message -p '#{pid}' 2>/dev/null)\"";
 
 /// Parse [`HOST_IDENTITY_SCRIPT`] output. `None` unless the `tmuxpid=` line is
 /// present and its value is empty or a number — anything else is output we
@@ -1097,6 +1112,22 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
         assert!(parse_host_identity(&String::from_utf8_lossy(&out.stdout)).is_some());
+    }
+
+    #[tokio::test]
+    async fn the_boot_id_does_not_depend_on_the_timezone() {
+        let run = |tz: &'static str| async move {
+            let out = tokio::process::Command::new("bash")
+                .args(["-c", HOST_IDENTITY_SCRIPT])
+                .env("TZ", tz)
+                .output()
+                .await
+                .unwrap();
+            parse_host_identity(&String::from_utf8_lossy(&out.stdout))
+                .unwrap()
+                .boot_id
+        };
+        assert_eq!(run("UTC").await, run("America/Los_Angeles").await);
     }
 
     #[tokio::test]
