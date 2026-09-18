@@ -215,7 +215,7 @@ export function keyToBytes(ev: KeyLike, opts: KeyOpts): string | null {
       break;
   }
 
-  if (key.length !== 1) return null; // other named keys (CapsLock, F13+, …)
+  if (key.length !== 1) return null; // other named keys (CapsLock, F21+, media, …)
 
   // Ctrl + printable → C0 control byte (Shift is ignored, as in xterm).
   if (ev.ctrlKey) {

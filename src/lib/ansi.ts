@@ -863,7 +863,7 @@ export class Screen {
       // atob yields one char per byte; the payload is UTF-8, so decode the
       // bytes (invalid sequences become U+FFFD) or 'čšá' / emoji arrive as
       // mojibake.
-      const bin = atob(b64.replace(/\s+/g, ''));
+      const bin = atob(b64);
       const text = UTF8.decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
       if (this.onClipboard) this.onClipboard(text);
     } catch {

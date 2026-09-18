@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createMouseController } from './terminal_mouse';
 import { Screen } from './ansi';
 import type { CellPos } from './terminal_selection';
@@ -87,6 +87,27 @@ describe('createMouseController window listeners (N6)', () => {
     windowUp(70, 20);
     for (const x of [30, 50, 70]) windowMove(x);
     expect(writes).toEqual([]);
+  });
+
+  it('reset() removes every window listener it installed', () => {
+    // Counting the listeners, not just watching for stray writes: a leaked
+    // pair stays on `window` for the component's life and keeps reporting.
+    const add = vi.spyOn(window, 'addEventListener');
+    const remove = vi.spyOn(window, 'removeEventListener');
+    try {
+      const { mouse } = setup('');
+      controllers.push(mouse);
+      mouse.onMousedown(down(0)); // local drag-select installs move + up
+      const gesture = (calls: [unknown, ...unknown[]][]) =>
+        calls.filter(([type]) => type === 'mousemove' || type === 'mouseup').length;
+      const installed = gesture(add.mock.calls as [unknown, ...unknown[]][]);
+      expect(installed).toBeGreaterThan(0);
+      mouse.reset();
+      expect(gesture(remove.mock.calls as [unknown, ...unknown[]][])).toBe(installed);
+    } finally {
+      add.mockRestore();
+      remove.mockRestore();
+    }
   });
 
   it('a local drag-select interrupted by reset() leaves nothing on window', () => {

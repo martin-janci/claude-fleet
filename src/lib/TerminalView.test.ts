@@ -1,6 +1,9 @@
 import { render, screen } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
+// The pinned run width lives in the component's <style>, which jsdom does not
+// apply; read the source so the rule itself is regression-tested.
+import terminalViewSource from './TerminalView.svelte?raw';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -270,7 +273,45 @@ describe('TerminalView resize debounce (FE-11)', () => {
   });
 });
 
+describe('TerminalView run boxes are pinned to the cell grid (F3)', () => {
+  it('publishes --cell-w and sizes every run box from it', () => {
+    // Both halves matter: the custom property carries the measured cell, and
+    // the rule multiplies it by the run's cell count. Drop either and glyph
+    // drift returns while the cursor and selection overlays stay put.
+    expect(terminalViewSource).toContain('--cell-w={cellWidth > 0');
+    expect(terminalViewSource).toMatch(/width:\s*calc\(var\(--cell-w\)\s*\*\s*var\(--n,\s*1\)\)/);
+  });
+});
+
 describe('TerminalView drain resilience (F1)', () => {
+  it('runs the rest of the tick after a chunk blows up the parser', async () => {
+    // The bytes are already consumed, so the eof the same drain reported must
+    // still be acted on — otherwise a dead PTY goes unnoticed until a reopen.
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') return drained({ data: 'boom', bytes: 4, eof: true });
+      return null;
+    });
+    const write = vi.spyOn(Screen.prototype, 'write').mockImplementation(() => {
+      throw new Error('parser bug');
+    });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      const before = calls('pty_open').length;
+      await vi.advanceTimersByTimeAsync(40); // the tick that throws
+      await vi.advanceTimersByTimeAsync(2000); // auto-reconnect backoff
+      await settle();
+      expect(calls('pty_open').length).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+      write.mockRestore();
+      errors.mockRestore();
+    }
+  });
+
   it('keeps rendering after one chunk blows up the parser', async () => {
     const chunks = ['boom', 'after'];
     inv().mockImplementation(async (cmd: string) => {
@@ -594,6 +635,26 @@ describe('TerminalView open lifecycle (F12/N4)', () => {
     await settle(16);
     expect(calls('pty_open')).toHaveLength(0);
     expect(calls('pty_resize')).toHaveLength(0);
+  });
+
+  it('a stale post-attach resize hint cannot fire into the next attach', async () => {
+    // The hint is armed 150 ms after an attach. Re-attaching inside that
+    // window must not leave the previous one's timer to fire as well.
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      clearSelection();
+      await settle();
+      selectSession(onAlpha);
+      await settle();
+      const before = calls('pty_resize').length;
+      await vi.advanceTimersByTimeAsync(400);
+      expect(calls('pty_resize').length - before).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('the post-attach resize hint does not fire after the pane is closed', async () => {
@@ -1192,6 +1253,22 @@ describe('TerminalView IME input proxy (F9)', () => {
     ime.dispatchEvent(key({ key: 'Enter' }));
     await settle();
     expect(written()).toEqual(['日本', '\r']);
+  });
+
+  it('swallows the Space that commits a composition, but not the next one', async () => {
+    // Space commits the first conversion step in most Japanese and Chinese
+    // IMEs; sending it too would type a stray space into the prompt.
+    const ime = await mountProxy();
+    ime.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    ime.dispatchEvent(compose(ime, 'にほん'));
+    ime.dispatchEvent(key({ key: ' ' }));
+    await settle();
+    expect(written()).toEqual(['にほん']);
+
+    await nextMacrotask();
+    ime.dispatchEvent(key({ key: ' ' }));
+    await settle();
+    expect(written()).toEqual(['にほん', ' ']);
   });
 
   it('sends an emoji-picker / accent-popup insert once', async () => {

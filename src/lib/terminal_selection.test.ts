@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeSelection, selectionRects, type CellPos } from './terminal_selection';
+import {
+  normalizeSelection,
+  selectionRects,
+  snapToGlyphs,
+  type CellPos,
+} from './terminal_selection';
 
 describe('normalizeSelection', () => {
   it('orders endpoints in reading order', () => {
@@ -143,7 +148,6 @@ describe('expandSelection', () => {
 });
 
 // ─── Wide glyphs: highlight and copy agree (N3) ──────────────────────────
-import { snapToGlyphs } from './terminal_selection';
 
 describe('selections never cut a wide glyph', () => {
   // 'ab中cd' as the screen stores it: the head carries the glyph, '' trails.

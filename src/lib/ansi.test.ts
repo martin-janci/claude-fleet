@@ -1518,6 +1518,17 @@ describe('ansi.Screen — SGR hidden / strike / ITU colon forms / underline colo
     return s.cells[0][0];
   }
 
+  it('decodes an OSC 52 payload whose base64 carries whitespace', () => {
+    const s = new Screen(1, 4);
+    const copied: string[] = [];
+    s.onClipboard = (t) => copied.push(t);
+    // A long copy can reach us wrapped. `atob` implements forgiving-base64
+    // and skips ASCII whitespace itself, so this needs no unwrapping of our
+    // own — the case is here so that stays true.
+    s.write('\x1b]52;c;xI3F\nocOh\x07');
+    expect(copied).toEqual(['čšá']);
+  });
+
   it('handles out-of-range and oversized colour groups as tmux 3.6a does', () => {
     // Measured with `capture-pane -e` after setting red (31):
     //   38:2:300:0:0      -> still red   (out-of-range RGB: group ignored)
