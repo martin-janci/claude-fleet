@@ -447,7 +447,18 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     continue;
                 }
                 if let Some(text) = user_text(content) {
-                    if let Some(name) = tag_text(&text, "command-name") {
+                    // Only an entry that *starts* with the tag is a command
+                    // (or its output); a human prompt that merely contains
+                    // one (a pasted transcript) stays a prompt.
+                    let head = text.trim_start();
+                    let is_command =
+                        head.starts_with("<command-name>") || head.starts_with("<command-message>");
+                    let is_output = head.starts_with("<local-command-stdout>")
+                        || head.starts_with("<local-command-stderr>");
+                    if let Some(name) = is_command
+                        .then(|| tag_text(&text, "command-name"))
+                        .flatten()
+                    {
                         push(&mut turns, current.take());
                         tool_items.clear();
                         current = Some(ConvTurn {
@@ -462,20 +473,21 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         });
                         continue;
                     }
-                    if let Some(out) = tag_text(&text, "local-command-stdout")
-                        .or_else(|| tag_text(&text, "local-command-stderr"))
+                    // Command output is consumed only by an open command
+                    // (the current turn's); without one it is a prompt.
+                    let open_command = current.as_mut().and_then(|t| {
+                        t.items
+                            .iter_mut()
+                            .rev()
+                            .find(|i| matches!(i, ConvItem::Command { .. }))
+                    });
+                    if let (true, Some(ConvItem::Command { output, .. })) =
+                        (is_output, open_command)
                     {
-                        if let Some(ConvItem::Command { output, .. }) =
-                            current.as_mut().and_then(|t| {
-                                t.items
-                                    .iter_mut()
-                                    .rev()
-                                    .find(|i| matches!(i, ConvItem::Command { .. }))
-                            })
-                        {
-                            if output.is_none() {
-                                *output = Some(cap_chars(&out, COMMAND_OUTPUT_MAX_CHARS));
-                            }
+                        if output.is_none() {
+                            *output = tag_text(&text, "local-command-stdout")
+                                .or_else(|| tag_text(&text, "local-command-stderr"))
+                                .map(|out| cap_chars(&out, COMMAND_OUTPUT_MAX_CHARS));
                         }
                         continue;
                     }
@@ -799,6 +811,7 @@ pub async fn fetch_conversation_for_row(
     claude_session_id: Option<&str>,
     turns: usize,
     max_chars: usize,
+    events_limit: i64,
 ) -> Result<Conversation, IpcError> {
     let args = match claude_session_id {
         Some(id) => resolve_args_for(store, row, id, turns, max_chars)?,
@@ -807,9 +820,17 @@ pub async fn fetch_conversation_for_row(
     let claude_id = args.claude_session_id.clone();
     let mut conv = fetch_conversation(args, ssh).await?;
     if let Ok(s) = lock(store) {
-        conv.events = s
-            .list_conversation_events(row.id, &claude_id, CONV_EVENTS_LIMIT)
-            .unwrap_or_default();
+        conv.events = match s.list_conversation_events(row.id, &claude_id, events_limit) {
+            Ok(events) => events,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = row.id,
+                    code = %e.code,
+                    "conversation events query failed; returning none"
+                );
+                Vec::new()
+            }
+        };
         if row.claude_session_id.as_deref() == Some(claude_id.as_str()) {
             if let Some(v) = &conv.context {
                 let _ = s.set_context(row.id, &claude_id, v.tokens, v.window, "transcript", None);
@@ -820,8 +841,11 @@ pub async fn fetch_conversation_for_row(
 }
 
 /// Most timeline events [`fetch_conversation_for_row`] attaches to a
-/// `Conversation`.
-const CONV_EVENTS_LIMIT: i64 = 200;
+/// `Conversation` for the UI (the `session_conversation` Tauri command).
+pub const CONV_EVENTS_LIMIT_UI: i64 = 200;
+/// Most timeline events the `session_conversation` MCP tool returns — kept
+/// small so an assistant's context is not flooded.
+pub const CONV_EVENTS_LIMIT_MCP: i64 = 50;
 
 /// Validate `args` and build the script that prints the last `max_bytes` of
 /// its transcript. Errors: `E_INVALID` (bad id / host / pane name).
@@ -1403,6 +1427,66 @@ mod tests {
     }
 
     #[test]
+    fn a_command_message_first_shape_still_parses() {
+        let t = parse_conversation(&jl(&[user(serde_json::json!(
+            "<command-message>clear</command-message>\n<command-name>/clear</command-name>"
+        ))]));
+        assert_eq!(
+            t[0].items,
+            vec![ConvItem::Command {
+                name: "/clear".into(),
+                args: None,
+                output: None
+            }]
+        );
+    }
+
+    #[test]
+    fn a_prompt_with_an_embedded_command_tag_stays_a_prompt() {
+        let text = "why did this happen?\n<command-name>/model</command-name>";
+        let t = parse_conversation(&jl(&[user(serde_json::json!(text)), asst("because")]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt.as_deref(), Some(text));
+        assert_eq!(
+            t[0].items,
+            vec![ConvItem::Text {
+                text: "because".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_stdout_looking_prompt_without_an_open_command_stays_a_prompt() {
+        let text = "<local-command-stdout>pasted</local-command-stdout> what is this?";
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("first")),
+            asst("ok"),
+            user(serde_json::json!(text)),
+        ]));
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[1].prompt.as_deref(), Some(text));
+    }
+
+    #[test]
+    fn embedded_stdout_mid_prompt_is_not_command_output() {
+        let text = "look: <local-command-stdout>x</local-command-stdout>";
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("<command-name>/model</command-name>")),
+            user(serde_json::json!(text)),
+        ]));
+        assert_eq!(t.len(), 2);
+        assert_eq!(
+            t[0].items,
+            vec![ConvItem::Command {
+                name: "/model".into(),
+                args: None,
+                output: None
+            }]
+        );
+        assert_eq!(t[1].prompt.as_deref(), Some(text));
+    }
+
+    #[test]
     fn meta_entries_are_skipped() {
         let t = parse_conversation(&jl(&[
             user(serde_json::json!("real prompt")),
@@ -1858,14 +1942,23 @@ mod tests {
                 .context_tokens
         };
         let before = ctx(&store);
-        let conv = fetch_conversation_for_row(&store, &ssh, &row, Some(CONV_B), 10, 8_000)
-            .await
-            .unwrap();
+        let conv = fetch_conversation_for_row(
+            &store,
+            &ssh,
+            &row,
+            Some(CONV_B),
+            10,
+            8_000,
+            CONV_EVENTS_LIMIT_UI,
+        )
+        .await
+        .unwrap();
         assert_eq!(conv.context.as_ref().map(|c| c.tokens), Some(2_000));
         assert_eq!(ctx(&store), before, "an earlier conversation is read-only");
-        let conv = fetch_conversation_for_row(&store, &ssh, &row, None, 10, 8_000)
-            .await
-            .unwrap();
+        let conv =
+            fetch_conversation_for_row(&store, &ssh, &row, None, 10, 8_000, CONV_EVENTS_LIMIT_UI)
+                .await
+                .unwrap();
         assert_eq!(conv.context.as_ref().map(|c| c.tokens), Some(1_000));
         assert_eq!(ctx(&store), Some(1_000));
     }
@@ -1884,9 +1977,17 @@ mod tests {
                 .unwrap();
         }
         let ssh = Arc::new(SshClient::new());
-        let conv = fetch_conversation_for_row(&store, &ssh, &row, Some(CONV_B), 10, 8_000)
-            .await
-            .unwrap();
+        let conv = fetch_conversation_for_row(
+            &store,
+            &ssh,
+            &row,
+            Some(CONV_B),
+            10,
+            8_000,
+            CONV_EVENTS_LIMIT_UI,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             conv.events
                 .iter()
@@ -1894,9 +1995,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some("b1".to_string())]
         );
-        let conv = fetch_conversation_for_row(&store, &ssh, &row, Some(CONV_A), 10, 8_000)
-            .await
-            .unwrap();
+        let conv = fetch_conversation_for_row(
+            &store,
+            &ssh,
+            &row,
+            Some(CONV_A),
+            10,
+            8_000,
+            CONV_EVENTS_LIMIT_UI,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             conv.events
                 .iter()
@@ -1904,6 +2013,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some("a1".to_string()), Some("a2".to_string())],
             "oldest first, only this conversation's events"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_for_row_caps_events_at_the_limit_keeping_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, row, _, _) = two_conversations(dir.path(), 1_000, 2_000);
+        {
+            let s = store.lock().unwrap();
+            for d in ["a1", "a2", "a3"] {
+                s.insert_session_event_for(row.id, Some(CONV_A), "prompt_sent", Some(d))
+                    .unwrap();
+            }
+        }
+        let ssh = Arc::new(SshClient::new());
+        let conv = fetch_conversation_for_row(&store, &ssh, &row, Some(CONV_A), 10, 8_000, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            conv.events
+                .iter()
+                .map(|e| e.detail.clone())
+                .collect::<Vec<_>>(),
+            vec![Some("a2".to_string()), Some("a3".to_string())]
         );
     }
 

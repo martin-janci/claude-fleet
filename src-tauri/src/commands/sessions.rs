@@ -345,6 +345,7 @@ pub async fn session_conversation(
         args.claude_session_id.as_deref(),
         turns,
         max_chars,
+        transcript::CONV_EVENTS_LIMIT_UI,
     )
     .await
 }
