@@ -800,6 +800,8 @@
                     </div>
                   {:else if g.kind === 'interrupt'}
                     <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
+                  {:else if g.kind === 'subagent'}
+                    <!-- rendered in a later task -->
                   {/if}
                 {/each}
                 {#if duration}

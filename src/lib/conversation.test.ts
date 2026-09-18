@@ -42,6 +42,7 @@ import {
   type Conversation,
   type ConversationSummary,
   type ConvTurn,
+  type ConvItem,
 } from './conversation';
 import type { SessionRow } from './sessions';
 
@@ -173,12 +174,46 @@ describe('relativeTime', () => {
   });
 });
 
+/** A `tool` ConvItem with the fields not under test defaulted. */
+function tool(summary: string, error = false) {
+  return {
+    kind: 'tool' as const,
+    summary,
+    error,
+    id: null,
+    name: '',
+    target: null,
+    at: null,
+    ended_at: null,
+    done: false,
+  };
+}
+
+/** A `subagent` ConvItem with the fields not under test defaulted. */
+function subagent(over: Partial<Extract<ConvItem, { kind: 'subagent' }>> = {}) {
+  return {
+    kind: 'subagent' as const,
+    id: null,
+    name: 'Task',
+    agent_type: null,
+    description: null,
+    result: null,
+    error: false,
+    at: null,
+    ended_at: null,
+    done: false,
+    ...over,
+  };
+}
+
 describe('groupItems', () => {
   it('keeps text items apart and folds consecutive tool calls together', () => {
     const t = (text: string) => ({ kind: 'text' as const, text });
-    const u = (summary: string, error?: boolean) => ({ kind: 'tool' as const, summary, error });
-    const l = (summary: string, error = false) => ({ summary, error });
-    expect(groupItems([u('Read(a)'), u('Bash(ls)', true), t('x'), u('Edit(b)'), t('y'), t('z')])).toEqual([
+    const l = (summary: string, error = false) => {
+      const { kind: _kind, ...rest } = tool(summary, error);
+      return rest;
+    };
+    expect(groupItems([tool('Read(a)'), tool('Bash(ls)', true), t('x'), tool('Edit(b)'), t('y'), t('z')])).toEqual([
       { kind: 'tools', tools: [l('Read(a)'), l('Bash(ls)', true)] },
       { kind: 'text', text: 'x' },
       { kind: 'tools', tools: [l('Edit(b)')] },
@@ -189,12 +224,14 @@ describe('groupItems', () => {
   });
 
   it('new item kinds are their own groups and break a tool run', () => {
-    const g = groupItems([
-      { kind: 'tool', summary: 'Bash(ls)' },
-      { kind: 'interrupt', during_tool: true },
-      { kind: 'tool', summary: 'Read(x)' },
-    ]);
+    const g = groupItems([tool('Bash(ls)'), { kind: 'interrupt', during_tool: true }, tool('Read(x)')]);
     expect(g.map((x) => x.kind)).toEqual(['tools', 'interrupt', 'tools']);
+  });
+
+  it('a subagent item is its own group and breaks a tool run', () => {
+    const g = groupItems([tool('Bash(ls)'), subagent({ id: 's1', description: 'Map it' }), tool('Read(x)')]);
+    expect(g.map((x) => x.kind)).toEqual(['tools', 'subagent', 'tools']);
+    expect(g[1]).toEqual(subagent({ id: 's1', description: 'Map it' }));
   });
 });
 
@@ -206,10 +243,15 @@ describe('toolName / toolGroupLabel', () => {
   });
 
   it('counts calls and lists up to three distinct names in order, plus how many failed', () => {
-    const l = (summary: string, error = false) => ({ summary, error });
+    const l = (summary: string, error = false) => tool(summary, error);
     expect(toolGroupLabel([l('Read(a)'), l('Read(b)'), l('Bash(x)')])).toBe('3 tool calls · Read, Bash');
     expect(toolGroupLabel([l('A()'), l('B()'), l('C()'), l('D()'), l('A()')])).toBe('5 tool calls · A, B, C +1');
     expect(toolGroupLabel([l('Bash(x)', true), l('Bash(y)'), l('Read(z)', true)])).toBe('3 tool calls · Bash, Read · 2 failed');
+  });
+
+  it('prefers the structured name over parsing the summary when present', () => {
+    const named = { ...tool('irrelevant(summary=x)'), name: 'Bash' };
+    expect(toolGroupLabel([named])).toBe('1 tool calls · Bash');
   });
 });
 

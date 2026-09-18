@@ -6,7 +6,29 @@ import type { SessionEvent } from './timeline';
 
 export type ConvItem =
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; summary: string; error?: boolean }
+  | {
+      kind: 'tool';
+      summary: string;
+      error?: boolean;
+      id: string | null;
+      name: string;
+      target: string | null;
+      at: string | null;
+      ended_at: string | null;
+      done: boolean;
+    }
+  | {
+      kind: 'subagent';
+      id: string | null;
+      name: string;
+      agent_type: string | null;
+      description: string | null;
+      result: string | null;
+      error: boolean;
+      at: string | null;
+      ended_at: string | null;
+      done: boolean;
+    }
   | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
   | { kind: 'command'; name: string; args: string | null; output: string | null }
   | { kind: 'interrupt'; during_tool: boolean };
@@ -115,6 +137,12 @@ export function relativeTime(iso: string, nowMs: number): string {
 export interface ToolLine {
   summary: string;
   error: boolean;
+  id: string | null;
+  name: string;
+  target: string | null;
+  at: string | null;
+  ended_at: string | null;
+  done: boolean;
 }
 
 /** A reply item after folding: prose, a run of consecutive tool calls, or one
@@ -122,13 +150,25 @@ export interface ToolLine {
 export type ConvGroup =
   | { kind: 'text'; text: string }
   | { kind: 'tools'; tools: ToolLine[] }
+  | {
+      kind: 'subagent';
+      id: string | null;
+      name: string;
+      agent_type: string | null;
+      description: string | null;
+      result: string | null;
+      error: boolean;
+      at: string | null;
+      ended_at: string | null;
+      done: boolean;
+    }
   | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
   | { kind: 'command'; name: string; args: string | null; output: string | null }
   | { kind: 'interrupt'; during_tool: boolean };
 
 /** Fold consecutive tool one-liners into one group; text items stay apart;
- *  compact/command/interrupt items are each their own group and close any
- *  open tool run. */
+ *  a subagent (and compact/command/interrupt) items are each their own
+ *  group and close any open tool run. */
 export function groupItems(items: ConvItem[]): ConvGroup[] {
   const out: ConvGroup[] = [];
   for (const item of items) {
@@ -137,7 +177,16 @@ export function groupItems(items: ConvItem[]): ConvGroup[] {
       continue;
     }
     if (item.kind === 'tool') {
-      const line: ToolLine = { summary: item.summary, error: item.error === true };
+      const line: ToolLine = {
+        summary: item.summary,
+        error: item.error === true,
+        id: item.id,
+        name: item.name,
+        target: item.target,
+        at: item.at,
+        ended_at: item.ended_at,
+        done: item.done,
+      };
       const last = out[out.length - 1];
       if (last?.kind === 'tools') last.tools.push(line);
       else out.push({ kind: 'tools', tools: [line] });
@@ -157,7 +206,7 @@ export function toolName(summary: string): string {
 /** `"7 tool calls · Bash, Read, Edit +2"` for a folded group, with
  *  `" · 1 failed"` appended when any call errored. */
 export function toolGroupLabel(tools: ToolLine[]): string {
-  const names = [...new Set(tools.map((t) => toolName(t.summary)))];
+  const names = [...new Set(tools.map((t) => t.name || toolName(t.summary)))];
   const shown = names.slice(0, 3).join(', ');
   const more = names.length > 3 ? ` +${names.length - 3}` : '';
   const failed = tools.filter((t) => t.error).length;

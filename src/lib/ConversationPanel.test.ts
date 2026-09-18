@@ -39,6 +39,22 @@ function session(over: Partial<SessionRow> = {}): SessionRow {
   } as SessionRow;
 }
 
+/** A `tool` ConvItem with the fields not under test defaulted. */
+function tool(summary: string, over: Partial<{ error: boolean; id: string | null; name: string; target: string | null; at: string | null; ended_at: string | null; done: boolean }> = {}) {
+  return {
+    kind: 'tool' as const,
+    summary,
+    error: false,
+    id: null,
+    name: '',
+    target: null,
+    at: null,
+    ended_at: null,
+    done: false,
+    ...over,
+  };
+}
+
 function conv(over: Partial<Conversation> = {}): Conversation {
   return {
     truncated: false,
@@ -49,10 +65,7 @@ function conv(over: Partial<Conversation> = {}): Conversation {
         prompt: 'fix the bug',
         at: '2026-09-13T10:00:00.000Z',
         ended_at: null,
-        items: [
-          { kind: 'text', text: 'looking into it' },
-          { kind: 'tool', summary: 'Bash(command=ls -la)' },
-        ],
+        items: [{ kind: 'text', text: 'looking into it' }, tool('Bash(command=ls -la)')],
       },
     ],
     ...over,
@@ -396,11 +409,11 @@ describe('ConversationPanel', () => {
               at: null,
               ended_at: null,
               items: [
-                { kind: 'tool', summary: 'Read(file_path=a)' },
-                { kind: 'tool', summary: 'Bash(command=ls)' },
-                { kind: 'tool', summary: 'Read(file_path=b)' },
+                tool('Read(file_path=a)'),
+                tool('Bash(command=ls)'),
+                tool('Read(file_path=b)'),
                 { kind: 'text', text: 'between' },
-                { kind: 'tool', summary: 'Edit(file_path=c)' },
+                tool('Edit(file_path=c)'),
               ],
             },
           ],
@@ -839,15 +852,12 @@ describe('ConversationPanel tool outcomes', () => {
       ok(
         conv({
           turns: [
-            { prompt: 'p', at: null, ended_at: null, items: [{ kind: 'tool', summary: 'Bash(cargo test)', error: true }] },
+            { prompt: 'p', at: null, ended_at: null, items: [tool('Bash(cargo test)', { error: true })] },
             {
               prompt: 'q',
               at: null,
               ended_at: null,
-              items: [
-                { kind: 'tool', summary: 'Read(a)' },
-                { kind: 'tool', summary: 'Bash(b)', error: true },
-              ],
+              items: [tool('Read(a)'), tool('Bash(b)', { error: true })],
             },
           ],
         }),
@@ -893,10 +903,7 @@ describe('ConversationPanel turn duration and open tool group', () => {
   });
 
   it("keeps the running turn's last tool group open, earlier groups folded", async () => {
-    const tools = (n: string) => [
-      { kind: 'tool' as const, summary: `${n}1()` },
-      { kind: 'tool' as const, summary: `${n}2()` },
-    ];
+    const tools = (n: string) => [tool(`${n}1()`), tool(`${n}2()`)];
     mockedConv.mockReturnValue(
       ok(
         conv({
@@ -1186,7 +1193,7 @@ describe('ConversationPanel second review-round fixes', () => {
 
   it('a manually closed running group stays closed on refresh; a manually opened finished group stays open', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    const tools = (n: string, k: number) => Array.from({ length: k }, (_, i) => ({ kind: 'tool' as const, summary: `${n}${i}()` }));
+    const tools = (n: string, k: number) => Array.from({ length: k }, (_, i) => tool(`${n}${i}()`));
     const base = conv({
       turns: [
         { prompt: 'a', at: '2026-09-13T10:00:00Z', ended_at: null, items: tools('A', 2) },

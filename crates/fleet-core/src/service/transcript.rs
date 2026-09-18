@@ -40,6 +40,14 @@ const READ_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(20);
 /// Cap on a single tool_use summary line.
 const TOOL_SUMMARY_CHARS: usize = 160;
 
+/// Chars kept of a tool target (plus "…").
+const TOOL_TARGET_MAX_CHARS: usize = 120;
+/// Chars kept of a subagent's final text.
+const SUBAGENT_RESULT_MAX_CHARS: usize = 1_500;
+/// `tool_use` names that get their own [`ConvItem::Subagent`] item instead
+/// of a plain [`ConvItem::Tool`].
+const SUBAGENT_TOOLS: [&str; 2] = ["Task", "Agent"];
+
 /// Encode a working directory the way Claude Code names its per-project
 /// transcript directory: every char outside `[A-Za-z0-9]` becomes `-`.
 /// The read script does this on the host (after `pwd -P`) with an
@@ -176,6 +184,50 @@ fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// What a tool call touched, for its compact line: a path, a pattern, a
+/// URL, a query or the first line of a command. `None` when nothing
+/// identifying is in the input.
+pub fn tool_target(_name: &str, input: Option<&serde_json::Value>) -> Option<String> {
+    let map = input?.as_object()?;
+    for key in [
+        "file_path",
+        "notebook_path",
+        "pattern",
+        "url",
+        "query",
+        "command",
+        "path",
+        "skill",
+        "description",
+    ] {
+        if let Some(s) = map.get(key).and_then(|v| v.as_str()) {
+            let first = s.lines().next().unwrap_or("").trim();
+            if first.is_empty() {
+                continue;
+            }
+            return Some(cap_chars(first, TOOL_TARGET_MAX_CHARS));
+        }
+    }
+    None
+}
+
+/// The text of a tool_result's content (a string, or its text blocks
+/// joined); images are skipped.
+fn tool_result_text(block: &serde_json::Value) -> Option<String> {
+    match block.get("content") {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(parts)) => {
+            let texts: Vec<&str> = parts
+                .iter()
+                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        }
+        _ => None,
+    }
+}
+
 /// Turns kept by `session_conversation`, and its character budget.
 pub const CONV_TURNS: usize = 10;
 /// Most turns the Conversation tab may ask for with "Load older".
@@ -227,6 +279,41 @@ pub enum ConvItem {
         summary: String,
         #[serde(default)]
         error: bool,
+        /// The `tool_use` id, so a lazy detail fetch can find it again.
+        id: Option<String>,
+        /// The tool's name: `"Bash"`, `"Edit"`, `"mcp__x__y"`, …
+        name: String,
+        /// What the tool touched; see [`tool_target`].
+        target: Option<String>,
+        /// ISO timestamp of the `tool_use` entry.
+        at: Option<String>,
+        /// ISO timestamp of its `tool_result` entry.
+        ended_at: Option<String>,
+        /// A `tool_result` was seen for this call.
+        done: bool,
+    },
+    /// A `Task` / `Agent` call, kept apart from other tools so its final
+    /// text can be shown without cramming a subagent transcript into the
+    /// tool one-liner.
+    Subagent {
+        /// The `tool_use` id.
+        id: Option<String>,
+        /// `"Task"` or `"Agent"`.
+        name: String,
+        /// `input.subagent_type`.
+        agent_type: Option<String>,
+        /// `input.description`.
+        description: Option<String>,
+        /// The final text of its `tool_result`, capped at
+        /// [`SUBAGENT_RESULT_MAX_CHARS`].
+        result: Option<String>,
+        error: bool,
+        /// ISO timestamp of the `tool_use` entry.
+        at: Option<String>,
+        /// ISO timestamp of its `tool_result` entry.
+        ended_at: Option<String>,
+        /// A `tool_result` was seen for this call.
+        done: bool,
     },
     /// A compaction (`system/compact_boundary`). `summary` is the text of
     /// the following `isCompactSummary` user entry when the read tail has
@@ -420,15 +507,41 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     for b in blocks
                         .iter()
                         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-                        .filter(|b| b.get("is_error").and_then(|e| e.as_bool()) == Some(true))
                     {
+                        let is_err = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
                         let idx = b
                             .get("tool_use_id")
                             .and_then(|i| i.as_str())
                             .and_then(|i| tool_items.get(i).copied());
                         if let (Some(idx), Some(turn)) = (idx, current.as_mut()) {
-                            if let Some(ConvItem::Tool { error, .. }) = turn.items.get_mut(idx) {
-                                *error = true;
+                            let ended = at();
+                            match turn.items.get_mut(idx) {
+                                Some(ConvItem::Tool {
+                                    error,
+                                    done,
+                                    ended_at,
+                                    ..
+                                }) => {
+                                    *error |= is_err;
+                                    *done = true;
+                                    *ended_at = ended;
+                                }
+                                Some(ConvItem::Subagent {
+                                    error,
+                                    done,
+                                    ended_at,
+                                    result,
+                                    ..
+                                }) => {
+                                    *error |= is_err;
+                                    *done = true;
+                                    *ended_at = ended;
+                                    if let Some(t) = tool_result_text(b) {
+                                        *result =
+                                            Some(cap_chars(t.trim(), SUBAGENT_RESULT_MAX_CHARS));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -542,13 +655,47 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 }
                             }
                             Some("tool_use") => {
-                                if let Some(id) = b.get("id").and_then(|i| i.as_str()) {
-                                    tool_items.insert(id.to_string(), turn.items.len());
+                                let id = b.get("id").and_then(|i| i.as_str()).map(String::from);
+                                let name = b
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("tool")
+                                    .to_string();
+                                if let Some(id) = &id {
+                                    tool_items.insert(id.clone(), turn.items.len());
                                 }
-                                turn.items.push(ConvItem::Tool {
-                                    summary: tool_summary(b),
-                                    error: false,
-                                });
+                                let input = b.get("input");
+                                if SUBAGENT_TOOLS.contains(&name.as_str()) {
+                                    turn.items.push(ConvItem::Subagent {
+                                        id,
+                                        agent_type: input
+                                            .and_then(|v| v.get("subagent_type"))
+                                            .and_then(|v| v.as_str())
+                                            .map(String::from),
+                                        description: input
+                                            .and_then(|v| v.get("description"))
+                                            .and_then(|v| v.as_str())
+                                            .map(String::from),
+                                        result: None,
+                                        error: false,
+                                        at: at(),
+                                        ended_at: None,
+                                        done: false,
+                                        name,
+                                    });
+                                } else {
+                                    let target = tool_target(&name, input);
+                                    turn.items.push(ConvItem::Tool {
+                                        summary: tool_summary(b),
+                                        error: false,
+                                        id,
+                                        name,
+                                        target,
+                                        at: at(),
+                                        ended_at: None,
+                                        done: false,
+                                    });
+                                }
                             }
                             _ => {}
                         }
@@ -576,6 +723,12 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
                 .map(|i| match i {
                     ConvItem::Text { text } => text.clone(),
                     ConvItem::Tool { summary, .. } => format!("{TOOL_USE_PREFIX}{summary}"),
+                    ConvItem::Subagent {
+                        name, description, ..
+                    } => format!(
+                        "{TOOL_USE_PREFIX}{name}(description={})",
+                        one_line(description.as_deref().unwrap_or(""))
+                    ),
                     ConvItem::Compact { trigger, .. } => {
                         format!("[compacted] {}", trigger.as_deref().unwrap_or("unknown"))
                     }
@@ -596,7 +749,17 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
 fn item_chars(item: &ConvItem) -> usize {
     match item {
         ConvItem::Text { text } => text.chars().count(),
-        ConvItem::Tool { summary, .. } => summary.chars().count(),
+        ConvItem::Tool {
+            summary, target, ..
+        } => summary.chars().count() + target.as_deref().map_or(0, |s| s.chars().count()),
+        ConvItem::Subagent {
+            description,
+            result,
+            ..
+        } => {
+            description.as_deref().map_or(0, |s| s.chars().count())
+                + result.as_deref().map_or(0, |s| s.chars().count())
+        }
         ConvItem::Compact { summary, .. } => summary.as_deref().map_or(0, |s| s.chars().count()),
         ConvItem::Command { name, args, output } => {
             name.chars().count()
@@ -1288,11 +1451,23 @@ mod tests {
             vec![
                 ConvItem::Tool {
                     summary: "Bash(command=cargo test)".into(),
-                    error: true
+                    error: true,
+                    id: Some("t1".into()),
+                    name: "Bash".into(),
+                    target: Some("cargo test".into()),
+                    at: None,
+                    ended_at: None,
+                    done: true,
                 },
                 ConvItem::Tool {
                     summary: "Read(file_path=a.rs)".into(),
-                    error: false
+                    error: false,
+                    id: Some("t2".into()),
+                    name: "Read".into(),
+                    target: Some("a.rs".into()),
+                    at: None,
+                    ended_at: None,
+                    done: true,
                 },
                 ConvItem::Text {
                     text: "One failed.".into()
@@ -1334,7 +1509,13 @@ mod tests {
                 },
                 ConvItem::Tool {
                     summary: "Bash(command=ls -la)".into(),
-                    error: false
+                    error: false,
+                    id: None,
+                    name: "Bash".into(),
+                    target: Some("ls -la".into()),
+                    at: None,
+                    ended_at: None,
+                    done: false,
                 },
             ]
         );
@@ -1367,6 +1548,211 @@ mod tests {
     fn asst(text: &str) -> serde_json::Value {
         serde_json::json!({"type":"assistant","timestamp":"2026-09-18T10:00:05Z",
             "message":{"content":[{"type":"text","text":text}]}})
+    }
+    fn tool_use(ts: &str, id: &str, name: &str, input: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"type":"assistant","timestamp":ts,
+            "message":{"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}})
+    }
+    fn tool_result(ts: &str, id: &str, content: serde_json::Value, err: bool) -> serde_json::Value {
+        serde_json::json!({"type":"user","timestamp":ts,
+            "message":{"content":[{"type":"tool_result","tool_use_id":id,"content":content,"is_error":err}]}})
+    }
+    /// A `Tool` item with only `summary`/`error` set, for synthetic
+    /// (non-parsed) test turns that don't exercise the new fields.
+    fn tool_item(summary: &str, error: bool) -> ConvItem {
+        ConvItem::Tool {
+            summary: summary.into(),
+            error,
+            id: None,
+            name: String::new(),
+            target: None,
+            at: None,
+            ended_at: None,
+            done: false,
+        }
+    }
+
+    #[test]
+    fn a_tool_item_carries_id_name_target_times_and_done() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T09:00:20.100Z",
+                "toolu_1",
+                "Bash",
+                serde_json::json!({"command":"cargo test -p fleet-core\nsecond line"}),
+            ),
+            tool_result(
+                "2026-09-18T09:00:41.900Z",
+                "toolu_1",
+                serde_json::json!("ok"),
+                false,
+            ),
+            tool_use(
+                "2026-09-18T09:00:42Z",
+                "toolu_2",
+                "Edit",
+                serde_json::json!({"file_path":"/w/src/a.rs","old_string":"a","new_string":"b"}),
+            ),
+        ]));
+        match &t[0].items[0] {
+            ConvItem::Tool {
+                id,
+                name,
+                target,
+                at,
+                ended_at,
+                done,
+                error,
+                ..
+            } => {
+                assert_eq!(id.as_deref(), Some("toolu_1"));
+                assert_eq!(name, "Bash");
+                assert_eq!(target.as_deref(), Some("cargo test -p fleet-core"));
+                assert_eq!(at.as_deref(), Some("2026-09-18T09:00:20.100Z"));
+                assert_eq!(ended_at.as_deref(), Some("2026-09-18T09:00:41.900Z"));
+                assert!(*done && !*error);
+            }
+            other => panic!("{other:?}"),
+        }
+        match &t[0].items[1] {
+            ConvItem::Tool {
+                target,
+                done,
+                ended_at,
+                ..
+            } => {
+                assert_eq!(target.as_deref(), Some("/w/src/a.rs"));
+                assert!(!*done);
+                assert_eq!(*ended_at, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_and_agent_calls_become_subagent_items_with_their_final_text() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T09:00:00Z",
+                "toolu_3",
+                "Task",
+                serde_json::json!({"description":"Map the store","prompt":"p","subagent_type":"Explore"}),
+            ),
+            tool_result(
+                "2026-09-18T09:02:00Z",
+                "toolu_3",
+                serde_json::json!([{"type":"text","text":"Final report: all good"}]),
+                false,
+            ),
+            tool_use(
+                "2026-09-18T09:03:00Z",
+                "toolu_4",
+                "Agent",
+                serde_json::json!({"description":"Second"}),
+            ),
+        ]));
+        assert_eq!(
+            t[0].items[0],
+            ConvItem::Subagent {
+                id: Some("toolu_3".into()),
+                name: "Task".into(),
+                agent_type: Some("Explore".into()),
+                description: Some("Map the store".into()),
+                result: Some("Final report: all good".into()),
+                error: false,
+                at: Some("2026-09-18T09:00:00Z".into()),
+                ended_at: Some("2026-09-18T09:02:00Z".into()),
+                done: true,
+            }
+        );
+        assert!(matches!(
+            &t[0].items[1],
+            ConvItem::Subagent {
+                done: false,
+                agent_type: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn tool_target_prefers_what_the_tool_touched() {
+        let j = |v: serde_json::Value| Some(v);
+        assert_eq!(
+            tool_target(
+                "Read",
+                j(serde_json::json!({"file_path":"/a/b.rs"})).as_ref()
+            )
+            .as_deref(),
+            Some("/a/b.rs")
+        );
+        assert_eq!(
+            tool_target(
+                "Grep",
+                j(serde_json::json!({"pattern":"fn x","path":"src"})).as_ref()
+            )
+            .as_deref(),
+            Some("fn x")
+        );
+        assert_eq!(
+            tool_target(
+                "WebFetch",
+                j(serde_json::json!({"url":"https://x.y"})).as_ref()
+            )
+            .as_deref(),
+            Some("https://x.y")
+        );
+        assert_eq!(
+            tool_target("Bash", j(serde_json::json!({"command":"a\nb"})).as_ref()).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            tool_target("TodoWrite", j(serde_json::json!({"todos":[]})).as_ref()),
+            None
+        );
+        let long = "x".repeat(300);
+        assert_eq!(
+            tool_target("Bash", j(serde_json::json!({"command": long})).as_ref())
+                .unwrap()
+                .chars()
+                .count(),
+            121
+        );
+    }
+
+    #[test]
+    fn the_mcp_text_rendering_of_tools_is_unchanged() {
+        let turns = parse_turns(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T09:00:00Z",
+                "toolu_1",
+                "Bash",
+                serde_json::json!({"command":"ls"}),
+            ),
+        ]));
+        assert!(turns.join("\n").contains("[tool_use] Bash(command=ls)"));
+    }
+
+    #[test]
+    fn subagent_calls_render_like_the_old_tool_summary_in_plain_text() {
+        // parse_turns pins the plain-text (MCP) projection: a Subagent
+        // renders the same "Name(description=…)" shape tool_summary used
+        // to produce for Task/Agent before they were split out.
+        let turns = parse_turns(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T09:00:00Z",
+                "toolu_5",
+                "Task",
+                serde_json::json!({"description":"Map the store","prompt":"p","subagent_type":"Explore"}),
+            ),
+        ]));
+        assert!(turns
+            .join("\n")
+            .contains("[tool_use] Task(description=Map the store)"));
     }
 
     #[test]
@@ -1584,10 +1970,7 @@ mod tests {
                 ended_at: None,
                 items: vec![
                     ConvItem::Text { text: "hi".into() },
-                    ConvItem::Tool {
-                        summary: "Bash(command=ls)".into(),
-                        error: false,
-                    },
+                    tool_item("Bash(command=ls)", false),
                 ],
             }],
             truncated: false,
@@ -1597,7 +1980,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"items":[
-                {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)","error":false}]}],
+                {"kind":"text","text":"hi"},
+                {"kind":"tool","summary":"Bash(command=ls)","error":false,"id":null,"name":"","target":null,"at":null,"ended_at":null,"done":false}]}],
                 "truncated":false,"context":null,"events":[]})
         );
     }
@@ -1623,10 +2007,7 @@ mod tests {
                 ConvItem::Text {
                     text: "a".repeat(10),
                 },
-                ConvItem::Tool {
-                    summary: "b".repeat(10),
-                    error: false,
-                },
+                tool_item(&"b".repeat(10), false),
             ],
         };
         // 30 chars total; a 25 budget drops the oldest item only.
@@ -1634,13 +2015,7 @@ mod tests {
         assert!(c.truncated);
         assert_eq!(c.turns.len(), 1);
         assert_eq!(c.turns[0].prompt.as_deref(), Some("pppppppppp"));
-        assert_eq!(
-            c.turns[0].items,
-            vec![ConvItem::Tool {
-                summary: "b".repeat(10),
-                error: false
-            }]
-        );
+        assert_eq!(c.turns[0].items, vec![tool_item(&"b".repeat(10), false)]);
         // Exactly at budget: nothing dropped.
         assert!(!trim_conversation(vec![turn], 10, 30).truncated);
     }
@@ -1699,10 +2074,7 @@ mod tests {
             at: None,
             ended_at: None,
             items: vec![
-                ConvItem::Tool {
-                    summary: "Bash(command=ls)".into(),
-                    error: false,
-                },
+                tool_item("Bash(command=ls)", false),
                 ConvItem::Text {
                     text: "the reply!".into(),
                 },
