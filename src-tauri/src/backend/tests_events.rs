@@ -53,14 +53,19 @@ impl RemoteEventSink for Recorder {
 }
 
 /// Counts resyncs. That is the whole assertion for "one refetch per gap".
+/// Also records what the bridge showed it between resyncs.
 #[derive(Default)]
 struct CountingResync {
     calls: std::sync::atomic::AtomicUsize,
+    observed: StdMutex<Vec<&'static str>>,
 }
 
 impl CountingResync {
     fn count(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn observed(&self) -> Vec<&'static str> {
+        self.observed.lock().unwrap().clone()
     }
 }
 
@@ -68,6 +73,9 @@ impl CountingResync {
 impl FleetResync for CountingResync {
     async fn resync(&self) {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn observe(&self, name: &'static str, _payload: &Value) {
+        self.observed.lock().unwrap().push(name);
     }
 }
 
@@ -94,10 +102,25 @@ impl Delay for FakeDelay {
 }
 
 /// One scripted connection: either it fails to open, or it delivers these
-/// pieces of body and then ends.
+/// pieces of body and then ends — or, for the idle-timeout tests, goes quiet.
 enum Connection {
     Fails(&'static str),
     Delivers(Vec<String>),
+    /// Delivers these pieces and then never answers again, and never closes:
+    /// a half-open socket after a laptop slept and woke on another network.
+    GoesSilent(Vec<String>),
+    /// Delivers these pieces, then `beats` keep-alive comments one
+    /// `KEEPALIVE_INTERVAL` apart on the tokio clock, then ends. The counter
+    /// records how many beats were actually read, which is how a test tells
+    /// "the stream ran its course" from "the client cut it short".
+    KeepsAlive(Vec<String>, usize, Arc<std::sync::atomic::AtomicUsize>),
+}
+
+/// What a scripted body does once its pieces are spent.
+enum After {
+    End,
+    Silence,
+    Beats(usize, Arc<std::sync::atomic::AtomicUsize>),
 }
 
 /// A script of connections. When it runs out it cancels the bridge, so
@@ -134,6 +157,21 @@ impl HubEventStream for ScriptedStream {
                 self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(Box::new(ScriptedBody {
                     pieces: pieces.into(),
+                    after: After::End,
+                }))
+            }
+            Some(Connection::GoesSilent(pieces)) => {
+                self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Box::new(ScriptedBody {
+                    pieces: pieces.into(),
+                    after: After::Silence,
+                }))
+            }
+            Some(Connection::KeepsAlive(pieces, beats, served)) => {
+                self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Box::new(ScriptedBody {
+                    pieces: pieces.into(),
+                    after: After::Beats(beats, served),
                 }))
             }
             // The script is spent: end the run so the test finishes without
@@ -148,13 +186,48 @@ impl HubEventStream for ScriptedStream {
 
 struct ScriptedBody {
     pieces: std::collections::VecDeque<String>,
+    after: After,
 }
 
 #[async_trait::async_trait]
 impl EventStreamBody for ScriptedBody {
     async fn next(&mut self) -> Result<Option<String>, String> {
-        Ok(self.pieces.pop_front())
+        if let Some(piece) = self.pieces.pop_front() {
+            return Ok(Some(piece));
+        }
+        match &mut self.after {
+            After::End => Ok(None),
+            After::Silence => std::future::pending().await,
+            After::Beats(0, _) => Ok(None),
+            After::Beats(left, served) => {
+                tokio::time::sleep(fleet_core::mcp::events_route::KEEPALIVE_INTERVAL).await;
+                *left -= 1;
+                served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // What axum's `KeepAlive` writes: an SSE comment line.
+                Ok(Some(":\n\n".to_string()))
+            }
+        }
     }
+}
+
+fn ready() -> String {
+    frame(
+        READY_FRAME,
+        &json!({"version": "0.2.20", "now": 1, "kinds": ["session"]}),
+    )
+}
+
+/// `drive`, bounded. Only for `start_paused` tests: the bound is on the tokio
+/// clock, which a paused runtime advances the moment everything is idle, so a
+/// bridge wedged on a silent socket FAILS here instead of hanging the suite.
+async fn drive_bounded(
+    script: Vec<Connection>,
+) -> (Arc<Recorder>, Arc<CountingResync>, Arc<FakeDelay>, usize) {
+    tokio::time::timeout(Duration::from_secs(24 * 3600), drive(script))
+        .await
+        .expect(
+            "the bridge wedged: a day passed on the tokio clock and it never gave up on a stream",
+        )
 }
 
 /// One SSE frame as `/events` writes it (`sse_event` in
@@ -280,7 +353,12 @@ async fn every_variant_this_test_can_build_crosses_unchanged() {
 /// to exist on one side and not the other.
 #[tokio::test]
 async fn every_event_name_the_frontend_listens_for_crosses_the_bridge() {
-    let payload = json!({ "probe": 1 });
+    // Every key any store merges on, so the shape check (SF-5) passes it
+    // under every name; `probe` is the unknown field that must survive.
+    let payload = json!({
+        "probe": 1, "id": 1, "alias": "trn", "uuid": "u-1", "account_uuid": "u-1",
+        "host_alias": "trn", "harness": "claude"
+    });
     let body: Vec<String> = fleet_core::events::EVENT_NAMES
         .iter()
         .map(|name| frame(name, &payload))
@@ -371,6 +449,55 @@ async fn a_payload_that_is_not_json_is_dropped_without_ending_the_stream() {
 
 /// The hub writes one frame per `send`, but TCP does not preserve that: a
 /// read boundary can fall inside a `data:` line.
+/// SF-5. The bridge used to emit anything that parsed as JSON under any name
+/// the frontend listens for, and `events.ts` reads the payload unchecked:
+/// `null` under `session:killed` throws inside the batch flush and loses the
+/// whole batch; `42` under `session:updated` is appended to the sessions
+/// array. And an opted-in plaintext hub is explicitly supported, where anyone
+/// on the path can write these frames — the name allowlist constrains only
+/// the name.
+#[tokio::test]
+async fn a_payload_the_frontend_store_cannot_apply_is_dropped_not_emitted() {
+    let good = RowChange::SessionKilled(9);
+    let bad = [
+        ("session:killed", "null"),
+        ("session:updated", "42"),
+        ("host:removed", "\"trn\""),
+        ("task:updated", "[]"),
+        // Objects, but without the key the store merges on, or with it
+        // under the wrong type.
+        ("session:updated", "{}"),
+        ("session:killed", r#"{"id":"9"}"#),
+        ("host:probed", r#"{"alias":7}"#),
+        ("worktree:removed", r#"{"id":null}"#),
+        ("account:upserted", r#"{"email":"a@b"}"#),
+        ("account_usage:updated", "{}"),
+        ("asset_inventory:cleared", r#"{"host_alias":"trn"}"#),
+    ];
+    let mut body: Vec<String> = bad
+        .iter()
+        .map(|(name, data)| format!("event: {name}\ndata: {data}\n\n"))
+        .collect();
+    body.push(frame_for(&good));
+    let seen = one_connection(body).await;
+    assert_eq!(
+        seen.events(),
+        vec![(good.name(), good.payload())],
+        "only the well-formed event may reach the frontend, and a bad one must \
+         not end the stream"
+    );
+}
+
+/// The forward-compatibility the passthrough exists for is kept: a field
+/// this build does not know still crosses untouched.
+#[tokio::test]
+async fn an_unknown_field_on_a_well_formed_payload_still_crosses() {
+    let mut row = RowChange::SessionUpdated(sample_session()).payload();
+    row["from_a_newer_hub"] = json!({ "nested": [1, 2] });
+    let seen = one_connection(vec![frame("session:updated", &row)]).await;
+    assert_eq!(seen.events(), vec![("session:updated", row)]);
+}
+
 #[tokio::test]
 async fn a_frame_split_across_reads_still_produces_one_event() {
     let change = RowChange::SessionUpdated(sample_session());
@@ -498,18 +625,19 @@ async fn a_hub_that_accepts_and_delivers_nothing_does_not_reset_the_backoff() {
     );
 }
 
-/// And the other direction: one frame — even just `ready` — proves the route
-/// answered, so the next drop is retried promptly rather than after a minute
-/// of doubling.
+/// And the other direction: a row event proves the stream works, so the next
+/// drop is retried promptly rather than after a minute of doubling.
+///
+/// This used to be "one frame — even just `ready`", and that was the hole the
+/// review found (SF-2): the hub emits `ready` unconditionally, before it
+/// touches its bus, so a route whose bus has gone still sends it. See the next
+/// two tests.
 #[tokio::test]
-async fn a_single_frame_is_enough_to_call_a_connection_working() {
+async fn a_row_event_is_what_calls_a_connection_working() {
     let (_, _, delay, _) = drive(vec![
         Connection::Delivers(vec![]),
         Connection::Delivers(vec![]),
-        Connection::Delivers(vec![frame(
-            READY_FRAME,
-            &json!({"version": "0.2.20", "now": 1, "kinds": ["session"]}),
-        )]),
+        Connection::Delivers(vec![ready(), frame_for(&RowChange::SessionKilled(1))]),
         Connection::Delivers(vec![]),
     ])
     .await;
@@ -522,6 +650,122 @@ async fn a_single_frame_is_enough_to_call_a_connection_working() {
             FIRST_BACKOFF * 2
         ],
         "the third connection delivered, so the wait after it starts over"
+    );
+}
+
+/// SF-2. `events_route` sends `ready` before it ever reads the bus, so "a
+/// `/events` route whose bus has gone" — the exact case the backoff guard was
+/// written for — answers 200, sends `ready`, and closes. Counting `ready` as
+/// delivery reset the wait every time: the review measured 1s, 1s, 1s, 1s.
+#[tokio::test]
+async fn a_connection_that_only_says_ready_does_not_reset_the_backoff() {
+    let (_, resync, delay, _) = drive(vec![
+        Connection::Delivers(vec![ready()]),
+        Connection::Delivers(vec![ready()]),
+        Connection::Delivers(vec![ready()]),
+        Connection::Delivers(vec![ready()]),
+    ])
+    .await;
+    assert_eq!(resync.count(), 4);
+    assert_eq!(
+        delay.waits()[..4],
+        [
+            FIRST_BACKOFF,
+            FIRST_BACKOFF * 2,
+            FIRST_BACKOFF * 4,
+            FIRST_BACKOFF * 8
+        ],
+        "`ready` is sent before the hub touches its bus, so it proves nothing"
+    );
+}
+
+/// SF-3. `lagged` also reset the wait. And the loop it feeds is
+/// self-sustaining: a resync is four serial calls during which nothing reads
+/// the stream, so the hub's ring overflows and the first frame of the next
+/// connection is `lagged` again — at one second, not at a growing backoff.
+#[tokio::test]
+async fn a_connection_that_ends_lagged_does_not_reset_the_backoff() {
+    let lagged = frame(LAGGED_FRAME, &json!({ "skipped": 300 }));
+    let (_, _, delay, _) = drive(vec![
+        Connection::Delivers(vec![ready(), lagged.clone()]),
+        Connection::Delivers(vec![ready(), lagged.clone()]),
+        Connection::Delivers(vec![
+            ready(),
+            frame_for(&RowChange::SessionKilled(1)),
+            lagged,
+        ]),
+    ])
+    .await;
+    assert_eq!(
+        delay.waits()[..3],
+        [FIRST_BACKOFF, FIRST_BACKOFF * 2, FIRST_BACKOFF * 4],
+        "a connection that ended by falling behind is the hot loop itself, \
+         even if a row squeezed through first"
+    );
+}
+
+/// B-1, the blocker. A laptop sleeps and wakes on another network: the client
+/// never writes on the socket again, so it never gets an RST, and the hub's
+/// FIN never reaches it. `read()` blocks forever — no reconnect, no resync, a
+/// frozen fleet and not one log line. The hub sends a keep-alive every 15 s
+/// precisely so a client can notice this; silence well past that IS the
+/// signal.
+#[tokio::test(start_paused = true)]
+async fn a_stream_that_goes_silent_is_abandoned_and_reconnected() {
+    let after = RowChange::SessionKilled(2);
+    let (seen, resync, _, opens) = drive_bounded(vec![
+        Connection::GoesSilent(vec![ready()]),
+        Connection::Delivers(vec![frame_for(&after)]),
+    ])
+    .await;
+    assert_eq!(opens, 2, "the silent stream must be given up on");
+    assert_eq!(resync.count(), 2, "and the new connection re-lists");
+    assert_eq!(seen.events(), vec![(after.name(), after.payload())]);
+}
+
+/// The other side of B-1: a stream kept alive only by the hub's heartbeat is
+/// a healthy, quiet fleet, and must not be cut. Ten beats is 150 s of no
+/// events at all.
+#[tokio::test(start_paused = true)]
+async fn a_stream_kept_alive_by_the_hubs_heartbeat_is_not_cut() {
+    let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (_, resync, _, opens) = drive_bounded(vec![Connection::KeepsAlive(
+        vec![ready()],
+        10,
+        served.clone(),
+    )])
+    .await;
+    assert_eq!(
+        served.load(std::sync::atomic::Ordering::SeqCst),
+        10,
+        "every heartbeat was read: the client did not cut a live stream"
+    );
+    assert_eq!(opens, 1);
+    assert_eq!(resync.count(), 1);
+}
+
+/// And a quiet stream that stayed up is a working one: a hub with nothing to
+/// say for a minute, then a proxy's idle cut, must be retried promptly — the
+/// SF-2 fix must not turn every quiet evening into a 30-second outage.
+#[tokio::test(start_paused = true)]
+async fn a_quiet_connection_that_stayed_up_counts_as_working() {
+    let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (_, _, delay, _) = drive_bounded(vec![
+        Connection::Delivers(vec![]),
+        Connection::Delivers(vec![]),
+        Connection::KeepsAlive(vec![ready()], 5, served),
+        Connection::Delivers(vec![]),
+    ])
+    .await;
+    assert_eq!(
+        delay.waits()[..4],
+        [
+            FIRST_BACKOFF,
+            FIRST_BACKOFF * 2,
+            FIRST_BACKOFF,
+            FIRST_BACKOFF * 2
+        ],
+        "75 s of heartbeats is a stream that worked"
     );
 }
 
@@ -983,6 +1227,60 @@ async fn a_later_resync_kills_what_has_gone_while_this_client_was_detached() {
             .any(|(n, p)| *n == "session:killed" && p["id"] == 1),
         "a session that is still there must not be killed: {after:?}"
     );
+}
+
+/// SF-4. `Seen` used to be written only by a resync, so a row that arrived
+/// as a LIVE event and vanished during a gap was never in `before` and never
+/// removed: a permanent ghost in the sidebar, every action on it failing,
+/// until a manual refresh.
+#[tokio::test]
+async fn a_row_that_arrived_live_and_vanished_in_a_gap_is_removed() {
+    let (resync, seen, _) = resync_over(&[
+        ("list_sessions", &sessions_payload(&[1, 2])),
+        ("list_hosts", &hosts_payload(&["trn"])),
+        ("list_tasks", "[]"),
+        ("list_accounts", "[]"),
+    ]);
+    resync.resync().await;
+
+    // Live, between resyncs: session 3 and host `new` are created, session 2
+    // is killed.
+    resync.observe("session:created", &json!({ "id": 3 }));
+    resync.observe("host:added", &json!({ "alias": "new" }));
+    resync.observe("session:killed", &json!({ "id": 2 }));
+    let before = seen.events().len();
+
+    // Then a gap, during which 3 and `new` go away too.
+    resync.resync().await;
+    let after: Vec<(&'static str, Value)> = seen.events().into_iter().skip(before).collect();
+    assert!(
+        after.contains(&("session:killed", json!({ "id": 3 }))),
+        "a session this client learned about live must be removed when it \
+         vanishes: {after:?}"
+    );
+    assert!(
+        after.contains(&("host:removed", json!({ "alias": "new" }))),
+        "{after:?}"
+    );
+    assert!(
+        !after.contains(&("session:killed", json!({ "id": 2 }))),
+        "2's kill already arrived live; the resync must not repeat it: {after:?}"
+    );
+}
+
+/// The bridge's half of SF-4: every row event it emits is shown to the
+/// resync, which is how `Seen` hears about rows no list returned.
+#[tokio::test]
+async fn the_bridge_shows_the_resync_every_row_event_it_emits() {
+    let created = RowChange::SessionCreated(sample_session());
+    let removed = RowChange::HostRemoved("trn".into());
+    let (_, resync, _, _) = drive(vec![Connection::Delivers(vec![
+        ready(),
+        frame_for(&created),
+        frame_for(&removed),
+    ])])
+    .await;
+    assert_eq!(resync.observed(), vec![created.name(), removed.name()]);
 }
 
 #[tokio::test]

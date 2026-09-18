@@ -82,6 +82,10 @@ pub trait RemoteEventSink: Send + Sync {
 #[async_trait::async_trait]
 pub trait FleetResync: Send + Sync {
     async fn resync(&self);
+
+    /// A row event the bridge has just emitted. See [`HubResync`]'s
+    /// implementation for why a resync needs to hear about them.
+    fn observe(&self, _name: &'static str, _payload: &Value) {}
 }
 
 /// A live `GET /events` body: the text of the response as it arrives, with
@@ -127,6 +131,25 @@ pub const FIRST_BACKOFF: Duration = Duration::from_secs(1);
 /// up on it.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// How long a stream may say nothing at all before it is presumed dead.
+///
+/// The hub writes a keep-alive comment every
+/// [`KEEPALIVE_INTERVAL`](fleet_core::mcp::events_route::KEEPALIVE_INTERVAL)
+/// (15 s) precisely so a client can tell a quiet fleet from a dead socket.
+/// Two and a half intervals is two missed beats plus slack for a slow link.
+/// Without this, a laptop that slept and woke on another network blocks in
+/// `read()` forever: it never writes on that socket again, so it never gets
+/// an RST, and the hub's FIN never reaches it.
+pub const IDLE_TIMEOUT: Duration = Duration::from_millis(
+    fleet_core::mcp::events_route::KEEPALIVE_INTERVAL.as_millis() as u64 * 5 / 2,
+);
+
+/// A connection that stayed up this long counts as working even if it
+/// carried no row event — a quiet fleet is not a broken one. Longer than
+/// [`IDLE_TIMEOUT`], so a stream that said `ready` and then went silent does
+/// not qualify.
+pub const HEALTHY_AFTER: Duration = Duration::from_secs(60);
+
 /// The next wait after `previous` failed: doubling, capped.
 pub fn next_backoff(previous: Duration) -> Duration {
     std::cmp::min(previous.saturating_mul(2), MAX_BACKOFF)
@@ -153,7 +176,7 @@ enum StreamEnd {
     /// mean the same thing to a client: reconnect, and re-list, because the
     /// picture now has a hole of unknown size in it.
     Gap {
-        /// Did this connection carry a single frame before it ended?
+        /// Did this connection prove the stream works before it ended?
         ///
         /// It decides whether the backoff resets, and the distinction is not
         /// academic. A hub that accepts the socket, answers 200 and closes
@@ -163,7 +186,14 @@ enum StreamEnd {
         /// and because every connection re-lists, each of those seconds costs
         /// four tool calls against a hub that is already unwell.
         ///
-        /// The `ready` frame counts: the route really did answer.
+        /// So only two things count: a ROW event, or a connection that stayed
+        /// up for [`HEALTHY_AFTER`]. **`ready` does not**: `events_route`
+        /// sends it unconditionally, before it ever reads its bus, so a route
+        /// whose bus has gone still sends it. **A connection that ends
+        /// `lagged` never counts on its events**, only on its lifetime: a
+        /// resync's four serial calls leave the stream unread, the hub's ring
+        /// overflows, and the next connection opens `lagged` — reset on that
+        /// and the loop feeds itself at one second.
         delivered: bool,
     },
 }
@@ -171,8 +201,10 @@ enum StreamEnd {
 /// What one frame decided.
 #[derive(Debug, PartialEq, Eq)]
 enum Delivery {
-    /// Keep reading this connection.
+    /// Keep reading this connection; the frame proved nothing about it.
     KeepReading,
+    /// A row event reached the frontend: the stream demonstrably works.
+    Row,
     /// This connection is over.
     EndOfStream,
 }
@@ -247,31 +279,55 @@ impl EventBridge {
 
     /// Read one connection to its end, emitting as it goes.
     async fn pump(&self, mut body: Box<dyn EventStreamBody>) -> StreamEnd {
+        let opened = tokio::time::Instant::now();
+        let stayed_up = || opened.elapsed() >= HEALTHY_AFTER;
         let mut decoder = SseDecoder::new();
-        let mut delivered = false;
+        let mut row_events = false;
         loop {
+            // Any bytes at all — the hub's keep-alive comment included —
+            // make `next` return, so this bounds SILENCE, not the stream.
             let piece = tokio::select! {
                 _ = self.cancel.cancelled() => return StreamEnd::Cancelled,
-                next = body.next() => next,
+                next = tokio::time::timeout(IDLE_TIMEOUT, body.next()) => next,
             };
             let text = match piece {
-                Ok(Some(text)) => text,
-                Ok(None) => {
+                Ok(Ok(Some(text))) => text,
+                Ok(Ok(None)) => {
                     tracing::info!("[hub events] the hub closed the event stream; reconnecting");
-                    return StreamEnd::Gap { delivered };
+                    return StreamEnd::Gap {
+                        delivered: row_events || stayed_up(),
+                    };
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(
                         error = %e,
                         "[hub events] the event stream failed; reconnecting"
                     );
-                    return StreamEnd::Gap { delivered };
+                    return StreamEnd::Gap {
+                        delivered: row_events || stayed_up(),
+                    };
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        silent_for = ?IDLE_TIMEOUT,
+                        "[hub events] the event stream went silent (not even the hub's \
+                         keep-alive); presuming it dead and reconnecting"
+                    );
+                    return StreamEnd::Gap {
+                        delivered: row_events || stayed_up(),
+                    };
                 }
             };
             for frame in decoder.feed(&text) {
-                delivered = true;
-                if self.deliver(&frame.name, &frame.data) == Delivery::EndOfStream {
-                    return StreamEnd::Gap { delivered };
+                match self.deliver(&frame.name, &frame.data) {
+                    Delivery::KeepReading => {}
+                    Delivery::Row => row_events = true,
+                    // Lagged: only the lifetime can vouch for this one.
+                    Delivery::EndOfStream => {
+                        return StreamEnd::Gap {
+                            delivered: stayed_up(),
+                        }
+                    }
                 }
             }
         }
@@ -305,22 +361,73 @@ impl EventBridge {
                     return Delivery::KeepReading;
                 };
                 match serde_json::from_str::<Value>(data) {
-                    Ok(payload) => self.sink.emit_remote(known, payload),
-                    Err(e) => tracing::warn!(
-                        event = %known,
-                        error = %e,
-                        "[hub events] dropping an event whose payload is not JSON"
-                    ),
+                    Ok(payload) => {
+                        if let Err(why) = payload_fits(known, &payload) {
+                            tracing::warn!(
+                                event = %known,
+                                why = %why,
+                                "[hub events] dropping an event the frontend could not apply"
+                            );
+                            return Delivery::KeepReading;
+                        }
+                        self.resync.observe(known, &payload);
+                        self.sink.emit_remote(known, payload);
+                        Delivery::Row
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            event = %known,
+                            error = %e,
+                            "[hub events] dropping an event whose payload is not JSON"
+                        );
+                        Delivery::KeepReading
+                    }
                 }
-                Delivery::KeepReading
             }
         }
     }
 }
 
+/// Can the frontend apply `payload` under `name` at all?
+///
+/// The payload is otherwise passed through untouched (see the module docs),
+/// and `src/lib/events.ts` reads it unchecked — so a payload that is not an
+/// object, or lacks the key its store merges on, is a TypeError inside the
+/// batch flush (which loses the whole batch) or a junk entry in a row array.
+/// Checked here: an object, plus that key with the right type. Unknown
+/// fields are NOT checked, which keeps a desktop working against a newer hub.
+pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
+    let Some(obj) = payload.as_object() else {
+        return Err("the payload is not a JSON object".to_string());
+    };
+    let integer = |key: &str| match obj.get(key) {
+        Some(v) if v.is_i64() => Ok(()),
+        _ => Err(format!("`{key}` is missing or not an integer")),
+    };
+    let string = |key: &str| match obj.get(key) {
+        Some(Value::String(_)) => Ok(()),
+        _ => Err(format!("`{key}` is missing or not a string")),
+    };
+    match name {
+        "session:created" | "session:updated" | "session:killed" | "project:updated"
+        | "worktree:updated" | "worktree:removed" | "task:updated" => integer("id"),
+        "host:added" | "host:probed" | "host:removed" => string("alias"),
+        "account:upserted" => string("uuid"),
+        "account_usage:updated" => string("account_uuid"),
+        "asset_inventory:cleared" => string("host_alias").and_then(|()| string("harness")),
+        _ => Ok(()),
+    }
+}
+
 // --- re-listing after a gap ---------------------------------------------------
 
-/// What the last resync saw, so the next one can tell what has gone.
+/// Every session and host the frontend currently holds, as far as this
+/// bridge knows — so the next resync can tell what has gone.
+///
+/// Written by a resync AND by every live `session:*` / `host:*` frame (see
+/// [`FleetResync::observe`]). Written by a resync alone, a row that arrived
+/// live and vanished during a gap was never in the set and so was never
+/// removed: a permanent ghost.
 ///
 /// `None` means "no resync has run yet": the first one cannot know what
 /// vanished before the app started, and inventing removals from an empty set
@@ -382,6 +489,41 @@ impl HubResync {
 
 #[async_trait::async_trait]
 impl FleetResync for HubResync {
+    /// Keep [`Seen`] in step with what the frontend has been told live.
+    fn observe(&self, name: &'static str, payload: &Value) {
+        let mut seen = self.seen.lock().expect("resync state");
+        let id = || payload.get("id").and_then(Value::as_i64);
+        let alias = || {
+            payload
+                .get("alias")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        match name {
+            "session:created" | "session:updated" => {
+                if let (Some(set), Some(id)) = (seen.sessions.as_mut(), id()) {
+                    set.insert(id);
+                }
+            }
+            "session:killed" => {
+                if let (Some(set), Some(id)) = (seen.sessions.as_mut(), id()) {
+                    set.remove(&id);
+                }
+            }
+            "host:added" | "host:probed" => {
+                if let (Some(set), Some(alias)) = (seen.hosts.as_mut(), alias()) {
+                    set.insert(alias);
+                }
+            }
+            "host:removed" => {
+                if let (Some(set), Some(alias)) = (seen.hosts.as_mut(), alias()) {
+                    set.remove(&alias);
+                }
+            }
+            _ => {}
+        }
+    }
+
     async fn resync(&self) {
         // `force: false` — a reconcile pass belongs to whoever owns the fleet,
         // and that is the hub. This asks for what it already knows.
@@ -455,9 +597,9 @@ impl FleetResync for HubResync {
 // --- the real stream ----------------------------------------------------------
 
 /// How long to wait for the hub's response head. The body then stays open
-/// indefinitely, which is the whole point, so there is no read timeout past
-/// this: the 15 s keep-alive comment is what proves a live stream, and
-/// [`EventStreamBody::next`] returning an error is what ends a dead one.
+/// indefinitely, which is the whole point; past the head, silence is bounded
+/// by [`IDLE_TIMEOUT`] in [`EventBridge::pump`] instead, because the 15 s
+/// keep-alive comment is what proves a live stream.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Largest response head accepted, so a listener that never sends the blank
