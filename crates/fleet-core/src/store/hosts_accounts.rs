@@ -312,22 +312,33 @@ impl Store {
     /// over SSH as today) or `"agent"` (reached through an outbound
     /// fleet-agent connection). `E_INVALID` for any other value — an
     /// unvalidated write here would silently strand every future command
-    /// against the host.
+    /// against the host. `E_NOTFOUND` for an unknown alias (same
+    /// affected-row-count check as `set_host_token_mode`) — unlike
+    /// `set_host_hidden`/`set_host_account`/`set_host_provisioned` (which
+    /// return a bare `rusqlite::Error` and can't express it), this setter
+    /// already returns `IpcError`, so a typo'd alias gets a real signal
+    /// instead of a silent no-op.
     pub fn set_host_transport(
         &self,
         alias: &str,
         transport: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        if transport != "ssh" && transport != "agent" {
+        if !HOST_TRANSPORTS.contains(&transport) {
             return Err(crate::ipc_error::IpcError::new(
                 codes::E_INVALID,
                 format!("unknown transport {transport:?}: must be \"ssh\" or \"agent\""),
             ));
         }
-        self.conn.execute(
+        let n = self.conn.execute(
             "UPDATE hosts SET transport=?1 WHERE alias=?2",
             rusqlite::params![transport, alias],
         )?;
+        if n == 0 {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("host {alias} not found"),
+            ));
+        }
         self.emit_host(alias, |bus, row| bus.host_probed(row))?;
         Ok(())
     }
@@ -660,6 +671,16 @@ mod tests {
         assert_eq!(err.code, "E_INVALID");
         // The rejected write left the prior value untouched.
         assert_eq!(s.get_host_row("h").unwrap().unwrap().transport, "ssh");
+    }
+
+    /// An unknown alias is `E_NOTFOUND`, not a silent no-op — the same
+    /// affected-row-count check `set_host_token_mode` uses, so a typo'd
+    /// alias gets a signal instead of a success that changed nothing.
+    #[test]
+    fn set_host_transport_rejects_an_unknown_alias() {
+        let s = Store::open_in_memory().unwrap();
+        let err = s.set_host_transport("nope", "agent").unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
     }
 
     #[test]

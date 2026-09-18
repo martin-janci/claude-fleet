@@ -391,6 +391,11 @@ pub struct HostRow {
     pub transport: String,
 }
 
+/// The only values `hosts.transport` may hold (migration 033). The single
+/// definition `Store::set_host_transport` and `service::hosts::add_host`
+/// both validate against, so the allowed set can't drift between them.
+pub const HOST_TRANSPORTS: [&str; 2] = ["ssh", "agent"];
+
 /// Columns every `HostRow` query selects, in [`map_host_row`] order.
 pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \

@@ -51,16 +51,33 @@ pub async fn add_host(
     crate::validate::host_alias(&args.alias)?;
     // Only ever an argument to `ssh`, never the `local` host itself.
     crate::validate::host_alias_syntax(&args.ssh_alias)?;
+    // Validate the transport before the probe or any write: `insert_host`
+    // autocommits and fires `host_added` immediately (no transaction wraps
+    // this whole call), so validating only once we reach
+    // `Store::set_host_transport` left a ghost, unreachable-looking row
+    // behind — and an emitted event — on a rejected value.
+    if let Some(t) = args.transport.as_deref() {
+        if !crate::store::HOST_TRANSPORTS.contains(&t) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("unknown transport {t:?}: must be \"ssh\" or \"agent\""),
+            ));
+        }
+    }
     // Probe first; we don't want to persist a host we can't talk to.
     let (reachable, claude_ver, tmux_ver, account) = probe(ssh, &args.ssh_alias).await?;
     {
         let s = lock(store)?;
         s.insert_host(&args.alias, Some(&args.ssh_alias))?;
-        // Validated (E_INVALID for anything but "ssh"/"agent") and persisted
-        // even for the default, so every host row leaves this call with an
-        // explicit transport rather than relying on the column default.
-        let transport = args.transport.as_deref().unwrap_or("ssh");
-        s.set_host_transport(&args.alias, transport)?;
+        // `insert_host` is an upsert, so this branch also runs on a re-add
+        // of an existing alias. Only write the transport when the caller
+        // named one: `None` means "unspecified", not "reset to ssh" — a
+        // fresh row already gets 'ssh' from the column default, but an
+        // existing row (e.g. already "agent") must not be silently
+        // downgraded by a re-add that didn't mention transport at all.
+        if let Some(t) = args.transport.as_deref() {
+            s.set_host_transport(&args.alias, t)?;
+        }
         // Link account if probe found one
         if let Some(acc) = account
             .as_ref()
@@ -1100,8 +1117,17 @@ mod tests {
         assert_eq!(calls[0].script().as_deref(), Some(PROBE_SCRIPT));
     }
 
+    /// NOTE: this passes only because `fake_fleet()` fakes the SSH probe to
+    /// succeed. `add_host` still runs `probe(ssh, &args.ssh_alias).await?`
+    /// *before* anything is persisted (see `add_host`'s body), so today
+    /// `add_host { transport: "agent" }` only succeeds for a host that is
+    /// ALSO SSH-reachable — the one case that does not need an agent. This
+    /// is not proof an unreachable agent host can be added; that needs
+    /// Task 4/5 (route reachability through the agent registry instead of an
+    /// SSH probe when `transport == "agent"`). Ledgered as deferred, not a
+    /// Task 1 defect.
     #[tokio::test]
-    async fn add_host_persists_an_explicit_agent_transport() {
+    async fn add_host_persists_an_explicit_agent_transport_when_the_ssh_probe_succeeds() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
         let fake = fake_fleet();
         let row = add_host(
@@ -1134,6 +1160,51 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, "E_INVALID");
+        // A rejected add_host must persist nothing — the same invariant
+        // add_host_unreachable_is_e_probe_and_persists_nothing protects.
+        // Before the fix, validation ran after insert_host had already
+        // committed and emitted host_added, leaving a ghost row behind.
+        assert!(
+            host_row(&store, "delta").is_none(),
+            "no row for a rejected transport"
+        );
+        assert!(fake.calls().is_empty(), "validation runs before the probe");
+    }
+
+    /// insert_host is an upsert, so re-adding an existing alias is a
+    /// supported update path. `transport: None` means "unspecified", not
+    /// "reset to ssh" — re-adding an agent host without naming a transport
+    /// must leave it on "agent", not silently downgrade it to "ssh".
+    #[tokio::test]
+    async fn add_host_without_a_transport_does_not_downgrade_an_existing_agent_host() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        add_host(
+            AddHostArgs {
+                alias: "eps".into(),
+                ssh_alias: "eps.example".into(),
+                transport: Some("agent".into()),
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .expect("first add");
+        let row = add_host(
+            AddHostArgs {
+                alias: "eps".into(),
+                ssh_alias: "eps.example".into(),
+                transport: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .expect("re-add without a transport");
+        assert_eq!(
+            row.transport, "agent",
+            "re-adding without a transport must not downgrade an agent host"
+        );
     }
 
     #[tokio::test]

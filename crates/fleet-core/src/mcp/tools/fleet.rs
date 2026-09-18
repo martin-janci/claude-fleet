@@ -83,10 +83,7 @@ impl FleetTools {
         &self,
         Parameters(args): Parameters<hosts::AddHostArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit(
-            "add_host",
-            &format!("alias={} ssh_alias={}", args.alias, args.ssh_alias),
-        );
+        audit("add_host", &add_host_audit_detail(&args));
         let row = hosts::add_host(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -284,9 +281,23 @@ fn pair_ttl(ttl_s: Option<u64>) -> std::time::Duration {
     }
 }
 
+/// The `add_host` audit line's identifying detail. A transport change is
+/// exactly the kind of thing the audit trail should carry, so it rides
+/// alongside `alias`/`ssh_alias` — defaulted the same way `add_host` itself
+/// resolves an unset transport, so the log always names the effective value.
+fn add_host_audit_detail(args: &hosts::AddHostArgs) -> String {
+    format!(
+        "alias={} ssh_alias={} transport={}",
+        args.alias,
+        args.ssh_alias,
+        args.transport.as_deref().unwrap_or("ssh")
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::pair_ttl;
+    use super::{add_host_audit_detail, pair_ttl};
+    use crate::service::hosts;
     use std::time::Duration;
 
     #[test]
@@ -298,6 +309,32 @@ mod tests {
             pair_ttl(Some(u64::MAX)),
             Duration::from_secs(3600),
             "ceiling"
+        );
+    }
+
+    #[test]
+    fn add_host_audit_detail_names_an_explicit_transport() {
+        let args = hosts::AddHostArgs {
+            alias: "h".into(),
+            ssh_alias: "h.example".into(),
+            transport: Some("agent".into()),
+        };
+        assert_eq!(
+            add_host_audit_detail(&args),
+            "alias=h ssh_alias=h.example transport=agent"
+        );
+    }
+
+    #[test]
+    fn add_host_audit_detail_names_the_default_transport_when_unset() {
+        let args = hosts::AddHostArgs {
+            alias: "h".into(),
+            ssh_alias: "h.example".into(),
+            transport: None,
+        };
+        assert_eq!(
+            add_host_audit_detail(&args),
+            "alias=h ssh_alias=h.example transport=ssh"
         );
     }
 }
