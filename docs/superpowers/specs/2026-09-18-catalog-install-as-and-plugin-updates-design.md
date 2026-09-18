@@ -44,7 +44,7 @@ catalog's *install names* per kind from `installed()`, so an installed
 For skills, agents and MCP servers, when the slug differs from the original
 identifier and the original is a valid install name, the importer sets
 `install_as` to the original. When the original is not a valid install name
-(a space, a slash, a leading dot), the asset is still created under the slug
+(a space, a slash, or exactly `.` or `..`), the asset is still created under the slug
 without `install_as`, and the report's new `warnings: Vec<Problem>` lists it
 (`<kind> <slug>: installs under a new name; <original> stays unmanaged`).
 Hooks and plugin refs never get `install_as`.

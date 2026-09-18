@@ -38,7 +38,7 @@ name changes it (`~/.claude/skills/foo_bar` becomes catalog `skill/foo-bar`
 with `install_as: foo_bar`), so the rendered asset keeps installing under the
 original identifier and that host copy reads as in sync rather than
 unmanaged; when the original identifier is not itself a valid install name
-(a space, a slash, a leading dot), the import proceeds under the slug without
+(a space, a slash, or exactly `.` or `..`), the import proceeds under the slug without
 `install_as` and the report lists it as a warning instead. The asset editor
 exposes an "Installs as" field for the kinds that support it, and the detail
 view shows "installs as `<name>`" when one is set.
