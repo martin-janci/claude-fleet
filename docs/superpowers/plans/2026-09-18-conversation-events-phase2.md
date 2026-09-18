@@ -373,7 +373,19 @@ export type ConvGroup =
   | { kind: 'interrupt'; during_tool: boolean };
 ```
 
-In `groupItems`, `tool` items keep folding into the open `tools` group; `text` stays as is; each `compact` / `command` / `interrupt` item closes any open tool run and becomes its own group with the same fields (drop `kind: 'tool'`'s grouping only). Add the `groupItems` test from Task 2 Step 3 ("new item kinds are their own groups and break a tool run") here. `ConversationPanel.svelte`'s `{#each groups}` must ignore the three new group kinds until Task 4 (an `{:else}` branch rendering nothing) so svelte-check passes.
+In `groupItems`, `tool` items keep folding into the open `tools` group; `text` stays as is; each `compact` / `command` / `interrupt` item closes any open tool run and becomes its own group with the same fields (drop `kind: 'tool'`'s grouping only). Add this test to `conversation.test.ts`:
+
+```ts
+it('new item kinds are their own groups and break a tool run', () => {
+  const g = groupItems([
+    { kind: 'tool', summary: 'Bash(ls)' },
+    { kind: 'interrupt', during_tool: true },
+    { kind: 'tool', summary: 'Read(x)' },
+  ]);
+  expect(g.map((x) => x.kind)).toEqual(['tools', 'interrupt', 'tools']);
+});
+```
+ `ConversationPanel.svelte`'s `{#each groups}` must ignore the three new group kinds until Task 4 (an `{:else}` branch rendering nothing) so svelte-check passes.
 
 - [ ] **Step 6: Run** — full `cargo test -p fleet-core`, clippy, fmt, `cargo check -p claude-fleet`, `npx svelte-check`, `npx vitest run` → PASS. `REGEN_DOCS=1 cargo test -p fleet-core reference_is_current` only if a tool description changed (it should not).
 
