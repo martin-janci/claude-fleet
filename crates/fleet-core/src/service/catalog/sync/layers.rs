@@ -27,20 +27,18 @@ pub fn resolve_for_host(
         return Ok(resolve(catalog, &[], &[]));
     }
 
-    let role_name = rows
+    // Any row whose axis is neither "role" nor "context" is an error, even
+    // beside recognised rows. `set_host_layers` can never produce one (it
+    // hard-codes both literals), but a direct-SQL path or a future third axis
+    // must not be silently dropped: with every row bogus the host would fall
+    // back to the whole catalog, and with some bogus it would resolve to less
+    // than its assignment says.
+    let mut bogus: Vec<&str> = rows
         .iter()
-        .find(|r| r.axis == "role")
-        .map(|r| r.layer_name.clone());
-    let mut context_rows: Vec<_> = rows.iter().filter(|r| r.axis == "context").collect();
-    context_rows.sort_by_key(|r| r.position);
-
-    // `rows` is non-empty but neither selector matched anything: every row
-    // carries an axis that is neither "role" nor "context". `set_host_layers`
-    // can never produce this (it hard-codes both literals), but a direct-SQL
-    // path or a future third axis must not silently fall back to the whole
-    // catalog — that is the exact failure the spec forbids.
-    if role_name.is_none() && context_rows.is_empty() {
-        let mut bogus: Vec<&str> = rows.iter().map(|r| r.axis.as_str()).collect();
+        .map(|r| r.axis.as_str())
+        .filter(|a| *a != "role" && *a != "context")
+        .collect();
+    if !bogus.is_empty() {
         bogus.sort();
         bogus.dedup();
         return Err(IpcError::new(
@@ -51,6 +49,13 @@ pub fn resolve_for_host(
             ),
         ));
     }
+
+    let role_name = rows
+        .iter()
+        .find(|r| r.axis == "role")
+        .map(|r| r.layer_name.clone());
+    let mut context_rows: Vec<_> = rows.iter().filter(|r| r.axis == "context").collect();
+    context_rows.sort_by_key(|r| r.position);
 
     let role_chain = match &role_name {
         None => Vec::new(),
@@ -248,6 +253,26 @@ mod tests {
                 .execute(
                     "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
                      VALUES ('local', 'core', 'bogus', 0, 1)",
+                    [],
+                )
+                .unwrap();
+        }
+        let err = resolve_for_host(&store, &cat(), "local").unwrap_err();
+        assert!(err.message.contains("bogus"), "{}", err.message);
+    }
+
+    #[test]
+    fn an_unrecognised_axis_beside_a_valid_role_is_still_an_error() {
+        // One recognised row must not let a bogus sibling be silently
+        // dropped: the host would resolve to less than its assignment says.
+        let store = Mutex::new(store_with_local());
+        {
+            let s = store.lock().unwrap();
+            s.set_host_layers("local", Some("core"), &[]).unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
+                     VALUES ('local', 'extra', 'bogus', 0, 1)",
                     [],
                 )
                 .unwrap();
