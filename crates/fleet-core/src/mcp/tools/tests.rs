@@ -1331,6 +1331,19 @@ fn enforce_admin_fails_closed_for_an_unclassified_tool_name() {
     for caller in [&full_client, &full_host] {
         let err = enforce_admin(caller, made_up).expect_err(made_up);
         assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+        // Unlike a real admin tool (see `fleet_admin_tools_are_master_only`),
+        // an unclassified name must not be told it IS a fleet-admin tool —
+        // it is not one, it is simply not client-callable.
+        assert!(
+            !err.message.contains("is a fleet-admin tool"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("is not a client-callable tool"),
+            "{}",
+            err.message
+        );
     }
     assert!(enforce_admin(&Caller::master(), made_up).is_ok());
 }
