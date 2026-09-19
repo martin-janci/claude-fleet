@@ -35,7 +35,9 @@ pub struct NewSessionArgs {
     /// Resume this Claude conversation id instead of minting a fresh one (a
     /// conversation found by `discover_lost_sessions`). Must be a lowercase
     /// UUID not already held by a session on the host; rejected for a
-    /// `"shell"` session.
+    /// `"shell"` session. The pane starts in `worktree_id` / the project root,
+    /// which must be the transcript's cwd for `claude --resume` to find it
+    /// (see `LostCandidate::resumable`).
     #[serde(default)]
     pub resume_claude_session_id: Option<String>,
 }

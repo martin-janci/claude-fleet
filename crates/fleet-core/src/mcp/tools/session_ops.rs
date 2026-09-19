@@ -401,6 +401,10 @@ impl FleetTools {
         original name. Call with dry_run=true first to get the plan (no ssh, no writes). \
         Concurrency and pacing come from the restore.batch_size / restore.stagger_ms settings. \
         One failing session never fails the others; the result lists each session's outcome. \
+        One restore per host at a time: a second call while one runs gets E_INVALID_STATE. A \
+        lost fleet controller is skipped (recreate it with recreate_session force=true). A call \
+        that timed out may have partially completed: sessions keep coming back after it; re-run \
+        with dry_run=true to see what is still lost. \
         First-run prompts in a resumed session are not answered: they surface as stuck_kind."
     )]
     pub(super) async fn restore_host_sessions(

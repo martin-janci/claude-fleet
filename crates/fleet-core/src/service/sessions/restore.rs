@@ -35,7 +35,8 @@ pub struct RestoreHostSessionsArgs {
 
 /// One planned restore action. `action` is `"restore"` for a session the
 /// batch will attempt to resume, `"skip"` (with `reason` set) for one an
-/// explicit `session_ids` request named that cannot be restored. `tmux_name`
+/// explicit `session_ids` request named that cannot be restored — or, in
+/// either plan, for the fleet controller, which the batch never recreates. `tmux_name`
 /// is `None` only for an id that names no session at all.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RestorePlanEntry {
@@ -191,26 +192,43 @@ fn plan_cwd(s: &Store, row: &SessionRow) -> Option<String> {
     None
 }
 
+/// The skip reason for the registered fleet controller: the batch recreates
+/// with `force: false`, which `guard_not_controller` refuses for it, so it
+/// would only ever fail — say how to bring it back instead.
+pub(crate) const CONTROLLER_SKIP_REASON: &str =
+    "fleet controller: recreate it explicitly with force";
+
+/// Whether `row` is the registered fleet controller — the same test
+/// `guard_not_controller` applies (host + tmux name).
+fn is_controller(controller: Option<&(String, String)>, row: &SessionRow) -> bool {
+    controller.is_some_and(|(h, n)| *h == row.host_alias && *n == row.tmux_name)
+}
+
 /// Every lost, resumable session on the host, ordered by `lost_at` then `id`
-/// — the `session_ids`-less plan.
-fn plan_all_lost(s: &Store, rows: &[SessionRow]) -> Vec<RestorePlanEntry> {
+/// — the `session_ids`-less plan. The fleet controller is listed as a skip
+/// ([`CONTROLLER_SKIP_REASON`]), since the batch cannot recreate it.
+fn plan_all_lost(s: &Store, rows: &[SessionRow]) -> Result<Vec<RestorePlanEntry>, IpcError> {
+    let controller = s.get_controller()?;
     let mut candidates: Vec<&SessionRow> = rows
         .iter()
         .filter(|r| r.lost_at.is_some() && is_tmux_kind(&r.kind) && r.claude_session_id.is_some())
         .collect();
     candidates.sort_by_key(|r| (r.lost_at.unwrap_or(i64::MAX), r.id));
-    candidates
+    Ok(candidates
         .into_iter()
-        .map(|r| RestorePlanEntry {
-            session_id: r.id,
-            tmux_name: Some(r.tmux_name.clone()),
-            cwd: plan_cwd(s, r),
-            claude_session_id: r.claude_session_id.clone(),
-            friendly_name: r.friendly_name.clone(),
-            action: "restore".into(),
-            reason: None,
+        .map(|r| {
+            let controller = is_controller(controller.as_ref(), r);
+            RestorePlanEntry {
+                session_id: r.id,
+                tmux_name: Some(r.tmux_name.clone()),
+                cwd: plan_cwd(s, r),
+                claude_session_id: r.claude_session_id.clone(),
+                friendly_name: r.friendly_name.clone(),
+                action: if controller { "skip" } else { "restore" }.into(),
+                reason: controller.then(|| CONTROLLER_SKIP_REASON.to_string()),
+            }
         })
-        .collect()
+        .collect())
 }
 
 /// One `session_ids` entry: look the id up fleet-wide (not just on this
@@ -272,6 +290,13 @@ fn plan_one_explicit(s: &Store, host_alias: &str, id: i64) -> Result<RestorePlan
             ..base
         });
     }
+    if is_controller(s.get_controller()?.as_ref(), &row) {
+        return Ok(RestorePlanEntry {
+            action: "skip".into(),
+            reason: Some(CONTROLLER_SKIP_REASON.to_string()),
+            ..base
+        });
+    }
     Ok(base)
 }
 
@@ -303,7 +328,7 @@ pub fn plan_restore(
     match &args.session_ids {
         None => {
             let rows = s.list_sessions_for_host(&args.host_alias)?;
-            Ok(plan_all_lost(s, &rows))
+            plan_all_lost(s, &rows)
         }
         Some(ids) => plan_explicit_ids(s, &args.host_alias, ids),
     }
@@ -967,7 +992,14 @@ mod tests {
 
         let s = lock(&store).unwrap();
         let a_events = s.list_session_events(a, 10).unwrap();
-        assert!(a_events.iter().any(|e| e.kind == "session_restored"));
+        assert_eq!(
+            a_events
+                .iter()
+                .filter(|e| e.kind == "session_restored")
+                .count(),
+            1,
+            "exactly one restored event per success: {a_events:?}"
+        );
         let b_events = s.list_session_events(b, 10).unwrap();
         let failed = b_events
             .iter()
@@ -979,7 +1011,14 @@ mod tests {
             .unwrap_or("")
             .contains("worktree gone"));
         let c_events = s.list_session_events(c, 10).unwrap();
-        assert!(c_events.iter().any(|e| e.kind == "session_restored"));
+        assert_eq!(
+            c_events
+                .iter()
+                .filter(|e| e.kind == "session_restored")
+                .count(),
+            1,
+            "exactly one restored event per success: {c_events:?}"
+        );
     }
 
     #[tokio::test]
@@ -1236,6 +1275,88 @@ mod tests {
                 .iter()
                 .all(|e| e.kind != "session_restore_failed" && e.kind != "session_restored"),
             "a skip is not a restore attempt on the timeline"
+        );
+    }
+
+    /// A host fleet has no row for fails fast just like an unreachable one:
+    /// `E_HOST_OFFLINE`, before any recreate.
+    #[tokio::test]
+    async fn a_missing_host_row_fails_fast() {
+        let store = Mutex::new(Store::open_in_memory().expect("open"));
+        let counter = AtomicUsize::new(0);
+        let counter_ref = &counter;
+
+        let err = restore_host_sessions_with(
+            run_args("ghost-host"),
+            &store,
+            &RestoresInFlight::default(),
+            move |_id| async move {
+                counter_ref.fetch_add(1, Ordering::SeqCst);
+                Err(IpcError::new(codes::E_INTERNAL, "must not be called"))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, codes::E_HOST_OFFLINE);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    /// The fleet controller can only be recreated with force, which the
+    /// batch never passes: both plans list it as a skip with a reason saying
+    /// how to bring it back, and the batch never tries it.
+    #[tokio::test]
+    async fn a_lost_fleet_controller_is_skipped_with_a_reason() {
+        let mut s = Store::open_in_memory().expect("open");
+        let ids = seed_reachable_lost(&mut s, "h", &["ctl", "other"]);
+        let (ctl, other) = (ids[0], ids[1]);
+        s.set_controller("h", "ctl").unwrap();
+        s.set_setting("restore.stagger_ms", "0").unwrap();
+        let store = Mutex::new(s);
+        let store_ref = &store;
+
+        let explicit = plan_restore(
+            &lock(&store).unwrap(),
+            &RestoreHostSessionsArgs {
+                host_alias: "h".to_string(),
+                dry_run: true,
+                session_ids: Some(vec![ctl, other]),
+            },
+        )
+        .unwrap();
+        assert_eq!(explicit[0].action, "skip");
+        assert_eq!(explicit[0].reason.as_deref(), Some(CONTROLLER_SKIP_REASON));
+        assert_eq!(explicit[1].action, "restore");
+
+        let recreated = std::sync::Mutex::new(Vec::<i64>::new());
+        let recreated_ref = &recreated;
+        let report = restore_host_sessions_with(
+            run_args("h"),
+            &store,
+            &RestoresInFlight::default(),
+            move |id| async move {
+                recreated_ref.lock().unwrap().push(id);
+                let s = lock(store_ref).unwrap();
+                Ok(s.get_session_by_id(id).unwrap().unwrap())
+            },
+        )
+        .await
+        .unwrap();
+        let ctl_entry = report
+            .plan
+            .iter()
+            .find(|e| e.session_id == ctl)
+            .expect("the controller is listed in the plan");
+        assert_eq!(ctl_entry.action, "skip");
+        assert_eq!(ctl_entry.reason.as_deref(), Some(CONTROLLER_SKIP_REASON));
+        assert_eq!(*recreated.lock().unwrap(), vec![other]);
+        assert_eq!(
+            report
+                .results
+                .iter()
+                .map(|r| r.session_id)
+                .collect::<Vec<_>>(),
+            vec![other]
         );
     }
 

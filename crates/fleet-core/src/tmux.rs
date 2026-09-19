@@ -1229,6 +1229,22 @@ mod tests {
         let p2_probe = by_id.get(uuid4).expect("uuid4 present");
         assert_eq!(p2_probe.cwd.as_deref(), Some("/w/b"));
         assert_eq!(p2_probe.git_branch.as_deref(), Some("dev"));
+
+        // `limit` keeps the NEWEST transcripts: at 1, only uuid1 (touched
+        // an hour after uuid4) comes back.
+        let out = std::process::Command::new("bash")
+            .args(["-c", &discover_transcripts_script(1)])
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let (_boot, probes) = parse_discover_output(&stdout);
+        let ids: Vec<&str> = probes
+            .iter()
+            .map(|p| p.claude_session_id.as_str())
+            .collect();
+        assert_eq!(ids, vec![uuid1], "raw:\n{stdout}");
     }
 
     #[test]
