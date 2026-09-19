@@ -53,6 +53,13 @@ pub struct Spec {
 
 // ── keys ──
 pub const RECONCILE_INTERVAL_SECS: &str = "reconcile.interval_secs";
+/// How long a resumable mass-loss row (`lost_reason` `host_reboot` /
+/// `tmux_server_gone`, with a `claude_session_id`) is kept before Phase 2
+/// hard-deletes it, counted from `lost_at` (when it was lost) — not extra
+/// time added on top of the usual one-cycle grace. Default 14 days. Wired
+/// through to `HostReconcile::lost_ttl_cutoff` / `ghost_and_clean_bg_sessions`
+/// by Task 6.
+pub const SESSIONS_LOST_TTL_SECS: &str = "sessions.lost_ttl_secs";
 pub const PLAYBOOK_PRESS_ENTER: &str = "playbooks.press_enter";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 pub const GC_ENABLED: &str = "gc.enabled";
@@ -111,6 +118,11 @@ pub const SPECS: &[Spec] = &[
     Spec {
         key: RECONCILE_INTERVAL_SECS,
         default: "20",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: SESSIONS_LOST_TTL_SECS,
+        default: "1209600",
         kind: Kind::Secs,
     },
     Spec {

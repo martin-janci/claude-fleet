@@ -12,6 +12,8 @@ export interface SessionEvent {
   at: number;
   kind: string;
   detail: string | null;
+  /** The conversation the event belongs to (migration 037). */
+  claude_session_id: string | null;
 }
 
 /** Newest-first timeline for one session. */

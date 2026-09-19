@@ -179,6 +179,7 @@ fn row(
         parent_session_id: None,
         tags: Vec::new(),
         usage: Default::default(),
+        context: Default::default(),
     }
 }
 
@@ -362,6 +363,7 @@ fn unmatched_bg_agents_selects_agents_with_no_tmux_session() {
         last_activity: 1,
         attached: false,
         path: std::path::PathBuf::from("/a"),
+        pane_id: None,
     }];
     let unmatched = unmatched_bg_agents(&live, &agents, true);
     let ids: Vec<&str> = unmatched
@@ -945,6 +947,133 @@ async fn probe_reports_a_failed_mtime_call_as_none() {
     assert_eq!(probe.agent_mtimes, None);
 }
 
+/// Scriptable executor for the identity probe tests: a fixed session list
+/// and a configurable `host_identity` answer, nothing else scripted. Reused
+/// by later reboot-safety-net tests (Task 6) — construct with the
+/// `sessions`/`identity` you need and nothing more; every other `TmuxExec`
+/// method is a trivial stub, same as `ScriptedTmux`.
+#[derive(Default)]
+struct IdentityTmux {
+    sessions: Vec<crate::tmux::TmuxSession>,
+    identity: Option<crate::tmux::HostIdentity>,
+    /// `claude agents --json` rows for this pass — empty by default (most
+    /// callers only care about `sessions`/`identity`); the mass-loss e2e
+    /// tests set this so a live tmux session picks up a `claude_session_id`
+    /// via `claude_agents::find_for_session`'s by-name match.
+    agents: Vec<crate::claude_agents::ClaudeAgentRow>,
+}
+
+#[async_trait::async_trait]
+impl TmuxExec for IdentityTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        Ok(self.sessions.clone())
+    }
+    async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+        self.agents.clone()
+    }
+    async fn host_identity(&self) -> Option<crate::tmux::HostIdentity> {
+        self.identity.clone()
+    }
+}
+
+#[tokio::test]
+async fn a_probe_records_the_host_identity_only_when_the_list_succeeded() {
+    let id = crate::tmux::HostIdentity {
+        boot_id: Some("b".into()),
+        tmux_server_pid: Some(9),
+    };
+    let probe = probe_with_timeout(
+        host_row("mefistos"),
+        Box::new(IdentityTmux {
+            sessions: vec![],
+            identity: Some(id.clone()),
+            ..Default::default()
+        }),
+        std::time::Duration::from_secs(5),
+        None,
+    )
+    .await;
+    assert_eq!(probe.identity, Some(id));
+}
+
+#[tokio::test]
+async fn a_probe_drops_the_host_identity_when_list_sessions_fails() {
+    // The identity read sits behind the same `tmux_result.is_ok()` guard as
+    // `account`: a host we could not reach must never contribute an
+    // identity reading (Task 6 would otherwise mistake a dead probe for a
+    // fresh "no tmux server" signal).
+    struct FailingListTmux {
+        identity: Option<crate::tmux::HostIdentity>,
+    }
+    #[async_trait::async_trait]
+    impl TmuxExec for FailingListTmux {
+        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+            Err(IpcError::new(codes::E_SSH, "unreachable"))
+        }
+        async fn new_session(
+            &self,
+            _n: &str,
+            _c: &std::path::Path,
+            _p: &str,
+        ) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+            vec![]
+        }
+        async fn host_identity(&self) -> Option<crate::tmux::HostIdentity> {
+            self.identity.clone()
+        }
+    }
+    let probe = probe_with_timeout(
+        host_row("mefistos"),
+        Box::new(FailingListTmux {
+            identity: Some(crate::tmux::HostIdentity {
+                boot_id: Some("b".into()),
+                tmux_server_pid: Some(9),
+            }),
+        }),
+        std::time::Duration::from_secs(5),
+        None,
+    )
+    .await;
+    assert!(probe.result.is_err());
+    assert_eq!(probe.identity, None);
+}
+
 #[test]
 fn failed_mtime_call_keeps_an_old_blocked_bg_agent_blocked() {
     // Spec §2: a failed transcript probe leaves agents active. With the
@@ -1367,6 +1496,7 @@ fn tmux_session(name: &str) -> crate::tmux::TmuxSession {
         last_activity: 1,
         attached: false,
         path: PathBuf::from("/tmp"),
+        pane_id: None,
     }
 }
 
@@ -1790,6 +1920,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         intel: PaneIntelMap::new(),
         account: None,
         pr_info: PrInfoMap::new(),
+        identity: None,
         started_at: now_unix(),
     };
     // 2. `new_session` creates the tmux session and runs its own
@@ -1836,6 +1967,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         intel: PaneIntelMap::new(),
         account: None,
         pr_info: PrInfoMap::new(),
+        identity: None,
         started_at: now_unix() + 5,
     };
     let mut s = store.lock().unwrap();
@@ -2404,12 +2536,14 @@ fn reconcile_linking(
             last_activity: 1,
             attached: false,
             path: PathBuf::from(cwd),
+            pane_id: None,
         }]),
         agent_rows: Vec::new(),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
         pr_info: PrInfoMap::new(),
+        identity: None,
         started_at: now_unix(),
     };
     // Two ticks: the second must keep the link, not null it.
@@ -3154,6 +3288,7 @@ fn repo_session(name: &str, path: &str) -> crate::tmux::TmuxSession {
         last_activity: 1,
         attached: false,
         path: PathBuf::from(path),
+        pane_id: None,
     }
 }
 
@@ -3586,4 +3721,966 @@ async fn ensure_remote_project_script_mirrors_pushed_branches_and_refuses_unpush
         "branch feature/local-only is not on origin; push it from the source machine, or start a new worktree on h"
     );
     std::fs::remove_dir_all(&base).ok();
+}
+
+// ── Task 6: the mass-loss verdict and branch ──────────────────────────────
+
+#[test]
+fn verdict_needs_a_readable_identity() {
+    let stored = StoredIdentity {
+        boot_id: Some("a".into()),
+        tmux_server_pid: Some(1),
+    };
+    assert_eq!(mass_loss_verdict(&stored, None), None);
+}
+
+#[test]
+fn a_changed_boot_id_is_a_reboot() {
+    let stored = StoredIdentity {
+        boot_id: Some("a".into()),
+        tmux_server_pid: Some(1),
+    };
+    let obs = crate::tmux::HostIdentity {
+        boot_id: Some("b".into()),
+        tmux_server_pid: Some(2),
+    };
+    assert_eq!(mass_loss_verdict(&stored, Some(&obs)), Some("host_reboot"));
+}
+
+#[test]
+fn no_tmux_server_or_a_new_server_pid_means_the_server_is_gone() {
+    let stored = StoredIdentity {
+        boot_id: Some("a".into()),
+        tmux_server_pid: Some(1),
+    };
+    let none = crate::tmux::HostIdentity {
+        boot_id: Some("a".into()),
+        tmux_server_pid: None,
+    };
+    let new = crate::tmux::HostIdentity {
+        boot_id: Some("a".into()),
+        tmux_server_pid: Some(2),
+    };
+    assert_eq!(
+        mass_loss_verdict(&stored, Some(&none)),
+        Some("tmux_server_gone")
+    );
+    assert_eq!(
+        mass_loss_verdict(&stored, Some(&new)),
+        Some("tmux_server_gone")
+    );
+}
+
+#[test]
+fn a_first_probe_after_upgrade_is_never_a_verdict() {
+    let obs = crate::tmux::HostIdentity {
+        boot_id: Some("b".into()),
+        tmux_server_pid: Some(2),
+    };
+    assert_eq!(
+        mass_loss_verdict(&StoredIdentity::default(), Some(&obs)),
+        None
+    );
+}
+
+#[test]
+fn an_unchanged_identity_is_a_normal_pass() {
+    let stored = StoredIdentity {
+        boot_id: Some("a".into()),
+        tmux_server_pid: Some(1),
+    };
+    let same = crate::tmux::HostIdentity {
+        boot_id: Some("a".into()),
+        tmux_server_pid: Some(1),
+    };
+    assert_eq!(mass_loss_verdict(&stored, Some(&same)), None);
+}
+
+/// `ClaudeAgentRow` that binds to a live tmux session by NAME (the way a
+/// fleet-launched session with `--name <tmux_name>` binds), so the session
+/// picks up a `claude_session_id` on upsert.
+fn agent_for_session(tmux_name: &str, session_id: &str) -> crate::claude_agents::ClaudeAgentRow {
+    crate::claude_agents::ClaudeAgentRow {
+        session_id: Some(session_id.to_string()),
+        name: Some(tmux_name.to_string()),
+        status: None,
+        cwd: None,
+        kind: crate::claude_agents::AgentKind::Interactive,
+        job_id: None,
+        started_at: None,
+    }
+}
+
+/// A `claude --bg` agent row that matches NO tmux session (no name, no
+/// cwd) — surfaces as a synthetic `kind='bg'` row via `reconcile_agent_rows`,
+/// so a `host_reboot` verdict (which touches every session kind, not just
+/// tmux-backed ones) has something non-tmux to mark lost too.
+fn unmatched_bg_agent(session_id: &str) -> crate::claude_agents::ClaudeAgentRow {
+    crate::claude_agents::ClaudeAgentRow {
+        session_id: Some(session_id.to_string()),
+        name: None,
+        status: None,
+        cwd: None,
+        kind: crate::claude_agents::AgentKind::Background,
+        job_id: None,
+        started_at: None,
+    }
+}
+
+/// `ReconcileDeps` whose named host `alias` answers via `IdentityTmux` with
+/// the given `sessions`/`identity`/`agents`; every other alias (`local` is
+/// auto-created every pass) gets a bare default `IdentityTmux` — no
+/// sessions, no identity, no agents, so it never interferes.
+fn identity_deps(
+    alias: &'static str,
+    sessions: Vec<crate::tmux::TmuxSession>,
+    identity: Option<crate::tmux::HostIdentity>,
+    agents: Vec<crate::claude_agents::ClaudeAgentRow>,
+) -> Arc<ReconcileDeps> {
+    ReconcileDeps::fake(
+        move |a| {
+            if a == alias {
+                Box::new(IdentityTmux {
+                    sessions: sessions.clone(),
+                    identity: identity.clone(),
+                    agents: agents.clone(),
+                })
+            } else {
+                Box::new(IdentityTmux::default())
+            }
+        },
+        std::time::Duration::from_secs(5),
+    )
+}
+
+fn boot_a_pid(pid: Option<i64>) -> crate::tmux::HostIdentity {
+    crate::tmux::HostIdentity {
+        boot_id: Some("a".into()),
+        tmux_server_pid: pid,
+    }
+}
+
+/// Acceptance criterion 1: a host that stays reachable but whose tmux server
+/// vanished (a plain `sudo systemctl restart tmux`-style loss, no reboot)
+/// keeps its sessions' rows — ghosted, `lost_reason='tmux_server_gone'`,
+/// with their `claude_session_id` intact so they can be resumed — instead of
+/// the routine one-cycle ghost-then-reap deleting them.
+#[tokio::test]
+async fn a_vanished_tmux_server_keeps_the_rows_lost_with_their_claude_ids() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: identity {boot a, pid 1}, one live session "x" bound to
+    // claude_session_id "cid-x" ⇒ a normal, uneventful pass.
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("x")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("x", "cid-x")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let row = s
+            .get_session("x", "mefistos")
+            .unwrap()
+            .expect("row created on pass 1");
+        assert_eq!(row.status, "running");
+        assert_eq!(row.claude_session_id.as_deref(), Some("cid-x"));
+    }
+
+    // Push "x"'s `last_reconciled_at` (the BE-3 guard `mark_host_sessions_lost`
+    // now shares with the routine ghost path) well into the past: two real
+    // passes inside one test can land in the same wall-clock second, which
+    // would otherwise make pass 2's `probe_started_at` collide with pass 1's
+    // stamp and spuriously exempt "x" from the mass-loss mark — a
+    // test-timing artifact, not something the guard is meant to catch.
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["x".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: identity {boot a, pid None} — the host answers (reachable),
+    // but its tmux server is gone, so `list_sessions` truthfully reports no
+    // sessions. `tmux_server_gone` must mark "x" lost instead of letting the
+    // routine keep-set prune reap it over the next two passes.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(None)), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let row_id = {
+        let s = store.lock().unwrap();
+        let row = s
+            .get_session("x", "mefistos")
+            .unwrap()
+            .expect("row survives pass 2, marked lost rather than deleted");
+        assert_eq!(row.status, "ghost");
+        assert!(row.lost_at.is_some(), "lost_at must be stamped");
+        assert_eq!(
+            row.claude_session_id.as_deref(),
+            Some("cid-x"),
+            "the claude_session_id must survive so the session can be resumed"
+        );
+        row.id
+    };
+    {
+        let s = store.lock().unwrap();
+        let events = s.list_session_events(row_id, 10).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == "lost" && e.detail.as_deref() == Some("tmux_server_gone")),
+            "a session_events 'lost' row with detail='tmux_server_gone' must be recorded; got {events:?}"
+        );
+    }
+
+    // Pass 3: identical to pass 2 (server still gone, same identity — no
+    // NEW verdict fires since a stored `(None, None)` pid pair is not a
+    // verdict). Without the TTL exemption this is exactly the pass that
+    // would hard-delete "x" (the routine one-cycle ghost-then-reap); WITH
+    // it, the row must still be there.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(None)), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let row = s
+            .get_session("x", "mefistos")
+            .unwrap()
+            .expect("the exemption keeps the row past pass 3, not the one-cycle reap");
+        assert_eq!(row.status, "ghost");
+        assert_eq!(row.claude_session_id.as_deref(), Some("cid-x"));
+        // The MCP tool's include-lost listing is `list_all_sessions` — no
+        // status filter — so a resumable ghost row must still show up there.
+        let all = s.list_all_sessions().unwrap();
+        assert!(
+            all.iter().any(|r| r.tmux_name == "x" && r.id == row.id),
+            "the lost row must still appear in the include-lost listing"
+        );
+    }
+}
+
+/// A changed boot id (a real reboot) marks EVERY session on the host lost —
+/// not just the tmux-backed ones a vanished tmux server would touch — with
+/// `lost_reason='host_reboot'`.
+#[tokio::test]
+async fn a_changed_boot_id_marks_every_session_lost_as_a_reboot() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: identity {boot a, pid 1}; one tmux session "y" and one
+    // unmatched bg agent "bg-1" (⇒ a synthetic kind='bg' row via
+    // reconcile_agent_rows), so the test can tell a reboot's "every kind"
+    // sweep apart from tmux_server_gone's tmux-only one.
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("y")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("y", "cid-y"), unmatched_bg_agent("bg-1")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let (tmux_id, bg_id) = {
+        let s = store.lock().unwrap();
+        let tmux_row = s.get_session("y", "mefistos").unwrap().expect("tmux row");
+        assert_eq!(tmux_row.status, "running");
+        let bg_row = s
+            .get_session("bg:bg-1", "mefistos")
+            .unwrap()
+            .expect("synthetic bg row exists after pass 1");
+        (tmux_row.id, bg_row.id)
+    };
+
+    // Same BE-3-guard timing fix as the tmux_server_gone test above.
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["y".to_string(), "bg:bg-1".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: the host comes back with a DIFFERENT boot id — a real reboot.
+    // Nothing tmux-side or agent-side is live any more.
+    let deps = identity_deps(
+        "mefistos",
+        vec![],
+        Some(crate::tmux::HostIdentity {
+            boot_id: Some("b".into()),
+            tmux_server_pid: Some(2),
+        }),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+
+    let s = store.lock().unwrap();
+    let tmux_row = s
+        .get_session("y", "mefistos")
+        .unwrap()
+        .expect("tmux row survives, marked lost");
+    assert_eq!(tmux_row.status, "ghost");
+    let bg_row = s
+        .get_session("bg:bg-1", "mefistos")
+        .unwrap()
+        .expect("bg row also survives, marked lost — a reboot kills bg agents too");
+    assert_eq!(bg_row.status, "ghost");
+
+    for (id, name) in [(tmux_id, "y"), (bg_id, "bg:bg-1")] {
+        let events = s.list_session_events(id, 10).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == "lost" && e.detail.as_deref() == Some("host_reboot")),
+            "session {name} must carry a 'lost' event with detail='host_reboot'; got {events:?}"
+        );
+    }
+}
+
+/// Acceptance criterion 4: a host whose identity can never be read (no
+/// `/proc`, an executor that doesn't implement it, a stubborn ssh hiccup —
+/// `identity: None` on every pass) must behave exactly as before Task 6: a
+/// session that drops out is ghosted on the pass it disappears and hard-
+/// deleted on the NEXT pass (the routine one-cycle grace), never granted the
+/// mass-loss TTL exemption.
+#[tokio::test]
+async fn an_unreadable_identity_leaves_today_s_behaviour_intact() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: identity unreadable, one live session "z".
+    let deps = identity_deps("mefistos", vec![tmux_session("z")], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get_session("z", "mefistos")
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+
+    // Push "z"'s `last_reconciled_at` (BE-3's stale-probe guard) well into
+    // the past: two real passes inside one test can land in the same
+    // wall-clock second, which would otherwise make pass 2's `probe_started_at`
+    // collide with pass 1's stamp and spuriously exempt "z" from ghosting —
+    // a test-timing artifact, not something Task 6 changes.
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["z".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: "z" disappeared; identity still unreadable ⇒ no verdict, so
+    // this is the routine keep-set ghost (lost_reason='missing').
+    let deps = identity_deps("mefistos", vec![], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get_session("z", "mefistos")
+            .unwrap()
+            .expect("ghosted, not yet deleted")
+            .status,
+        "ghost",
+        "pass 2 ghosts the missing row exactly as before Task 6"
+    );
+
+    // Pass 3: identical — the routine one-cycle reap must still fire; a
+    // 'missing' row is never exempt regardless of the (now-active) TTL
+    // cutoff.
+    let deps = identity_deps("mefistos", vec![], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session("z", "mefistos")
+            .unwrap()
+            .is_none(),
+        "pass 3 hard-deletes the 'missing' row exactly as before Task 6 — \
+         the reboot-safety-net TTL exemption must never apply to it"
+    );
+}
+
+/// `skip_prune` in isolation from the TTL exemption: with
+/// `sessions.lost_ttl_secs` set to `0` (the exemption disabled — every
+/// mass-loss row reaps on the routine one-cycle schedule same as a
+/// `missing` row), a verdict must still leave the just-marked row alive
+/// for the pass it was marked on. Without `skip_prune`, the routine
+/// `ghost_and_clean` running right after `mark_host_sessions_lost` in the
+/// SAME `apply_host_reconcile` write would see the row as already-ghost
+/// (Phase 2's `pre_ghost_ids` is captured before that pass's Phase 1 runs)
+/// and hard-delete it immediately — the mass-loss verdict would never be
+/// visible to anyone.
+#[tokio::test]
+async fn a_mass_loss_verdict_survives_its_own_pass_with_the_ttl_exemption_disabled() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("mefistos").unwrap();
+        s.set_setting("sessions.lost_ttl_secs", "0").unwrap();
+    }
+
+    // Pass 1: normal pass, one live session "w".
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("w")],
+        Some(boot_a_pid(Some(1))),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get_session("w", "mefistos")
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+    // BE-3-guard timing fix, same as the other mass-loss e2e tests.
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["w".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: tmux server gone ⇒ mark_host_sessions_lost ghosts "w" with
+    // lost_reason='tmux_server_gone'. With the TTL exemption disabled,
+    // ONLY `skip_prune` stands between that write and the routine
+    // ghost_and_clean's Phase 2 treating it as a stale ghost to reap THIS
+    // SAME pass.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(None)), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+
+    let row = store
+        .lock()
+        .unwrap()
+        .get_session("w", "mefistos")
+        .unwrap()
+        .expect(
+            "skip_prune must keep the just-marked row alive for its own pass, \
+             even with the TTL exemption off",
+        );
+    assert_eq!(row.status, "ghost");
+}
+
+/// `read_lost_ttl_cutoff` in isolation. Mirrors `read_reconcile_interval_secs`'s
+/// established `settings::resolve` → parse pattern, so — same as that sibling
+/// reader — an unparseable raw string and a NEGATIVE raw string collapse to
+/// the same outcome: `settings::resolve`'s `Kind::Secs` validator parses as
+/// `u64`, so a negative string fails validation exactly like garbage does
+/// and both fall back to the registry default, never reaching the `<= 0`
+/// branch as a literal negative number. Only a value that PARSES successfully
+/// (`"0"` or a positive integer) can reach that branch; `"0"` is the only way
+/// to observe it in practice.
+#[test]
+fn read_lost_ttl_cutoff_resolves_like_the_reconcile_interval_reader() {
+    let now = 10_000_000i64;
+    // A normal positive value ⇒ Some(now - ttl).
+    assert_eq!(
+        read_lost_ttl_cutoff(Some("100".into()), now),
+        Some(now - 100)
+    );
+    // "0" is the documented "disabled" sentinel ⇒ None.
+    assert_eq!(read_lost_ttl_cutoff(Some("0".into()), now), None);
+    // Unparseable ⇒ the registry default.
+    assert_eq!(
+        read_lost_ttl_cutoff(Some("nonsense".into()), now),
+        Some(now - DEFAULT_LOST_TTL_SECS)
+    );
+    // Missing (no setting stored yet) ⇒ the registry default.
+    assert_eq!(
+        read_lost_ttl_cutoff(None, now),
+        Some(now - DEFAULT_LOST_TTL_SECS)
+    );
+    // A negative raw string fails `Kind::Secs`'s `u64` validation the same
+    // way garbage does, so `settings::resolve` substitutes the default
+    // BEFORE this function ever sees a negative number — it also resolves
+    // to the registry default, not `None`.
+    assert_eq!(
+        read_lost_ttl_cutoff(Some("-5".into()), now),
+        Some(now - DEFAULT_LOST_TTL_SECS)
+    );
+}
+
+/// BE-3 regression (finding 1): `mark_host_sessions_lost` must share the
+/// exact same "a newer probe already saw this row live" guard that
+/// `Store::ghost_and_clean`'s Phase 1 uses. Without it, a background tick's
+/// STALE probe (started before `new_session`'s own faster single-host
+/// reconcile landed) can mass-mark a session the fleet has already
+/// confirmed live again.
+#[tokio::test]
+async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let host = {
+        let s = store.lock().unwrap();
+        s.upsert_host("mefistos").unwrap();
+        s.set_host_identity("mefistos", Some("a"), Some(1)).unwrap();
+        s.upsert_session("x", "mefistos", None, None, 1, 1, "running", None)
+            .unwrap();
+        // "x" was reconciled (by a NEWER, faster writer — e.g. `new_session`'s
+        // own single-host reconcile) at t=5000, strictly AFTER the stale
+        // probe below started.
+        s.mark_sessions_reconciled("mefistos", &["x".to_string()], 5000)
+            .unwrap();
+        s.list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == "mefistos")
+            .unwrap()
+    };
+
+    // The stale probe STARTED at t=1000 (before "x" was reconciled above)
+    // and — being stale — saw no tmux server at all: a genuine
+    // tmux_server_gone verdict candidate, delivered late.
+    let probe = HostProbe {
+        host: host.clone(),
+        result: Ok(Vec::new()),
+        agent_rows: Vec::new(),
+        agent_mtimes: Some(std::collections::HashMap::new()),
+        intel: PaneIntelMap::new(),
+        account: None,
+        pr_info: PrInfoMap::new(),
+        identity: Some(crate::tmux::HostIdentity {
+            boot_id: Some("a".into()),
+            tmux_server_pid: None,
+        }),
+        started_at: 1000,
+    };
+    let mut s = store.lock().unwrap();
+    let projects = s.list_projects().unwrap();
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+
+    let row = s
+        .get_session("x", "mefistos")
+        .unwrap()
+        .expect("row still exists");
+    assert_eq!(
+        row.status, "running",
+        "a row a NEWER probe already saw live must not be marked lost by a stale verdict"
+    );
+    assert!(
+        s.list_session_events(row.id, 10)
+            .unwrap()
+            .iter()
+            .all(|e| e.kind != "lost"),
+        "no false 'lost' event may be recorded for it"
+    );
+}
+
+/// Ruling (finding 2): never write the observed identity when it is `None`.
+/// If that guard regressed and a transient unreadable read got stored as
+/// `(None, None)`, a REAL vanished-tmux-server pass right after it would
+/// compare `(None, None)` to the freshly observed identity and — per the
+/// `(None, None)` "not a verdict" rule — find nothing, silently falling back
+/// to the routine `'missing'` ghost-then-reap. This is the exact false
+/// negative the whole feature exists to prevent.
+#[tokio::test]
+async fn a_failed_identity_read_never_overwrites_the_stored_identity() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: identity {boot a, pid 1}; sessions "x" and "y" live.
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("x"), tmux_session("y")],
+        Some(boot_a_pid(Some(1))),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["x".to_string(), "y".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: identity unreadable (`None`); "x" disappeared, "y" stays
+    // live. No verdict fires (mass_loss_verdict short-circuits on `None`),
+    // so "x" takes the routine 'missing' ghost path — and, the ruling under
+    // test, the stored identity (a, 1) must survive this pass untouched.
+    let deps = identity_deps("mefistos", vec![tmux_session("y")], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_session("x", "mefistos").unwrap().unwrap().status,
+            "ghost",
+            "x takes the routine 'missing' path with no verdict"
+        );
+        assert_eq!(
+            s.get_session("y", "mefistos").unwrap().unwrap().status,
+            "running"
+        );
+    }
+    // BE-3-guard timing fix (pass 2's own reconcile just re-stamped "y").
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["y".to_string()], 1)
+        .unwrap();
+
+    // Pass 3: identity {boot a, pid None} — the tmux server is genuinely
+    // gone now. If pass 2 had wrongly stored (None, None), this pass would
+    // compare (None, None) to (a, None) and find NO verdict (a stored `None`
+    // pid never compares, and (None, None) is deliberately not a verdict
+    // either), so "y" would only take the routine 'missing' path with no
+    // 'lost' event. The stored (a, 1) surviving pass 2 is the only way pass
+    // 3 can produce a genuine tmux_server_gone verdict here.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(None)), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let s = store.lock().unwrap();
+    let y = s
+        .get_session("y", "mefistos")
+        .unwrap()
+        .expect("y row still exists");
+    let events = s.list_session_events(y.id, 10).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == "lost" && e.detail.as_deref() == Some("tmux_server_gone")),
+        "pass 3 must produce a genuine tmux_server_gone verdict, proving (a, 1) \
+         survived pass 2's unreadable identity; got {events:?}"
+    );
+}
+
+/// `skip_prune` only when the verdict actually recorded something (finding
+/// 4): a verdict pass that neither marks NOR reclassifies any row must leave
+/// the routine prune running — otherwise an unrelated already-ghost row due
+/// for its one-cycle reap on this very pass gets an undeserved reprieve,
+/// purely because a verdict elsewhere on the host "fired" with nothing to
+/// do. The ghost used is one fleet killed itself (`lost_reason='killed'`),
+/// which the verdict neither marks (already ghost) nor reclassifies (not
+/// `missing`). (A `missing` ghost IS reclassified and kept — see
+/// `accepted_tradeoff_a_session_that_ended_one_pass_before_a_reboot_is_kept_as_lost`.)
+#[tokio::test]
+async fn skip_prune_does_not_delay_the_reap_of_an_unrelated_already_ghost_row() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: identity {boot a, pid 1}; one live session "old".
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("old")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("old", "cid-old")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let id = {
+        let s = store.lock().unwrap();
+        let id = s.get_session("old", "mefistos").unwrap().unwrap().id;
+        // Fleet kills "old" itself: a `killed` ghost before the next pass.
+        s.mark_session_killed(id, 100).unwrap().expect("ghosted");
+        id
+    };
+
+    // Pass 2: the boot id changes (a genuine host_reboot verdict), but the
+    // only row is already a `killed` ghost — the verdict marks and
+    // reclassifies nothing, so the routine prune's Phase 2 must reap "old"
+    // THIS pass.
+    let deps = identity_deps(
+        "mefistos",
+        vec![],
+        Some(crate::tmux::HostIdentity {
+            boot_id: Some("b".into()),
+            tmux_server_pid: Some(2),
+        }),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .is_none(),
+        "a verdict that marks and reclassifies nothing must not delay the \
+         routine reap of an unrelated already-ghost row"
+    );
+}
+
+/// ACCEPTED TRADE-OFF (Important 2 ruling, option (a)): a `missing` ghost is
+/// indistinguishable from one left by a failed first post-loss pass, so a
+/// session that genuinely ended within the ONE pass before a mass-loss
+/// verdict is reclassified and kept to the TTL (still dismissable). This is
+/// deliberate — the reclassification errs toward keeping.
+#[tokio::test]
+async fn accepted_tradeoff_a_session_that_ended_one_pass_before_a_reboot_is_kept_as_lost() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("old")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("old", "cid-old")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["old".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: "old" ends on its own, identity readable and unchanged ⇒
+    // a routine `missing` ghost.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(Some(1))), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let (id, lost_at) = {
+        let s = store.lock().unwrap();
+        let row = s.get_session("old", "mefistos").unwrap().unwrap();
+        assert_eq!(row.status, "ghost");
+        (row.id, row.lost_at)
+    };
+
+    // Pass 3: an unrelated reboot. The one-pass-old `missing` ghost is
+    // reclassified `host_reboot` (keeping its lost_at) and survives.
+    let deps = identity_deps(
+        "mefistos",
+        vec![],
+        Some(crate::tmux::HostIdentity {
+            boot_id: Some("b".into()),
+            tmux_server_pid: Some(2),
+        }),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().expect("kept on pass 3");
+        assert_eq!(row.lost_at, lost_at);
+        assert_eq!(lost_events(&s, id, "host_reboot"), 1);
+    }
+    // Pass 4: TTL-exempt as a resumable mass loss.
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .is_some(),
+        "the accepted trade-off keeps the row past the routine reap"
+    );
+}
+
+/// `session_events` `lost` rows of `id` carrying `reason` as their detail.
+fn lost_events(s: &Store, id: i64, reason: &str) -> usize {
+    s.list_session_events(id, 50)
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == "lost" && e.detail.as_deref() == Some(reason))
+        .count()
+}
+
+/// Final-review Important 1: tmux exits when its last session closes, so
+/// fleet's OWN kill of a host's only session makes the kill's follow-up
+/// reconcile see no tmux server — a `tmux_server_gone` verdict. The killed
+/// row must not become a 14-day "resumable" ghost (it would also duplicate a
+/// moved session's claude id, since `move_session` kills its source through
+/// the same path): it reaps on the ordinary schedule, and no
+/// `tmux_server_gone` loss is ever recorded for it.
+#[tokio::test]
+async fn killing_a_host_s_last_session_is_not_a_resumable_mass_loss() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: server pid 1, one live session "x" bound to "cid-x".
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("x")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("x", "cid-x")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let id = store
+        .lock()
+        .unwrap()
+        .get_session("x", "mefistos")
+        .unwrap()
+        .expect("row created on pass 1")
+        .id;
+    // Same BE-3 timing fix as the other mass-loss e2e tests.
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["x".to_string()], 1)
+        .unwrap();
+
+    // Kill "x" through the real kill path; the host now answers with no
+    // tmux server (its last session closed) and no sessions.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(None)), vec![]);
+    let ssh = Arc::new(SshClient::new());
+    let killed = kill_session_with(
+        KillSessionArgs {
+            host_alias: "mefistos".into(),
+            name: "x".into(),
+            force: false,
+        },
+        &store,
+        &ssh,
+        &deps,
+    )
+    .await
+    .unwrap();
+    assert_eq!(killed, id);
+    {
+        let s = store.lock().unwrap();
+        if s.get_session_by_id(id).unwrap().is_some() {
+            assert_eq!(
+                lost_events(&s, id, "tmux_server_gone"),
+                0,
+                "fleet's own kill must never be recorded as a tmux_server_gone loss"
+            );
+        }
+    }
+
+    // The following pass (server still gone): the killed row must be gone —
+    // not held back by the mass-loss TTL exemption.
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .is_none(),
+        "the killed row must be reaped on the ordinary schedule, not kept as a resumable ghost"
+    );
+}
+
+/// Final-review Important 2: the FIRST pass after a loss could not record
+/// the verdict (here: one transient ssh failure made the identity
+/// unreadable), so the routine prune ghosted the rows as `missing`. The
+/// verdict that fires on the next pass must still record them as a mass
+/// loss (reclassify them) — otherwise Phase 2 reaps them all, the exact
+/// loss the feature exists to prevent.
+#[tokio::test]
+async fn a_verdict_after_a_failed_first_pass_still_keeps_the_rows() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: identity {a, pid 1}, "x" live with a claude id.
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("x")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("x", "cid-x")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let id = store
+        .lock()
+        .unwrap()
+        .get_session("x", "mefistos")
+        .unwrap()
+        .expect("row created on pass 1")
+        .id;
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["x".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: the server is gone but the identity read failed ⇒ no verdict;
+    // the routine prune ghosts "x" as `missing`.
+    let deps = identity_deps("mefistos", vec![], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let lost_at = {
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().expect("ghosted on pass 2");
+        assert_eq!(row.status, "ghost");
+        row.lost_at.expect("lost_at stamped on pass 2")
+    };
+
+    // Pass 3: the identity reads again — pid None vs stored pid 1 ⇒
+    // `tmux_server_gone`. The `missing` ghost must be reclassified and
+    // survive, keeping its pass-2 `lost_at`.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(None)), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let row = s
+            .get_session_by_id(id)
+            .unwrap()
+            .expect("the verdict must keep the row on pass 3");
+        assert_eq!(row.status, "ghost");
+        assert_eq!(row.lost_at, Some(lost_at), "reclassification keeps lost_at");
+        assert_eq!(row.claude_session_id.as_deref(), Some("cid-x"));
+        assert_eq!(
+            lost_events(&s, id, "tmux_server_gone"),
+            1,
+            "the reclassification records the loss exactly once"
+        );
+    }
+
+    // Pass 4: now TTL-exempt as a resumable mass loss.
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .is_some(),
+        "the reclassified row must be exempt from the routine reap on pass 4"
+    );
+}
+
+/// Final-review minor 3: `keep` names tmux sessions only, so a `host_reboot`
+/// verdict used to mark a bg agent that is running NOW (present in this very
+/// probe) lost — and `reconcile_agent_rows` revived it in the same writer
+/// call, leaving a spurious permanent `lost` event behind.
+#[tokio::test]
+async fn a_reboot_verdict_spares_a_bg_agent_live_in_the_same_probe() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("y")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("y", "cid-y"), unmatched_bg_agent("bg-1")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let bg_id = store
+        .lock()
+        .unwrap()
+        .get_session("bg:bg-1", "mefistos")
+        .unwrap()
+        .expect("bg row after pass 1")
+        .id;
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["y".to_string(), "bg:bg-1".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: a new boot id (reboot); the tmux session is gone but the bg
+    // agent is listed live again (e.g. relaunched by a unit on boot).
+    let deps = identity_deps(
+        "mefistos",
+        vec![],
+        Some(crate::tmux::HostIdentity {
+            boot_id: Some("b".into()),
+            tmux_server_pid: Some(2),
+        }),
+        vec![unmatched_bg_agent("bg-1")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+
+    let s = store.lock().unwrap();
+    let bg = s.get_session_by_id(bg_id).unwrap().expect("bg row kept");
+    assert_eq!(bg.status, "running");
+    assert_eq!(
+        lost_events(&s, bg_id, "host_reboot"),
+        0,
+        "a bg agent live in the verdict's own probe must get no lost event"
+    );
+    // The tmux row that really vanished is still marked.
+    let y = s
+        .get_session("y", "mefistos")
+        .unwrap()
+        .expect("tmux row kept");
+    assert_eq!(y.status, "ghost");
+    assert_eq!(lost_events(&s, y.id, "host_reboot"), 1);
 }

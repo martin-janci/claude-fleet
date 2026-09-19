@@ -345,13 +345,19 @@ Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
 ### `session_conversation`
 
-Read a session's recent conversation as structured turns: each turn carries the human prompt, its timestamp, the turn's end timestamp, and items that are either assistant text or a one-line tool summary (flagged when that tool call failed). turns defaults to 10 and is capped at 100; the character budget scales with it. Prefer this over session_transcript when you want the shape of the exchange rather than one flat blob. Read-only. Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet).
+Read a session's recent conversation as structured turns: each turn carries the human prompt, its timestamp, the turn's end timestamp, and items that are either assistant text or a one-line tool summary (flagged when that tool call failed). turns defaults to 10 and is capped at 100; the character budget scales with it. Prefer this over session_transcript when you want the shape of the exchange rather than one flat blob. Pass claude_session_id (from session_conversations) to read an earlier conversation of the session instead of the current one. Read-only. Errors: E_INVALID (claude_session_id is not one of the session's conversations), E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet).
 
-Parameters: `session_id`, `turns`
+Parameters: `claude_session_id`, `session_id`, `turns`
+
+### `session_conversations`
+
+List the Claude Code conversations a session has run, newest first: claude_session_id, started_at, ended_at, start_source (startup, resume, clear, compact, fork, fleet, unknown), end_reason, model, first_prompt, turns, compactions and current. Pass a claude_session_id to session_conversation to read an earlier one. limit defaults to 20 (max 500). Read-only. A per-host token may only list sessions on its own host.
+
+Parameters: `limit`, `session_id`
 
 ### `session_history`
 
-Return the recorded event timeline for a session (status changes, prompts, stuck, kills). Newest-first; pass `limit` to cap (default 50). Returns the events as JSON.
+Return the recorded event timeline for a session (status changes, prompts, stuck, kills, and conversation events: conversation_started, conversation_ended, compact_started, compact_done, turn_done). Newest-first; pass `limit` to cap (default 50). Returns the events as JSON.
 
 Parameters: `limit`, `session_id`
 
@@ -446,6 +452,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
 - `commands::sessions::session_history`
+- `commands::sessions::session_conversations`
 - `commands::sessions::session_conversation`
 - `commands::sessions::session_activity`
 - `commands::sessions::restart_session`

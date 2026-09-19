@@ -111,6 +111,13 @@ export function session(hostAlias: string, name: string, over: Partial<SessionRo
     last_stop_at: NOW - 5 * MIN,
     parent_session_id: null,
     tags: [],
+    model: null,
+    context_tokens: null,
+    context_window: null,
+    context_source: null,
+    context_at: null,
+    context_stale: false,
+    tmux_pane_id: null,
     ...over,
   };
 }

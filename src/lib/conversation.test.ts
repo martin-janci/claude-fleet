@@ -5,6 +5,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 
 import {
   sessionConversation,
+  listConversations,
   sameConversation,
   isPinned,
   emptyStateText,
@@ -39,6 +40,7 @@ beforeEach(() => {
 function conv(over: Partial<Conversation> = {}): Conversation {
   return {
     truncated: false,
+    context: null,
     turns: [
       {
         prompt: 'fix the bug',
@@ -63,6 +65,29 @@ describe('sessionConversation', () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue({ turns: [], truncated: false });
     await sessionConversation(5, 30);
     expect(mockedInvoke).toHaveBeenCalledWith('session_conversation', { args: { session_id: 5, turns: 30 } });
+  });
+
+  it('passes an earlier conversation id as claude_session_id', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue({ turns: [], truncated: false, context: null });
+    await sessionConversation(5, undefined, 'uuid-b');
+    expect(mockedInvoke).toHaveBeenCalledWith('session_conversation', {
+      args: { session_id: 5, claude_session_id: 'uuid-b' },
+    });
+  });
+});
+
+describe('listConversations', () => {
+  it('invokes session_conversations with the session id and a default limit', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    const r = await listConversations(7);
+    expect(mockedInvoke).toHaveBeenCalledWith('session_conversations', { args: { session_id: 7, limit: 50 } });
+    expect(r.ok).toBe(true);
+  });
+
+  it('passes an explicit limit', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await listConversations(7, 5);
+    expect(mockedInvoke).toHaveBeenCalledWith('session_conversations', { args: { session_id: 7, limit: 5 } });
   });
 });
 

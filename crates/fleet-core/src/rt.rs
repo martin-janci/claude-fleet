@@ -39,6 +39,21 @@ where
     }
 }
 
+/// [`spawn`] when a runtime is reachable, else `None` (the future is
+/// dropped). For best-effort follow-ups fired from code that synchronous
+/// unit tests also drive, where neither a current nor an installed runtime
+/// exists.
+pub fn try_spawn<F>(fut: F) -> Option<JoinHandle<F::Output>>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match Handle::try_current() {
+        Ok(h) => Some(h.spawn(fut)),
+        Err(_) => INSTALLED.get().map(|h| h.spawn(fut)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

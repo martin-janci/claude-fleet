@@ -874,6 +874,16 @@
         <span class="hook-desc" id="limit-tasks-desc">hours before an open task (counted from its start, else its creation) is failed by the liveness sweep (0 = never)</span>
       </div>
       <div class="mcp-field">
+        <label class="lbl" for="limit-lost-ttl-hours">lost sessions</label>
+        <input class="port" id="limit-lost-ttl-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.sessionsLostTtlSecs))}
+          disabled={limitsBusy}
+          aria-describedby="limit-lost-ttl-desc"
+          data-testid="sessions-lost-ttl-hours"
+          onchange={(e) => onLimitHoursChange(SETTING_KEYS.sessionsLostTtlSecs, 'Lost session TTL', e)} />
+        <span class="hook-desc" id="limit-lost-ttl-desc">hours a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost (0 = off: removed on the next pass like any vanished session)</span>
+      </div>
+      <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>
         <input class="port" id="limit-move-mb" type="number" min="1" max={MOVE_MAX_TRANSCRIPT_MB_MAX} step="1"
           value={settingInt($fleetSettings, SETTING_KEYS.moveMaxTranscriptMb)}

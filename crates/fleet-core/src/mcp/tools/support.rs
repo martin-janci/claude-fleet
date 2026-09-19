@@ -442,18 +442,34 @@ pub(super) fn apply_marker(
 /// (`pair_client` / `revoke_client` / `list_clients`) are master-only,
 /// whatever the host token's mode — and whatever a paired client's mode,
 /// since [`Caller::is_master`] is false for a client too.
+///
+/// Fails CLOSED on the tool name: refuses unless the caller is master OR the
+/// tool is on [`guard::CLIENT_TOOLS`] — not merely "unless it's on
+/// `guard::ADMIN_TOOLS`". `guard::ADMIN_TOOLS` and `guard::CLIENT_TOOLS`
+/// partition every real router tool (enforced by the exhaustiveness test in
+/// `tools::tests`), so this refuses exactly the same tools as an
+/// `is_admin_tool` check for every tool that exists today; the difference is
+/// a tool that exists but was never classified — that now needs the master
+/// too, instead of defaulting open. The wording says which case it is: a
+/// real, deliberately master-only tool gets the "fleet-admin tool" message,
+/// while a name in neither list — nothing a client may ever call — gets a
+/// message that does not claim it as a real admin tool.
 pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError> {
-    if guard::is_admin_tool(tool) && !caller.is_master() {
-        return Err(mcp_err(
-            "E_FORBIDDEN",
-            format!(
-                "{tool} is a fleet-admin tool: master token only ({} refused)",
-                caller.label()
-            ),
-            None,
-        ));
+    if caller.is_master() || guard::is_client_tool(tool) {
+        return Ok(());
     }
-    Ok(())
+    let message = if guard::is_admin_tool(tool) {
+        format!(
+            "{tool} is a fleet-admin tool: master token only ({} refused)",
+            caller.label()
+        )
+    } else {
+        format!(
+            "{tool} is not a client-callable tool ({} refused)",
+            caller.label()
+        )
+    };
+    Err(mcp_err("E_FORBIDDEN", message, None))
 }
 
 /// Substituted for an otherwise-empty text block. The Anthropic API rejects
@@ -947,6 +963,7 @@ pub(super) const QUICK_TOOLS: &[&str] = &[
     "send_message",
     "send_prompt",
     "session_history",
+    "session_conversations",
     "set_clipboard",
     "set_friendly_name",
     "set_session_tags",

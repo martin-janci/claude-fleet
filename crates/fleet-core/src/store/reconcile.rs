@@ -6,11 +6,50 @@ use super::*;
 /// Translate `HostReconcile::probe_started_at` into the `last_reconciled_at`
 /// cutoff used by [`Store::ghost_and_clean`]: rows stamped at or after the
 /// probe start are protected, and `0` ("no guard") protects nothing.
-fn ghost_cutoff(probe_started_at: i64) -> i64 {
+/// `pub(super)`: also reused by [`Store::mark_host_sessions_lost`]
+/// (`store/sessions.rs`) for the identical BE-3 guard against the mass-loss
+/// verdict marking a row a NEWER reconcile pass already saw live.
+pub(super) fn ghost_cutoff(probe_started_at: i64) -> i64 {
     if probe_started_at <= 0 {
         i64::MAX
     } else {
         probe_started_at
+    }
+}
+
+/// Classify a [`RowChange`] as a session lifecycle transition, for the R5
+/// forensics log (Task 7): a host reboot used to leave almost nothing in the
+/// log besides MCP tool calls and tunnel warnings, so every session
+/// created/lost/deleted transition now gets one INFO line. Returns `None`
+/// for changes that are not a session lifecycle event (including a
+/// `SessionUpdated` of a still-live row).
+///
+/// `SessionUpdated` maps to `"lost"` only when the row's `lost_at` is set.
+/// Through the two loops that call this (`apply_host_reconcile`,
+/// `mark_host_sessions_lost`), a session is logged `"lost"` exactly once
+/// per loss episode: `ghost_and_clean` and `mark_host_sessions_lost` both
+/// skip rows already `status = 'ghost'`, and `upsert_session_in_tx` clears
+/// `lost_at` back to `NULL` on every conflict, so a `SessionUpdated` from
+/// the reconcile upsert never carries `lost_at.is_some()`. Other emitters
+/// of `SessionUpdated` (e.g. `set_friendly_name`) go straight to the event
+/// bus and bypass these loops entirely, so they never produce a lifecycle
+/// line. A second `"lost"` line for the same session with no intervening
+/// `"created"`/revival is therefore a bug, not a benign duplicate.
+///
+/// Two lifecycle lines are logged outside this mapping: a row fleet itself
+/// killed is logged `"lost"` (reason `killed`) by `mark_session_killed`, and
+/// is then skipped by both loops above since it is already ghost; and a
+/// `missing` ghost that a later mass-loss verdict upgrades is logged
+/// `"reclassified"` by `mark_host_sessions_lost` — a DISTINCT kind, so a
+/// session ghosted by the routine prune and then reclassified legitimately
+/// carries one `"lost"` line followed by one `"reclassified"` line, never
+/// two `"lost"` lines.
+pub(crate) fn lifecycle_kind(change: &RowChange) -> Option<&'static str> {
+    match change {
+        RowChange::SessionCreated(_) => Some("created"),
+        RowChange::SessionUpdated(row) if row.lost_at.is_some() => Some("lost"),
+        RowChange::SessionKilled(_) => Some("deleted"),
+        _ => None,
     }
 }
 
@@ -93,6 +132,7 @@ impl Store {
         ci_status: Option<&str>,
         pr_observed: bool,
         probe_started_at: i64,
+        tmux_pane_id: Option<&str>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read the prior row (not just its id) before the write: it tells us
@@ -124,15 +164,52 @@ impl Store {
                                             AND last_hook_at >= ?20 \
                                        THEN claude_status \
                                        ELSE COALESCE(excluded.claude_status, claude_status) END";
+        // The candidate claude_session_id, refused when another live row on
+        // the host already holds it: `claude agents`' cwd match can be
+        // ambiguous, and one conversation must never be bound to two rows
+        // (the hooks' pane binding settles it). Evaluated in VALUES, so
+        // `excluded.claude_session_id` below is already the guarded value and
+        // the id write, the transcript reset and the stale flag all share
+        // this one condition.
+        const GUARDED_ID: &str = "CASE WHEN EXISTS (SELECT 1 FROM sessions o \
+                                      WHERE o.claude_session_id = ?9 AND o.host_alias = ?2 \
+                                        AND o.tmux_name != ?1 AND o.status != 'ghost') \
+                                  THEN NULL ELSE ?9 END";
+        // The post-write claude_session_id. The MCP-1 in-flight guard
+        // applies to the id as to the status: a hook that landed at or after
+        // this probe STARTED (a SessionStart / UserPromptSubmit rebind, a
+        // SessionEnd(clear|resume)) owns the conversation binding (spec
+        // §1.3/§1.4), so a pass that read `claude agents` before it must not
+        // write the replaced id back.
+        const NEW_ID: &str = "CASE WHEN ?20 > 0 AND last_hook_at IS NOT NULL \
+                                        AND last_hook_at >= ?20 \
+                                   THEN claude_session_id \
+                                   ELSE COALESCE(excluded.claude_session_id, claude_session_id) END";
+        // The pass moves the row off a conversation it was bound to. SET
+        // clauses see the OLD row, so this compares against the prior id. A
+        // first sighting (prior id NULL) is not a change: nothing stored
+        // belonged to another conversation.
+        let id_changes =
+            format!("claude_session_id IS NOT NULL AND ({NEW_ID}) IS NOT claude_session_id");
+        // A hook/transcript context value younger than 120 s outranks the
+        // pane footer (spec §1.5) — unless it belongs to the conversation
+        // this pass moves the row away from.
+        const FRESH_CONTEXT: &str = "context_source IN ('transcript','hook') \
+                                     AND context_at >= ?19 - 120";
         let sql = format!(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
                                    created_at, last_activity_at, status, account_uuid,
                                    worktree_key, lost_at,
                                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                                   context_pct, stuck_kind, ci_status, idle_since, stuck_since)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?17,
+                                   context_pct, stuck_kind, ci_status, idle_since, stuck_since,
+                                   tmux_pane_id, context_source, context_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, {guarded_id}, ?10, ?11, ?12, ?13,
+                     ?14, ?15, ?17,
                      CASE WHEN ?10 IN ('idle','completed','stopped') THEN ?19 ELSE NULL END,
-                     CASE WHEN ?15 IS NULL THEN NULL ELSE ?19 END)
+                     CASE WHEN ?15 IS NULL THEN NULL ELSE ?19 END,
+                     ?21,
+                     CASE WHEN ?14 IS NULL THEN NULL ELSE 'pane' END,
+                     CASE WHEN ?14 IS NULL THEN NULL ELSE ?19 END)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                last_activity_at=excluded.last_activity_at,
@@ -140,7 +217,13 @@ impl Store {
                worktree_key=COALESCE(excluded.worktree_key, worktree_key),
                status=CASE WHEN status='ghost' THEN 'running' ELSE status END,
                lost_at=NULL,
-               claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
+               lost_reason=NULL,
+               claude_session_id={new_id},
+               -- A new conversation: the old transcript is not its transcript,
+               -- and the old context size is not its size.
+               transcript_path=CASE WHEN {id_changes} THEN NULL ELSE transcript_path END,
+               context_stale=CASE WHEN {id_changes} THEN 1 ELSE context_stale END,
+               tmux_pane_id=COALESCE(excluded.tmux_pane_id, tmux_pane_id),
                claude_status={new_status},
                effort_level=COALESCE(excluded.effort_level, effort_level),
                -- pr_url / ci_status are authoritative when the gh probe ran
@@ -150,7 +233,23 @@ impl Store {
                ci_status=CASE WHEN ?18 THEN excluded.ci_status
                               ELSE COALESCE(excluded.ci_status, ci_status) END,
                current_activity=COALESCE(excluded.current_activity, current_activity),
-               context_pct=COALESCE(excluded.context_pct, context_pct),
+               -- The pane footer is a fallback (spec §1.5): it applies only
+               -- when no fresh hook/transcript value exists, and a missing
+               -- footer never overwrites anything.
+               context_pct=CASE WHEN excluded.context_pct IS NULL THEN context_pct
+                                WHEN {fresh} AND NOT ({id_changes}) THEN context_pct
+                                ELSE excluded.context_pct END,
+               context_source=CASE WHEN excluded.context_pct IS NULL THEN context_source
+                                   WHEN {fresh} AND NOT ({id_changes}) THEN context_source
+                                   ELSE 'pane' END,
+               -- An unchanged footer value keeps its stamp: re-stamping it
+               -- every pass would make each no-op pass emit (BE-11).
+               context_at=CASE WHEN excluded.context_pct IS NULL THEN context_at
+                               WHEN {fresh} AND NOT ({id_changes}) THEN context_at
+                               WHEN context_source IS 'pane'
+                                    AND context_pct IS excluded.context_pct
+                                    AND NOT ({id_changes}) THEN context_at
+                               ELSE ?19 END,
                -- stuck_kind is authoritative when the pane was observed this
                -- pass (?16): a NULL then CLEARS a stale flag. When the pane was
                -- NOT observed (capture failed) we preserve the prior value.
@@ -165,6 +264,10 @@ impl Store {
             new_stuck = NEW_STUCK,
             new_status = NEW_STATUS,
             idle = idle_since_sql(NEW_STATUS, "?19"),
+            guarded_id = GUARDED_ID,
+            id_changes = id_changes,
+            new_id = NEW_ID,
+            fresh = FRESH_CONTEXT,
         );
         tx.execute(
             &sql,
@@ -188,7 +291,8 @@ impl Store {
                 ci_status,
                 pr_observed,
                 now_unix(),
-                probe_started_at
+                probe_started_at,
+                tmux_pane_id
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -252,6 +356,18 @@ impl Store {
     /// tick that listed tmux just before `new_session` created it). Such rows
     /// are left alone; the next pass, whose probe starts later, judges them.
     /// `None` disables the guard (the pane-less pruner has no such race).
+    ///
+    /// `lost_ttl_cutoff` (unix secs) guards Phase 2 against reaping a
+    /// resumable mass-loss row too early: a row with `claude_session_id IS
+    /// NOT NULL`, `lost_reason IN ('host_reboot','tmux_server_gone')`, and
+    /// `lost_at >= lost_ttl_cutoff` is exempt from the hard-delete — the
+    /// session can still be resumed, so it survives past the usual one-cycle
+    /// grace until it ages out of the TTL. A `missing` row (a single session
+    /// that dropped out while its neighbours stayed live) is never exempt,
+    /// so it keeps today's one-cycle reap regardless of this cutoff. `None`
+    /// disables the exemption entirely — today's behaviour, byte-identical
+    /// SQL and bindings.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn ghost_and_clean(
         tx: &rusqlite::Transaction,
         host_alias: &str,
@@ -259,6 +375,7 @@ impl Store {
         now: i64,
         kind_filter: &str,
         cutoff: Option<i64>,
+        lost_ttl_cutoff: Option<i64>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         let not_in = if keep_names.is_empty() {
@@ -270,11 +387,38 @@ impl Store {
         // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
         // so that sessions newly ghosted in Phase 1 are not immediately deleted.
         let pre_ghost_ids: Vec<i64> = {
+            // `exempt` is textually BEFORE `not_in` so its explicit `?2`
+            // claims that slot before `not_in`'s bare `?`s are numbered by
+            // SQLite (which continues from the highest placeholder used so
+            // far in the text) — the keep names then land at ?3.. . When
+            // `lost_ttl_cutoff` is `None`, `exempt` is empty and `?2` never
+            // appears, so `not_in`'s bare `?`s fall back to ?2.. exactly as
+            // before this feature existed.
+            // `COALESCE(..., 0)`: `lost_reason` is NULL on every row ghosted
+            // before migration 036 introduced the column. SQL's
+            // three-valued logic would otherwise make `lost_reason IN (...)`
+            // evaluate to NULL, the inner AND chain NULL, and `NOT NULL`
+            // NULL again — which `WHERE` treats as "leave this row out of
+            // the reaped set", wrongly exempting it. Coalescing the inner
+            // expression to `0` (false) before negating makes a NULL
+            // `lost_reason` explicitly NOT exempt, preserving today's
+            // one-cycle reap for every pre-migration row after an upgrade.
+            let exempt = if lost_ttl_cutoff.is_some() {
+                " AND NOT COALESCE((claude_session_id IS NOT NULL \
+                                    AND lost_reason IN ('host_reboot','tmux_server_gone') \
+                                    AND lost_at >= ?2), 0)"
+            } else {
+                ""
+            };
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND {kind_filter}{not_in}"
+                 WHERE host_alias=?1 AND status='ghost' AND {kind_filter}{exempt}{not_in}"
             );
-            let params = params_then(rusqlite::params![host_alias], keep_names);
+            let head: Vec<&dyn rusqlite::ToSql> = match &lost_ttl_cutoff {
+                Some(c) => vec![&host_alias, c],
+                None => vec![&host_alias],
+            };
+            let params = params_then(&head, keep_names);
             tx.prepare(&sql)?
                 .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -289,7 +433,7 @@ impl Store {
                 ""
             };
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='missing'
                  WHERE host_alias=?2 AND status!='ghost' AND {kind_filter}{guard}{not_in}
                  RETURNING id"
             );
@@ -382,6 +526,7 @@ impl Store {
                         sess.ci_status.as_deref(),
                         sess.pr_observed,
                         spec.probe_started_at,
+                        sess.tmux_pane_id.as_deref(),
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -392,21 +537,55 @@ impl Store {
                 for (pid, ts) in project_touch {
                     Self::touch_project_last_session_at_in_tx(tx, pid, ts, &mut out)?;
                 }
-                Self::ghost_and_clean(
-                    tx,
-                    spec.alias,
-                    spec.keep,
-                    now_unix(),
-                    KIND_TMUX,
-                    Some(ghost_cutoff(spec.probe_started_at)),
-                    &mut out,
-                )?;
+                // Task 6: a pass that just mass-marked this host's sessions
+                // lost (reboot / vanished tmux server) skips the routine
+                // ghost/reap pass entirely — it must not immediately re-ghost
+                // (and restart the reap clock on) rows the mass-loss path
+                // just stamped with their own `lost_reason`.
+                if !spec.skip_prune {
+                    Self::ghost_and_clean(
+                        tx,
+                        spec.alias,
+                        spec.keep,
+                        now_unix(),
+                        KIND_TMUX,
+                        Some(ghost_cutoff(spec.probe_started_at)),
+                        spec.lost_ttl_cutoff,
+                        &mut out,
+                    )?;
+                }
             }
             Ok(out)
         })?;
 
         // Phase 2: transaction committed — now it is safe to emit.
         for change in &changes {
+            // Task 7 (R5): one INFO line per session lifecycle transition —
+            // a host reboot used to leave nothing in the log to forensically
+            // reconstruct what happened to the 8+ sessions it took out.
+            if let Some(kind) = lifecycle_kind(change) {
+                match change {
+                    RowChange::SessionCreated(row) | RowChange::SessionUpdated(row) => {
+                        tracing::info!(
+                            lifecycle = kind,
+                            session_id = row.id,
+                            host_alias = %row.host_alias,
+                            tmux_name = %row.tmux_name,
+                            claude_session_id = row.claude_session_id.as_deref().unwrap_or("-"),
+                            "[session] {kind}"
+                        );
+                    }
+                    RowChange::SessionKilled(id) => {
+                        tracing::info!(
+                            lifecycle = kind,
+                            host_alias = %spec.alias,
+                            session_id = id,
+                            "[session] {kind}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
             self.bus.emit_change(change);
         }
         Ok(())
@@ -441,6 +620,98 @@ impl Store {
 mod tests {
     use super::*;
     use crate::store::test_support::*;
+
+    /// A minimal, DB-free `SessionRow` for `lifecycle_kind` classification
+    /// tests — only `lost_at` varies between cases, every other field is a
+    /// harmless default.
+    fn bare_row(lost_at: Option<i64>) -> SessionRow {
+        SessionRow {
+            id: 1,
+            tmux_name: "work-a".into(),
+            host_alias: "alpha".into(),
+            project_id: None,
+            worktree_id: None,
+            created_at: 0,
+            last_activity_at: 0,
+            status: "running".into(),
+            notes: None,
+            account_uuid: None,
+            kind: "work".into(),
+            reviews_session_id: None,
+            worktree_key: None,
+            lost_at,
+            claude_session_id: None,
+            claude_status: None,
+            effort_level: None,
+            pr_url: None,
+            current_activity: None,
+            context_pct: None,
+            stuck_kind: None,
+            friendly_name: None,
+            safe_kill_state: None,
+            safe_kill_nonce: None,
+            safe_kill_detail: None,
+            safe_kill_requested_at: None,
+            idle_since: None,
+            stuck_since: None,
+            last_playbook_at: None,
+            last_prompt: None,
+            started_at: None,
+            last_turn_at: None,
+            ci_status: None,
+            turn_seq: 0,
+            last_stop_at: None,
+            parent_session_id: None,
+            tags: Vec::new(),
+            usage: Default::default(),
+            context: Default::default(),
+        }
+    }
+
+    fn bare_host() -> HostRow {
+        HostRow {
+            alias: "alpha".into(),
+            ssh_alias: None,
+            reachable: true,
+            claude_version: None,
+            tmux_version: None,
+            hidden: false,
+            last_pinged_at: None,
+            account_uuid: None,
+            provisioned: false,
+            transport: "ssh".to_string(),
+        }
+    }
+
+    #[test]
+    fn lifecycle_kind_classifies_created_lost_deleted() {
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionCreated(bare_row(None))),
+            Some("created")
+        );
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionUpdated(bare_row(Some(500)))),
+            Some("lost")
+        );
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionKilled(1)),
+            Some("deleted")
+        );
+    }
+
+    #[test]
+    fn lifecycle_kind_ignores_live_updates_and_non_session_changes() {
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionUpdated(bare_row(None))),
+            None,
+            "an update to a still-live row is not a lifecycle transition"
+        );
+        assert_eq!(
+            lifecycle_kind(&RowChange::HostProbed(bare_host())),
+            None,
+            "non-session changes never carry a lifecycle kind"
+        );
+    }
 
     #[test]
     fn reconcile_hard_delete_reaps_session_events() {
@@ -552,6 +823,7 @@ mod tests {
                         None,
                         false,
                         0,
+                        None,
                         &mut out,
                     )?;
                     Ok(out)
@@ -600,6 +872,26 @@ mod tests {
             evts.contains(&format!("project:updated:{pid}")),
             "first pass touches the project; got {evts:?}"
         );
+
+        // Pass 2 runs in a later second than pass 1 on every run: backdate
+        // the footer stamp so a pass that re-stamps an unchanged footer
+        // value fails deterministically, not only across a second boundary.
+        store
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET context_at = context_at - 5 WHERE tmux_name = 's1'",
+                [],
+            )
+            .unwrap();
+        let backdated: Option<i64> = store
+            .conn_ref()
+            .query_row(
+                "SELECT context_at FROM sessions WHERE tmux_name = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(backdated.is_some(), "the footer value was stamped");
 
         // Pass 2: identical observation → only the host probe stamp moves.
         let sessions = vec![live_session("s1", pid, 10)];
@@ -1272,5 +1564,555 @@ mod tests {
         let r = reconcile_one(&mut s, "a", None, None, Some((None, None)));
         assert_eq!(r.pr_url, None);
         assert_eq!(r.ci_status, None);
+    }
+
+    const ID_A: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const ID_B: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+    #[test]
+    fn a_reset_context_is_not_resurrected_by_an_empty_pane_footer() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        s.rebind_conversation(row.id, ID_A, StartSource::Clear, None, None)
+            .unwrap();
+        // pane footer shows nothing this pass
+        let after = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        assert_eq!(after.context_pct, Some(0.0));
+    }
+
+    #[test]
+    fn a_fresh_transcript_value_beats_a_pane_value() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        s.rebind_conversation(row.id, ID_A, StartSource::Fleet, None, None)
+            .unwrap();
+        s.set_context(row.id, ID_A, 100_000, 200_000, "transcript", None)
+            .unwrap();
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[ReconcileSession {
+                tmux_name: "a",
+                created_at: 1,
+                last_activity_at: 1,
+                context_pct: Some(12.0),
+                intel_observed: true,
+                ..Default::default()
+            }],
+            keep: &["a".to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+        let row = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(row.context_pct, Some(50.0));
+        assert_eq!(row.context.context_source.as_deref(), Some("transcript"));
+    }
+
+    #[test]
+    fn a_stale_transcript_value_yields_to_a_pane_value() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        s.rebind_conversation(row.id, ID_A, StartSource::Fleet, None, None)
+            .unwrap();
+        s.set_context(row.id, ID_A, 100_000, 200_000, "transcript", None)
+            .unwrap();
+        // Age the transcript value past the 120 s freshness window.
+        s.conn
+            .execute(
+                "UPDATE sessions SET context_at = context_at - 121 WHERE id = ?1",
+                [row.id],
+            )
+            .unwrap();
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[ReconcileSession {
+                tmux_name: "a",
+                created_at: 1,
+                last_activity_at: 1,
+                context_pct: Some(12.0),
+                intel_observed: true,
+                ..Default::default()
+            }],
+            keep: &["a".to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+        let row = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(row.context_pct, Some(12.0));
+        assert_eq!(row.context.context_source.as_deref(), Some("pane"));
+    }
+
+    #[test]
+    fn a_pane_value_applies_when_no_other_source_wrote() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        reconcile_one(&mut s, "a", Some("idle"), None, None);
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[ReconcileSession {
+                tmux_name: "a",
+                created_at: 1,
+                last_activity_at: 1,
+                context_pct: Some(12.0),
+                tmux_pane_id: Some("%4".into()),
+                intel_observed: true,
+                ..Default::default()
+            }],
+            keep: &["a".to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+        let row = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(row.context_pct, Some(12.0));
+        assert_eq!(row.context.context_source.as_deref(), Some("pane"));
+        assert_eq!(row.context.tmux_pane_id.as_deref(), Some("%4"));
+        // A pass without a pane id keeps the last one seen.
+        let row = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        assert_eq!(row.context.tmux_pane_id.as_deref(), Some("%4"));
+    }
+
+    #[test]
+    fn an_id_change_from_claude_agents_clears_the_transcript_path() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", None, None, None);
+        s.rebind_conversation(
+            row.id,
+            ID_A,
+            StartSource::Fleet,
+            Some("/h/.claude/projects/x/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl"),
+            None,
+        )
+        .unwrap();
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[ReconcileSession {
+                tmux_name: "a",
+                created_at: 1,
+                last_activity_at: 1,
+                claude_session_id: Some(ID_B.into()),
+                ..Default::default()
+            }],
+            keep: &["a".to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+        assert_eq!(s.session_transcript_path(row.id).unwrap(), None);
+    }
+
+    #[test]
+    fn reconcile_never_binds_one_claude_id_to_two_rows() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let a = reconcile_one(&mut s, "a", None, None, None);
+        s.rebind_conversation(a.id, ID_A, StartSource::Fleet, Some("/t/a.jsonl"), None)
+            .unwrap();
+        let b = reconcile_one(&mut s, "b", None, None, None);
+        s.rebind_conversation(b.id, ID_B, StartSource::Fleet, Some("/t/b.jsonl"), None)
+            .unwrap();
+        // `claude agents` matched row `b` by cwd to `a`'s conversation.
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[
+                ReconcileSession {
+                    tmux_name: "a",
+                    created_at: 1,
+                    last_activity_at: 1,
+                    claude_session_id: Some(ID_A.into()),
+                    ..Default::default()
+                },
+                ReconcileSession {
+                    tmux_name: "b",
+                    created_at: 1,
+                    last_activity_at: 1,
+                    claude_session_id: Some(ID_A.into()),
+                    ..Default::default()
+                },
+            ],
+            keep: &["a".to_string(), "b".to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+        let b = s.get_session("b", "local").unwrap().unwrap();
+        assert_eq!(b.claude_session_id.as_deref(), Some(ID_B));
+        // The transcript reset is gated on the same condition.
+        assert_eq!(
+            s.session_transcript_path(b.id).unwrap().as_deref(),
+            Some("/t/b.jsonl")
+        );
+        assert_eq!(s.sessions_by_claude_id(ID_A).unwrap().len(), 1);
+    }
+
+    fn pass_with_id(s: &mut Store, name: &'static str, id: &str, started: i64) {
+        s.apply_host_reconcile(HostReconcile {
+            probe_started_at: started,
+            sessions: &[ReconcileSession {
+                tmux_name: name,
+                created_at: 1,
+                last_activity_at: 1,
+                claude_session_id: Some(id.into()),
+                ..Default::default()
+            }],
+            keep: &[name.to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn an_id_change_marks_the_context_stale_but_a_first_sighting_does_not() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let stale = |s: &Store, name: &str| {
+            s.get_session(name, "local")
+                .unwrap()
+                .unwrap()
+                .context
+                .context_stale
+        };
+        // First sighting of a new row carrying an id: nothing stored was
+        // stale, so nothing is marked.
+        pass_with_id(&mut s, "a", ID_A, 0);
+        assert!(!stale(&s, "a"));
+        // A real change: the stored size belongs to the old conversation.
+        let a = s.get_session("a", "local").unwrap().unwrap();
+        s.set_context(a.id, ID_A, 50_000, 200_000, "transcript", None)
+            .unwrap();
+        pass_with_id(&mut s, "a", "cccccccc-cccc-cccc-cccc-cccccccccccc", 0);
+        assert!(stale(&s, "a"));
+        // First sighting of an id on a row whose id was NULL: not stale
+        // either. (Each single-row pass ghosts the other row; fine here.)
+        reconcile_one(&mut s, "b", None, None, None);
+        pass_with_id(&mut s, "b", ID_B, 0);
+        assert!(!stale(&s, "b"));
+    }
+
+    #[test]
+    fn reconcile_never_undoes_a_hook_rebind_newer_than_its_probe() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", None, None, None);
+        s.rebind_conversation(row.id, ID_A, StartSource::Fleet, None, None)
+            .unwrap();
+        // /clear: the hook moves the row to B and stamps last_hook_at.
+        s.close_conversation(row.id, ID_A, "clear").unwrap();
+        s.rebind_conversation(row.id, ID_B, StartSource::Clear, Some("/t/b.jsonl"), None)
+            .unwrap();
+        s.record_hook_seen(row.id).unwrap();
+        let hook_at: i64 = s
+            .conn
+            .query_row(
+                "SELECT last_hook_at FROM sessions WHERE id=?1",
+                [row.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // A pass that probed before the hook still reports A.
+        pass_with_id(&mut s, "a", ID_A, hook_at - 1);
+        let after = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(after.claude_session_id.as_deref(), Some(ID_B));
+        assert_eq!(
+            s.session_transcript_path(row.id).unwrap().as_deref(),
+            Some("/t/b.jsonl")
+        );
+        assert!(!after.context.context_stale);
+        assert_eq!(after.context_pct, Some(0.0));
+        // A pass that probed after the hook is authoritative again.
+        pass_with_id(&mut s, "a", ID_A, hook_at + 1);
+        assert_eq!(
+            s.get_session("a", "local")
+                .unwrap()
+                .unwrap()
+                .claude_session_id
+                .as_deref(),
+            Some(ID_A)
+        );
+    }
+
+    /// 14 days, matching `SESSIONS_LOST_TTL_SECS`'s default — kept as a
+    /// literal here so these tests don't reach into `service::settings`.
+    const TTL_SECS: i64 = 1_209_600;
+
+    /// Seed a row directly as already-ghost (bypassing Phase 1) with the
+    /// given `lost_at` / `lost_reason` / `claude_session_id`, so a single
+    /// `apply_host_reconcile` pass exercises Phase 2's exemption straight
+    /// away. `lost_reason: None` writes SQL `NULL`, matching a row ghosted
+    /// before migration 036 introduced the column.
+    fn seed_ghost_row(
+        store: &Store,
+        host: &str,
+        name: &str,
+        lost_at: i64,
+        lost_reason: Option<&str>,
+        claude_session_id: Option<&str>,
+    ) -> i64 {
+        let id = store
+            .upsert_session(name, host, None, None, 1, 1, "running", None)
+            .unwrap();
+        if let Some(uuid) = claude_session_id {
+            store.set_claude_session_id(id, uuid).unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2 WHERE id=?3",
+                rusqlite::params![lost_at, lost_reason, id],
+            )
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn a_resumable_mass_loss_row_survives_the_reap() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            now - 100,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_some(),
+            "a resumable host_reboot row within the TTL must survive the reap"
+        );
+    }
+
+    #[test]
+    fn a_missing_row_is_still_reaped_on_the_next_pass() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = store
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store.set_claude_session_id(id, "uuid-a").unwrap();
+        // Pass 1: live and not in keep → ghosted normally with lost_reason='missing'.
+        store
+            .apply_host_reconcile(HostReconcile {
+                lost_ttl_cutoff: Some(cutoff),
+                keep: &[],
+                ..empty_probe("alpha", now)
+            })
+            .unwrap();
+        assert_eq!(
+            store.get_session_by_id(id).unwrap().unwrap().status,
+            "ghost",
+            "pass 1 ghosts the row"
+        );
+        // Pass 2: already ghost before this pass — 'missing' is not exempt,
+        // even with a TTL cutoff set, so the one-cycle grace still applies.
+        store
+            .apply_host_reconcile(HostReconcile {
+                lost_ttl_cutoff: Some(cutoff),
+                keep: &[],
+                ..empty_probe("alpha", now + 10)
+            })
+            .unwrap();
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a 'missing' row keeps the one-cycle reap even with a TTL cutoff set"
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_row_without_a_claude_id_is_reaped() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(&store, "alpha", "s1", now - 100, Some("host_reboot"), None);
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a mass-loss row with no claude_session_id is not resumable and must be reaped"
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_row_older_than_the_ttl_is_reaped() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            cutoff - 1,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a mass-loss row whose lost_at is older than the TTL cutoff must be reaped"
+        );
+    }
+
+    #[test]
+    fn with_no_cutoff_nothing_is_exempt() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            now - 100,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: None,
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a None cutoff means no exemption at all — today's behaviour"
+        );
+    }
+
+    #[test]
+    fn a_resumable_row_and_a_missing_row_are_judged_correctly_alongside_a_kept_live_row() {
+        // The other tests above all pass an EMPTY `keep`, so `not_in` is the
+        // empty string and never appears in the SQL — they can't catch
+        // `exempt` drifting to AFTER `not_in` in the query text, which would
+        // let a non-empty `not_in`'s bare `?`s claim `?2` before `exempt`'s
+        // explicit `?2` does (misbinding the cutoff to a keep name, or
+        // erroring on the parameter count once a real keep set is in play).
+        // This test exercises `exempt` and a non-empty `not_in` together.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+
+        let kept_id = store
+            .upsert_session("keep-me", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let resumable_id = seed_ghost_row(
+            &store,
+            "alpha",
+            "resumable",
+            now - 100,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        let missing_id = seed_ghost_row(&store, "alpha", "gone", now - 100, Some("missing"), None);
+
+        store
+            .apply_host_reconcile(HostReconcile {
+                lost_ttl_cutoff: Some(cutoff),
+                keep: &["keep-me".to_string()],
+                ..empty_probe("alpha", now)
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.get_session_by_id(kept_id).unwrap().unwrap().status,
+            "running",
+            "the kept live row must stay running alongside an active TTL cutoff"
+        );
+        assert!(
+            store.get_session_by_id(resumable_id).unwrap().is_some(),
+            "the resumable ghost must survive alongside a non-empty keep set"
+        );
+        assert!(
+            store.get_session_by_id(missing_id).unwrap().is_none(),
+            "the 'missing' ghost must still be reaped alongside a non-empty keep set"
+        );
+    }
+
+    #[test]
+    fn a_pre_migration_ghost_row_with_null_lost_reason_is_reaped() {
+        // Rows ghosted before migration 036 added `lost_reason` have it
+        // NULL. SQL three-valued logic must not let that NULL silently
+        // exempt them: `lost_reason IN (...)` on NULL is NULL, so an
+        // un-coalesced `NOT (... AND NULL AND ...)` is NULL too, and a
+        // `WHERE` clause treats NULL as "leave this row out of the reaped
+        // set" — i.e. wrongly exempting it. This would be a behaviour
+        // change for every pre-migration row after an upgrade, which the
+        // plan forbids.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(&store, "alpha", "s1", now - 100, None, Some("uuid-a"));
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a NULL lost_reason (a pre-migration row) must not be silently \
+             exempted; it keeps today's one-cycle reap"
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_row_exactly_at_the_ttl_cutoff_survives() {
+        // Pins the `>=` boundary: `lost_at == cutoff` must be inclusive.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            cutoff,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_some(),
+            "lost_at exactly at the cutoff must survive (inclusive >=)"
+        );
     }
 }

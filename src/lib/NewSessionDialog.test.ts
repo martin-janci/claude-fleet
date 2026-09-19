@@ -152,7 +152,7 @@ describe('NewSessionDialog', () => {
         effort_level: null,
         pr_url: null,
         current_activity: null,
-        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
       },
     });
 
@@ -194,7 +194,7 @@ describe('NewSessionDialog', () => {
         worktree_key: null, lost_at: null, claude_session_id: null,
         claude_status: null, effort_level: null, pr_url: null, current_activity: null,
         friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
-        safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+        safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
       },
     });
 
@@ -231,7 +231,7 @@ describe('NewSessionDialog', () => {
         worktree_key: null, lost_at: null, claude_session_id: null,
         claude_status: null, effort_level: null, pr_url: null, current_activity: null,
         friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
-        safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+        safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
       },
     });
 
@@ -278,7 +278,7 @@ describe('NewSessionDialog', () => {
         safe_kill_state: null,
         safe_kill_nonce: null,
         safe_kill_detail: null,
-        safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+        safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
       },
     });
 
@@ -316,7 +316,7 @@ describe('NewSessionDialog', () => {
         status: 'running', notes: null, account_uuid: null, kind: 'work',
         reviews_session_id: null, worktree_key: null, lost_at: null,
         claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
-        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
       },
     });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
@@ -336,7 +336,7 @@ describe('NewSessionDialog', () => {
         status: 'running', notes: null, account_uuid: null, kind: 'shell',
         reviews_session_id: null, worktree_key: null, lost_at: null,
         claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
-        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
       },
     });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
@@ -360,7 +360,7 @@ describe('NewSessionDialog', () => {
         status: 'running', notes: null, account_uuid: null, kind: 'shell',
         reviews_session_id: null, worktree_key: null, lost_at: null,
         claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
-        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
       },
     });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
@@ -398,7 +398,7 @@ function okRow(over: Partial<sessionsModule.SessionRow> = {}): sessionsModule.Se
     last_prompt: null,
     started_at: null,
     last_turn_at: null,
-    ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+    ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
     ...over,
   };
 }

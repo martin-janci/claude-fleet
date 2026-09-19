@@ -239,6 +239,34 @@ pub struct Conversation {
     pub turns: Vec<ConvTurn>,
     /// Older turns or items were dropped to fit the turn / char budget.
     pub truncated: bool,
+    /// Current-conversation context size, from this same read's tail.
+    /// `None` when the tail carried no usage (nothing yet, or a compaction
+    /// with no reply since).
+    pub context: Option<ContextView>,
+}
+
+/// The context size shown in the Conversation payload (spec §1.5), derived
+/// from a [`crate::service::context::ContextUsage`] read at the same time as
+/// the transcript tail.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ContextView {
+    pub tokens: i64,
+    pub window: i64,
+    pub pct: f64,
+    /// Always `false` here: a value freshly read from the transcript is
+    /// never stale.
+    pub stale: bool,
+}
+
+impl From<&crate::service::context::ContextUsage> for ContextView {
+    fn from(u: &crate::service::context::ContextUsage) -> Self {
+        ContextView {
+            tokens: u.tokens,
+            window: u.window,
+            pct: ((u.tokens as f64) * 100.0 / (u.window.max(1) as f64)).round(),
+            stale: false,
+        }
+    }
 }
 
 /// The prompt text of a human `user` entry, or `None` when the entry is not
@@ -441,7 +469,11 @@ pub fn trim_conversation(
         }
         truncated = true;
     }
-    Conversation { turns, truncated }
+    Conversation {
+        turns,
+        truncated,
+        context: None,
+    }
 }
 
 /// Fit a lone turn holding at most one item into `max_chars`. The reply
@@ -558,6 +590,68 @@ pub fn resolve_args(
     })
 }
 
+/// [`resolve_args`] for a specific conversation of the row. `E_INVALID` when
+/// `claude_session_id` is not one of the row's conversations. The transcript
+/// path is that conversation's (falls back to the cwd search). The row need
+/// not have a current id for an earlier one to be read.
+pub fn resolve_args_for(
+    store: &Mutex<Store>,
+    row: &SessionRow,
+    claude_session_id: &str,
+    turns: usize,
+    max_chars: usize,
+) -> Result<TranscriptArgs, IpcError> {
+    crate::validate::claude_session_id(claude_session_id)?;
+    if row.claude_session_id.as_deref() == Some(claude_session_id) {
+        return resolve_args(store, row, turns, max_chars);
+    }
+    let conv = lock(store)?
+        .get_conversation(row.id, claude_session_id)?
+        .ok_or_else(|| {
+            IpcError::new(
+                codes::E_INVALID,
+                "claude_session_id is not a conversation of this session",
+            )
+        })?;
+    // Everything but the id and path comes from the row; `resolve_args`
+    // only needs an id to proceed.
+    let mut probe = row.clone();
+    probe.claude_session_id = Some(conv.claude_session_id.clone());
+    let mut args = resolve_args(store, &probe, turns, max_chars)?;
+    args.claude_session_id = conv.claude_session_id;
+    args.transcript_path = conv.transcript_path;
+    Ok(args)
+}
+
+/// `session_conversation` (Tauri command and MCP tool): read the row's
+/// current conversation, or the earlier one `claude_session_id` names, and
+/// write the context size back so the row's meter is right immediately —
+/// only when the conversation read is the row's current one. The store lock
+/// is never held across the fetch.
+pub async fn fetch_conversation_for_row(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    row: &SessionRow,
+    claude_session_id: Option<&str>,
+    turns: usize,
+    max_chars: usize,
+) -> Result<Conversation, IpcError> {
+    let args = match claude_session_id {
+        Some(id) => resolve_args_for(store, row, id, turns, max_chars)?,
+        None => resolve_args(store, row, turns, max_chars)?,
+    };
+    let claude_id = args.claude_session_id.clone();
+    let conv = fetch_conversation(args, ssh).await?;
+    if row.claude_session_id.as_deref() == Some(claude_id.as_str()) {
+        if let Some(v) = &conv.context {
+            if let Ok(s) = lock(store) {
+                let _ = s.set_context(row.id, &claude_id, v.tokens, v.window, "transcript", None);
+            }
+        }
+    }
+    Ok(conv)
+}
+
 /// Validate `args` and build the script that prints the last `max_bytes` of
 /// its transcript. Errors: `E_INVALID` (bad id / host / pane name).
 fn tail_script(args: &TranscriptArgs, max_bytes: usize) -> Result<String, IpcError> {
@@ -623,6 +717,17 @@ async fn read_tail(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Read the last `max_bytes` of `args`' transcript (shared with
+/// `service::context`). Errors as [`tail_script`] / [`read_tail`].
+pub(crate) async fn read_tail_bytes(
+    args: &TranscriptArgs,
+    max_bytes: usize,
+    ssh: &Arc<SshClient>,
+) -> Result<String, IpcError> {
+    let script = tail_script(args, max_bytes)?;
+    read_tail(args, &script, ssh).await
+}
+
 /// Fetch and render a transcript as plain text. Errors as [`tail_script`] /
 /// [`read_tail`].
 pub async fn fetch_transcript(
@@ -659,6 +764,9 @@ pub async fn fetch_conversation(
     // A tail that filled the byte budget started mid-file: older history
     // exists even when the parsed turns fit the window.
     conv.truncated |= text.len() >= conv_read_bytes(args.turns);
+    conv.context = crate::service::context::context_from_jsonl(&text)
+        .as_ref()
+        .map(ContextView::from);
     Ok(conv)
 }
 
@@ -682,6 +790,7 @@ async fn run_shell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::StartSource;
 
     #[test]
     fn project_dir_encoding_matches_claude_code() {
@@ -1106,13 +1215,25 @@ mod tests {
                 ],
             }],
             truncated: false,
+            context: None,
         };
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"items":[
                 {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)","error":false}]}],
-                "truncated":false})
+                "truncated":false,"context":null})
         );
+    }
+
+    #[test]
+    fn conversation_context_view_rounds_pct() {
+        let u = crate::service::context::ContextUsage {
+            tokens: 50_000,
+            window: 200_000,
+            model: None,
+        };
+        let v = ContextView::from(&u);
+        assert_eq!((v.pct, v.stale), (25.0, false));
     }
 
     #[test]
@@ -1317,6 +1438,143 @@ mod tests {
             resolve_args(&store, &no_id, 1, 1).unwrap_err().code,
             "E_INVALID_STATE"
         );
+    }
+
+    const CONV_A: &str = "550e8400-e29b-41d4-a716-4466554400aa";
+    const CONV_B: &str = "550e8400-e29b-41d4-a716-4466554400bb";
+
+    /// A row whose current conversation is A, with an earlier B; each has
+    /// a transcript in `dir` whose last reply used `a_tokens` / `b_tokens`.
+    fn two_conversations(
+        dir: &std::path::Path,
+        a_tokens: i64,
+        b_tokens: i64,
+    ) -> (std::sync::Mutex<Store>, SessionRow, String, String) {
+        let write = |id: &str, tokens: i64| {
+            let p = dir.join(format!("{id}.jsonl"));
+            let line = serde_json::json!({"type":"assistant","message":{
+                "model":"claude-opus-5","usage":{"input_tokens": tokens}}});
+            std::fs::write(&p, format!("{line}\n")).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let (pa, pb) = (write(CONV_A, a_tokens), write(CONV_B, b_tokens));
+        let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
+        let row = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session(
+                    "no-such-pane-t7",
+                    "local",
+                    None,
+                    None,
+                    1,
+                    1,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            s.rebind_conversation(id, CONV_B, StartSource::Startup, Some(&pb), None)
+                .unwrap();
+            s.rebind_conversation(id, CONV_A, StartSource::Clear, Some(&pa), None)
+                .unwrap();
+            s.get_session_by_id(id).unwrap().unwrap()
+        };
+        (store, row, pa, pb)
+    }
+
+    #[test]
+    fn resolve_args_for_an_earlier_conversation_uses_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, row, pa, pb) = two_conversations(dir.path(), 1, 2);
+        let a = resolve_args_for(&store, &row, CONV_B, 3, 500).unwrap();
+        assert_eq!(a.claude_session_id, CONV_B);
+        assert_eq!(a.transcript_path.as_deref(), Some(pb.as_str()));
+        assert_eq!((a.turns, a.max_chars), (3, 500));
+        // The current id is the plain resolve.
+        let a = resolve_args_for(&store, &row, CONV_A, 3, 500).unwrap();
+        assert_eq!(a.transcript_path.as_deref(), Some(pa.as_str()));
+        // Not one of the row's conversations / not an id at all.
+        let unknown = "550e8400-e29b-41d4-a716-4466554400cc";
+        assert_eq!(
+            resolve_args_for(&store, &row, unknown, 3, 500)
+                .unwrap_err()
+                .code,
+            "E_INVALID"
+        );
+        assert_eq!(
+            resolve_args_for(&store, &row, "../x", 3, 500)
+                .unwrap_err()
+                .code,
+            "E_INVALID"
+        );
+    }
+
+    #[test]
+    fn resolve_args_for_an_earlier_conversation_needs_no_current_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, mut row, _, pb) = two_conversations(dir.path(), 1, 2);
+        row.claude_session_id = None;
+        let a = resolve_args_for(&store, &row, CONV_B, 3, 500).unwrap();
+        assert_eq!(a.claude_session_id, CONV_B);
+        assert_eq!(a.transcript_path.as_deref(), Some(pb.as_str()));
+    }
+
+    #[test]
+    fn resolve_args_for_finds_a_conversation_older_than_the_newest_500() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, row, _, pb) = two_conversations(dir.path(), 1, 2);
+        {
+            let s = store.lock().unwrap();
+            // 500 conversations newer than B (A is already one of them).
+            for i in 0..500i64 {
+                s.conn_ref()
+                    .execute(
+                        "INSERT INTO conversations (session_id, claude_session_id, \
+                             started_at, start_source, ended_at) \
+                         VALUES (?1, ?2, ?3, 'clear', ?3)",
+                        rusqlite::params![
+                            row.id,
+                            format!("550e8400-e29b-41d4-a716-{i:012}"),
+                            4_000_000_000i64 + i
+                        ],
+                    )
+                    .unwrap();
+            }
+            assert!(!s
+                .list_conversations(row.id, 500)
+                .unwrap()
+                .iter()
+                .any(|c| c.claude_session_id == CONV_B));
+        }
+        let a = resolve_args_for(&store, &row, CONV_B, 3, 500).unwrap();
+        assert_eq!(a.transcript_path.as_deref(), Some(pb.as_str()));
+    }
+
+    #[tokio::test]
+    async fn fetch_for_row_writes_the_context_back_only_for_the_current_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, row, _, _) = two_conversations(dir.path(), 1_000, 2_000);
+        let ssh = Arc::new(SshClient::new());
+        let ctx = |store: &std::sync::Mutex<Store>| {
+            let s = store.lock().unwrap();
+            s.get_session_by_id(row.id)
+                .unwrap()
+                .unwrap()
+                .context
+                .context_tokens
+        };
+        let before = ctx(&store);
+        let conv = fetch_conversation_for_row(&store, &ssh, &row, Some(CONV_B), 10, 8_000)
+            .await
+            .unwrap();
+        assert_eq!(conv.context.as_ref().map(|c| c.tokens), Some(2_000));
+        assert_eq!(ctx(&store), before, "an earlier conversation is read-only");
+        let conv = fetch_conversation_for_row(&store, &ssh, &row, None, 10, 8_000)
+            .await
+            .unwrap();
+        assert_eq!(conv.context.as_ref().map(|c| c.tokens), Some(1_000));
+        assert_eq!(ctx(&store), Some(1_000));
     }
 
     fn tail_args(max_chars: usize) -> TranscriptArgs {

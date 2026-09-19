@@ -96,11 +96,12 @@ pub async fn provision_one(
 
 const SETTINGS_JSON: &str = "~/.claude/settings.json";
 
-/// Merge fleet's Stop + PostToolUse(WorktreeCreate) http hooks into the
-/// host's `~/.claude/settings.json`. Idempotent — re-running replaces fleet's
-/// entries (whatever base URL they pointed at) and leaves the user's own
-/// hooks alone. The block carries the host's bearer token, so the file is written
-/// 0600.
+/// Merge fleet's hook block (see [`super::hooks_install::FLEET_HOOK_EVENTS`])
+/// into the host's `~/.claude/settings.json`, and write the SessionStart
+/// command hook's bearer-token headers file. Idempotent — re-running
+/// replaces fleet's entries (whatever base URL they pointed at) and leaves
+/// the user's own hooks alone. Both files carry (or, for settings.json,
+/// reference) the host's bearer token, so both are written 0600.
 pub async fn provision_hook(
     ssh: &dyn SshExec,
     host: &str,
@@ -110,6 +111,19 @@ pub async fn provision_hook(
     let existing = read_host_file(ssh, host, SETTINGS_JSON).await?;
     // Errors (malformed JSON → E_PROVISION) fire BEFORE any write.
     let merged = super::hooks_install::merge_hook_into_settings_json(&existing, hook_url, token)?;
+    // The SessionStart command hook reads its bearer token from this file
+    // (`curl -H @file`) rather than argv or the command string (SEC-3).
+    // Written BEFORE settings.json: a hook installed ahead of its headers
+    // file would post without a token until the next provision.
+    let headers_path = format!("{CLAUDE_DIR}/{}", super::hooks_install::HOOK_HEADERS_FILE);
+    write_host_file_secret(
+        ssh,
+        host,
+        CLAUDE_DIR,
+        &headers_path,
+        &super::hooks_install::hook_headers_content(token),
+    )
+    .await?;
     if !existing.trim().is_empty() {
         // The file carries the user's permissions/env/hooks: back it up
         // first, like ~/.claude.json.
@@ -266,7 +280,9 @@ pub async fn provision_host_with_token(
     commit_host_token(store, host, &token, minted)?;
     // A public hub is reached directly; only a loopback hub needs the
     // reverse tunnel so the host's 127.0.0.1:<port> lands on this machine.
-    if host != "local" && !base.public {
+    // An agent host is never dialed over SSH at all, so it has no use for
+    // one either — it reaches the hub over its own outbound connection.
+    if host != "local" && !base.public && !routes_to_agent(store, host)? {
         tunnels.ensure(host, base.port, base.port);
     }
     if let Ok(s) = store.lock() {
@@ -423,7 +439,7 @@ pub fn reestablish_tunnels(
     }
     let hosts = { lock(store)?.list_hosts()? };
     for h in hosts {
-        if h.provisioned && h.alias != "local" && !h.hidden {
+        if h.provisioned && h.alias != "local" && !h.hidden && h.transport != "agent" {
             tunnels.ensure(&h.alias, base.port, base.port);
         }
     }
@@ -1183,6 +1199,17 @@ mod tests {
             .unwrap()
     }
 
+    fn headers_path() -> String {
+        format!(
+            "{CLAUDE_DIR}/{}",
+            crate::service::hooks_install::HOOK_HEADERS_FILE
+        )
+    }
+
+    fn expected_headers() -> String {
+        crate::service::hooks_install::hook_headers_content(TOKEN)
+    }
+
     /// The three (or four, first time) steps [`write_host_file_secret`]
     /// issues for one file: touch the `.fleet-tmp` sibling 0600, optionally
     /// resolve `$HOME` (only the first secret write on a fresh `FakeSsh`,
@@ -1239,6 +1266,14 @@ mod tests {
             // 4. Stop / WorktreeCreate hooks ($HOME is cached now).
             Script(remote_read_script(SETTINGS_JSON)),
         ]);
+        // The SessionStart command hook's bearer-token headers file ($HOME
+        // is cached by now), written before the settings that reference it.
+        steps.extend(secret_write_steps(
+            CLAUDE_DIR,
+            &headers_path(),
+            &expected_headers(),
+            true,
+        ));
         steps.extend(secret_write_steps(
             CLAUDE_DIR,
             SETTINGS_JSON,
@@ -1274,6 +1309,7 @@ mod tests {
                         ".claude.json",
                         ".tmux.conf",
                         ".claude/settings.json",
+                        ".claude/fleet-hook.headers",
                     ] {
                         if body.contains(path) {
                             assert!(
@@ -1315,9 +1351,10 @@ mod tests {
         }
         assert_eq!(steps.len(), expected.len(), "step count");
         assert_quoting_invariants(&calls);
-        // The secret reached the host exactly twice, both times over stdin.
+        // The secret reached the host exactly three times (claude.json, the
+        // hook settings, and the SessionStart headers file), all over stdin.
         let uploads = calls.iter().filter(|c| c.stdin.is_some()).count();
-        assert_eq!(uploads, 2);
+        assert_eq!(uploads, 3);
         assert!(calls
             .iter()
             .filter_map(Call::stdin_str)
@@ -1411,6 +1448,15 @@ mod tests {
         assert!(steps.contains(&Step::Script(remote_rename_script(
             &format!("{SETTINGS_JSON}.fleet-bak.fleet-tmp"),
             &format!("{SETTINGS_JSON}.fleet-bak")
+        ))));
+        // The SessionStart headers file has no backup (it carries only the
+        // token, no user content), but is rewritten with byte-identical
+        // content via its own tmp-rename dance every run.
+        let headers_tmp = quote(&format!("{HOME}/.claude/fleet-hook.headers.fleet-tmp"));
+        assert_eq!(content(&headers_tmp), expected_headers());
+        assert!(steps.contains(&Step::Script(remote_rename_script(
+            &format!("{}.fleet-tmp", headers_path()),
+            &headers_path()
         ))));
         // The backups are 0600 too (touch-private before each upload) — on
         // their own `.fleet-tmp` sibling, same as the main files.
@@ -1826,6 +1872,35 @@ mod tests {
         tunnels.stop_all();
     }
 
+    /// An agent host is by definition not dialable over SSH, so a reverse
+    /// tunnel to it would just be `ssh -R` restarting forever against an
+    /// address that never accepts a connection. `provision_host_with_token`
+    /// must skip the tunnel for it even on a loopback hub.
+    #[tokio::test]
+    async fn provisioning_an_agent_host_starts_no_reverse_tunnel() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("laptop", Some("laptop")).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            // An existing token, so this re-provision does not mint a new
+            // one — minting one would instead hit E_AGENT_REINSTALL (an
+            // agent host's new token can never travel over the connection
+            // it is replacing), which is a different, already-tested path.
+            s.upsert_host_token("laptop", "existing-token").unwrap();
+        }
+        let tunnels = quiet_tunnels();
+        let fake = fresh_host();
+        provision_host_with_token(&store, &fake, &tunnels, "laptop", &base(), false)
+            .await
+            .unwrap();
+        assert!(
+            tunnels.snapshot().is_empty(),
+            "an agent host has no way to reach an ssh -R tunnel: {:?}",
+            tunnels.snapshot()
+        );
+    }
+
     #[tokio::test]
     async fn reestablish_tunnels_is_a_no_op_for_a_public_base() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -1867,6 +1942,36 @@ mod tests {
         let argv = spawned.lock().unwrap().clone();
         assert_eq!(argv.len(), 1, "{argv:?}");
         assert!(argv[0].contains("mefistos"), "{argv:?}");
+        tunnels.stop_all();
+    }
+
+    /// A provisioned agent host is skipped on the app-start reconcile pass
+    /// too, the same as on first provisioning: it has no address for the hub
+    /// to dial, so `ssh -R` against it would just restart forever.
+    #[tokio::test]
+    async fn reestablish_tunnels_skips_agent_transport_hosts() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("laptop", Some("laptop")).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            s.set_host_provisioned("laptop", true).unwrap();
+            s.upsert_host("mefistos").unwrap();
+            s.set_host_provisioned("mefistos", true).unwrap();
+        }
+        let tunnels = quiet_tunnels();
+        reestablish_tunnels(&store, &tunnels, &HubBase::loopback(4180)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !tunnels.snapshot().contains_key("laptop"),
+            "an agent host has no way to reach an ssh -R tunnel: {:?}",
+            tunnels.snapshot()
+        );
+        assert_eq!(
+            tunnels.snapshot().get("mefistos"),
+            Some(&true),
+            "an ssh-transport host is still tunneled"
+        );
         tunnels.stop_all();
     }
 

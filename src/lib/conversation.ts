@@ -13,9 +13,18 @@ export interface ConvTurn {
   items: ConvItem[];
 }
 
+/** Current-conversation context size, read from the same transcript tail. */
+export interface ContextView {
+  tokens: number;
+  window: number;
+  pct: number;
+  stale: boolean;
+}
+
 export interface Conversation {
   turns: ConvTurn[];
   truncated: boolean;
+  context: ContextView | null;
 }
 
 /** Poll cadence for the Conversation tab while it is visible (spec §6). */
@@ -31,10 +40,41 @@ export const CONV_MAX_TURNS = 100;
 /** How long an on-demand pane probe outranks the row's own status. */
 export const PROBE_TTL_MS = 10_000;
 
-export function sessionConversation(sessionId: number, turns?: number): Promise<Result<Conversation>> {
-  const args: { session_id: number; turns?: number } = { session_id: sessionId };
+/** One Claude Code conversation a session has run (`session_conversations`). */
+export interface ConversationSummary {
+  id: number;
+  session_id: number;
+  claude_session_id: string;
+  transcript_path: string | null;
+  started_at: number;
+  ended_at: number | null;
+  start_source: 'startup' | 'resume' | 'clear' | 'compact' | 'fork' | 'fleet' | 'unknown';
+  end_reason: string | null;
+  model: string | null;
+  first_prompt: string | null;
+  turns: number;
+  compactions: number;
+  current: boolean;
+}
+
+/** `claudeSessionId` reads an earlier conversation of the session instead of
+ *  the current one (from {@link listConversations}). */
+export function sessionConversation(
+  sessionId: number,
+  turns?: number,
+  claudeSessionId?: string,
+): Promise<Result<Conversation>> {
+  const args: { session_id: number; turns?: number; claude_session_id?: string } = { session_id: sessionId };
   if (turns !== undefined) args.turns = turns;
+  if (claudeSessionId !== undefined) args.claude_session_id = claudeSessionId;
   return invokeCmd<Conversation>('session_conversation', { args });
+}
+
+/** The session's conversations, newest first (backend caps `limit` at 500). */
+export function listConversations(sessionId: number, limit = 50): Promise<Result<ConversationSummary[]>> {
+  return invokeCmd<ConversationSummary[]>('session_conversations', {
+    args: { session_id: sessionId, limit },
+  });
 }
 
 /** Deep (JSON) equality — used to decide whether a poll result actually changed. */

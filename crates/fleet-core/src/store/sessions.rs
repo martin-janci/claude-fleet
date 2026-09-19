@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// SQL fragment for the turn-boundary hook writes: a turn starting or
+/// ending ends a `compacting` activity (PreCompact set it; spec: "the next
+/// UserPromptSubmit / Stop clears it"). Any other activity is left alone.
+const END_COMPACTING: &str = ", current_activity = CASE WHEN current_activity = 'compacting' \
+     THEN NULL ELSE current_activity END";
+
 impl Store {
     // ---- Private fetch helpers used after writes to produce emit payloads ----
     //
@@ -124,6 +130,7 @@ impl Store {
                kind=excluded.kind,
                status='running',
                lost_at=NULL,
+               lost_reason=NULL,
                claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
                claude_status=COALESCE(excluded.claude_status, claude_status),
                idle_since={idle}
@@ -173,6 +180,7 @@ impl Store {
         host_alias: &str,
         keep_names: &[String],
         now: i64,
+        lost_ttl_cutoff: Option<i64>,
     ) -> Result<(), rusqlite::Error> {
         let tx = self.conn.unchecked_transaction()?;
         let mut changes: Vec<RowChange> = Vec::new();
@@ -183,6 +191,7 @@ impl Store {
             now,
             KIND_PANE_LESS,
             None,
+            lost_ttl_cutoff,
             &mut changes,
         )?;
         tx.commit()?;
@@ -191,6 +200,192 @@ impl Store {
             self.bus.emit_change(change);
         }
         Ok(())
+    }
+
+    /// One-shot: mark every non-ghost row of `host_alias` NOT in `keep_names`
+    /// as lost, recording WHY (`reason`, one of `host_reboot` /
+    /// `tmux_server_gone` / `missing`). Called by the reboot/vanished-tmux
+    /// detector (Task 6) instead of waiting out the normal one-cycle ghost
+    /// grace, so the resume path can tell a reboot apart from a routine probe
+    /// miss.
+    ///
+    /// `reason == "tmux_server_gone"` only ghosts tmux-backed rows
+    /// ([`KIND_TMUX`]) — a tmux restart does not kill a `claude --bg` agent,
+    /// so those rows are left alone. Any other reason (namely `host_reboot`)
+    /// ghosts every kind, since a reboot kills bg agents too.
+    ///
+    /// Reclassification: the same call ALSO upgrades already-ghost rows of
+    /// the host that are not in `keep_names` and carry `lost_reason =
+    /// 'missing'` (or NULL) to `reason`, keeping their existing `lost_at`.
+    /// Those are rows the routine keep-set prune ghosted on a FAILED first
+    /// post-loss pass (the identity read, the stored-identity read or this
+    /// very mark failed, so no verdict was recorded and the prune ran); the
+    /// verdict firing on the next pass must still record them as a mass
+    /// loss, or Phase 2 would reap them as ordinary `missing` rows. A
+    /// `missing` ghost is at most one pass old by construction (never
+    /// exempt, reaped next pass). Accepted trade-off: a session that
+    /// genuinely ended within that one pass is indistinguishable from one a
+    /// failed pass ghosted, so it is reclassified and kept to the TTL too
+    /// (still dismissable) — erring toward keeping is the feature's point.
+    /// A row fleet itself killed carries `lost_reason = 'killed'`
+    /// ([`Self::mark_session_killed`]): fleet knows that loss is not
+    /// ambiguous, so it is never reclassified. Same kind
+    /// filter and same BE-3 guard as the main mark. Reclassified rows do not
+    /// change on the wire (`lost_reason` is not a `SessionRow` field), so no
+    /// event is emitted for them; they are logged with the distinct
+    /// lifecycle kind `"reclassified"`.
+    ///
+    /// Mirrors [`Self::ghost_and_clean_bg_sessions`]'s shape: its own
+    /// `unchecked_transaction`, collect the affected rows, commit, and only
+    /// THEN emit one `SessionUpdated` per newly marked row.
+    ///
+    /// `probe_started_at` is the BE-3 guard, identical to
+    /// [`Store::ghost_and_clean`]'s Phase 1: a row whose `last_reconciled_at`
+    /// is at or after this probe's start was reconciled by a NEWER pass
+    /// (e.g. `new_session`'s own single-host reconcile, which runs outside
+    /// the fleet-wide gate and can commit before an in-flight tick's stale
+    /// write lands) — its absence from this verdict's evidence is not
+    /// evidence it is lost, so it is left alone. `0` disables the guard
+    /// (every row eligible), exactly as [`super::reconcile::ghost_cutoff`]
+    /// defines for Phase 1; reused here rather than reimplemented.
+    pub fn mark_host_sessions_lost(
+        &self,
+        host_alias: &str,
+        reason: &str,
+        keep_names: &[String],
+        now: i64,
+        probe_started_at: i64,
+    ) -> Result<MarkedLost, rusqlite::Error> {
+        // A tmux restart does not kill `claude --bg` agents; a reboot does.
+        let kind_filter = if reason == "tmux_server_gone" {
+            KIND_TMUX
+        } else {
+            "1=1"
+        };
+        let not_in = if keep_names.is_empty() {
+            String::new()
+        } else {
+            format!(" AND tmux_name NOT IN ({})", in_clause(keep_names.len()))
+        };
+        let cutoff = super::reconcile::ghost_cutoff(probe_started_at);
+        let tx = self.conn.unchecked_transaction()?;
+        let fetch_all = |ids: &[i64]| -> Result<Vec<SessionRow>, rusqlite::Error> {
+            let mut rows = Vec::new();
+            for id in ids {
+                if let Some(row) = fetch_session_by_id(&tx, *id)? {
+                    rows.push(row);
+                }
+            }
+            Ok(rows)
+        };
+        // Reclassify FIRST, while the rows the main mark is about to ghost
+        // are still live: those get `reason` directly and must not be
+        // counted twice. `lost_at` is deliberately left untouched.
+        let reclassify_sql = format!(
+            "UPDATE sessions SET lost_reason=?1
+             WHERE host_alias=?2 AND status='ghost'
+               AND COALESCE(lost_reason, 'missing')='missing' AND {kind_filter}
+               AND COALESCE(last_reconciled_at, 0) < ?3{not_in}
+             RETURNING id"
+        );
+        let head: Vec<&dyn rusqlite::ToSql> = vec![&reason, &host_alias, &cutoff];
+        let params = params_then(&head, keep_names);
+        let reclassified_ids: Vec<i64> = tx
+            .prepare(&reclassify_sql)?
+            .query_map(params.as_slice(), |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let sql = format!(
+            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2
+             WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
+               AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
+             RETURNING id"
+        );
+        let head: Vec<&dyn rusqlite::ToSql> = vec![&now, &reason, &host_alias, &cutoff];
+        let params = params_then(&head, keep_names);
+        let ids: Vec<i64> = tx
+            .prepare(&sql)?
+            .query_map(params.as_slice(), |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let out = MarkedLost {
+            marked: fetch_all(&ids)?,
+            reclassified: fetch_all(&reclassified_ids)?,
+        };
+        tx.commit()?;
+        for row in &out.reclassified {
+            // Not a wire change, so no event — but the reboot forensics
+            // still need the line. A distinct kind, NOT "lost": the row was
+            // already logged "lost" when Phase 1 ghosted it.
+            tracing::info!(
+                lifecycle = "reclassified",
+                session_id = row.id,
+                host_alias = %row.host_alias,
+                tmux_name = %row.tmux_name,
+                claude_session_id = row.claude_session_id.as_deref().unwrap_or("-"),
+                reason,
+                "[session] reclassified"
+            );
+        }
+        for row in &out.marked {
+            let change = RowChange::SessionUpdated(row.clone());
+            // Task 7 (R5): the mass-loss verdict is exactly the reboot-
+            // forensics case this logging exists for, so log it with the
+            // `reason` this call already knows (`host_reboot` /
+            // `tmux_server_gone`) alongside the shared `lifecycle` kind.
+            if let Some(kind) = super::reconcile::lifecycle_kind(&change) {
+                tracing::info!(
+                    lifecycle = kind,
+                    session_id = row.id,
+                    host_alias = %row.host_alias,
+                    tmux_name = %row.tmux_name,
+                    claude_session_id = row.claude_session_id.as_deref().unwrap_or("-"),
+                    reason,
+                    "[session] {kind}"
+                );
+            }
+            self.bus.emit_change(&change);
+        }
+        Ok(out)
+    }
+
+    /// Ghost the row `id` right after fleet ITSELF killed its tmux session
+    /// (`kill_session`, which `move_session` also reaches): `status='ghost'`,
+    /// `lost_at=now`, `lost_reason='killed'`. tmux exits when its last
+    /// session closes, so killing a host's only session makes the next probe
+    /// see no tmux server — a `tmux_server_gone` verdict. Recording the kill
+    /// first keeps that verdict (which only marks `status != 'ghost'` rows)
+    /// off this row, and `'killed'` is neither TTL-exempt in Phase 2 nor
+    /// eligible for [`Self::mark_host_sessions_lost`]'s reclassification of
+    /// `missing` ghosts, so the ordinary one-cycle reap removes it. No-op
+    /// (returns `None`) when the row is gone or already ghost. Emits
+    /// `SessionUpdated` like the routine Phase 1 ghosting it stands in for.
+    pub fn mark_session_killed(
+        &self,
+        id: i64,
+        now: i64,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed'
+             WHERE id=?2 AND status!='ghost'",
+            rusqlite::params![now, id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(row) = &row {
+            tracing::info!(
+                lifecycle = "lost",
+                session_id = row.id,
+                host_alias = %row.host_alias,
+                tmux_name = %row.tmux_name,
+                claude_session_id = row.claude_session_id.as_deref().unwrap_or("-"),
+                reason = "killed",
+                "[session] lost"
+            );
+            self.bus
+                .emit_change(&RowChange::SessionUpdated(row.clone()));
+        }
+        Ok(row)
     }
 
     /// User-initiated removal of an agent row (`claude agents --json`, not a
@@ -344,14 +539,18 @@ impl Store {
         Ok(())
     }
 
-    /// Record the Claude Code session id minted for a session. Reconcile's
+    /// Record the Claude Code session id fleet launched this session with
+    /// (create / recreate / move / review). Opens that conversation with
+    /// source `fleet` via [`Self::rebind_conversation`], which closes any
+    /// previous one as `replaced` and resets the context. Reconcile's
     /// `upsert_session` never writes this column, so the value survives
     /// reconciliation.
-    pub fn set_claude_session_id(&self, id: i64, uuid: &str) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE sessions SET claude_session_id=?1 WHERE id=?2",
-            rusqlite::params![uuid, id],
-        )?;
+    pub fn set_claude_session_id(
+        &self,
+        id: i64,
+        uuid: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.rebind_conversation(id, uuid, StartSource::Fleet, None, None)?;
         Ok(())
     }
 
@@ -535,7 +734,7 @@ impl Store {
     /// the host — for both ghost and live (RAM/wedged) recreates.
     pub fn restore_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         self.conn.execute(
-            "UPDATE sessions SET status='running', lost_at=NULL WHERE id=?1",
+            "UPDATE sessions SET status='running', lost_at=NULL, lost_reason=NULL WHERE id=?1",
             rusqlite::params![id],
         )?;
         self.emit_session(id)
@@ -549,18 +748,6 @@ impl Store {
     /// the row exists, nothing when it is gone. Returns the row.
     pub(super) fn emit_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
-    }
-
-    /// [`Self::emit_session`] keyed by `claude_session_id` (the hook writes).
-    fn emit_session_by_claude_id(
-        &self,
-        claude_session_id: &str,
-    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
-        let row = self.fetch_session_by_claude_id(claude_session_id)?;
         if let Some(ref r) = row {
             self.bus.session_updated(r);
         }
@@ -706,90 +893,96 @@ impl Store {
     // ── Orchestration (migration 020) ────────────────────────────────────
 
     /// The Stop hook's write: the turn is over. Sets `claude_status = idle`,
-    /// bumps `turn_seq`, stamps `last_stop_at` / `last_turn_at` and maintains
-    /// `idle_since`. Matches by `claude_session_id`; returns the updated row
-    /// (`None` when no row carries this id yet). Emits `session_updated`.
-    pub fn record_stop_hook(
+    /// bumps `turn_seq`, stamps `last_stop_at` / `last_turn_at`, maintains
+    /// `idle_since` and ends a `compacting` activity. Keyed by row id (the
+    /// hook resolver already picked the row: two rows may share one
+    /// `claude_session_id`); returns the updated row (`None` when the row is
+    /// gone). Emits `session_updated`.
+    pub fn record_stop_hook_for_row(
         &self,
-        claude_session_id: &str,
+        row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
         let changed = self.conn.execute(
-            "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
-                 last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
-                 idle_since = COALESCE(idle_since, ?2) \
-                 WHERE claude_session_id = ?1",
-            rusqlite::params![claude_session_id, now],
+            &format!(
+                "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
+                     last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
+                     idle_since = COALESCE(idle_since, ?2){END_COMPACTING} \
+                 WHERE id = ?1"
+            ),
+            rusqlite::params![row_id, now],
         )?;
         if changed == 0 {
             return Ok(None);
         }
-        self.emit_session_by_claude_id(claude_session_id)
+        Ok(self.emit_session(row_id)?)
     }
 
     /// The UserPromptSubmit hook's write: a turn is starting. Sets
-    /// `claude_status = working` and clears `idle_since` so "idle because
+    /// `claude_status = working`, clears `idle_since` so "idle because
     /// never started" and "idle after a turn" are distinguishable from
-    /// "busy". Returns the updated row (`None` when unmatched). Emits
-    /// `session_updated`.
-    pub fn record_prompt_submit_hook(
+    /// "busy", and ends a `compacting` activity. Returns the updated row
+    /// (`None` when the row is gone). Emits `session_updated`.
+    pub fn record_prompt_submit_hook_for_row(
         &self,
-        claude_session_id: &str,
+        row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let changed = self.conn.execute(
-            "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
-                 last_hook_at = ?2 WHERE claude_session_id = ?1",
-            rusqlite::params![claude_session_id, now_unix()],
+            &format!(
+                "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
+                     last_hook_at = ?2{END_COMPACTING} WHERE id = ?1"
+            ),
+            rusqlite::params![row_id, now_unix()],
         )?;
         if changed == 0 {
             return Ok(None);
         }
-        self.emit_session_by_claude_id(claude_session_id)
+        Ok(self.emit_session(row_id)?)
     }
 
     /// The SessionEnd hook's write: the Claude process is gone. Sets
     /// `claude_status = stopped`, starts `idle_since` if not already idle,
     /// clears any stuck episode and stamps `last_hook_at` so the reconcile
     /// guard keeps the verdict until a later pass observes the pane afresh.
-    /// Returns the row (`None` when unmatched). Emits `session_updated`.
-    pub fn record_session_end_hook(
+    /// Returns the row (`None` when the row is gone). Emits `session_updated`.
+    pub fn record_session_end_hook_for_row(
         &self,
-        claude_session_id: &str,
+        row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
         let changed = self.conn.execute(
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
                  stuck_kind = NULL, stuck_since = NULL \
-                 WHERE claude_session_id = ?1",
-            rusqlite::params![claude_session_id, now],
+                 WHERE id = ?1",
+            rusqlite::params![row_id, now],
         )?;
         if changed == 0 {
             return Ok(None);
         }
-        self.emit_session_by_claude_id(claude_session_id)
+        Ok(self.emit_session(row_id)?)
     }
 
     /// The StopFailure hook's write: the turn ended in an API error. The row
     /// effect is exactly `Stop`'s (idle, `turn_seq` bump, stamps) so waiters
     /// return and read the error from the transcript; the handler records
     /// the `stop_failure` timeline event that tells the two apart.
-    pub fn record_stop_failure_hook(
+    pub fn record_stop_failure_hook_for_row(
         &self,
-        claude_session_id: &str,
+        row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
-        self.record_stop_hook(claude_session_id)
+        self.record_stop_hook_for_row(row_id)
     }
 
     /// The Notification hook's write. `status` is the mapped status;
     /// `stuck` is `Some(Some(kind))` to set (restarting `stuck_since` when
     /// the kind changes, keeping it when equal), `Some(None)` to clear,
     /// `None` to leave the stuck fields untouched. Stamps `last_hook_at`;
-    /// `idle_since` follows the status. Returns the row (`None` when
-    /// unmatched). Emits `session_updated`.
-    pub fn record_notification_hook(
+    /// `idle_since` follows the status. Returns the row (`None` when the row
+    /// is gone). Emits `session_updated`.
+    pub fn record_notification_hook_for_row(
         &self,
-        claude_session_id: &str,
+        row_id: i64,
         status: crate::service::pane_intel::ClaudeStatus,
         stuck: Option<Option<crate::service::pane_intel::StuckKind>>,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
@@ -809,21 +1002,137 @@ impl Store {
         };
         let sql = format!(
             "UPDATE sessions SET claude_status = ?4, last_hook_at = ?2, \
-             idle_since = {idle}{stuck_sql} WHERE claude_session_id = ?1",
+             idle_since = {idle}{stuck_sql} WHERE id = ?1",
             idle = idle_since_sql("?4", "?2"),
         );
         let kind = match stuck {
             Some(Some(k)) => Some(k.as_str()),
             _ => None,
         };
-        let changed = self.conn.execute(
-            &sql,
-            rusqlite::params![claude_session_id, now, kind, status],
-        )?;
+        let changed = self
+            .conn
+            .execute(&sql, rusqlite::params![row_id, now, kind, status])?;
         if changed == 0 {
             return Ok(None);
         }
-        self.emit_session_by_claude_id(claude_session_id)
+        Ok(self.emit_session(row_id)?)
+    }
+
+    /// Test shorthand: [`Self::record_stop_hook_for_row`] on the row bound
+    /// to `claude_session_id`.
+    #[cfg(test)]
+    pub fn record_stop_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id)? {
+            Some(r) => self.record_stop_hook_for_row(r.id),
+            None => Ok(None),
+        }
+    }
+
+    /// Test shorthand: [`Self::record_prompt_submit_hook_for_row`] by
+    /// `claude_session_id`.
+    #[cfg(test)]
+    pub fn record_prompt_submit_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id)? {
+            Some(r) => self.record_prompt_submit_hook_for_row(r.id),
+            None => Ok(None),
+        }
+    }
+
+    /// Test shorthand: [`Self::record_session_end_hook_for_row`] by
+    /// `claude_session_id`.
+    #[cfg(test)]
+    pub fn record_session_end_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id)? {
+            Some(r) => self.record_session_end_hook_for_row(r.id),
+            None => Ok(None),
+        }
+    }
+
+    /// Test shorthand: [`Self::record_stop_failure_hook_for_row`] by
+    /// `claude_session_id`.
+    #[cfg(test)]
+    pub fn record_stop_failure_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id)? {
+            Some(r) => self.record_stop_failure_hook_for_row(r.id),
+            None => Ok(None),
+        }
+    }
+
+    /// Test shorthand: [`Self::record_notification_hook_for_row`] by
+    /// `claude_session_id`.
+    #[cfg(test)]
+    pub fn record_notification_hook(
+        &self,
+        claude_session_id: &str,
+        status: crate::service::pane_intel::ClaudeStatus,
+        stuck: Option<Option<crate::service::pane_intel::StuckKind>>,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id)? {
+            Some(r) => self.record_notification_hook_for_row(r.id, status, stuck),
+            None => Ok(None),
+        }
+    }
+
+    /// Set (or clear) the row's `current_activity`. Emits `session_updated`.
+    pub fn set_current_activity(
+        &self,
+        id: i64,
+        activity: Option<&str>,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE sessions SET current_activity = ?2 WHERE id = ?1",
+            rusqlite::params![id, activity],
+        )?;
+        Ok(self.emit_session(id)?)
+    }
+
+    /// The one live row on `host_alias` whose last-seen pane is `pane_id`.
+    /// `None` when there is none or more than one (a stale pane id after a
+    /// tmux server restart shared with a new row).
+    pub fn find_session_by_pane(
+        &self,
+        host_alias: &str,
+        pane_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions \
+             WHERE host_alias = ?1 AND tmux_pane_id = ?2 AND status != 'ghost' LIMIT 2"
+        ))?;
+        let rows: Vec<SessionRow> = stmt
+            .query_map(rusqlite::params![host_alias, pane_id], map_session_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(match rows.len() {
+            1 => rows.into_iter().next(),
+            _ => None,
+        })
+    }
+
+    /// Every row bound to `claude_session_id` (normally zero or one; two rows
+    /// sharing an id has been observed live, and the hook resolver then
+    /// refuses to guess).
+    pub fn sessions_by_claude_id(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Vec<SessionRow>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"
+        ))?;
+        let rows = stmt
+            .query_map(rusqlite::params![claude_session_id], map_session_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Replace a session's tags (migration 020). Emits `session_updated`.
@@ -863,6 +1172,21 @@ impl Store {
         self.conn.execute(
             "UPDATE sessions SET transcript_path = ?1 WHERE claude_session_id = ?2",
             rusqlite::params![path, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// [`Self::set_transcript_path_by_claude_id`] for one row, and only while
+    /// `claude_session_id` is still its current conversation.
+    pub fn set_transcript_path_for_row(
+        &self,
+        row_id: i64,
+        claude_session_id: &str,
+        path: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE sessions SET transcript_path = ?1 WHERE id = ?2 AND claude_session_id = ?3",
+            rusqlite::params![path, row_id, claude_session_id],
         )?;
         Ok(())
     }
@@ -935,13 +1259,322 @@ mod tests {
         let s = store();
         s.upsert_bg_session("local", "bg:e1", None, "e1", Some("idle"), 1, "external")
             .unwrap();
-        s.ghost_and_clean_bg_sessions("local", &[], 10).unwrap();
+        s.ghost_and_clean_bg_sessions("local", &[], 10, None)
+            .unwrap();
         assert_eq!(
             s.get_session("bg:e1", "local").unwrap().unwrap().status,
             "ghost"
         );
-        s.ghost_and_clean_bg_sessions("local", &[], 20).unwrap();
+        s.ghost_and_clean_bg_sessions("local", &[], 20, None)
+            .unwrap();
         assert!(s.get_session("bg:e1", "local").unwrap().is_none());
+    }
+
+    /// `lost_reason` deliberately has no field on `SessionRow` yet (PR 2) —
+    /// read it straight off the connection.
+    fn lost_reason_of(s: &Store, id: i64) -> Option<String> {
+        s.conn_ref()
+            .query_row(
+                "SELECT lost_reason FROM sessions WHERE id=?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn mark_host_sessions_lost_ghosts_unseen_rows_and_keeps_every_identity_field() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let pid = s.upsert_project("o", "r", "/tmp/r").unwrap();
+        let wid = s
+            .upsert_worktree(pid, "main", "/tmp/r", Some("main"))
+            .unwrap();
+        // Two live tmux rows on "h", one carrying a claude_session_id, a
+        // friendly_name, a last_prompt, and a project/worktree; keep "b".
+        let a = s
+            .upsert_session("a", "h", Some(pid), Some(wid), 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(a, "abc").unwrap();
+        s.set_friendly_name("h", "a", Some("My Friendly Name"))
+            .unwrap();
+        s.set_last_prompt(a, "do the thing").unwrap();
+        s.upsert_session("b", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        let rows = s
+            .mark_host_sessions_lost("h", "host_reboot", &["b".to_string()], 500, 0)
+            .unwrap();
+        assert_eq!(rows.marked.len(), 1);
+        assert!(rows.reclassified.is_empty());
+
+        let a_row = s.get_session("a", "h").unwrap().unwrap();
+        assert_eq!(a_row.status, "ghost");
+        assert_eq!(a_row.lost_at, Some(500));
+        assert_eq!(a_row.claude_session_id.as_deref(), Some("abc"));
+        assert_eq!(a_row.friendly_name.as_deref(), Some("My Friendly Name"));
+        assert_eq!(a_row.last_prompt.as_deref(), Some("do the thing"));
+        assert_eq!(a_row.project_id, Some(pid));
+        assert_eq!(a_row.worktree_id, Some(wid));
+        assert_eq!(
+            lost_reason_of(&s, a_row.id),
+            Some("host_reboot".to_string())
+        );
+        assert_eq!(s.get_session("b", "h").unwrap().unwrap().status, "running");
+    }
+
+    #[test]
+    fn a_tmux_restart_does_not_mark_background_agents_lost() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        // One live tmux row + one live `bg` row on "h".
+        let tmux_id = s
+            .upsert_session("work-a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let bg_id = s
+            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
+            .unwrap();
+
+        s.mark_host_sessions_lost("h", "tmux_server_gone", &[], 500, 0)
+            .unwrap();
+
+        assert_eq!(
+            s.get_session_by_id(tmux_id).unwrap().unwrap().status,
+            "ghost",
+            "the tmux row is ghosted"
+        );
+        assert_eq!(
+            lost_reason_of(&s, tmux_id),
+            Some("tmux_server_gone".to_string())
+        );
+        assert_eq!(
+            s.get_session_by_id(bg_id).unwrap().unwrap().status,
+            "running",
+            "a tmux restart does not kill a claude --bg agent"
+        );
+    }
+
+    #[test]
+    fn mark_host_sessions_lost_is_idempotent_and_does_not_re_stamp_an_already_lost_row() {
+        // Task 6 calls this on every pass while a tmux server stays down, so a
+        // second call must never clobber the first ghosting's lost_at/lost_reason
+        // — that is exactly what the `status!='ghost'` guard in the UPDATE buys.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let a = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        let first = s
+            .mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+        assert_eq!(first.marked.len(), 1);
+
+        let second = s
+            .mark_host_sessions_lost("h", "tmux_server_gone", &[], 900, 0)
+            .unwrap();
+        assert!(
+            second.is_empty(),
+            "an already-ghosted row must not be re-stamped; got {second:?}"
+        );
+
+        let row = s.get_session_by_id(a).unwrap().unwrap();
+        assert_eq!(
+            row.lost_at,
+            Some(500),
+            "lost_at must stay at the first stamp"
+        );
+        assert_eq!(
+            lost_reason_of(&s, a),
+            Some("host_reboot".to_string()),
+            "lost_reason must stay the FIRST reason, not be overwritten by the second call"
+        );
+    }
+
+    /// Force a row into a ghost state straight on the connection, as a
+    /// prior pass (Phase 1 / a verdict / a kill) would have left it.
+    fn set_ghost(s: &Store, id: i64, lost_at: i64, reason: &str) {
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2 WHERE id=?3",
+                rusqlite::params![lost_at, reason, id],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_verdict_reclassifies_a_missing_ghost_and_keeps_its_lost_at() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        // "a": a `missing` ghost with a claude id, left by a failed first
+        // post-loss pass — must be reclassified.
+        let a = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(a, "cid-a").unwrap();
+        set_ghost(&s, a, 400, "missing");
+        // "k": a `missing` ghost that IS in keep — untouched.
+        let k = s
+            .upsert_session("k", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, k, 400, "missing");
+        // "r": already carries a mass-loss reason — untouched.
+        let r = s
+            .upsert_session("r", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, r, 300, "host_reboot");
+        // "f": fleet's own kill — never reclassified.
+        let f = s
+            .upsert_session("f", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, f, 400, "killed");
+
+        let out = s
+            .mark_host_sessions_lost("h", "host_reboot", &["k".to_string()], 500, 0)
+            .unwrap();
+        assert!(out.marked.is_empty(), "nothing was live: {out:?}");
+        assert_eq!(
+            out.reclassified.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![a]
+        );
+
+        let a_row = s.get_session_by_id(a).unwrap().unwrap();
+        assert_eq!(a_row.status, "ghost");
+        assert_eq!(a_row.lost_at, Some(400), "reclassification keeps lost_at");
+        assert_eq!(a_row.claude_session_id.as_deref(), Some("cid-a"));
+        assert_eq!(lost_reason_of(&s, a), Some("host_reboot".to_string()));
+
+        assert_eq!(lost_reason_of(&s, k), Some("missing".to_string()));
+        assert_eq!(s.get_session_by_id(k).unwrap().unwrap().lost_at, Some(400));
+        assert_eq!(lost_reason_of(&s, r), Some("host_reboot".to_string()));
+        assert_eq!(s.get_session_by_id(r).unwrap().unwrap().lost_at, Some(300));
+        assert_eq!(lost_reason_of(&s, f), Some("killed".to_string()));
+    }
+
+    #[test]
+    fn a_tmux_server_verdict_reclassifies_tmux_ghosts_only() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let t = s
+            .upsert_session("t", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, t, 400, "missing");
+        let bg = s
+            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
+            .unwrap();
+        set_ghost(&s, bg, 400, "missing");
+
+        let out = s
+            .mark_host_sessions_lost("h", "tmux_server_gone", &[], 500, 0)
+            .unwrap();
+        assert_eq!(
+            out.reclassified.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![t]
+        );
+        assert_eq!(lost_reason_of(&s, t), Some("tmux_server_gone".to_string()));
+        assert_eq!(lost_reason_of(&s, bg), Some("missing".to_string()));
+    }
+
+    #[test]
+    fn a_reclassification_honours_the_stale_probe_guard() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let a = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, a, 400, "missing");
+        // A newer pass saw it (stamped at 1000) after this probe began (900).
+        s.mark_sessions_reconciled("h", &["a".to_string()], 1000)
+            .unwrap();
+        let out = s
+            .mark_host_sessions_lost("h", "host_reboot", &[], 950, 900)
+            .unwrap();
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(lost_reason_of(&s, a), Some("missing".to_string()));
+    }
+
+    #[test]
+    fn mark_session_killed_ghosts_the_row_as_an_ordinary_loss() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("x", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "cid-x").unwrap();
+
+        let row = s.mark_session_killed(id, 700).unwrap().expect("row");
+        assert_eq!(row.status, "ghost");
+        assert_eq!(row.lost_at, Some(700));
+        assert_eq!(lost_reason_of(&s, id), Some("killed".to_string()));
+        // Idempotent: an already-ghost row is not re-stamped.
+        assert!(s.mark_session_killed(id, 900).unwrap().is_none());
+        assert_eq!(s.get_session_by_id(id).unwrap().unwrap().lost_at, Some(700));
+        // A later verdict neither marks nor reclassifies it.
+        let out = s
+            .mark_host_sessions_lost("h", "tmux_server_gone", &[], 800, 0)
+            .unwrap();
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(lost_reason_of(&s, id), Some("killed".to_string()));
+    }
+
+    #[test]
+    fn a_reboot_marks_background_agents_lost_too() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        // Same seed as the tmux-restart case: one tmux row + one bg row.
+        let tmux_id = s
+            .upsert_session("work-a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let bg_id = s
+            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
+            .unwrap();
+
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+
+        assert_eq!(
+            s.get_session_by_id(tmux_id).unwrap().unwrap().status,
+            "ghost"
+        );
+        assert_eq!(
+            s.get_session_by_id(bg_id).unwrap().unwrap().status,
+            "ghost",
+            "a reboot kills bg agents too"
+        );
+        assert_eq!(lost_reason_of(&s, bg_id), Some("host_reboot".to_string()));
+    }
+
+    #[test]
+    fn phase_one_ghosting_records_missing_and_a_resurrection_clears_it() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        // apply_host_reconcile with an empty keep ⇒ the row is ghost with
+        // lost_reason 'missing'.
+        s.apply_host_reconcile(empty_probe("h", 100)).unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "ghost");
+        assert_eq!(lost_reason_of(&s, id), Some("missing".to_string()));
+
+        // Upserting it live again (the tmux session reappears) ⇒ lost_reason NULL.
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[ReconcileSession {
+                tmux_name: "a",
+                created_at: 1,
+                last_activity_at: 2,
+                ..Default::default()
+            }],
+            keep: &["a".to_string()],
+            ..empty_probe("h", 200)
+        })
+        .unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(row.lost_at, None);
+        assert_eq!(lost_reason_of(&s, id), None);
     }
 
     #[test]
@@ -977,7 +1610,7 @@ mod tests {
 
         // Pass 1: agent vanished → row is ghosted (soft), not deleted.
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 200)
+            .ghost_and_clean_bg_sessions("alpha", &[], 200, None)
             .unwrap();
         let row = store.get_session_by_id(id).unwrap().expect("still present");
         assert_eq!(row.status, "ghost");
@@ -986,7 +1619,7 @@ mod tests {
 
         // Pass 2: still vanished → hard-deleted, events reaped, kill emitted.
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 300)
+            .ghost_and_clean_bg_sessions("alpha", &[], 300, None)
             .unwrap();
         assert!(store.get_session_by_id(id).unwrap().is_none());
         let orphans: i64 = store
@@ -1020,10 +1653,10 @@ mod tests {
 
         let keep = vec!["bg:live".to_string()];
         store
-            .ghost_and_clean_bg_sessions("alpha", &keep, 200)
+            .ghost_and_clean_bg_sessions("alpha", &keep, 200, None)
             .unwrap();
         store
-            .ghost_and_clean_bg_sessions("alpha", &keep, 300)
+            .ghost_and_clean_bg_sessions("alpha", &keep, 300, None)
             .unwrap();
 
         let rows = store.list_sessions_for_host("alpha").unwrap();
@@ -1044,7 +1677,8 @@ mod tests {
         let id = s
             .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100, "bg")
             .unwrap();
-        s.ghost_and_clean_bg_sessions("alpha", &[], 200).unwrap();
+        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None)
+            .unwrap();
         assert_eq!(s.get_session_by_id(id).unwrap().unwrap().status, "ghost");
 
         // Agent reappears (e.g. the previous probe transiently failed).
@@ -1055,6 +1689,37 @@ mod tests {
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert_eq!(row.status, "running");
         assert_eq!(row.lost_at, None);
+    }
+
+    #[test]
+    fn upsert_bg_session_resurrection_also_clears_lost_reason() {
+        // The pane-less pruner (ghost_and_clean, shared with Phase 1) now
+        // stamps lost_reason='missing' on ghosting. A live row must never
+        // carry a stale reason once the agent reappears — PR 2 will surface
+        // lost_reason on the wire, and a "running" row with a leftover
+        // reason would be a lie.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        let id = s
+            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100, "bg")
+            .unwrap();
+        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None)
+            .unwrap();
+        assert_eq!(
+            lost_reason_of(&s, id),
+            Some("missing".to_string()),
+            "precondition: the ghost carries a reason"
+        );
+
+        s.upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 300, "bg")
+            .unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(
+            lost_reason_of(&s, id),
+            None,
+            "a revived bg row must not keep the old lost_reason"
+        );
     }
 
     #[test]
@@ -1077,12 +1742,16 @@ mod tests {
             .insert_message(bg, peer, "from the gone bg", "message", None)
             .unwrap();
         // Two passes without the agent: ghost, then hard-delete.
-        store.ghost_and_clean_bg_sessions("alpha", &[], 10).unwrap();
+        store
+            .ghost_and_clean_bg_sessions("alpha", &[], 10, None)
+            .unwrap();
         assert!(
             store.get_session_by_id(bg).unwrap().is_some(),
             "ghosted first"
         );
-        store.ghost_and_clean_bg_sessions("alpha", &[], 20).unwrap();
+        store
+            .ghost_and_clean_bg_sessions("alpha", &[], 20, None)
+            .unwrap();
         assert!(store.get_session_by_id(bg).unwrap().is_none());
         assert!(
             store.list_session_events(bg, 10).unwrap().is_empty(),
@@ -1398,6 +2067,35 @@ mod tests {
         assert!(
             evts.iter().any(|e| e.starts_with("session:updated:")),
             "restore must emit session:updated; got: {evts:?}"
+        );
+    }
+
+    #[test]
+    fn restore_session_also_clears_lost_reason() {
+        // `recreate_session` calls this after rebuilding the tmux session on
+        // the host. A row lost with a recorded reason (e.g. `host_reboot`)
+        // must not keep carrying it once it's manually restored — a live row
+        // carries no reason.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        let id = s
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.mark_host_sessions_lost("alpha", "host_reboot", &[], 999, 0)
+            .unwrap();
+        assert_eq!(
+            lost_reason_of(&s, id),
+            Some("host_reboot".to_string()),
+            "precondition: the ghost carries a reason"
+        );
+
+        let row = s.restore_session(id).unwrap().expect("row must exist");
+        assert_eq!(row.status, "running");
+        assert_eq!(row.lost_at, None);
+        assert_eq!(
+            lost_reason_of(&s, id),
+            None,
+            "a manually restored row must not keep the old lost_reason"
         );
     }
 
@@ -1726,7 +2424,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.last_playbook_at, Some(555));
-        assert_eq!(bus.take(), vec![format!("session:updated:{id}")]);
+        assert_eq!(
+            bus.take(),
+            vec![
+                format!("session:event:{id}:playbook_applied"),
+                format!("session:updated:{id}")
+            ]
+        );
         let events = s.list_session_events(id, 10).unwrap();
         assert!(events
             .iter()
