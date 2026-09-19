@@ -81,7 +81,7 @@ describe('the hub badge', () => {
       url: 'http://10.0.0.5:8787',
       allow_plaintext: true,
       warning:
-        'http://10.0.0.5:8787 is plain http to a host that is not loopback, so this app’s client token would cross the network in the clear on every call — allowed by hub.allow_plaintext, so this is deliberate',
+        'http://10.0.0.5:8787 is plain http to a host that is not loopback, so this app’s client token would cross the network in the clear on every call — allowed by hub.client_plaintext_token, so this is deliberate',
     };
     const { restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? warned : undefined));
     try {

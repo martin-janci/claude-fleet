@@ -10,7 +10,15 @@ pub const SETTING_BIND: &str = "hub.bind";
 pub const SETTING_PUBLIC_URL: &str = "hub.public_url";
 pub const SETTING_ALLOWED_HOSTS: &str = "hub.allowed_hosts";
 pub const SETTING_LOCAL_HOST: &str = "hub.local_host";
-/// Written by `fleet-hub` only: whether a plaintext routable bind is allowed.
+/// Written by `fleet-hub` only: whether a plaintext routable bind is allowed
+/// — that is, whether this daemon may *serve* in the clear.
+///
+/// **Not the desktop's key.** The desktop has its own plaintext opt-in,
+/// `hub.client_plaintext_token` (`src-tauri/src/backend/mod.rs`'s
+/// `ALLOW_PLAINTEXT_KEY`), and it answers the opposite question: whether this
+/// *client* may send its own token in the clear. They were once the same
+/// string, so a `state.db` copied between a daemon and a desktop carried one
+/// decision into the other; the desktop reads its own name and no fallback.
 pub const SETTING_ALLOW_PLAINTEXT: &str = "hub.allow_plaintext";
 /// Written by `fleet-hub` only: how the daemon terminates TLS itself —
 /// `off` (a proxy in front) or `cert` (an operator-supplied PEM pair).

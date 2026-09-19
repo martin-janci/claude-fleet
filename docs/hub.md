@@ -856,6 +856,17 @@ the client token is a credential for the whole fleet, and it would cross the
 network in the clear on every call, forever. The pairing dialog names the risk
 and offers to do it anyway (mirroring the hub's own `--allow-plaintext`), and
 an opted-in plaintext hub keeps saying so beside its badge on every launch.
+The opt-in is saved as `hub.client_plaintext_token`, deliberately **not** the
+daemon's `hub.allow_plaintext`: that one says a `fleet-hub` may serve a
+routable bind in the clear, this one says this app may send its own
+credential that way, and a `state.db` copied from one machine to the other
+must not answer a question nobody asked it.
+
+"Loopback" here means `localhost` itself, `127.0.0.0/8` or `::1` — the same
+rule the agent's `--insecure` uses. A name *under* `localhost`
+(`hub.localhost`) does not count: RFC 6761 only says a resolver should keep
+that subtree on the machine, and one that does not would let a DNS answer
+choose where the token goes. Such a URL needs the opt-in like any other.
 
 **Disconnect does not revoke.** It forgets the URL and the token on that
 machine. The client stays in the hub's list and its token stays valid there
@@ -873,7 +884,7 @@ causes are:
 - the token cannot be read, for example because the macOS keychain was locked
   at launch or its prompt was denied;
 - the URL is plain `http://` to a host that is not loopback, and
-  `hub.allow_plaintext` is not set;
+  `hub.client_plaintext_token` is not set;
 - `hub.remote_url` does not parse;
 - the settings cannot be read, but a client token is stored, which proves the
   app was paired.

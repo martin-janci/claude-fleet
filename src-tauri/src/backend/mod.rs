@@ -40,8 +40,8 @@ pub const REMOTE_URL_KEY: &str = "hub.remote_url";
 pub const CLIENT_NAME_KEY: &str = "hub.client_name";
 /// What Settings shows before pairing has told us otherwise.
 const DEFAULT_CLIENT_NAME: &str = "desktop";
-/// Opt-in for sending the client token over plain `http://` to a host that is
-/// **not** loopback. Mirrors the hub's own `--allow-plaintext`
+/// Opt-in for sending **this app's client token** over plain `http://` to a
+/// host that is not loopback. Mirrors the hub's own `--allow-plaintext`
 /// (`docs/hub.md`), which refuses to serve a routable bind in the clear
 /// without being told to.
 ///
@@ -50,12 +50,29 @@ const DEFAULT_CLIENT_NAME: &str = "desktop";
 /// typed `http://` instead of `https://` in Settings got a working app that
 /// put a fleet-control bearer token on the wire in the clear on every call,
 /// forever, with nothing ever saying so.
-pub const ALLOW_PLAINTEXT_KEY: &str = "hub.allow_plaintext";
+///
+/// **Not the daemon's key**, though both are about plaintext and both live in
+/// the same settings table: `fleet_core::service::hub::SETTING_ALLOW_PLAINTEXT`
+/// (`hub.allow_plaintext`) says a `fleet-hub` may *serve* a routable bind in
+/// the clear, and this one says this *client* may send its own credential
+/// that way. They were once the same string, so a `state.db` copied from a
+/// daemon to a desktop silently answered a question nobody had asked it.
+/// There is no fallback read of the old name, because a fallback would be
+/// that same cross-contamination.
+///
+/// The IPC field on the Tauri command args and in `src/lib/hub.ts` is still
+/// `allow_plaintext`: that is a wire name between this app's halves, not a
+/// row in anyone's database.
+pub const ALLOW_PLAINTEXT_KEY: &str = "hub.client_plaintext_token";
 
 /// `Some(reason)` when reaching this hub would put the bearer token on the
 /// wire in the clear — plain `http://` to anything but a loopback address.
 /// `None` for `https://`, and for `http://` to loopback, which is the tunnelled
 /// or port-forwarded setup and needs no ceremony.
+///
+/// What counts as loopback is [`fleet_proto::net::is_loopback`], shared with
+/// the agent and the hub. `url` still does the parsing here — it is already a
+/// dependency and it normalises the host — but it no longer gets to decide.
 ///
 /// Public because pairing (Task 5) hits `POST /pair` with a URL the user just
 /// typed, *before* any token is stored and therefore before [`Backend::resolve`]
@@ -66,17 +83,8 @@ pub fn plaintext_risk(base_url: &str) -> Option<String> {
     if parsed.scheme() != "http" {
         return None;
     }
-    let loopback = match parsed.host() {
-        // RFC 6761: `localhost` and anything under it resolve to loopback.
-        Some(url::Host::Domain(d)) => {
-            let d = d.to_ascii_lowercase();
-            d == "localhost" || d.ends_with(".localhost")
-        }
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    };
-    if loopback {
+    // `host_str` keeps an IPv6 literal's brackets; `is_loopback` strips them.
+    if parsed.host_str().is_some_and(fleet_proto::net::is_loopback) {
         return None;
     }
     Some(format!(
@@ -807,7 +815,6 @@ mod tests {
             "http://127.0.0.5:8787",
             "http://localhost:8787",
             "http://LOCALHOST:8787",
-            "http://hub.localhost:8787",
             "http://[::1]:8787",
         ] {
             assert_eq!(plaintext_risk(safe), None, "for {safe}");
@@ -818,6 +825,16 @@ mod tests {
             "http://[2001:db8::1]:8787",
             // Not loopback: a name that merely *contains* localhost.
             "http://localhost.evil.example.com",
+            // Nor a name UNDER `localhost`. RFC 6761 says a resolver should
+            // keep the subtree on the machine, but "should" is not "must" —
+            // musl's does not, so a DNS server that answers for
+            // `<anything>.localhost` would choose where this app's
+            // fleet-wide token goes. Such a URL now needs the plaintext
+            // opt-in like any other, which is the fail-safe direction.
+            "http://hub.localhost:8787",
+            "http://localhost.localhost:8787",
+            // An IPv4-mapped v6 address is routable, not `::1`.
+            "http://[::ffff:127.0.0.1]:8787",
         ] {
             let risk = plaintext_risk(risky).unwrap_or_else(|| panic!("{risky} must be a risk"));
             assert!(risk.contains("in the clear"), "for {risky}: {risk}");
@@ -854,6 +871,32 @@ mod tests {
             let warning = resolved.warning.expect("an opted-in hub still warns");
             assert!(warning.contains("deliberate"), "for {value}: {warning}");
         }
+    }
+
+    /// The daemon's `hub.allow_plaintext` and this app's opt-in were the same
+    /// string in the same table, and they mean different things: the daemon's
+    /// is "serve a routable bind in the clear", this app's is "put MY client
+    /// token on the wire in the clear". A `state.db` copied from a hub to a
+    /// desktop therefore carried one decision into the other. There is
+    /// deliberately no fallback read of the old key — a fallback would be
+    /// exactly the cross-contamination.
+    #[test]
+    fn the_daemons_plaintext_key_does_not_opt_this_app_in() {
+        assert_ne!(
+            ALLOW_PLAINTEXT_KEY,
+            fleet_core::service::hub::SETTING_ALLOW_PLAINTEXT,
+            "the two settings must not share a row"
+        );
+        let (_dir, store) = store_with(&[
+            (REMOTE_URL_KEY, "http://fleet.example.com"),
+            (fleet_core::service::hub::SETTING_ALLOW_PLAINTEXT, "true"),
+        ]);
+        let resolved = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("cl_tok"));
+        assert_unavailable(
+            &resolved,
+            Some("http://fleet.example.com"),
+            "the daemon's key must not opt this app in",
+        );
     }
 
     /// A loopback hub is the tunnelled setup `docs/hub.md` describes. It must
