@@ -22,6 +22,7 @@ mod lifecycle;
 mod paths;
 mod prompt;
 mod reconcile;
+mod restore;
 mod review;
 mod targeting;
 
@@ -41,6 +42,7 @@ pub use self::lifecycle::*;
 pub(crate) use self::paths::*;
 pub use self::prompt::*;
 pub use self::reconcile::*;
+pub use self::restore::*;
 pub use self::review::*;
 pub use self::targeting::*;
 
