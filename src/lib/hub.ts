@@ -243,14 +243,16 @@ export function hubBlock(action: HubAction, status: HubStatus = get(hubStatus)):
 
 /**
  * Action keys for the mutations that ROUTE to the hub — the ones a paired
- * client can still send, as long as the live connection to it is up
- * (`src-tauri/src/backend/tests_routing.rs`, `routed_mutation_cases`). Kept
- * aligned with the Rust command names (not the MCP tool names, where they
- * differ, e.g. `set_friendly_name`'s command is
- * `set_session_friendly_name`) so a later refactor that generates this list
- * from the Rust table is a rename, not a redesign.
+ * client can still send, as long as the live connection to it is up. Kept
+ * aligned with the routed-mutation case names in
+ * `src-tauri/src/backend/tests_routing.rs` (`routed_mutation_cases`) so a
+ * later refactor that generates this list from that table is a rename, not a
+ * redesign. Those case names usually match the `#[tauri::command]` fn name;
+ * the one place they don't is `set_friendly_name`, whose command is
+ * `set_session_friendly_name` (the tool it routes to is `set_friendly_name`,
+ * which is what the test names the case after).
  */
-const ROUTED_ACTIONS = [
+export const ROUTED_ACTIONS = [
   'send_prompt',
   'kill_session',
   'safe_kill_session',

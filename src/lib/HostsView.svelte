@@ -37,7 +37,8 @@
   import AddHostPicker from './AddHostPicker.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
-  import { hubStatus, hubBlock, ownsTheFleet } from './hub';
+  import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
+  import { hubConnection } from './hub_connection';
 
   let {
     preselect = null,
@@ -156,12 +157,13 @@
 
   onMount(() => {
     listEl?.focus();
-    void loadHostTokens();
+    // `list_host_tokens` and `refresh_account_usage` are both local-only in
+    // remote mode (`host_tokens`, `refresh_account_usage` REASONS) — a hub
+    // client must not fire either only to drop an E_LOCAL_ONLY each time.
     // "The Hosts view opening" is a fetch trigger; the backend keeps the
-    // floor. `refresh_account_usage` SSHes to the host and is local-only in
-    // remote mode — a hub client must not fire one per linked account only
-    // to drop an E_LOCAL_ONLY each time.
+    // usage floor.
     if (ownsTheFleet($hubStatus)) {
+      void loadHostTokens();
       for (const uuid of linkedUuids) void refreshAccountUsage(uuid);
     }
   });
@@ -195,13 +197,18 @@
   const focusList = () => listEl?.focus();
   const focusDetail = () => detailEl?.focus();
 
+  // Gated in the handlers, not only on the buttons that call them: a
+  // keyboard shortcut (`r` / `u` below) reaches these directly, bypassing
+  // whatever a button's `disabled` attribute says.
   async function reprobe(alias: string) {
+    if (hubActionBlocked('probe_host', $hubStatus, $hubConnection)) return;
     probing = alias;
     await reprobeHost(alias);
     probing = null;
   }
 
   async function refreshUsage(alias: string) {
+    if (hubActionBlocked('refresh_account_usage', $hubStatus, $hubConnection)) return;
     const host = $hosts.find((h) => h.alias === alias);
     const uuid = host?.account_uuid;
     if (!uuid) return;
@@ -217,6 +224,7 @@
   }
 
   async function retryOutage() {
+    if (hubActionBlocked('refresh_account_usage', $hubStatus, $hubConnection)) return;
     if (!outage) return;
     const r = await Promise.all(outage.accountUuids.map((u) => refreshAccountUsage(u)));
     const failed = r.find((x) => !x.ok);

@@ -85,6 +85,11 @@
   const refreshUsageBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
   // probe_host routes, so it only needs the live connection to be up.
   const reprobeBlocked = $derived(hubActionBlocked('probe_host', $hubStatus, $hubConnection));
+  // `HostsView` never fetches `list_host_tokens` on a hub client (it is
+  // local-only), so `token` is always null and `tokensLoaded` never turns
+  // true there — without this, the empty-token line below would show "…"
+  // forever instead of a real answer.
+  const hostTokensBlocked = $derived(hubBlock('host_tokens', $hubStatus));
 
   function sessionName(s: SessionRow): string {
     return s.friendly_name?.trim() || s.tmux_name;
@@ -248,7 +253,9 @@
           <option value="readonly">readonly</option>
         </select>
       {:else}
-        <span class="muted">{tokensLoaded ? 'none — provision hosts to mint one' : '…'}</span>
+        <span class="muted" data-testid="detail-token-empty"
+          >{hostTokensBlocked ?? (tokensLoaded ? 'none — provision hosts to mint one' : '…')}</span
+        >
       {/if}
     </div>
     <div class="kv">
