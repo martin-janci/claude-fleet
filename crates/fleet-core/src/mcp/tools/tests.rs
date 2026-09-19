@@ -790,6 +790,62 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
 }
 
 #[tokio::test]
+async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
+    let (s, _pid, on_b) = two_host_store();
+    // A ghost on hostb, so dismiss would otherwise succeed.
+    let ghost_b = s
+        .upsert_session("gone-b", "hostb", None, None, 1, 1, "ghost", None)
+        .unwrap();
+    let t = test_tools(s);
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.recreate_session(
+            Extension(a.clone()),
+            Parameters(sessions::RecreateSessionArgs {
+                session_id: on_b,
+                force: true,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+    forbidden(
+        t.dismiss_ghost_session(
+            Extension(a),
+            Parameters(sessions::DismissGhostSessionArgs {
+                session_id: ghost_b,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+    // The ghost row survives the refused dismiss…
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .get_session_by_id(ghost_b)
+        .unwrap()
+        .is_some());
+    // …and the master token still reaches it.
+    t.dismiss_ghost_session(
+        Extension(Caller::master()),
+        Parameters(sessions::DismissGhostSessionArgs {
+            session_id: ghost_b,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .get_session_by_id(ghost_b)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
