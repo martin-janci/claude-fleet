@@ -213,6 +213,7 @@ pub const CLIENT_TOOLS: &[&str] = &[
     "send_prompt",
     "broadcast_prompt",
     "session_history",
+    "session_conversations",
     "send_message",
     "inbox",
     "peer_status",
