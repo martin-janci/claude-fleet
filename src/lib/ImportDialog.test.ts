@@ -11,7 +11,7 @@ const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 beforeEach(() => {
   invoke.mockReset();
   hosts.set([
-    { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true },
+    { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true, transport: 'ssh' },
   ]);
 });
 

@@ -26,6 +26,7 @@
     locale,
     timeZone,
     suppressUnavailable = false,
+    refreshBlocked = null,
   }: {
     account: AccountRow | null;
     snapshot: AccountUsageSnapshot | null;
@@ -39,6 +40,9 @@
     /** The owner shows ONE endpoint-unavailable banner for every account, so
      *  this block drops its own unavailable line and Copy details. */
     suppressUnavailable?: boolean;
+    /** `hubBlock('refresh_account_usage', …)` from the owner — a refresh
+     *  SSHes to the host from here, and a hub client has no such connection. */
+    refreshBlocked?: string | null;
   } = $props();
 
   const msg = $derived(statusMessage(snapshot, account, sharedWith, now, locale, timeZone));
@@ -89,10 +93,11 @@
           type="button"
           class="refresh"
           data-testid="usage-refresh"
-          disabled={countdown !== null}
+          disabled={countdown !== null || refreshBlocked !== null}
+          title={refreshBlocked ?? ''}
           onclick={() => onRefresh?.()}
         >
-          {#if countdown !== null}refresh available in {countdown}{:else}<kbd>u</kbd> refresh{/if}
+          {#if refreshBlocked}refresh{:else if countdown !== null}refresh available in {countdown}{:else}<kbd>u</kbd> refresh{/if}
         </button>
       {/if}
     {/if}

@@ -7,12 +7,15 @@
   import type { AccountUsageSnapshot } from './account_usage_store';
   import AccountNickname from './AccountNickname.svelte';
   import UsageBar from './UsageBar.svelte';
+  import { hubStatus, hubBlock } from './hub';
   import {
     compactWindow,
     freshnessMark,
     type HostGroup,
     type HostRowInfo,
   } from './hosts_view';
+
+  const nicknameBlocked = $derived(hubBlock('set_account_nickname', $hubStatus));
 
   let {
     groups,
@@ -102,6 +105,7 @@
                 onedit={() => oneditstart(g.account!.uuid)}
                 ondone={oneditdone}
                 testid="group-label"
+                blocked={nicknameBlocked}
               />
             {:else}
               <span class="group-label" data-testid="group-label">{g.label}</span>
@@ -153,6 +157,7 @@
             <span class="alias">{h.alias}</span>
             {#if !h.reachable}<span class="word-offline" data-testid="host-offline">offline</span>{/if}
             {#if h.hidden}<span class="word-hidden">hidden</span>{/if}
+            {#if h.transport === 'agent'}<span class="word-agent" data-testid="host-transport-agent">agent</span>{/if}
             <span class="spacer"></span>
             {#if info?.attention}
               <span class="attention" title={info.attention.title} aria-label={info.attention.title} data-testid="host-attention" data-kind={info.attention.kind}
@@ -251,6 +256,7 @@
   .alias { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .word-offline { color: var(--usage-warn); font-size: 0.7rem; }
   .word-hidden { color: var(--fg-muted); font-size: 0.7rem; }
+  .word-agent { color: var(--accent); font-size: 0.7rem; }
   .spacer { flex: 1; }
   .attention { font-size: 0.75rem; cursor: help; }
   .counts { color: var(--fg-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }

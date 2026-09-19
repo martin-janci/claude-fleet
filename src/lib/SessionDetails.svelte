@@ -33,7 +33,6 @@
   import Timeline from './Timeline.svelte';
   import { push, pushError } from './toasts';
   import { copyText } from './clipboard';
-  import { hubStatus, hubBlock } from './hub';
   import {
     ciStatusColor,
     ciStatusLabel,
@@ -47,8 +46,33 @@
     stuckKindLabel,
     STUCK_COLOR,
   } from './attention';
+  import { hubStatus, hubBlock, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
 
   let { session }: { session: SessionRow } = $props();
+
+  // None of these three has a hub tool (`commands/sessions.rs`): the
+  // pre-flight git inspect and the one-step discard-and-kill both act over
+  // this machine's SSH connection, and dismiss_agent_session's job is done
+  // instead by the hub's own kill_session.
+  const inspectSafeKillBlocked = $derived(hubBlock('inspect_safe_kill', $hubStatus));
+  const discardKillBlocked = $derived(hubBlock('discard_kill_session', $hubStatus));
+  const dismissAgentBlocked = $derived(hubBlock('dismiss_agent_session', $hubStatus));
+
+  // These route to the hub, so they stay enabled on a hub client — but only
+  // while the live connection to it is up (`hubActionBlocked`).
+  const killBlocked = $derived(hubActionBlocked('kill_session', $hubStatus, $hubConnection));
+  const restartBlocked = $derived(hubActionBlocked('restart_session', $hubStatus, $hubConnection));
+  const recreateBlocked = $derived(hubActionBlocked('recreate_session', $hubStatus, $hubConnection));
+  const moveBlocked = $derived(hubActionBlocked('move_session', $hubStatus, $hubConnection));
+  const repairBlocked = $derived(hubActionBlocked('repair_session', $hubStatus, $hubConnection));
+  const renameBlocked = $derived(hubActionBlocked('rename_session', $hubStatus, $hubConnection));
+  const setFriendlyNameBlocked = $derived(
+    hubActionBlocked('set_friendly_name', $hubStatus, $hubConnection),
+  );
+  const safeKillClaudeBlocked = $derived(
+    hubActionBlocked('safe_kill_session', $hubStatus, $hubConnection),
+  );
 
   // Look up the parent project (if any) for context.
   const parentProject = $derived(
@@ -367,11 +391,6 @@
     await tick();
     selectSession(r.value, { follow: true });
   }
-  // PARITY OR REFUSAL (see backend/routing.rs): the hub's repair tool always
-  // runs the EXPLICIT repair, and this button's automatic pre-attach check has
-  // no counterpart, so the command refuses rather than routing into something
-  // that means something else. Say so on the button.
-  const repairBlocked = $derived(hubBlock('repair_session', $hubStatus));
 </script>
 
 <article class="details" data-testid="session-details">
@@ -568,16 +587,34 @@
   {/if}
 
   <section class="block actions">
-    <button class="ghost" onclick={beginLabelEdit} data-testid="label-from-details">
+    <button
+      class="ghost"
+      onclick={beginLabelEdit}
+      disabled={setFriendlyNameBlocked !== null}
+      title={setFriendlyNameBlocked ?? ''}
+      data-testid="label-from-details"
+    >
       🏷 Edit label
     </button>
     <!-- An external row runs outside fleet: the label (local fleet metadata)
          is the only thing fleet can change about it. -->
     {#if session.kind !== 'external'}
-      <button class="ghost" onclick={beginRename} data-testid="rename-from-details">
+      <button
+        class="ghost"
+        onclick={beginRename}
+        disabled={renameBlocked !== null}
+        title={renameBlocked ?? ''}
+        data-testid="rename-from-details"
+      >
         ✎ Rename tmux session
       </button>
-      <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
+      <button
+        class="ghost"
+        onclick={onRestart}
+        disabled={restartBlocked !== null}
+        title={restartBlocked ?? ''}
+        data-testid="restart-from-details"
+      >
         ↻ Restart
       </button>
       {#if !hasNoPane(session) && session.project_id !== null}
@@ -585,8 +622,7 @@
           class="ghost"
           onclick={onRepair}
           disabled={repairing || repairBlocked !== null}
-          title={repairBlocked ??
-            'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
+          title={repairBlocked ?? 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
           data-testid="repair-from-details"
         >
           🩹 Repair workspace
@@ -600,14 +636,21 @@
       <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
         🔍 Review
       </button>
-      <button class="ghost" onclick={askRecreate} data-testid="recreate-from-details">
+      <button
+        class="ghost"
+        onclick={askRecreate}
+        disabled={recreateBlocked !== null}
+        title={recreateBlocked ?? ''}
+        data-testid="recreate-from-details"
+      >
         ♻ Recreate
       </button>
       {#if canMove}
         <button
           class="ghost"
           onclick={openMove}
-          title="Continue this conversation on another host: same branch, same Claude session"
+          disabled={moveBlocked !== null}
+          title={moveBlocked ?? 'Continue this conversation on another host: same branch, same Claude session'}
           data-testid="move-from-details"
         >
           ⇄ Move to host…
@@ -617,7 +660,8 @@
         <button
           class="ghost"
           onclick={onRemoveFromList}
-          title="Hide this inactive agent until it becomes active again"
+          disabled={dismissAgentBlocked !== null}
+          title={dismissAgentBlocked ?? 'Hide this inactive agent until it becomes active again'}
           data-testid="remove-from-list-details"
         >
           Remove from list
@@ -627,11 +671,23 @@
            only removal action. -->
       {#if !isInactiveAgent(session)}
         {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
-          <button class="ghost" onclick={askSafeKill} data-testid="safe-kill-from-details">
+          <button
+            class="ghost"
+            onclick={askSafeKill}
+            disabled={inspectSafeKillBlocked !== null}
+            title={inspectSafeKillBlocked ?? ''}
+            data-testid="safe-kill-from-details"
+          >
             ⏏ Safe remove
           </button>
         {/if}
-        <button class="danger" onclick={askKill} data-testid="kill-from-details">
+        <button
+          class="danger"
+          onclick={askKill}
+          disabled={killBlocked !== null}
+          title={killBlocked ?? ''}
+          data-testid="kill-from-details"
+        >
           Kill session
         </button>
       {/if}
@@ -695,7 +751,8 @@
         <div class="confirm-actions">
           <button onclick={cancelSafeKill}>Cancel</button>
           <button
-            disabled={busy}
+            disabled={busy || safeKillClaudeBlocked !== null}
+            title={safeKillClaudeBlocked ?? ''}
             onclick={doSafeKillViaClaude}
             data-testid="confirm-safe-kill-claude"
           >Ask Claude to commit + push</button>
@@ -711,7 +768,8 @@
           <button disabled={busy} onclick={cancelSafeKill}>Cancel</button>
           <button
             class="primary"
-            disabled={busy}
+            disabled={busy || discardKillBlocked !== null}
+            title={discardKillBlocked ?? ''}
             onclick={doDirectRemove}
             data-testid="confirm-safe-kill-direct"
           >Remove worktree + kill</button>
@@ -765,13 +823,15 @@
         <div class="confirm-actions">
           <button disabled={busy} onclick={cancelSafeKill}>Cancel</button>
           <button
-            disabled={busy}
+            disabled={busy || safeKillClaudeBlocked !== null}
+            title={safeKillClaudeBlocked ?? ''}
             onclick={doSafeKillViaClaude}
             data-testid="confirm-safe-kill-claude"
           >Let Claude commit it</button>
           <button
             class="danger"
-            disabled={busy}
+            disabled={busy || discardKillBlocked !== null}
+            title={discardKillBlocked ?? ''}
             onclick={doDiscardAndKill}
             data-testid="confirm-safe-kill-discard"
           >Discard &amp; kill</button>
@@ -806,7 +866,12 @@
     {/if}
     <div class="move-buttons">
       <button onclick={closeMove} disabled={moving}>Cancel</button>
-      <button onclick={doMove} disabled={moving || !moveTarget} data-testid="confirm-move">
+      <button
+        onclick={doMove}
+        disabled={moving || !moveTarget || moveBlocked !== null}
+        title={moveBlocked ?? ''}
+        data-testid="confirm-move"
+      >
         {moving ? 'Moving…' : 'Move'}
       </button>
     </div>

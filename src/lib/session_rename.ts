@@ -1,7 +1,10 @@
+import { get } from 'svelte/store';
 import { renameSession, setFriendlyName, type SessionRow } from './sessions';
 import { migrateSessionUi } from './session_ui';
 import { pushError } from './toasts';
 import type { IpcError } from './result';
+import { hubStatus, hubActionBlocked } from './hub';
+import { hubConnection } from './hub_connection';
 
 export type RenameMode = 'label' | 'tmux';
 
@@ -27,6 +30,17 @@ export async function applySessionRename(
   if (mode === 'label') {
     // Empty is meaningful here: it clears the label.
     if (next === (target.friendly_name ?? '').trim()) return { kind: 'noop' };
+    // The trigger buttons (label-from-details, the row's 🏷 icon) are
+    // disabled up front, but the label editor also opens on a double-click
+    // (SessionRowItem, SessionDetails' title) — a path that doesn't consult
+    // a button's `disabled`. Gate the one place the IPC call actually
+    // happens instead of every way to reach it.
+    const blocked = hubActionBlocked('set_friendly_name', get(hubStatus), get(hubConnection));
+    if (blocked) {
+      const error: IpcError = { code: 'E_LOCAL_ONLY', message: blocked };
+      pushError(error, 'Label update failed');
+      return { kind: 'error', error };
+    }
     const r = await setFriendlyName(target.host_alias, target.tmux_name, next);
     if (!r.ok) {
       pushError(r.error, 'Label update failed');
@@ -35,6 +49,12 @@ export async function applySessionRename(
     return { kind: 'ok', row: null };
   }
   if (!next || next === target.tmux_name) return { kind: 'noop' };
+  const blocked = hubActionBlocked('rename_session', get(hubStatus), get(hubConnection));
+  if (blocked) {
+    const error: IpcError = { code: 'E_LOCAL_ONLY', message: blocked };
+    pushError(error, 'Rename failed');
+    return { kind: 'error', error };
+  }
   const r = await renameSession(target.host_alias, target.tmux_name, next);
   if (!r.ok) {
     pushError(r.error, 'Rename failed');

@@ -29,6 +29,8 @@ import {
   outageUsage,
   snapshot,
 } from './hosts_fixture';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd);
@@ -36,6 +38,8 @@ const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd);
 beforeEach(() => {
   resetTombstonesForTests();
   clearToasts();
+  hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
   hosts.set(fleetHosts());
   accounts.set(fleetAccounts());
   sessions.set(fleetSessions());
@@ -444,6 +448,137 @@ describe('HostsView: usage', () => {
     expect(screen.queryByTestId('usage-outage-banner')).toBeNull();
     const lines = within(detail()).queryAllByTestId('usage-message').map((m) => m.dataset.kind);
     expect(lines).toContain('unavailable');
+  });
+});
+
+// #147: refresh_account_usage SSHes to the host and is local-only in remote
+// mode. "The Hosts view opening" is an unprompted fetch trigger (one call per
+// linked account) — a hub client must not fire it only to drop an
+// E_LOCAL_ONLY each time.
+describe('HostsView: hub client', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+  });
+
+  // fix round 1, finding 1: `r` and `u` called `reprobe`/`refreshUsage`
+  // directly, bypassing the buttons' `disabled` — the only non-button path
+  // to a gated action this task found. Gated in the handlers themselves.
+  it('r and u do nothing while blocked: no probe_host, no refresh_account_usage', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'offline', attempt: 1, retry_in_secs: 5, reason: 'refused' });
+    mount({ preselect: 'mefistos' });
+    await tick();
+    const before = { probe: calls('probe_host').length, usage: calls('refresh_account_usage').length };
+    await key(list(), 'r');
+    await key(list(), 'u');
+    expect(calls('probe_host')).toHaveLength(before.probe);
+    expect(calls('refresh_account_usage')).toHaveLength(before.usage);
+  });
+
+  it('standalone is untouched: r and u still call probe_host and refresh_account_usage', async () => {
+    mount({ preselect: 'mefistos' });
+    await tick();
+    const before = { probe: calls('probe_host').length, usage: calls('refresh_account_usage').length };
+    await key(list(), 'r');
+    expect(calls('probe_host')).toHaveLength(before.probe + 1);
+    await key(list(), 'u');
+    expect(calls('refresh_account_usage')).toHaveLength(before.usage + 1);
+  });
+
+  // #147, finding 5: the `e` shortcut called `startEdit` directly, bypassing
+  // the nickname button's own `disabled={blocked !== null}` — the same
+  // non-button-path gap as `r`/`u` above, just found later.
+  it('e does nothing while blocked: no editor opens, no set_account_nickname', async () => {
+    hubStatus.set(remote);
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await key(list(), 'e');
+    expect(screen.queryByTestId('group-label-input')).toBeNull();
+    expect(calls('set_account_nickname')).toHaveLength(0);
+  });
+
+  it('standalone is untouched: e still opens the editor', async () => {
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await key(list(), 'e');
+    expect(screen.getByTestId('group-label-input')).toBeInTheDocument();
+  });
+
+  it('does not fire refresh_account_usage on open', async () => {
+    hubStatus.set(remote);
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await tick();
+    expect(calls('refresh_account_usage')).toHaveLength(0);
+  });
+
+  it('standalone is untouched: opening still refreshes linked accounts', async () => {
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await tick();
+    expect(calls('refresh_account_usage').length).toBeGreaterThan(0);
+  });
+
+  it('the manual usage refresh and outage-retry buttons are disabled, with the reason', async () => {
+    accountUsage.set(fleetUsage());
+    hubStatus.set(remote);
+    mount({ preselect: 'mefistos' });
+    await tick();
+    const refresh = within(detail()).getByTestId('usage-refresh') as HTMLButtonElement;
+    expect(refresh).toBeDisabled();
+    expect(refresh.title).toContain('fleet.example.com');
+  });
+
+  // fix round 1, finding 4: `list_host_tokens` is also local-only in remote
+  // mode and was still firing unconditionally on open.
+  it('does not fire list_host_tokens on open', async () => {
+    hubStatus.set(remote);
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await tick();
+    expect(calls('list_host_tokens')).toHaveLength(0);
+  });
+
+  it('standalone is untouched: opening still loads host tokens', async () => {
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await tick();
+    expect(calls('list_host_tokens').length).toBeGreaterThan(0);
+  });
+
+  // Never fetching the tokens on a hub client means `tokensLoaded` never
+  // turns true, so the empty-token line must not read "…" forever — it has
+  // to say why, the same as every other disabled control here.
+  it('the empty-token line reads the reason instead of "…" forever', async () => {
+    hubStatus.set(remote);
+    mount({ preselect: 'mefistos' });
+    await tick();
+    const empty = within(detail()).getByTestId('detail-token-empty');
+    expect(empty.textContent).not.toBe('…');
+    expect(empty.textContent).toContain('fleet.example.com');
+  });
+
+  it('standalone is untouched: the empty-token line still reads "…" before tokens load, then the real answer', async () => {
+    mount({ preselect: 'mefistos' });
+    // Before the async `list_host_tokens` resolves, `mefistos` (seeded with
+    // a token by the mock) has not been merged into the store yet.
+    const empty = within(detail()).queryByTestId('detail-token-empty');
+    if (empty) expect(empty.textContent).toBe('…');
+    await waitFor(() => expect(within(detail()).queryByTestId('detail-token-mode')).not.toBeNull());
   });
 });
 

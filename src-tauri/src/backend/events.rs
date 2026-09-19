@@ -43,6 +43,7 @@
 //! [`FleetResync`] for what a resync can and cannot restore.
 
 use super::connection::{ConnectionReporter, HubConnection, NoReporter};
+use super::contract;
 use super::remote::{connect, Endpoint, HubBackend};
 use super::RemoteConfig;
 use fleet_core::events::EVENT_NAMES;
@@ -199,6 +200,15 @@ enum StreamEnd {
         /// Why it ended, for the disconnected banner.
         why: String,
     },
+    /// The hub's `ready` frame named a wire-contract revision outside
+    /// `[MIN_HUB_CONTRACT, MAX_HUB_CONTRACT]` (`backend::contract`). Never
+    /// resynced and never applied a row — see [`Self::pump`]'s handling of
+    /// [`READY_FRAME`]. `run` must not overwrite the specific state already
+    /// reported (naming both revisions and which side to update) with a
+    /// generic `Reconnecting`, and must not reset the backoff: this
+    /// connection proved nothing about whether the hub is reachable, only
+    /// that it is not yet one to trust.
+    ContractSkew,
 }
 
 /// What one frame decided.
@@ -264,15 +274,22 @@ impl EventBridge {
             }
             match self.stream.open().await {
                 Ok(body) => {
-                    self.status.report(HubConnection::Connected);
-                    // A fresh subscription replays nothing, so everything that
-                    // happened while this client was detached is missing.
-                    // Re-list BEFORE reading a frame, so that whatever the hub
-                    // sends from here on is applied on top of the re-listed
-                    // rows rather than underneath them.
-                    self.resync.resync().await;
+                    // Reporting `Connected` and re-listing both move into
+                    // `pump`, gated on the hub's `ready` frame: whether this
+                    // hub's rows are trusted at all is not known until that
+                    // frame's `contract` field is read (issue #148), and a
+                    // resync is exactly the backfill that must not happen
+                    // against a hub outside the accepted range.
                     match self.pump(body).await {
                         StreamEnd::Cancelled => return,
+                        StreamEnd::ContractSkew => {
+                            // Already reported a specific state naming both
+                            // revisions and what to do — a generic
+                            // `Reconnecting` here would paper right over it.
+                            // Never resets: a hub that fails the version
+                            // check has proven nothing about the connection.
+                            attempt = attempt.saturating_add(1);
+                        }
                         StreamEnd::Gap { delivered, why } => {
                             // A connection that carried nothing is not a
                             // working connection, whatever the socket said.
@@ -317,6 +334,15 @@ impl EventBridge {
         let stayed_up = || opened.elapsed() >= HEALTHY_AFTER;
         let mut decoder = SseDecoder::new();
         let mut row_events = false;
+        // Whether this connection's `ready` frame has been read yet. A real
+        // hub always sends it first, before touching its bus, so nothing
+        // this loop should ever read before that — but this flag is what
+        // actually enforces it, rather than the loop trusting the ordering:
+        // every frame before the first `ready` is dropped, unapplied, below.
+        let mut contract_checked = false;
+        // Whether the "dropped before ready" warning has already fired for
+        // this connection — logged once, not once per frame.
+        let mut warned_before_ready = false;
         loop {
             // Any bytes at all — the hub's keep-alive comment included —
             // make `next` return, so this bounds SILENCE, not the stream.
@@ -359,6 +385,80 @@ impl EventBridge {
                 }
             };
             for frame in decoder.feed(&text) {
+                // The FIRST `ready` frame decides whether this connection's
+                // hub is trusted at all — see `backend::contract` for the
+                // range and `wire_contract` for what moves a hub's revision.
+                // Deliberately before `deliver`, and deliberately `.await`s
+                // here rather than there: `deliver` is not async, and a
+                // resync must happen (or not) before any row frame that
+                // follows in this same read is looked at.
+                if !contract_checked && frame.name == READY_FRAME {
+                    contract_checked = true;
+                    tracing::info!(hub = %frame.data, "[hub events] subscribed");
+                    let hub_contract = contract::hub_contract_revision(&frame.data);
+                    match contract::classify_hub_contract(
+                        hub_contract,
+                        contract::MIN_HUB_CONTRACT,
+                        contract::MAX_HUB_CONTRACT,
+                    ) {
+                        contract::ContractFit::InRange => {
+                            self.status.report(HubConnection::Connected);
+                            // A fresh subscription replays nothing, so
+                            // everything that happened while this client was
+                            // detached is missing. Re-list before reading
+                            // any further frame, so whatever the hub sends
+                            // from here on applies on top of the re-listed
+                            // rows rather than underneath them.
+                            self.resync.resync().await;
+                        }
+                        contract::ContractFit::TooOld => {
+                            tracing::warn!(
+                                hub_contract,
+                                min_contract = contract::MIN_HUB_CONTRACT,
+                                "[hub events] the hub's wire contract is older than this \
+                                 build requires; not trusting its rows until it is upgraded"
+                            );
+                            self.status.report(HubConnection::HubTooOld {
+                                hub_contract,
+                                min_contract: contract::MIN_HUB_CONTRACT,
+                            });
+                            return StreamEnd::ContractSkew;
+                        }
+                        contract::ContractFit::TooNew => {
+                            tracing::warn!(
+                                hub_contract,
+                                max_contract = contract::MAX_HUB_CONTRACT,
+                                "[hub events] the hub's wire contract is newer than this \
+                                 build understands; not trusting its rows until this app \
+                                 is upgraded"
+                            );
+                            self.status.report(HubConnection::HubTooNew {
+                                hub_contract,
+                                max_contract: contract::MAX_HUB_CONTRACT,
+                            });
+                            return StreamEnd::ContractSkew;
+                        }
+                    }
+                    continue;
+                }
+                if !contract_checked {
+                    // Nothing has validated this hub's contract yet, so
+                    // nothing it sent before `ready` is trusted — a row
+                    // applied here would be exactly the backfill-from-an-
+                    // unchecked-hub this mechanism exists to prevent.
+                    // Unreachable against any real hub (`ready` always
+                    // comes first), but this is what makes that true rather
+                    // than assumed.
+                    if !warned_before_ready {
+                        warned_before_ready = true;
+                        tracing::warn!(
+                            frame = %frame.name,
+                            "[hub events] a frame arrived before `ready`; dropping it and \
+                             everything else on this connection until the contract is checked"
+                        );
+                    }
+                    continue;
+                }
                 match self.deliver(&frame.name, &frame.data) {
                     Delivery::KeepReading => {}
                     Delivery::Row => row_events = true,
@@ -378,11 +478,12 @@ impl EventBridge {
     fn deliver(&self, name: &str, data: &str) -> Delivery {
         match name {
             READY_FRAME => {
-                // The hub's version and the kinds it will send. Logged rather
-                // than emitted: the frontend has no `ready` listener, and
-                // giving it one would be exactly the store change this task
-                // may not make.
-                tracing::info!(hub = %data, "[hub events] subscribed");
+                // `pump` handles the first `ready` frame itself (the
+                // contract check needs to run before anything else this
+                // connection sends is trusted). A real hub sends exactly
+                // one per connection, so reaching this arm at all means a
+                // second one arrived; nothing to do but note it.
+                tracing::debug!(hub = %data, "[hub events] a second `ready` frame; ignoring");
                 Delivery::KeepReading
             }
             LAGGED_FRAME => {

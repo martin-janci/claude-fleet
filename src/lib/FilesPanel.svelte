@@ -21,8 +21,16 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import PromptDialog from './PromptDialog.svelte';
   import { validateBranchName } from './branch-slug';
+  import { hubStatus, hubBlock } from './hub';
 
   let { session }: { session: SessionRow } = $props();
+
+  // None of the ten git-write commands (checkout, branch create/delete,
+  // stage/unstage, commit, fetch/pull/push) has a hub tool — a remote client
+  // must not mutate a worktree a running agent may be mid-edit in
+  // (`src-tauri/src/commands/mutate.rs`). One reason, computed once, fans out
+  // to every control below rather than each guessing its own copy.
+  const writeBlocked = $derived(hubBlock('repo_write', $hubStatus));
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
 
@@ -306,7 +314,7 @@
     <div class="full-col" data-testid="history-view">
       <div class="hbar hbar-row">
         <label><input type="checkbox" bind:checked={allBranches} onchange={() => loadHistory()} /> All branches</label>
-        <RemoteToolbar {session} ondone={onRefresh} />
+        <RemoteToolbar {session} ondone={onRefresh} {writeBlocked} />
       </div>
       <div class="hscroll">
         {#if loading && commits.length === 0}
@@ -320,6 +328,7 @@
             onSelect={(h) => openCommitDetail(h)}
             onCreateBranch={(h) => promptCreateBranch(h)}
             onCheckoutCommit={(h) => confirmCheckoutCommit(h)}
+            {writeBlocked}
           />
           {#if commits.length > 0}
             <button class="more" disabled={loading} onclick={() => loadHistory(false)}>Load more</button>
@@ -330,7 +339,7 @@
   {:else if mode === 'branches'}
     <div class="full-col" data-testid="branches-view">
       <div class="hbar hbar-row">
-        <RemoteToolbar {session} ondone={onRefresh} />
+        <RemoteToolbar {session} ondone={onRefresh} {writeBlocked} />
       </div>
       <div class="branch-scroll">
         <BranchList
@@ -340,6 +349,7 @@
           onCheckout={(n) => confirmCheckout(n)}
           onDelete={(n) => confirmDeleteBranch(n)}
           onNew={() => promptCreateBranch(null)}
+          {writeBlocked}
         />
       </div>
     </div>
@@ -362,7 +372,7 @@
             {onSelect}
           />
         {:else}
-          <FileList {mode} {changes} {tree} {loading} {error} {selectedPath} {onSelect} enableStaging={true} onStageToggle={stageToggle} onCommit={commitStaged} />
+          <FileList {mode} {changes} {tree} {loading} {error} {selectedPath} {onSelect} enableStaging={true} onStageToggle={stageToggle} onCommit={commitStaged} {writeBlocked} />
         {/if}
       </div>
       <Resizer id="files-list" onresize={onResize} />

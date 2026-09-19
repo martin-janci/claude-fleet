@@ -31,3 +31,4 @@ pub mod ssh_fake;
 pub mod store;
 pub mod tmux;
 pub mod validate;
+pub mod wire_contract;

@@ -12,9 +12,12 @@ import {
   hubDisconnect,
   hubBlock,
   hubNextStep,
+  hubActionBlocked,
   HUB_ACTIONS,
+  ROUTED_ACTIONS,
   type HubStatus,
 } from './hub';
+import type { HubConnection } from './hub_connection';
 
 const remote: HubStatus = {
   remote: true,
@@ -95,14 +98,6 @@ describe('hubBlock', () => {
     for (const action of ['add_host', 'remove_host', 'hide_host', 'provision_hosts', 'apply_sync', 'set_secret'] as const) {
       expect(hubBlock(action, remote)!.toLowerCase(), action).toContain('client');
     }
-  });
-
-  // PARITY OR REFUSAL, the rule Task 3 made and the ledger asks to write down:
-  // new_session and repair_session REFUSE rather than route, because routing
-  // would have succeeded while silently dropping the user's label.
-  it('new_session and repair_session say why they refuse rather than routing', () => {
-    expect(hubBlock('new_session', remote)).toMatch(/label|name/i);
-    expect(hubBlock('repair_session', remote)).toBeTruthy();
   });
 
   // The terminal is the spec's named non-goal, and the hint has to be more
@@ -217,5 +212,156 @@ describe('hubDisconnect', () => {
     expect(inv).toHaveBeenCalledWith('hub_disconnect', undefined);
     expect(get(hubStatus).configured_url).toBeNull();
     expect(get(hubStatus).restart_required).toBe(true);
+  });
+});
+
+// #147: the one place a control checks both refusal (hubBlock) and the live
+// connection (hubConnection) — offline gating for routed mutations. The
+// truth table below is the actual contract: standalone / owning the fleet
+// locally / hub connected / each not-connected state, crossed with a refused
+// action, a routed action, and one unaffected by either.
+describe('hubActionBlocked', () => {
+  const unavailable: HubStatus = {
+    ...STANDALONE,
+    configured_url: 'https://fleet.example.com',
+    unavailable: 'https://fleet.example.com is configured but no client token is stored',
+  };
+
+  const STANDALONE_CONN: HubConnection = { state: 'standalone' };
+  const CONNECTING: HubConnection = { state: 'connecting' };
+  const CONNECTED: HubConnection = { state: 'connected' };
+  const RECONNECTING: HubConnection = {
+    state: 'reconnecting',
+    attempt: 2,
+    retry_in_secs: 5,
+    reason: 'socket closed',
+  };
+  const OFFLINE: HubConnection = {
+    state: 'offline',
+    attempt: 4,
+    retry_in_secs: 30,
+    reason: 'connect refused',
+  };
+  const TOO_OLD: HubConnection = { state: 'hub_too_old', hub_contract: 1, min_contract: 3 };
+  const TOO_NEW: HubConnection = { state: 'hub_too_new', hub_contract: 9, max_contract: 5 };
+
+  // `standalone` (no hub configured) must never disable anything, in either
+  // half, whatever the connection store happens to hold.
+  it('standalone blocks nothing at all, for a refused action, a routed one, or neither', () => {
+    for (const conn of [STANDALONE_CONN, CONNECTING, CONNECTED, RECONNECTING, OFFLINE, TOO_OLD, TOO_NEW]) {
+      expect(hubActionBlocked('add_host', STANDALONE, conn)).toBeNull();
+      expect(hubActionBlocked('kill_session', STANDALONE, conn)).toBeNull();
+    }
+  });
+
+  // Refusal wins: a refused action is blocked in remote mode regardless of
+  // the connection, and says the REASONS sentence, not an offline one.
+  it('a refused action is blocked the same way whatever the connection is doing', () => {
+    for (const conn of [CONNECTING, CONNECTED, RECONNECTING, OFFLINE, TOO_OLD, TOO_NEW]) {
+      const why = hubActionBlocked('add_host', remote, conn);
+      expect(why, conn.state).not.toBeNull();
+      expect(why, conn.state).toBe(hubBlock('add_host', remote));
+      expect(why!.toLowerCase(), conn.state).toContain('client');
+    }
+  });
+
+  // A routed action: enabled only once the connection is actually up.
+  it('a routed action is enabled while connected, blocked in every other connection state', () => {
+    expect(hubActionBlocked('kill_session', remote, CONNECTED)).toBeNull();
+    for (const conn of [CONNECTING, RECONNECTING, OFFLINE]) {
+      const why = hubActionBlocked('kill_session', remote, conn);
+      expect(why, conn.state).not.toBeNull();
+      expect(why!.toLowerCase(), conn.state).toMatch(/unreachable|connecting/);
+    }
+    for (const conn of [TOO_OLD, TOO_NEW]) {
+      const why = hubActionBlocked('kill_session', remote, conn);
+      expect(why, conn.state).not.toBeNull();
+      expect(why!.toLowerCase(), conn.state).toContain('incompatible');
+    }
+  });
+
+  // The skew states name which side is behind, distinctly.
+  it('the skew states say which side is out of date', () => {
+    expect(hubActionBlocked('send_prompt', remote, TOO_OLD)!.toLowerCase()).toContain('update the hub');
+    expect(hubActionBlocked('send_prompt', remote, TOO_NEW)!.toLowerCase()).toContain('update this app');
+  });
+
+  // An action neither refused nor routed (a read, navigation, or one of the
+  // handful of commands that run the same in both modes) is never blocked
+  // here — this module has nothing to say about it.
+  it('an action that is neither refused nor routed is never blocked, connected or not', () => {
+    for (const conn of [CONNECTING, CONNECTED, RECONNECTING, OFFLINE, TOO_OLD, TOO_NEW]) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(hubActionBlocked('hub_status' as any, remote, conn)).toBeNull();
+    }
+  });
+
+  // #148 finding 9: `action in REASONS` walks the prototype chain, so an
+  // action name that only collides with an inherited `Object.prototype`
+  // member (never one of this module's own keys) must not be treated as a
+  // refused action.
+  it('an action name that only collides with Object.prototype is not treated as refused', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(hubActionBlocked('toString' as any, remote, CONNECTED)).toBeNull();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(hubActionBlocked('constructor' as any, remote, CONNECTED)).toBeNull();
+  });
+
+  // F1: a hub is configured but this launch could not use it — refuses every
+  // routed command too (the routing test's `a_configured_but_unavailable_hub_
+  // refuses_every_routed_command`), not just the ones with a REASONS entry.
+  it('a configured-but-unavailable hub blocks a routed action as well as a refused one', () => {
+    const why = hubActionBlocked('kill_session', unavailable, CONNECTED);
+    expect(why).not.toBeNull();
+    expect(why).toContain('no client token is stored');
+    expect(why!.toLowerCase()).toContain('settings');
+  });
+
+  // A desktop that owns its fleet locally but isn't the bare STANDALONE
+  // constant — e.g. it still has a hub URL saved from before Disconnect,
+  // pending a restart — must be treated exactly like STANDALONE: `remote` and
+  // `unavailable` are what `ownsTheFleet` actually checks, not object
+  // identity with the constant.
+  const LOCAL_OWNER: HubStatus = {
+    ...STANDALONE,
+    configured_url: 'https://fleet.example.com',
+    restart_required: true,
+  };
+
+  const NOT_CONNECTED: HubConnection[] = [
+    STANDALONE_CONN,
+    CONNECTING,
+    RECONNECTING,
+    OFFLINE,
+    TOO_OLD,
+    TOO_NEW,
+  ];
+  const EVERY_ACTION = [...HUB_ACTIONS, ...ROUTED_ACTIONS];
+
+  // The exhaustive local-mode sweep: every refused key and every routed key,
+  // for both flavours of "owns the fleet locally", across every connection
+  // state that isn't `connected` (including a stale `reconnecting` left over
+  // from a hub this desktop no longer points at) — none of it may ever
+  // block a local desktop.
+  it('every refused and routed action is unblocked for a local-owning desktop, in any connection state', () => {
+    for (const status of [STANDALONE, LOCAL_OWNER]) {
+      for (const conn of NOT_CONNECTED) {
+        for (const action of EVERY_ACTION) {
+          expect(hubActionBlocked(action, status, conn), `${status === STANDALONE ? 'STANDALONE' : 'LOCAL_OWNER'}/${conn.state}/${action}`).toBeNull();
+        }
+      }
+    }
+  });
+
+  // The exhaustive connected-hub-client sweep: every routed key is sendable
+  // once the connection is up, and every refused key still says no — refusal
+  // never depends on the connection being fine.
+  it('on a connected hub client, every routed key is null and every refused key is non-null', () => {
+    for (const action of ROUTED_ACTIONS) {
+      expect(hubActionBlocked(action, remote, CONNECTED), action).toBeNull();
+    }
+    for (const action of HUB_ACTIONS) {
+      expect(hubActionBlocked(action, remote, CONNECTED), action).not.toBeNull();
+    }
   });
 });
