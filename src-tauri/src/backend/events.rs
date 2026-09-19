@@ -44,6 +44,7 @@
 
 use super::connection::{ConnectionReporter, HubConnection, NoReporter};
 use super::contract;
+use super::http1::{find, Dechunker};
 use super::remote::{connect, Endpoint, HubBackend};
 use super::RemoteConfig;
 use fleet_core::events::EVENT_NAMES;
@@ -851,14 +852,12 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
     };
     let leftover = head.split_off(split);
     let head = String::from_utf8_lossy(&head).into_owned();
-    let status = head
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| format!("unreadable status line from {}", at.authority()))?;
+    // The status line and header parsing are `http1`'s, shared with the
+    // one-shot `POST /mcp` path; only the wording of a malformed status line
+    // stays this call's own, naming the hub rather than a status line nobody
+    // asked to see verbatim.
+    let status = super::http1::parse_status(&head)
+        .map_err(|_| format!("unreadable status line from {}", at.authority()))?;
     if status != 200 {
         // `/events` answers 503 with `events are not enabled on this server`
         // and 429 with `too many concurrent event streams`, both as plain
@@ -871,7 +870,7 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
             format!("the hub answered {status} to GET /events: {said}")
         });
     }
-    let chunked = super::remote::head_is_chunked(&head);
+    let chunked = super::http1::head_is_chunked(&head);
     Ok(Box::new(SseBody {
         conn,
         dechunker: Dechunker::new(chunked),
@@ -965,82 +964,6 @@ fn take_utf8(bytes: &mut Vec<u8>) -> String {
             text
         }
     }
-}
-
-/// Undo `Transfer-Encoding: chunked` incrementally.
-///
-/// The one-shot path can de-chunk a whole body at once
-/// (`remote::dechunk`); a stream cannot, because a chunk boundary falls
-/// wherever the hub flushed and the next size line may not have arrived yet.
-struct Dechunker {
-    chunked: bool,
-    /// Bytes left in the chunk being read.
-    remaining: usize,
-    /// The zero-size chunk arrived.
-    done: bool,
-}
-
-impl Dechunker {
-    fn new(chunked: bool) -> Self {
-        Self {
-            chunked,
-            remaining: 0,
-            done: false,
-        }
-    }
-
-    fn finished(&self) -> bool {
-        self.done
-    }
-
-    /// Take whatever payload `raw` now yields, leaving the rest in place.
-    fn take(&mut self, raw: &mut Vec<u8>) -> Result<Vec<u8>, String> {
-        if !self.chunked {
-            return Ok(std::mem::take(raw));
-        }
-        let mut out = Vec::new();
-        loop {
-            if self.done {
-                raw.clear();
-                break;
-            }
-            if self.remaining > 0 {
-                let take = self.remaining.min(raw.len());
-                if take == 0 {
-                    break;
-                }
-                out.extend(raw.drain(..take));
-                self.remaining -= take;
-                continue;
-            }
-            // A size line, possibly preceded by the CRLF that ended the
-            // previous chunk's data.
-            let skip = if raw.starts_with(b"\r\n") { 2 } else { 0 };
-            let Some(eol) = find(&raw[skip..], b"\r\n") else {
-                // Not a whole size line yet.
-                break;
-            };
-            let line = String::from_utf8_lossy(&raw[skip..skip + eol]).into_owned();
-            let token = line.split(';').next().unwrap_or("").trim().to_string();
-            let size = usize::from_str_radix(&token, 16)
-                .map_err(|_| format!("unreadable chunk size {token:?}"))?;
-            raw.drain(..skip + eol + 2);
-            if size == 0 {
-                self.done = true;
-                raw.clear();
-                break;
-            }
-            self.remaining = size;
-        }
-        Ok(out)
-    }
-}
-
-/// First offset of `needle` in `haystack`.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 /// Start the bridge as a background task.

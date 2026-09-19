@@ -1205,85 +1205,25 @@ where
 /// the shortcut; it is the same latent bug, not a different one.)
 ///
 /// Bytes in, text out, decoded ONCE at the end: a chunk size is a byte count,
-/// and a chunk boundary may fall inside a multi-byte character.
+/// and a chunk boundary may fall inside a multi-byte character. The head
+/// parsing and de-chunking themselves are [`super::http1`]'s, shared with
+/// `events.rs`'s streaming reader; this is the one-shot assembly on top.
 pub fn split_response(raw: impl AsRef<[u8]>) -> Result<HubResponse, String> {
     let raw = raw.as_ref();
-    let split = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or("the hub sent a malformed HTTP response")?;
+    let split =
+        super::http1::find(raw, b"\r\n\r\n").ok_or("the hub sent a malformed HTTP response")?;
     // The head is ASCII by the grammar; a stray byte in it is not worth
     // failing over.
     let head = String::from_utf8_lossy(&raw[..split]);
     let head = head.as_ref();
     let body = &raw[split + 4..];
-    let status_line = head.lines().next().unwrap_or_default();
-    // The status token, not a substring: a `contains(" 200")` would match the
-    // reason phrase and any header that happened to carry " 200" too.
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| format!("unreadable status line: {status_line:?}"))?;
-    let body = if head_is_chunked(head) {
-        String::from_utf8_lossy(&dechunk(body)?).into_owned()
+    let status = super::http1::parse_status(head)?;
+    let body = if super::http1::head_is_chunked(head) {
+        String::from_utf8_lossy(&super::http1::dechunk(body)?).into_owned()
     } else {
         String::from_utf8_lossy(body).into_owned()
     };
     Ok(HubResponse { status, body })
-}
-
-/// Does this response head declare `Transfer-Encoding: chunked`? Header names
-/// are case-insensitive and the value may be a list (`gzip, chunked`).
-pub fn head_is_chunked(head: &str) -> bool {
-    head.lines().skip(1).any(|line| {
-        line.split_once(':').is_some_and(|(name, value)| {
-            name.trim().eq_ignore_ascii_case("transfer-encoding")
-                && value
-                    .split(',')
-                    .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
-        })
-    })
-}
-
-/// Undo `Transfer-Encoding: chunked` over a whole body.
-///
-/// A chunk is `<hex size>[;ext]CRLF<size bytes>CRLF`, and a zero-size chunk
-/// ends the body. A body that stops mid-chunk (the peer closed early) yields
-/// what had arrived rather than an error: [`speak`] already tolerates a
-/// half-closed connection, and failing here would undo that.
-///
-/// Over BYTES: a chunk size is a byte count and says nothing about character
-/// boundaries, so a chunk may legitimately end halfway through a character.
-/// The caller decodes the joined result.
-pub fn dechunk(body: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    loop {
-        let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") else {
-            // The body ended mid-header; whatever decoded is what there is.
-            return Ok(out);
-        };
-        let size_line = String::from_utf8_lossy(&rest[..eol]);
-        let after = &rest[eol + 2..];
-        // `;` introduces chunk extensions, which nothing here uses.
-        let size_token = size_line.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_token, 16)
-            .map_err(|_| format!("unreadable chunk size {size_token:?}"))?;
-        if size == 0 {
-            return Ok(out);
-        }
-        if after.len() < size {
-            // Truncated final chunk: take what arrived.
-            out.extend_from_slice(after);
-            return Ok(out);
-        }
-        out.extend_from_slice(&after[..size]);
-        // Skip the chunk's own trailing CRLF.
-        rest = after[size..]
-            .strip_prefix(b"\r\n")
-            .unwrap_or(&after[size..]);
-    }
 }
 
 #[cfg(test)]

@@ -989,25 +989,6 @@ fn a_body_that_did_not_declare_chunked_is_left_alone() {
     );
 }
 
-#[test]
-fn the_transfer_encoding_header_is_matched_case_insensitively_and_in_a_list() {
-    for head in [
-        "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked",
-        "HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked",
-        "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked",
-    ] {
-        assert!(head_is_chunked(head), "{head:?}");
-    }
-    for head in [
-        "HTTP/1.1 200 OK\r\nContent-Length: 3",
-        // The status line is skipped, so a reason phrase cannot match.
-        "HTTP/1.1 200 Transfer-Encoding: chunked",
-        "HTTP/1.1 200 OK\r\nX-Note: Transfer-Encoding: chunked",
-    ] {
-        assert!(!head_is_chunked(head), "{head:?}");
-    }
-}
-
 /// SF-6. The whole-body path decoded UTF-8 BEFORE de-chunking: `speak` ran
 /// `from_utf8_lossy` over the raw bytes, chunk framing and all, so a
 /// character split by a chunk boundary became two replacement characters,
@@ -1044,32 +1025,12 @@ fn a_character_split_across_two_chunks_survives_the_whole_body_path() {
     assert_eq!(r.body, text, "de-chunk the bytes, THEN decode them");
 }
 
-/// A peer that dies mid-chunk leaves what arrived, matching `speak`'s own
-/// tolerance for a half-close. Refusing here would undo that.
+/// The de-chunking itself (partial-chunk tolerance, a malformed size line, a
+/// chunk splitting a character) is `http1`'s and tested there
+/// (`tests_http1.rs`); this is `split_response`'s own wiring of it — decode
+/// lossily rather than panic on bytes that are not valid UTF-8 at all.
 #[test]
-fn a_truncated_chunked_body_yields_what_arrived() {
-    assert_eq!(dechunk(b"5\r\nhel").expect("partial"), b"hel");
-    assert_eq!(
-        dechunk(b"5\r\nhello\r\n6\r\n wor").expect("partial"),
-        b"hello wor"
-    );
-}
-
-#[test]
-fn an_unreadable_chunk_size_is_an_error_not_a_guess() {
-    let e = dechunk(b"zz\r\nxx").expect_err("zz is not hex");
-    assert!(e.contains("chunk size"), "{e}");
-}
-
-/// A chunk size is a BYTE count, so a chunk may end inside a character —
-/// that is legal framing, not a malformed body. (This used to assert an
-/// error, which is the SF-6 bug stated as a requirement.) Bytes that are not
-/// UTF-8 at all still cannot panic: they decode lossily at the end.
-#[test]
-fn a_chunk_may_end_inside_a_character_and_invalid_bytes_never_panic() {
-    // "ä" is 0xC3 0xA4: one byte per chunk.
-    let joined = dechunk(b"1\r\n\xC3\r\n1\r\n\xA4\r\n0\r\n\r\n").expect("legal framing");
-    assert_eq!(joined, "ä".as_bytes());
+fn invalid_utf8_in_a_chunked_response_decodes_lossily_via_split_response() {
     let r = split_response(
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n\xFF\r\n0\r\n\r\n",
     )
