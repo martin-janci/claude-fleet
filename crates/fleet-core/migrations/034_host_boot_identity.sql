@@ -3,7 +3,7 @@
 -- the pid of the host's tmux server, NULL when none is running. A change in
 -- either between probes marks the host's sessions lost instead of deleting
 -- them. `lost_reason` says why a ghost row is lost:
--- host_reboot | tmux_server_gone | missing.
+-- host_reboot | tmux_server_gone | missing | killed (fleet killed the session itself).
 ALTER TABLE hosts ADD COLUMN boot_id TEXT;
 ALTER TABLE hosts ADD COLUMN tmux_server_pid INTEGER;
 ALTER TABLE sessions ADD COLUMN lost_reason TEXT;
