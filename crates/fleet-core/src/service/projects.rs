@@ -6,14 +6,15 @@ use crate::projects::{
 };
 use crate::service::settings;
 use crate::store::{ProjectRow, Store, WorktreeRow};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectTreeRow {
     pub project: ProjectRow,
+    #[serde(default)]
     pub worktrees: Vec<WorktreeRow>,
 }
 

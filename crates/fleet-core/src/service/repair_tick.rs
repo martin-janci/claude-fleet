@@ -299,15 +299,12 @@ pub fn backoff_sig(row: &SessionRow, t: &Target) -> String {
 /// re-adds anyway). Everything else is a refusal that needs a human (or a
 /// row change), so it is stamped and backed off.
 pub fn is_transient(e: &IpcError) -> bool {
-    matches!(
-        e.code.as_str(),
-        codes::E_HOST_OFFLINE
-            | codes::E_SSH
-            | codes::E_SSH_TIMEOUT
-            | codes::E_TIMEOUT
-            | codes::E_LOCK
-            | codes::E_SHELL
-    ) || (e.code == codes::E_REPAIR_FAILED && e.message.contains(repair::PARTIALLY_APPLIED))
+    codes::is_transport_failure(&e.code)
+        || matches!(
+            e.code.as_str(),
+            codes::E_HOST_OFFLINE | codes::E_TIMEOUT | codes::E_LOCK | codes::E_SHELL
+        )
+        || (e.code == codes::E_REPAIR_FAILED && e.message.contains(repair::PARTIALLY_APPLIED))
 }
 
 /// The backoff stamp of a session: `(signature, unix secs)`.
@@ -983,7 +980,16 @@ mod tests {
     #[test]
     fn transient_codes_are_transport_only() {
         let err = |c: &str| IpcError::new(c, "x");
-        for c in [codes::E_HOST_OFFLINE, codes::E_SSH, codes::E_TIMEOUT] {
+        for c in [
+            codes::E_HOST_OFFLINE,
+            codes::E_SSH,
+            codes::E_TIMEOUT,
+            // An agent host's transport failures are transport failures too:
+            // the agent reconnects with backoff, so the next interval is
+            // exactly the right time to try again.
+            codes::E_AGENT_OFFLINE,
+            codes::E_AGENT_PROTOCOL,
+        ] {
             assert!(is_transient(&err(c)), "{c}");
         }
         for c in [

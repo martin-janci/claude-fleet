@@ -790,6 +790,125 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
 }
 
 #[tokio::test]
+async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
+    let (s, _pid, on_b) = two_host_store();
+    // A ghost on hostb, so dismiss would otherwise succeed.
+    let ghost_b = s
+        .upsert_session("gone-b", "hostb", None, None, 1, 1, "ghost", None)
+        .unwrap();
+    let t = test_tools(s);
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.recreate_session(
+            Extension(a.clone()),
+            Parameters(sessions::RecreateSessionArgs {
+                session_id: on_b,
+                force: true,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+    forbidden(
+        t.dismiss_ghost_session(
+            Extension(a),
+            Parameters(sessions::DismissGhostSessionArgs {
+                session_id: ghost_b,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+    // The ghost row survives the refused dismiss…
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .get_session_by_id(ghost_b)
+        .unwrap()
+        .is_some());
+    // …and the master token still reaches it.
+    t.dismiss_ghost_session(
+        Extension(Caller::master()),
+        Parameters(sessions::DismissGhostSessionArgs {
+            session_id: ghost_b,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .get_session_by_id(ghost_b)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn per_host_callers_cannot_capture_or_peek_another_hosts_session() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_claude_session_id(on_b, "0f8fad5b-d9cb-469f-a165-70867728950e")
+        .unwrap();
+    // No Claude id yet: peek must still refuse rather than say "nothing
+    // to peek" about another host's session.
+    let bare_b = s
+        .upsert_session("bare-b", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    // Readonly tokens may call both tools, but only on their own host.
+    for mode in [TokenMode::Full, TokenMode::Readonly] {
+        let a = host_caller("hosta", mode);
+        forbidden(
+            t.capture_session(
+                Extension(a.clone()),
+                Parameters(CaptureSessionParams {
+                    session_id: on_b,
+                    scrollback_lines: None,
+                    max_lines: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        for (session_id, claude_session_id) in [
+            (Some(on_b), None),
+            (Some(bare_b), None),
+            // A bare Claude id resolves to the tracked row's host.
+            (
+                None,
+                Some("0f8fad5b-d9cb-469f-a165-70867728950e".to_string()),
+            ),
+        ] {
+            forbidden(
+                t.peek_session(
+                    Extension(a.clone()),
+                    Parameters(PeekSessionParams {
+                        session_id,
+                        claude_session_id,
+                        host_alias: None,
+                    }),
+                )
+                .await
+                .unwrap_err(),
+            );
+        }
+    }
+    // The master token is unbound: its peek at the id-less session gets
+    // the friendly answer, not E_FORBIDDEN.
+    t.peek_session(
+        Extension(Caller::master()),
+        Parameters(PeekSessionParams {
+            session_id: Some(bare_b),
+            claude_session_id: None,
+            host_alias: None,
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
@@ -1025,8 +1144,8 @@ fn capture_default_cap_matches_docs() {
 /// attributes in the router files. 57 was the count before the split, 60
 /// with the asset-catalog block, 63 with plan_sync/apply_sync/set_secret, 67
 /// with list_layers/resolve_preview/propose_layers/set_host_layers, 71 with
-/// session_conversation/pair_client/list_clients/revoke_client; bump it when
-/// adding a tool.
+/// session_conversation/pair_client/list_clients/revoke_client, 72 with
+/// agent_status, 73 with session_conversations; bump it when adding a tool.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1046,7 +1165,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 72);
+    assert_eq!(served, 73);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1124,6 +1243,109 @@ fn every_router_tool_is_explicitly_classified() {
             "{name} is classified but not served"
         );
     }
+}
+
+// ---- master-only tool gate must not fail open (Task 3: #143) ----
+
+#[test]
+fn every_router_tool_is_admin_or_client_exactly_once() {
+    // guard::ADMIN_TOOLS is a denylist: a tool left off both it and
+    // guard::CLIENT_TOOLS used to be callable by any paired `full` client by
+    // default. Walk the real router and force the decision, the same way
+    // `every_router_tool_is_explicitly_classified` forces a deadline class.
+    let listed: Vec<String> = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(!listed.is_empty());
+    for name in &listed {
+        let admin = guard::ADMIN_TOOLS.contains(&name.as_str());
+        let client = guard::CLIENT_TOOLS.contains(&name.as_str());
+        assert!(
+            admin || client,
+            "tool {name} is in neither guard::ADMIN_TOOLS nor guard::CLIENT_TOOLS \
+             — add it to exactly one so a new tool's access is a decision, not a \
+             default (master-only ⇒ ADMIN_TOOLS, client-callable ⇒ CLIENT_TOOLS)"
+        );
+        assert!(
+            !(admin && client),
+            "tool {name} is in BOTH guard::ADMIN_TOOLS and guard::CLIENT_TOOLS \
+             — a tool is either master-only or client-callable, not both"
+        );
+    }
+}
+
+#[test]
+fn guard_lists_name_only_real_router_tools() {
+    // Catches a typo or a renamed tool left stale in one of the hand-written
+    // lists: every name they mention must be a tool the router actually
+    // serves.
+    let listed: Vec<String> = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    for (label, names) in [
+        ("READONLY_TOOLS", guard::READONLY_TOOLS),
+        ("CONFIRM_TOOLS", guard::CONFIRM_TOOLS),
+        ("ADMIN_TOOLS", guard::ADMIN_TOOLS),
+        ("CLIENT_TOOLS", guard::CLIENT_TOOLS),
+    ] {
+        for name in names {
+            assert!(
+                listed.iter().any(|l| l == name),
+                "guard::{label} names {name:?}, which is not a real router tool \
+                 (typo, or the tool was renamed/removed)"
+            );
+        }
+    }
+}
+
+#[test]
+fn readonly_tools_are_client_tools_or_the_documented_list_clients_exception() {
+    // guard.rs's own doc comment on READONLY_TOOLS: `list_clients` is the
+    // one tool that is BOTH master-only (ADMIN_TOOLS) and readable by a
+    // readonly token (READONLY_TOOLS) — every OTHER tool a readonly caller
+    // may reach must also be something a full client may reach.
+    for name in guard::READONLY_TOOLS {
+        assert!(
+            guard::CLIENT_TOOLS.contains(name) || *name == "list_clients",
+            "{name} is in READONLY_TOOLS but is neither in CLIENT_TOOLS nor the \
+             documented list_clients special case"
+        );
+    }
+}
+
+#[test]
+fn enforce_admin_fails_closed_for_an_unclassified_tool_name() {
+    // A made-up name stands in for a tool nobody has added to either list
+    // yet. Before this gate failed closed on the tool name, a caller that
+    // is not master (a paired `full` client, or a per-host token) would
+    // reach it anyway, since `is_admin_tool` only checks a denylist.
+    let full_client = client_caller("phone", TokenMode::Full);
+    let full_host = host_caller("mefistos", TokenMode::Full);
+    let made_up = "definitely_not_a_real_tool_143";
+    assert!(!guard::is_admin_tool(made_up));
+    assert!(!guard::is_client_tool(made_up));
+    for caller in [&full_client, &full_host] {
+        let err = enforce_admin(caller, made_up).expect_err(made_up);
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+        // Unlike a real admin tool (see `fleet_admin_tools_are_master_only`),
+        // an unclassified name must not be told it IS a fleet-admin tool —
+        // it is not one, it is simply not client-callable.
+        assert!(
+            !err.message.contains("is a fleet-admin tool"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("is not a client-callable tool"),
+            "{}",
+            err.message
+        );
+    }
+    assert!(enforce_admin(&Caller::master(), made_up).is_ok());
 }
 
 #[test]

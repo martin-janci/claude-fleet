@@ -8,6 +8,523 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.22] - 2026-09-19
+
+### Fixed
+- **mcp:** a per-host token can no longer act on another host's sessions
+  through `recreate_session`, `dismiss_ghost_session`, `capture_session` or
+  `peek_session` — they now return `E_FORBIDDEN`, like the other
+  session-addressed tools.
+- **deps:** resolve devalue 5.9.2 (GHSA-9rgm-9g3h-6x36).
+- **release:** release notes give the working macOS install steps.
+
+## [0.2.21] - 2026-09-18
+
+### Added
+- **hub:** serve TLS directly with operator-supplied certificates
+- **mcp:** session_conversation returns structured turns
+- **hub:** broadcast event bus and a GET /events SSE stream
+- **hub:** fleet-hub pair, client list and client revoke
+- **mcp:** pair_client, list_clients and revoke_client
+- **hub:** pairing codes and the POST /pair exchange
+- **commands:** wire layer authoring into Tauri commands
+- **catalog:** author layers through the existing commit-and-reload path
+- **mcp:** client tokens resolve to a non-master client caller
+- **mcp:** list_layers, resolve_preview, propose_layers, set_host_layers
+- **store:** client_tokens table with hashed, revocable rows
+- **catalog:** propose initial layers by host-set signature
+- **sync:** report dropped plugin refs instead of uninstalling them
+- **sync:** resolve each host's layers before computing its plan
+- **store:** host_layers table and assignment accessors
+- **catalog:** pure resolve() producing the effective catalog with provenance
+- **catalog:** load layers/ with extends flattening and cycle detection
+- **catalog:** layer model with members, exclude and overrides
+- **mcp:** unauthenticated /healthz liveness route
+- **hub:** healthcheck subcommand and Docker HEALTHCHECK
+- **hub:** Docker image, compose with Caddy, systemd unit, docs/hub.md
+- **hub:** fleet-hub daemon — init, serve, token, ssh-key
+- **reconcile:** hub.local_host opt-out — a daemon hub has no local host
+- **provision:** HubBase — public base URL for hooks and MCP entries, tunnels only for a loopback hub
+- **mcp:** configurable bind address and Host/Origin allowlist
+- **conversation:** file paths in reply text open in the Files tab
+- **conversation:** recall earlier prompts with ArrowUp in the composer
+- **conversation:** context meter beside the composer, Compact suggested when high
+- **conversation:** Load older turns
+- **conversation:** the Latest button counts what landed while scrolled up
+- **conversation:** keep an unsent draft per session and focus the composer
+- **conversation:** turn duration and an open tool group on the running turn
+- **conversation:** mark tool calls whose result was an error
+- **conversation:** live indicator, blocked banner and on-demand pane probe
+- **conversation:** quick-action chips with presets editable in Settings
+- **conversation:** slash-command menu and a hint for the composer
+- **conversation:** send prompts from the Conversation tab
+- **sync:** keep only the three newest .fleet-bak backups per file
+- **ui:** asset editor, templates, lint, commit/push and authoring sessions in the Assets tab
+- **catalog:** authoring commands
+- **catalog:** open an authoring session in the catalog repo
+- **catalog:** templates, lint, and authoring operations with auto-commit
+- **hooks:** SessionEnd → stopped, StopFailure → turn over, Notification → blocked
+- **store:** session_end, stop_failure and notification hook writes
+- **catalog:** path-addressed git helpers, remove_asset, resource pruning
+- **hooks:** accept SessionEnd, StopFailure and Notification payload fields
+- **hooks:** install SessionEnd, StopFailure and Notification http hooks
+- **ui:** sync plan dialog, secrets panel, and sync actions in the Assets tab
+- **catalog:** sync and secrets commands and MCP tools (plan_sync, apply_sync, set_secret)
+- **catalog:** plan_sync and apply_sync orchestration with progress and run history
+- **catalog:** guarded per-host applier with backups, secret uploads, config merges, plugins and manifest
+- **catalog:** sync plan computation, plan registry, managed and orphan inventory states
+- **catalog:** managed manifest and secret resolution for sync
+- **catalog:** Codex host scan and TOML config merge
+- **catalog:** harness merge_config/manifest_path, JSON merge and unmerge helpers, config hashes in the Claude scan
+- **mcp:** bound every tool call with a per-class wall clock
+- **store:** migration 031 — managed inventory flag, catalog secrets, sync runs, sync:progress event
+- **mcp:** return tool failures as is_error results with the E_* code
+- **mcp:** stateless streamable HTTP and protocol 2025-11-25
+- **catalog:** Tauri IPC commands and MCP tools for the asset catalog
+- **catalog:** import skills, agents, hooks, MCP servers and plugins from ~/.claude
+- **catalog:** configure/load/list/get service functions and host scan runner
+- **catalog:** Claude host scan and per-asset drift state computation
+- **store:** catalog_config and asset_inventory tables (migration 018) with row events
+- **catalog:** load and write the catalog repo, git clone/pull/head
+- **catalog:** experimental Codex renderer for skills and MCP servers
+- **catalog:** Claude Code renderer for all asset kinds
+- **catalog:** render plan, host snapshot and Harness trait
+- **catalog:** IR model for skills, agents, hooks, MCP servers and plugin refs
+- **ui:** Assets tab with catalog list, host matrix, previews and import dialog
+- **terminal:** text-input style selection and cursor
+- **ui:** assets store and catalog/inventory row events
+- **conversation:** render replies as Markdown; fold tool calls, clamp long prompts, jump to latest
+- **app:** Conversation tab; no-pane rows open it by default
+- **conversation:** transcript-backed Conversation panel
+- **sidebar:** Outside fleet group, inactive agents, drop log peek
+- **transcript:** session_conversation; replace claude logs with the transcript
+- **store:** agent kind on bg upserts, dismissed_agents table
+- **agents:** keep kind, job id and start time from claude agents
+- **usage:** show headroom when starting a session and in the footer
+- **hosts:** open the Hosts view from anywhere; slim Settings
+- **hosts:** the Hosts view
+- **usage:** usage bar and block components
+- **usage:** the usage model and theme tokens
+- **usage:** poll account usage in the background and expose it
+- **usage:** fetch each account's 5-hour and weekly usage on its own host
+- **accounts:** nicknames and the extra-usage flag
+- **sidebar:** reach Add project from the project picker
+- **projects:** the Add project dialog
+- **projects:** addProject and listGithubRepos wrappers
+- **commands:** add_project and list_github_repos
+- **projects:** create a new project and browse GitHub repos
+- **projects:** adopt an existing checkout as a project
+- **projects:** add a project by cloning a GitHub repo
+- **repo-url:** parse the repo identifiers Add project accepts
+- **sidebar:** two-line session rows with the name on its own line
+- **sidebar:** persisted details toggle for session rows
+- **new-session:** list the chosen host's worktrees; scan remote hosts
+- **projects:** listHostWorktrees wrapper
+- **commands:** list_host_worktrees for the new-session dialog
+- **worktrees:** list a host's worktrees by scanning its checkout
+- **store:** prune a host's worktree rows a scan no longer reports
+- **triage:** count one bucket narrower than the filter shows
+- **triage:** one ranked "Needs you" queue in the sidebar (T1a, P13/P27)
+- **mcp:** auto-install the local hook on enable; show per-host hook health
+- **sessions:** show the session timeline; double-click edits the label
+- **usage:** Settings rows for the usage.* settings
+- **usage:** per-session token usage and estimated cost
+- **repair:** gate automatic stale-entry removal on the parent dev:inode fingerprint
+- **sessions:** move_session between hosts; descope Freeze (W5 G2)
+- **repair:** guarded automatic removal of a vanished worktree's own stale entry
+- **repair:** opt-in automatic workspace repair on the reconcile tick
+- **orchestration:** completion signal, wait/transcript/run_prompt, task objects, tags (W3 Track E)
+- **projects:** projects base path and layout as settings, one-host quickstart (W5 G3)
+- **observability:** rotating log file with redaction, copy-diagnostics, runbook
+- **sessions:** generated names, quick switcher, scrollable pickers
+- **mcp:** whoami, session_id addressing, list_sessions force, peek by claude id, tracked new_bg_session (W2 D5/D6)
+- **triage:** stuck chips, attention filter, playbooks, session GC, outcome fields (W2 Track D)
+- **mcp:** one source of truth for status vocabulary + response caps
+- **safe-kill:** pre-flight inspect + clean/discard paths; fix Stop hook (#29)
+- **sessions:** deterministic friendly name on create + startup backfill (#28)
+
+### Changed
+- **pty:** wait for a killed child to disappear instead of demanding it at once
+- **terminal:** lock in the behaviour six passing tests did not
+- **sync:** exempt the two new async tests from await_holding_lock
+- **sync:** assigning a layer that drops an installed asset plans Remove
+- ignore graft's local graph cache
+- **hub:** end-to-end coverage for client access
+- **catalog:** strengthen the no-layers backward-compat test
+- **mcp:** a client token is refused admin tools and honours readonly
+- **sync:** cover the layered-planning integration, context-chain flatten, and unrecognised axis
+- rustfmt the catalog layer module
+- cosmetic sweep across the hub branch
+- **hub:** end-to-end script for a real fleet-hub binary
+- **catalog:** serialise the provision HOME test on CATALOG_TEST_LOCK
+- **deploy:** harden the systemd unit
+- bind test discriminates on the address; config precedence coverage
+- pre-commit hook lints only fleet-core and fleet-hub without Tauri libs
+- headless fleet-hub build job; release bumps the hub crate
+- **core:** move service, store, ssh, tmux and mcp into fleet-core
+- **core:** fleet-core crate with the rt::spawn runtime seam
+- cargo workspace rooted at the repository root
+- **release:** bump version to 0.2.20
+- **account_usage:** report bash/tool paths when the DEBUG trace assert fires
+- **release:** bump version to 0.2.19
+- **provision:** take the shared HOME lock in expand_home_local_expands_tilde
+- **mcp:** resolve the inbox target through resolve_target_row
+- **mcp:** take service Args structs as tool parameters directly
+- **events:** one generic emit behind the typed EventBus methods
+- **validate:** shared sub-checks behind every public validator
+- **ui:** one row-store core and one inline-rename flow
+- **ssh:** one run_shell for the local-vs-remote `bash -lc` hop
+- **store:** one ghost_and_clean shared by the tmux and pane-less pruners
+- **commands:** move cancel_command out of lib.rs into commands/cancel.rs
+- **store:** derive Default on the reconcile/account fixtures, add empty_probe
+- **store:** tighten visibility, collapse the get_worktree twin
+- **mcp:** read the control-API settings through one mcp::settings module
+- **store:** collect() row iterators, now_unix() everywhere, RETURNING id upserts
+- **service:** move fleet hook installation into service/hooks_install.rs
+- **store:** write→re-fetch→emit helpers for sessions and hosts
+- **service:** move mutating git commands into service/repo_mutate.rs
+- **store:** `in_clause(n)` + `params_then` for the IN-list builders
+- **service:** move repo read views from commands/ into service/repo_read.rs
+- **store:** `.optional()` for every single-row lookup
+- **store:** shared column consts + row mappers for hosts, projects, accounts, cursors, messages
+- **service:** move git repo plumbing from commands/ into service/repo.rs
+- **ui:** fold duplicated frontend helpers into their one home
+- route every `IpcError::new("E_*")` through `codes::`
+- one `lock()` idiom for app mutexes, drop redundant error maps
+- remove dead code confirmed by the dead_code lint
+- **terminal:** read pty.rs through the bundler, not node:fs
+- **terminal:** stop the idle header rewrite and cap the resize rate
+- **catalog:** catalog_template takes no store
+- **release:** bump version to 0.2.18
+- **terminal:** tmux 3.6a attach fixture generator and recording
+- **mcp:** classify plan_sync, apply_sync and set_secret for the per-call wall clock
+- **mcp:** count the asset-catalog router block in the tool-count guard
+- **catalog:** migration 030 and the shared ipc_error codes module
+- **provision:** restore HOME after expand_home_local_expands_tilde
+- **release:** bump version to 0.2.17
+- **release:** bump version to 0.2.16
+- **release:** refresh Cargo.lock for 0.2.15
+- **release:** bump version to 0.2.15
+- **release:** refresh Cargo.lock for 0.2.14
+- **release:** bump version to 0.2.14
+- **projects:** a remotely added project survives a local refresh
+- **deps:** tauri-plugin-dialog for the folder picker
+- **projects:** make the real gh unreachable from hermetic tests
+- **release:** refresh Cargo.lock for 0.2.13
+- **release:** bump version to 0.2.13
+- **sidebar:** split rowMeta into rowElapsed and rowPrompt
+- **validate:** one canonical remote worktree path rule
+- **release:** refresh Cargo.lock for 0.2.12
+- **release:** bump version to 0.2.12
+- **release:** bump version to 0.2.11
+- **store:** split store.rs into a store/ module
+- **mcp,lib:** split mcp/tools.rs and lib.rs startup helpers (F4c/F4d)
+- **settings:** share dialog CSS and copyText; drain-loop and focus tests
+- **sessions:** split service/sessions.rs into sessions/ (F4b, pure move)
+- **terminal:** split TerminalView into mouse, drain and clipboard modules (F5b)
+- **logging:** eprintln sweep part B2 — last 34 sites, empty guard, codes constants
+- **sidebar:** split SessionRowItem, PeekPanel, SidebarFilters, NewBgSessionDialog and session_status out of Sidebar
+- **settings:** split HostsTable and McpSettings out of SettingsDialog
+- **logging:** eprintln sweep part B1 — guard hardening, 8 more sites, codes constants
+- **store:** fingerprint_keys_of_project covers local rows; remote keys are the stored path
+- **repair:** drop the helper-thread canonicalization in fingerprint_keys
+- **usage:** log move_session usage failures through tracing
+- **logging:** eprintln sweep part A — tracing in 6 files + production-eprintln guard
+- **logging:** Track H2 logging and diagnostics nits
+- **repair-tick:** factor the fake's fingerprint map into a type alias (clippy)
+- **settings:** Settings rows for every backend setting; registry test; Refresh + repair docs (Track H2)
+- **repair:** replaced-parent test keeps both inodes alive; dev differs, inode equal refuses
+- **reconcile:** hook-guard phantom path, real gate entry point, call-gated writers
+- **reconcile:** transitions, ghost lifecycle, bg agents, multi-host through the real reconcile path (W4 F1)
+- bump health schema_version to 20; fix read_bytes_for expectation
+- **ssh:** tmux roundtrip cleanup guard, LocalExec test-only, review nits
+- **ssh:** SshExec trait, scripted fake, end-to-end host/provision/reconcile tests (W4 F6)
+- **db:** renumber lifecycle migration to 019 (Track B takes 018)
+- skill note on E_SELF_TARGET, ignore proptest regressions, tidy visibility
+- **backend:** pty and messages coverage, atomic send_message, proptest for shell quoting (W4 F2/F7)
+- **release:** tag-only dispatch, concurrency group, deny on linux only
+- macos+ubuntu matrix and tag-gated tauri release job (W4 F8)
+- **store:** migration table
+- **errors:** IpcError::lock(), canonical codes module, E_SQLITE for DB failures
+- **ci:** pin toolchains, add local CI mirror, cargo-deny and pnpm audit
+- **deps:** clear RUSTSEC and npm audit advisories via lockfile updates
+- **sidebar:** deterministic perf assertion for 500-session render
+- **release:** replace release-please with scripts/release.sh
+- **release:** bump version to 0.2.10
+- **release:** bump version to 0.2.9
+- **release:** bump version to 0.2.8
+- **release:** bump version to 0.2.7
+- **release:** bump version to 0.2.6
+- **release:** bump version to 0.2.5
+- gitignore .claude/settings.local.json
+
+### Fixed
+- **release:** write the CHANGELOG section on macOS, and fail if it cannot
+- **terminal:** AltGr on punctuation, one tab stop, safer IME and paste routing
+- **terminal:** keep non-Latin prose in one run, measure the cell over 20 glyphs
+- **terminal:** tmux-exact colour groups, cleaner wrapped copies, stable fixture
+- **terminal:** one drain loop at a time, and say so when a chunk fails
+- **catalog:** warn on unknown exclude keys; test the layer load branch
+- **sessions:** send prompts and pane queries to an exact tmux target
+- **pty:** close leaves no stale shared state, input keeps its order, reap never parks a worker
+- **catalog:** list_layers shows only active assignments
+- **sync:** take the layered flag from the resolution, reject any bogus axis
+- **catalog:** delete host_layers on remove_host; validate host alias on layer entry points
+- **hub:** pair and client list/revoke honour --port
+- **mcp:** list_clients is master-only, as the spec's own ruling says
+- **hub:** hardening sweep over client access
+- **hub:** TLS needs an https public URL, and the healthcheck speaks TLS
+- **hub:** a revoked client's event stream ends at the next heartbeat
+- **catalog:** only Noop a dropped plugin_ref orphan on a layered host
+- **catalog:** detect extends cycles at load, not just at plan time
+- **catalog:** lint a layer before writing it, not after
+- **clippy:** remove unused import, dead LayerSet::is_empty, redundant closures
+- **mcp:** validate host_alias, admin-gate set_host_layers, cap resolve_preview payload
+- **mcp:** bump health's schema-version tripwire, reject colliding layer names
+- **catalog:** filter propose_layers to installed states, drop hyphen-joined layer names
+- **catalog:** harden resolve() against identity-changing overrides and a vacuous test guard
+- **sessions:** unknown project or worktree id answers E_NOTFOUND
+- **hub:** one deadline for the health probe, and flag an orphaned ssh key
+- **usage:** skip local on a hub
+- **hub:** persist allow_plaintext; token needs an existing database; ssh-key derives from a private key
+- **hub:** refuse every explicit local target when hub.local_host is off
+- **hub:** own default data dir, stricter plaintext refusal, drain on shutdown
+- **usage:** skip hidden hosts
+- **provision:** strict public URL parsing; strip legacy token hooks; refuse ?token= on a public hub
+- **core:** embedder-supplied app version
+- **mcp:** pass the hub allowlist to rmcp's own Host check
+- **hub:** effective allowlist includes the public host; global CLI options; serve logs to stderr
+- **reconcile:** single-host reconcile refuses local when hub.local_host is off
+- **provision:** match only fleet's exact hook entry shape when stripping
+- **test:** match the trace dump on a variable, not on bash 4+ syntax
+- **conversation:** final review batch for prompt recall and file paths
+- **conversation:** second review batch for the Conversation tab
+- **conversation:** review-round fixes for the Conversation tab
+- **sync:** drop unparseable manifest keys on rewrite
+- **terminal:** let a held key repeat reach macOS press-and-hold
+- **terminal:** the IME proxy follows the caret even with the cursor hidden
+- **app:** the terminal's IME proxy is the terminal, not a text field
+- **terminal:** give the terminal a real input target so IME text arrives
+- **terminal:** Option-composed punctuation is text, not a Meta chord
+- **terminal:** a keystroke mid-tick no longer forks a second drain
+- **terminal:** pre-empting a gesture now cancels its state, not just its listeners
+- **terminal:** re-run a coalesced open that targets the same session
+- **catalog:** keep add_project's reason in the catalog adoption error
+- **catalog:** plan_sync rejects an unknown host alias
+- **catalog:** clearer error when the catalog origin is already adopted elsewhere
+- **terminal:** state the grid minimum once, and lock it to pty.rs
+- **terminal:** a forwarded mouse press can no longer orphan window listeners
+- **terminal:** a drop's paths only ever reach the session that started it
+- **terminal:** give every open a generation and stop losing session switches
+- **catalog:** kebab-case kinds in authoring session names, drop unreachable blank-name branch
+- **terminal:** re-attach when the backend reports dropped output
+- **terminal:** trust the backend's eof flag, not `[cf]` text in the output
+- **catalog:** treat blank url/command as missing in validate
+- **terminal:** a failed drain tick can no longer freeze the terminal
+- **pty:** keep blocking PTY work off the main thread and off the lock
+- **pty:** report overflow and PTY death out of band, not as output text
+- **pty:** hold back only a real partial codepoint, under one lock
+- **pty:** clamp to the renderer's minimum grid (10x2), not 40x10
+- **terminal:** disable ssh's `~` escape on the remote PTY attach
+- **terminal:** target tmux sessions exactly so an attach can't land elsewhere
+- **catalog:** cap add_resource at 1 MiB
+- **ui:** confirm resource removal, refresh repo status after loads, surface git stderr
+- **terminal:** pin every run to its cells so a fallback glyph can't shift a row
+- **catalog:** importer reports invalid resource names as problems
+- **terminal:** a repaint with erased gaps ends a stale soft wrap
+- **catalog:** skip empty authoring commits, tighten url and resource checks
+- **terminal:** a plain click on a wide glyph no longer selects and copies it
+- **terminal:** a full-width repaint ends a stale soft wrap
+- **terminal:** copying a soft-wrapped line no longer adds a newline at the wrap
+- **terminal:** a selection edge on a wide glyph copies and highlights it whole
+- **terminal:** join VS16, ZWJ, skin-tone and flag clusters like tmux 3.6a
+- **catalog:** refuse symlinked remove_asset targets, validate resource paths in write_asset
+- **catalog:** resolve git identity normally, isolate tests via GIT_CONFIG_GLOBAL/NOSYSTEM
+- **terminal:** ignore DECSTBM with a negative top margin
+- **terminal:** DEC Special Graphics b-e map to control pictures, not controls
+- **terminal:** clamp an oversize DECSTBM bottom margin instead of ignoring it
+- **terminal:** scrolled and inserted lines take the current background
+- **terminal:** decode OSC 52 clipboard payloads as UTF-8
+- **terminal:** SGR hidden, strikethrough, ITU colon forms and underline colour
+- **terminal:** RIS resets mouse, bracketed paste, cursor and DECSC state
+- **terminal:** treat every private CSI marker as private, not as the public form
+- **sync:** keep a re-parked plan's original TTL deadline
+- **provision:** write host secrets via tmp file + atomic rename
+- **ui:** keep sync plan dialog mounted after apply, disable stale re-apply
+- **catalog:** set_secret's value must never reach the persisted audit trail
+- **catalog:** a plan refused for missing secrets stays in the registry
+- **catalog:** never rewrite an unparseable config, route every config write through the 0600 path
+- **catalog:** back up merge-only assets and unmerge superseded manifest entries
+- **catalog:** a latest plugin ref matches any installed version
+- **catalog:** redact secrets from Substituted's Debug output
+- **catalog:** fail closed on TOML datetimes in codex merge_config
+- **add-project:** adopt an existing checkout only when it is that repository
+- **ui:** pause the Conversation poll under the Assets overlay; spec names migration 030
+- **ui:** tolerate missing tags on asset detail, reload without pull after import
+- **catalog:** harden tags serialization, scan failure handling, importer slugs and error codes
+- **hosts:** re-read each remote host's Claude account every reconcile pass
+- **add-project:** keep sentinel exit codes alive past ~/.bash_logout
+- **catalog:** flag hook secrets, scrub token everywhere, handle multi-hook entries and missing plugin versions
+- **catalog:** correct hook-merge presence check and scan zero-file hang
+- **catalog:** normalise relative clone paths, skip symlinks in resources, tolerate unreadable kind dirs
+- **catalog:** quote unsafe YAML scalars in Claude frontmatter
+- **ui:** Terminal tab must not read active while Assets tab is open
+- **conversation:** emphasis around code spans, visible tool-group chevron, tighter nested lists
+- **ui:** read-only external rows, inactive agents, lighter Conversation polling
+- **agents:** launch lookup, inactive kill, mtime failures, lighter conversation read
+- **conversation:** decouple relative-time ticker from poll content changes
+- **sidebar:** stuck-count pill ignores external rows
+- **transcript:** keep the newest reply when a huge prompt overflows the budget
+- **bg:** stop by job id, find launched agents by name, remove from list
+- **sessions:** treat external rows as pane-less everywhere
+- **reconcile:** external rows for interactive agents, retire idle bg agents
+- **usage:** monotonic polling floor; stricter connect-failure detection
+- **usage:** keep the token off disk and out of curlrc; request-level polling floor
+- **hosts:** follow an account switch on the local host
+- **hosts:** record the local host's Claude account
+- **projects:** add-project dialog opens the session on the right host; honest, accessible in-flight state
+- **projects:** cancel kills the whole local process group and is hedged for GitHub creation
+- **cancel:** send callId so the Cancel button reaches the backend; separate anonymous ids
+- **projects:** only resume a repository new created
+- **projects:** push-only retry only finishes a creation fleet started
+- **projects:** make the GitHub-creation retry real and safe
+- **projects:** recoverable GitHub creation, a real confirmation token, no fake authors
+- **projects:** adopting a bare repo's worktree registers the worktree
+- **projects:** keep adopted folders across a refresh; resolve worktrees and validate names
+- **projects:** bound the clone connect timeout, validate the host, keep error context
+- **repo-url:** reject a .git component, all-dot names and oversized components
+- **sidebar:** keep the name full-width, wrap the details line, real separators
+- **new-session:** keep typed branch input across a host switch
+- **new-session:** never submit another host's worktree; narrow the scan effect
+- **sessions:** guard the local arm, trust the scanned worktree path
+- **sessions:** refuse another host's worktree row; open the scanned path
+- **worktrees:** inode-compare the scan root; split_scan_output tests
+- **worktrees:** canonical root, name dedupe, ssh error mapping in the host scan
+- **store:** propagate scan errors, guard empty keep list, drop fingerprints on prune
+- **sessions:** mirror an existing worktree from origin instead of a naive worktree add
+- **prompt:** strip the untrusted marker before recording a prompt (Q2)
+- **sidebar:** widen the host filter when the selected session's host is hidden
+- **settings:** apply the projects preview indent and its error colour
+- **settings:** keep loadHostTokens optional; test the drain re-entrancy guard
+- **status:** per-row agent parsing, waitingFor precedence, live dialog fixture
+- **status:** count ghosts by status; detect dialogs; map new claude agents fields
+- post-B2 review nits (guard trailing-comment close, temp-file collision, set_friendly_name not read-only)
+- **worktrees:** address #76 review (symmetric spellings, 026 on an existing DB)
+- **worktrees:** canonical spellings and race guard in the remote prune
+- **repair:** adoption guard canonicalizes outside the store lock
+- **worktrees:** prune stale remote worktree rows; per-entry migration guard
+- **logging:** legacy daily log sorts strictly before that day's hour-00 file
+- **store:** compute fingerprint keys before the store lock and pass them to the deletes
+- **repair:** no filesystem calls under the store lock; tick checks registration; bg reap test
+- **usage:** make migration 025 safe to re-run
+- **usage:** close the move window and seed the 023 upgrade test from MIGRATIONS
+- **settings:** never send a Limits value that silently means never (#65 review)
+- **worktrees:** address #63 review (pre-existing FK rows, events, linking order)
+- **worktrees:** host-scoped worktree rows, sibling linking, purge FK guard
+- **repair:** reap fingerprints, timelines and inboxes with their rows; tick records fingerprints
+- **repair:** keep render_git_script test-only; scope a test's store lock before await
+- **sessions:** move_session follow-ups — post-kill check, event order, cap setting
+- **sessions:** move_session review — idle source, post-copy recheck, in-flight guard
+- **paths:** address #56 review (worktree FK, bare repos, remote cwd)
+- **paths:** canonical path identity, worktree dedupe, remote worktree hooks
+- **repair:** only the reconcile tick may drop a stale worktree entry automatically
+- **reconcile:** phantom status events, orphaned timelines, bg status filter, garbage tmux output
+- **repair:** re-check before removing a stale entry, same-filesystem guard, review nits
+- **repair:** keep the context-free plan() and backoff_of() test-only
+- **purge:** delete the project only after every host succeeds, strict not-found match
+- **projects:** purge Claude transcripts on the right host under both path forms
+- **orchestration:** host-check spawns, physical transcript paths, task liveness, marker ordering
+- **orchestration:** dispatch_task defers worker naming to new_session; post-rebase test fixes
+- **projects:** link remote sessions under custom roots and flat layout, correct previews
+- **repair:** automatic repair only creates, destructive steps explicit, canonical paths
+- **sessions:** self-repairing worktrees and tmux cwd on create, recreate, restart, attach
+- **sessions-ux:** platform-correct switcher chord, reveal selected session, dialog fixes
+- **mcp:** gate session_id addressing on the resolved host after the Caller rebase
+- **triage:** no launch notification burst, PR probe outside host budget, GC skips no-worktree rows, attached-pane guard
+- **security:** bind confirm nonce to args, refuse malformed settings.json, master-only fleet admin
+- **security:** per-host tokens, http hooks on every host, caller identity, blast-radius limits (W1 Track B)
+- **mcp:** correct status docs and skill params, drop unknown CLI statuses
+- **terminal:** loop-safe secondary DA, bounded control-string buffer
+- **terminal:** code-point rendering, wcwidth, DCS/APC swallow, full key table, ansi property tests (W4 F3/F7)
+- **ssh:** reset master only when wedged; forced refresh path; register E_SSH_TIMEOUT
+- **backend:** ssh wall-clock timeouts, guarded list_sessions, no-op-free upserts (W1 Track A)
+- **frontend:** timer-based event batching, modal scrollbar clicks, keep selection on bootstrap failure
+- **frontend:** session identity, derived selection, native dialogs, toasts, event batching (W1 Track C)
+- **bg-sessions:** allow prompts that start with a dash
+- **ci:** runner-agnostic cargo-deny install, single pnpm version source
+- **security:** gate devtools behind a feature, harden claude CLI argv and ssh -R
+- **a11y:** clear the 12 svelte-check warnings in dialogs and Sidebar
+- **sessions:** make bg:<uuid> rows addressable — kill via claude stop, typed E_BG_SESSION elsewhere
+- **reconcile:** prune dead bg session rows and cap session_events
+- **pty:** keepalive + auto-reconnect so a wedged remote attach self-heals
+- **reconcile:** bound per-host probe so a wedged SSH master cannot empty the sidebar
+- **safe-kill:** install Stop hook on remote hosts via provision (#30)
+
+### Documentation
+- fix stale src-tauri paths in the asset-layers design spec
+- the client-access doc and comment sweep
+- pairing, clients, the event stream and the two new endpoints
+- renumber host-reboot spec's migration off the taken 032
+- **plans:** client access implementation plan
+- **specs:** client access design — pairing, events stream, conversation tool, built-in TLS
+- **plan:** correct the Claude harness reference in task 6
+- **plan:** implementation plan for composable asset layers
+- **spec:** composable asset layers (roles + contexts)
+- **mcp:** refresh_projects says what a hub without a local host answers
+- point the schema-version hint at MIGRATIONS instead of a number
+- **hub:** ssh ownership and known_hosts, token regeneration on migration, bare-binary steps
+- **hub:** claude-fleet client name; re-provisioning keeps user hooks
+- **spec:** host reboot session survival and restore
+- **plans:** hub daemon implementation plan
+- **specs:** hub daemon design — headless fleet-hub, core crate split, public-URL provisioning
+- **conversation:** user guide for the Conversation tab, plus final cleanups
+- **pty:** describe the writer thread and shared output state
+- **install:** explain the macOS "damaged" Gatekeeper dialog
+- name the Open in session action in the catalog concepts
+- describe catalog authoring
+- **control-api:** hook contract; SessionEnd, StopFailure and Notification
+- **specs,plans:** hook events design and implementation plan
+- **plans:** asset authoring implementation plan
+- **specs:** asset catalog sub-project 3 design (authoring)
+- fix misplaced doc comment and stale sync-tool/confirm wording
+- describe the sync engine and its MCP tools
+- **control-api:** stateless transport, is_error tool results, wall clocks
+- **plans:** asset sync engine implementation plan
+- **plans:** MCP transport and tool-contract implementation plan
+- **specs:** asset catalog sub-project 2 design (sync engine)
+- **specs:** MCP transport and tool-contract hardening design
+- **specs:** note importer slugification in the asset-catalog design
+- describe the asset catalog and its MCP tools
+- **plans:** asset catalog sub-project 1 implementation plan
+- **specs:** asset catalog sub-project 1 design (universal model, import, inventory)
+- **control:** track bg runs with session_transcript; explain external rows
+- **plan:** agent rows outside tmux and the Conversation tab
+- **spec:** agent rows outside tmux and the Conversation tab
+- **plans:** Hosts view and per-account usage
+- **specs:** Hosts view and per-account usage
+- **plans:** record the confirm-token flow and honest cancel for the dialog
+- **plans:** the TS parser must port every rule is_component gained
+- **plans:** record the cancellation trap that would undo the clone timeout fix
+- **plans:** de-duplicate projects case-insensitively, not in the parser
+- **plans:** use the real confirmation code, introduce E_EXISTS and E_GH
+- **plans:** add a project that is not checked out yet
+- **specs:** add a project that is not checked out yet
+- **specs:** real separator spans, wrapping details line, overlaid row actions
+- **specs:** wt-status line above the picker; no idle state
+- record E_INVALID and the scanned-path cwd in the spec and plan
+- **plans:** host-scoped worktree picker and two-line session rows
+- **specs:** friendly name is primary on line 1, tmux name on line 2
+- **specs:** host-scoped worktree picker and two-line session rows
+- **specs:** keep the session-management analysis and pre-check
+- **diagnostics:** say what the generated reference lists for Tauri commands
+- **mcp:** regenerate the control API reference for repair_session
+- **mcp:** regenerate the control API reference for repair_session
+- **mcp:** regenerate the control API reference for repair_session
+- CI mirror and toolchain notes, crate license, health test literal (W0 follow-ups)
+- **control-api:** fix drift, slim the control skill and managed CLAUDE.md
+- correct stale orientation notes (W0.1)
+- **plans:** six-lens improvement report and wave plan
+- **mcp:** regenerate control-api reference for kill_session description
 ## [0.2.4] - 2026-05-25
 
 ### Added
@@ -36,4 +553,6 @@ Entries before 0.2.4 were plain version bumps and were not recorded individually
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.22]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.22
+[0.2.21]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.21
 [0.2.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.4

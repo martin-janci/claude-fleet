@@ -95,7 +95,7 @@ export interface SessionRow {
   usage_model?: string | null;
   /** Unix secs the usage totals last changed. */
   usage_updated_at?: number | null;
-  // Current-conversation context (migration 034), flattened on the wire.
+  // Current-conversation context (migration 037), flattened on the wire.
   /** Model of the current conversation (SessionStart / transcript). */
   model: string | null;
   /** Prompt size of the latest request: input + cache read + cache write. */

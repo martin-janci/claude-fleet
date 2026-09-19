@@ -61,10 +61,12 @@ impl FleetTools {
     #[tool(description = "Compute a sync plan: scan the selected hosts, \
         compare every catalog asset with what is installed, and return \
         per-host actions (create | update | overwrite | adopt | remove | \
-        plugin_install | noop | blocked) plus a plan_id valid for 10 \
-        minutes. Inventory states now include orphan (in the host's fleet \
-        manifest, no longer in the catalog). Nothing is written. Pass the \
-        plan_id to apply_sync.")]
+        plugin_install | plugin_update | noop | blocked) plus a plan_id \
+        valid for 10 minutes. plugin_update fires once a pinned plugin's \
+        catalog version changes; a host still on the old version after \
+        that stays blocked. Inventory states now include orphan (in the \
+        host's fleet manifest, no longer in the catalog). Nothing is \
+        written. Pass the plan_id to apply_sync.")]
     pub(super) async fn plan_sync(
         &self,
         Parameters(p): Parameters<PlanSyncParams>,

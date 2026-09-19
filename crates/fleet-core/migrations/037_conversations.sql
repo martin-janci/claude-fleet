@@ -47,4 +47,4 @@ INSERT OR IGNORE INTO conversations (session_id, claude_session_id, transcript_p
   SELECT id, claude_session_id, transcript_path, created_at, 'unknown'
   FROM sessions WHERE claude_session_id IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (34);
+INSERT OR IGNORE INTO schema_version (version) VALUES (37);

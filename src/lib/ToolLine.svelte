@@ -42,6 +42,9 @@
   let open = $state(false);
   let detail = $state<ToolDetail | null>(null);
   let loadError = $state<string | null>(null);
+  // A hub-connected desktop refuses the detail read (`E_LOCAL_ONLY`, the hub
+  // has no tool for it); retrying cannot help, so no Retry is offered.
+  let loadRetryable = $state(true);
   let fetching = $state(false);
   let fullDiff = $state(false);
   let fullResult = $state(false);
@@ -56,6 +59,7 @@
       open = false;
       detail = null;
       loadError = null;
+      loadRetryable = true;
       fetching = false;
       fullDiff = false;
       fullResult = false;
@@ -95,7 +99,10 @@
     if (mine !== key) return;
     fetching = false;
     if (r.ok) detail = r.value;
-    else loadError = r.error.message;
+    else {
+      loadError = r.error.message;
+      loadRetryable = r.error.code !== 'E_LOCAL_ONLY';
+    }
   }
 
   function toggle() {
@@ -155,7 +162,9 @@
     {#if loadError}
       <div class="detail-error" data-testid="conv-tool-detail-error" role="alert">
         <span>{loadError}</span>
-        <button type="button" class="linkish" onclick={() => void fetchDetail()}>Retry</button>
+        {#if loadRetryable}
+          <button type="button" class="linkish" onclick={() => void fetchDetail()}>Retry</button>
+        {/if}
       </div>
     {:else if detail}
       <div class="detail" data-testid="conv-tool-detail">

@@ -129,6 +129,48 @@ impl Store {
         rows.collect()
     }
 
+    /// The fleet alias of the **agent** host addressed by `key`, or `None` if
+    /// `key` names no agent host (including an alias with no row at all).
+    ///
+    /// `key` is whatever the service layer handed the transport as its `host`
+    /// argument. That is the fleet alias everywhere except `service::hosts`,
+    /// which probes a host by its `ssh_alias`, so both columns are matched —
+    /// and the *fleet alias* is what comes back, because that is the name an
+    /// agent registers under.
+    ///
+    /// A `key` that is some host's fleet alias names THAT host, whatever its
+    /// transport: an SSH host whose alias happens to be an agent host's
+    /// `ssh_alias` stays on SSH, and its commands never run on the agent's
+    /// machine. Only a key that is no host's alias is matched against the
+    /// `ssh_alias` column, and only when it is unambiguous across the WHOLE
+    /// table — one claimant, on the agent transport. Two hosts claiming one
+    /// `ssh_alias` route to neither, and the count deliberately includes SSH
+    /// hosts: were it agent rows only, `mefistos` (ssh) and `laptop` (agent)
+    /// both claiming `box.example` would leave a single agent claimant, and
+    /// `probe_host(mefistos)` — which addresses a host by the `ssh_alias` on
+    /// its row — would run on the laptop and stamp the laptop's versions onto
+    /// `mefistos`.
+    pub fn agent_host_alias(&self, key: &str) -> Result<Option<String>, rusqlite::Error> {
+        let exact: Option<String> = self
+            .conn
+            .prepare_cached("SELECT transport FROM hosts WHERE alias=?1")?
+            .query_row([key], |r| r.get(0))
+            .optional()?;
+        if let Some(transport) = exact {
+            return Ok((transport == "agent").then(|| key.to_string()));
+        }
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT alias, transport FROM hosts WHERE ssh_alias=?1 LIMIT 2")?;
+        let matches: Vec<(String, String)> = stmt
+            .query_map([key], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(match matches.as_slice() {
+            [(alias, transport)] if transport == "agent" => Some(alias.clone()),
+            _ => None,
+        })
+    }
+
     pub fn insert_host(&self, alias: &str, ssh_alias: Option<&str>) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO hosts (alias, ssh_alias, reachable, hidden) VALUES (?1, ?2, 0, 0)
@@ -308,6 +350,41 @@ impl Store {
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
+    /// Set a host's transport (migration 034): `"ssh"` (the default, reached
+    /// over SSH as today) or `"agent"` (reached through an outbound
+    /// fleet-agent connection). `E_INVALID` for any other value — an
+    /// unvalidated write here would silently strand every future command
+    /// against the host. `E_NOTFOUND` for an unknown alias (same
+    /// affected-row-count check as `set_host_token_mode`) — unlike
+    /// `set_host_hidden`/`set_host_account`/`set_host_provisioned` (which
+    /// return a bare `rusqlite::Error` and can't express it), this setter
+    /// already returns `IpcError`, so a typo'd alias gets a real signal
+    /// instead of a silent no-op.
+    pub fn set_host_transport(
+        &self,
+        alias: &str,
+        transport: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        if !HOST_TRANSPORTS.contains(&transport) {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_INVALID,
+                format!("unknown transport {transport:?}: must be \"ssh\" or \"agent\""),
+            ));
+        }
+        let n = self.conn.execute(
+            "UPDATE hosts SET transport=?1 WHERE alias=?2",
+            rusqlite::params![transport, alias],
+        )?;
+        if n == 0 {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("host {alias} not found"),
+            ));
+        }
+        self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        Ok(())
+    }
+
     pub fn set_host_provisioned(
         &self,
         alias: &str,
@@ -406,6 +483,41 @@ impl Store {
     pub fn get_host_row(&self, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
         fetch_host(&self.conn, alias)
     }
+
+    // ---- host boot identity (migration 036) ----
+
+    /// The boot identity recorded by the last probe that could read it.
+    /// An unknown host, or one never probed, is `StoredIdentity::default()`
+    /// (both `None`) — "unknown", which never produces a mass-loss verdict.
+    pub fn get_host_identity(&self, alias: &str) -> rusqlite::Result<StoredIdentity> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT boot_id, tmux_server_pid FROM hosts WHERE alias = ?1",
+                rusqlite::params![alias],
+                |r| {
+                    Ok(StoredIdentity {
+                        boot_id: r.get(0)?,
+                        tmux_server_pid: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or_default())
+    }
+
+    pub fn set_host_identity(
+        &self,
+        alias: &str,
+        boot_id: Option<&str>,
+        tmux_server_pid: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE hosts SET boot_id = ?1, tmux_server_pid = ?2 WHERE alias = ?3",
+            rusqlite::params![boot_id, tmux_server_pid, alias],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -457,6 +569,33 @@ mod tests {
             .map(|h| h.alias)
             .collect();
         assert_eq!(names, vec!["local", "mefistos", "zebra"]);
+    }
+
+    /// The `ssh_alias` fallback answers `probe_host`, which addresses a host
+    /// by the `ssh_alias` on its row. It may only answer when the key is
+    /// unambiguous across the WHOLE table: one SSH host and one agent host
+    /// claiming the same key is exactly as ambiguous as two agent hosts, and
+    /// picking the agent would run the SSH host's probe on the agent's box.
+    #[test]
+    fn the_ssh_alias_fallback_answers_only_for_an_unshared_key() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("laptop", Some("box.example")).unwrap();
+        s.set_host_transport("laptop", "agent").unwrap();
+        assert_eq!(
+            s.agent_host_alias("box.example").unwrap().as_deref(),
+            Some("laptop"),
+            "one claimant, and it is an agent host"
+        );
+
+        // A second claimant on ANY transport takes the key away again.
+        s.insert_host("mefistos", Some("box.example")).unwrap();
+        assert_eq!(s.agent_host_alias("box.example").unwrap(), None);
+        // …while each host's own fleet alias still names it.
+        assert_eq!(
+            s.agent_host_alias("laptop").unwrap().as_deref(),
+            Some("laptop")
+        );
+        assert_eq!(s.agent_host_alias("mefistos").unwrap(), None);
     }
 
     #[test]
@@ -647,6 +786,40 @@ mod tests {
                 .unwrap()
                 .hidden
         );
+    }
+
+    #[test]
+    fn fresh_host_row_defaults_to_ssh_transport() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        assert_eq!(s.get_host_row("local").unwrap().unwrap().transport, "ssh");
+        s.insert_host("h", Some("h")).unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().transport, "ssh");
+    }
+
+    #[test]
+    fn set_host_transport_round_trips_and_rejects_unknown_values() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.set_host_transport("h", "agent").unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().transport, "agent");
+        s.set_host_transport("h", "ssh").unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().transport, "ssh");
+
+        let err = s.set_host_transport("h", "carrier-pigeon").unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        // The rejected write left the prior value untouched.
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().transport, "ssh");
+    }
+
+    /// An unknown alias is `E_NOTFOUND`, not a silent no-op — the same
+    /// affected-row-count check `set_host_token_mode` uses, so a typo'd
+    /// alias gets a signal instead of a success that changed nothing.
+    #[test]
+    fn set_host_transport_rejects_an_unknown_alias() {
+        let s = Store::open_in_memory().unwrap();
+        let err = s.set_host_transport("nope", "agent").unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
     }
 
     #[test]
@@ -984,5 +1157,44 @@ mod tests {
         // edit, not folded into upsert_account's no-op detection.
         s.set_account_nickname("u1", Some("Home")).unwrap();
         assert_eq!(bus.take(), vec!["account:upserted:u1".to_string()]);
+    }
+
+    // ── host boot identity (migration 036) ──
+
+    #[test]
+    fn host_identity_round_trips_and_defaults_to_unknown() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mefistos").unwrap();
+        assert_eq!(
+            s.get_host_identity("mefistos").unwrap(),
+            StoredIdentity::default()
+        );
+
+        s.set_host_identity("mefistos", Some("boot-a"), Some(4242))
+            .unwrap();
+        assert_eq!(
+            s.get_host_identity("mefistos").unwrap(),
+            StoredIdentity {
+                boot_id: Some("boot-a".into()),
+                tmux_server_pid: Some(4242)
+            }
+        );
+
+        // "No server" is stored as a NULL pid, distinct from a changed pid.
+        s.set_host_identity("mefistos", Some("boot-a"), None)
+            .unwrap();
+        assert_eq!(
+            s.get_host_identity("mefistos").unwrap().tmux_server_pid,
+            None
+        );
+    }
+
+    #[test]
+    fn host_identity_of_an_unknown_host_is_unknown_not_an_error() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(
+            s.get_host_identity("ghost").unwrap(),
+            StoredIdentity::default()
+        );
     }
 }

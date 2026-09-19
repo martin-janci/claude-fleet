@@ -179,7 +179,7 @@ which case it resets nothing.
 
 ### 1.3 Conversation model
 
-**Migration `034_conversations.sql`:**
+**Migration `037_conversations.sql` (numbered 034, then 036, before main took 034–036):**
 
 ```sql
 CREATE TABLE conversations (
@@ -215,7 +215,7 @@ INSERT OR IGNORE INTO conversations (session_id, claude_session_id, transcript_p
   SELECT id, claude_session_id, transcript_path, created_at, 'unknown'
   FROM sessions WHERE claude_session_id IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (34);
+INSERT OR IGNORE INTO schema_version (version) VALUES (37);
 ```
 
 Registered in `MIGRATIONS`, gated, run inside a transaction.
@@ -514,7 +514,7 @@ spinner text that exists today).
   (newer transcript beats older pane, reset to 0 sticks when the footer is
   empty).
 - Parser: compact summary, compact boundary, meta/command entries, interrupt.
-- Migration 034: fresh DB and upgrade from 033 with backfill.
+- Migration 037: fresh DB and upgrade from 036 with backfill.
 - Tasks: `/clear` inside a worker keeps the task running; recreate still fails it.
 - `reference_is_current` after regenerating the reference.
 

@@ -5,20 +5,25 @@
 //! code only means something inside the process that will redeem it (the
 //! registry is in memory), and revoking through the live server is what makes
 //! the change visible on the very next request. So each command reads the
-//! master token out of the data dir, resolves the port the daemon listens on
-//! (flag > env > stored setting > default, as `serve` and `healthcheck` do),
-//! and then calls the hub's own `/mcp` — `pair_client`, `list_clients`,
+//! master token out of the data dir, resolves the port AND the TLS mode the
+//! daemon runs with (flag > env > stored setting > default — the same
+//! precedence `serve`/`init` resolve every `hub.*` value with), and then
+//! calls the hub's own `/mcp` — `pair_client`, `list_clients`,
 //! `revoke_client` — instead of opening a second write path into the store.
 //!
-//! The request is written by hand over a `TcpStream`, the way `serve.rs`'s
-//! health probe is: the only endpoint these commands ever talk to is
-//! `127.0.0.1`, so an HTTP client crate (and a TLS stack with it) would be a
-//! large dependency for one loopback POST.
+//! The request is written by hand over a `tokio::net::TcpStream` — or, when
+//! the hub terminates TLS itself (`--tls cert`), over the same client-side
+//! TLS handshake `serve.rs`'s healthcheck probe uses
+//! ([`crate::serve::maybe_tls`], [`crate::tls::insecure_probe_client`])
+//! rather than a second TLS client: the only endpoint these commands ever
+//! talk to is `127.0.0.1`, so an HTTP client crate would be a large
+//! dependency for one loopback POST.
 
-use crate::config::{resolve_data_dir, HubOptions};
+use crate::config::{resolve_data_dir, HubOptions, TlsMode};
 use crate::out;
-use crate::serve::existing_db;
+use crate::serve::{existing_db, maybe_tls};
 use fleet_core::mcp::settings::McpSettings;
+use fleet_core::service::hub::SETTING_TLS;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -41,6 +46,9 @@ const MAX_RESPONSE: u64 = 1024 * 1024;
 struct HubConn {
     addr: SocketAddr,
     token: String,
+    /// Whether the hub terminates TLS itself (`--tls cert`), resolved the
+    /// same way `hub_conn` resolves `addr`'s port.
+    tls: bool,
 }
 
 /// Read the master token out of the data dir and work out which port the
@@ -81,11 +89,33 @@ fn hub_conn(opts: &HubOptions, env: &HashMap<String, String>) -> Result<HubConn,
         Some(p) => p.parse::<u16>().map_err(|e| format!("port '{p}': {e}"))?,
         None => cfg.port,
     };
+    // TLS: the same precedence `serve`/`init` resolve `hub.tls` with — flag >
+    // `FLEET_HUB_TLS` > the stored setting > off. Unlike `healthcheck`, which
+    // never opens `state.db` a second time while `serve` holds it for
+    // writing, this command already opened it read-only above for the port
+    // and the token, so the stored value costs nothing extra to read here.
+    let tls = match crate::config::pick(
+        "--tls",
+        opts.tls.clone(),
+        env,
+        "FLEET_HUB_TLS",
+        store
+            .get_setting(SETTING_TLS)
+            .map_err(|e| format!("read {SETTING_TLS}: {e}"))?,
+    )? {
+        Some(v) => TlsMode::parse(&v)?,
+        None => TlsMode::default(),
+    };
+    if tls == TlsMode::Auto {
+        return Err(crate::config::ACME_UNAVAILABLE.to_string());
+    }
+    let tls = tls.terminates_tls();
     // Loopback, like `healthcheck`: the CLI runs next to the daemon, and the
     // master token must not travel over anything but the loopback interface.
     Ok(HubConn {
         addr: SocketAddr::from(([127, 0, 0, 1], port)),
         token,
+        tls,
     })
 }
 
@@ -112,24 +142,30 @@ async fn call_tool(
         conn.token,
         body.len()
     );
-    let raw = match tokio::time::timeout(CALL_TIMEOUT, exchange(addr, &request)).await {
+    let raw = match tokio::time::timeout(CALL_TIMEOUT, exchange(addr, conn.tls, &request)).await {
         Ok(r) => r?,
         Err(_) => return Err(format!("{addr} did not answer within {CALL_TIMEOUT:.0?}")),
     };
     parse_tool_response(&raw)
 }
 
-/// Write `request` to `addr` and read the whole response back.
-async fn exchange(addr: SocketAddr, request: &str) -> Result<String, String> {
+/// Write `request` to `addr` and read the whole response back — over TLS
+/// first when `tls`, reusing the healthcheck probe's own connect/handshake
+/// code ([`maybe_tls`]) rather than a second TLS client.
+async fn exchange(addr: SocketAddr, tls: bool, request: &str) -> Result<String, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut conn = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
+    let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::ConnectionRefused {
             format!("no hub is answering on {addr} — {NOT_RUNNING}")
         } else {
             format!("connect {addr}: {e}")
         }
     })?;
+    let mut conn = maybe_tls(tcp, addr, tls).await?;
     conn.write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("send to {addr}: {e}"))?;
+    conn.flush()
         .await
         .map_err(|e| format!("send to {addr}: {e}"))?;
     let mut raw = Vec::new();
@@ -164,7 +200,7 @@ pub fn parse_tool_response(raw: &str) -> Result<serde_json::Value, String> {
             _ => format!("the hub answered {status}"),
         });
     }
-    let payload = last_event_payload(body);
+    let payload = fleet_core::mcp::wire::last_event_payload(body);
     let envelope: serde_json::Value =
         serde_json::from_str(&payload).map_err(|e| format!("the hub sent unreadable JSON: {e}"))?;
     if let Some(err) = envelope.get("error") {
@@ -189,38 +225,11 @@ pub fn parse_tool_response(raw: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(text).map_err(|e| format!("the tool's result was not JSON: {e}"))
 }
 
-/// The payload of the LAST server-sent event in `body`, or the trimmed body
-/// itself when there is no `data:` line (a `json_response` transport).
-///
-/// This de-chunks properly rather than assuming one event per response and
-/// one line per event, which the earlier "take the last `data:` line" did:
-/// per the SSE grammar a blank line ends an event and an event may spread its
-/// payload over several `data:` lines, which are joined with `\n`. A keep-alive
-/// comment (`: ping`) or a second frame ahead of the answer is therefore
-/// skipped, and a long envelope split across `data:` lines is reassembled
-/// instead of being truncated to its tail.
-fn last_event_payload(body: &str) -> String {
-    let mut events: Vec<String> = Vec::new();
-    let mut current: Vec<&str> = Vec::new();
-    for line in body.lines() {
-        if line.trim().is_empty() {
-            if !current.is_empty() {
-                events.push(current.join("\n"));
-                current.clear();
-            }
-            continue;
-        }
-        if let Some(data) = line.strip_prefix("data:") {
-            // The spec strips ONE leading space after the colon, no more.
-            current.push(data.strip_prefix(' ').unwrap_or(data));
-        }
-        // Every other field (`event:`, `id:`, a `:` comment) is not payload.
-    }
-    if !current.is_empty() {
-        events.push(current.join("\n"));
-    }
-    events.pop().unwrap_or_else(|| body.trim().to_string())
-}
+// The SSE de-chunking this used to carry now lives in
+// `fleet_core::mcp::wire::last_event_payload`: the desktop's hub-client
+// backend has to undo the same framing, and a second copy of a subtle parser
+// is how the two drift apart. The tests below still exercise it through
+// `parse_tool_response`.
 
 // --- rendering ---------------------------------------------------------------
 
@@ -495,6 +504,69 @@ mod tests {
         assert!(e.contains("not-a-port"), "{e}");
     }
 
+    /// `hub.tls` resolves the same way `mcp.port` does: flag > env > the
+    /// stored setting > off — the precedence `serve`/`init` use for every
+    /// `hub.*` value. This is deliberately NOT `healthcheck`'s flag > env >
+    /// default, which never reads the store at all because it must not open
+    /// `state.db` a second time while `serve` holds it for writing; this
+    /// command already opens the store read-only above for the port and the
+    /// token, so reading `hub.tls` the same way costs nothing extra.
+    #[test]
+    fn the_tls_flag_and_env_beat_the_stored_setting() {
+        let dir = data_dir_with_port("4180");
+        {
+            let store = fleet_core::store::Store::open_with_bus(
+                &dir.path().join("state.db"),
+                std::sync::Arc::new(fleet_core::events::NoopEventBus),
+            )
+            .unwrap();
+            store.set_setting(SETTING_TLS, "cert").unwrap();
+        }
+        let no_env = HashMap::new();
+
+        // Nothing given: the stored `cert` mode is picked up.
+        let conn = hub_conn(&opts_for(&dir, None), &no_env).expect("stored tls");
+        assert!(conn.tls, "hub.tls=cert in the store must be picked up");
+
+        // The flag wins over the stored value.
+        let mut opts = opts_for(&dir, None);
+        opts.tls = Some("off".to_string());
+        let conn = hub_conn(&opts, &no_env).expect("--tls off");
+        assert!(!conn.tls, "--tls off must beat the stored cert");
+
+        // The env wins over the store.
+        let env: HashMap<String, String> =
+            [("FLEET_HUB_TLS".to_string(), "off".to_string())].into();
+        assert!(!hub_conn(&opts_for(&dir, None), &env).unwrap().tls);
+
+        // A bad value is refused, naming the flag.
+        let mut opts = opts_for(&dir, None);
+        opts.tls = Some("yes".to_string());
+        let e = match hub_conn(&opts, &no_env) {
+            Err(e) => e,
+            Ok(_) => panic!("--tls yes must be refused"),
+        };
+        assert!(e.contains("--tls"), "{e}");
+    }
+
+    /// `hub.tls=auto` is refused here the same way `config::resolve` refuses
+    /// it for `serve`/`init` — `terminates_tls()` is true for both `Auto` and
+    /// `Cert`, so without this check `pair`/`client` would silently speak a
+    /// client-side TLS handshake `serve` never offered, against a hub that is
+    /// actually plaintext.
+    #[test]
+    fn tls_auto_is_refused_like_resolve_refuses_it() {
+        let dir = data_dir_with_port("4180");
+        let mut opts = opts_for(&dir, None);
+        opts.tls = Some("auto".to_string());
+        let no_env = HashMap::new();
+        let e = match hub_conn(&opts, &no_env) {
+            Err(e) => e,
+            Ok(_) => panic!("--tls auto must be refused, not silently treated as cert"),
+        };
+        assert_eq!(e, crate::config::ACME_UNAVAILABLE);
+    }
+
     /// One `tools/call` answer as the hub really frames it: SSE, so the JSON
     /// is on a `data:` line rather than being the whole body.
     fn sse(payload: &str) -> String {
@@ -702,5 +774,96 @@ mod tests {
         assert_eq!(display_width("e\u{301}"), 1);
         assert_eq!(display_width("📱"), 2);
         assert_eq!(display_width("👍\u{fe0f}"), 2);
+    }
+
+    /// A minimal, real hub: a `state.db` with a master token, and a
+    /// listener speaking the actual MCP transport, optionally behind the
+    /// TLS acceptor `tls::acceptor` builds for `--tls cert`. Returns the
+    /// `TempDir` (must outlive `pair`/`client_*` calls against it), the
+    /// shutdown token and the serve task, which the caller must cancel and
+    /// join.
+    async fn running_hub(
+        tls: Option<crate::tls::HubTls>,
+    ) -> (
+        tempfile::TempDir,
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use fleet_core::events::NoopEventBus;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let token = "b".repeat(64);
+        let store = fleet_core::store::Store::open_with_bus(
+            &dir.path().join("state.db"),
+            Arc::new(NoopEventBus),
+        )
+        .unwrap();
+        store
+            .set_setting(fleet_core::mcp::SETTING_TOKEN, &token)
+            .unwrap();
+        store
+            .set_setting(fleet_core::mcp::SETTING_PORT, &port.to_string())
+            .unwrap();
+        store
+            .set_setting(SETTING_TLS, if tls.is_some() { "cert" } else { "off" })
+            .unwrap();
+
+        let (shutdown, task) = fleet_core::mcp::start_with_listener(
+            Arc::new(Mutex::new(store)),
+            Arc::new(fleet_core::ssh::SshClient::new()),
+            fleet_core::cancel::CancellationRegistry::new(),
+            Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new()),
+            fleet_core::mcp::McpGuards::new(Arc::new(
+                |_: &fleet_core::mcp::guard::ConfirmRequest| {},
+            )),
+            listener,
+            token,
+            vec![],
+            None,
+            tls,
+        )
+        .await
+        .unwrap();
+        (dir, shutdown, task)
+    }
+
+    /// The whole point of the task: `fleet-hub pair` against a hub running
+    /// `--tls cert` — today's hand-rolled `TcpStream` cannot complete the
+    /// handshake at all, so this fails without the fix.
+    #[tokio::test]
+    async fn pair_reaches_a_hub_that_terminates_tls() {
+        let cert_dir = tempfile::tempdir().unwrap();
+        let (cert, key, _) = crate::tls::tests::self_signed(cert_dir.path());
+        let tls = crate::tls::acceptor(&crate::tls::tests::cert_resolved(cert, key))
+            .unwrap()
+            .expect("cert mode");
+
+        let (dir, shutdown, task) = running_hub(Some(tls)).await;
+        let opts = opts_for(&dir, None);
+        let result = pair(&opts, &HashMap::new(), "phone", None, None).await;
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+        assert!(result.is_ok(), "pair over TLS must succeed: {result:?}");
+    }
+
+    /// The unchanged path: `fleet-hub pair` against a plaintext hub, which
+    /// must keep working exactly as before.
+    #[tokio::test]
+    async fn pair_reaches_a_plaintext_hub() {
+        let (dir, shutdown, task) = running_hub(None).await;
+        let opts = opts_for(&dir, None);
+        let result = pair(&opts, &HashMap::new(), "phone", None, None).await;
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+        assert!(
+            result.is_ok(),
+            "pair over plaintext must succeed: {result:?}"
+        );
     }
 }

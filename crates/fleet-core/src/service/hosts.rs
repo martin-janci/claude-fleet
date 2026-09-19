@@ -23,6 +23,73 @@ pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
     s.list_hosts().map_err(IpcError::from)
 }
 
+/// One agent host, as `agent_status` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AgentHostStatus {
+    pub alias: String,
+    /// A `fleet-agent` is connected for this host right now.
+    pub connected: bool,
+    /// Unix seconds the live connection was registered; `None` when offline.
+    pub connected_at: Option<i64>,
+    pub agent_version: Option<String>,
+    pub host_name: Option<String>,
+    pub os: Option<String>,
+}
+
+/// What `agent_status` answers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AgentStatusReport {
+    /// This server accepts agent connections (a hub). `false` on the desktop,
+    /// which reaches every host over SSH.
+    pub enabled: bool,
+    /// Every host on the agent transport, connected or not, by alias.
+    pub hosts: Vec<AgentHostStatus>,
+}
+
+/// Which agent hosts have a `fleet-agent` connected, since when, and which
+/// version — every host whose transport is `agent`, so an offline one is
+/// listed too.
+pub fn agent_status(
+    store: &Mutex<Store>,
+    registry: Option<&crate::agent::AgentRegistry>,
+) -> Result<AgentStatusReport, IpcError> {
+    let agent_hosts: Vec<String> = {
+        let s = lock(store)?;
+        s.list_hosts()?
+            .into_iter()
+            .filter(|h| h.transport == "agent")
+            .map(|h| h.alias)
+            .collect()
+    };
+    let live = registry.map(|r| r.snapshot()).unwrap_or_default();
+    let mut hosts: Vec<AgentHostStatus> = agent_hosts
+        .into_iter()
+        .map(|alias| match live.iter().find(|a| a.alias == alias) {
+            Some(a) => AgentHostStatus {
+                alias,
+                connected: true,
+                connected_at: Some(a.connected_at),
+                agent_version: Some(a.agent_version.clone()),
+                host_name: Some(a.host_name.clone()),
+                os: Some(a.os.clone()),
+            },
+            None => AgentHostStatus {
+                alias,
+                connected: false,
+                connected_at: None,
+                agent_version: None,
+                host_name: None,
+                os: None,
+            },
+        })
+        .collect();
+    hosts.sort_by(|a, b| a.alias.cmp(&b.alias));
+    Ok(AgentStatusReport {
+        enabled: registry.is_some(),
+        hosts,
+    })
+}
+
 pub fn list_accounts(store: &Mutex<Store>) -> Result<Vec<crate::store::AccountRow>, IpcError> {
     let s = lock(store)?;
     s.list_accounts().map_err(IpcError::from)
@@ -36,6 +103,12 @@ pub struct AddHostArgs {
     pub alias: String,
     /// SSH config alias used to reach the host (from `~/.ssh/config`).
     pub ssh_alias: String,
+    /// `"ssh"` (the default) or `"agent"` — how the host is reached.
+    /// Anything else is rejected before the host is persisted. An `"agent"`
+    /// host is added without an SSH probe: it is reachable only through a
+    /// `fleet-agent` that has yet to dial in.
+    #[serde(default)]
+    pub transport: Option<String>,
 }
 
 pub async fn add_host(
@@ -47,11 +120,45 @@ pub async fn add_host(
     crate::validate::host_alias(&args.alias)?;
     // Only ever an argument to `ssh`, never the `local` host itself.
     crate::validate::host_alias_syntax(&args.ssh_alias)?;
-    // Probe first; we don't want to persist a host we can't talk to.
-    let (reachable, claude_ver, tmux_ver, account) = probe(ssh, &args.ssh_alias).await?;
+    // Validate the transport before the probe or any write: `insert_host`
+    // autocommits and fires `host_added` immediately (no transaction wraps
+    // this whole call), so validating only once we reach
+    // `Store::set_host_transport` left a ghost, unreachable-looking row
+    // behind — and an emitted event — on a rejected value.
+    if let Some(t) = args.transport.as_deref() {
+        if !crate::store::HOST_TRANSPORTS.contains(&t) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("unknown transport {t:?}: must be \"ssh\" or \"agent\""),
+            ));
+        }
+    }
+    // An agent host is, by definition, one the hub cannot dial — that is the
+    // whole reason it needs an agent — so an SSH probe must not be the price
+    // of admission. Nor can the agent dial in first: the per-host token it
+    // authenticates with is minted against the row this call creates. So the
+    // row is persisted unprobed and `reachable=false`, and reachability
+    // arrives from the agent registry — through the router, which needs the
+    // row to exist — on the first `probe_host` or reconcile pass after the
+    // agent connects.
+    let (reachable, claude_ver, tmux_ver, account) = if args.transport.as_deref() == Some("agent") {
+        (false, None, None, None)
+    } else {
+        // Probe first; we don't want to persist a host we can't talk to.
+        probe(ssh, &args.ssh_alias).await?
+    };
     {
         let s = lock(store)?;
         s.insert_host(&args.alias, Some(&args.ssh_alias))?;
+        // `insert_host` is an upsert, so this branch also runs on a re-add
+        // of an existing alias. Only write the transport when the caller
+        // named one: `None` means "unspecified", not "reset to ssh" — a
+        // fresh row already gets 'ssh' from the column default, but an
+        // existing row (e.g. already "agent") must not be silently
+        // downgraded by a re-add that didn't mention transport at all.
+        if let Some(t) = args.transport.as_deref() {
+            s.set_host_transport(&args.alias, t)?;
+        }
         // Link account if probe found one
         if let Some(acc) = account
             .as_ref()
@@ -598,6 +705,48 @@ fn now_unix() -> i64 {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn agent_status_lists_every_agent_host_connected_or_not() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            for (alias, transport) in [("laptop", "agent"), ("desk", "agent"), ("mefistos", "ssh")]
+            {
+                s.insert_host(alias, Some(alias)).unwrap();
+                s.set_host_transport(alias, transport).unwrap();
+            }
+        }
+        let reg = crate::agent::AgentRegistry::new();
+        let _agent = crate::agent::fake::FakeAgent::connect(
+            &reg,
+            "laptop",
+            crate::agent::fake::answer_exit(0),
+        );
+
+        let report = agent_status(&store, Some(&reg)).unwrap();
+        assert!(report.enabled);
+        let aliases: Vec<_> = report.hosts.iter().map(|h| h.alias.as_str()).collect();
+        assert_eq!(aliases, ["desk", "laptop"], "agent hosts only, by alias");
+        let laptop = &report.hosts[1];
+        assert!(laptop.connected);
+        assert!(laptop.connected_at.is_some());
+        assert_eq!(laptop.agent_version.as_deref(), Some("9.9.9"));
+        assert_eq!(laptop.host_name.as_deref(), Some("fake-host"));
+        let desk = &report.hosts[0];
+        assert!(!desk.connected);
+        assert_eq!(
+            (desk.connected_at, desk.agent_version.as_deref()),
+            (None, None)
+        );
+
+        // The desktop routes nothing: the agent hosts are still listed, all
+        // offline, and it says it is not accepting agents at all.
+        let desktop = agent_status(&store, None).unwrap();
+        assert!(!desktop.enabled);
+        assert!(desktop.hosts.iter().all(|h| !h.connected));
+        assert_eq!(desktop.hosts.len(), 2);
+    }
+
     #[test]
     fn parse_tmux_version_extracts_version() {
         assert_eq!(parse_tmux_version("tmux 3.6a").as_deref(), Some("3.6a"));
@@ -1063,6 +1212,7 @@ mod tests {
             AddHostArgs {
                 alias: "alpha".into(),
                 ssh_alias: "alpha.example".into(),
+                transport: None,
             },
             &store,
             &fake,
@@ -1074,6 +1224,7 @@ mod tests {
         assert_eq!(row.tmux_version.as_deref(), Some("3.4"));
         assert_eq!(row.claude_version.as_deref(), Some("2.1.144"));
         assert_eq!(row.account_uuid.as_deref(), Some("acc-1"));
+        assert_eq!(row.transport, "ssh", "the default transport");
         assert!(row.last_pinged_at.is_some());
         let accounts = store.lock().unwrap().list_accounts().unwrap();
         assert_eq!(accounts.len(), 1);
@@ -1089,6 +1240,107 @@ mod tests {
         assert_eq!(calls[0].script().as_deref(), Some(PROBE_SCRIPT));
     }
 
+    /// The feature's headline case: a laptop behind NAT. The hub cannot dial
+    /// it — that is *why* it needs an agent — so an SSH probe must not be the
+    /// price of admission. Nor can the agent dial in first: the per-host
+    /// token it authenticates with is minted against the row this call
+    /// creates. So an agent host is persisted unprobed and `reachable=false`,
+    /// and its reachability comes from the agent registry (through the
+    /// router, which needs the row to exist) on the first `probe_host` or
+    /// reconcile pass after the agent connects.
+    #[tokio::test]
+    async fn add_host_persists_an_agent_host_the_hub_cannot_reach() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        fake.unreachable("gamma.example");
+        let row = add_host(
+            AddHostArgs {
+                alias: "gamma".into(),
+                ssh_alias: "gamma.example".into(),
+                transport: Some("agent".into()),
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .expect("an agent host is added without an SSH probe");
+        assert_eq!(row.transport, "agent");
+        assert!(!row.reachable, "no agent has connected yet");
+        assert!(
+            row.last_pinged_at.is_some(),
+            "the add is still a probe stamp"
+        );
+        assert!(
+            fake.calls().is_empty(),
+            "an agent host is never SSH-probed: {:?}",
+            fake.calls()
+        );
+        assert!(host_row(&store, "gamma").is_some(), "the row is persisted");
+    }
+
+    #[tokio::test]
+    async fn add_host_rejects_an_unknown_transport() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        let err = add_host(
+            AddHostArgs {
+                alias: "delta".into(),
+                ssh_alias: "delta.example".into(),
+                transport: Some("carrier-pigeon".into()),
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        // A rejected add_host must persist nothing — the same invariant
+        // add_host_unreachable_is_e_probe_and_persists_nothing protects.
+        // Before the fix, validation ran after insert_host had already
+        // committed and emitted host_added, leaving a ghost row behind.
+        assert!(
+            host_row(&store, "delta").is_none(),
+            "no row for a rejected transport"
+        );
+        assert!(fake.calls().is_empty(), "validation runs before the probe");
+    }
+
+    /// insert_host is an upsert, so re-adding an existing alias is a
+    /// supported update path. `transport: None` means "unspecified", not
+    /// "reset to ssh" — re-adding an agent host without naming a transport
+    /// must leave it on "agent", not silently downgrade it to "ssh".
+    #[tokio::test]
+    async fn add_host_without_a_transport_does_not_downgrade_an_existing_agent_host() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        add_host(
+            AddHostArgs {
+                alias: "eps".into(),
+                ssh_alias: "eps.example".into(),
+                transport: Some("agent".into()),
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .expect("first add");
+        let row = add_host(
+            AddHostArgs {
+                alias: "eps".into(),
+                ssh_alias: "eps.example".into(),
+                transport: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .expect("re-add without a transport");
+        assert_eq!(
+            row.transport, "agent",
+            "re-adding without a transport must not downgrade an agent host"
+        );
+    }
+
     #[tokio::test]
     async fn add_host_unreachable_is_e_probe_and_persists_nothing() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -1098,6 +1350,7 @@ mod tests {
             AddHostArgs {
                 alias: "down".into(),
                 ssh_alias: "down.example".into(),
+                transport: None,
             },
             &store,
             &fake,
@@ -1295,6 +1548,7 @@ mod tests {
             AddHostArgs {
                 alias: "bare".into(),
                 ssh_alias: "bare.example".into(),
+                transport: None,
             },
             &store,
             &fake,

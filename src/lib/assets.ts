@@ -24,6 +24,8 @@ export interface HostState { host_alias: string; harness: string; state: string 
 export interface Problem { path: string; message: string }
 export interface AssetSummary {
   kind: string; name: string; version: string; description: string; tags: string[]; hosts: HostState[];
+  /** The identifier the asset installs under, when it differs from `name`. */
+  install_as?: string;
 }
 export interface AssetListing {
   head: string; loaded_at: number; assets: AssetSummary[]; unmanaged: AssetInventoryRow[]; problems: Problem[];
@@ -63,6 +65,13 @@ export interface EditableAsset {
   version: string;
   description: string;
   tags?: string[];
+  /** The identifier a harness installs this asset under, when it differs
+   *  from `name` (skill/agent/mcp_server only — `hook`/`plugin_ref` derive
+   *  their host key from other fields and reject it). Absent/`null` means
+   *  "use `name`"; the backend omits the key on the wire when unset and
+   *  accepts either an absent key or an explicit `null` back (`Option<String>`
+   *  with `#[serde(default, skip_serializing_if = "Option::is_none")]`). */
+  install_as?: string | null;
   body: string;
   resources?: ResourceRef[];
   [key: string]: unknown;
@@ -78,7 +87,7 @@ export interface AssetDetail {
   hosts: HostState[];
 }
 export interface HostScanResult { host: string; status: string; detail: string | null; rows: number }
-export interface ImportReport { created: [string, string][]; problems: Problem[]; flagged_secrets: string[]; dry_run: boolean }
+export interface ImportReport { created: [string, string][]; problems: Problem[]; warnings?: Problem[]; flagged_secrets: string[]; dry_run: boolean }
 
 export const catalogConfig = writable<CatalogConfigRow | null>(null);
 export const catalog = writable<AssetListing | null>(null);

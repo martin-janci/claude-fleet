@@ -36,6 +36,7 @@ pub const CONFIRM_TTL: Duration = Duration::from_secs(10 * 60);
 pub const READONLY_TOOLS: &[&str] = &[
     "fleet_health",
     "list_hosts",
+    "agent_status",
     "discover_hosts",
     "list_accounts",
     "probe_host",
@@ -128,6 +129,11 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// Being here is about WHO may call a tool, not about whether it writes:
 /// `list_clients` is master-only *and* read-only, so it appears in
 /// [`READONLY_TOOLS`] too.
+///
+/// This is a DENYLIST, so a new router tool left off both this and
+/// [`CLIENT_TOOLS`] would otherwise be callable by any paired `full` client
+/// by default. A new tool must therefore be added to exactly one of the
+/// two — the exhaustiveness test in `tools::tests` enforces it.
 pub const ADMIN_TOOLS: &[&str] = &[
     "provision_hosts",
     "add_host",
@@ -161,6 +167,92 @@ pub const ADMIN_TOOLS: &[&str] = &[
 
 pub fn is_admin_tool(name: &str) -> bool {
     ADMIN_TOOLS.contains(&name)
+}
+
+/// Every other router tool: reachable by a paired `full` client (and, for
+/// the readonly-eligible subset, a `readonly` one — see [`READONLY_TOOLS`]).
+///
+/// Classification is MANDATORY, not a denylist: a tool that is in neither
+/// this list nor [`ADMIN_TOOLS`] fails the exhaustiveness test in
+/// `tools::tests` (it walks the real router). Adding a tool means picking
+/// exactly one of the two — [`ADMIN_TOOLS`] if only the master may call it,
+/// here otherwise.
+pub const CLIENT_TOOLS: &[&str] = &[
+    // fleet.rs
+    "fleet_health",
+    "usage_report",
+    "list_hosts",
+    "agent_status",
+    "discover_hosts",
+    "list_accounts",
+    "probe_host",
+    // session_ops.rs
+    "list_sessions",
+    "related_sessions",
+    "register_self",
+    "whoami",
+    "new_session",
+    "new_shell_session",
+    "capture_session",
+    "peek_session",
+    "recreate_session",
+    "dismiss_ghost_session",
+    "new_bg_session",
+    // lifecycle.rs
+    "kill_session",
+    "safe_kill_session",
+    "rename_session",
+    "set_friendly_name",
+    "restart_session",
+    "spawn_review",
+    "get_clipboard",
+    "set_clipboard",
+    "repair_session",
+    "move_session",
+    // messaging.rs
+    "send_prompt",
+    "broadcast_prompt",
+    "session_history",
+    "session_conversations",
+    "send_message",
+    "inbox",
+    "peer_status",
+    // orchestration.rs
+    "wait_for_session",
+    "session_transcript",
+    "session_conversation",
+    "run_prompt",
+    "dispatch_task",
+    "wait_for_task",
+    "list_tasks",
+    "cancel_task",
+    "set_session_tags",
+    // repo.rs
+    "list_projects",
+    "refresh_projects",
+    "list_worktrees",
+    "delete_worktree",
+    "repo_changes",
+    "repo_tree",
+    "repo_file",
+    "repo_diff",
+    "repo_log",
+    "repo_branches",
+    "repo_commit",
+    "repo_commit_diff",
+    // assets.rs (apply_sync, set_secret and set_host_layers stay out — see
+    // ADMIN_TOOLS)
+    "list_assets",
+    "scan_assets",
+    "import_assets",
+    "plan_sync",
+    "list_layers",
+    "resolve_preview",
+    "propose_layers",
+];
+
+pub fn is_client_tool(name: &str) -> bool {
+    CLIENT_TOOLS.contains(&name)
 }
 
 /// Resolve the broadcast interval from the raw setting value.

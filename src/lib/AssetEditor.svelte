@@ -72,6 +72,16 @@
   );
 
   const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+  // Kinds whose host path/config key derives from `install_name()` (skill,
+  // agent, mcp_server) — mirrors `Header::validate`'s allow-list. `hook` and
+  // `plugin_ref` derive their host key from other fields and reject
+  // `install_as` outright, so the editor never renders the field for them.
+  const INSTALL_AS_KINDS = new Set(['skill', 'agent', 'mcp_server']);
+  // Mirrors `is_valid_install_name` in `service/catalog/model.rs`: non-empty
+  // after trim, every character in `[A-Za-z0-9._-]`, not `.`/`..`.
+  const INSTALL_AS_RE = /^[A-Za-z0-9._-]+$/;
+  const showInstallAs = $derived(INSTALL_AS_KINDS.has(draft.kind));
+
   // Kept deliberately minimal per spec: required description and the name
   // pattern. Everything else (vocab, TODOs, per-kind requirements) is the
   // server lint's job — shown as `serverLint`/the E_LINT report, not
@@ -80,6 +90,14 @@
     const errs: string[] = [];
     if (draft.description.trim() === '') errs.push('description must not be empty');
     if (!NAME_RE.test(draft.name)) errs.push("name must match [a-z0-9][a-z0-9-]*");
+    if (showInstallAs) {
+      const ia = draft.install_as as string | null | undefined;
+      if (ia !== null && ia !== undefined && ia !== '') {
+        if (ia === '.' || ia === '..' || !INSTALL_AS_RE.test(ia)) {
+          errs.push("install_as must match [A-Za-z0-9._-]+ and not be '.' or '..'");
+        }
+      }
+    }
     return errs;
   });
 
@@ -90,6 +108,16 @@
   function onTagsInput(e: Event) {
     const v = (e.currentTarget as HTMLInputElement).value;
     draft.tags = v.split(',').map((t) => t.trim()).filter((t) => t !== '');
+  }
+
+  // An empty input clears the field to "unset" by dropping the key (rather
+  // than sending `''`) — `updateAsset` then serialises no `install_as` key
+  // at all, which the backend's `#[serde(default)]` on `Option<String>`
+  // reads the same way as an explicit `null`.
+  const installAsText = $derived((draft.install_as as string | null | undefined) ?? '');
+  function onInstallAsInput(e: Event) {
+    const v = (e.currentTarget as HTMLInputElement).value.trim();
+    draft.install_as = v === '' ? undefined : v;
   }
 
   // ── Kind-specific fields ─────────────────────────────────────────────
@@ -263,6 +291,11 @@
   <label>Tags (comma separated)
     <input value={tagsText} oninput={onTagsInput} data-testid="editor-tags" />
   </label>
+  {#if showInstallAs}
+    <label>Installs as
+      <input value={installAsText} oninput={onInstallAsInput} placeholder={draft.name} data-testid="editor-install-as" />
+    </label>
+  {/if}
 
   <div class="kind-fields">
     {#if draft.kind === 'skill'}

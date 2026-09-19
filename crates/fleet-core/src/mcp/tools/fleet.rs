@@ -63,6 +63,19 @@ impl FleetTools {
         ok_json(&hosts::list_hosts(&self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(
+        description = "Which agent hosts (transport \"agent\") have a fleet-agent \
+        connected, since when (unix seconds), which agent version, host name and \
+        OS. Offline agent hosts are listed with connected=false; a call for one \
+        fails fast with E_AGENT_OFFLINE. enabled=false on a server that accepts \
+        no agents (the desktop). Returns JSON."
+    )]
+    pub(super) async fn agent_status(&self) -> Result<CallToolResult, McpError> {
+        audit("agent_status", "");
+        let registry = self.ssh.agent_registry().map(|r| r.as_ref());
+        ok_json(&hosts::agent_status(&self.store, registry).map_err(to_mcp_err)?)
+    }
+
     #[tool(description = "Discover SSH hosts from the user's ~/.ssh/config. \
         These are candidates for add_host. Returns JSON.")]
     pub(super) async fn discover_hosts(&self) -> Result<CallToolResult, McpError> {
@@ -77,16 +90,18 @@ impl FleetTools {
         ok_json(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
     }
 
-    #[tool(description = "Register a new SSH host. Probes it first; only \
-        persists the host if it is reachable. Returns the host row as JSON.")]
+    #[tool(
+        description = "Register a new host. transport is \"ssh\" (the default: \
+        probed first, persisted only if reachable) or \"agent\" (a host the hub \
+        cannot reach, which runs fleet-agent and dials in: persisted unprobed and \
+        unreachable until its agent connects; get its token on the hub with \
+        `fleet-hub agent-token <alias>`). Returns the host row as JSON."
+    )]
     pub(super) async fn add_host(
         &self,
         Parameters(args): Parameters<hosts::AddHostArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit(
-            "add_host",
-            &format!("alias={} ssh_alias={}", args.alias, args.ssh_alias),
-        );
+        audit("add_host", &add_host_audit_detail(&args));
         let row = hosts::add_host(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -284,9 +299,23 @@ fn pair_ttl(ttl_s: Option<u64>) -> std::time::Duration {
     }
 }
 
+/// The `add_host` audit line's identifying detail. A transport change is
+/// exactly the kind of thing the audit trail should carry, so it rides
+/// alongside `alias`/`ssh_alias` — defaulted the same way `add_host` itself
+/// resolves an unset transport, so the log always names the effective value.
+fn add_host_audit_detail(args: &hosts::AddHostArgs) -> String {
+    format!(
+        "alias={} ssh_alias={} transport={}",
+        args.alias,
+        args.ssh_alias,
+        args.transport.as_deref().unwrap_or("ssh")
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::pair_ttl;
+    use super::{add_host_audit_detail, pair_ttl};
+    use crate::service::hosts;
     use std::time::Duration;
 
     #[test]
@@ -298,6 +327,32 @@ mod tests {
             pair_ttl(Some(u64::MAX)),
             Duration::from_secs(3600),
             "ceiling"
+        );
+    }
+
+    #[test]
+    fn add_host_audit_detail_names_an_explicit_transport() {
+        let args = hosts::AddHostArgs {
+            alias: "h".into(),
+            ssh_alias: "h.example".into(),
+            transport: Some("agent".into()),
+        };
+        assert_eq!(
+            add_host_audit_detail(&args),
+            "alias=h ssh_alias=h.example transport=agent"
+        );
+    }
+
+    #[test]
+    fn add_host_audit_detail_names_the_default_transport_when_unset() {
+        let args = hosts::AddHostArgs {
+            alias: "h".into(),
+            ssh_alias: "h.example".into(),
+            transport: None,
+        };
+        assert_eq!(
+            add_host_audit_detail(&args),
+            "alias=h ssh_alias=h.example transport=ssh"
         );
     }
 }

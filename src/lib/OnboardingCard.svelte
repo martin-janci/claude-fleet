@@ -14,6 +14,7 @@
     type TunnelStatusRow,
     type StepId,
   } from './onboarding';
+  import { hubStatus, hubBlock, ownsTheFleet } from './hub';
 
   // Parent supplies actions that open existing dialogs.
   let { onaddhost, onnewsession }: { onaddhost: () => void; onnewsession: () => void } =
@@ -28,8 +29,16 @@
   let busy = $state<StepId | null>(null);
   let errorText = $state<string | null>(null);
 
+  // Three of the six commands this UI calls UNPROMPTED live here
+  // (check_local_prereqs, tunnel_status, mcp_status), fired from an $effect on
+  // mount. All three are guarded in remote mode, so without this the sidebar
+  // raised three error toasts on every launch — for a checklist that is about
+  // setting up a fleet on THIS machine, which the hub is doing instead.
+  const setupBlocked = $derived(hubBlock('check_local_prereqs', $hubStatus));
+
   // Refresh backend snapshots on mount and whenever hosts change.
   async function refreshSnapshots() {
+    if (!ownsTheFleet($hubStatus)) return;
     const [p, t, m] = await Promise.all([checkLocalPrereqs(), tunnelStatus(), mcpStatus()]);
     if (p.ok) prereqs = p.value;
     if (t.ok) tunnels = t.value;
@@ -111,11 +120,14 @@
     <button class="x" onclick={dismiss} aria-label="Dismiss setup guide" title="Dismiss">✕</button>
   </div>
 
-  {#if complete}
+  {#if setupBlocked}
+    <p class="done-msg" data-testid="onboarding-remote">{setupBlocked}</p>
+    <button class="dismiss-all" onclick={dismiss}>Dismiss</button>
+  {:else if complete}
     <p class="done-msg">You're all set 🎉</p>
     <button class="dismiss-all" onclick={dismiss}>Dismiss</button>
   {:else}
-    <div class="prog">{doneCount} of {requiredCount} done</div>
+    <div class="prog" data-testid="onboarding-steps">{doneCount} of {requiredCount} done</div>
     <div class="pbar"><i aria-hidden="true" style="width:{requiredCount > 0 ? (doneCount / requiredCount) * 100 : 0}%"></i></div>
 
     {#each steps as step (step.id)}

@@ -1,4 +1,7 @@
 //! Cancel an in-flight IPC call by its `call_id` (see `cancel.rs`).
+//!
+//! Same in both modes: the registry is this process's, and a call it is
+//! cancelling is one this process started, whichever backend served it.
 
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;

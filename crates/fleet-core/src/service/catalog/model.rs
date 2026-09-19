@@ -148,6 +148,13 @@ pub struct Header {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<Source>,
+    /// The identifier used on hosts, when it differs from `name` (e.g. an
+    /// imported `foo_bar` that was slugified to the catalog name `foo-bar`).
+    /// Only meaningful for kinds that derive a host path/config key from the
+    /// name (skill, agent, mcp_server) — `validate` rejects it on `hook` and
+    /// `plugin_ref`. See `Asset::install_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_as: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub targets: BTreeMap<String, TargetOverride>,
 }
@@ -433,6 +440,15 @@ impl Asset {
             .unwrap_or_default()
     }
 
+    /// The identifier a harness should install this asset under: `install_as`
+    /// when set, else the catalog `name`.
+    pub fn install_name(&self) -> &str {
+        self.header
+            .install_as
+            .as_deref()
+            .unwrap_or(&self.header.name)
+    }
+
     /// Return every validation problem (empty means valid).
     pub fn validate(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -444,6 +460,18 @@ impl Asset {
         }
         if self.header.description.trim().is_empty() {
             out.push("description must not be empty".into());
+        }
+        if let Some(install_as) = &self.header.install_as {
+            if matches!(self.header.kind, Kind::Hook | Kind::PluginRef) {
+                out.push(format!(
+                    "install_as is not supported for kind '{}'",
+                    self.header.kind.as_str()
+                ));
+            } else if !is_valid_install_name(install_as) {
+                out.push(format!(
+                    "install_as '{install_as}' must be non-empty, match [A-Za-z0-9._-]+, and not be '.' or '..'"
+                ));
+            }
         }
         match &self.spec {
             AssetSpec::Skill { allowed_tools, .. } => {
@@ -521,6 +549,19 @@ pub fn is_valid_name(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// `install_as`'s constraint: non-empty, every character in `[A-Za-z0-9._-]`,
+/// and not `.` or `..` (both of which are meaningless or dangerous as a path
+/// segment). The charset is applied to the raw value and nothing is trimmed
+/// first, so surrounding whitespace is simply invalid — `install_name()`
+/// hands the raw value to the harnesses, and the two must agree.
+pub fn is_valid_install_name(s: &str) -> bool {
+    if s.is_empty() || s == "." || s == ".." {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 fn is_valid_tool(t: &str) -> bool {
@@ -852,6 +893,78 @@ version: "6.3.0"
                 .any(|p| p == "command is required for transport stdio"),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn install_as_round_trips_through_yaml_and_json() {
+        let mut a = Asset::from_yaml(None, SKILL_YAML).unwrap();
+        a.header.install_as = Some("foo_bar".into());
+        assert_eq!(a.install_name(), "foo_bar");
+
+        let yaml = a.to_yaml();
+        assert!(yaml.contains("install_as: foo_bar"), "{yaml}");
+        let again = Asset::from_yaml(None, &yaml).unwrap();
+        assert_eq!(again.header.install_as.as_deref(), Some("foo_bar"));
+        assert_eq!(again.install_name(), "foo_bar");
+
+        let json = serde_json::to_value(&a).unwrap();
+        assert_eq!(json["install_as"], serde_json::json!("foo_bar"));
+
+        // Without `install_as`: the key is absent in both forms, and
+        // `install_name()` falls back to `name`.
+        let plain = Asset::from_yaml(None, SKILL_YAML).unwrap();
+        assert!(plain.header.install_as.is_none());
+        assert!(
+            !plain.to_yaml().contains("install_as"),
+            "{}",
+            plain.to_yaml()
+        );
+        let plain_json = serde_json::to_value(&plain).unwrap();
+        assert!(!plain_json.as_object().unwrap().contains_key("install_as"));
+        assert_eq!(plain.install_name(), plain.header.name);
+    }
+
+    #[test]
+    fn validate_rejects_bad_install_as() {
+        let hook_yaml = "kind: hook\nname: x\ndescription: A reasonably long description here.\nevent: before_tool\naction: { type: command, command: echo }\n";
+        let plugin_yaml = "kind: plugin_ref\nname: x\ndescription: A reasonably long description here.\nharness: claude\nmarketplace: { name: m, source: github, repo: o/r }\nplugin: p\nversion: \"1.0.0\"\n";
+
+        for kind_yaml in [hook_yaml, plugin_yaml] {
+            for value in ["", "a b", "..", "a/b", "ok"] {
+                let mut a = Asset::from_yaml(None, kind_yaml).unwrap();
+                a.header.install_as = Some(value.to_string());
+                let problems = a.validate();
+                assert!(
+                    problems.iter().any(|p| p.starts_with("install_as")),
+                    "kind {:?} value {value:?}: {problems:?}",
+                    a.header.kind
+                );
+            }
+        }
+
+        let skill_yaml = "kind: skill\nname: x\ndescription: A reasonably long description here.\n";
+        let agent_yaml = "kind: agent\nname: x\ndescription: A reasonably long description here.\n";
+        let mcp_yaml = "kind: mcp_server\nname: x\ndescription: A reasonably long description here.\ntransport: http\nurl: http://127.0.0.1/mcp\n";
+        for kind_yaml in [skill_yaml, agent_yaml, mcp_yaml] {
+            let mut a = Asset::from_yaml(None, kind_yaml).unwrap();
+            a.header.install_as = Some("foo_bar".to_string());
+            let problems = a.validate();
+            assert!(problems.is_empty(), "{:?}: {problems:?}", a.header.kind);
+        }
+    }
+
+    #[test]
+    fn is_valid_install_name_checks_the_raw_value() {
+        assert!(is_valid_install_name("foo_bar"));
+        assert!(is_valid_install_name("a.b"));
+        assert!(is_valid_install_name("-"));
+        // Nothing is trimmed away first: surrounding whitespace is simply
+        // invalid, because the charset is applied to the raw value.
+        for bad in [
+            "", " ", " foo", "foo ", " foo ", ".", "..", " . ", " .. ", "a/b",
+        ] {
+            assert!(!is_valid_install_name(bad), "{bad:?}");
+        }
     }
 
     #[test]

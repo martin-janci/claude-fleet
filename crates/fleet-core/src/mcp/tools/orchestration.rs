@@ -101,8 +101,8 @@ impl FleetTools {
         audit(
             "session_conversation",
             &format!(
-                "session_id={} turns={:?} claude_session_id={:?}",
-                p.session_id, p.turns, p.claude_session_id
+                "session_id={} turns={:?} claude_session_id={:?} events_limit={:?}",
+                p.session_id, p.turns, p.claude_session_id, p.events_limit
             ),
         );
         let row =
@@ -115,7 +115,7 @@ impl FleetTools {
             p.claude_session_id.as_deref(),
             turns,
             max_chars,
-            transcript::CONV_EVENTS_LIMIT_MCP,
+            transcript::conv_events_limit(p.events_limit),
         )
         .await
         .map_err(to_mcp_err)?;

@@ -122,6 +122,18 @@ describe('ToolLine', () => {
     expect(screen.getByTestId('conv-tool-result').textContent).toContain('test result: ok');
   });
 
+  it('a hub-connected refusal shows the reason without a Retry', async () => {
+    mockedDetail.mockResolvedValueOnce({
+      ok: false,
+      error: { code: 'E_LOCAL_ONLY', message: 'session_tool_detail is not available through the hub' },
+    });
+    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(screen.getByTestId('conv-tool-detail-error').textContent).toContain('not available through the hub');
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
   it('a call without an id is not expandable', () => {
     render(ToolLine, { line: line({ id: null }), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
     expect(screen.queryByRole('button')).toBeNull();
