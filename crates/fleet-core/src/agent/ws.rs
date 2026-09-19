@@ -68,16 +68,17 @@ use super::registry::{AgentHello, AgentRegistry, ConnId};
 use crate::mcp::auth::TokenMode;
 use crate::mcp::Caller;
 use crate::store::Store;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use fleet_proto::{
-    decode_agent_frame_within, encode_hub_frame, AgentFrame, HubFrame, MAX_FRAME_BYTES,
+    decode_agent_frame_lenient_within, decode_agent_frame_within, encode_hub_frame, AgentFrame,
+    Decoded, HubFrame, MAX_FRAME_BYTES,
 };
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -126,6 +127,18 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long closing the socket may take.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Close a connection with a reason an agent can log and act on — a version
+/// refusal, currently the only case that needs one on this side; every other
+/// refusal here still just closes bare.
+async fn close_with_reason(sink: &mut SplitSink<WebSocket, Message>, code: u16, reason: String) {
+    let frame = CloseFrame {
+        code,
+        reason: reason.into(),
+    };
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.send(Message::Close(Some(frame)))).await;
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
+}
 
 /// What a host whose token is `readonly` is told.
 pub const READONLY_HOST: &str = "this host's token is readonly, and an agent receives every \
@@ -477,6 +490,19 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
             return;
         }
     };
+    // Judged before anything else touches the store or the registry: an
+    // agent whose `proto` is out of range must never register, even
+    // briefly, so it never looks connected and never has a command routed
+    // to it. Unlike every other refusal on this connection, the agent needs
+    // to be able to tell this one apart from an ordinary close — that is
+    // what `VERSION_REFUSED_CLOSE_CODE` and the reason text are for.
+    if let Some(reason) =
+        fleet_proto::judge_proto(hello.proto).refusal_reason("the hub", "fleet-agent")
+    {
+        tracing::warn!(host = %alias, why = %reason, "[agent] refused a hello: protocol version");
+        close_with_reason(&mut sink, fleet_proto::VERSION_REFUSED_CLOSE_CODE, reason).await;
+        return;
+    }
     // Two channels into the writer. The registry holds the ONLY sender of
     // the first, so the writer sees it close exactly when the registry lets
     // go of this connection — deregistered, or replaced by a second
@@ -502,6 +528,16 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
         let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
         return;
     }
+    // Tell the agent our own version too, so it can refuse a hub too OLD for
+    // IT with the same clear message `hello.proto` lets us refuse it with.
+    // Queued on `tx` before `connect_bound` makes this connection reachable
+    // through the registry, so nothing routed through a concurrent call can
+    // ever be enqueued ahead of it — this is unconditionally the first frame
+    // the agent reads after hello.
+    let _ = tx.send(HubFrame::Welcome {
+        hub_version: crate::app_version::get().to_string(),
+        proto: fleet_proto::PROTO_VERSION,
+    });
     let conn_id = registry.connect_bound(&alias, hello, tx, credential.clone());
     if stale() {
         tracing::warn!(host = %alias, conn = conn_id, "[agent] its token changed as it registered; dropping");
@@ -594,18 +630,23 @@ async fn first_hello(
             () = deadline.tick() => return Err(LATE.into()),
         };
         match msg {
-            // The `hello` carries three short strings; nothing about it needs
-            // more than the floor, whatever the connection's ceiling is.
+            // The `hello` carries three short strings and a version number;
+            // nothing about it needs more than the floor, whatever the
+            // connection's ceiling is. Strict decode: the handshake is
+            // exactly where an unknown `kind` still must be a hard error —
+            // see the crate doc.
             Some(Ok(Message::Text(text))) => {
                 return match decode_agent_frame_within(&text, MIN_INBOUND_BYTES) {
                     Ok(AgentFrame::Hello {
                         agent_version,
                         host_name,
                         os,
+                        proto,
                     }) => Ok(AgentHello {
                         agent_version,
                         host_name,
                         os,
+                        proto,
                     }),
                     Ok(other) => Err(format!("the first frame must be hello, got {other:?}")),
                     Err(e) => Err(format!("the first frame did not decode: {e}")),
@@ -713,6 +754,10 @@ async fn read_loop(
     // is measured from the registration.
     let mut missed = 0;
     let mut heard = false;
+    // Kinds already warned about on this connection, so a peer that sends
+    // many frames of a kind we do not know floods the log once, not once per
+    // frame. The handshake is already behind us here — see the crate doc.
+    let mut warned_kinds: HashSet<String> = HashSet::new();
     loop {
         // A beat that has come due is taken first, before any read, however
         // many frames are waiting: see `Ticker`. Otherwise wait for either.
@@ -781,12 +826,25 @@ async fn read_loop(
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .allowance();
-                        match decode_agent_frame_within(&text, allowance) {
-                            Ok(frame) => {
+                        // Lenient: the handshake (`first_hello`) is behind us
+                        // here, so a `kind` this build does not know is
+                        // skipped, not fatal — see the crate doc. A `kind` it
+                        // DOES know but cannot parse is still corruption and
+                        // still closes the connection.
+                        match decode_agent_frame_lenient_within(&text, allowance) {
+                            Ok(Decoded::Frame(frame)) => {
                                 if let Some(id) = answered_id(&frame) {
                                     budgets.lock().unwrap_or_else(|e| e.into_inner()).done(id);
                                 }
                                 registry.deliver(alias, conn_id, frame);
+                            }
+                            Ok(Decoded::Unknown { kind }) => {
+                                if warned_kinds.insert(kind.clone()) {
+                                    tracing::warn!(
+                                        host = %alias, conn = conn_id, kind,
+                                        "[agent] unknown frame kind; skipping"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 // The design's rule: a frame the far side
@@ -874,6 +932,10 @@ fn answer_budget(frame: &HubFrame) -> Option<(String, usize, Instant)> {
             Instant::now() + Duration::from_millis(*timeout_ms) + LATE_ANSWER_GRACE,
         )),
         HubFrame::Upload { .. } | HubFrame::Cancel { .. } | HubFrame::Ping { .. } => None,
+        // Sent once, straight onto the outbound channel, before this
+        // connection is even registered — never through a path that awaits
+        // an answer.
+        HubFrame::Welcome { .. } => None,
     }
 }
 
@@ -1047,10 +1109,15 @@ mod tests {
     }
 
     fn hello_as(version: &str) -> AgentFrame {
+        hello_with_proto(version, fleet_proto::PROTO_VERSION)
+    }
+
+    fn hello_with_proto(version: &str, proto: u32) -> AgentFrame {
         AgentFrame::Hello {
             agent_version: version.into(),
             host_name: "laptop.local".into(),
             os: "linux".into(),
+            proto,
         }
     }
 
@@ -1062,6 +1129,9 @@ mod tests {
     /// Dial, say hello, and wait until the hub has registered THIS connection
     /// — recognised by the version its hello carried, since `connected(alias)`
     /// is already true while an earlier connection for the alias is live.
+    /// Also consumes the `welcome` the hub sends right after registering, so
+    /// every OTHER test can `next_frame` for the frame it actually cares
+    /// about without knowing `welcome` exists.
     async fn connected_as(hub: &Hub, token: &str, alias: &str, version: &str) -> Client {
         let mut ws = dial(hub.addr, Some(token)).await.expect("the upgrade");
         send(&mut ws, &hello_as(version)).await;
@@ -1072,6 +1142,10 @@ mod tests {
                 .any(|s| s.alias == alias && s.agent_version == version)
         })
         .await;
+        match next_frame(&mut ws).await {
+            Some(HubFrame::Welcome { .. }) => {}
+            other => panic!("expected welcome first, got {other:?}"),
+        }
         ws
     }
 
@@ -1122,6 +1196,22 @@ mod tests {
                 Err(_) => return false,
                 Ok(None) | Ok(Some(Ok(WsMessage::Close(_)))) | Ok(Some(Err(_))) => return true,
                 Ok(Some(Ok(_))) => continue,
+            }
+        }
+    }
+
+    /// Read until the hub closes the socket, returning the close code and
+    /// reason it sent. Panics if [`PATIENCE`] runs out first — every caller
+    /// already knows the hub is about to close this connection.
+    async fn close_reason(ws: &mut Client) -> (u16, String) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match tokio::time::timeout_at(deadline, ws.next()).await {
+                Ok(Some(Ok(WsMessage::Close(Some(frame))))) => {
+                    return (u16::from(frame.code), frame.reason.to_string())
+                }
+                Ok(Some(Ok(_))) => continue,
+                other => panic!("expected a close frame with a reason, got {other:?}"),
             }
         }
     }
@@ -1894,7 +1984,11 @@ mod tests {
     async fn a_frame_that_does_not_decode_closes_the_connection() {
         let hub = hub().await;
         let mut ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
-        ws.send(WsMessage::Text("{\"kind\":\"nope\"}".into()))
+        // A `kind` the hub DOES know AGENTS send ("result"), but whose body
+        // will not parse — corruption, not evolution, so it still closes the
+        // connection. An unknown `kind` no longer does: see
+        // `an_unknown_kind_after_the_handshake_is_skipped_not_fatal`.
+        ws.send(WsMessage::Text("{\"kind\":\"result\"}".into()))
             .await
             .unwrap();
         assert!(closed_by_hub(&mut ws).await);
@@ -1973,8 +2067,114 @@ mod tests {
             agent_version: "1.2.3".into(),
             host_name: "h".repeat(MIN_INBOUND_BYTES),
             os: "linux".into(),
+            proto: fleet_proto::PROTO_VERSION,
         };
         send(&mut ws, &hello).await;
+        assert!(closed_by_hub(&mut ws).await);
+        assert!(!hub.registry.connected("laptop"));
+    }
+
+    // ── protocol version negotiation ────────────────────────────────────────
+
+    /// A hello inside the supported window registers, and the negotiated
+    /// version — not just the `agent_version` string — is what the registry
+    /// keeps.
+    #[tokio::test]
+    async fn an_in_range_hello_is_accepted_and_its_proto_recorded() {
+        let hub = hub().await;
+        let _ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
+        assert_eq!(
+            hub.registry.negotiated_proto("laptop"),
+            Some(fleet_proto::PROTO_VERSION)
+        );
+    }
+
+    /// The hub's own first frame down the connection is `welcome`, carrying
+    /// its own version — never sent to a hello the hub is about to refuse.
+    #[tokio::test]
+    async fn the_hub_welcomes_an_accepted_agent_with_its_own_version() {
+        let hub = hub().await;
+        let mut ws = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("upgrade");
+        send(&mut ws, &hello_as("1.2.3")).await;
+        match next_frame(&mut ws).await {
+            Some(HubFrame::Welcome { proto, .. }) => {
+                assert_eq!(proto, fleet_proto::PROTO_VERSION);
+            }
+            other => panic!("expected welcome, got {other:?}"),
+        }
+    }
+
+    /// Below `MIN_SUPPORTED_PROTO`: refused with a reason naming both
+    /// versions and telling the agent what to do, never registered.
+    #[tokio::test]
+    async fn a_hello_below_the_minimum_proto_is_refused_with_a_reason() {
+        let hub = hub().await;
+        let mut ws = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("upgrade");
+        send(&mut ws, &hello_with_proto("old-agent", 0)).await;
+        let (code, reason) = close_reason(&mut ws).await;
+        assert_eq!(code, fleet_proto::VERSION_REFUSED_CLOSE_CODE);
+        assert!(reason.contains('0'), "{reason}");
+        assert!(
+            reason.contains(&fleet_proto::MIN_SUPPORTED_PROTO.to_string()),
+            "{reason}"
+        );
+        assert!(reason.contains("update fleet-agent"), "{reason}");
+        assert!(!hub.registry.connected("laptop"));
+    }
+
+    /// Above `PROTO_VERSION`: refused with a reason pointing the other way —
+    /// the HUB needs updating, not the agent.
+    #[tokio::test]
+    async fn a_hello_above_the_maximum_proto_is_refused_with_a_reason() {
+        let hub = hub().await;
+        let mut ws = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("upgrade");
+        let too_new = fleet_proto::PROTO_VERSION + 1;
+        send(&mut ws, &hello_with_proto("new-agent", too_new)).await;
+        let (code, reason) = close_reason(&mut ws).await;
+        assert_eq!(code, fleet_proto::VERSION_REFUSED_CLOSE_CODE);
+        assert!(reason.contains(&too_new.to_string()), "{reason}");
+        assert!(reason.contains("update the hub"), "{reason}");
+        assert!(!hub.registry.connected("laptop"));
+    }
+
+    /// Once past the handshake, a frame whose `kind` the hub does not know is
+    /// skipped, not fatal — the session carries on, and a following VALID
+    /// frame still gets through.
+    #[tokio::test]
+    async fn an_unknown_kind_after_the_handshake_is_skipped_not_fatal() {
+        let hub = hub().await;
+        let mut ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
+
+        ws.send(WsMessage::Text(
+            r#"{"kind":"selfdestruct","id":"1"}"#.into(),
+        ))
+        .await
+        .unwrap();
+        // The connection survives: a barrier round-trips, and the next real
+        // request still gets an answer.
+        barrier(&mut ws).await;
+        assert!(hub.registry.connected("laptop"));
+
+        let call = dispatch(&hub, &mut ws, exec("after-unknown", None)).await;
+        send(&mut ws, &result_of("after-unknown", b"still works", b"")).await;
+        assert_eq!(
+            call.await.unwrap().unwrap(),
+            result_of("after-unknown", b"still works", b"")
+        );
+    }
+
+    /// Before the handshake completes, an unknown `kind` is still a hard
+    /// error — the hub must not register a connection it cannot even parse
+    /// the hello frame of.
+    #[tokio::test]
+    async fn an_unknown_kind_before_hello_is_fatal() {
+        let hub = hub().await;
+        let mut ws = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("upgrade");
+        ws.send(WsMessage::Text(
+            r#"{"kind":"selfdestruct","id":"1"}"#.into(),
+        ))
+        .await
+        .unwrap();
         assert!(closed_by_hub(&mut ws).await);
         assert!(!hub.registry.connected("laptop"));
     }

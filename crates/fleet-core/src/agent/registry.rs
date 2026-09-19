@@ -31,6 +31,13 @@ pub struct AgentHello {
     pub agent_version: String,
     pub host_name: String,
     pub os: String,
+    /// The agent's `proto`. `/agent` (`ws.rs`) judges this against
+    /// [`fleet_proto::judge_proto`] BEFORE this hello ever reaches
+    /// [`AgentRegistry::connect_bound`] — an out-of-range one is refused, not
+    /// registered — so by the time it is here it has already cleared that
+    /// check. Kept on the connection as [`Connection::proto`], the
+    /// negotiated version [`AgentRegistry::negotiated_proto`] reads back.
+    pub proto: u32,
 }
 
 /// One row of [`AgentRegistry::snapshot`] — what `agent_status` (Task 8) and
@@ -48,6 +55,11 @@ pub struct AgentStatus {
 struct Connection {
     id: ConnId,
     hello: AgentHello,
+    /// The negotiated protocol version — `hello.proto`, copied out here so
+    /// `AgentRegistry::negotiated_proto` does not have to expose the whole
+    /// `hello`. `transport.rs` has nothing to gate on it yet: see the doc
+    /// comment where its frames are built.
+    proto: u32,
     connected_at: i64,
     /// Frames to write to the socket. Unbounded: the writer is a dedicated
     /// task and a blocked `send` here would block a service call.
@@ -143,6 +155,7 @@ impl AgentRegistry {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let conn = Arc::new(Connection {
             id,
+            proto: hello.proto,
             hello,
             connected_at: now_unix(),
             outbound,
@@ -203,6 +216,15 @@ impl AgentRegistry {
     /// Is an agent connected for this host?
     pub fn connected(&self, alias: &str) -> bool {
         self.conns.contains_key(alias)
+    }
+
+    /// The protocol version negotiated with the live connection for `alias`,
+    /// if any. Nothing built on top of this needs it yet — no frame this
+    /// crate sends requires an agent above `proto` 1 to understand it — but
+    /// `AgentTransport` (`transport.rs`) is where a future one would gate a
+    /// new frame kind on it, and this is what it would read.
+    pub fn negotiated_proto(&self, alias: &str) -> Option<u32> {
+        self.live(alias).map(|c| c.proto)
     }
 
     /// Every connected agent, ordered by alias.
@@ -384,6 +406,11 @@ pub(crate) fn frame_id(frame: &HubFrame) -> &str {
         | HubFrame::Upload { id, .. }
         | HubFrame::Cancel { id }
         | HubFrame::Ping { id } => id,
+        // `welcome` carries no id: it is a one-way broadcast `ws.rs` writes
+        // straight onto a connection's outbound channel, never through
+        // `request`/`send` — nothing calls this with one in practice, but
+        // the match must stay exhaustive.
+        HubFrame::Welcome { .. } => "",
     }
 }
 
