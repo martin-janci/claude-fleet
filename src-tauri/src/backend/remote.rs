@@ -917,8 +917,12 @@ impl HubTransport for NoTransport {
 /// The hub over HTTP or HTTPS, written by hand onto a `TcpStream` — the same
 /// way `fleet-hub`'s own CLI talks to `/mcp`. One request, one response,
 /// `Connection: close`; there is no connection pool because a desktop makes a
-/// handful of calls a second at worst, and no HTTP client crate is in this
-/// workspace's graph to borrow one from.
+/// handful of calls a second at worst, and no *usable outbound HTTP client*
+/// crate is in this workspace's graph to borrow one from: `hyper` is present
+/// only as `axum`'s server side (via `fleet-core`'s embedded MCP server), and
+/// `reqwest` appears in `Cargo.lock` only through a target-specific `tauri`
+/// dependency that is not compiled here (`cargo tree -i reqwest` prints
+/// nothing on this platform).
 ///
 /// `https://` is the case that matters: `docs/hub.md` refuses to serve a
 /// public hub in plaintext, so a real hub is always TLS. `http://` stays for a
