@@ -879,113 +879,39 @@ impl FleetTools {
 
 // ---- per-call wall clock ----------------------------------------------------
 
-/// Tools that are themselves bounded long-polls (`timeout_s` ≤ 600):
-/// the wire cap sits above their own maximum.
-pub(super) const LONG_POLL_TOOLS: &[&str] = &["wait_for_session", "wait_for_task", "run_prompt"];
+/// Cap for [`guard::Deadline::LongPoll`]: tools that are themselves bounded
+/// long-polls (`timeout_s` ≤ 600), so the wire cap sits above their own
+/// maximum.
 pub(super) const LONG_POLL_CAP: std::time::Duration = std::time::Duration::from_secs(660);
 
-/// Tools that compose several SSH round trips or spawn processes on a host
-/// (session lifecycle, provisioning, host probes, fan-outs, reads that may
-/// page through large files).
-pub(super) const LIFECYCLE_TOOLS: &[&str] = &[
-    "add_host",
-    "probe_host",
-    "provision_hosts",
-    "new_session",
-    "new_bg_session",
-    "new_shell_session",
-    "recreate_session",
-    "restart_session",
-    "repair_session",
-    "move_session",
-    "spawn_review",
-    "dispatch_task",
-    "safe_kill_session",
-    "kill_session",
-    "delete_worktree",
-    "import_assets",
-    "scan_assets",
-    // Sync: plan_sync scans every selected host (pass host_alias to scope
-    // the scan/plan to one host); apply_sync then applies the WHOLE plan —
-    // every host it covers, each bounded at 300 s — so a fleet-wide apply
-    // over many hosts may hit this cap over MCP; scope the plan itself via
-    // plan_sync's host_alias to keep one apply_sync call under it.
-    "plan_sync",
-    "apply_sync",
-    "refresh_projects",
-    "session_transcript",
-    "session_conversation",
-    "usage_report",
-    "broadcast_prompt",
-];
+/// Cap for [`guard::Deadline::Lifecycle`]: tools that compose several SSH
+/// round trips or spawn processes on a host (session lifecycle, provisioning,
+/// host probes, fan-outs, reads that may page through large files).
 pub(super) const LIFECYCLE_CAP: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Everything else: store reads and single SSH round trips.
-pub(super) const QUICK_TOOLS: &[&str] = &[
-    "agent_status",
-    "cancel_task",
-    "capture_session",
-    "discover_hosts",
-    "dismiss_ghost_session",
-    "fleet_health",
-    "get_clipboard",
-    "hide_host",
-    "inbox",
-    "list_accounts",
-    "list_assets",
-    "list_clients",
-    "list_hosts",
-    "list_layers",
-    "list_projects",
-    "list_sessions",
-    "list_tasks",
-    "list_worktrees",
-    "pair_client",
-    "peek_session",
-    "peer_status",
-    "propose_layers",
-    "register_self",
-    "related_sessions",
-    "remove_host",
-    "rename_session",
-    "resolve_preview",
-    "revoke_client",
-    "set_host_layers",
-    "set_secret",
-    "repo_branches",
-    "repo_changes",
-    "repo_commit",
-    "repo_commit_diff",
-    "repo_diff",
-    "repo_file",
-    "repo_log",
-    "repo_tree",
-    "send_message",
-    "send_prompt",
-    "session_history",
-    "session_conversations",
-    "set_clipboard",
-    "set_friendly_name",
-    "set_session_tags",
-    "whoami",
-];
+/// Cap for [`guard::Deadline::Quick`]: everything else — store reads and
+/// single SSH round trips. Also the default for a tool with no
+/// [`guard::TOOL_POLICIES`] row.
 pub(super) const QUICK_CAP: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Wall-clock cap for one tool call. An unknown name gets the quick cap;
-/// the classification test guarantees every served tool is listed.
+/// Wall-clock cap for one tool call, from `tool`'s [`guard::Deadline`] class
+/// in [`guard::TOOL_POLICIES`]. An unknown name gets the quick cap; the
+/// exhaustiveness test in `tools::tests` guarantees every served tool has a
+/// row.
 pub(super) fn tool_deadline(tool: &str) -> std::time::Duration {
-    if LONG_POLL_TOOLS.contains(&tool) {
-        LONG_POLL_CAP
-    } else if LIFECYCLE_TOOLS.contains(&tool) {
-        LIFECYCLE_CAP
-    } else {
-        if !QUICK_TOOLS.contains(&tool) {
+    match guard::policy(tool) {
+        Some(p) => match p.deadline {
+            guard::Deadline::LongPoll => LONG_POLL_CAP,
+            guard::Deadline::Lifecycle => LIFECYCLE_CAP,
+            guard::Deadline::Quick => QUICK_CAP,
+        },
+        None => {
             // Reachable only for a name the router does not serve (rmcp then
-            // answers "tool not found") — the classification test keeps every
-            // served tool in one of the three lists.
+            // answers "tool not found") — the exhaustiveness test keeps every
+            // served tool with exactly one TOOL_POLICIES row.
             tracing::debug!(tool, "[mcp] unclassified tool name gets the quick cap");
+            QUICK_CAP
         }
-        QUICK_CAP
     }
 }
 
