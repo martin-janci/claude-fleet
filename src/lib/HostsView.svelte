@@ -37,6 +37,7 @@
   import AddHostPicker from './AddHostPicker.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
+  import { hubStatus, hubBlock } from './hub';
 
   let {
     preselect = null,
@@ -318,6 +319,11 @@
     if (handled) e.preventDefault();
   }
 
+  // Adding a host is fleet administration: the hub refuses it to a paired
+  // client, and this app guards it with `E_LOCAL_ONLY`. Say so on the button
+  // rather than after the dialog has been filled in.
+  const addHostBlocked = $derived(hubBlock('add_host', $hubStatus));
+
   const LEGEND: [string, string][] = [
     ['↑ ↓  j k  Home End', 'move the selection (in the detail: between sessions)'],
     ['Enter  →', 'open the detail'],
@@ -340,7 +346,13 @@
     <span class="summary" data-testid="hosts-summary">{$hosts.length} · {onlineCount} online</span>
     <span class="cadence">usage every 5 min</span>
     <span class="grow"></span>
-    <button type="button" class="head-btn" data-testid="hosts-add" onclick={() => (showAddPicker = true)}>+ Add host</button>
+    <button
+      type="button"
+      class="head-btn"
+      data-testid="hosts-add"
+      disabled={addHostBlocked !== null}
+      title={addHostBlocked ?? ''}
+      onclick={() => (showAddPicker = true)}>+ Add host</button>
     <button
       type="button"
       class="head-btn"

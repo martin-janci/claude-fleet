@@ -2,8 +2,8 @@
 
 use super::harness::claude::{hook_asset_name, unmap_event, unmap_tier, unmap_tool};
 use super::model::{
-    is_valid_name, Asset, AssetSpec, Header, HookAction, HookMatch, Kind, Marketplace, Problem,
-    Resource, Source, TargetOverride,
+    is_valid_install_name, is_valid_name, Asset, AssetSpec, Header, HookAction, HookMatch, Kind,
+    Marketplace, Problem, Resource, Source, TargetOverride,
 };
 use super::repo::{asset_path, write_asset};
 use super::E_ASSET_EXISTS;
@@ -17,6 +17,12 @@ use std::path::{Path, PathBuf};
 pub struct ImportReport {
     pub created: Vec<(String, String)>,
     pub problems: Vec<Problem>,
+    /// Non-blocking notices: the asset was still created, but under a
+    /// slugified name because its host identifier couldn't be used as
+    /// `install_as` (see `install_as_for`). Never populated for hooks or
+    /// plugin refs, which don't carry `install_as` at all.
+    #[serde(default)]
+    pub warnings: Vec<Problem>,
     pub flagged_secrets: Vec<String>,
     pub dry_run: bool,
 }
@@ -126,6 +132,46 @@ fn slug_or_problem(
     }
 }
 
+/// Whether `original` should become the asset's `install_as`: `Some(original)`
+/// when the catalog slug diverges from the host identifier and that
+/// identifier is itself a valid install name; `None` when they match
+/// (nothing to record) or `original` can't be used as-is, in which case the
+/// caller records a warning instead (see `apply_install_as`).
+fn install_as_for(original: &str, slug: &str) -> Option<String> {
+    if original != slug && is_valid_install_name(original) {
+        Some(original.to_string())
+    } else {
+        None
+    }
+}
+
+/// Set `install_as` on `h` for skills, agents and MCP servers when `original`
+/// (the host identifier) diverges from the catalog slug, or record a warning
+/// when `original` isn't a valid install name — the asset is still created
+/// under the slug, but the original stays unmanaged. Hooks and plugin refs
+/// never call this: their identity isn't slugified from an arbitrary host
+/// identifier, so `install_as` never applies to them.
+fn apply_install_as(
+    h: &mut Header,
+    kind: Kind,
+    original: &str,
+    slug: &str,
+    path: &Path,
+    warnings: &mut Vec<Problem>,
+) {
+    match install_as_for(original, slug) {
+        Some(install_as) => h.install_as = Some(install_as),
+        None if original != slug => warnings.push(Problem {
+            path: path.to_string_lossy().to_string(),
+            message: format!(
+                "{} {slug}: installs under a new name; {original} stays unmanaged",
+                kind.as_str()
+            ),
+        }),
+        None => {}
+    }
+}
+
 /// Split a Claude tool list (`Read, Grep` or a YAML sequence) into
 /// (neutral names, unknown Claude names).
 fn split_tools(v: Option<&serde_yaml::Value>) -> (Vec<String>, Vec<String>) {
@@ -174,6 +220,11 @@ fn header(
             original_path: Some(original.to_string_lossy().to_string()),
             symlink_target: symlink.map(|p| p.to_string_lossy().to_string()),
         }),
+        // Left unset here; `apply_install_as` fills it in afterwards for
+        // skills, agents and MCP servers when the host identifier warrants
+        // it. Hooks and plugin refs never call `apply_install_as`, so it
+        // stays `None` for them.
+        install_as: None,
         targets: BTreeMap::new(),
     }
 }
@@ -200,7 +251,13 @@ fn claude_override(
 const KNOWN_SKILL_KEYS: &[&str] = &["name", "description", "allowed-tools"];
 const KNOWN_AGENT_KEYS: &[&str] = &["name", "description", "tools", "model"];
 
-fn import_skill(dir: &Path, name: &str, host: &str) -> Result<Asset, String> {
+fn import_skill(
+    dir: &Path,
+    original: &str,
+    name: &str,
+    host: &str,
+    warnings: &mut Vec<Problem>,
+) -> Result<Asset, String> {
     let symlink = std::fs::read_link(dir).ok();
     let skill_md = dir.join("SKILL.md");
     let text =
@@ -261,6 +318,7 @@ fn import_skill(dir: &Path, name: &str, host: &str) -> Result<Asset, String> {
         dir,
         symlink,
     );
+    apply_install_as(&mut h, Kind::Skill, original, name, dir, warnings);
     h.targets = claude_override(extra, None);
     Ok(Asset {
         header: h,
@@ -274,7 +332,13 @@ fn import_skill(dir: &Path, name: &str, host: &str) -> Result<Asset, String> {
     })
 }
 
-fn import_agent(file: &Path, name: &str, host: &str) -> Result<Asset, String> {
+fn import_agent(
+    file: &Path,
+    original: &str,
+    name: &str,
+    host: &str,
+    warnings: &mut Vec<Problem>,
+) -> Result<Asset, String> {
     let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
     let (fm, body) = parse_frontmatter(&text);
     let (tools, unknown) = split_tools(fm.get("tools"));
@@ -304,6 +368,7 @@ fn import_agent(file: &Path, name: &str, host: &str) -> Result<Asset, String> {
         file,
         None,
     );
+    apply_install_as(&mut h, Kind::Agent, original, name, file, warnings);
     h.targets = claude_override(extra, explicit);
     Ok(Asset {
         header: h,
@@ -478,6 +543,7 @@ fn import_mcp(
     flagged: &mut Vec<String>,
     slugs: &mut SlugMap,
     problems: &mut Vec<Problem>,
+    warnings: &mut Vec<Problem>,
 ) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(servers) = claude_json.get("mcpServers").and_then(Value::as_object) else {
@@ -541,6 +607,7 @@ fn import_mcp(
             path,
             None,
         );
+        apply_install_as(&mut hd, Kind::McpServer, name, &slug, path, warnings);
         hd.targets = claude_override(extra, None);
         out.push(Asset {
             header: hd,
@@ -658,6 +725,7 @@ pub fn import_claude(
     let mut report = ImportReport {
         created: vec![],
         problems: vec![],
+        warnings: vec![],
         flagged_secrets: vec![],
         dry_run,
     };
@@ -700,7 +768,7 @@ pub fn import_claude(
             else {
                 continue;
             };
-            match import_skill(&p, &slug, host) {
+            match import_skill(&p, &name, &slug, host, &mut report.warnings) {
                 Ok(a) => assets.push(a),
                 Err(message) => report.problems.push(Problem {
                     path: p.to_string_lossy().to_string(),
@@ -729,7 +797,7 @@ pub fn import_claude(
             else {
                 continue;
             };
-            match import_agent(&p, &slug, host) {
+            match import_agent(&p, &name, &slug, host, &mut report.warnings) {
                 Ok(a) => assets.push(a),
                 Err(message) => report.problems.push(Problem {
                     path: p.to_string_lossy().to_string(),
@@ -757,6 +825,7 @@ pub fn import_claude(
         &mut report.flagged_secrets,
         &mut slugs,
         &mut report.problems,
+        &mut report.warnings,
     ));
     let installed_path = src.claude_dir.join("plugins/installed_plugins.json");
     let known_path = src.claude_dir.join("plugins/known_marketplaces.json");
@@ -1130,6 +1199,7 @@ mod tests {
         let mut flagged = Vec::new();
         let mut slugs = SlugMap::new();
         let mut problems = Vec::new();
+        let mut warnings = Vec::new();
         let assets = import_mcp(
             &claude_json,
             "local",
@@ -1138,6 +1208,7 @@ mod tests {
             &mut flagged,
             &mut slugs,
             &mut problems,
+            &mut warnings,
         );
         let AssetSpec::McpServer { env, .. } = &assets[0].spec else {
             panic!()
@@ -1298,7 +1369,7 @@ mod tests {
         // recurse forever. It must be skipped entirely, not walked.
         std::os::unix::fs::symlink("..", skill_dir.join("loop")).unwrap();
 
-        let asset = import_skill(&skill_dir, "s", "local").unwrap();
+        let asset = import_skill(&skill_dir, "s", "s", "local", &mut Vec::new()).unwrap();
         assert_eq!(asset.resources.len(), 1);
         assert_eq!(asset.resources[0].rel_path, "resources/real.txt");
     }
@@ -1330,6 +1401,7 @@ mod tests {
         let mut flagged = Vec::new();
         let mut slugs = SlugMap::new();
         let mut problems = Vec::new();
+        let mut warnings = Vec::new();
         let assets = import_mcp(
             &claude_json,
             "local",
@@ -1338,6 +1410,7 @@ mod tests {
             &mut flagged,
             &mut slugs,
             &mut problems,
+            &mut warnings,
         );
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(assets.len(), 1);
@@ -1403,6 +1476,144 @@ mod tests {
         assert!(cat.find(Kind::Skill, "good").is_some());
         assert!(cat.find(Kind::Agent, "pm-qa").is_some());
         assert!(cat.find(Kind::Skill, "bad").is_none());
+    }
+
+    #[test]
+    fn install_as_for_examples() {
+        assert_eq!(
+            install_as_for("foo_bar", "foo-bar"),
+            Some("foo_bar".to_string())
+        );
+        // Original equals the slug: nothing to record.
+        assert_eq!(install_as_for("worktree", "worktree"), None);
+        // Original is not itself a valid install name (a space): no
+        // `install_as`; the caller records a warning instead.
+        assert_eq!(install_as_for("PM Review", "pm-review"), None);
+    }
+
+    #[test]
+    fn non_kebab_skill_dir_gets_install_as() {
+        let base = std::env::temp_dir().join(format!(
+            "fleet-import-install-as-skill-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let claude_dir = base.join("home/.claude");
+        let w = |rel: &str, c: &str| {
+            let p = base.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        w(
+            "home/.claude/skills/foo_bar/SKILL.md",
+            "---\nname: foo_bar\ndescription: d\n---\nb\n",
+        );
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        let src = ImportSources {
+            claude_dir,
+            claude_json: base.join("home/.claude.json"),
+        };
+
+        let rep = import_claude(&src, &repo, "local", None, false).unwrap();
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+        let cat = load_dir(&repo).unwrap();
+        let skill = cat.find(Kind::Skill, "foo-bar").unwrap();
+        assert_eq!(skill.header.install_as.as_deref(), Some("foo_bar"));
+    }
+
+    #[test]
+    fn non_slug_safe_agent_name_warns_instead_of_install_as() {
+        let base = std::env::temp_dir().join(format!(
+            "fleet-import-install-as-agent-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let claude_dir = base.join("home/.claude");
+        let w = |rel: &str, c: &str| {
+            let p = base.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        w(
+            "home/.claude/agents/PM Review.md",
+            "---\nname: PM Review\ndescription: d\n---\nb\n",
+        );
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        let src = ImportSources {
+            claude_dir,
+            claude_json: base.join("home/.claude.json"),
+        };
+
+        let rep = import_claude(&src, &repo, "local", None, false).unwrap();
+        let cat = load_dir(&repo).unwrap();
+        let agent = cat.find(Kind::Agent, "pm-review").unwrap();
+        assert!(agent.header.install_as.is_none());
+        assert!(rep.problems.is_empty(), "{:?}", rep.problems);
+        assert_eq!(rep.warnings.len(), 1, "{:?}", rep.warnings);
+        assert_eq!(
+            rep.warnings[0].message,
+            "agent pm-review: installs under a new name; PM Review stays unmanaged"
+        );
+    }
+
+    #[test]
+    fn mcp_server_key_gets_install_as() {
+        let claude_json = serde_json::json!({
+            "mcpServers": {
+                "claude_ai_Docs": { "type": "stdio", "command": "x" }
+            }
+        });
+        let mut flagged = Vec::new();
+        let mut slugs = SlugMap::new();
+        let mut problems = Vec::new();
+        let mut warnings = Vec::new();
+        let assets = import_mcp(
+            &claude_json,
+            "local",
+            Path::new(".claude.json"),
+            None,
+            &mut flagged,
+            &mut slugs,
+            &mut problems,
+            &mut warnings,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].header.name, "claude-ai-docs");
+        assert_eq!(
+            assets[0].header.install_as.as_deref(),
+            Some("claude_ai_Docs")
+        );
+    }
+
+    #[test]
+    fn kebab_originals_get_no_install_as_and_no_warning() {
+        let (src, repo) = fixture("kebab-install-as");
+        let rep = import_claude(&src, &repo, "local", Some("SECRET123"), false).unwrap();
+        let cat = load_dir(&repo).unwrap();
+        let skill = cat.find(Kind::Skill, "worktree").unwrap();
+        assert!(skill.header.install_as.is_none());
+        let agent = cat.find(Kind::Agent, "pm-qa").unwrap();
+        assert!(agent.header.install_as.is_none());
+        let fleet = cat.find(Kind::McpServer, "claude-fleet").unwrap();
+        assert!(fleet.header.install_as.is_none());
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+    }
+
+    #[test]
+    fn hooks_and_plugin_refs_never_get_install_as() {
+        let (src, repo) = fixture("hooks-plugins-install-as");
+        import_claude(&src, &repo, "local", Some("SECRET123"), false).unwrap();
+        let cat = load_dir(&repo).unwrap();
+        let hook = cat.find(Kind::Hook, "before-tool-bash").unwrap();
+        assert!(hook.header.install_as.is_none());
+        let plugin = cat.find(Kind::PluginRef, "superpowers").unwrap();
+        assert!(plugin.header.install_as.is_none());
     }
 
     #[test]

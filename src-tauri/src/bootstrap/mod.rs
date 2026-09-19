@@ -6,3 +6,4 @@
 pub(crate) mod env;
 pub(crate) mod mcp;
 pub(crate) mod singleton;
+pub(crate) mod tasks;
