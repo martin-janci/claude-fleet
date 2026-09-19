@@ -430,7 +430,29 @@ pub enum ProtoError {
     TooLarge { size: usize, cap: usize },
     /// Not JSON, not a frame of this direction, an unknown `kind`, a missing
     /// or mistyped field, or an undecodable base64 body.
+    ///
+    /// **The detail quotes the peer.** Serde names an offending value in its
+    /// message and renders it VERBATIM — a `kind` of `"\nfleet-hub: …"`
+    /// comes back with a real newline in it — and every receiver logs this
+    /// (`ws.rs` at warn; the agent through `SessionEnd::Protocol`, which
+    /// reaches both a log line and systemd's `STATUS=`). Build it with
+    /// [`ProtoError::malformed`], never by hand: that neutralises control
+    /// characters and bounds the length, so no call site has to remember
+    /// to.
     Malformed(String),
+}
+
+impl ProtoError {
+    /// [`ProtoError::Malformed`] with the detail made safe to log: every
+    /// control character replaced with `U+FFFD`, truncated to
+    /// [`MALFORMED_DETAIL_MAX_LEN`] bytes on a `char` boundary.
+    ///
+    /// Takes a `Display` so a `serde_json::Error`, a `base64` error or a
+    /// plain `&str` all go the same way — there is deliberately no path
+    /// that skips this.
+    pub fn malformed(why: impl fmt::Display) -> Self {
+        Self::Malformed(sanitize_for_log(&why.to_string(), MALFORMED_DETAIL_MAX_LEN))
+    }
 }
 
 impl fmt::Display for ProtoError {
@@ -536,7 +558,7 @@ fn decode_lenient<T: DeserializeOwned>(text: &str, cap: usize) -> Result<Decoded
         // already bounded by `cap`.
         Err(e) => match unknown_kind::<T>(text) {
             Some(kind) => Ok(Decoded::Unknown { kind }),
-            None => Err(ProtoError::Malformed(e.to_string())),
+            None => Err(ProtoError::malformed(e)),
         },
     }
 }
@@ -620,6 +642,15 @@ fn unknown_variant_name(e: &serde_json::Error) -> Option<String> {
     let (name, _) = after.split_once('`')?;
     Some(name.to_string())
 }
+
+/// The longest detail a [`ProtoError::Malformed`] carries, in bytes.
+///
+/// Generous next to [`UNKNOWN_KIND_MAX_LEN`] — serde's messages are prose
+/// ("missing field `id`", "invalid type: string, expected u32 at line 1
+/// column 24") and a truncated one is worth much less than a truncated
+/// kind — but bounded all the same, because part of what serde prints is
+/// the peer's own text.
+pub const MALFORMED_DETAIL_MAX_LEN: usize = 256;
 
 /// The longest a `kind` [`UnknownKinds`] stores or hands back for logging,
 /// in bytes, truncated on a `char` boundary so it is never split
@@ -723,7 +754,7 @@ pub fn sanitize_for_log(text: &str, max_bytes: usize) -> String {
 }
 
 fn encode<T: Serialize>(frame: &T, cap: usize) -> Result<String, ProtoError> {
-    let text = serde_json::to_string(frame).map_err(|e| ProtoError::Malformed(e.to_string()))?;
+    let text = serde_json::to_string(frame).map_err(ProtoError::malformed)?;
     check_size(text.len(), cap)?;
     Ok(text)
 }
@@ -732,7 +763,7 @@ fn decode<T: DeserializeOwned>(text: &str, cap: usize) -> Result<T, ProtoError> 
     // Size first: a hostile peer must not get serde to walk 100 MB before the
     // cap is consulted.
     check_size(text.len(), cap)?;
-    serde_json::from_str(text).map_err(|e| ProtoError::Malformed(e.to_string()))
+    serde_json::from_str(text).map_err(ProtoError::malformed)
 }
 
 fn check_size(size: usize, cap: usize) -> Result<(), ProtoError> {
@@ -750,7 +781,11 @@ pub fn encode_b64(bytes: &[u8]) -> String {
 /// Decode a `*_b64` field back to bytes.
 pub fn decode_b64(text: &str) -> Result<Vec<u8>, ProtoError> {
     B64.decode(text)
-        .map_err(|e| ProtoError::Malformed(format!("base64: {e}")))
+        // `base64`'s own error reports byte VALUES and offsets, not the
+        // input, but it goes the same way as every other one: there is no
+        // second path to `Malformed` for a future error type to slip
+        // through.
+        .map_err(|e| ProtoError::malformed(format!("base64: {e}")))
 }
 
 #[cfg(test)]

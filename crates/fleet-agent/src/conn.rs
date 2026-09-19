@@ -2053,6 +2053,37 @@ mod tests {
         }
     }
 
+    /// The same hazard as the close reason above, by the other route: a
+    /// frame the agent REFUSES ends the session as `SessionEnd::Protocol`,
+    /// carrying the decoder's own rejection — which quotes the peer's text.
+    /// `run_with` puts that into a `tracing::warn!` AND into
+    /// `notifier.status`, which becomes systemd's `STATUS=` (it strips a
+    /// newline, but not a carriage return or an ANSI escape). It must be
+    /// clean before it leaves `fleet-proto`.
+    #[tokio::test]
+    async fn a_refused_frame_s_session_end_cannot_forge_a_log_line() {
+        // Two `kind` keys, the first one hostile: serde's enum reads the
+        // FIRST, so its complaint quotes the forged text verbatim.
+        let forged =
+            serde_json::to_string("\nfleet-agent: forged \x1b[31mred\x1b[0m\r").expect("encodes");
+        let hostile = format!(r#"{{"kind":{forged},"kind":"ping"}}"#);
+        let mut p = pair().await;
+        p.hub.send(Message::Text(hostile.into())).await.unwrap();
+        let served = tokio::time::timeout(PATIENCE, p.served)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(served.end, SessionEnd::Protocol(_)), "{served:?}");
+        let rendered = served.end.to_string();
+        assert!(
+            !rendered.chars().any(char::is_control),
+            "control character in {rendered:?}"
+        );
+        // Still says something: the peer's forgery is neutralised, not the
+        // reason for the refusal.
+        assert!(rendered.contains("malformed frame"), "{rendered:?}");
+    }
+
     /// The hub side of a version refusal: a close carrying
     /// `VERSION_REFUSED_CLOSE_CODE` is read back as `SessionEnd::VersionRefused`
     /// with its reason, not the generic `Closed`.

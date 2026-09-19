@@ -10,8 +10,8 @@ use fleet_proto::{
     decode_hub_frame, decode_hub_frame_lenient, decode_hub_frame_within, encode_agent_frame,
     encode_agent_frame_within, encode_b64, encode_hub_frame, encode_hub_frame_within, judge_proto,
     AgentFrame, Decoded, HubFrame, ProtoError, ProtoVerdict, UnknownKindAction, UnknownKinds,
-    MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES, MIN_SUPPORTED_PROTO, PROTO_VERSION,
-    VERSION_REFUSED_CLOSE_CODE,
+    MALFORMED_DETAIL_MAX_LEN, MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES, MIN_SUPPORTED_PROTO,
+    PROTO_VERSION, VERSION_REFUSED_CLOSE_CODE,
 };
 use serde_json::{json, Value};
 
@@ -371,6 +371,106 @@ fn a_malformed_base64_field_is_an_error_not_a_panic() {
             "accepted {text:?}"
         );
     }
+}
+
+// --- a rejection's own text is peer-derived, and is logged -------------------
+
+/// A string a peer might send, carrying a newline, a carriage return and
+/// two ANSI escapes. Serde renders an unknown variant's name into its own
+/// message VERBATIM — it does not escape it — so anything that ends up in a
+/// `ProtoError` has to be neutralised before a receiver logs it.
+const HOSTILE: &str = "\nfleet-hub: forged line \x1b[31mred\x1b[0m\r";
+
+/// `HOSTILE`, escaped the way a peer's JSON encoder would write it — quotes
+/// included, ready to paste into a frame.
+fn hostile_json_string(extra_prefix: &str) -> String {
+    serde_json::to_string(&format!("{extra_prefix}{HOSTILE}")).expect("encodes")
+}
+
+fn assert_no_control_chars(err: &ProtoError, what: &str) {
+    let ProtoError::Malformed(why) = err else {
+        panic!("{what}: expected Malformed, got {err:?}");
+    };
+    assert!(
+        !why.chars().any(char::is_control),
+        "{what}: control character in {why:?}"
+    );
+    assert!(
+        why.len() <= MALFORMED_DETAIL_MAX_LEN,
+        "{what}: {} bytes, cap is {MALFORMED_DETAIL_MAX_LEN}",
+        why.len()
+    );
+    let rendered = err.to_string();
+    assert!(
+        !rendered.chars().any(char::is_control),
+        "{what}: control character in {rendered:?}"
+    );
+}
+
+/// The three input classes that take the Malformed branch carrying serde's
+/// own message about a peer-chosen string. Before the classifier read the
+/// `kind` out of the JSON, every one of these was reported as an unknown
+/// KIND, which `UnknownKinds::record` sanitised; now they are damage, and
+/// the sanitising has to happen where the error is built.
+#[test]
+fn a_rejection_never_carries_a_control_character_out_of_the_frame() {
+    let plain = hostile_json_string("");
+    let backticked = hostile_json_string("a`b");
+    let cases = [
+        // A JSON array: serde reads its first element as the variant name.
+        ("json array", format!("[{plain},1]")),
+        // Two `kind` keys: serde's enum takes the FIRST, which is hostile;
+        // `KindOnly` refuses the duplicate, so this is damage.
+        (
+            "duplicate kind",
+            format!(r#"{{"kind":{plain},"kind":"exec"}}"#),
+        ),
+        // A backtick truncates serde's own rendering of the name, so the
+        // probe cannot confirm it and the frame is damage.
+        (
+            "backtick in the kind",
+            format!(r#"{{"kind":{backticked}}}"#),
+        ),
+    ];
+    for (what, text) in cases {
+        let err = decode_hub_frame_lenient(&text).expect_err("rejected");
+        assert_no_control_chars(&err, &format!("hub/lenient {what}"));
+
+        let err = decode_agent_frame_lenient_within(&text, MAX_FRAME_BYTES).expect_err("rejected");
+        assert_no_control_chars(&err, &format!("agent/lenient {what}"));
+
+        // The strict decoders build their Malformed the same way.
+        let err = decode_hub_frame(&text).expect_err("rejected");
+        assert_no_control_chars(&err, &format!("hub/strict {what}"));
+        let err = decode_agent_frame(&text).expect_err("rejected");
+        assert_no_control_chars(&err, &format!("agent/strict {what}"));
+    }
+}
+
+/// A peer cannot make the detail arbitrarily long either — the cap holds
+/// even when the offending name is the size of a whole frame.
+#[test]
+fn a_rejection_s_detail_is_bounded_however_long_the_offending_name_is() {
+    let text = format!(r#"{{"kind":"{}"}}"#, "z".repeat(4096));
+    // A plain long kind is a genuine unknown kind, so provoke the Malformed
+    // branch with a backtick in front of it.
+    let text = text.replace(r#""kind":"z"#, r#""kind":"`z"#);
+    let err = decode_hub_frame_lenient(&text).expect_err("rejected");
+    assert_no_control_chars(&err, "long name");
+}
+
+/// And it is still worth reading: an ordinary malformed frame's rejection
+/// still says what serde complained about.
+#[test]
+fn an_ordinary_rejection_still_says_what_went_wrong() {
+    let err = decode_hub_frame(r#"{"kind":"exec"}"#).expect_err("rejected");
+    let rendered = err.to_string();
+    assert!(rendered.contains("missing field"), "{rendered}");
+    assert!(rendered.contains("id"), "{rendered}");
+
+    let err = decode_b64("not base64!!").expect_err("rejected");
+    let rendered = err.to_string();
+    assert!(rendered.contains("base64"), "{rendered}");
 }
 
 // --- the error type ---------------------------------------------------------
