@@ -336,10 +336,13 @@ impl EventBridge {
         let mut row_events = false;
         // Whether this connection's `ready` frame has been read yet. A real
         // hub always sends it first, before touching its bus, so nothing
-        // this loop reads before that is a row worth applying anyway — but
-        // some of this suite's scripts skip straight to a row frame for
-        // brevity, hence the guard rather than an assumption.
+        // this loop should ever read before that — but this flag is what
+        // actually enforces it, rather than the loop trusting the ordering:
+        // every frame before the first `ready` is dropped, unapplied, below.
         let mut contract_checked = false;
+        // Whether the "dropped before ready" warning has already fired for
+        // this connection — logged once, not once per frame.
+        let mut warned_before_ready = false;
         loop {
             // Any bytes at all — the hub's keep-alive comment included —
             // make `next` return, so this bounds SILENCE, not the stream.
@@ -435,6 +438,24 @@ impl EventBridge {
                             });
                             return StreamEnd::ContractSkew;
                         }
+                    }
+                    continue;
+                }
+                if !contract_checked {
+                    // Nothing has validated this hub's contract yet, so
+                    // nothing it sent before `ready` is trusted — a row
+                    // applied here would be exactly the backfill-from-an-
+                    // unchecked-hub this mechanism exists to prevent.
+                    // Unreachable against any real hub (`ready` always
+                    // comes first), but this is what makes that true rather
+                    // than assumed.
+                    if !warned_before_ready {
+                        warned_before_ready = true;
+                        tracing::warn!(
+                            frame = %frame.name,
+                            "[hub events] a frame arrived before `ready`; dropping it and \
+                             everything else on this connection until the contract is checked"
+                        );
                     }
                     continue;
                 }

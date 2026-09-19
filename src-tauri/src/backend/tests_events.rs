@@ -310,9 +310,14 @@ async fn drive_reporting(
     seen
 }
 
-/// The script every "one event" test uses: one connection carrying `body`.
+/// The script every "one event" test uses: one connection carrying `ready()`
+/// then `body`. `ready()` first because the contract gate (issue #148) drops
+/// every frame ahead of it — a real hub always sends it first anyway, so
+/// this is what these tests would script even without that gate.
 async fn one_connection(body: Vec<String>) -> Arc<Recorder> {
-    drive(vec![Connection::Delivers(body)]).await.0
+    let mut script = vec![ready()];
+    script.extend(body);
+    drive(vec![Connection::Delivers(script)]).await.0
 }
 
 /// `drive`, but also recording the connection states reported — for the
@@ -884,6 +889,71 @@ async fn recovery_when_a_later_reconnect_is_back_in_range() {
     );
 }
 
+/// The gate must hold for EVERY frame ahead of `ready`, not only the ones
+/// this suite's other scripts happen to send. A row frame that somehow beat
+/// `ready` to the wire — unreachable against a real hub today (`events_route`'s
+/// `Phase::Ready` always precedes `Phase::Live`), but not something the code
+/// itself enforces — must not be trusted: no contract has been checked yet,
+/// so there is nothing to trust it against.
+#[tokio::test]
+async fn a_row_frame_ahead_of_ready_is_dropped_and_does_not_trigger_a_resync() {
+    use crate::backend::connection::HubConnection as C;
+    let early = RowChange::SessionKilled(1);
+    let later = RowChange::SessionKilled(2);
+    let (sink, states, resync) = drive_watched(vec![Connection::Delivers(vec![
+        frame_for(&early),
+        ready(),
+        frame_for(&later),
+    ])])
+    .await;
+    assert_eq!(
+        sink.events(),
+        vec![(later.name(), later.payload())],
+        "the frame ahead of `ready` must be dropped; the one after must apply"
+    );
+    assert_eq!(
+        resync.count(),
+        1,
+        "one resync, from `ready` — not one triggered by the early row"
+    );
+    assert_eq!(states.first(), Some(&C::Connected), "{states:?}");
+}
+
+/// The other half: a connection that sends rows and never sends `ready` at
+/// all. Nothing it sends is ever trusted, and — just as important — the
+/// bridge must never tell the frontend it is `Connected` on the strength of
+/// a socket alone. This script's connection simply runs out of frames and
+/// closes (`Ok(None)`), which `pump` treats like any other connection that
+/// proved nothing: a `Reconnecting` report, not a `Connecting` stuck
+/// forever and not a `Connected` that was never earned. Pinned so a future
+/// change to this path is a deliberate one.
+#[tokio::test]
+async fn a_connection_that_never_sends_ready_never_reports_connected() {
+    use crate::backend::connection::HubConnection as C;
+    let row = RowChange::SessionKilled(7);
+    let (sink, states, resync) =
+        drive_watched(vec![Connection::Delivers(vec![frame_for(&row)])]).await;
+    assert!(
+        sink.events().is_empty(),
+        "no row is trusted without a `ready` first: {:?}",
+        sink.events()
+    );
+    assert_eq!(
+        resync.count(),
+        0,
+        "no backfill without a validated contract"
+    );
+    assert!(
+        !states.contains(&C::Connected),
+        "a connection that never sends `ready` must never report Connected: {states:?}"
+    );
+    assert!(
+        matches!(states.first(), Some(C::Reconnecting { .. })),
+        "this script's connection closes normally once spent, which `pump` \
+         reports as Reconnecting, not Connected: {states:?}"
+    );
+}
+
 /// SF-3. `lagged` also reset the wait. And the loop it feeds is
 /// self-sustaining: a resync is four serial calls during which nothing reads
 /// the stream, so the hub's ring overflows and the first frame of the next
@@ -1044,10 +1114,13 @@ async fn a_hub_that_refuses_is_offline_with_a_growing_attempt_and_its_reason() {
 #[tokio::test]
 async fn a_stream_that_worked_starts_the_attempt_count_over() {
     use crate::backend::connection::HubConnection as C;
+    // `ready()` first: a real hub always sends it, and the contract gate
+    // (issue #148) drops a row that arrives ahead of it, which would
+    // otherwise silently stop this connection from counting as delivered.
     let states = drive_reporting(vec![
         Connection::Fails("refused"),
         Connection::Fails("refused"),
-        Connection::Delivers(vec![frame_for(&RowChange::SessionKilled(1))]),
+        Connection::Delivers(vec![ready(), frame_for(&RowChange::SessionKilled(1))]),
     ])
     .await;
     let attempts: Vec<u32> = states
