@@ -23,11 +23,14 @@ cp fleet-hub.env.example fleet-hub.env
 ```
 
 **The image.** The compose file pulls `ghcr.io/martin-janci/fleet-hub:latest`.
-A new ghcr package starts out private, and no `latest` tag exists until the
-first `v*` release tag is pushed (a manual run of the `hub-image.yml`
-workflow publishes only a `sha-<commit>` tag). Until then — or if you cannot
-pull the package — build the image locally from a checkout of the repository
-and point `image:` in `docker-compose.yml` at it:
+`hub-image.yml` has now run successfully on a pushed `v*` tag (v0.2.21 and
+later), so a `latest` tag should exist —
+[check the package page](https://github.com/martin-janci/claude-fleet/pkgs/container/fleet-hub)
+if you are unsure, or if it still shows private (a manual `workflow_dispatch`
+run, rather than a tag push, only ever publishes a `sha-<commit>` tag, never
+`latest`). If you cannot pull the package for any reason, build the image
+locally from a checkout of the repository instead and point `image:` in
+`docker-compose.yml` at it:
 
 ```bash
 docker build -f crates/fleet-hub/Dockerfile -t fleet-hub:local .
@@ -203,7 +206,26 @@ no reverse tunnel for it.
    This is the only way an agent host's token reaches the host. The hub never
    sends a token over the agent connection (see *Rotating* below). Treat the
    output like a password.
-3. **Install the agent, on the host.** Paste the token into stdin rather
+3. **Get the binary, on the host.** Each release attaches
+   `fleet-agent-<version>-<target>.tar.gz` for `x86_64-unknown-linux-gnu` and
+   `aarch64-unknown-linux-gnu` (binary + `LICENSE` + a `README.txt` pointing
+   back here), plus a `SHA256SUMS` covering every asset in that release —
+   [github.com/martin-janci/claude-fleet/releases](https://github.com/martin-janci/claude-fleet/releases):
+   ```bash
+   v=0.3.0   # the release you're installing; target: x86_64- or aarch64-unknown-linux-gnu
+   curl -LO https://github.com/martin-janci/claude-fleet/releases/download/v$v/fleet-agent-$v-x86_64-unknown-linux-gnu.tar.gz
+   curl -LO https://github.com/martin-janci/claude-fleet/releases/download/v$v/SHA256SUMS
+   sha256sum -c SHA256SUMS --ignore-missing
+   tar xzf fleet-agent-$v-x86_64-unknown-linux-gnu.tar.gz
+   sudo install -m 0755 fleet-agent-$v-x86_64-unknown-linux-gnu/fleet-agent /usr/local/bin/fleet-agent
+   ```
+   These are built on `ubuntu-22.04` runners and need **glibc 2.35 or
+   newer** on the host — Ubuntu 22.04+, Debian 12+ and equivalents; not
+   Debian 11. No matching release yet, or an older host? Build from a
+   checkout instead: `cargo build -p fleet-agent --release --locked` needs
+   neither the Tauri system libraries nor `fleet-core` (see
+   `crates/fleet-agent/Cargo.toml`).
+4. **Install the agent, on the host.** Paste the token into stdin rather
    than the command line. `--token` also works, but it shows up in the
    process list and in your shell history.
    ```bash
@@ -212,6 +234,12 @@ no reverse tunnel for it.
    # or a user unit, no root needed:
    fleet-agent install --user --hub https://fleet.example.com --token-file -
    ```
+   **No systemd on this host (or not Linux at all)?** `install` checks for
+   it first — `/run/systemd/system` and `systemctl` on `$PATH` — and refuses
+   cleanly, before writing anything, naming what it checked. Run the agent
+   under your own supervisor instead: `fleet-agent run --hub <url>
+   --token-file -` (or `--config <path>` once `install` has written one
+   somewhere systemd could).
    **Careful with stdin under `sudo`.** `sudo` reads its password from the
    terminal, so a token pasted while it is still asking goes to the password
    prompt, not to `--token-file -`. A pipe into `ssh -tt host sudo
@@ -244,17 +272,17 @@ no reverse tunnel for it.
      loopback (`localhost`, `127.0.0.0/8`, `::1`). It exists for a test on
      one machine. Anywhere else it is refused, because the token would cross
      the network in clear.
-4. **Check it,** on the host with `fleet-agent status [--user]`, or from any
+5. **Check it,** on the host with `fleet-agent status [--user]`, or from any
    client with `agent_status`. `fleet-agent status` exits `0` when the
    service is running and connected, and `3` otherwise. It reads the
    agent's own report through `systemctl show`; the agent keeps no state
    file.
-5. **Provision it:** `probe_host { alias: "laptop" }` (or wait for the next
+6. **Provision it:** `probe_host { alias: "laptop" }` (or wait for the next
    reconcile pass), then `provision_hosts`. Provisioning runs over the
    agent, exactly as it would over SSH.
 
-Without systemd, `fleet-agent run --config <path>` (or
-`run --hub <url> --token-file -`) runs the same loop in the foreground.
+(No systemd? See the no-systemd note under step 4 — `fleet-agent run` is
+the same loop, just in the foreground, under whatever supervises it instead.)
 
 ### What the agent does, and does not do
 
@@ -525,6 +553,19 @@ the stream closes — reconnect and re-list rather than assume continuity.
 ## Bare binary
 
 Prefer running without Docker, or need it as a system service:
+
+```bash
+v=0.3.0   # the release you're installing; target: x86_64- or aarch64-unknown-linux-gnu
+curl -LO https://github.com/martin-janci/claude-fleet/releases/download/v$v/fleet-hub-$v-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/martin-janci/claude-fleet/releases/download/v$v/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+tar xzf fleet-hub-$v-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m 0755 fleet-hub-$v-x86_64-unknown-linux-gnu/fleet-hub /usr/local/bin/fleet-hub
+```
+
+Like `fleet-agent`'s binaries (see *Get the binary* above), these are built
+on `ubuntu-22.04` runners and need **glibc 2.35 or newer** on the host. No
+matching release, or an older host? Build from a checkout instead:
 
 ```bash
 cargo build -p fleet-hub --release

@@ -65,11 +65,33 @@ Publishing fires `docs.yml` (`release: published`), which rebuilds the rustdoc
 site. If a leg fails, fix and re-run the workflow from the same tag; the
 existing draft is reused and its assets replaced.
 
+### fleet-agent and fleet-hub binaries
+
+The same workflow also runs an `agent-hub-binaries` job, in parallel with the
+three desktop legs above (same `needs: create-release`, no dependency on or
+from `build`). It builds `fleet-agent` and `fleet-hub` `--release --locked`
+for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` on native
+`ubuntu-22.04` / `ubuntu-22.04-arm` runners (22.04 rather than 24.04 so the
+binaries need only **glibc 2.35+** on the host — see `docs/hub.md`), then
+`scripts/package-linux-release.sh` packs each binary with a `LICENSE` and a
+`README.txt` into `fleet-agent-X.Y.Z-<target>.tar.gz` /
+`fleet-hub-X.Y.Z-<target>.tar.gz`, plus one `SHA256SUMS` covering all four
+tarballs, and `gh release upload` attaches them to the same draft.
+
+This job has `continue-on-error: true` and depends on nothing the desktop
+legs depend on, so a failure here never blocks, delays or marks failed the
+desktop bundles or the draft release itself — check its own job status
+separately after a release. After publishing, spot-check with
+`sha256sum -c SHA256SUMS` against a downloaded tarball.
+
 ### Hub image
 
 `.github/workflows/hub-image.yml` also runs on push of any `v*` tag: it
-builds and publishes the `fleet-hub` container image (independently of the
-desktop-bundle legs above and of the draft-release review step). See the
+builds and publishes the `fleet-hub` container image for `linux/amd64` and
+`linux/arm64` (independently of the desktop-bundle legs above and of the
+draft-release review step) — two native per-arch jobs pushed by digest, then
+merged into one multi-arch manifest under the real tags, so the arm64 leg
+(no QEMU; see the workflow file) never slows amd64's publication. See the
 workflow file for the image name/tag scheme.
 
 ### Signing caveat
