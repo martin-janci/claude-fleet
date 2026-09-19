@@ -398,7 +398,8 @@ export interface NewSessionArgs {
   friendly_name?: string | null;
   /**
    * Resume this Claude conversation id instead of minting a fresh one (from
-   * discover_lost_sessions). Ignored for a shell session.
+   * discover_lost_sessions). Rejected for a shell session and when a session
+   * on the host already holds that conversation.
    */
   resume_claude_session_id?: string;
 }

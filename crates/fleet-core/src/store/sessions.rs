@@ -556,6 +556,22 @@ impl Store {
             .optional()
     }
 
+    /// The session on `host_alias` (live or lost) holding Claude conversation
+    /// `claude_id`, if any. `new_session` refuses to resume a held conversation.
+    pub fn session_with_claude_id(
+        &self,
+        host_alias: &str,
+        claude_id: &str,
+    ) -> rusqlite::Result<Option<SessionRow>> {
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions
+                 WHERE host_alias=?1 AND claude_session_id=?2 LIMIT 1"
+            ))?
+            .query_row(rusqlite::params![host_alias, claude_id], map_session_row)
+            .optional()
+    }
+
     /// Record the Claude Code session id minted for a session. Reconcile's
     /// `upsert_session` never writes this column, so the value survives
     /// reconciliation.
@@ -1164,6 +1180,32 @@ mod tests {
             .lost_resumable_session_named("local", "nope")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn session_with_claude_id_matches_only_its_host() {
+        let s = store();
+        s.upsert_host("other").unwrap();
+        s.upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.upsert_session("b", "other", None, None, 1, 1, "running", None)
+            .unwrap();
+        let a = s.get_session("a", "local").unwrap().unwrap().id;
+        let b = s.get_session("b", "other").unwrap().unwrap().id;
+        s.set_claude_session_id(a, "u-a").unwrap();
+        s.set_claude_session_id(b, "u-b").unwrap();
+        s.mark_session_killed(a, 50).unwrap();
+
+        let hit = s.session_with_claude_id("local", "u-a").unwrap();
+        assert_eq!(hit.map(|r| r.id), Some(a), "a lost holder still matches");
+        assert!(s.session_with_claude_id("local", "u-b").unwrap().is_none());
+        assert!(s.session_with_claude_id("other", "u-a").unwrap().is_none());
+        assert_eq!(
+            s.session_with_claude_id("other", "u-b")
+                .unwrap()
+                .map(|r| r.id),
+            Some(b)
+        );
     }
 
     #[test]

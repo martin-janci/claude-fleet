@@ -34,7 +34,8 @@ pub struct NewSessionArgs {
     pub friendly_name: Option<String>,
     /// Resume this Claude conversation id instead of minting a fresh one (a
     /// conversation found by `discover_lost_sessions`). Must be a lowercase
-    /// UUID; ignored for a `"shell"` session.
+    /// UUID not already held by a session on the host; rejected for a
+    /// `"shell"` session.
     #[serde(default)]
     pub resume_claude_session_id: Option<String>,
 }
@@ -320,6 +321,13 @@ pub async fn new_session(
     }
     if let Some(id) = args.resume_claude_session_id.as_deref() {
         crate::validate::claude_session_id(id)?;
+        if args.kind.as_deref() == Some("shell") {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "resume_claude_session_id applies to Claude sessions, not shell sessions",
+            ));
+        }
+        reject_held_conversation(&*lock(store)?, &args.host_alias, id)?;
     }
     reject_lost_session_name(&*lock(store)?, &args.host_alias, &args.name)?;
 
@@ -368,6 +376,26 @@ pub(crate) fn reject_lost_session_name(
             format!(
                 "{name} belongs to a lost session (id {}); restore it with restore_host_sessions or dismiss it first",
                 row.id
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Refuse to resume a conversation some session on the host already holds
+/// (live or lost): two panes on one transcript would interleave, and a lost
+/// holder should be brought back by `restore_host_sessions` instead.
+pub(crate) fn reject_held_conversation(
+    s: &Store,
+    host_alias: &str,
+    claude_id: &str,
+) -> Result<(), IpcError> {
+    match s.session_with_claude_id(host_alias, claude_id)? {
+        Some(row) => Err(IpcError::new(
+            codes::E_EXISTS,
+            format!(
+                "conversation {claude_id} already belongs to session {} ({}); restore it with restore_host_sessions instead",
+                row.id, row.tmux_name
             ),
         )),
         None => Ok(()),

@@ -375,3 +375,70 @@ fn a_shell_session_has_no_claude_id() {
     assert_eq!(cid, None);
     assert_eq!(pane, crate::tmux::shell_pane_command(None));
 }
+
+#[tokio::test]
+async fn a_resume_id_on_a_shell_session_is_rejected() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let mut args = args_named("dev-y", Some(RESUME_ID));
+    args.kind = Some("shell".into());
+    let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_INVALID);
+    assert_eq!(
+        err.message,
+        "resume_claude_session_id applies to Claude sessions, not shell sessions"
+    );
+}
+
+/// Resuming a conversation a session on the host already holds — lost or
+/// live — is refused; the lost holder is restored instead.
+#[tokio::test]
+async fn a_resume_id_held_by_a_lost_session_is_refused() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let id = lost_row(&store.lock().unwrap(), "dev-x", Some(RESUME_ID));
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-new", Some(RESUME_ID)), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+    assert_eq!(
+        err.message,
+        format!(
+            "conversation {RESUME_ID} already belongs to session {id} (dev-x); restore it with restore_host_sessions instead"
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_resume_id_held_by_a_live_session_is_refused() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-live", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let id = s.get_session("dev-live", "local").unwrap().unwrap().id;
+        s.set_claude_session_id(id, RESUME_ID).unwrap();
+    }
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-new", Some(RESUME_ID)), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+}
+
+/// An unheld resume id passes both checks and fails later on the unknown
+/// project — the guards do not over-block.
+#[tokio::test]
+async fn an_unheld_resume_id_gets_past_the_guards() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-new", Some(RESUME_ID)), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+}
