@@ -39,9 +39,13 @@ own native runner (no QEMU) and, if the `arm64` leg fails, still publishes
 so a given `latest`/`vX.Y.Z` may, on such a run, carry only an amd64
 manifest, and `docker pull --platform linux/arm64` (or any arm64 host
 pulling by tag) then fails outright rather than silently getting an amd64
-image. Check the `hub-image` workflow's own run history, or `docker buildx
-imagetools inspect ghcr.io/martin-janci/fleet-hub:latest`, if that matters
-to you.
+image. **The run itself still shows green** when this happens — an
+amd64-only publish is a successful run, not a failed one, since amd64
+publishing must keep working regardless of arm64 — but it is not silent:
+the run carries a `::warning::` annotation and a job-summary note saying
+arm64 failed and the manifest is amd64-only. Check the `hub-image`
+workflow's own run history and summaries, or `docker buildx imagetools
+inspect ghcr.io/martin-janci/fleet-hub:latest`, if that matters to you.
 
 ```bash
 docker build -f crates/fleet-hub/Dockerfile -t fleet-hub:local .
