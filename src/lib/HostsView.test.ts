@@ -499,6 +499,25 @@ describe('HostsView: hub client', () => {
     expect(calls('refresh_account_usage')).toHaveLength(before.usage + 1);
   });
 
+  // #147, finding 5: the `e` shortcut called `startEdit` directly, bypassing
+  // the nickname button's own `disabled={blocked !== null}` — the same
+  // non-button-path gap as `r`/`u` above, just found later.
+  it('e does nothing while blocked: no editor opens, no set_account_nickname', async () => {
+    hubStatus.set(remote);
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await key(list(), 'e');
+    expect(screen.queryByTestId('group-label-input')).toBeNull();
+    expect(calls('set_account_nickname')).toHaveLength(0);
+  });
+
+  it('standalone is untouched: e still opens the editor', async () => {
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await key(list(), 'e');
+    expect(screen.getByTestId('group-label-input')).toBeInTheDocument();
+  });
+
   it('does not fire refresh_account_usage on open', async () => {
     hubStatus.set(remote);
     mount({ preselect: 'mefistos' });

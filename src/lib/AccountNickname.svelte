@@ -44,6 +44,15 @@
   async function save(value: string) {
     if (finished) return;
     finished = true;
+    // Belt and braces: the owner already gates opening the editor
+    // (`startEdit`) on this same reason, but if `blocked` turned non-null
+    // while it was already open (or a caller ever opens it unguarded), do
+    // not send a call the hub will refuse anyway — that would just surface
+    // an E_LOCAL_ONLY toast where a plain "nothing happened" belongs.
+    if (blocked) {
+      ondone();
+      return;
+    }
     const trimmed = value.trim();
     const r = await setAccountNickname(account.uuid, trimmed === '' ? null : trimmed);
     if (!r.ok) pushError(r.error, 'Nickname not saved');

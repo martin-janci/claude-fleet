@@ -236,6 +236,10 @@
   }
 
   function startEdit(where: 'list' | 'detail', uuid: string | null | undefined) {
+    // The `e` shortcut (below) reaches this directly, bypassing the
+    // nickname button's own `disabled={blocked !== null}` — the same
+    // non-button-path gap `r`/`u` had.
+    if (hubBlock('set_account_nickname', $hubStatus)) return;
     if (uuid && $accountByUuid.has(uuid)) editing = { uuid, where };
   }
 
