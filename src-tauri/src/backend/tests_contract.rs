@@ -6,12 +6,12 @@ use fleet_core::service::projects::ProjectTreeRow;
 use fleet_core::service::repo_read::{
     Branch, ChangedFile, Commit, CommitDetail, FileContent, FileDiff, GitRef, RepoTree,
 };
-use fleet_core::service::transcript::{ConvItem, ConvTurn, Conversation};
+use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversation};
 use fleet_core::service::usage::DayUsage;
 use fleet_core::service::worktrees::{WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
-    AccountRow, HostRow, ProjectRow, SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals,
-    WorktreeRow,
+    AccountRow, HostRow, ProjectRow, SessionContext, SessionEvent, SessionRow, SessionUsage,
+    TaskRow, UsageTotals, WorktreeRow,
 };
 use std::collections::BTreeMap;
 
@@ -74,6 +74,15 @@ pub(crate) fn sample_session() -> SessionRow {
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         usage: sample_usage(),
+        context: SessionContext {
+            model: Some("claude-opus-5".into()),
+            context_tokens: Some(120_000),
+            context_window: Some(200_000),
+            context_source: Some("transcript".into()),
+            context_at: Some(1_725_001_000),
+            context_stale: true,
+            tmux_pane_id: Some("%17".into()),
+        },
     }
 }
 
@@ -115,6 +124,7 @@ fn sample_event() -> SessionEvent {
         at: 1_725_000_000,
         kind: "prompt_sent".into(),
         detail: Some("detail".into()),
+        claude_session_id: Some("claude-uuid".into()),
     }
 }
 
@@ -217,10 +227,38 @@ fn sample_conversation() -> Conversation {
                 ConvItem::Tool {
                     summary: "Read(src/lib.rs)".into(),
                     error: true,
+                    id: Some("toolu_1".into()),
+                    name: "Read".into(),
+                    target: Some("src/lib.rs".into()),
+                    at: Some("2026-09-18T10:00:01Z".into()),
+                    ended_at: Some("2026-09-18T10:00:02Z".into()),
+                    done: true,
                 },
+                sample_subagent(),
             ],
         }],
         truncated: true,
+        context: Some(ContextView {
+            tokens: 120_000,
+            window: 200_000,
+            pct: 60.0,
+            stale: false,
+        }),
+        events: vec![sample_event()],
+    }
+}
+
+fn sample_subagent() -> ConvItem {
+    ConvItem::Subagent {
+        id: Some("toolu_2".into()),
+        name: "Task".into(),
+        agent_type: Some("Explore".into()),
+        description: Some("find it".into()),
+        result: Some("found".into()),
+        error: false,
+        at: Some("2026-09-18T10:00:03Z".into()),
+        ended_at: Some("2026-09-18T10:00:04Z".into()),
+        done: true,
     }
 }
 
@@ -288,7 +326,34 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         wire_keys(&ConvItem::Tool {
             summary: "s".into(),
             error: false,
+            id: Some("toolu_1".into()),
+            name: "Bash".into(),
+            target: Some("t".into()),
+            at: Some("2026-09-18T10:00:01Z".into()),
+            ended_at: Some("2026-09-18T10:00:02Z".into()),
+            done: true,
         }),
+    );
+    put("ConvItem::Subagent", wire_keys(&sample_subagent()));
+    put(
+        "ConvItem::Compact",
+        wire_keys(&ConvItem::Compact {
+            trigger: Some("auto".into()),
+            pre_tokens: Some(150_000),
+            summary: Some("s".into()),
+        }),
+    );
+    put(
+        "ConvItem::Command",
+        wire_keys(&ConvItem::Command {
+            name: "/model".into(),
+            args: Some("opus".into()),
+            output: Some("o".into()),
+        }),
+    );
+    put(
+        "ConvItem::Interrupt",
+        wire_keys(&ConvItem::Interrupt { during_tool: true }),
     );
     // The eight repo-browsing reads.
     put("ChangedFile", wire_keys(&sample_changed_file()));
@@ -441,13 +506,18 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_forty_four() {
+fn a_session_rows_wire_names_are_these_exact_fifty_one() {
     let expected = [
         "account_uuid",
         "ci_status",
         "claude_session_id",
         "claude_status",
+        "context_at",
         "context_pct",
+        "context_source",
+        "context_stale",
+        "context_tokens",
+        "context_window",
         "created_at",
         "current_activity",
         "effort_level",
@@ -462,6 +532,7 @@ fn a_session_rows_wire_names_are_these_exact_forty_four() {
         "last_stop_at",
         "last_turn_at",
         "lost_at",
+        "model",
         "notes",
         "parent_session_id",
         "pr_url",
@@ -477,6 +548,7 @@ fn a_session_rows_wire_names_are_these_exact_forty_four() {
         "stuck_since",
         "tags",
         "tmux_name",
+        "tmux_pane_id",
         "turn_seq",
         "usage_cache_read_tokens",
         "usage_cache_write_tokens",
@@ -489,7 +561,7 @@ fn a_session_rows_wire_names_are_these_exact_forty_four() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 44, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 51, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 
@@ -641,4 +713,28 @@ fn a_task_row_never_puts_its_nonce_on_the_wire() {
         .expect("a TaskRow read back from a hub must still parse");
     assert_eq!(back.nonce, "", "a hub-read TaskRow carries no nonce");
     assert_eq!(back.worker_claude_session_id, None);
+}
+
+/// A hub that predates the structured tool lines sends a `Tool` item with
+/// only `summary` / `error`; the desktop must still parse it (and the
+/// Conversation around it) rather than fail the whole read.
+#[test]
+fn an_older_hubs_tool_item_still_parses_with_defaults() {
+    let item: ConvItem =
+        serde_json::from_value(serde_json::json!({ "kind": "tool", "summary": "Read(x)" }))
+            .expect("an older hub's tool item must parse");
+    assert_eq!(
+        item,
+        ConvItem::Tool {
+            summary: "Read(x)".into(),
+            error: false,
+            id: None,
+            name: String::new(),
+            target: None,
+            at: None,
+            ended_at: None,
+            // Finished, not "no result": an older hub's line is history.
+            done: true,
+        }
+    );
 }

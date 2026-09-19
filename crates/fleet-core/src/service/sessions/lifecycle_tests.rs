@@ -244,3 +244,21 @@ fn fetch_worktree_reports_an_unknown_worktree_as_not_found() {
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
     assert_eq!(err.message, "worktree 77 not found");
 }
+
+#[test]
+fn a_kill_closes_the_current_conversation_as_killed() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("k", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let a = "11111111-1111-1111-1111-111111111111";
+    s.set_claude_session_id(id, a).unwrap();
+    record_kill(&s, id, Some(a));
+    let convs = s.list_conversations(id, 10).unwrap();
+    let c = convs.iter().find(|c| c.claude_session_id == a).unwrap();
+    assert_eq!(c.end_reason.as_deref(), Some("killed"));
+    assert!(c.ended_at.is_some());
+    // No id (a row never bound): only the timeline event, no error.
+    record_kill(&s, id, None);
+}

@@ -130,6 +130,17 @@ fn hosts_has_transport(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 037: `sessions` already has its
+/// `tmux_pane_id` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+fn sessions_has_tmux_pane_id(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'tmux_pane_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Ordered schema migrations, `(version, sql)`. Versions are contiguous from
 /// 1 and every script must end by recording its own version with
 /// `INSERT OR IGNORE INTO schema_version (version) VALUES (N)` — the tests
@@ -264,6 +275,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/036_host_boot_identity.sql"),
         already_applied: Some(sessions_has_lost_reason),
     },
+    // Conversations table + `sessions.tmux_pane_id`; the ADD COLUMN needs
+    // the same guard as 034.
+    Migration {
+        version: 37,
+        sql: include_str!("../../migrations/037_conversations.sql"),
+        already_applied: Some(sessions_has_tmux_pane_id),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -341,7 +359,51 @@ impl Store {
             }
             restored?;
         }
+        self.repair_skipped_main_migrations()?;
         self.reap_orphan_session_events()?;
+        Ok(())
+    }
+
+    /// Repair for the conversations-migration collision. The
+    /// conversation-tracking branch numbered its migration 034, then 036,
+    /// while `main` shipped 034 (`hosts.transport`), 035 (layers repair) and
+    /// 036 (host boot identity); it is now 037. A database created by an
+    /// earlier build of that branch recorded 34 or 36 for the conversations
+    /// migration, so `migrate()` (which only offers `version >
+    /// MAX(schema_version)`) never runs the `main` migrations numbered at or
+    /// below that, and 037 is then skipped by its own guard.
+    ///
+    /// SQLite has no `ADD COLUMN IF NOT EXISTS`, so each column those
+    /// migrations add is checked and added here when missing, and 035's
+    /// `IF NOT EXISTS` DDL is re-run. Every step is idempotent, in one
+    /// transaction; a no-op on any database that went through the numbered
+    /// migrations.
+    fn repair_skipped_main_migrations(&self) -> Result<()> {
+        /// `(table, column, column definition)` added by `main`'s 034 and 036.
+        const COLUMNS: &[(&str, &str, &str)] = &[
+            ("hosts", "transport", "TEXT NOT NULL DEFAULT 'ssh'"),
+            ("hosts", "boot_id", "TEXT"),
+            ("hosts", "tmux_server_pid", "INTEGER"),
+            ("sessions", "lost_reason", "TEXT"),
+        ];
+        let tx = self.conn.unchecked_transaction()?;
+        for (table, column, def) in COLUMNS {
+            let n: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                rusqlite::params![table, column],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                tracing::warn!(
+                    "{table}.{column} missing despite schema version; adding it (migration collision repair)"
+                );
+                tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {def};"))?;
+            }
+        }
+        // 035 is `IF NOT EXISTS` throughout; re-running it is a no-op when
+        // its tables are there.
+        tx.execute_batch(include_str!("../../migrations/035_host_layers_repair.sql"))?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -433,6 +495,7 @@ mod tests {
         "catalog_secrets_host",
         "sync_runs",
         "client_tokens",
+        "conversations",
     ];
 
     #[test]
@@ -484,7 +547,7 @@ mod tests {
         .unwrap();
         let store = Store {
             conn,
-            bus: Arc::new(NoopEventBus),
+            bus: StoreBus::new(Arc::new(NoopEventBus)),
         };
         assert!(store.has_table("handoffs").unwrap());
         assert!(session_columns(&store).contains(&"frozen_scrollback".to_string()));
@@ -526,6 +589,54 @@ mod tests {
         store.migrate().expect("second migrate");
         assert!(!store.has_table("handoffs").unwrap());
         assert!(!session_columns(&store).contains(&"frozen_scrollback".to_string()));
+    }
+
+    /// Migration 037 backfills exactly one open `conversations` row (matching
+    /// `sessions.claude_session_id`) per session bound to a conversation at
+    /// upgrade time, stamped `start_source = 'unknown'` at the session's
+    /// `created_at`.
+    #[test]
+    fn migration_037_backfills_one_open_conversation_per_bound_session() {
+        let conn = Connection::open_in_memory().unwrap();
+        for &Migration { version, sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= 36) {
+            let _ = version;
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute("INSERT INTO hosts (alias) VALUES ('local')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status, claude_session_id)
+             VALUES ('s', 'local', 7, 7, 'running', '11111111-1111-1111-1111-111111111111')",
+            [],
+        )
+        .unwrap();
+        let store = Store {
+            conn,
+            bus: StoreBus::new(Arc::new(NoopEventBus)),
+        };
+        store.migrate().unwrap();
+        let (n, src, started): (i64, String, i64) = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*), start_source, started_at FROM conversations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((n, src.as_str(), started), (1, "unknown", 7));
+    }
+
+    /// A freshly created session row carries `SessionContext::default()` —
+    /// every context_* column is NULL / false until a hook writes one.
+    #[test]
+    fn session_row_carries_context_defaults() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("local").unwrap();
+        store
+            .upsert_session("s", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        let row = store.get_session("s", "local").unwrap().unwrap();
+        assert_eq!(row.context, SessionContext::default());
     }
 
     #[test]
@@ -726,7 +837,7 @@ mod tests {
         }
         Store {
             conn,
-            bus: Arc::new(NoopEventBus),
+            bus: StoreBus::new(Arc::new(NoopEventBus)),
         }
     }
 
@@ -1391,6 +1502,81 @@ mod tests {
         assert_eq!(n, 1, "034 did not re-add a column the branch already had");
     }
 
+    /// A database from an earlier build of the conversation-tracking branch,
+    /// which recorded the conversations migration as `recorded_as` after
+    /// running `main`'s migrations up to `main_upto`.
+    fn conversation_branch_db(main_upto: i64, recorded_as: i64) -> Store {
+        let old = store_at_version(main_upto);
+        old.conn
+            .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
+            .unwrap();
+        let conv = include_str!("../../migrations/037_conversations.sql");
+        let branch = conv.replace(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (37);",
+            &format!("INSERT OR IGNORE INTO schema_version (version) VALUES ({recorded_as});"),
+        );
+        assert_ne!(branch, conv);
+        old.conn.execute_batch(&branch).unwrap();
+        old
+    }
+
+    /// Every column `main`'s 034 and 036 add, and 035's tables, are there.
+    fn assert_main_034_to_036_applied(s: &Store) {
+        for (table, column) in [
+            ("hosts", "transport"),
+            ("hosts", "boot_id"),
+            ("hosts", "tmux_server_pid"),
+            ("sessions", "lost_reason"),
+        ] {
+            let n: i64 = s
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    [table, column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{table}.{column}");
+        }
+        assert!(s.has_table("host_layers").unwrap());
+        let transport: String = s
+            .conn
+            .query_row("SELECT transport FROM hosts WHERE alias = 'h'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(transport, "ssh");
+        assert!(s.has_table("conversations").unwrap());
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Pre-merge branch: `main` up to 033, conversations recorded as 34.
+    /// 035 and 036 run as pending migrations, 037 is guarded out, and the
+    /// repair adds the `hosts.transport` 034 never got to add.
+    #[test]
+    fn a_conversation_branch_db_recorded_as_34_gets_main_034_to_036() {
+        let old = conversation_branch_db(33, 34);
+        old.migrate()
+            .expect("merged head on a pre-merge conversation-branch DB");
+        assert_main_034_to_036_applied(&old);
+        // Idempotent: a second start changes nothing and does not fail.
+        old.migrate().expect("second migrate");
+        assert_main_034_to_036_applied(&old);
+    }
+
+    /// Intermediate branch: `main` up to 035, conversations recorded as 36.
+    /// Only 037 is pending and it is guarded out, so without the repair
+    /// `main`'s 036 columns would never be added.
+    #[test]
+    fn a_conversation_branch_db_recorded_as_36_gets_main_036() {
+        let old = conversation_branch_db(35, 36);
+        old.migrate()
+            .expect("merged head on an intermediate conversation-branch DB");
+        assert_main_034_to_036_applied(&old);
+        old.migrate().expect("second migrate");
+        assert_main_034_to_036_applied(&old);
+    }
+
     #[test]
     fn migration_034_is_idempotent() {
         let old = store_at_version(33);
@@ -1521,7 +1707,7 @@ mod tests {
         .unwrap();
         let s = Store {
             conn,
-            bus: Arc::new(NoopEventBus),
+            bus: StoreBus::new(Arc::new(NoopEventBus)),
         };
         assert_eq!(s.schema_version().unwrap(), SEED_AT);
         assert!(!s.has_table("worktree_parent_fingerprints").unwrap());

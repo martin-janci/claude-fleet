@@ -12,6 +12,8 @@ export interface SessionEvent {
   at: number;
   kind: string;
   detail: string | null;
+  /** The conversation the event belongs to (migration 037). */
+  claude_session_id: string | null;
 }
 
 /** Newest-first timeline for one session. */
@@ -40,6 +42,14 @@ const OPS_KINDS = new Set([
   'message_sent',
 ]);
 
+const TURN_KINDS = new Set([
+  'conversation_started',
+  'conversation_ended',
+  'compact_started',
+  'compact_done',
+  'turn_done',
+]);
+
 /** Which chip an event kind belongs to. `status_change` into `failed` or
  *  `blocked` counts as an error; any other status change is a turn edge. */
 export function eventCategory(e: Pick<SessionEvent, 'kind' | 'detail'>): EventCategory {
@@ -49,6 +59,7 @@ export function eventCategory(e: Pick<SessionEvent, 'kind' | 'detail'>): EventCa
     const d = (e.detail ?? '').toLowerCase();
     return /\b(failed|blocked)\b/.test(d) ? 'errors' : 'turns';
   }
+  if (TURN_KINDS.has(k)) return 'turns';
   if (k.startsWith('prompt')) return 'prompts';
   if (
     OPS_KINDS.has(k) ||

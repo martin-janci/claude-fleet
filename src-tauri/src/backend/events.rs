@@ -453,6 +453,7 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
         "session:created" | "session:updated" | "session:killed" | "project:updated"
         | "worktree:updated" | "worktree:removed" | "task:updated" => integer("id"),
         "host:added" | "host:probed" | "host:removed" => string("alias"),
+        "session:event" | "session:conversations" => integer("session_id"),
         "account:upserted" => string("uuid"),
         "account_usage:updated" => string("account_uuid"),
         "asset_inventory:cleared" => string("host_alias").and_then(|()| string("harness")),
