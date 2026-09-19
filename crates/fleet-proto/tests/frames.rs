@@ -600,11 +600,11 @@ fn a_hello_with_proto_round_trips_it() {
 
 #[test]
 fn min_supported_proto_is_the_current_version() {
-    // Task 3's own choice: see `MIN_SUPPORTED_PROTO`'s doc for why 1, not 0
-    // — the same change that introduces the version field also introduces
+    // See `MIN_SUPPORTED_PROTO`'s doc for why 1, not 0 — the same change
+    // that introduced the version field also introduced
     // `HubFrame::Welcome`, which a proto-0 (pre-versioning) agent cannot
-    // parse, so admitting proto 0 would not avoid the reconnect loop this
-    // task exists to end.
+    // parse, so admitting proto 0 would not avoid the reconnect loop the
+    // versioning exists to end (#151).
     assert_eq!(MIN_SUPPORTED_PROTO, PROTO_VERSION);
 }
 

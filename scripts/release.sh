@@ -32,7 +32,7 @@ echo "Bumping $CUR -> $NEW"
 # For a .toml file the bump is scoped to the [package] table — not just the
 # first `version = "…"` anywhere in the file — so a `[dependencies.foo]` or
 # `[workspace.package]` table ahead of `[package]` can never be bumped by
-# mistake (#152 review).
+# mistake (#152).
 node - "$NEW" "${VERSION_FILES[@]}" <<'JS'
 const fs = require("fs");
 const [next, ...files] = process.argv.slice(2);
@@ -75,7 +75,7 @@ if [[ -z "${RELEASE_DRY_RUN:-}" ]]; then
     [[ "$f" == *.toml ]] || continue
     # Scoped to the [package] table only — the first `name = "…"` anywhere in
     # the file could belong to a `[lib]`/`[[bin]]` table ahead of [package]
-    # and silently name the wrong crate (#152 review).
+    # and silently name the wrong crate (#152).
     name="$(node -e '
       const fs = require("fs");
       const f = process.argv[1];
