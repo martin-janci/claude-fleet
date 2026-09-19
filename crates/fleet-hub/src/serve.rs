@@ -472,25 +472,51 @@ pub(crate) async fn maybe_tls(
     Ok(Conn::Tls(Box::new(conn)))
 }
 
-/// The write-read half, over whatever transport [`probe_exchange`] opened.
-async fn exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
-    mut conn: S,
+/// Write `request` to `conn` and read the whole response back, capped at
+/// `cap` bytes — the one write-then-read-to-end both this probe and
+/// [`crate::pair`]'s `exchange` need, over whatever transport [`maybe_tls`]
+/// produced. Bytes already read survive a later read error (a peer that
+/// answers and then resets — e.g. because it never read this connection's own
+/// request out of its receive buffer before closing — has still answered);
+/// only an error with NOTHING read yet is a real failure.
+///
+/// The request text, the cap, and what each caller does with the bytes
+/// afterward (validate a liveness body here; parse an HTTP response there)
+/// differ and stay with each caller — only this shape is identical between
+/// them.
+pub(crate) async fn write_and_read(
+    mut conn: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     addr: std::net::SocketAddr,
-) -> Result<String, String> {
+    request: &str,
+    cap: u64,
+) -> Result<Vec<u8>, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let req = format!("GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    conn.write_all(req.as_bytes())
+    conn.write_all(request.as_bytes())
         .await
         .map_err(|e| format!("send to {addr}: {e}"))?;
+    // TLS needs an explicit flush: the record is buffered until one.
     conn.flush()
         .await
         .map_err(|e| format!("send to {addr}: {e}"))?;
-    // Status line plus the short body is all we need; bound what a stray peer
-    // can make us read. Bytes already read survive a later read error.
     let mut raw = Vec::new();
-    let read = conn.take(1024).read_to_end(&mut raw).await;
+    let read = conn.take(cap).read_to_end(&mut raw).await;
     if raw.is_empty() {
         read.map_err(|e| format!("read from {addr}: {e}"))?;
+    }
+    Ok(raw)
+}
+
+/// The write-read half, over whatever transport [`probe_exchange`] opened,
+/// plus the liveness validation only this probe needs.
+async fn exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    conn: S,
+    addr: std::net::SocketAddr,
+) -> Result<String, String> {
+    // Status line plus the short body is all we need; bound what a stray peer
+    // can make us read.
+    let req = format!("GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    let raw = write_and_read(conn, addr, &req, 1024).await?;
+    if raw.is_empty() {
         return Err(format!("{addr} closed without answering"));
     }
     let text = String::from_utf8_lossy(&raw);
