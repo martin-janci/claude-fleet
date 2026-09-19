@@ -70,4 +70,14 @@ describe('HostDetail', () => {
     expect(screen.queryByTestId('detail-rotate')).toBeNull();
     expect(screen.getByText('none — provision hosts to mint one')).toBeInTheDocument();
   });
+
+  it('marks an agent-transport host in the facts list; an ssh host stays quiet', () => {
+    mount('mefistos', { host: { ...host('mefistos'), transport: 'agent' } });
+    expect(screen.getByTestId('detail-transport').textContent).toBe('agent');
+  });
+
+  it('an ssh host (the default) shows no transport fact', () => {
+    mount('mefistos');
+    expect(screen.queryByTestId('detail-transport')).toBeNull();
+  });
 });

@@ -6,6 +6,13 @@
   import { attentionIdleMinutes } from './notify';
   import Attention from './Attention.svelte';
   import { RECENCY_VALUES, type Recency } from './session_status';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
+
+  // send_prompt / kill_session route, so they only need the live connection
+  // to be up.
+  const bulkSendBlocked = $derived(hubActionBlocked('send_prompt', $hubStatus, $hubConnection));
+  const bulkKillBlocked = $derived(hubActionBlocked('kill_session', $hubStatus, $hubConnection));
 
   let {
     search = $bindable(),
@@ -156,8 +163,20 @@
   {#if selectedCount > 0}
     <div class="bulk-bar" data-testid="bulk-bar" role="toolbar" aria-label="bulk actions">
       <span class="bulk-count">{selectedCount} selected</span>
-      <button class="pill" data-testid="bulk-send" onclick={() => onBulkSend()}>→ Send prompt</button>
-      <button class="pill danger" data-testid="bulk-kill" onclick={() => onBulkKill()}>× Kill</button>
+      <button
+        class="pill"
+        data-testid="bulk-send"
+        disabled={bulkSendBlocked !== null}
+        title={bulkSendBlocked ?? ''}
+        onclick={() => onBulkSend()}
+      >→ Send prompt</button>
+      <button
+        class="pill danger"
+        data-testid="bulk-kill"
+        disabled={bulkKillBlocked !== null}
+        title={bulkKillBlocked ?? ''}
+        onclick={() => onBulkKill()}
+      >× Kill</button>
       <button class="pill" data-testid="bulk-clear" onclick={clearSelected}>clear</button>
     </div>
   {/if}

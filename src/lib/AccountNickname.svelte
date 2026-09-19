@@ -12,12 +12,16 @@
     onedit,
     ondone,
     testid,
+    blocked = null,
   }: {
     account: AccountRow;
     editing: boolean;
     onedit: () => void;
     ondone: () => void;
     testid: string;
+    /** `hubBlock('set_account_nickname', …)` from the owner — the nickname
+     *  lives in the hub's database, and there is no tool to set it from here. */
+    blocked?: string | null;
   } = $props();
 
   let input: HTMLInputElement | undefined = $state();
@@ -40,6 +44,15 @@
   async function save(value: string) {
     if (finished) return;
     finished = true;
+    // Belt and braces: the owner already gates opening the editor
+    // (`startEdit`) on this same reason, but if `blocked` turned non-null
+    // while it was already open (or a caller ever opens it unguarded), do
+    // not send a call the hub will refuse anyway — that would just surface
+    // an E_LOCAL_ONLY toast where a plain "nothing happened" belongs.
+    if (blocked) {
+      ondone();
+      return;
+    }
     const trimmed = value.trim();
     const r = await setAccountNickname(account.uuid, trimmed === '' ? null : trimmed);
     if (!r.ok) pushError(r.error, 'Nickname not saved');
@@ -78,7 +91,8 @@
     class="nick"
     tabindex="-1"
     data-testid={testid}
-    title="{account.email ?? accountLabel(account)} — click or press e to set a nickname"
+    disabled={blocked !== null}
+    title={blocked ?? `${account.email ?? accountLabel(account)} — click or press e to set a nickname`}
     onclick={(e) => {
       e.stopPropagation();
       onedit();

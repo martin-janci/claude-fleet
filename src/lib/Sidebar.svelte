@@ -47,6 +47,7 @@
   } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { push, pushError } from './toasts';
+  import { hubStatus, hubBlock } from './hub';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
@@ -55,7 +56,6 @@
   import SessionRowItem from './SessionRowItem.svelte';
   import NewBgSessionDialog from './NewBgSessionDialog.svelte';
   import { isRecency, matchesRecency, type Recency } from './session_status';
-  import { hubStatus, hubBlock } from './hub';
 
   let showTasks = $state(false);
 
@@ -356,6 +356,12 @@
   /** Host to preselect in NewSessionDialog: where Add project put the project. */
   let dialogHost: string | undefined = $state(undefined);
 
+  // Both act on a checkout using this machine's SSH (and, for Add project,
+  // GitHub credentials): neither has a hub tool, so both refuse with
+  // E_LOCAL_ONLY in remote mode (`commands/projects.rs`, `commands/sessions.rs`).
+  const addProjectBlocked = $derived(hubBlock('add_project', $hubStatus));
+  const purgeProjectBlocked = $derived(hubBlock('purge_project', $hubStatus));
+
   /** Host the open project picker preselects (the Hosts view's `n`). */
   let pickerHost: string | undefined = $state(undefined);
 
@@ -610,13 +616,6 @@
   function cancelPurge() {
     pendingPurge = null;
   }
-  // PARITY OR REFUSAL (see backend/routing.rs): `NewSessionArgs` carries kind,
-  // start_command and friendly_name and `NewSessionParams` carries none of
-  // them, so routing this would have SUCCEEDED while silently dropping the
-  // label the user typed. It refuses instead — and a refusal nobody can see
-  // coming is only half honest, so the button says so before the click.
-  // Background sessions (⚡) ARE routed and stay available.
-  const newSessionBlocked = $derived(hubBlock('new_session', $hubStatus));
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
@@ -702,7 +701,8 @@
               </button>
               <button
                 class="icon-btn small purge-btn"
-                title="Purge Claude Code project state (irreversible)"
+                title={purgeProjectBlocked ?? 'Purge Claude Code project state (irreversible)'}
+                disabled={purgeProjectBlocked !== null}
                 onclick={(e) => { e.stopPropagation(); pendingPurge = row.project; }}
                 data-testid="purge-project"
                 aria-label="Purge project"
@@ -759,8 +759,6 @@
       <button
         class="new-btn"
         onclick={toggleProjectPicker}
-        disabled={newSessionBlocked !== null}
-        title={newSessionBlocked ?? ''}
         data-testid="new-session-footer"
       >
         + New session
@@ -783,7 +781,13 @@
     </button>
     {#if showProjectPicker}
       <div class="picker" role="listbox" aria-label="Pick project for new session">
-        <button class="picker-item add-project" onclick={openAddProject} data-testid="add-project-row">
+        <button
+          class="picker-item add-project"
+          disabled={addProjectBlocked !== null}
+          title={addProjectBlocked ?? ''}
+          onclick={openAddProject}
+          data-testid="add-project-row"
+        >
           ＋ Add project…
         </button>
         {#each allProjectsSorted as row (row.project.id)}

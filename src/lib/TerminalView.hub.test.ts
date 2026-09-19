@@ -11,6 +11,7 @@ vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import TerminalView from './TerminalView.svelte';
 import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
+import { hosts, type HostRow } from './hosts';
 import { selectSession, clearSelection } from './selection';
 import { clearToasts } from './toasts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
@@ -63,6 +64,22 @@ const remote: HubStatus = {
   unavailable: null,
 };
 
+function makeHost(over: Partial<HostRow>): HostRow {
+  return {
+    alias: 'trn',
+    ssh_alias: 'trn',
+    reachable: true,
+    claude_version: null,
+    tmux_version: null,
+    hidden: false,
+    last_pinged_at: null,
+    account_uuid: null,
+    provisioned: true,
+    transport: 'ssh',
+    ...over,
+  };
+}
+
 const session = makeSession({});
 const inv = () => mockedInvoke as ReturnType<typeof vi.fn>;
 const settle = async (n = 8) => {
@@ -86,6 +103,7 @@ beforeEach(() => {
   globalThis.ResizeObserver = FakeResizeObserver;
   resetTombstonesForTests();
   sessions.set([session]);
+  hosts.set([]);
   clearSelection();
   clearToasts();
   hubStatus.set({ ...STANDALONE });
@@ -123,6 +141,30 @@ describe('the terminal tab against a hub', () => {
     expect(hint.textContent).toContain('tmux attach');
     expect(hint.textContent).toContain('dev-martin-janci-claude-fleet');
     expect(hint.textContent).toContain('fleet.example.com');
+  });
+
+  it('an agent-transport host gets no ssh command, just the explanation', async () => {
+    hubStatus.set(remote);
+    hosts.set([makeHost({ alias: 'trn', transport: 'agent' })]);
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    const hint = screen.getByTestId('terminal-remote');
+    // No attach command for this session — not "ssh trn" (the command it
+    // would otherwise print) anywhere in the hint.
+    expect(hint.textContent).not.toContain('ssh trn');
+    expect(screen.queryByTestId('terminal-attach-line')).toBeNull();
+    expect(hint.textContent).toContain('fleet-agent');
+    expect(hint.textContent).toContain('dev-martin-janci-claude-fleet');
+  });
+
+  it('an ssh-transport host (and an unknown host) still get the ssh command', async () => {
+    hubStatus.set(remote);
+    hosts.set([makeHost({ alias: 'trn', transport: 'ssh' })]);
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    expect(screen.getByTestId('terminal-attach-line').textContent).toContain('ssh trn');
   });
 
   it('says so even with no session selected, rather than "select a session"', async () => {

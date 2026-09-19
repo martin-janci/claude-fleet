@@ -3,7 +3,11 @@
   import type { Result } from './result';
   import type { SessionRow } from './sessions';
 
-  let { session, ondone }: { session: SessionRow; ondone: () => void } = $props();
+  let {
+    session,
+    ondone,
+    writeBlocked = null,
+  }: { session: SessionRow; ondone: () => void; writeBlocked?: string | null } = $props();
   let busy = $state<string | null>(null);
   let err = $state<string | null>(null);
 
@@ -18,13 +22,25 @@
 </script>
 
 <div class="remote">
-  <button disabled={busy !== null} onclick={() => run('fetch', () => repoFetch(session.id))}>
+  <button
+    disabled={busy !== null || writeBlocked !== null}
+    title={writeBlocked ?? ''}
+    onclick={() => run('fetch', () => repoFetch(session.id))}
+  >
     {busy === 'fetch' ? '…' : 'Fetch'}
   </button>
-  <button disabled={busy !== null} onclick={() => run('pull', () => repoPull(session.id))}>
+  <button
+    disabled={busy !== null || writeBlocked !== null}
+    title={writeBlocked ?? ''}
+    onclick={() => run('pull', () => repoPull(session.id))}
+  >
     {busy === 'pull' ? '…' : 'Pull'}
   </button>
-  <button disabled={busy !== null} onclick={() => run('push', () => repoPush(session.id, false))}>
+  <button
+    disabled={busy !== null || writeBlocked !== null}
+    title={writeBlocked ?? ''}
+    onclick={() => run('push', () => repoPush(session.id, false))}
+  >
     {busy === 'push' ? '…' : 'Push'}
   </button>
   {#if err}<span class="err" title={err}>!</span>{/if}

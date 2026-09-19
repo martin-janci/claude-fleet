@@ -338,6 +338,11 @@ pub(super) async fn handle_events(
                         "version": crate::app_version::get(),
                         "now": unix_now(),
                         "kinds": accepted_list(st.kinds.as_ref()),
+                        // The wire-contract revision (see `wire_contract`
+                        // for what moves it): purely additive next to
+                        // `version` and `now` above, so an older client
+                        // that has never heard of it just ignores it.
+                        "contract": crate::wire_contract::CONTRACT_REVISION,
                     });
                     Some((Ok::<Event, Infallible>(sse_event("ready", &ready)), st))
                 }

@@ -4,23 +4,40 @@
 // The backend already refuses each of these with `E_LOCAL_ONLY` and a message
 // naming where the operation does work (`backend.local_only`). That is the
 // safety net. What these tests pin is the part a person actually experiences.
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { render, screen, waitFor, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 import HostDetail from './HostDetail.svelte';
 import AssetsPanel from './AssetsPanel.svelte';
 import OnboardingCard from './OnboardingCard.svelte';
 import HostsView from './HostsView.svelte';
 import Sidebar from './Sidebar.svelte';
 import SessionDetails from './SessionDetails.svelte';
+import FileList from './FileList.svelte';
+import RemoteToolbar from './RemoteToolbar.svelte';
+import BranchList from './BranchList.svelte';
+import CommitGraph from './CommitGraph.svelte';
 import { sharedWith } from './hosts_view';
-import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host } from './hosts_fixture';
+import {
+  ADMIN,
+  GMAIL,
+  NOW,
+  fleetHosts,
+  fleetSessions,
+  fleetUsage,
+  host,
+  session as sessionFixture,
+} from './hosts_fixture';
 import { hosts } from './hosts';
+import { projects, type ProjectTreeRow } from './projects';
+import { sessions as sessionsStore, type SessionRow } from './sessions';
 
 const remote: HubStatus = {
   remote: true,
@@ -44,11 +61,17 @@ beforeEach(() => {
   // `tunnels.some(...)`, and the real command never answers null.
   inv().mockImplementation(async (cmd: string) => (cmd === 'tunnel_status' ? [] : null));
   hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
   hosts.set([]);
+  projects.set([]);
+  sessionsStore.set([]);
 });
 
 afterEach(() => {
   hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
+  projects.set([]);
+  sessionsStore.set([]);
 });
 
 function mountHostDetail(alias: string) {
@@ -195,10 +218,11 @@ describe('adding a host on a hub client', () => {
   });
 });
 
-// PARITY OR REFUSAL: these two REFUSE rather than route, because routing them
-// would have succeeded while meaning something else. A refusal nobody can see
-// coming is only half honest.
-describe('the two commands that refuse rather than route', () => {
+// Task 1 (#146): `new_session` and `repair_session` (explicit, the only mode
+// the desktop's buttons ever send) now map one-to-one onto their hub tools
+// and route, so — unlike the fleet-administration and this-machine-only
+// controls above — these two stay enabled on a hub client.
+describe('new_session and repair_session route now, so their buttons stay enabled', () => {
   const session = {
     id: 1, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: 3, worktree_id: null,
     created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
@@ -213,27 +237,257 @@ describe('the two commands that refuse rather than route', () => {
     context_at: null, context_stale: false, tmux_pane_id: null,
   };
 
-  it('New session says the label it would drop is why', async () => {
+  it('+ New session is enabled on a hub client', async () => {
     hubStatus.set(remote);
-    render(Sidebar, { props: {} as never });
-    const btn = (await screen.findByTestId('new-session-footer')) as HTMLButtonElement;
-    expect(btn).toBeDisabled();
-    expect(btn.title).toMatch(/label|name/i);
-    expect(btn.title).toContain('fleet.example.com');
-  });
-
-  it('Repair workspace says why it is not the same operation here', async () => {
-    hubStatus.set(remote);
-    render(SessionDetails, { props: { session } });
-    const btn = (await screen.findByTestId('repair-from-details')) as HTMLButtonElement;
-    expect(btn).toBeDisabled();
-    expect(btn.title).toContain('fleet.example.com');
-  });
-
-  it('standalone is untouched: both still work', async () => {
     render(Sidebar, { props: {} as never });
     expect(await screen.findByTestId('new-session-footer')).not.toBeDisabled();
+  });
+
+  it('Repair workspace is enabled on a hub client', async () => {
+    hubStatus.set(remote);
     render(SessionDetails, { props: { session } });
     expect(await screen.findByTestId('repair-from-details')).not.toBeDisabled();
+  });
+});
+
+// #147: the git-write panel. None of the ten git-write commands
+// (checkout/branch/stage/commit/fetch/pull/push) has a hub tool
+// (`commands/mutate.rs`) — a remote client must not stage or commit under a
+// running agent. `FilesPanel` computes one reason (`hubBlock('repo_write',
+// …)`) and fans it out to every control below; these are the components that
+// actually render them.
+describe('the git-write panel on a hub client', () => {
+  const change = { path: 'src/lib.rs', status: 'modified' as const, staged: false, orig_path: null };
+  const branch = {
+    name: 'feature/x',
+    isCurrent: false,
+    isRemote: false,
+    upstream: null,
+    ahead: 0,
+    behind: 0,
+    tipHash: 'abc123',
+  };
+  const commit = {
+    hash: 'abc123',
+    shortHash: 'abc123',
+    parents: [],
+    refs: [],
+    author: 'me',
+    date: new Date().toISOString(),
+    subject: 'a commit',
+  };
+  const REASON = 'no git-write tool';
+
+  it('FileList disables staging and committing, with the reason', async () => {
+    render(FileList, {
+      props: {
+        mode: 'changes',
+        changes: [change],
+        tree: null,
+        loading: false,
+        error: null,
+        selectedPath: null,
+        onSelect: vi.fn(),
+        onStageToggle: vi.fn(),
+        onCommit: vi.fn(),
+        enableStaging: true,
+        writeBlocked: REASON,
+      },
+    });
+    const checkbox = document.querySelector('.stage') as HTMLInputElement;
+    expect(checkbox).toBeDisabled();
+    expect(checkbox.title).toBe(REASON);
+    const commitBtn = screen.getByText(/Commit \d+ file/);
+    expect(commitBtn).toBeDisabled();
+  });
+
+  it('FileList staging and committing are enabled with writeBlocked=null', () => {
+    render(FileList, {
+      props: {
+        mode: 'changes',
+        changes: [{ ...change, staged: true }],
+        tree: null,
+        loading: false,
+        error: null,
+        selectedPath: null,
+        onSelect: vi.fn(),
+        onStageToggle: vi.fn(),
+        onCommit: vi.fn(),
+        enableStaging: true,
+        writeBlocked: null,
+      },
+    });
+    expect(document.querySelector('.stage')).not.toBeDisabled();
+  });
+
+  it('RemoteToolbar disables Fetch/Pull/Push, with the reason', () => {
+    render(RemoteToolbar, {
+      props: { session: { id: 1 } as SessionRow, ondone: vi.fn(), writeBlocked: REASON },
+    });
+    for (const label of ['Fetch', 'Pull', 'Push']) {
+      const btn = screen.getByText(label);
+      expect(btn, label).toBeDisabled();
+      expect(btn.title, label).toBe(REASON);
+    }
+  });
+
+  it('BranchList disables Checkout/Delete/+ New branch, with the reason', () => {
+    render(BranchList, {
+      props: {
+        branches: [branch],
+        loading: false,
+        error: null,
+        onCheckout: vi.fn(),
+        onDelete: vi.fn(),
+        onNew: vi.fn(),
+        writeBlocked: REASON,
+      },
+    });
+    expect(screen.getByText('+ New branch')).toBeDisabled();
+    expect(screen.getByText('Checkout')).toBeDisabled();
+    expect(screen.getByText('Delete')).toBeDisabled();
+  });
+
+  it('CommitGraph disables its create-branch and checkout-commit actions, with the reason', () => {
+    render(CommitGraph, {
+      props: {
+        commits: [commit],
+        selected: null,
+        onSelect: vi.fn(),
+        onCreateBranch: vi.fn(),
+        onCheckoutCommit: vi.fn(),
+        writeBlocked: REASON,
+      },
+    });
+    const buttons = screen.getAllByRole('button');
+    // The two per-row action buttons (⎇ create branch, ⤓ checkout commit).
+    const actionButtons = buttons.filter((b) => b.title === REASON);
+    expect(actionButtons).toHaveLength(2);
+    for (const b of actionButtons) expect(b).toBeDisabled();
+  });
+});
+
+// #147: the two swept gaps that live in SessionDetails — the pre-flight
+// safe-kill inspection and the one-step discard-and-kill, neither of which
+// has a hub tool (`commands/sessions.rs`).
+describe('safe remove and discard-kill on a hub client', () => {
+  const session: SessionRow = sessionFixture('mefistos', 'dev-foo', {
+    project_id: 3, claude_status: null, turn_seq: 0, last_stop_at: null,
+  });
+
+  it('Safe remove is disabled, with the reason', async () => {
+    hubStatus.set(remote);
+    render(SessionDetails, { props: { session } });
+    const btn = await screen.findByTestId('safe-kill-from-details');
+    expect(btn).toBeDisabled();
+    expect((btn as HTMLButtonElement).title).toContain('fleet.example.com');
+    // A disabled button fires no click in a real browser; jsdom does not
+    // enforce that, so this pins the handler never having been reached the
+    // way the rendered `disabled` attribute promises.
+    expect(inv().mock.calls.some((c) => c[0] === 'inspect_safe_kill')).toBe(false);
+  });
+
+  it('standalone is untouched: Safe remove still opens the dialog', async () => {
+    inv().mockImplementation(async (cmd: string) =>
+      cmd === 'inspect_safe_kill'
+        ? { safe_to_remove: true, has_worktree: true, branch: 'main', upstream: 'origin/main', unpushed_commits: 0, dirty_files: [] }
+        : cmd === 'tunnel_status' ? [] : null,
+    );
+    render(SessionDetails, { props: { session } });
+    const btn = await screen.findByTestId('safe-kill-from-details');
+    expect(btn).not.toBeDisabled();
+    await fireEvent.click(btn);
+    await tick();
+    expect(await screen.findByTestId('confirm-safe-kill-direct')).not.toBeDisabled();
+  });
+
+  it("an inactive agent's Remove from list is disabled, with the reason", async () => {
+    hubStatus.set(remote);
+    render(SessionDetails, { props: { session: { ...session, kind: 'bg', claude_status: 'stopped' } } });
+    const btn = await screen.findByTestId('remove-from-list-details');
+    expect(btn).toBeDisabled();
+    expect((btn as HTMLButtonElement).title.toLowerCase()).toContain('kill');
+  });
+});
+
+// #147: Add project and Purge project. Neither has a hub tool
+// (`commands/projects.rs`, `commands/sessions.rs`): both act over this
+// machine's SSH (and, for Add project, GitHub credentials).
+describe('add and purge project on a hub client', () => {
+  const project: ProjectTreeRow = {
+    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 1, adopted: false },
+    worktrees: [{ id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' }],
+  };
+  const projectSession: SessionRow = sessionFixture('local', 'dev-cf', {
+    project_id: 1, worktree_id: 11, worktree_key: 'main',
+    claude_status: null, turn_seq: 0, last_stop_at: null,
+  });
+
+  it('+ Add project… is disabled with the reason', async () => {
+    hubStatus.set(remote);
+    projects.set([project]);
+    sessionsStore.set([projectSession]);
+    render(Sidebar, { props: {} as never });
+    await fireEvent.click(await screen.findByTestId('new-session-footer'));
+    const btn = await screen.findByTestId('add-project-row');
+    expect(btn).toBeDisabled();
+    expect((btn as HTMLButtonElement).title).toContain('fleet.example.com');
+  });
+
+  it('standalone is untouched: + Add project… still opens the dialog', async () => {
+    projects.set([project]);
+    sessionsStore.set([projectSession]);
+    render(Sidebar, { props: {} as never });
+    await fireEvent.click(await screen.findByTestId('new-session-footer'));
+    expect(await screen.findByTestId('add-project-row')).not.toBeDisabled();
+  });
+
+  it('Purge project is disabled with the reason', async () => {
+    hubStatus.set(remote);
+    projects.set([project]);
+    sessionsStore.set([projectSession]);
+    render(Sidebar, { props: {} as never });
+    const btn = await screen.findByTestId('purge-project');
+    expect(btn).toBeDisabled();
+    expect((btn as HTMLButtonElement).title).toContain('fleet.example.com');
+  });
+
+  it('standalone is untouched: Purge project still opens the confirm dialog', async () => {
+    projects.set([project]);
+    sessionsStore.set([projectSession]);
+    render(Sidebar, { props: {} as never });
+    expect(await screen.findByTestId('purge-project')).not.toBeDisabled();
+  });
+});
+
+// #147, requirement C: offline gating for routed mutations. `kill_session`
+// stands in for the family (send prompt, kill/restart/rename/move,
+// new_session, repair, task cancel, …), all driven by the one derived helper
+// (`hubActionBlocked`).
+describe('a routed mutation control while the hub connection is not up', () => {
+  const session: SessionRow = sessionFixture('mefistos', 'dev-foo', {
+    project_id: 3, claude_status: null, turn_seq: 0, last_stop_at: null,
+  });
+
+  it('Kill session is disabled while reconnecting, naming the hub as unreachable', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
+    render(SessionDetails, { props: { session } });
+    const btn = await screen.findByTestId('kill-from-details');
+    expect(btn).toBeDisabled();
+    expect((btn as HTMLButtonElement).title.toLowerCase()).toContain('unreachable');
+  });
+
+  it('Kill session is enabled once connected', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'connected' });
+    render(SessionDetails, { props: { session } });
+    expect(await screen.findByTestId('kill-from-details')).not.toBeDisabled();
+  });
+
+  it('standalone is untouched: Kill session is enabled whatever the (irrelevant) connection store holds', async () => {
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
+    render(SessionDetails, { props: { session } });
+    expect(await screen.findByTestId('kill-from-details')).not.toBeDisabled();
   });
 });

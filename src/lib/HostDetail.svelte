@@ -18,7 +18,8 @@
   import { hideHostWithUndo, rotateToken, setTokenMode, showHost } from './host_actions';
   import { pushError, push } from './toasts';
   import { removeHostMessage, rotateTokenMessage, type HostAttention } from './hosts_view';
-  import { hubStatus, hubBlock } from './hub';
+  import { hubStatus, hubBlock, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
   import AccountNickname from './AccountNickname.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import UsageBlock from './UsageBlock.svelte';
@@ -78,6 +79,17 @@
   // in the tooltip rather than left to fail at the click: the button would
   // otherwise look like a button that works.
   const adminBlocked = $derived(hubBlock('remove_host', $hubStatus));
+  // Neither has a hub tool either: the nickname lives in the hub's own
+  // database, and a usage refresh SSHes to the host from here.
+  const nicknameBlocked = $derived(hubBlock('set_account_nickname', $hubStatus));
+  const refreshUsageBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
+  // probe_host routes, so it only needs the live connection to be up.
+  const reprobeBlocked = $derived(hubActionBlocked('probe_host', $hubStatus, $hubConnection));
+  // `HostsView` never fetches `list_host_tokens` on a hub client (it is
+  // local-only), so `token` is always null and `tokensLoaded` never turns
+  // true there — without this, the empty-token line below would show "…"
+  // forever instead of a real answer.
+  const hostTokensBlocked = $derived(hubBlock('host_tokens', $hubStatus));
 
   function sessionName(s: SessionRow): string {
     return s.friendly_name?.trim() || s.tmux_name;
@@ -140,13 +152,22 @@
         >{host.reachable ? '● online' : '○ offline'}</span
       >
       {#if host.hidden}<span class="muted">hidden</span>{/if}
-      <button type="button" class="small" onclick={onreprobe} disabled={probing} data-testid="detail-reprobe"
+      <button
+        type="button"
+        class="small"
+        onclick={onreprobe}
+        disabled={probing || reprobeBlocked !== null}
+        title={reprobeBlocked ?? ''}
+        data-testid="detail-reprobe"
         >{#if probing}probing…{:else}<kbd>r</kbd> Re-probe{/if}</button
       >
     </div>
     <dl class="facts">
       {#if host.ssh_alias}
         <dt>ssh</dt><dd data-testid="detail-ssh">{host.ssh_alias}</dd>
+      {/if}
+      {#if host.transport === 'agent'}
+        <dt>transport</dt><dd class="transport-agent" data-testid="detail-transport">agent</dd>
       {/if}
       <dt>last ping</dt>
       <dd data-testid="detail-ping">
@@ -171,6 +192,7 @@
           onedit={oneditstart}
           ondone={oneditdone}
           testid="detail-nickname"
+          blocked={nicknameBlocked}
         />
         {#if account.email}<span class="muted">{account.email}</span>{/if}
       </div>
@@ -184,6 +206,7 @@
       {timeZone}
       {suppressUnavailable}
       onRefresh={account ? onrefreshusage : undefined}
+      refreshBlocked={refreshUsageBlocked}
     />
   </section>
 
@@ -230,7 +253,9 @@
           <option value="readonly">readonly</option>
         </select>
       {:else}
-        <span class="muted">{tokensLoaded ? 'none — provision hosts to mint one' : '…'}</span>
+        <span class="muted" data-testid="detail-token-empty"
+          >{hostTokensBlocked ?? (tokensLoaded ? 'none — provision hosts to mint one' : '…')}</span
+        >
       {/if}
     </div>
     <div class="kv">
@@ -335,6 +360,7 @@
   }
   .facts dt { color: var(--fg-muted); }
   .facts dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .transport-agent { color: var(--accent); }
   .attention { margin: 0.4rem 0 0; color: var(--usage-warn); }
   .block { border-top: 1px solid var(--border); padding-top: 0.6rem; }
   .account-line { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.4rem; min-width: 0; }

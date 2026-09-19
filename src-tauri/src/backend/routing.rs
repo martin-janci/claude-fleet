@@ -36,17 +36,20 @@
 //! the tool's parameters**, checked field by field against the source. Where
 //! they do not, the command is local-only. This is a rule, not a backlog.
 //!
-//! `new_session` is why it exists. `NewSessionArgs` carries `kind`,
-//! `start_command` and `friendly_name`; `NewSessionParams` carries none of the
-//! three, and a shell session is a different tool (`new_shell_session`).
-//! Routing it would not have failed — it would have **SUCCEEDED**, created a
-//! session, and silently dropped the label the user typed. A refusal is
-//! visible; a dropped field is not. `repair_session` is the same shape: the
-//! tool always runs the EXPLICIT repair, and the desktop's automatic
-//! pre-attach check has no counterpart, so a routed call would quietly mean
-//! something else.
+//! `new_session` set the rule. `NewSessionArgs` used to carry `kind`,
+//! `start_command` and `friendly_name` that `NewSessionParams` carried none
+//! of, and a shell session was a different tool (`new_shell_session`):
+//! routing it would not have failed — it would have **SUCCEEDED**, created a
+//! session, and silently dropped the label the user typed. Task 1 (#146)
+//! closed that gap by adding the three fields to the tool's params (optional
+//! — absent means today's MCP behaviour), so `new_session` now routes
+//! unconditionally. `repair_session` is still partly refused, and for the
+//! same shape of reason: the tool always runs the EXPLICIT repair, and the
+//! desktop's automatic pre-attach check (`explicit: false`) has no
+//! counterpart, so routing it would quietly mean something else — only
+//! `explicit: true` (the Repair workspace button) routes.
 //!
-//! So: do not "fix" one of these refusals by wiring a lossy mapping. If the
+//! So: do not "fix" a refusal like this by wiring a lossy mapping. If the
 //! tool grows the missing parameters, route it then — and check the rest of
 //! the struct again while you are there. The rule is also in `docs/hub.md`
 //! (*Parity or refusal*), because the refusal is user-visible.

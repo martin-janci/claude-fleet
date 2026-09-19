@@ -10,8 +10,8 @@ use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversat
 use fleet_core::service::usage::DayUsage;
 use fleet_core::service::worktrees::{WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
-    AccountRow, HostRow, ProjectRow, SessionContext, SessionEvent, SessionRow, SessionUsage,
-    TaskRow, UsageTotals, WorktreeRow,
+    AccountRow, ConversationRow, HostRow, ProjectRow, SessionContext, SessionEvent, SessionRow,
+    SessionUsage, TaskRow, UsageTotals, WorktreeRow,
 };
 use std::collections::BTreeMap;
 
@@ -125,6 +125,24 @@ fn sample_event() -> SessionEvent {
         kind: "prompt_sent".into(),
         detail: Some("detail".into()),
         claude_session_id: Some("claude-uuid".into()),
+    }
+}
+
+pub(crate) fn sample_conversation_row() -> ConversationRow {
+    ConversationRow {
+        id: 1,
+        session_id: 2,
+        claude_session_id: "claude-uuid".into(),
+        transcript_path: Some("/home/dev/.claude/projects/-r-cf/claude-uuid.jsonl".into()),
+        started_at: 1_725_000_000,
+        ended_at: Some(1_725_000_100),
+        start_source: "startup".into(),
+        end_reason: Some("clear".into()),
+        model: Some("claude-opus-5".into()),
+        first_prompt: Some("do the thing".into()),
+        turns: 3,
+        compactions: 1,
+        current: true,
     }
 }
 
@@ -291,6 +309,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("HostRow", wire_keys(&sample_host()));
     put("AccountRow", wire_keys(&sample_account()));
     put("SessionEvent", wire_keys(&sample_event()));
+    put("ConversationRow", wire_keys(&sample_conversation_row()));
     put("TaskRow", wire_keys(&sample_task()));
     put("ProjectTreeRow", wire_keys(&sample_project_tree()));
     put("ProjectRow", wire_keys(&sample_project_row()));
@@ -423,10 +442,21 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     c
 }
 
+/// The golden file's shape: the wire-key contract plus the wire-contract
+/// revision it was generated at. The revision ties this file to
+/// [`fleet_core::wire_contract::CONTRACT_REVISION`] — see
+/// `the_goldens_revision_matches_the_wire_contract_constant` and the
+/// REGEN branch of the test below.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Golden {
+    revision: u32,
+    types: BTreeMap<String, Vec<String>>,
+}
+
 /// The golden file, as committed.
-fn golden_on_disk() -> BTreeMap<String, Vec<String>> {
+fn golden_on_disk() -> Golden {
     let raw = include_str!("hub_contract.golden.json");
-    serde_json::from_str(raw).expect("the golden file must be a JSON object of name -> [keys]")
+    serde_json::from_str(raw).expect("the golden file must be {revision, types: name -> [keys]}")
 }
 
 /// Absolute path to the golden, for the regenerate path. `CARGO_MANIFEST_DIR`
@@ -446,21 +476,62 @@ fn golden_abs() -> std::path::PathBuf {
 fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
     let actual = the_whole_contract();
     if std::env::var(REGEN_ENV).is_ok() {
-        let mut json = serde_json::to_string_pretty(&actual).unwrap();
-        json.push('\n');
-        std::fs::write(golden_abs(), json).expect("write the golden");
-        // Deliberately fails after rewriting. Regenerating this file is never
-        // the end of the job — someone has to read the diff and decide
-        // whether the hub renaming that field was meant to happen. A green
-        // run would let it pass unread, which is the failure mode the whole
-        // module exists to close.
-        panic!(
-            "{GOLDEN_PATH} was regenerated. Read `git diff -- {GOLDEN_PATH}`: \
-             a key that changed name is a field the desktop will silently \
-             default from here on. Then unset {REGEN_ENV} and run again."
-        );
+        let old = golden_on_disk();
+        // The decision is made BEFORE anything touches disk — see
+        // `regen_verdict`'s doc comment for why the write used to come
+        // first and what that let through.
+        let lost = types_that_lost_fields(&old.types, &actual);
+        match regen_verdict(
+            lost,
+            old.revision,
+            fleet_core::wire_contract::CONTRACT_REVISION,
+        ) {
+            RegenVerdict::Refuse { lost } => {
+                panic!(
+                    "refusing to regenerate {GOLDEN_PATH}: a field was renamed or \
+                     removed without bumping the wire-contract revision (still {}):\n\n\
+                     {}\n\n\
+                     Review crates/fleet-core/src/wire_contract.rs's CONTRACT_REVISION \
+                     and this file's MIN_HUB_CONTRACT/MAX_HUB_CONTRACT, bump \
+                     CONTRACT_REVISION, then regenerate again. {GOLDEN_PATH} was NOT \
+                     written.",
+                    old.revision,
+                    lost.join("\n"),
+                );
+            }
+            RegenVerdict::Write => {
+                let golden = Golden {
+                    revision: fleet_core::wire_contract::CONTRACT_REVISION,
+                    types: actual.clone(),
+                };
+                let mut json = serde_json::to_string_pretty(&golden).unwrap();
+                json.push('\n');
+                std::fs::write(golden_abs(), json).expect("write the golden");
+                // Deliberately fails after rewriting. Regenerating this file
+                // is never the end of the job — someone has to read the diff
+                // and decide whether the hub renaming that field was meant
+                // to happen. A green run would let it pass unread, which is
+                // the failure mode the whole module exists to close.
+                panic!(
+                    "{GOLDEN_PATH} was regenerated. Read `git diff -- {GOLDEN_PATH}`: \
+                     a key that changed name is a field the desktop will silently \
+                     default from here on. Then unset {REGEN_ENV} and run again."
+                );
+            }
+        }
     }
-    let expected = golden_on_disk();
+    let golden = golden_on_disk();
+    assert_eq!(
+        golden.revision,
+        fleet_core::wire_contract::CONTRACT_REVISION,
+        "{GOLDEN_PATH} was generated at wire-contract revision {}, but \
+         fleet_core::wire_contract::CONTRACT_REVISION is now {} — regenerate \
+         with `{REGEN_ENV}=1 cargo test -p claude-fleet --lib contract` so \
+         the golden's recorded revision matches, and read the diff",
+        golden.revision,
+        fleet_core::wire_contract::CONTRACT_REVISION,
+    );
+    let expected = golden.types;
 
     let mut complaints = Vec::new();
     for (ty, want) in &expected {
@@ -713,6 +784,173 @@ fn a_task_row_never_puts_its_nonce_on_the_wire() {
         .expect("a TaskRow read back from a hub must still parse");
     assert_eq!(back.nonce, "", "a hub-read TaskRow carries no nonce");
     assert_eq!(back.worker_claude_session_id, None);
+}
+
+// ── the wire-contract revision ──────────────────────────────────────────────
+
+/// The golden file's own tie to `CONTRACT_REVISION`, isolated from the big
+/// field-name test above so it fails with its own message rather than being
+/// buried in a wall of key-diff complaints.
+#[test]
+fn the_goldens_revision_matches_the_wire_contract_constant() {
+    let golden = golden_on_disk();
+    assert_eq!(
+        golden.revision,
+        fleet_core::wire_contract::CONTRACT_REVISION,
+        "hub_contract.golden.json says revision {}, but \
+         fleet_core::wire_contract::CONTRACT_REVISION is {}",
+        golden.revision,
+        fleet_core::wire_contract::CONTRACT_REVISION,
+    );
+}
+
+#[test]
+fn hub_contract_revision_reads_the_field() {
+    assert_eq!(
+        hub_contract_revision(r#"{"contract":3,"version":"1.0"}"#),
+        3
+    );
+}
+
+#[test]
+fn hub_contract_revision_defaults_to_zero_when_the_field_is_absent() {
+    assert_eq!(
+        hub_contract_revision(r#"{"version":"0.2.20","now":1,"kinds":["session"]}"#),
+        0,
+        "a hub built before this mechanism existed sends nothing"
+    );
+}
+
+#[test]
+fn hub_contract_revision_defaults_to_zero_when_the_whole_frame_is_unparsable() {
+    // The whole `ready` frame is not even JSON — a hub that HAS a contract to
+    // report always JSON-encodes it correctly, so this is read the same as a
+    // missing field, per the doc comment on `hub_contract_revision`.
+    assert_eq!(hub_contract_revision("not json"), 0);
+}
+
+/// #148 finding 8: a `contract` key that is PRESENT but not a `u32` used to
+/// fold to the same `0` as a genuinely absent key, which is in range —
+/// silently trusting a hub sending nonsense as if it were an old hub sending
+/// nothing. It must instead read as a hub too new to understand (out of
+/// range on the high side), never as "everything is fine".
+#[test]
+fn hub_contract_revision_treats_a_present_but_unreadable_value_as_too_new() {
+    for data in [
+        r#"{"contract":"three","version":"1.0"}"#, // a string
+        r#"{"contract":3.5,"version":"1.0"}"#,     // a float
+        r#"{"contract":-1,"version":"1.0"}"#,      // negative
+        r#"{"contract":18446744073709551615,"version":"1.0"}"#, // > u32::MAX
+    ] {
+        assert_eq!(hub_contract_revision(data), u32::MAX, "{data}");
+    }
+}
+
+#[test]
+fn a_hub_below_the_minimum_is_too_old() {
+    assert_eq!(classify_hub_contract(3, 5, 9), ContractFit::TooOld);
+}
+
+#[test]
+fn a_hub_above_the_maximum_is_too_new() {
+    assert_eq!(classify_hub_contract(10, 5, 9), ContractFit::TooNew);
+}
+
+#[test]
+fn a_hub_at_either_edge_of_the_range_is_in_range() {
+    assert_eq!(classify_hub_contract(5, 5, 9), ContractFit::InRange);
+    assert_eq!(classify_hub_contract(9, 5, 9), ContractFit::InRange);
+}
+
+#[test]
+fn todays_bounds_accept_a_hub_with_no_contract_field_and_this_builds_own_hub() {
+    // The concrete claim MIN_HUB_CONTRACT/MAX_HUB_CONTRACT exist to make
+    // true: an old hub (read as revision 0, see `hub_contract_revision` above)
+    // and this build's own hub (`fleet_core::wire_contract::CONTRACT_REVISION`)
+    // are both inside `[MIN_HUB_CONTRACT, MAX_HUB_CONTRACT]` today.
+    assert_eq!(
+        classify_hub_contract(0, MIN_HUB_CONTRACT, MAX_HUB_CONTRACT),
+        ContractFit::InRange
+    );
+    assert_eq!(
+        classify_hub_contract(
+            fleet_core::wire_contract::CONTRACT_REVISION,
+            MIN_HUB_CONTRACT,
+            MAX_HUB_CONTRACT
+        ),
+        ContractFit::InRange
+    );
+}
+
+#[test]
+fn types_that_lost_fields_reports_only_renames_and_removals() {
+    let old = BTreeMap::from([
+        ("A".to_string(), vec!["x".to_string(), "y".to_string()]),
+        ("B".to_string(), vec!["z".to_string()]),
+    ]);
+    // A gained a field (additive — not reported), B's only field was
+    // renamed (reported), and C is new outright (not reported: nothing
+    // about it was LOST).
+    let new = BTreeMap::from([
+        (
+            "A".to_string(),
+            vec!["x".to_string(), "y".to_string(), "w".to_string()],
+        ),
+        ("B".to_string(), vec!["zz".to_string()]),
+        ("C".to_string(), vec!["q".to_string()]),
+    ]);
+    let lost = types_that_lost_fields(&old, &new);
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert!(lost[0].starts_with("B:"), "{lost:?}");
+}
+
+#[test]
+fn types_that_lost_fields_reports_a_type_that_vanished_outright() {
+    let old = BTreeMap::from([("A".to_string(), vec!["x".to_string()])]);
+    let new = BTreeMap::new();
+    let lost = types_that_lost_fields(&old, &new);
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert!(lost[0].contains("the whole type is gone"), "{lost:?}");
+}
+
+#[test]
+fn types_that_lost_fields_is_empty_for_a_purely_additive_change() {
+    let old = BTreeMap::from([("A".to_string(), vec!["x".to_string()])]);
+    let new = BTreeMap::from([
+        ("A".to_string(), vec!["x".to_string(), "y".to_string()]),
+        ("B".to_string(), vec!["z".to_string()]),
+    ]);
+    assert!(types_that_lost_fields(&old, &new).is_empty());
+}
+
+#[test]
+fn regen_verdict_writes_a_purely_additive_change_at_the_same_revision() {
+    assert_eq!(regen_verdict(vec![], 1, 1), RegenVerdict::Write);
+}
+
+#[test]
+fn regen_verdict_refuses_a_lossy_change_at_the_same_revision() {
+    let lost = vec!["SessionRow: lost [\"lost_at\"]".to_string()];
+    assert_eq!(
+        regen_verdict(lost.clone(), 1, 1),
+        RegenVerdict::Refuse { lost }
+    );
+}
+
+#[test]
+fn regen_verdict_writes_a_lossy_change_once_the_revision_moved_past_the_old_one() {
+    let lost = vec!["SessionRow: lost [\"lost_at\"]".to_string()];
+    assert_eq!(regen_verdict(lost, 1, 2), RegenVerdict::Write);
+}
+
+#[test]
+fn regen_verdict_refuses_a_lossy_change_even_if_the_revision_moved_backward() {
+    // A hand-edited rollback does not retroactively cover a loss either.
+    let lost = vec!["SessionRow: lost [\"lost_at\"]".to_string()];
+    assert_eq!(
+        regen_verdict(lost.clone(), 2, 1),
+        RegenVerdict::Refuse { lost }
+    );
 }
 
 /// A hub that predates the structured tool lines sends a `Tool` item with

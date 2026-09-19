@@ -3,6 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
+  import { hostByAlias } from './hosts';
   import { Screen, rowToRuns, runsKey, runStyleCss, type Run } from './ansi';
   import { pointInRect } from './geometry';
   import { selectionRects, type CellPos } from './terminal_selection';
@@ -1054,6 +1055,14 @@
     }
     return style;
   }
+
+  // The hub-mode hint below needs to know whether the selected session's host
+  // is reachable over SSH at all. `selectedSession` only carries `host_alias`,
+  // so look the row up; an unknown host (not yet loaded) falls back to the
+  // ssh hint rather than asserting agent-only reach it hasn't confirmed.
+  const selectedSessionHostTransport = $derived(
+    $selectedSession ? ($hostByAlias.get($selectedSession.host_alias)?.transport ?? 'ssh') : 'ssh',
+  );
 </script>
 
 {#if !ownsTheFleet($hubStatus)}
@@ -1083,7 +1092,13 @@
     </svg>
     <p class="empty-msg">The terminal is local-only.</p>
     <p class="empty-msg remote-why">{hubBlock('terminal', $hubStatus)}</p>
-    {#if $selectedSession}
+    {#if $selectedSession && selectedSessionHostTransport === 'agent'}
+      <p class="empty-msg" data-testid="terminal-agent-transport">
+        {$selectedSession.host_alias} (session {$selectedSession.tmux_name}) is reached through
+        fleet-agent, not SSH — there is no SSH route to it from this desktop or from the hub, so
+        this session can't be attached to from here.
+      </p>
+    {:else if $selectedSession}
       <pre class="attach-line" data-testid="terminal-attach-line">ssh {$selectedSession.host_alias}
 tmux attach -t {$selectedSession.tmux_name}</pre>
     {:else}

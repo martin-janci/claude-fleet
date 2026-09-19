@@ -20,6 +20,8 @@
     projectsDefaultRoot,
     PROJECTS_RESOLVED_KEY,
   } from './fleet_settings';
+  import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
 
   let {
     project,
@@ -185,6 +187,33 @@
       // remote scan's own upserts from feeding back into this effect.
       scanSeq++;
       hostWorktrees = { status: 'ready', rows: project.worktrees, cloned: true };
+      return () => {
+        scanSeq++;
+      };
+    }
+    if (!ownsTheFleet($hubStatus)) {
+      // `list_host_worktrees` scans THIS host over its own SSH and refuses
+      // with E_LOCAL_ONLY for a hub client (no hub tool for it). Fix round 1
+      // here read `project.worktrees` as a substitute, on the assumption a
+      // remote host's rows land there via the row-event stream — false:
+      // `list_projects_joined` LEFT JOINs worktrees on `host_alias = 'local'`
+      // only, `upsert_worktree_on` fires `worktree:updated` for local rows
+      // only, and the `list_worktrees` tool goes through
+      // `list_worktrees_for_project`, also local-only (all in
+      // `crates/fleet-core/src/store/projects.rs`). So `project.worktrees`
+      // is always the STORE's own local checkout (the hub's own `local`
+      // host when this is a hub client) and never a remote one — filtering
+      // it by `host_alias === host` for a non-local `host` always came back
+      // empty, which silently read as "this host has no worktrees" rather
+      // than "unknown". There is no way to list a remote host's worktrees
+      // from a hub client today (a hub-side scanning tool is filed as a
+      // follow-up); offer only "+ new worktree" and say so
+      // (`remoteWorktreesUnknownOnHubClient` below) instead of a false
+      // empty list. No async round-trip, so nothing needs to force
+      // new-worktree mode first: the repair effect below already lands on
+      // "+ new worktree" once it sees these rows are empty.
+      scanSeq++;
+      hostWorktrees = { status: 'ready', rows: [], cloned: true };
       return () => {
         scanSeq++;
       };
@@ -355,6 +384,8 @@
       ? '.claude/worktrees'
       : '.worktrees',
   );
+  // new_session routes, so it only needs the live connection to be up.
+  const newSessionBlocked = $derived(hubActionBlocked('new_session', $hubStatus, $hubConnection));
   const projectsLayout = $derived(settingLayout($fleetSettings));
   const remoteRoot = $derived(
     settingPathMap($fleetSettings, PROJECTS_RESOLVED_KEY)[chosenHost] ?? projectsDefaultRoot(projectsLayout),
@@ -364,11 +395,14 @@
     void loadFleetSettings();
     // "The New-session dialog opening" is a usage fetch trigger. The backend
     // keeps the 5-minute floor; a refused or failed refresh just leaves the
-    // last-known snapshot, so nothing is surfaced here.
-    const uuids = new Set(
-      $hosts.filter((h) => !h.hidden && h.account_uuid).map((h) => h.account_uuid as string),
-    );
-    for (const uuid of uuids) void refreshAccountUsage(uuid);
+    // last-known snapshot, so nothing is surfaced here. `refresh_account_usage`
+    // is local-only in remote mode (same as HostsView's), so skip it there.
+    if (ownsTheFleet($hubStatus)) {
+      const uuids = new Set(
+        $hosts.filter((h) => !h.hidden && h.account_uuid).map((h) => h.account_uuid as string),
+      );
+      for (const uuid of uuids) void refreshAccountUsage(uuid);
+    }
   });
   const pathPreview = $derived.by(() => {
     const root =
@@ -401,6 +435,17 @@
     if (!hostWorktrees.cloned) return `Not cloned on ${chosenHost} yet — it is cloned on the first session.`;
     return null;
   });
+  // Non-null while a hub client has a non-local host chosen: this dialog has
+  // no way to list that host's existing worktrees (see the `$effect` above),
+  // so the picker only ever offers "+ new worktree" for it. A neutral note,
+  // not an error — deliberately separate from `worktreeStatus`'s scanning /
+  // error / not-cloned states, which never fire for this case (`hostWorktrees`
+  // is always `{status: 'ready', cloned: true}` here).
+  const remoteWorktreesUnknownOnHubClient = $derived(
+    chosenHost !== 'local' && !ownsTheFleet($hubStatus)
+      ? `Existing worktrees on ${chosenHost} can't be listed from a hub client yet — create a new one, or start from the project root.`
+      : null,
+  );
 
   let busy = $state(false);
   let error: string | null = $state(null);
@@ -499,6 +544,11 @@
 
   async function submit() {
     if (busy) return;
+    // The Create button's `disabled` reads the same derived, but Enter in
+    // any field (`onKeydown` below) calls `submit()` directly — the handler
+    // must refuse too, or a blocked hub client could still route
+    // `new_session` from the keyboard.
+    if (newSessionBlocked) return;
     if (inNewMode) {
       // Strip any trailing dash the live slugifier left in place so the
       // backend sees a fully-finalized branch name.
@@ -653,6 +703,9 @@
     {#if worktreeStatus}
       <p class="wt-status" data-testid="wt-status" class:err={hostWorktrees.status === 'error'}>{worktreeStatus}</p>
     {/if}
+    {#if remoteWorktreesUnknownOnHubClient}
+      <p class="wt-status" data-testid="wt-remote-unknown">{remoteWorktreesUnknownOnHubClient}</p>
+    {/if}
     <PickerList
       items={worktreeItems}
       activeKey={inNewMode ? 'new' : String(chosenWorktreeId)}
@@ -704,7 +757,12 @@
     {#if busy}
       <button type="button" data-testid="cancel-create" onclick={cancelCreate}>Cancel creation</button>
     {:else}
-      <button class="primary" onclick={submit} disabled={inNewMode && !newWorktreeName.trim()}>Create</button>
+      <button
+        class="primary"
+        onclick={submit}
+        disabled={(inNewMode && !newWorktreeName.trim()) || newSessionBlocked !== null}
+        title={newSessionBlocked ?? ''}
+      >Create</button>
     {/if}
   </div>
 </div>

@@ -372,6 +372,7 @@ describe('row event batching', () => {
     const host = (alias: string) => ({
       alias, ssh_alias: alias, reachable: true, claude_version: null, tmux_version: null,
       hidden: false, last_pinged_at: null, account_uuid: null, provisioned: false,
+      transport: 'ssh' as const,
     });
     fire('host:added', host('a'));
     fire('host:added', host('b'));

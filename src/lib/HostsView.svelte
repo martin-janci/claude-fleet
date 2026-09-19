@@ -37,7 +37,8 @@
   import AddHostPicker from './AddHostPicker.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
-  import { hubStatus, hubBlock } from './hub';
+  import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
+  import { hubConnection } from './hub_connection';
 
   let {
     preselect = null,
@@ -156,9 +157,15 @@
 
   onMount(() => {
     listEl?.focus();
-    void loadHostTokens();
-    // "The Hosts view opening" is a fetch trigger; the backend keeps the floor.
-    for (const uuid of linkedUuids) void refreshAccountUsage(uuid);
+    // `list_host_tokens` and `refresh_account_usage` are both local-only in
+    // remote mode (`host_tokens`, `refresh_account_usage` REASONS) — a hub
+    // client must not fire either only to drop an E_LOCAL_ONLY each time.
+    // "The Hosts view opening" is a fetch trigger; the backend keeps the
+    // usage floor.
+    if (ownsTheFleet($hubStatus)) {
+      void loadHostTokens();
+      for (const uuid of linkedUuids) void refreshAccountUsage(uuid);
+    }
   });
 
   function select(alias: string) {
@@ -190,13 +197,18 @@
   const focusList = () => listEl?.focus();
   const focusDetail = () => detailEl?.focus();
 
+  // Gated in the handlers, not only on the buttons that call them: a
+  // keyboard shortcut (`r` / `u` below) reaches these directly, bypassing
+  // whatever a button's `disabled` attribute says.
   async function reprobe(alias: string) {
+    if (hubActionBlocked('probe_host', $hubStatus, $hubConnection)) return;
     probing = alias;
     await reprobeHost(alias);
     probing = null;
   }
 
   async function refreshUsage(alias: string) {
+    if (hubActionBlocked('refresh_account_usage', $hubStatus, $hubConnection)) return;
     const host = $hosts.find((h) => h.alias === alias);
     const uuid = host?.account_uuid;
     if (!uuid) return;
@@ -212,6 +224,7 @@
   }
 
   async function retryOutage() {
+    if (hubActionBlocked('refresh_account_usage', $hubStatus, $hubConnection)) return;
     if (!outage) return;
     const r = await Promise.all(outage.accountUuids.map((u) => refreshAccountUsage(u)));
     const failed = r.find((x) => !x.ok);
@@ -223,6 +236,10 @@
   }
 
   function startEdit(where: 'list' | 'detail', uuid: string | null | undefined) {
+    // The `e` shortcut (below) reaches this directly, bypassing the
+    // nickname button's own `disabled={blocked !== null}` — the same
+    // non-button-path gap `r`/`u` had.
+    if (hubBlock('set_account_nickname', $hubStatus)) return;
     if (uuid && $accountByUuid.has(uuid)) editing = { uuid, where };
   }
 
@@ -323,6 +340,7 @@
   // client, and this app guards it with `E_LOCAL_ONLY`. Say so on the button
   // rather than after the dialog has been filled in.
   const addHostBlocked = $derived(hubBlock('add_host', $hubStatus));
+  const usageRefreshBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
 
   const LEGEND: [string, string][] = [
     ['↑ ↓  j k  Home End', 'move the selection (in the detail: between sessions)'],
@@ -367,7 +385,13 @@
     <div class="banner" role="status" data-testid="usage-outage-banner">
       <span class="banner-text"><span aria-hidden="true">⚠</span> {outage.text}</span>
       <button type="button" class="head-btn" data-testid="outage-copy" onclick={copyOutage}>{copied ? 'Copied' : 'Copy details'}</button>
-      <button type="button" class="head-btn" data-testid="outage-retry" onclick={retryOutage}
+      <button
+        type="button"
+        class="head-btn"
+        data-testid="outage-retry"
+        disabled={usageRefreshBlocked !== null}
+        title={usageRefreshBlocked ?? ''}
+        onclick={retryOutage}
         >Retry{outage.nextTryAt !== null ? ` ${clockText(outage.nextTryAt, locale, timeZone)}` : ''}</button
       >
     </div>
