@@ -25,6 +25,7 @@
 // a paired desktop rather than like a broken one.
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
+import { hubConnection, type HubConnection } from './hub_connection';
 
 /** Mirrors the backend `HubStatus` (`src-tauri/src/commands/hub.rs`). */
 export interface HubStatus {
@@ -177,6 +178,24 @@ const REASONS = {
     'these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not',
   list_account_usage:
     'this app does not poll account usage while a hub owns the fleet, so its cache stays empty',
+  refresh_account_usage:
+    'it reads the account’s usage over this machine’s SSH connection to the host',
+  set_account_nickname:
+    'the nickname lives in the hub’s database and there is no tool to set it',
+
+  // --- acted out over this machine's SSH, and the hub has no tool for it ---
+  repo_write:
+    'the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session',
+  add_project:
+    'it clones or adopts a checkout using this machine’s SSH and GitHub credentials',
+  purge_project:
+    'it deletes Claude Code state on every host over this machine’s SSH connections, and the hub exposes no tool for it',
+  inspect_safe_kill:
+    'it inspects the worktree over this machine’s SSH connection, and the hub exposes no tool for it',
+  discard_kill_session:
+    'the hub exposes no tool that discards a worktree and kills in one step — use Safe remove’s "Ask Claude" path, or do it from the hub',
+  dismiss_agent_session:
+    'use Kill instead: the hub’s kill_session removes an inactive agent from the list exactly as this would',
 } as const;
 
 export type HubAction = keyof typeof REASONS;
@@ -196,19 +215,109 @@ export function ownsTheFleet(status: HubStatus = get(hubStatus)): boolean {
 }
 
 /**
+ * F1's sentence, shared by `hubBlock` and `hubActionBlocked`: a hub is
+ * configured but THIS launch could not use it, so the backend owns no fleet
+ * at all and refuses every command — routed or refused — the same way.
+ */
+function unavailableReason(status: HubStatus): string | null {
+  if (!status.unavailable) return null;
+  // Not "do it on the hub": the hub is the problem, and every action is
+  // refused until it is fixed.
+  return `Not available: ${status.unavailable}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub.`;
+}
+
+/**
  * Why `action` is unavailable from this window, or `null` when it is
  * available. `null` in standalone mode, always: nothing here may change what
  * a standalone app does.
  */
 export function hubBlock(action: HubAction, status: HubStatus = get(hubStatus)): string | null {
-  if (status.unavailable) {
-    // Not "do it on the hub": the hub is the problem, and every action is
-    // refused until it is fixed.
-    return `Not available: ${status.unavailable}. This app is set to use that hub, so it manages no fleet of its own until that is fixed — pair again, or Disconnect, in Settings → Hub.`;
-  }
+  const unavailable = unavailableReason(status);
+  if (unavailable) return unavailable;
   if (!status.remote) return null;
   const where = status.url ?? 'the hub';
   return `${REASONS[action]}. Do it on the hub (${where}).`;
+}
+
+// ---- offline gating: routed mutations while the live link is down ---------
+
+/**
+ * Action keys for the mutations that ROUTE to the hub — the ones a paired
+ * client can still send, as long as the live connection to it is up
+ * (`src-tauri/src/backend/tests_routing.rs`, `routed_mutation_cases`). Kept
+ * aligned with the Rust command names (not the MCP tool names, where they
+ * differ, e.g. `set_friendly_name`'s command is
+ * `set_session_friendly_name`) so a later refactor that generates this list
+ * from the Rust table is a rename, not a redesign.
+ */
+const ROUTED_ACTIONS = [
+  'send_prompt',
+  'kill_session',
+  'safe_kill_session',
+  'rename_session',
+  'set_friendly_name',
+  'restart_session',
+  'spawn_review',
+  'recreate_session',
+  'dismiss_ghost_session',
+  'new_bg_session',
+  'delete_worktree',
+  'cancel_task',
+  'probe_host',
+  'move_session',
+  'new_session',
+  'repair_session',
+] as const;
+
+export type RoutedAction = (typeof ROUTED_ACTIONS)[number];
+
+const ROUTED_ACTION_SET: ReadonlySet<string> = new Set(ROUTED_ACTIONS);
+
+/** The offline banner's sentence, reworded as a per-control reason: what a
+ *  click would need instead of what the whole window is missing. `null` for
+ *  `standalone` / `connected`, which never block a routed action. */
+function offlineReason(conn: HubConnection, url: string | null): string | null {
+  const hub = url ?? 'the hub';
+  switch (conn.state) {
+    case 'connecting':
+      return `Still connecting to ${hub} — try again once it's connected.`;
+    case 'reconnecting':
+      return `${hub} is unreachable right now (reconnecting, attempt ${conn.attempt}) — try again once it's back.`;
+    case 'offline':
+      return `${hub} is unreachable right now (retrying, attempt ${conn.attempt}) — try again once it's back.`;
+    case 'hub_too_old':
+      return `${hub}'s version is incompatible with this app — its wire contract (revision ${conn.hub_contract}) is older than the ${conn.min_contract} this app requires. Update the hub.`;
+    case 'hub_too_new':
+      return `${hub}'s version is incompatible with this app — its wire contract (revision ${conn.hub_contract}) is newer than the ${conn.max_contract} this app understands. Update this app.`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The one place a control checks BOTH halves of "can I send this": refusal
+ * (`hubBlock`, `REASONS`) and the live connection (`$hubConnection`), so a
+ * call site is a one-liner and the two checks cannot drift apart.
+ *
+ * Refusal wins over offline: an action the hub never accepts from a client
+ * says so, not "try again once connected" (which it never will be, and would
+ * send someone chasing a connection that was never the problem). `standalone`
+ * — no hub configured — never blocks anything, in either half; a key that is
+ * neither refused nor routed (reads, navigation, and the handful of commands
+ * that run the same in both modes) is never blocked here either.
+ */
+export function hubActionBlocked(
+  action: HubAction | RoutedAction,
+  status: HubStatus = get(hubStatus),
+  conn: HubConnection = get(hubConnection),
+): string | null {
+  if (action in REASONS) return hubBlock(action as HubAction, status);
+  if (!ROUTED_ACTION_SET.has(action)) return null;
+  const unavailable = unavailableReason(status);
+  if (unavailable) return unavailable;
+  if (!status.remote) return null;
+  if (conn.state === 'connected') return null;
+  return offlineReason(conn, status.url);
 }
 
 /**

@@ -37,7 +37,7 @@
   import AddHostPicker from './AddHostPicker.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
-  import { hubStatus, hubBlock } from './hub';
+  import { hubStatus, hubBlock, ownsTheFleet } from './hub';
 
   let {
     preselect = null,
@@ -157,8 +157,13 @@
   onMount(() => {
     listEl?.focus();
     void loadHostTokens();
-    // "The Hosts view opening" is a fetch trigger; the backend keeps the floor.
-    for (const uuid of linkedUuids) void refreshAccountUsage(uuid);
+    // "The Hosts view opening" is a fetch trigger; the backend keeps the
+    // floor. `refresh_account_usage` SSHes to the host and is local-only in
+    // remote mode — a hub client must not fire one per linked account only
+    // to drop an E_LOCAL_ONLY each time.
+    if (ownsTheFleet($hubStatus)) {
+      for (const uuid of linkedUuids) void refreshAccountUsage(uuid);
+    }
   });
 
   function select(alias: string) {
@@ -323,6 +328,7 @@
   // client, and this app guards it with `E_LOCAL_ONLY`. Say so on the button
   // rather than after the dialog has been filled in.
   const addHostBlocked = $derived(hubBlock('add_host', $hubStatus));
+  const usageRefreshBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
 
   const LEGEND: [string, string][] = [
     ['↑ ↓  j k  Home End', 'move the selection (in the detail: between sessions)'],
@@ -367,7 +373,13 @@
     <div class="banner" role="status" data-testid="usage-outage-banner">
       <span class="banner-text"><span aria-hidden="true">⚠</span> {outage.text}</span>
       <button type="button" class="head-btn" data-testid="outage-copy" onclick={copyOutage}>{copied ? 'Copied' : 'Copy details'}</button>
-      <button type="button" class="head-btn" data-testid="outage-retry" onclick={retryOutage}
+      <button
+        type="button"
+        class="head-btn"
+        data-testid="outage-retry"
+        disabled={usageRefreshBlocked !== null}
+        title={usageRefreshBlocked ?? ''}
+        onclick={retryOutage}
         >Retry{outage.nextTryAt !== null ? ` ${clockText(outage.nextTryAt, locale, timeZone)}` : ''}</button
       >
     </div>

@@ -7,12 +7,15 @@
   import type { AccountUsageSnapshot } from './account_usage_store';
   import AccountNickname from './AccountNickname.svelte';
   import UsageBar from './UsageBar.svelte';
+  import { hubStatus, hubBlock } from './hub';
   import {
     compactWindow,
     freshnessMark,
     type HostGroup,
     type HostRowInfo,
   } from './hosts_view';
+
+  const nicknameBlocked = $derived(hubBlock('set_account_nickname', $hubStatus));
 
   let {
     groups,
@@ -102,6 +105,7 @@
                 onedit={() => oneditstart(g.account!.uuid)}
                 ondone={oneditdone}
                 testid="group-label"
+                blocked={nicknameBlocked}
               />
             {:else}
               <span class="group-label" data-testid="group-label">{g.label}</span>

@@ -17,6 +17,20 @@ import { sendPrompt, type SessionRow } from './sessions';
 import { composerPresets, resetComposerPresets } from './composer_presets';
 import { composerDrafts } from './conversation';
 import { openPathRequest } from './app_views';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+
+const REMOTE: HubStatus = {
+  remote: true,
+  url: 'https://fleet.example.com',
+  client_name: 'laptop',
+  client_mode: null,
+  configured_url: 'https://fleet.example.com',
+  configured_client_name: 'laptop',
+  allow_plaintext: false,
+  warning: null,
+  restart_required: false,
+  unavailable: null,
+};
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
@@ -73,11 +87,13 @@ beforeEach(() => {
   composerDrafts.clear();
   resetComposerPresets();
   setVisibility('visible');
+  hubStatus.set({ ...STANDALONE });
 });
 
 afterEach(() => {
   vi.useRealTimers();
   setVisibility('visible');
+  hubStatus.set({ ...STANDALONE });
 });
 
 describe('ConversationPanel', () => {
@@ -742,6 +758,30 @@ describe('ConversationPanel live indicator', () => {
     vi.advanceTimersByTime(ACTIVITY_POLL_MS);
     await settle();
     expect(mockedAct).toHaveBeenCalledTimes(2);
+  });
+
+  // #147: session_activity is local-only in remote mode (peek_session answers
+  // a different shape) — a hub client must not poll it every 2s only to drop
+  // an E_LOCAL_ONLY each time.
+  it('a hub client never polls session_activity, even for a working row', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    hubStatus.set(REMOTE);
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    vi.advanceTimersByTime(ACTIVITY_POLL_MS * 3);
+    await settle();
+    expect(mockedAct).not.toHaveBeenCalled();
+  });
+
+  it('standalone is untouched: a working row still polls', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    expect(mockedAct).toHaveBeenCalledTimes(1);
   });
 
   it('an idle row shows no indicator and does not probe', async () => {

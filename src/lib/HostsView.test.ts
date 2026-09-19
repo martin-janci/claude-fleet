@@ -29,6 +29,7 @@ import {
   outageUsage,
   snapshot,
 } from './hosts_fixture';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd);
@@ -36,6 +37,7 @@ const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd);
 beforeEach(() => {
   resetTombstonesForTests();
   clearToasts();
+  hubStatus.set({ ...STANDALONE });
   hosts.set(fleetHosts());
   accounts.set(fleetAccounts());
   sessions.set(fleetSessions());
@@ -444,6 +446,54 @@ describe('HostsView: usage', () => {
     expect(screen.queryByTestId('usage-outage-banner')).toBeNull();
     const lines = within(detail()).queryAllByTestId('usage-message').map((m) => m.dataset.kind);
     expect(lines).toContain('unavailable');
+  });
+});
+
+// #147: refresh_account_usage SSHes to the host and is local-only in remote
+// mode. "The Hosts view opening" is an unprompted fetch trigger (one call per
+// linked account) — a hub client must not fire it only to drop an
+// E_LOCAL_ONLY each time.
+describe('HostsView: hub client', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+  });
+
+  it('does not fire refresh_account_usage on open', async () => {
+    hubStatus.set(remote);
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await tick();
+    expect(calls('refresh_account_usage')).toHaveLength(0);
+  });
+
+  it('standalone is untouched: opening still refreshes linked accounts', async () => {
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await tick();
+    expect(calls('refresh_account_usage').length).toBeGreaterThan(0);
+  });
+
+  it('the manual usage refresh and outage-retry buttons are disabled, with the reason', async () => {
+    accountUsage.set(fleetUsage());
+    hubStatus.set(remote);
+    mount({ preselect: 'mefistos' });
+    await tick();
+    const refresh = within(detail()).getByTestId('usage-refresh') as HTMLButtonElement;
+    expect(refresh).toBeDisabled();
+    expect(refresh.title).toContain('fleet.example.com');
   });
 });
 

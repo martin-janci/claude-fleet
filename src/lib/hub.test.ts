@@ -12,9 +12,11 @@ import {
   hubDisconnect,
   hubBlock,
   hubNextStep,
+  hubActionBlocked,
   HUB_ACTIONS,
   type HubStatus,
 } from './hub';
+import type { HubConnection } from './hub_connection';
 
 const remote: HubStatus = {
   remote: true,
@@ -209,5 +211,97 @@ describe('hubDisconnect', () => {
     expect(inv).toHaveBeenCalledWith('hub_disconnect', undefined);
     expect(get(hubStatus).configured_url).toBeNull();
     expect(get(hubStatus).restart_required).toBe(true);
+  });
+});
+
+// #147: the one place a control checks both refusal (hubBlock) and the live
+// connection (hubConnection) — offline gating for routed mutations. The
+// truth table below is the actual contract: standalone / owning the fleet
+// locally / hub connected / each not-connected state, crossed with a refused
+// action, a routed action, and one unaffected by either.
+describe('hubActionBlocked', () => {
+  const unavailable: HubStatus = {
+    ...STANDALONE,
+    configured_url: 'https://fleet.example.com',
+    unavailable: 'https://fleet.example.com is configured but no client token is stored',
+  };
+
+  const STANDALONE_CONN: HubConnection = { state: 'standalone' };
+  const CONNECTING: HubConnection = { state: 'connecting' };
+  const CONNECTED: HubConnection = { state: 'connected' };
+  const RECONNECTING: HubConnection = {
+    state: 'reconnecting',
+    attempt: 2,
+    retry_in_secs: 5,
+    reason: 'socket closed',
+  };
+  const OFFLINE: HubConnection = {
+    state: 'offline',
+    attempt: 4,
+    retry_in_secs: 30,
+    reason: 'connect refused',
+  };
+  const TOO_OLD: HubConnection = { state: 'hub_too_old', hub_contract: 1, min_contract: 3 };
+  const TOO_NEW: HubConnection = { state: 'hub_too_new', hub_contract: 9, max_contract: 5 };
+
+  // `standalone` (no hub configured) must never disable anything, in either
+  // half, whatever the connection store happens to hold.
+  it('standalone blocks nothing at all, for a refused action, a routed one, or neither', () => {
+    for (const conn of [STANDALONE_CONN, CONNECTING, CONNECTED, RECONNECTING, OFFLINE, TOO_OLD, TOO_NEW]) {
+      expect(hubActionBlocked('add_host', STANDALONE, conn)).toBeNull();
+      expect(hubActionBlocked('kill_session', STANDALONE, conn)).toBeNull();
+    }
+  });
+
+  // Refusal wins: a refused action is blocked in remote mode regardless of
+  // the connection, and says the REASONS sentence, not an offline one.
+  it('a refused action is blocked the same way whatever the connection is doing', () => {
+    for (const conn of [CONNECTING, CONNECTED, RECONNECTING, OFFLINE, TOO_OLD, TOO_NEW]) {
+      const why = hubActionBlocked('add_host', remote, conn);
+      expect(why, conn.state).not.toBeNull();
+      expect(why, conn.state).toBe(hubBlock('add_host', remote));
+      expect(why!.toLowerCase(), conn.state).toContain('client');
+    }
+  });
+
+  // A routed action: enabled only once the connection is actually up.
+  it('a routed action is enabled while connected, blocked in every other connection state', () => {
+    expect(hubActionBlocked('kill_session', remote, CONNECTED)).toBeNull();
+    for (const conn of [CONNECTING, RECONNECTING, OFFLINE]) {
+      const why = hubActionBlocked('kill_session', remote, conn);
+      expect(why, conn.state).not.toBeNull();
+      expect(why!.toLowerCase(), conn.state).toMatch(/unreachable|connecting/);
+    }
+    for (const conn of [TOO_OLD, TOO_NEW]) {
+      const why = hubActionBlocked('kill_session', remote, conn);
+      expect(why, conn.state).not.toBeNull();
+      expect(why!.toLowerCase(), conn.state).toContain('incompatible');
+    }
+  });
+
+  // The skew states name which side is behind, distinctly.
+  it('the skew states say which side is out of date', () => {
+    expect(hubActionBlocked('send_prompt', remote, TOO_OLD)!.toLowerCase()).toContain('update the hub');
+    expect(hubActionBlocked('send_prompt', remote, TOO_NEW)!.toLowerCase()).toContain('update this app');
+  });
+
+  // An action neither refused nor routed (a read, navigation, or one of the
+  // handful of commands that run the same in both modes) is never blocked
+  // here — this module has nothing to say about it.
+  it('an action that is neither refused nor routed is never blocked, connected or not', () => {
+    for (const conn of [CONNECTING, CONNECTED, RECONNECTING, OFFLINE, TOO_OLD, TOO_NEW]) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(hubActionBlocked('hub_status' as any, remote, conn)).toBeNull();
+    }
+  });
+
+  // F1: a hub is configured but this launch could not use it — refuses every
+  // routed command too (the routing test's `a_configured_but_unavailable_hub_
+  // refuses_every_routed_command`), not just the ones with a REASONS entry.
+  it('a configured-but-unavailable hub blocks a routed action as well as a refused one', () => {
+    const why = hubActionBlocked('kill_session', unavailable, CONNECTED);
+    expect(why).not.toBeNull();
+    expect(why).toContain('no client token is stored');
+    expect(why!.toLowerCase()).toContain('settings');
   });
 });

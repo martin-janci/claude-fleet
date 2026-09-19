@@ -46,6 +46,7 @@
     type SlashCommand,
     type ActivityProbe,
   } from './conversation';
+  import { hubStatus, ownsTheFleet } from './hub';
   import Markdown from './MarkdownView.svelte';
 
   let {
@@ -291,7 +292,12 @@
   // once, then on the interval. `probeLive` is a boolean derived, so a fresh
   // probe (which yields a new `indicator` object) never restarts the timer.
   // bg / external rows have no pane: the backend would reject every probe.
-  const probeLive = $derived(visible && !hasNoPane(session) && indicator !== null);
+  // `session_activity` is also local-only in remote mode (`peek_session`
+  // answers a different shape) — a hub client must not poll it every 2s only
+  // to drop an E_LOCAL_ONLY every time.
+  const probeLive = $derived(
+    visible && !hasNoPane(session) && indicator !== null && ownsTheFleet($hubStatus),
+  );
   $effect(() => {
     if (!probeLive) return;
     if (document.visibilityState === 'visible') void untrack(probeNow);

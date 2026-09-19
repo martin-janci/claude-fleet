@@ -19,12 +19,14 @@
     onSelect,
     onCreateBranch,
     onCheckoutCommit,
+    writeBlocked = null,
   }: {
     commits: Commit[];
     selected: string | null;
     onSelect: (hash: string) => void;
     onCreateBranch: (hash: string) => void;
     onCheckoutCommit: (hash: string) => void;
+    writeBlocked?: string | null;
   } = $props();
 
   const rows = $derived(computeGraph(commits.map((c) => ({ hash: c.hash, parents: c.parents }))));
@@ -113,11 +115,13 @@
       </span>
       <span class="actions">
         <button
-          title="Create branch from here"
+          disabled={writeBlocked !== null}
+          title={writeBlocked ?? 'Create branch from here'}
           onclick={(e) => { e.stopPropagation(); onCreateBranch(r.hash); }}>⎇</button
         >
         <button
-          title="Checkout this commit (detached)"
+          disabled={writeBlocked !== null}
+          title={writeBlocked ?? 'Checkout this commit (detached)'}
           onclick={(e) => { e.stopPropagation(); onCheckoutCommit(r.hash); }}>⤓</button
         >
       </span>

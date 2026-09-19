@@ -47,6 +47,7 @@
   } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { push, pushError } from './toasts';
+  import { hubStatus, hubBlock } from './hub';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
@@ -354,6 +355,12 @@
   let showAddProject = $state(false);
   /** Host to preselect in NewSessionDialog: where Add project put the project. */
   let dialogHost: string | undefined = $state(undefined);
+
+  // Both act on a checkout using this machine's SSH (and, for Add project,
+  // GitHub credentials): neither has a hub tool, so both refuse with
+  // E_LOCAL_ONLY in remote mode (`commands/projects.rs`, `commands/sessions.rs`).
+  const addProjectBlocked = $derived(hubBlock('add_project', $hubStatus));
+  const purgeProjectBlocked = $derived(hubBlock('purge_project', $hubStatus));
 
   /** Host the open project picker preselects (the Hosts view's `n`). */
   let pickerHost: string | undefined = $state(undefined);
@@ -694,7 +701,8 @@
               </button>
               <button
                 class="icon-btn small purge-btn"
-                title="Purge Claude Code project state (irreversible)"
+                title={purgeProjectBlocked ?? 'Purge Claude Code project state (irreversible)'}
+                disabled={purgeProjectBlocked !== null}
                 onclick={(e) => { e.stopPropagation(); pendingPurge = row.project; }}
                 data-testid="purge-project"
                 aria-label="Purge project"
@@ -773,7 +781,13 @@
     </button>
     {#if showProjectPicker}
       <div class="picker" role="listbox" aria-label="Pick project for new session">
-        <button class="picker-item add-project" onclick={openAddProject} data-testid="add-project-row">
+        <button
+          class="picker-item add-project"
+          disabled={addProjectBlocked !== null}
+          title={addProjectBlocked ?? ''}
+          onclick={openAddProject}
+          data-testid="add-project-row"
+        >
           ＋ Add project…
         </button>
         {#each allProjectsSorted as row (row.project.id)}

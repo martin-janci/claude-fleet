@@ -8,6 +8,7 @@
     onCheckout,
     onDelete,
     onNew,
+    writeBlocked = null,
   }: {
     branches: Branch[];
     loading: boolean;
@@ -15,6 +16,7 @@
     onCheckout: (name: string) => void;
     onDelete: (name: string) => void;
     onNew: () => void;
+    writeBlocked?: string | null;
   } = $props();
 
   const locals = $derived(branches.filter((b) => !b.isRemote));
@@ -23,7 +25,9 @@
 
 <div class="branches" data-testid="branch-list">
   <div class="bbar">
-    <button class="new" onclick={onNew}>+ New branch</button>
+    <button class="new" disabled={writeBlocked !== null} title={writeBlocked ?? ''} onclick={onNew}
+      >+ New branch</button
+    >
   </div>
   {#if loading}
     <p class="hint">Loading…</p>
@@ -39,8 +43,8 @@
         {/if}
         <span class="bactions">
           {#if !b.isCurrent}
-            <button onclick={() => onCheckout(b.name)}>Checkout</button>
-            <button class="del" onclick={() => onDelete(b.name)}>Delete</button>
+            <button disabled={writeBlocked !== null} title={writeBlocked ?? ''} onclick={() => onCheckout(b.name)}>Checkout</button>
+            <button class="del" disabled={writeBlocked !== null} title={writeBlocked ?? ''} onclick={() => onDelete(b.name)}>Delete</button>
           {/if}
         </span>
       </div>
@@ -51,7 +55,7 @@
         <div class="brow">
           <span class="bname">{b.name}</span>
           <span class="bactions">
-            <button onclick={() => onCheckout(b.name)}>Checkout</button>
+            <button disabled={writeBlocked !== null} title={writeBlocked ?? ''} onclick={() => onCheckout(b.name)}>Checkout</button>
           </span>
         </div>
       {/each}

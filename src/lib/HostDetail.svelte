@@ -18,7 +18,8 @@
   import { hideHostWithUndo, rotateToken, setTokenMode, showHost } from './host_actions';
   import { pushError, push } from './toasts';
   import { removeHostMessage, rotateTokenMessage, type HostAttention } from './hosts_view';
-  import { hubStatus, hubBlock } from './hub';
+  import { hubStatus, hubBlock, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
   import AccountNickname from './AccountNickname.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import UsageBlock from './UsageBlock.svelte';
@@ -78,6 +79,12 @@
   // in the tooltip rather than left to fail at the click: the button would
   // otherwise look like a button that works.
   const adminBlocked = $derived(hubBlock('remove_host', $hubStatus));
+  // Neither has a hub tool either: the nickname lives in the hub's own
+  // database, and a usage refresh SSHes to the host from here.
+  const nicknameBlocked = $derived(hubBlock('set_account_nickname', $hubStatus));
+  const refreshUsageBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
+  // probe_host routes, so it only needs the live connection to be up.
+  const reprobeBlocked = $derived(hubActionBlocked('probe_host', $hubStatus, $hubConnection));
 
   function sessionName(s: SessionRow): string {
     return s.friendly_name?.trim() || s.tmux_name;
@@ -140,7 +147,13 @@
         >{host.reachable ? '● online' : '○ offline'}</span
       >
       {#if host.hidden}<span class="muted">hidden</span>{/if}
-      <button type="button" class="small" onclick={onreprobe} disabled={probing} data-testid="detail-reprobe"
+      <button
+        type="button"
+        class="small"
+        onclick={onreprobe}
+        disabled={probing || reprobeBlocked !== null}
+        title={reprobeBlocked ?? ''}
+        data-testid="detail-reprobe"
         >{#if probing}probing…{:else}<kbd>r</kbd> Re-probe{/if}</button
       >
     </div>
@@ -174,6 +187,7 @@
           onedit={oneditstart}
           ondone={oneditdone}
           testid="detail-nickname"
+          blocked={nicknameBlocked}
         />
         {#if account.email}<span class="muted">{account.email}</span>{/if}
       </div>
@@ -187,6 +201,7 @@
       {timeZone}
       {suppressUnavailable}
       onRefresh={account ? onrefreshusage : undefined}
+      refreshBlocked={refreshUsageBlocked}
     />
   </section>
 

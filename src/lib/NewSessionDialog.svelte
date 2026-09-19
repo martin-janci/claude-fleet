@@ -20,6 +20,8 @@
     projectsDefaultRoot,
     PROJECTS_RESOLVED_KEY,
   } from './fleet_settings';
+  import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
 
   let {
     project,
@@ -355,6 +357,8 @@
       ? '.claude/worktrees'
       : '.worktrees',
   );
+  // new_session routes, so it only needs the live connection to be up.
+  const newSessionBlocked = $derived(hubActionBlocked('new_session', $hubStatus, $hubConnection));
   const projectsLayout = $derived(settingLayout($fleetSettings));
   const remoteRoot = $derived(
     settingPathMap($fleetSettings, PROJECTS_RESOLVED_KEY)[chosenHost] ?? projectsDefaultRoot(projectsLayout),
@@ -364,11 +368,14 @@
     void loadFleetSettings();
     // "The New-session dialog opening" is a usage fetch trigger. The backend
     // keeps the 5-minute floor; a refused or failed refresh just leaves the
-    // last-known snapshot, so nothing is surfaced here.
-    const uuids = new Set(
-      $hosts.filter((h) => !h.hidden && h.account_uuid).map((h) => h.account_uuid as string),
-    );
-    for (const uuid of uuids) void refreshAccountUsage(uuid);
+    // last-known snapshot, so nothing is surfaced here. `refresh_account_usage`
+    // is local-only in remote mode (same as HostsView's), so skip it there.
+    if (ownsTheFleet($hubStatus)) {
+      const uuids = new Set(
+        $hosts.filter((h) => !h.hidden && h.account_uuid).map((h) => h.account_uuid as string),
+      );
+      for (const uuid of uuids) void refreshAccountUsage(uuid);
+    }
   });
   const pathPreview = $derived.by(() => {
     const root =
@@ -704,7 +711,12 @@
     {#if busy}
       <button type="button" data-testid="cancel-create" onclick={cancelCreate}>Cancel creation</button>
     {:else}
-      <button class="primary" onclick={submit} disabled={inNewMode && !newWorktreeName.trim()}>Create</button>
+      <button
+        class="primary"
+        onclick={submit}
+        disabled={(inNewMode && !newWorktreeName.trim()) || newSessionBlocked !== null}
+        title={newSessionBlocked ?? ''}
+      >Create</button>
     {/if}
   </div>
 </div>
