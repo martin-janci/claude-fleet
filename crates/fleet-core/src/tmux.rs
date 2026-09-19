@@ -713,13 +713,19 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
 /// most-recent-for-cwd behavior. The id is single-quoted; externally-supplied
 /// ids should be validated with `validate::claude_session_id` before being
 /// passed in (minted ids are safe by construction).
-pub fn pane_command_for(claude_session_id: Option<&str>) -> String {
+///
+/// Every `cl` also gets `--name <tmux_name>`, so `claude agents` lists the
+/// session under its tmux name and reconcile pairs it with its agent BY NAME
+/// (authoritative) instead of inferring it from the cwd, which is ambiguous
+/// once two sessions share a directory.
+pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> String {
     let tail = "exec ${SHELL:-/bin/zsh} -l";
+    let name = format!("--name {}", crate::shell::quote(tmux_name));
     match claude_session_id {
-        Some(id) => {
-            format!("cl --resume '{id}' 2>/dev/null || cl --session-id '{id}' || cl; {tail}")
-        }
-        None => format!("cl --continue || cl; {tail}"),
+        Some(id) => format!(
+            "cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
+        ),
+        None => format!("cl --continue {name} || cl {name}; {tail}"),
     }
 }
 
@@ -998,13 +1004,16 @@ mod tests {
 
     #[test]
     fn pane_command_for_none_falls_back_to_shell_after_claude_exits() {
-        let cmd = pane_command_for(None);
+        let cmd = pane_command_for(None, "dev-x");
         // The semicolon (NOT `||`) after the second `cl` is the whole point:
         // it makes the shell always continue to the exec regardless of `cl`'s
         // exit status. Regression test that the next person who edits this
         // doesn't accidentally use `||` and resurrect the "session dies on
         // /exit" bug.
-        assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
+        assert!(
+            cmd.contains("cl --continue --name 'dev-x' || cl --name 'dev-x';"),
+            "got: {cmd}"
+        );
         assert!(cmd.contains("exec ${SHELL:-/bin/zsh}"), "got: {cmd}");
     }
 
@@ -1043,13 +1052,19 @@ mod tests {
     #[test]
     fn pane_command_for_resumes_or_creates_with_id() {
         let id = "550e8400-e29b-41d4-a716-446655440000";
-        let cmd = pane_command_for(Some(id));
-        assert!(cmd.contains(&format!("cl --resume '{id}'")), "got: {cmd}");
+        let cmd = pane_command_for(Some(id), "dev-x");
         assert!(
-            cmd.contains(&format!("cl --session-id '{id}'")),
+            cmd.contains(&format!("cl --resume '{id}' --name 'dev-x'")),
             "got: {cmd}"
         );
-        assert!(cmd.contains("|| cl;"), "bare fallback missing: {cmd}");
+        assert!(
+            cmd.contains(&format!("cl --session-id '{id}' --name 'dev-x'")),
+            "got: {cmd}"
+        );
+        assert!(
+            cmd.contains("|| cl --name 'dev-x';"),
+            "bare fallback missing: {cmd}"
+        );
         assert!(cmd.contains("exec ${SHELL"), "got: {cmd}");
     }
 
@@ -1077,9 +1092,15 @@ mod tests {
 
     #[test]
     fn pane_command_for_none_uses_continue() {
-        let cmd = pane_command_for(None);
-        assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
+        let cmd = pane_command_for(None, "dev-x");
+        assert!(cmd.contains("cl --continue --name 'dev-x'"), "got: {cmd}");
         assert!(!cmd.contains("--session-id"), "got: {cmd}");
+    }
+
+    #[test]
+    fn pane_command_for_quotes_the_session_name() {
+        let cmd = pane_command_for(None, "it's$(x)");
+        assert!(cmd.contains("--name 'it'\\''s$(x)'"), "got: {cmd}");
     }
 
     #[test]

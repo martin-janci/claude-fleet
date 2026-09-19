@@ -270,15 +270,40 @@ pub fn find_by_session_id<'a>(
 /// a path on another machine, and resolving it here would stat the LOCAL
 /// filesystem under the store lock (on macOS `/home` is an autofs mount that
 /// can stall).
+///
+/// Only a by-name match identifies the session; a cwd match is an inference
+/// ("the only Claude in this directory right now") that is wrong whenever a
+/// second fleet session in the same cwd has not registered its agent yet.
+/// [`AgentMatch::by_name`] tells the two apart so reconcile never lets an
+/// inference overwrite an id the session already has.
 pub fn find_for_session<'a>(
     rows: &'a [ClaudeAgentRow],
     tmux_name: &str,
     cwd: &str,
     is_local: bool,
-) -> Option<&'a ClaudeAgentRow> {
-    if let Some(by_name) = find_by_name(rows, tmux_name) {
-        return Some(by_name);
+) -> Option<AgentMatch<'a>> {
+    if let Some(row) = find_by_name(rows, tmux_name) {
+        return Some(AgentMatch { row, by_name: true });
     }
+    find_by_unique_cwd(rows, cwd, is_local).map(|row| AgentMatch {
+        row,
+        by_name: false,
+    })
+}
+
+/// A [`find_for_session`] result: the agent row and whether it matched by
+/// name (authoritative) or only by a unique cwd (inferred).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AgentMatch<'a> {
+    pub row: &'a ClaudeAgentRow,
+    pub by_name: bool,
+}
+
+fn find_by_unique_cwd<'a>(
+    rows: &'a [ClaudeAgentRow],
+    cwd: &str,
+    is_local: bool,
+) -> Option<&'a ClaudeAgentRow> {
     // An empty cwd identifies nothing; never pair two unknowns.
     if cwd.is_empty() {
         return None;
@@ -333,6 +358,7 @@ mod tests {
         assert_eq!(
             find_for_session(&rows, "dev-x", "/zzz", true)
                 .unwrap()
+                .row
                 .session_id
                 .as_deref(),
             Some("byname")
@@ -341,9 +367,21 @@ mod tests {
         assert_eq!(
             find_for_session(&rows, "no-name", "/b", true)
                 .unwrap()
+                .row
                 .session_id
                 .as_deref(),
             Some("bycwd")
+        );
+        // ...and says how it matched: only a name match is authoritative.
+        assert!(
+            find_for_session(&rows, "dev-x", "/zzz", true)
+                .unwrap()
+                .by_name
+        );
+        assert!(
+            !find_for_session(&rows, "no-name", "/b", true)
+                .unwrap()
+                .by_name
         );
         // Ambiguous cwd (two agents) → None (refuse to guess).
         assert!(find_for_session(&rows, "no-name", "/c", true).is_none());
@@ -378,6 +416,7 @@ mod tests {
         assert_eq!(
             find_for_session(&rows, "no-name", &logical, true)
                 .unwrap()
+                .row
                 .session_id
                 .as_deref(),
             Some("a")
@@ -407,6 +446,7 @@ mod tests {
         assert_eq!(
             find_for_session(&rows, "no-name", &physical, false)
                 .unwrap()
+                .row
                 .session_id
                 .as_deref(),
             Some("a")

@@ -543,8 +543,10 @@ impl Store {
     /// (create / recreate / move / review). Opens that conversation with
     /// source `fleet` via [`Self::rebind_conversation`], which closes any
     /// previous one as `replaced` and resets the context. Reconcile's
-    /// `upsert_session` never writes this column, so the value survives
-    /// reconciliation.
+    /// upsert only replaces the id with that of an agent matched BY NAME (or
+    /// fills a NULL from an unambiguous cwd match — see
+    /// `service::sessions::reconcile::pair_session_agents`), so a minted id
+    /// survives reconciliation.
     pub fn set_claude_session_id(
         &self,
         id: i64,
