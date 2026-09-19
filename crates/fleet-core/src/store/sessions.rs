@@ -537,6 +537,25 @@ impl Store {
         Ok(())
     }
 
+    /// The lost row (`lost_at` set) named `tmux_name` on `host_alias` that
+    /// still carries a Claude conversation id — i.e. one `restore_host_sessions`
+    /// could bring back. `new_session` refuses such a name: reconcile's upsert
+    /// would revive the lost row and overwrite its conversation id.
+    pub fn lost_resumable_session_named(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+    ) -> rusqlite::Result<Option<SessionRow>> {
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions
+                 WHERE host_alias=?1 AND tmux_name=?2
+                   AND lost_at IS NOT NULL AND claude_session_id IS NOT NULL"
+            ))?
+            .query_row(rusqlite::params![host_alias, tmux_name], map_session_row)
+            .optional()
+    }
+
     /// Record the Claude Code session id minted for a session. Reconcile's
     /// `upsert_session` never writes this column, so the value survives
     /// reconciliation.
@@ -1108,6 +1127,43 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         s
+    }
+
+    #[test]
+    fn lost_resumable_session_named_needs_lost_and_a_claude_id() {
+        let s = store();
+        let id_of = |name: &str| s.get_session(name, "local").unwrap().unwrap().id;
+        for name in ["live", "lost-with", "lost-without"] {
+            s.upsert_session(name, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        s.set_claude_session_id(id_of("live"), "u-live").unwrap();
+        s.set_claude_session_id(id_of("lost-with"), "u-lost")
+            .unwrap();
+        s.mark_session_killed(id_of("lost-with"), 50).unwrap();
+        s.mark_session_killed(id_of("lost-without"), 50).unwrap();
+
+        let hit = s
+            .lost_resumable_session_named("local", "lost-with")
+            .unwrap()
+            .expect("lost row with a conversation");
+        assert_eq!(hit.id, id_of("lost-with"));
+        assert!(s
+            .lost_resumable_session_named("local", "lost-without")
+            .unwrap()
+            .is_none());
+        assert!(s
+            .lost_resumable_session_named("local", "live")
+            .unwrap()
+            .is_none());
+        assert!(s
+            .lost_resumable_session_named("other", "lost-with")
+            .unwrap()
+            .is_none());
+        assert!(s
+            .lost_resumable_session_named("local", "nope")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

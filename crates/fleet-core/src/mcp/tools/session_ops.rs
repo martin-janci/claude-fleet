@@ -195,6 +195,7 @@ impl FleetTools {
             // MCP callers don't pick a label; let the service derive one from
             // the branch via `humanize::humanize_branch`.
             friendly_name: None,
+            resume_claude_session_id: p.resume_claude_session_id,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
@@ -233,6 +234,7 @@ impl FleetTools {
             start_command: p.start_command,
             // Let the service derive a humanised label from the branch.
             friendly_name: None,
+            resume_claude_session_id: None,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await

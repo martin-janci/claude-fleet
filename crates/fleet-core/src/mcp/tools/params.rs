@@ -81,6 +81,9 @@ pub struct NewSessionParams {
     /// branch if the named branch isn't found on the host.
     #[serde(default)]
     pub base_branch: Option<String>,
+    /// Resume this Claude conversation id instead of starting a new one (from discover_lost_sessions). Must be a transcript on this host.
+    #[serde(default)]
+    pub resume_claude_session_id: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

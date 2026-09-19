@@ -396,6 +396,11 @@ export interface NewSessionArgs {
    * `dev-<owner>-<repo>--…` slug.
    */
   friendly_name?: string | null;
+  /**
+   * Resume this Claude conversation id instead of minting a fresh one (from
+   * discover_lost_sessions). Ignored for a shell session.
+   */
+  resume_claude_session_id?: string;
 }
 
 export async function newSessionAbortable(

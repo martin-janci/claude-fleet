@@ -706,6 +706,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 name: "x".into(),
                 new_worktree: None,
                 base_branch: None,
+                resume_claude_session_id: None,
             }),
         )
         .await

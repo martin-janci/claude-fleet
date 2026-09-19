@@ -195,6 +195,7 @@ async fn an_unknown_project_id_is_not_found_not_a_raw_sqlite_error() {
         kind: Some("shell".into()),
         start_command: None,
         friendly_name: None,
+        resume_claude_session_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -219,6 +220,7 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
         kind: Some("shell".into()),
         start_command: None,
         friendly_name: None,
+        resume_claude_session_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -243,4 +245,133 @@ fn fetch_worktree_reports_an_unknown_worktree_as_not_found() {
     let err = fetch_worktree(&s, 77).unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
     assert_eq!(err.message, "worktree 77 not found");
+}
+
+// ---- Task 6: resume a given conversation; never reuse a lost session's name ----
+
+const RESUME_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+fn args_named(name: &str, resume: Option<&str>) -> NewSessionArgs {
+    NewSessionArgs {
+        host_alias: "local".into(),
+        project_id: 4242,
+        worktree_id: None,
+        name: name.into(),
+        call_id: None,
+        new_worktree: None,
+        base_branch: None,
+        kind: None,
+        start_command: None,
+        friendly_name: None,
+        resume_claude_session_id: resume.map(str::to_string),
+    }
+}
+
+/// A `local` row named `name`, ghosted as killed, optionally carrying a
+/// Claude conversation id. Returns its id.
+fn lost_row(s: &crate::store::Store, name: &str, claude_id: Option<&str>) -> i64 {
+    s.upsert_host("local").unwrap();
+    s.upsert_session(name, "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let id = s.get_session(name, "local").unwrap().unwrap().id;
+    if let Some(cid) = claude_id {
+        s.set_claude_session_id(id, cid).unwrap();
+    }
+    s.mark_session_killed(id, 100).unwrap().expect("ghosted");
+    id
+}
+
+#[tokio::test]
+async fn a_lost_session_with_a_conversation_blocks_its_name() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let id = lost_row(&store.lock().unwrap(), "dev-x", Some(RESUME_ID));
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-x", None), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+    assert_eq!(
+        err.message,
+        format!(
+            "dev-x belongs to a lost session (id {id}); restore it with restore_host_sessions or dismiss it first"
+        )
+    );
+    let row = store
+        .lock()
+        .unwrap()
+        .get_session_by_id(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_session_id.as_deref(), Some(RESUME_ID));
+}
+
+/// A lost row with no conversation has nothing to resume, so the name is
+/// free: the call gets past the guard and fails later on the unknown project.
+#[tokio::test]
+async fn a_lost_session_without_a_conversation_does_not_block() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    lost_row(&store.lock().unwrap(), "dev-x", None);
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-x", None), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+}
+
+/// Shell sessions are guarded too: the check runs before the kind split.
+#[tokio::test]
+async fn the_lost_name_guard_applies_to_shell_sessions() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    lost_row(&store.lock().unwrap(), "dev-x", Some(RESUME_ID));
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let mut args = args_named("dev-x", None);
+    args.kind = Some("shell".into());
+    let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+}
+
+#[tokio::test]
+async fn an_invalid_resume_id_is_rejected() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-y", Some("x; rm -rf")), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_INVALID);
+}
+
+/// `new_session_inner` threads the pair this returns into BOTH the pane
+/// command and `set_claude_session_id`; driving the whole path needs a real
+/// tmux, so the choice itself is pinned here.
+#[test]
+fn a_resume_id_is_used_for_both_the_pane_command_and_the_stored_id() {
+    let (cid, pane) = claude_id_and_pane_cmd(&args_named("dev-z", Some(RESUME_ID)));
+    assert_eq!(cid.as_deref(), Some(RESUME_ID));
+    assert!(
+        pane.contains(&format!("--resume '{RESUME_ID}'")),
+        "got: {pane}"
+    );
+    assert_eq!(pane, recreate_pane_command("work", Some(RESUME_ID)));
+}
+
+#[test]
+fn without_a_resume_id_a_fresh_uuid_is_minted() {
+    let (cid, pane) = claude_id_and_pane_cmd(&args_named("dev-z", None));
+    let cid = cid.expect("work session gets an id");
+    assert_ne!(cid, RESUME_ID);
+    assert!(crate::validate::claude_session_id(&cid).is_ok());
+    assert!(pane.contains(&format!("--resume '{cid}'")), "got: {pane}");
+}
+
+#[test]
+fn a_shell_session_has_no_claude_id() {
+    let mut args = args_named("dev-z", None);
+    args.kind = Some("shell".into());
+    let (cid, pane) = claude_id_and_pane_cmd(&args);
+    assert_eq!(cid, None);
+    assert_eq!(pane, crate::tmux::shell_pane_command(None));
 }
