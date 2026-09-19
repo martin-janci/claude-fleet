@@ -28,7 +28,7 @@ use fleet_proto::{
 };
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -508,10 +508,20 @@ where
     let mut missed = 0;
     let mut heard = false;
     let mut heard_any = false;
-    // Kinds already warned about on this connection: a hub that sends many
-    // frames of a kind this build does not know floods the log once, not
-    // once per frame.
-    let mut warned_kinds: HashSet<String> = HashSet::new();
+    // Bounded, sanitised tracking of unknown frame kinds on this connection
+    // — see `fleet_proto::UnknownKinds`'s doc.
+    let mut unknown_kinds = fleet_proto::UnknownKinds::new();
+    // Nothing else the hub sends is acted on until a compatible `welcome`
+    // arrives. A hub built before this protocol version exists sends no
+    // `welcome` at all — nothing about the connection stops it from sending
+    // a command straight after accepting `hello`, the way every hub did
+    // before this change — so seeing `hello` answered at the WebSocket
+    // layer is not enough to trust anything the hub sends next. Anything
+    // else arriving first, or nothing at all within one heartbeat (below),
+    // ends the session exactly as an out-of-range `welcome.proto` would:
+    // `SessionEnd::VersionRefused`, which `run_with` backs off on at the
+    // maximum interval instead of dialling this hub again right away.
+    let mut welcomed = false;
 
     let end = loop {
         tokio::select! {
@@ -536,20 +546,41 @@ where
                             if let Some(reason) =
                                 judge_proto(proto).refusal_reason("fleet-agent", "the hub")
                             {
-                                let _ = out.send(Out::Close(
-                                    CloseCode::from(VERSION_REFUSED_CLOSE_CODE),
-                                    reason.clone(),
-                                ));
                                 break SessionEnd::VersionRefused(reason);
                             }
+                            welcomed = true;
                             tracing::info!(
                                 hub_version, proto, "[agent] hub protocol compatible"
                             );
                         }
+                        // Anything else at all, before a compatible welcome:
+                        // this hub either predates the protocol entirely (no
+                        // welcome coming, ever) or is not behaving like one
+                        // that does — either way, nothing it sends is acted
+                        // on until that is resolved.
+                        Ok(_) if !welcomed => {
+                            break SessionEnd::VersionRefused(no_welcome_reason());
+                        }
                         Ok(Decoded::Frame(frame)) => handle(frame, agent, &out, &inflight),
                         Ok(Decoded::Unknown { kind }) => {
-                            if warned_kinds.insert(kind.clone()) {
-                                tracing::warn!(kind, "[agent] unknown frame kind; skipping");
+                            match unknown_kinds.record(&kind) {
+                                fleet_proto::UnknownKindAction::LogOnce(kind) => {
+                                    tracing::warn!(kind, "[agent] unknown frame kind; skipping");
+                                }
+                                fleet_proto::UnknownKindAction::Silent => {}
+                                // Unlike the hub (which is exposed to any
+                                // agent holding a valid host token, and
+                                // closes past this same cap), the agent
+                                // trusts the one hub it was configured to
+                                // dial: dropping that connection over noisy
+                                // unknown kinds would be more disruptive
+                                // than the risk it guards against, so here
+                                // it only stops logging, never disconnects.
+                                fleet_proto::UnknownKindAction::LogCapReached => {
+                                    tracing::warn!(
+                                        "[agent] too many distinct unknown frame kinds; no longer logging them"
+                                    );
+                                }
                             }
                         }
                         Err(e) => break SessionEnd::Protocol(e.to_string()),
@@ -562,6 +593,17 @@ where
                 }
             }
             ack = ticker.tick() => {
+                if !welcomed {
+                    // One heartbeat with no welcome at all: this hub is not
+                    // going to send one. Treated the same as an
+                    // out-of-range one, not `HubSilent` — the fix is a hub
+                    // upgrade, not a network problem, and `run_with` must
+                    // back off accordingly.
+                    if let Some(ack) = ack {
+                        let _ = ack.send(false);
+                    }
+                    break SessionEnd::VersionRefused(no_welcome_timeout_reason());
+                }
                 missed = if std::mem::take(&mut heard) { 0 } else { missed + 1 };
                 let alive = missed < SILENT_BEATS;
                 if let Some(ack) = ack {
@@ -609,6 +651,24 @@ fn close_end(frame: Option<CloseFrame>) -> SessionEnd {
         Some(f) if !f.reason.is_empty() => SessionEnd::Closed(f.reason.to_string()),
         _ => SessionEnd::Closed("the hub closed it".into()),
     }
+}
+
+/// Why the connection ends when the hub sends something other than
+/// `welcome` before ever sending one.
+fn no_welcome_reason() -> String {
+    format!(
+        "this hub sent no welcome — it predates protocol v{}; update the hub",
+        fleet_proto::MIN_SUPPORTED_PROTO
+    )
+}
+
+/// Why the connection ends when a whole heartbeat passes with no `welcome`
+/// at all.
+fn no_welcome_timeout_reason() -> String {
+    format!(
+        "no welcome within one heartbeat — this hub predates protocol v{}; update the hub",
+        fleet_proto::MIN_SUPPORTED_PROTO
+    )
 }
 
 async fn write_loop<S>(
@@ -1250,7 +1310,65 @@ mod tests {
         }
     }
 
+    /// A `welcome` naming a compatible, current `PROTO_VERSION` — what a
+    /// real hub built from this same crate sends. Every test using [`pair`]/
+    /// [`pair_with`] gets one automatically, so it exercises the SAME
+    /// must-see-welcome-first gate every real connection does, without every
+    /// other test in this file needing to know that gate exists.
+    fn compatible_welcome() -> HubFrame {
+        HubFrame::Welcome {
+            hub_version: "0.9.0".into(),
+            proto: fleet_proto::PROTO_VERSION,
+        }
+    }
+
     async fn pair_with(agent: Arc<Agent>) -> Pair {
+        let fake = FakeHub::new().await;
+        let dialer = fake.dialer();
+        let (beats, rx) = mpsc::unbounded_channel();
+        let served = tokio::spawn(async move {
+            let ws = dialer.dial().await.expect("the dial");
+            serve(ws, &agent, Beats::Manual(rx)).await
+        });
+        let (mut hub, seen) = fake.accept().await;
+        match next_frame(&mut hub).await {
+            Some((AgentFrame::Hello { .. }, _)) => {}
+            other => panic!("the first frame must be hello, got {other:?}"),
+        }
+        send(&mut hub, &compatible_welcome()).await;
+        // A barrier: the agent's `serve` loop processes one message at a
+        // time in order, so a `pong` for THIS ping can only come after the
+        // welcome just sent was already acted on (`welcomed = true`) —
+        // without this, a test that fires its first beat immediately after
+        // `pair_with` returns could race the agent still processing the
+        // welcome, and see a beat with no welcome yet as a version refusal.
+        send(
+            &mut hub,
+            &HubFrame::Ping {
+                id: "pair-barrier".into(),
+            },
+        )
+        .await;
+        match next_frame(&mut hub).await {
+            Some((AgentFrame::Pong { id }, _)) if id == "pair-barrier" => {}
+            other => panic!("expected the barrier's pong, got {other:?}"),
+        }
+        Pair {
+            hub,
+            seen,
+            served,
+            beats,
+        }
+    }
+
+    async fn pair() -> Pair {
+        pair_with(Agent::new(None, crate::exec::MAX_CONCURRENT)).await
+    }
+
+    /// [`pair_with`], but the fake hub never sends `welcome` — what a hub
+    /// built before this protocol version exists does. Only for the tests
+    /// about that gate itself; everything else should use [`pair`].
+    async fn pair_before_welcome(agent: Arc<Agent>) -> Pair {
         let fake = FakeHub::new().await;
         let dialer = fake.dialer();
         let (beats, rx) = mpsc::unbounded_channel();
@@ -1269,10 +1387,6 @@ mod tests {
             served,
             beats,
         }
-    }
-
-    async fn pair() -> Pair {
-        pair_with(Agent::new(None, crate::exec::MAX_CONCURRENT)).await
     }
 
     // ── the endpoint ───────────────────────────────────────────────────────
@@ -1640,6 +1754,12 @@ mod tests {
     #[tokio::test]
     async fn a_silent_hub_is_given_up_on_after_three_beats() {
         let mut p = pair().await;
+        // `pair`'s own setup already exchanged a ping/pong (its welcome
+        // barrier), which counts as life the same as any other frame does —
+        // one beat's worth of "heard" is still outstanding from it. Spend
+        // that beat explicitly, so the THREE that follow are unambiguously
+        // silent, the same count the connection has always needed.
+        assert!(p.beat().await, "still riding the barrier's own life signal");
         assert!(p.beat().await, "one silent beat");
         assert!(p.beat().await, "two silent beats");
         assert!(!p.beat().await, "three: the connection goes");
@@ -1652,7 +1772,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(served.end, SessionEnd::HubSilent);
-        assert!(!served.heard_any);
+        // Unlike before this task, `heard_any` can no longer be false for a
+        // connection that reached `pair()` at all: a compliant hub always
+        // welcomes it first, and that alone is something heard.
+        assert!(served.heard_any);
     }
 
     #[tokio::test]
@@ -1797,6 +1920,7 @@ mod tests {
             next_frame(&mut ws).await,
             Some((AgentFrame::Hello { .. }, _))
         ));
+        send(&mut ws, &compatible_welcome()).await;
         send(&mut ws, &HubFrame::Ping { id: "x".into() }).await;
         next_frame(&mut ws).await.expect("pong");
         drop(ws);
@@ -1858,7 +1982,7 @@ mod tests {
     /// `SessionEnd::Closed`.
     #[tokio::test]
     async fn an_incompatible_hub_is_refused_by_the_agent_with_the_version_code() {
-        let mut p = pair().await;
+        let mut p = pair_before_welcome(Agent::new(None, crate::exec::MAX_CONCURRENT)).await;
         p.hub
             .send(Message::Text(
                 encode_hub_frame(&HubFrame::Welcome {
@@ -1916,6 +2040,86 @@ mod tests {
             }
             other => panic!("expected VersionRefused, got {other:?}"),
         }
+    }
+
+    /// A hub predating this protocol version sends no `welcome` at all —
+    /// nothing about the connection stops it sending a command straight
+    /// after `hello`, which is exactly what every hub did before this
+    /// change. The agent must not run it: anything other than `welcome`,
+    /// before a compatible one has arrived, ends the session as
+    /// `VersionRefused` and the command is never acted on.
+    #[tokio::test]
+    async fn a_command_before_welcome_ends_the_session_without_running_it() {
+        let mut p = pair_before_welcome(Agent::new(None, crate::exec::MAX_CONCURRENT)).await;
+        send(&mut p.hub, &exec("premature", &["true"], None)).await;
+
+        // The hub closes it with the version-refused code, and — critically
+        // — never sees a `result` for "premature" first: the very next
+        // thing on the wire is the close, not an answer.
+        match tokio::time::timeout(PATIENCE, p.hub.next())
+            .await
+            .expect("a close in time")
+        {
+            Some(Ok(Message::Close(Some(frame)))) => {
+                assert_eq!(u16::from(frame.code), VERSION_REFUSED_CLOSE_CODE);
+                let reason = frame.reason.to_string();
+                assert!(reason.contains("no welcome"), "{reason}");
+                assert!(reason.contains("update the hub"), "{reason}");
+            }
+            other => panic!("expected a version-refused close, got {other:?}"),
+        }
+        let served = tokio::time::timeout(PATIENCE, p.served)
+            .await
+            .unwrap()
+            .unwrap();
+        match served.end {
+            SessionEnd::VersionRefused(reason) => assert!(reason.contains("welcome"), "{reason}"),
+            other => panic!("expected VersionRefused, got {other:?}"),
+        }
+    }
+
+    /// The other half of the same gate: a whole heartbeat of silence with no
+    /// `welcome` ends the session the same way — no real sleep, the fake
+    /// clock fires the one beat by hand.
+    #[tokio::test]
+    async fn silence_past_one_heartbeat_with_no_welcome_ends_the_session() {
+        let mut p = pair_before_welcome(Agent::new(None, crate::exec::MAX_CONCURRENT)).await;
+        assert!(
+            !p.beat().await,
+            "one heartbeat with no welcome must not survive"
+        );
+        match tokio::time::timeout(PATIENCE, p.hub.next())
+            .await
+            .expect("a close in time")
+        {
+            Some(Ok(Message::Close(Some(frame)))) => {
+                assert_eq!(u16::from(frame.code), VERSION_REFUSED_CLOSE_CODE);
+                let reason = frame.reason.to_string();
+                assert!(reason.contains("heartbeat"), "{reason}");
+                assert!(reason.contains("update the hub"), "{reason}");
+            }
+            other => panic!("expected a version-refused close, got {other:?}"),
+        }
+        let served = tokio::time::timeout(PATIENCE, p.served)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(served.end, SessionEnd::VersionRefused(_)),
+            "{served:?}"
+        );
+        assert!(!served.heard_any, "nothing but silence was ever heard");
+    }
+
+    /// The normal path is unaffected: `pair`'s automatic `welcome` means
+    /// every other test in this file already proves ordinary traffic keeps
+    /// working after it — this one just says so explicitly, end to end.
+    #[tokio::test]
+    async fn the_normal_path_still_works_once_welcomed() {
+        let mut p = pair().await;
+        send(&mut p.hub, &exec("ok", &["true"], None)).await;
+        let (code, ..) = result_for(&mut p.hub, "ok").await;
+        assert_eq!(code, 0);
     }
 
     /// End to end through `run_with`: a version refusal forces the maximum
