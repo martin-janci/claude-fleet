@@ -42,6 +42,22 @@
     "hash",
     "subject"
   ],
+  "ConvItem::Command": [
+    "args",
+    "kind",
+    "name",
+    "output"
+  ],
+  "ConvItem::Compact": [
+    "kind",
+    "pre_tokens",
+    "summary",
+    "trigger"
+  ],
+  "ConvItem::Interrupt": [
+    "during_tool",
+    "kind"
+  ],
   "ConvItem::Text": [
     "kind",
     "text"
@@ -59,6 +75,7 @@
   ],
   "Conversation": [
     "context",
+    "events",
     "truncated",
     "turns"
   ],

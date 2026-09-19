@@ -13,9 +13,20 @@
   import { sendPrompt, hasNoPane, type SessionRow } from './sessions';
   import { hintAnchor } from './hints';
   import { composerPresets, type ComposerPreset } from './composer_presets';
-  import { contextLevel, contextColor, contextTint } from './attention';
+  import { contextLevel } from './attention';
+  import { timeAgo } from './session_status';
+  import { onTimelineEvent, onConversationsChanged } from './live_events';
+  import type { SessionEvent } from './timeline';
+  import ConversationHeader from './ConversationHeader.svelte';
   import {
     sessionConversation,
+    listConversations,
+    switcherEntries,
+    buildThread,
+    mergeEvents,
+    lastEventLabel,
+    formatTokens,
+    SOURCE_LABELS,
     sameConversation,
     isPinned,
     emptyStateText,
@@ -42,6 +53,7 @@
     CONVERSATION_POLL_MS,
     ACTIVITY_POLL_MS,
     type Conversation,
+    type ConversationSummary,
     type PendingPrompt,
     type SlashCommand,
     type ActivityProbe,
@@ -125,6 +137,21 @@
   // for the same session, which must neither reset nor refetch.
   const sessionId = $derived(session.id);
 
+  // Conversations this session has run (header switcher), newest first.
+  let conversations = $state<ConversationSummary[]>([]);
+  // claude_session_id of an earlier conversation being read; null = current.
+  let viewing = $state<string | null>(null);
+  // A newer conversation started while an earlier one is being viewed.
+  let newerAvailable = $state(false);
+  // Shown after the session followed a /clear or /resume on its own. The
+  // label is derived from the list, so a list that lands after the notice
+  // (or is refreshed by a session:conversations push) still names it.
+  let switchNotice = $state<{ cid: string } | null>(null);
+  // Timeline events pushed live for the conversation on screen; merged with
+  // the ones the last read carried. Reset together with `conv`.
+  let pushed = $state<SessionEvent[]>([]);
+  let listSeq = 0;
+
   // Paths in reply text open in the Files tab (MarkdownInline reads this).
   setContext<OpenPathFn>(OPEN_PATH_CONTEXT, (path, line) => requestOpenPath(sessionId, path, line));
 
@@ -139,7 +166,7 @@
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
     try {
-      r = await sessionConversation(id, turnsWanted);
+      r = await sessionConversation(id, turnsWanted, viewing ?? undefined);
     } finally {
       const left = (inFlight.get(id) ?? 1) - 1;
       if (left > 0) inFlight.set(id, left);
@@ -160,7 +187,11 @@
         // Older turns prepended by Load older are history, not news.
         if (!pinned && !opts.older) unseen += newItemCount(conv, r.value);
         conv = r.value;
-        if (pending && transcriptCarries(conv, pending)) pending = null;
+        if (viewing === null && pending && transcriptCarries(conv, pending)) pending = null;
+        // Pushed events the read now carries are the backend's to keep (or
+        // age out); holding copies would grow `pushed` without bound.
+        const carried = new Set((conv.events ?? []).map((e) => e.id));
+        if (pushed.some((e) => carried.has(e.id))) pushed = pushed.filter((e) => !carried.has(e.id));
         if (pinned) {
           await tick();
           scrollToBottom();
@@ -172,31 +203,136 @@
     }
   }
 
+  async function loadConversations() {
+    const id = session.id;
+    const mine = ++listSeq;
+    const r = await listConversations(id);
+    if (mine !== listSeq || session.id !== id) return;
+    // A failed (or malformed) read keeps the list we had.
+    if (r.ok && Array.isArray(r.value)) conversations = r.value;
+  }
+
+  /** Drop the conversation on screen: content, live events, errors,
+   *  expansions, scroll state and the turn window; a fetch in flight is
+   *  made stale. */
+  function resetView() {
+    seq++;
+    conv = null;
+    pushed = [];
+    errorCode = null;
+    errorMsg = null;
+    expanded = new Set();
+    atBottom = true;
+    unseen = 0;
+    turnsWanted = undefined;
+    loadingOlder = false;
+  }
+
+  /** resetView plus the send and probe state of the current conversation;
+   *  the draft is the caller's business. */
+  function resetThread() {
+    resetView();
+    pending = null;
+    setProbe(null);
+    probeSeq++;
+    sentTurnSeq = null;
+    idleSeenSinceSend = false;
+  }
+
   // Reset + immediate fetch on session change.
   $effect(() => {
     void sessionId;
     untrack(() => {
-      seq++;
-      conv = null;
-      errorCode = null;
-      errorMsg = null;
-      expanded = new Set();
-      atBottom = true;
-      unseen = 0;
-      turnsWanted = undefined;
-      loadingOlder = false;
+      resetThread();
+      viewing = null;
+      newerAvailable = false;
+      switchNotice = null;
+      conversations = [];
       draft = composerDrafts.get(session.id) ?? '';
       draftFor = session.id;
       histIndex = null;
       sendError = null;
-      pending = null;
-      setProbe(null);
-      probeSeq++;
-      sentTurnSeq = null;
-      idleSeenSinceSend = false;
       void load();
+      void loadConversations();
     });
   });
+
+  // Follow /clear and /resume: the row's claude_session_id moves while the
+  // session id stays. The first id seen for a session (mount, session switch,
+  // or an id appearing where there was none) is not a switch.
+  const claudeId = $derived(session.claude_session_id);
+  let seenClaude: { sid: number; cid: string | null } | null = null;
+  $effect(() => {
+    const cid = claudeId;
+    const sid = sessionId;
+    untrack(() => {
+      const prev = seenClaude;
+      seenClaude = { sid, cid };
+      if (prev === null || prev.sid !== sid || prev.cid === cid || cid === null) return;
+      if (viewing !== null) {
+        newerAvailable = true;
+        return;
+      }
+      resetThread();
+      void load();
+      void loadConversations();
+      if (prev.cid !== null) switchNotice = { cid };
+    });
+  });
+
+  /** Header switcher / notice / banner: read an earlier conversation
+   *  (read-only) or go back to the current one (null). */
+  function select(id: string | null) {
+    if (id === viewing) return;
+    const leavingForNewer = id === null && newerAvailable;
+    viewing = id;
+    switchNotice = null;
+    resetView();
+    if (id === null) {
+      newerAvailable = false;
+      // A reading taken before we left is not the current state any more.
+      setProbe(null);
+      probeSeq++;
+    }
+    // The current conversation moved on while we were away: a prompt still
+    // shown pending belonged to the old one.
+    if (leavingForNewer) {
+      pending = null;
+      sentTurnSeq = null;
+      idleSeenSinceSend = false;
+    }
+    void load();
+  }
+
+  function viewPrevious() {
+    const prev = switcherEntries(conversations).find((c) => !c.current);
+    if (prev) select(prev.claude_session_id);
+  }
+
+  // Live pushes for this session: timeline events for the conversation on
+  // screen, and conversation-list changes.
+  $effect(() => {
+    const id = sessionId;
+    const offEvents = onTimelineEvent(id, (e) => {
+      if (e.claude_session_id === (viewing ?? session.claude_session_id)) pushed = [...pushed, e];
+    });
+    const offList = onConversationsChanged(id, () => void loadConversations());
+    return () => {
+      offEvents();
+      offList();
+    };
+  });
+
+  const events = $derived(mergeEvents(conv?.events ?? [], pushed));
+  const lastEvent = $derived(lastEventLabel(events, nowMs));
+  // The notice waits for a list that knows the new conversation: before
+  // that its source is unknown and "View previous" would pick from a stale
+  // list.
+  const noticeSource = $derived(
+    switchNotice === null
+      ? null
+      : (conversations.find((c) => c.claude_session_id === switchNotice!.cid)?.start_source ?? null),
+  );
 
   // Poll while shown, and refetch at once when it becomes shown again (not
   // up to a poll interval later). Depends only on `visible` so a `conv`
@@ -209,11 +345,15 @@
     }
     if (!wasVisible) {
       wasVisible = true;
-      void untrack(() => load({ poll: true }));
+      void untrack(() => {
+        if (viewing === null) void load({ poll: true });
+      });
     }
     const t = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       untrack(() => {
+        // An earlier conversation is finished: nothing to poll for.
+        if (viewing !== null) return;
         const quiet = isQuietStatus(liveStatus) && !pending && !optimistic;
         if (
           shouldFetchTranscript({
@@ -234,6 +374,7 @@
   $effect(() => {
     const turn = session.turn_seq;
     untrack(() => {
+      if (viewing !== null) return;
       if (visible && lastFetchTurnSeq !== null && turn !== lastFetchTurnSeq && session.claude_session_id) void load({ poll: true });
     });
   });
@@ -266,6 +407,10 @@
     }),
   );
 
+  const thread = $derived(
+    conv ? buildThread(conv.turns, events, { blocked: viewing === null && indicator?.kind === 'blocked' }, conv.truncated) : [],
+  );
+
   // One probe in flight at a time (a wedged host must not stack ssh
   // processes every 2 s), and a slow one never overwrites a newer result.
   let probing = false;
@@ -291,7 +436,7 @@
   // once, then on the interval. `probeLive` is a boolean derived, so a fresh
   // probe (which yields a new `indicator` object) never restarts the timer.
   // bg / external rows have no pane: the backend would reject every probe.
-  const probeLive = $derived(visible && !hasNoPane(session) && indicator !== null);
+  const probeLive = $derived(visible && !hasNoPane(session) && indicator !== null && viewing === null);
   $effect(() => {
     if (!probeLive) return;
     if (document.visibilityState === 'visible') void untrack(probeNow);
@@ -310,7 +455,11 @@
     return () => clearInterval(t);
   });
 
-  const empty = $derived(emptyStateText(errorCode, !!session.claude_session_id));
+  const empty = $derived(
+    viewing !== null && errorCode === 'E_NO_TRANSCRIPT'
+      ? 'Transcript no longer on host'
+      : emptyStateText(errorCode, !!session.claude_session_id),
+  );
   const canPrompt = $derived(!hasNoPane(session));
 
   // Keep the unsent text across tab switches (the panel unmounts).
@@ -325,10 +474,14 @@
     if (!visible || !canPrompt) return;
     void tick().then(() => box?.focus());
   });
-  const canSend = $derived(draft.trim().length > 0 && !sending);
-  const statusNote = $derived(composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }));
-  // Context-window meter beside the composer; at warn/crit the Compact chip
-  // is suggested, since that is the one-click remedy.
+  const canSend = $derived(draft.trim().length > 0 && !sending && viewing === null);
+  const statusNote = $derived(
+    viewing !== null
+      ? 'Viewing an earlier conversation — go back to current to send.'
+      : composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }),
+  );
+  // The context meter lives in the header; at warn/crit the Compact chip is
+  // suggested, since that is the one-click remedy.
   const ctxLevel = $derived(contextLevel(session.context_pct));
   const suggestCompact = $derived(ctxLevel === 'warn' || ctxLevel === 'crit');
   const isCompactPreset = (p: ComposerPreset) => /^\/compact\b/.test(p.text.trim());
@@ -400,7 +553,7 @@
   /** Send `text` as-is. Empty text is a bare Enter (the press_enter chip):
    *  it lands in the REPL but is not a prompt, so nothing is shown pending. */
   async function sendText(text: string, opts: { fromDraft?: boolean } = {}) {
-    if (sending) return;
+    if (sending || viewing !== null) return;
     sending = true;
     sendError = null;
     const id = session.id;
@@ -414,6 +567,7 @@
       return;
     }
     if (text === '') return;
+    switchNotice = null;
     // Only the box's own text is spent by a send; a chip sent with
     // Shift+click leaves whatever the user was typing.
     if (opts.fromDraft) draft = '';
@@ -532,6 +686,9 @@
     };
   }
 
+  const CMD_CLAMP_LINES = 8;
+  const isLongOutput = (out: string) => out.split('\n').length > CMD_CLAMP_LINES;
+
   function togglePrompt(key: string) {
     const next = new Set(expanded);
     if (next.has(key)) next.delete(key);
@@ -541,8 +698,20 @@
 </script>
 
 <div class="conversation-panel" data-testid="conversation-panel">
+  <ConversationHeader {session} {conversations} {viewing} {lastEvent} {newerAvailable} onSelect={select} />
+  {#if viewing !== null}
+    <div class="viewing" data-testid="conv-viewing-banner">
+      Viewing an earlier conversation · <button type="button" class="linkish" data-testid="conv-back-current" onclick={() => select(null)}>Back to current</button>
+    </div>
+  {:else if switchNotice && noticeSource}
+    <div class="switch-notice" data-testid="conv-switch-notice" role="status">
+      New conversation{#if noticeSource !== 'unknown'}{` (${SOURCE_LABELS[noticeSource]})`}{/if} ·
+      <button type="button" class="linkish" data-testid="conv-view-previous" onclick={viewPrevious}>View previous</button>
+      <button type="button" class="dismiss" aria-label="Dismiss" data-testid="conv-switch-dismiss" onclick={() => (switchNotice = null)}>×</button>
+    </div>
+  {/if}
   <div class="thread-area">
-  {#if empty && !pending}
+  {#if empty && !(pending && viewing === null)}
     <p class="muted" data-testid="conv-empty">{empty}</p>
   {:else if loading}
     <p class="muted">Loading…</p>
@@ -565,9 +734,16 @@
           </p>
         {/if}
         {#if conv}
-          {#each conv.turns as turn, i (i)}
+          {#each thread as row (row.kind === 'turn' ? `t${row.index}` : `e${row.event.id}`)}
+            {#if row.kind === 'event'}
+              <div class="event" data-testid="conv-event" data-tone={row.event.tone}>
+                <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time datetime={new Date(row.event.at * 1000).toISOString()}>{timeAgo(row.event.at, nowMs)}</time>
+              </div>
+            {:else}
+            {@const turn = row.turn}
+            {@const i = row.index}
             {@const isLast = i === conv.turns.length - 1}
-            {@const running = isLast && indicator?.kind === 'working'}
+            {@const running = isLast && viewing === null && indicator?.kind === 'working'}
             {@const groups = groupItems(turn.items)}
             {@const duration = running ? null : turnDuration(turn.at, turn.ended_at)}
             <section class="turn">
@@ -594,15 +770,36 @@
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text"><Markdown source={g.text} /></div>
-                  {:else if g.tools.length === 1}
+                  {:else if g.kind === 'tools' && g.tools.length === 1}
                     <div class="tool" class:err={g.tools[0].error} data-testid="conv-tool" data-error={g.tools[0].error || undefined} title={g.tools[0].error ? `Failed: ${g.tools[0].summary}` : g.tools[0].summary}>{g.tools[0].summary}</div>
-                  {:else}
+                  {:else if g.kind === 'tools'}
                     <details class="tools" class:has-err={g.tools.some((t) => t.error)} use:autoOpen={running && j === groups.length - 1} data-testid="conv-tools">
                       <summary>{toolGroupLabel(g.tools)}</summary>
                       {#each g.tools as line, k (k)}
                         <div class="tool" class:err={line.error} data-testid="conv-tool" data-error={line.error || undefined} title={line.error ? `Failed: ${line.summary}` : line.summary}>{line.summary}</div>
                       {/each}
                     </details>
+                  {:else if g.kind === 'compact'}
+                    <details class="compact" data-testid="conv-compact">
+                      <summary>Compacted ({g.trigger ?? 'unknown'}){#if g.pre_tokens}{` · was ${formatTokens(g.pre_tokens)} tokens`}{/if}</summary>
+                      {#if g.summary}<Markdown source={g.summary} />{:else}<p class="muted">Summary not in the loaded tail.</p>{/if}
+                    </details>
+                  {:else if g.kind === 'command'}
+                    {@const cmdKey = `cmd:${turnKey(turn, i)}:${j}`}
+                    {@const longOut = g.output !== null && isLongOutput(g.output)}
+                    <div class="command" data-testid="conv-command">
+                      <code>{g.name}{g.args ? ` ${g.args}` : ''}</code>
+                      {#if g.output}
+                        <pre class="command-out" class:clamped={longOut && !expanded.has(cmdKey)}>{g.output}</pre>
+                        {#if longOut}
+                          <button type="button" class="linkish" data-testid="conv-command-toggle" onclick={() => togglePrompt(cmdKey)}
+                            >{expanded.has(cmdKey) ? 'Show less' : 'Show more'}</button
+                          >
+                        {/if}
+                      {/if}
+                    </div>
+                  {:else if g.kind === 'interrupt'}
+                    <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
                   {/if}
                 {/each}
                 {#if duration}
@@ -610,9 +807,10 @@
                 {/if}
               </div>
             </section>
+            {/if}
           {/each}
         {/if}
-        {#if pending}
+        {#if pending && viewing === null}
           <section class="turn pending" data-testid="conv-pending">
             <div class="prompt">
               <div class="prompt-head">
@@ -623,6 +821,7 @@
             </div>
           </section>
         {/if}
+        {#if viewing === null}
         {#if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">
             <div class="blocked-text">
@@ -638,6 +837,7 @@
             <span class="pulse" aria-hidden="true"><i></i><i></i><i></i></span>
             <span class="indicator-label">{indicator.kind === 'sent' ? 'Sent, waiting for Claude…' : indicator.label}</span>
           </div>
+        {/if}
         {/if}
       </div>
     </div>
@@ -683,7 +883,7 @@
             class="chip stuck"
             data-testid="conv-chip-enter"
             title="The session is waiting on a key press. Sends a bare Enter."
-            disabled={sending}
+            disabled={sending || viewing !== null}
             onclick={() => void sendText('')}>⏎ Press Enter</button
           >
         {/if}
@@ -699,7 +899,7 @@
               title={suggested
                 ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.\n\nClick fills the box; Shift+click sends now.`
                 : `${p.text}\n\nClick fills the box; Shift+click sends now.`}
-              disabled={sending}
+              disabled={sending || viewing !== null}
               onclick={(e) => usePreset(p, e.shiftKey)}>{p.label}</button
             >
           {/if}
@@ -714,30 +914,13 @@
           onkeydown={onComposerKey}
           rows="2"
           placeholder="Send a prompt to this session (Enter to send, Shift+Enter for a new line, ↑ recalls earlier prompts)"
-          disabled={sending}
+          disabled={sending || viewing !== null}
         ></textarea>
         <button type="submit" data-testid="conv-composer-send" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>
       </div>
-      {#if statusNote || ctxLevel !== null}
+      {#if statusNote}
         <div class="composer-foot">
-          {#if statusNote}
-            <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
-          {/if}
-          {#if ctxLevel !== null && session.context_pct !== null}
-            <span
-              class="ctx"
-              data-testid="conv-ctx"
-              data-level={ctxLevel}
-              role="meter"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              aria-valuenow={Math.round(session.context_pct)}
-              aria-label="context usage"
-              title="Context window {Math.round(session.context_pct)}% used"
-              style="color: {contextColor(ctxLevel)}; border-color: {contextTint(ctxLevel)};"
-              ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, session.context_pct))}%; background: {contextColor(ctxLevel)};"></span><span class="ctx-pct">ctx {Math.round(session.context_pct)}%</span></span
-            >
-          {/if}
+          <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
         </div>
       {/if}
     </form>
@@ -909,29 +1092,6 @@
     margin: 0;
     color: var(--fg-muted);
     font-size: 0.75rem;
-  }
-  .ctx {
-    position: relative;
-    display: inline-block;
-    flex: 0 0 auto;
-    margin-left: auto;
-    padding: 0.1rem 0.45rem;
-    border: 1px solid;
-    border-radius: 999px;
-    overflow: hidden;
-    font-size: 0.68rem;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-  .ctx-bar {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    opacity: 0.25;
-  }
-  .ctx-pct {
-    position: relative;
   }
   .chip.suggest {
     border-color: var(--usage-warn, #e6a23c);
@@ -1166,6 +1326,99 @@
   }
   .tools .tool {
     margin-left: 1.1rem;
+  }
+  .viewing,
+  .switch-notice {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 0.35rem;
+    padding: 0.3rem 1.1rem;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-pane));
+    color: var(--fg-muted);
+    font-size: 0.78rem;
+  }
+  .viewing .linkish,
+  .switch-notice .linkish {
+    margin-top: 0;
+  }
+  .dismiss {
+    margin-left: 0.4rem;
+    padding: 0 0.3rem;
+    border: none;
+    background: none;
+    color: var(--fg-muted);
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .dismiss:hover {
+    color: var(--fg);
+  }
+  .event {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin: 0.2rem 0 0.9rem;
+    color: var(--fg-muted);
+    font-size: 0.74rem;
+    text-align: center;
+  }
+  .event .detail {
+    overflow-wrap: anywhere;
+  }
+  .event[data-tone='warn'] {
+    color: #e6a23c;
+  }
+  .event[data-tone='error'] {
+    color: #e64a4a;
+  }
+  .compact {
+    margin: 0.4rem 0 0.6rem;
+    padding: 0.3rem 0.6rem;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+  }
+  .compact summary {
+    cursor: pointer;
+    color: var(--fg-muted);
+    font-size: 0.76rem;
+    user-select: none;
+  }
+  .command {
+    margin: 0.35rem 0 0.5rem;
+  }
+  .command code {
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 0.76rem;
+    color: var(--accent);
+  }
+  .command-out {
+    margin: 0.25rem 0 0;
+    padding: 0.35rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-pane);
+    color: var(--fg-muted);
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 0.72rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .command-out.clamped {
+    max-height: calc(8 * 1.45em + 0.7rem);
+    overflow: hidden;
+  }
+  .interrupt {
+    margin: 0.3rem 0 0.5rem;
+    color: #e6a23c;
+    font-size: 0.76rem;
+    font-style: italic;
   }
   .latest {
     position: absolute;

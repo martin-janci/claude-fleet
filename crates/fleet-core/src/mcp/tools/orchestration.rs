@@ -77,9 +77,15 @@ impl FleetTools {
     #[tool(
         description = "Read a session's recent conversation as structured turns: \
         each turn carries the human prompt, its timestamp, the turn's end \
-        timestamp, and items that are either assistant text or a one-line tool \
-        summary (flagged when that tool call failed). turns defaults to 10 and \
-        is capped at 100; the character budget scales with it. Prefer this over \
+        timestamp, and items tagged by kind: text (assistant text), tool (a \
+        one-line tool summary, flagged when that call failed), compact (a \
+        context compaction with its trigger, pre-compaction tokens and \
+        summary), command (a slash command with its args and output) or \
+        interrupt (the user interrupted the turn). The response also carries \
+        events (this conversation's timeline events, oldest first, at most the \
+        newest 50) and context (the conversation's context-window usage, or \
+        null). turns defaults to 10 and is capped at 100; the character budget \
+        scales with it. Prefer this over \
         session_transcript when you want the shape of the exchange rather than \
         one flat blob. Pass claude_session_id (from session_conversations) to \
         read an earlier conversation of the session instead of the current one. \
@@ -95,8 +101,8 @@ impl FleetTools {
         audit(
             "session_conversation",
             &format!(
-                "session_id={} turns={:?} claude_session_id={:?}",
-                p.session_id, p.turns, p.claude_session_id
+                "session_id={} turns={:?} claude_session_id={:?} events_limit={:?}",
+                p.session_id, p.turns, p.claude_session_id, p.events_limit
             ),
         );
         let row =
@@ -109,6 +115,7 @@ impl FleetTools {
             p.claude_session_id.as_deref(),
             turns,
             max_chars,
+            transcript::conv_events_limit(p.events_limit),
         )
         .await
         .map_err(to_mcp_err)?;

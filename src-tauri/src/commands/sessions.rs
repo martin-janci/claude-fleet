@@ -629,6 +629,7 @@ pub(crate) mod routed {
                     args.session_id,
                     args.turns,
                     args.claude_session_id.as_deref(),
+                    transcript::CONV_EVENTS_LIMIT_UI,
                 )
                 .await;
         }
@@ -651,6 +652,7 @@ pub(crate) mod routed {
             args.claude_session_id.as_deref(),
             turns,
             max_chars,
+            transcript::CONV_EVENTS_LIMIT_UI,
         )
         .await
     }

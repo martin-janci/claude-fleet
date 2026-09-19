@@ -30,8 +30,20 @@ import {
   QUIET_POLL_MS,
   PROMPT_CLAMP_LINES,
   PIN_THRESHOLD_PX,
+  formatTokens,
+  contextMeter,
+  switcherEntries,
+  conversationTitle,
+  statusChip,
+  inlineEventFor,
+  buildThread,
+  lastEventLabel,
+  mergeEvents,
   type Conversation,
+  type ConversationSummary,
+  type ConvTurn,
 } from './conversation';
+import type { SessionRow } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -41,6 +53,7 @@ function conv(over: Partial<Conversation> = {}): Conversation {
   return {
     truncated: false,
     context: null,
+    events: [],
     turns: [
       {
         prompt: 'fix the bug',
@@ -173,6 +186,15 @@ describe('groupItems', () => {
       { kind: 'text', text: 'z' },
     ]);
     expect(groupItems([])).toEqual([]);
+  });
+
+  it('new item kinds are their own groups and break a tool run', () => {
+    const g = groupItems([
+      { kind: 'tool', summary: 'Bash(ls)' },
+      { kind: 'interrupt', during_tool: true },
+      { kind: 'tool', summary: 'Read(x)' },
+    ]);
+    expect(g.map((x) => x.kind)).toEqual(['tools', 'interrupt', 'tools']);
   });
 });
 
@@ -346,5 +368,116 @@ describe('promptHistory', () => {
     expect(promptHistory(c, null)).toEqual(['first', 'again']);
     expect(promptHistory(c, { prompt: 'newest', at: '', seen: 0 })).toEqual(['first', 'again', 'newest']);
     expect(promptHistory(null, null)).toEqual([]);
+  });
+});
+
+describe('formatTokens', () => {
+  it('formats', () => {
+    expect(formatTokens(950)).toBe('950');
+    expect(formatTokens(42_300)).toBe('42k');
+    expect(formatTokens(200_000)).toBe('200k');
+    expect(formatTokens(1_000_000)).toBe('1M');
+    expect(formatTokens(1_250_000)).toBe('1.25M');
+  });
+});
+
+describe('contextMeter', () => {
+  const s = (o: Partial<SessionRow>) =>
+    ({ context_pct: null, context_tokens: null, context_window: null, context_stale: false, ...o }) as SessionRow;
+  it('shows tokens and window when known', () => {
+    expect(contextMeter(s({ context_pct: 21, context_tokens: 42_000, context_window: 200_000 }))?.label)
+      .toBe('42k / 200k · 21%');
+  });
+  it('falls back to the percentage', () => {
+    expect(contextMeter(s({ context_pct: 55 }))?.label).toBe('ctx 55%');
+  });
+  it('is 0 after a clear, not null', () => {
+    expect(contextMeter(s({ context_pct: 0, context_tokens: 0, context_window: 200_000 }))?.label)
+      .toBe('0 / 200k · 0%');
+  });
+  it('marks a stale value', () => {
+    const m = contextMeter(s({ context_pct: 80, context_stale: true }))!;
+    expect(m.stale).toBe(true);
+    expect(m.title).toMatch(/before the last compaction/);
+  });
+  it('is null when nothing is known', () => {
+    expect(contextMeter(s({}))).toBeNull();
+  });
+});
+
+describe('switcherEntries / conversationTitle', () => {
+  const c = (o: Partial<ConversationSummary>): ConversationSummary => ({
+    id: 1, session_id: 1, claude_session_id: 'a', transcript_path: null, started_at: 1_789_000_000,
+    ended_at: null, start_source: 'clear', end_reason: null, model: null, first_prompt: null,
+    turns: 0, compactions: 0, current: false, ...o,
+  });
+  it('hides empty earlier conversations but keeps the current one', () => {
+    const list = [c({ id: 3, current: true }), c({ id: 2 }), c({ id: 1, turns: 4 })];
+    expect(switcherEntries(list).map((x) => x.id)).toEqual([3, 1]);
+  });
+  it('titles', () => {
+    expect(conversationTitle(c({ current: true, turns: 1 }))).toBe('Current · /clear · 1 turn');
+  });
+});
+
+describe('inlineEventFor', () => {
+  const e = (kind: string, detail: string | null, id = 1) =>
+    ({ id, session_id: 1, at: 100, kind, detail, claude_session_id: 'a' });
+  it('maps failures, permissions, resume and end; hides the rest', () => {
+    expect(inlineEventFor(e('stop_failure', 'rate_limit: slow down'), { latestId: 1, blocked: false }))
+      .toMatchObject({ label: 'Turn failed: rate limit', detail: 'slow down', tone: 'error' });
+    expect(inlineEventFor(e('notification', 'permission_prompt'), { latestId: 1, blocked: true }))
+      .toMatchObject({ label: 'Waiting for permission', tone: 'warn' });
+    expect(inlineEventFor(e('notification', 'permission_prompt'), { latestId: 2, blocked: true }))
+      .toMatchObject({ label: 'Asked for permission', tone: 'info' });
+    expect(inlineEventFor(e('conversation_started', 'resume'), { latestId: 1, blocked: false })?.label)
+      .toBe('Resumed conversation');
+    expect(inlineEventFor(e('conversation_started', 'clear'), { latestId: 1, blocked: false })).toBeNull();
+    expect(inlineEventFor(e('turn_done', 'x'), { latestId: 1, blocked: false })).toBeNull();
+    expect(inlineEventFor(e('compact_done', 'auto'), { latestId: 1, blocked: false })).toBeNull();
+  });
+});
+
+describe('buildThread', () => {
+  const turn = (at: string, prompt: string): ConvTurn => ({ prompt, at, ended_at: null, items: [] });
+  const ev = (id: number, at: number) =>
+    ({ id, session_id: 1, at, kind: 'stop_failure', detail: 'overloaded', claude_session_id: 'a' });
+  const t0 = Date.parse('2026-09-18T10:00:00Z') / 1000;
+  it('places events after the turn they follow', () => {
+    const rows = buildThread(
+      [turn('2026-09-18T10:00:00Z', 'a'), turn('2026-09-18T10:05:00Z', 'b')],
+      [ev(1, t0 + 60), ev(2, t0 + 400)],
+      { blocked: false },
+      false,
+    );
+    expect(rows.map((r) => (r.kind === 'turn' ? r.turn.prompt : `e${r.event.id}`))).toEqual(['a', 'e1', 'b', 'e2']);
+  });
+  it('drops events older than the first loaded turn when truncated', () => {
+    const rows = buildThread([turn('2026-09-18T10:00:00Z', 'a')], [ev(1, t0 - 60)], { blocked: false }, true);
+    expect(rows).toHaveLength(1);
+  });
+  it('keeps them first when not truncated', () => {
+    const rows = buildThread([turn('2026-09-18T10:00:00Z', 'a')], [ev(1, t0 - 60)], { blocked: false }, false);
+    expect(rows[0].kind).toBe('event');
+  });
+});
+
+describe('lastEventLabel / mergeEvents / statusChip', () => {
+  it('labels the newest notable event', () => {
+    const now = 1_000_000 * 1000;
+    const evs = [
+      { id: 1, session_id: 1, at: 999_700, kind: 'compact_done', detail: 'auto', claude_session_id: 'a' },
+      { id: 2, session_id: 1, at: 999_900, kind: 'turn_done', detail: null, claude_session_id: 'a' },
+    ];
+    expect(lastEventLabel(evs, now)).toMatch(/^\/compact /);
+  });
+  it('merges by id, oldest first', () => {
+    const a = { id: 2, session_id: 1, at: 5, kind: 'x', detail: null, claude_session_id: 'a' };
+    const b = { id: 1, session_id: 1, at: 4, kind: 'y', detail: null, claude_session_id: 'a' };
+    expect(mergeEvents([a], [b, a]).map((e) => e.id)).toEqual([1, 2]);
+  });
+  it('status chip prefers compacting', () => {
+    expect(statusChip({ claude_status: 'working', current_activity: 'compacting' })).toBe('compacting');
+    expect(statusChip({ claude_status: 'idle', current_activity: null })).toBe('idle');
   });
 });

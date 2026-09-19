@@ -1,9 +1,15 @@
 import { timeAgo } from './session_status';
 import { invokeCmd, type Result } from './result';
-import type { ClaudeStatus, StuckKind } from './sessions';
-import { stuckKindLabel } from './attention';
+import type { ClaudeStatus, StuckKind, SessionRow } from './sessions';
+import { stuckKindLabel, contextLevel, type ContextLevel } from './attention';
+import type { SessionEvent } from './timeline';
 
-export type ConvItem = { kind: 'text'; text: string } | { kind: 'tool'; summary: string; error?: boolean };
+export type ConvItem =
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; summary: string; error?: boolean }
+  | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
+  | { kind: 'command'; name: string; args: string | null; output: string | null }
+  | { kind: 'interrupt'; during_tool: boolean };
 
 export interface ConvTurn {
   prompt: string | null;
@@ -25,6 +31,8 @@ export interface Conversation {
   turns: ConvTurn[];
   truncated: boolean;
   context: ContextView | null;
+  /** This conversation's timeline events, oldest first. */
+  events: SessionEvent[];
 }
 
 /** Poll cadence for the Conversation tab while it is visible (spec §6). */
@@ -109,10 +117,18 @@ export interface ToolLine {
   error: boolean;
 }
 
-/** A reply item after folding: prose, or a run of consecutive tool calls. */
-export type ConvGroup = { kind: 'text'; text: string } | { kind: 'tools'; tools: ToolLine[] };
+/** A reply item after folding: prose, a run of consecutive tool calls, or one
+ *  of the standalone event kinds (each of which also breaks a tool run). */
+export type ConvGroup =
+  | { kind: 'text'; text: string }
+  | { kind: 'tools'; tools: ToolLine[] }
+  | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
+  | { kind: 'command'; name: string; args: string | null; output: string | null }
+  | { kind: 'interrupt'; during_tool: boolean };
 
-/** Fold consecutive tool one-liners into one group; text items stay apart. */
+/** Fold consecutive tool one-liners into one group; text items stay apart;
+ *  compact/command/interrupt items are each their own group and close any
+ *  open tool run. */
 export function groupItems(items: ConvItem[]): ConvGroup[] {
   const out: ConvGroup[] = [];
   for (const item of items) {
@@ -120,10 +136,14 @@ export function groupItems(items: ConvItem[]): ConvGroup[] {
       out.push({ kind: 'text', text: item.text });
       continue;
     }
-    const line: ToolLine = { summary: item.summary, error: item.error === true };
-    const last = out[out.length - 1];
-    if (last?.kind === 'tools') last.tools.push(line);
-    else out.push({ kind: 'tools', tools: [line] });
+    if (item.kind === 'tool') {
+      const line: ToolLine = { summary: item.summary, error: item.error === true };
+      const last = out[out.length - 1];
+      if (last?.kind === 'tools') last.tools.push(line);
+      else out.push({ kind: 'tools', tools: [line] });
+      continue;
+    }
+    out.push(item);
   }
   return out;
 }
@@ -359,4 +379,194 @@ export function promptHistory(conv: Conversation | null, pending: PendingPrompt 
   for (const t of conv?.turns ?? []) push(t.prompt);
   push(pending?.prompt ?? null);
   return out;
+}
+
+// ─── Header / thread helpers (Task 2) ───────────────────────────────────────
+
+export function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  const m = n / 1_000_000;
+  return `${Number.isInteger(m) ? m : m.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}M`;
+}
+
+export interface ContextMeter {
+  pct: number;
+  level: ContextLevel;
+  label: string;
+  title: string;
+  stale: boolean;
+}
+
+export function contextMeter(
+  s: Pick<SessionRow, 'context_pct' | 'context_tokens' | 'context_window' | 'context_stale'>,
+): ContextMeter | null {
+  const pct =
+    s.context_pct ??
+    (s.context_tokens != null && s.context_window ? (s.context_tokens * 100) / s.context_window : null);
+  const level = contextLevel(pct);
+  if (pct === null || level === null) return null;
+  const rounded = Math.round(pct);
+  const label =
+    s.context_tokens != null && s.context_window
+      ? `${formatTokens(s.context_tokens)} / ${formatTokens(s.context_window)} · ${rounded}%`
+      : `ctx ${rounded}%`;
+  const title = s.context_stale
+    ? 'Context size from before the last compaction or resume — it updates with the next reply'
+    : `Context window ${rounded}% used`;
+  return { pct, level, label, title, stale: !!s.context_stale };
+}
+
+export const SOURCE_LABELS: Record<ConversationSummary['start_source'], string> = {
+  startup: 'started',
+  resume: '/resume',
+  clear: '/clear',
+  compact: '/compact',
+  fork: 'fork',
+  fleet: 'started by fleet',
+  unknown: 'new conversation',
+};
+
+/** Switcher rows: drop empty non-current conversations (a `/clear` right
+ *  after a `/clear`), keep order (newest first). */
+export function switcherEntries(list: ConversationSummary[]): ConversationSummary[] {
+  return list.filter((c) => c.current || c.turns > 0 || c.first_prompt !== null);
+}
+
+function clock(unixSecs: number): string {
+  const d = new Date(unixSecs * 1000);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+export function conversationTitle(c: ConversationSummary): string {
+  const when = c.current ? 'Current' : clock(c.started_at);
+  const turns = `${c.turns} turn${c.turns === 1 ? '' : 's'}`;
+  return `${when} · ${SOURCE_LABELS[c.start_source]} · ${turns}`;
+}
+
+export function statusChip(s: Pick<SessionRow, 'claude_status' | 'current_activity'>): string | null {
+  if (s.current_activity === 'compacting') return 'compacting';
+  return s.claude_status ?? null;
+}
+
+export interface InlineEvent {
+  id: number;
+  at: number;
+  label: string;
+  detail: string | null;
+  tone: 'info' | 'warn' | 'error';
+}
+
+const PERMISSION_KINDS = new Set(['permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog']);
+
+function humanError(detail: string | null): { head: string; rest: string | null } {
+  if (!detail) return { head: 'unknown error', rest: null };
+  const i = detail.indexOf(':');
+  const head = (i < 0 ? detail : detail.slice(0, i)).replace(/_/g, ' ').trim();
+  const rest = i < 0 ? null : detail.slice(i + 1).trim() || null;
+  return { head, rest };
+}
+
+/** The inline row for a timeline event, or null for events the thread does
+ *  not show (turn_done, status changes, prompts and compactions — the
+ *  transcript already carries those). */
+export function inlineEventFor(
+  e: SessionEvent,
+  live: { latestId: number | null; blocked: boolean },
+): InlineEvent | null {
+  switch (e.kind) {
+    case 'conversation_started':
+      return e.detail === 'resume'
+        ? { id: e.id, at: e.at, label: 'Resumed conversation', detail: null, tone: 'info' }
+        : null;
+    case 'stop_failure': {
+      const { head, rest } = humanError(e.detail);
+      return { id: e.id, at: e.at, label: `Turn failed: ${head}`, detail: rest, tone: 'error' };
+    }
+    case 'notification': {
+      if (!e.detail || !PERMISSION_KINDS.has(e.detail)) return null;
+      const waiting = live.blocked && live.latestId === e.id;
+      return {
+        id: e.id,
+        at: e.at,
+        label: waiting ? 'Waiting for permission' : 'Asked for permission',
+        detail: null,
+        tone: waiting ? 'warn' : 'info',
+      };
+    }
+    case 'conversation_ended':
+      return { id: e.id, at: e.at, label: `Conversation ended (${e.detail ?? 'unknown'})`, detail: null, tone: 'info' };
+    default:
+      return null;
+  }
+}
+
+export type ThreadRow =
+  | { kind: 'turn'; turn: ConvTurn; index: number }
+  | { kind: 'event'; event: InlineEvent };
+
+/** Interleave turns (ISO `at`) and inline events (unix secs) by time. An
+ *  event goes after the last turn that started at or before it. When the
+ *  tail is truncated, events older than the first loaded turn are dropped
+ *  (their turns are not on screen). */
+export function buildThread(
+  turns: ConvTurn[],
+  events: SessionEvent[],
+  live: { blocked: boolean },
+  truncated: boolean,
+): ThreadRow[] {
+  const latestId = events.length ? events[events.length - 1].id : null;
+  const inline = events
+    .map((e) => inlineEventFor(e, { latestId, blocked: live.blocked }))
+    .filter((e): e is InlineEvent => e !== null)
+    .sort((a, b) => a.at - b.at || a.id - b.id);
+  const starts: number[] = [];
+  let prev = -Infinity;
+  for (const t of turns) {
+    const ms = t.at ? Date.parse(t.at) : NaN;
+    prev = Number.isNaN(ms) ? prev : ms / 1000;
+    starts.push(prev);
+  }
+  const rows: ThreadRow[] = [];
+  let k = 0;
+  const firstStart = starts.length ? starts[0] : Infinity;
+  while (k < inline.length && inline[k].at < firstStart) {
+    if (!truncated) rows.push({ kind: 'event', event: inline[k] });
+    k++;
+  }
+  turns.forEach((turn, i) => {
+    rows.push({ kind: 'turn', turn, index: i });
+    const next = i + 1 < starts.length ? starts[i + 1] : Infinity;
+    while (k < inline.length && inline[k].at < next) {
+      rows.push({ kind: 'event', event: inline[k] });
+      k++;
+    }
+  });
+  return rows;
+}
+
+const LAST_EVENT_KINDS: Record<string, (d: string | null) => string | null> = {
+  compact_done: () => '/compact',
+  compact_started: () => 'compacting',
+  stop_failure: (d) => humanError(d).head,
+  notification: (d) => (d && PERMISSION_KINDS.has(d) ? 'permission asked' : null),
+  conversation_started: (d) => (d === 'resume' ? '/resume' : d === 'clear' ? '/clear' : null),
+};
+
+/** "`/compact` 3m ago" for the newest notable event, else null. */
+export function lastEventLabel(events: SessionEvent[], nowMs: number): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const f = LAST_EVENT_KINDS[events[i].kind];
+    const label = f ? f(events[i].detail) : null;
+    if (label) return `${label} ${timeAgo(events[i].at, nowMs)}`;
+  }
+  return null;
+}
+
+/** Union by id, oldest first (the panel appends pushed events to the ones
+ *  the fetch returned). */
+export function mergeEvents(base: SessionEvent[], extra: SessionEvent[]): SessionEvent[] {
+  const byId = new Map<number, SessionEvent>();
+  for (const e of [...base, ...extra]) byId.set(e.id, e);
+  return [...byId.values()].sort((a, b) => a.at - b.at || a.id - b.id);
 }

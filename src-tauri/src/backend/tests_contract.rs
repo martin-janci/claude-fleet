@@ -237,6 +237,7 @@ fn sample_conversation() -> Conversation {
             pct: 60.0,
             stale: false,
         }),
+        events: vec![sample_event()],
     }
 }
 
@@ -305,6 +306,26 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             summary: "s".into(),
             error: false,
         }),
+    );
+    put(
+        "ConvItem::Compact",
+        wire_keys(&ConvItem::Compact {
+            trigger: Some("auto".into()),
+            pre_tokens: Some(150_000),
+            summary: Some("s".into()),
+        }),
+    );
+    put(
+        "ConvItem::Command",
+        wire_keys(&ConvItem::Command {
+            name: "/model".into(),
+            args: Some("opus".into()),
+            output: Some("o".into()),
+        }),
+    );
+    put(
+        "ConvItem::Interrupt",
+        wire_keys(&ConvItem::Interrupt { during_tool: true }),
     );
     // The eight repo-browsing reads.
     put("ChangedFile", wire_keys(&sample_changed_file()));

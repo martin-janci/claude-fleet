@@ -19,6 +19,7 @@
   import { footerUsage } from './lib/usage_glance';
   import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
+  import { dispatchTimelineEvents, dispatchConversationsChanged } from './lib/live_events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
   import NewSessionDialog from './lib/NewSessionDialog.svelte';
@@ -195,6 +196,8 @@
       onProjectEvents: applyProjectEvents,
       onTaskEvents: applyTaskEvents,
       onAccountUsageEvents: applyAccountUsageEvents,
+      onTimelineEvents: dispatchTimelineEvents,
+      onConversationsChanged: dispatchConversationsChanged,
       onAssetInventoryUpdated: mergeInventoryRow,
       onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
       onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },

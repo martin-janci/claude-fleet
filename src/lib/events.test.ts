@@ -13,7 +13,7 @@ vi.mock('@tauri-apps/api/event', () => {
   };
 });
 
-import { emit } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 import { get } from 'svelte/store';
 import { subscribeToRowEvents, ROW_EVENT_FLUSH_MS } from './events';
 import {
@@ -138,6 +138,43 @@ describe('subscribeToRowEvents', () => {
       ['acct-1', 'never_fetched'],
       ['acct-1', 'ok'],
     ]);
+  });
+
+  it('delivers session:event to onTimelineEvents as one batch, in order', async () => {
+    const seen: number[] = [];
+    await subscribeToRowEvents({
+      onTimelineEvents: (events) => {
+        for (const ev of events) seen.push(ev.id);
+      },
+    });
+    const tev = (id: number) => ({ id, session_id: 1, at: id, kind: 'stop_failure', detail: null, claude_session_id: 'a' });
+    fire('session:event', tev(1));
+    fire('session:event', tev(2));
+    fire('session:event', tev(3));
+    await flush();
+    expect(seen).toEqual([1, 2, 3]);
+  });
+
+  it('delivers session:conversations to onConversationsChanged as one batch, in order', async () => {
+    const seen: number[] = [];
+    await subscribeToRowEvents({
+      onConversationsChanged: (ids) => seen.push(...ids),
+    });
+    fire('session:conversations', { session_id: 7 });
+    fire('session:conversations', { session_id: 8 });
+    fire('session:conversations', { session_id: 7 });
+    await flush();
+    expect(seen).toEqual([7, 8, 7]);
+  });
+
+  it('does not subscribe to session:event / session:conversations when their handlers are absent', async () => {
+    vi.mocked(listen).mockClear();
+    await subscribeToRowEvents({
+      onSessionCreated: () => {},
+    });
+    const subscribedNames = vi.mocked(listen).mock.calls.map((c) => c[0]);
+    expect(subscribedNames).not.toContain('session:event');
+    expect(subscribedNames).not.toContain('session:conversations');
   });
 
   it('returns unsubscribe that detaches all listeners', async () => {
