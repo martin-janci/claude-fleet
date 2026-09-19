@@ -136,10 +136,22 @@ PUB=fleet.example.com
 PROJ_BASE="$ROOT/projects-base"
 FIXTURE="$PROJ_BASE/e2e/hub-e2e-fixture"
 mkdir -p "$FIXTURE"
-git init -q -b main "$FIXTURE"
-git -C "$FIXTURE" -c user.name="hub-e2e" -c user.email="hub-e2e@example.invalid" \
+# -c commit.gpgsign=false: without it, a developer machine with a global
+# commit.gpgsign=true can stall this unattended commit on a pinentry prompt
+# instead of failing fast -- the same hazard add_project.rs calls out at
+# ~827/~4301 for its own commits ("a prior commit failed, e.g.
+# commit.gpgsign with no TTY"). No tag.gpgsign: this fixture never tags.
+# GIT_CONFIG_GLOBAL/SYSTEM=/dev/null on all three calls is a second, broader
+# guard: it blanks any OTHER inherited global/system git config too (hooks,
+# templates, url.insteadOf rewrites), not just gpgsign -- git >=2.32 (2021),
+# checked locally on 2.53 and safe on the ubuntu-24.04 runner's default git
+# (2.43); `-b main` on `git init` (>=2.28) is unaffected by blanking those
+# files since it never depends on init.defaultBranch to begin with.
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git init -q -b main "$FIXTURE"
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$FIXTURE" \
+  -c user.name="hub-e2e" -c user.email="hub-e2e@example.invalid" -c commit.gpgsign=false \
   commit -q --allow-empty -m "hub-e2e fixture"
-git -C "$FIXTURE" remote add origin https://example.invalid/e2e/hub-e2e-fixture.git
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$FIXTURE" remote add origin https://example.invalid/e2e/hub-e2e-fixture.git
 
 echo "== Hub A (local host on)"
 TOKA=$("$BIN" init --data-dir "$ROOT/a" --public-url "https://$PUB" --port "$PA" --local-host true 2>&1 | grep -E '^[0-9a-f]{64}$')
@@ -197,9 +209,14 @@ if [ -n "$PID_" ]; then
 else
   # A root failure (the fixture project itself was never discovered) must not
   # print six misleading "project 0 not found" cascades: one clear reason
-  # above, and every check that needs a real session id explicitly skipped.
+  # above, and every check that needs a real session id explicitly skipped,
+  # by the same three names a successful run would have used (never
+  # "session id parsed from new_shell_session" here -- that name belongs to
+  # the nested SID branch above, a different failure that this path never
+  # reaches), so the tally still adds up to the documented 90 checks.
   bad "new_shell_session on local creates a tmux session" "skipped: no fixture project id (see 'list_projects finds the fixture repository' above)"
-  bad "session id parsed from new_shell_session" "skipped: no fixture project id"
+  bad "capture_session sees the marker" "skipped: no fixture project id"
+  bad "kill_session removes the tmux session" "skipped: no fixture project id"
 fi
 check "hook with master token, unknown session -> 204" '[ "$(code -X POST "http://127.0.0.1:$PA/hook" -H "Host: $PUB" -H "Authorization: Bearer $TOKA" -H "Content-Type: application/json" -d "{\"hook_event_name\":\"Stop\",\"session_id\":\"00000000-0000-0000-0000-000000000000\"}")" = 204 ]' ""
 check "legacy ?token= on a public hub -> 401" '[ "$(code -X POST "http://127.0.0.1:$PA/hook?token=$TOKA" -H "Host: $PUB" -H "Content-Type: application/json" -d "{}")" = 401 ]' ""
