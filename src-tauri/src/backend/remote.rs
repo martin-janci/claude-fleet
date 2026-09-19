@@ -53,7 +53,32 @@ pub struct HubResponse {
 pub trait HubTransport: Send + Sync {
     async fn post_json(&self, url: &str, bearer: &str, body: String)
         -> Result<HubResponse, String>;
+
+    /// [`Self::post_json`] with a caller-chosen deadline for the whole
+    /// exchange instead of the transport's default — for the few tools whose
+    /// hub-side work legitimately outlasts it (see [`LONG_CALL_TIMEOUT`]). A
+    /// transport without a deadline of its own ignores it.
+    async fn post_json_within(
+        &self,
+        url: &str,
+        bearer: &str,
+        body: String,
+        timeout: std::time::Duration,
+    ) -> Result<HubResponse, String> {
+        let _ = timeout;
+        self.post_json(url, bearer, body).await
+    }
 }
+
+/// Deadline for a hub call that runs a multi-session batch on the hub:
+/// `restore_host_sessions` (at `restore.batch_size` 4 and `restore.stagger_ms`
+/// 3000, eight sessions already pass [`CALL_TIMEOUT`]) and
+/// `discover_lost_sessions` (a 60 s transcript scan). A desktop that gave up
+/// at 30 s showed an error while the hub kept restoring, inviting a retry
+/// that raced the first. The hub caps these tools at 300 s itself
+/// (`LIFECYCLE_CAP` in `fleet_core::mcp::tools::support`); the margin lets its
+/// own `E_TIMEOUT` answer arrive before this side gives up.
+pub(crate) const LONG_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(310);
 
 /// A client of one hub.
 pub struct HubBackend {
@@ -172,7 +197,18 @@ impl HubBackend {
 
     /// Call one tool and deserialise its result into `T`.
     pub async fn call<T: DeserializeOwned>(&self, tool: &str, args: Value) -> Result<T, IpcError> {
-        let text = self.call_text(tool, args).await?;
+        self.call_within(tool, args, None).await
+    }
+
+    /// [`Self::call`] with an explicit deadline for the exchange (`None`: the
+    /// transport's default, [`CALL_TIMEOUT`] for the real one).
+    async fn call_within<T: DeserializeOwned>(
+        &self,
+        tool: &str,
+        args: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<T, IpcError> {
+        let text = self.call_text_within(tool, args, timeout).await?;
         serde_json::from_str(&text).map_err(|e| {
             IpcError::new(
                 codes::E_PARSE,
@@ -187,6 +223,15 @@ impl HubBackend {
     /// Call one tool and return its result text unparsed — for the tools that
     /// answer prose rather than JSON (`session_transcript`, `capture_session`).
     pub async fn call_text(&self, tool: &str, args: Value) -> Result<String, IpcError> {
+        self.call_text_within(tool, args, None).await
+    }
+
+    async fn call_text_within(
+        &self,
+        tool: &str,
+        args: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<String, IpcError> {
         if let Some(refused) = self.unavailable_error(tool) {
             return Err(refused);
         }
@@ -198,16 +243,20 @@ impl HubBackend {
         })
         .to_string();
         let url = format!("{}/mcp", self.cfg.base_url);
-        let response = self
-            .transport
-            .post_json(&url, &self.cfg.token, body)
-            .await
-            .map_err(|e| {
-                IpcError::new(
-                    codes::E_HUB_UNREACHABLE,
-                    format!("{} did not answer: {}", self.cfg.base_url, self.redact(&e)),
-                )
-            })?;
+        let sent = match timeout {
+            None => self.transport.post_json(&url, &self.cfg.token, body).await,
+            Some(t) => {
+                self.transport
+                    .post_json_within(&url, &self.cfg.token, body, t)
+                    .await
+            }
+        };
+        let response = sent.map_err(|e| {
+            IpcError::new(
+                codes::E_HUB_UNREACHABLE,
+                format!("{} did not answer: {}", self.cfg.base_url, self.redact(&e)),
+            )
+        })?;
         self.read_response(tool, response)
     }
 
@@ -759,6 +808,36 @@ impl HubBackend {
         .await
     }
 
+    /// `commands::sessions::restore_host_sessions`.
+    pub async fn restore_host_sessions(
+        &self,
+        args: &sessions::RestoreHostSessionsArgs,
+    ) -> Result<sessions::RestoreReport, IpcError> {
+        self.call_within(
+            "restore_host_sessions",
+            json!({
+                "host_alias": args.host_alias,
+                "dry_run": args.dry_run,
+                "session_ids": args.session_ids,
+            }),
+            Some(LONG_CALL_TIMEOUT),
+        )
+        .await
+    }
+
+    /// `commands::sessions::discover_lost_sessions`.
+    pub async fn discover_lost_sessions(
+        &self,
+        args: &sessions::DiscoverLostSessionsArgs,
+    ) -> Result<Vec<sessions::LostCandidate>, IpcError> {
+        self.call_within(
+            "discover_lost_sessions",
+            json!({ "host_alias": args.host_alias, "limit": args.limit }),
+            Some(LONG_CALL_TIMEOUT),
+        )
+        .await
+    }
+
     /// `commands::sessions::dismiss_ghost_session`. The tool answers
     /// `{"dismissed": id}` where the command answers `()`; the body is read
     /// and discarded so a tool error still surfaces.
@@ -1053,6 +1132,16 @@ impl HubTransport for TcpTransport {
         bearer: &str,
         body: String,
     ) -> Result<HubResponse, String> {
+        self.post_json_within(url, bearer, body, CALL_TIMEOUT).await
+    }
+
+    async fn post_json_within(
+        &self,
+        url: &str,
+        bearer: &str,
+        body: String,
+        timeout: std::time::Duration,
+    ) -> Result<HubResponse, String> {
         let at = Endpoint::parse(url)?;
         // `Accept` carries both types because the transport answers
         // SSE-framed; rmcp refuses a request that does not accept
@@ -1065,9 +1154,9 @@ impl HubTransport for TcpTransport {
             at.authority,
             body.len()
         );
-        let raw = tokio::time::timeout(CALL_TIMEOUT, exchange(&at, &request))
+        let raw = tokio::time::timeout(timeout, exchange(&at, &request))
             .await
-            .map_err(|_| format!("no answer within {CALL_TIMEOUT:.0?}"))??;
+            .map_err(|_| format!("no answer within {timeout:.0?}"))??;
         split_response(&raw)
     }
 }

@@ -879,6 +879,8 @@ pub(super) const LIFECYCLE_TOOLS: &[&str] = &[
     "new_bg_session",
     "new_shell_session",
     "recreate_session",
+    "restore_host_sessions",
+    "discover_lost_sessions",
     "restart_session",
     "repair_session",
     "move_session",

@@ -13,6 +13,32 @@ impl Store {
     /// background reconcile tick can otherwise grow one session's timeline
     /// without bound (observed: ~200k `status_change` rows per session); the
     /// prune is a cheap indexed subselect and keeps the table bounded.
+    ///
+    /// `kind` is free text (no DB-level enum), but every caller in the
+    /// codebase draws from one vocabulary, grouped by the subsystem that
+    /// writes it:
+    /// - reconcile (`service::sessions::reconcile`): `status_change`, `stuck`,
+    ///   `lost` (detail is the `lost_reason`, e.g. `host_reboot`).
+    /// - lifecycle (`service::sessions::lifecycle` / `prompt`):  `killed`,
+    ///   `recreated`, `prompt_sent`.
+    /// - host-reboot restore (`service::sessions::restore`, Task 3):
+    ///   `session_restored`, `session_restore_failed` (detail is the error
+    ///   message).
+    /// - workspace repair (`service::repair::{EVENT_REPAIRED,
+    ///   EVENT_REPAIR_FAILED}`): `workspace_repaired`, `workspace_repair_failed`.
+    /// - move_session (`service::move_session::{EVENT_MOVED,
+    ///   EVENT_MOVE_PARTIAL}`): `session_moved`, `session_move_partial`.
+    /// - tasks (`service::tasks`): `task_dispatched`, `task_started`,
+    ///   `task_done`, `task_failed`, `task_cancelled`.
+    /// - inter-session messages (`service::messages`): `message_sent`,
+    ///   `message_received`.
+    /// - safe kill (`service::safe_kill`): `safe_kill_requested`,
+    ///   `safe_kill_send_failed`, `safe_kill_failed`, `safe_kill_ready`,
+    ///   `safe_kill_discarded`.
+    /// - GC sweeper (`service::gc`): `gc_killed`, `gc_failed`.
+    /// - hooks (`service::hooks`): `notification`.
+    /// - playbooks (`Store::record_playbook_applied` et al.): `playbook_applied`.
+    /// - MCP call audit (`mcp::tools::support`): `mcp_call`.
     pub fn insert_session_event(
         &self,
         session_id: i64,

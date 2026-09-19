@@ -192,6 +192,7 @@ mod tests {
             reviews_session_id: None,
             worktree_key: None,
             lost_at: None,
+            lost_reason: None,
             claude_session_id: None,
             claude_status: claude_status.map(str::to_string),
             effort_level: None,

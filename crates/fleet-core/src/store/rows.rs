@@ -119,6 +119,11 @@ pub struct SessionRow {
     pub worktree_key: Option<String>,
     #[serde(default)]
     pub lost_at: Option<i64>,
+    /// Why the row was marked lost (migration 036): `host_reboot` |
+    /// `tmux_server_gone` | `missing` | `killed`. `None` while the row is
+    /// live (or never lost).
+    #[serde(default)]
+    pub lost_reason: Option<String>,
     #[serde(default)]
     pub claude_session_id: Option<String>,
     #[serde(default)]
@@ -206,7 +211,7 @@ pub(super) const SESSION_COLUMNS: &str =
      idle_since, stuck_since, last_playbook_at, last_prompt, started_at, last_turn_at, ci_status, \
      turn_seq, last_stop_at, parent_session_id, tags, \
      usage_input_tokens, usage_output_tokens, usage_cache_write_tokens, usage_cache_read_tokens, \
-     usage_cost_micros, usage_model, usage_updated_at";
+     usage_cost_micros, usage_model, usage_updated_at, lost_reason";
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -277,6 +282,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
             usage_model: row.get(42)?,
             usage_updated_at: row.get(43)?,
         },
+        lost_reason: row.get(44)?,
     })
 }
 
@@ -471,8 +477,9 @@ pub struct StoredIdentity {
 /// `marked` rows were live and are now ghost (they changed on the wire and
 /// were announced with `SessionUpdated`); `reclassified` rows were ALREADY a
 /// `missing` ghost (a failed first post-loss pass pruned them routinely) and
-/// only had their `lost_reason` upgraded to the verdict's reason — nothing
-/// the frontend sees changed, so no event was emitted for them.
+/// only had their `lost_reason` upgraded to the verdict's reason. `lost_reason`
+/// is now on the wire ([`SessionRow::lost_reason`]), so this IS a change the
+/// frontend sees — a `SessionUpdated` is announced for them too.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MarkedLost {
     pub marked: Vec<SessionRow>,

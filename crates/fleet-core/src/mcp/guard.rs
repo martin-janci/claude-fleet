@@ -89,6 +89,9 @@ pub const READONLY_TOOLS: &[&str] = &[
     "list_layers",
     "resolve_preview",
     "propose_layers",
+    // Host-reboot recovery discovery: scans a host's Claude transcripts and
+    // enriches candidates from the store — no ssh writes, no store writes.
+    "discover_lost_sessions",
 ];
 
 pub fn is_readonly_tool(name: &str) -> bool {

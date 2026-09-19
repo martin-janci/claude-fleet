@@ -18,10 +18,12 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 mod activity;
+mod discover;
 mod lifecycle;
 mod paths;
 mod prompt;
 mod reconcile;
+mod restore;
 mod review;
 mod targeting;
 
@@ -35,12 +37,14 @@ mod lifecycle_tests;
 mod tests;
 
 pub use self::activity::*;
+pub use self::discover::*;
 pub use self::lifecycle::*;
 // `paths` has no `pub` item — its widest is `pub(crate)` — so the re-export
 // is `pub(crate)` too (a `pub` glob would re-export nothing).
 pub(crate) use self::paths::*;
 pub use self::prompt::*;
 pub use self::reconcile::*;
+pub use self::restore::*;
 pub use self::review::*;
 pub use self::targeting::*;
 

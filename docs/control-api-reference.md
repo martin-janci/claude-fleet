@@ -51,6 +51,12 @@ Parameters: `confirm_nonce`, `force`, `worktree_id`
 
 Discover SSH hosts from the user's ~/.ssh/config. These are candidates for add_host. Returns JSON.
 
+### `discover_lost_sessions`
+
+Read-only: scan ~/.claude/projects on a host for recent Claude conversations (e.g. ones a reboot left without a pane), rank them relative to the host's boot (rank_hint: before_boot | after_boot | stale | unknown), and enrich each with the fleet ids it can infer: project_id, worktree_id, and existing_session_id — set when a fleet session on the host (live or lost) already holds that claude_session_id; restore such a row with restore_host_sessions, not new_session. resumable is true only when new_session would start the pane in exactly the transcript's cwd (a registered worktree or the project root); anywhere else (a subdirectory, an unregistered worktree) claude --resume cannot find the transcript and a new, empty conversation would start, so do not resume it. derived_tmux_name is set only for a resumable candidate; it may differ from a session's original name for a second session on the same worktree, so treat it as a hint. Restore a resumable one with new_session { host_alias, project_id, worktree_id, name: derived_tmux_name, resume_claude_session_id }. limit caps how many transcripts (newest first) are read: default 50, max 500.
+
+Parameters: `host_alias`, `limit`
+
 ### `dismiss_ghost_session`
 
 Dismiss a ghost session (lost from tmux): permanently delete its row. Use when a ghost is not worth reviving — the row is the only thing left to clean up. Errors if the session is not a ghost.
@@ -159,7 +165,7 @@ Parameters: `host_alias`, `name`, `prompt`
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree). Pass new_worktree to fork a fresh worktree+branch (optional base_branch). Auto-clones the repo on remote hosts.
 
-Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `worktree_id`
+Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -307,6 +313,12 @@ Restart a tmux session (kill and recreate it in the same place). Use when the Cl
 
 Parameters: `force`, `host_alias`, `name`, `session_id`
 
+### `restore_host_sessions`
+
+Restore sessions a host lost to a reboot or a tmux server restart: resume each lost tmux session's Claude conversation in its original worktree, under its original name. Call with dry_run=true first to get the plan (no ssh, no writes). Concurrency and pacing come from the restore.batch_size / restore.stagger_ms settings. One failing session never fails the others; the result lists each session's outcome. One restore per host at a time: a second call while one runs gets E_INVALID_STATE. A lost fleet controller is skipped (recreate it with recreate_session force=true). A call that timed out may have partially completed: sessions keep coming back after it; re-run with dry_run=true to see what is still lost. First-run prompts in a resumed session are not answered: they surface as stuck_kind.
+
+Parameters: `dry_run`, `host_alias`, `session_ids`
+
 ### `revoke_client`
 
 Revoke a paired client's token by name. Its next request is refused (the auth layer only resolves live rows) and the name becomes free to pair again; the row itself is kept, revoked, for the audit trail. E_NOTFOUND when no live client holds that name. Master token only. Returns the revoked row as JSON.
@@ -452,6 +464,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`
+- `commands::sessions::restore_host_sessions`
+- `commands::sessions::discover_lost_sessions`
 - `commands::move_session::move_session`
 - `commands::sessions::dismiss_ghost_session`
 - `commands::sessions::dismiss_agent_session`

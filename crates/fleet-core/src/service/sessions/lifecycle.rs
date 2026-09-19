@@ -32,6 +32,14 @@ pub struct NewSessionArgs {
     /// in-session agent can refine it later via the `set_friendly_name`
     /// MCP tool.
     pub friendly_name: Option<String>,
+    /// Resume this Claude conversation id instead of minting a fresh one (a
+    /// conversation found by `discover_lost_sessions`). Must be a lowercase
+    /// UUID not already held by a session on the host; rejected for a
+    /// `"shell"` session. The pane starts in `worktree_id` / the project root,
+    /// which must be the transcript's cwd for `claude --resume` to find it
+    /// (see `LostCandidate::resumable`).
+    #[serde(default)]
+    pub resume_claude_session_id: Option<String>,
 }
 
 /// An existing worktree to make sure is present on a remote host, ahead of
@@ -313,6 +321,17 @@ pub async fn new_session(
     if let Some(fname) = args.friendly_name.as_deref() {
         crate::validate::friendly_name(fname)?;
     }
+    if let Some(id) = args.resume_claude_session_id.as_deref() {
+        crate::validate::claude_session_id(id)?;
+        if args.kind.as_deref() == Some("shell") {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "resume_claude_session_id applies to Claude sessions, not shell sessions",
+            ));
+        }
+        reject_held_conversation(&*lock(store)?, &args.host_alias, id)?;
+    }
+    reject_lost_session_name(&*lock(store)?, &args.host_alias, &args.name)?;
 
     if let Some(name) = args.new_worktree.as_deref() {
         crate::validate::git_ref(name)?;
@@ -341,6 +360,73 @@ pub async fn new_session(
     let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
 
     new_session_inner(args, store, ssh, token).await
+}
+
+/// Refuse a name that belongs to a lost session with a resumable
+/// conversation: reconcile's upsert (ON CONFLICT host_alias, tmux_name) would
+/// revive that row and `set_claude_session_id` would overwrite its id, losing
+/// the conversation `restore_host_sessions` could bring back. Runs before any
+/// tmux call and before the work/shell split.
+pub(crate) fn reject_lost_session_name(
+    s: &Store,
+    host_alias: &str,
+    name: &str,
+) -> Result<(), IpcError> {
+    match s.lost_resumable_session_named(host_alias, name)? {
+        Some(row) => Err(IpcError::new(
+            codes::E_EXISTS,
+            format!(
+                "{name} belongs to a lost session (id {}); restore it with restore_host_sessions or dismiss it first",
+                row.id
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Refuse to resume a conversation some session on the host already holds
+/// (live or lost): two panes on one transcript would interleave, and a lost
+/// holder should be brought back by `restore_host_sessions` instead.
+pub(crate) fn reject_held_conversation(
+    s: &Store,
+    host_alias: &str,
+    claude_id: &str,
+) -> Result<(), IpcError> {
+    match s.session_with_claude_id(host_alias, claude_id)? {
+        Some(row) => Err(IpcError::new(
+            codes::E_EXISTS,
+            format!(
+                "conversation {claude_id} already belongs to session {} ({}); restore it with restore_host_sessions instead",
+                row.id, row.tmux_name
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The Claude conversation id a new session runs under, and its pane command.
+/// Work/review sessions get an app-minted id so a later recreate/restart
+/// resumes THIS conversation, not "most recent for the cwd" — or, with
+/// `resume_claude_session_id`, the given conversation, launched exactly as
+/// `recreate_pane_command` would. A shell session has no id.
+pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, String) {
+    if args.kind.as_deref() == Some("shell") {
+        return (
+            None,
+            crate::tmux::shell_pane_command(args.start_command.as_deref()),
+        );
+    }
+    match args.resume_claude_session_id.as_deref() {
+        Some(id) => (
+            Some(id.to_string()),
+            recreate_pane_command("work", Some(id)),
+        ),
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            let pane = crate::tmux::pane_command_for(Some(&id));
+            (Some(id), pane)
+        }
+    }
 }
 
 /// Mint a tmux name for a `new_session` call that left `name` empty.
@@ -375,10 +461,16 @@ pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<Stri
     } else {
         None
     };
-    let deterministic = tmux_safe(&match &wt {
-        Some(w) => format!("{base}--{w}{term}"),
-        None => format!("{base}{term}"),
-    });
+    // `derive_tmux_name` (`discover.rs`) mints the same `dev-<owner>-<repo>`
+    // / `dev-<owner>-<repo>--<worktree>` shape from a worktree key, "main"
+    // meaning the repo root — the same convention `wt: None` encodes here.
+    // `tmux_safe` is idempotent (it only ever removes `.`/`:`), so applying
+    // it again after appending `term` is safe.
+    let worktree_key = wt.as_deref().unwrap_or("main");
+    let deterministic = tmux_safe(&format!(
+        "{}{term}",
+        derive_tmux_name(&owner, &repo, worktree_key)
+    ));
     let on_host = s.list_sessions_for_host(&args.host_alias)?;
     if !on_host.iter().any(|r| r.tmux_name == deterministic) {
         return Ok(deterministic);
@@ -556,18 +648,7 @@ pub(super) async fn new_session_inner(
     // A "shell" session runs a plain login shell in the pane instead of
     // Claude Code. Any other value (incl. None) is treated as a "work" session.
     let is_shell = args.kind.as_deref() == Some("shell");
-    // Work/review sessions get an app-minted Claude session id so a later
-    // recreate/restart resumes THIS conversation, not "most recent for the cwd".
-    let claude_id: Option<String> = if is_shell {
-        None
-    } else {
-        Some(uuid::Uuid::new_v4().to_string())
-    };
-    let pane_cmd: String = if is_shell {
-        crate::tmux::shell_pane_command(args.start_command.as_deref())
-    } else {
-        crate::tmux::pane_command_for(claude_id.as_deref())
-    };
+    let (claude_id, pane_cmd) = claude_id_and_pane_cmd(&args);
 
     // Automatic self-repair for an EXISTING worktree row / main checkout: the
     // row may point at a directory that was deleted since it was written.

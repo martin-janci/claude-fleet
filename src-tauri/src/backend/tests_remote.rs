@@ -78,6 +78,9 @@ const LIST_SESSIONS_PAYLOAD: &str = r#"[{"is_controller":true,"id":12,"tmux_name
 struct Fake {
     answers: Mutex<Vec<Result<HubResponse, String>>>,
     seen: Mutex<Vec<(String, String, String)>>,
+    /// Per request: the deadline the caller asked for (`post_json_within`),
+    /// or `None` for the transport's default (`post_json`).
+    deadlines: Mutex<Vec<Option<std::time::Duration>>>,
 }
 
 impl Fake {
@@ -85,6 +88,7 @@ impl Fake {
         Arc::new(Self {
             answers: Mutex::new(vec![r]),
             seen: Mutex::new(Vec::new()),
+            deadlines: Mutex::new(Vec::new()),
         })
     }
 
@@ -111,14 +115,8 @@ impl Fake {
     }
 }
 
-#[async_trait::async_trait]
-impl HubTransport for Fake {
-    async fn post_json(
-        &self,
-        url: &str,
-        bearer: &str,
-        body: String,
-    ) -> Result<HubResponse, String> {
+impl Fake {
+    fn answer(&self, url: &str, bearer: &str, body: String) -> Result<HubResponse, String> {
         self.seen
             .lock()
             .unwrap()
@@ -128,6 +126,37 @@ impl HubTransport for Fake {
             .unwrap()
             .pop()
             .unwrap_or_else(|| panic!("the fake transport ran out of answers"))
+    }
+
+    /// The deadline of the one request it was given.
+    fn only_deadline(&self) -> Option<std::time::Duration> {
+        let d = self.deadlines.lock().unwrap();
+        assert_eq!(d.len(), 1, "expected exactly one request: {d:?}");
+        d[0]
+    }
+}
+
+#[async_trait::async_trait]
+impl HubTransport for Fake {
+    async fn post_json(
+        &self,
+        url: &str,
+        bearer: &str,
+        body: String,
+    ) -> Result<HubResponse, String> {
+        self.deadlines.lock().unwrap().push(None);
+        self.answer(url, bearer, body)
+    }
+
+    async fn post_json_within(
+        &self,
+        url: &str,
+        bearer: &str,
+        body: String,
+        timeout: std::time::Duration,
+    ) -> Result<HubResponse, String> {
+        self.deadlines.lock().unwrap().push(Some(timeout));
+        self.answer(url, bearer, body)
     }
 }
 
@@ -153,6 +182,81 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 }
 
 // --- the request -------------------------------------------------------------
+
+/// The real transport honours the deadline it is handed: a hub that accepts
+/// and never answers fails after the given duration, not after the default.
+#[test]
+fn the_tcp_transport_gives_up_after_the_deadline_it_was_handed() {
+    block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Accept and hold the connection open without ever answering.
+        let _server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(conn);
+        });
+        let started = std::time::Instant::now();
+        let e = TcpTransport
+            .post_json_within(
+                &format!("http://127.0.0.1:{port}/mcp"),
+                "t",
+                "{}".into(),
+                std::time::Duration::from_millis(200),
+            )
+            .await
+            .unwrap_err();
+        assert!(e.contains("no answer within"), "{e}");
+        assert!(
+            started.elapsed() < CALL_TIMEOUT,
+            "used the default deadline"
+        );
+    });
+}
+
+/// `restore_host_sessions` and `discover_lost_sessions` run a batch on the
+/// hub that outlasts the default 30 s exchange: the desktop must wait for the
+/// hub's own 300 s cap rather than report a failure while the hub is still
+/// restoring (which invited a retry that raced the first call). Every other
+/// call keeps the transport's default.
+#[test]
+fn the_restore_and_discover_calls_wait_longer_than_the_default_deadline() {
+    let fake = Fake::answering(Ok(ok(
+        r#"{"host_alias":"h","dry_run":false,"plan":[],"results":[]}"#,
+    )));
+    block_on(
+        backend(&fake).restore_host_sessions(&sessions::RestoreHostSessionsArgs {
+            host_alias: "h".into(),
+            dry_run: false,
+            session_ids: None,
+        }),
+    )
+    .expect("report");
+    assert_eq!(fake.only_call().0, "restore_host_sessions");
+    assert_eq!(fake.only_deadline(), Some(LONG_CALL_TIMEOUT));
+
+    let fake = Fake::answering(Ok(ok("[]")));
+    block_on(
+        backend(&fake).discover_lost_sessions(&sessions::DiscoverLostSessionsArgs {
+            host_alias: "h".into(),
+            limit: None,
+        }),
+    )
+    .expect("candidates");
+    assert_eq!(fake.only_call().0, "discover_lost_sessions");
+    assert_eq!(fake.only_deadline(), Some(LONG_CALL_TIMEOUT));
+
+    assert!(LONG_CALL_TIMEOUT > CALL_TIMEOUT);
+    assert!(LONG_CALL_TIMEOUT >= std::time::Duration::from_secs(300));
+
+    let fake = Fake::answering(Ok(ok("[]")));
+    let _ = block_on(backend(&fake).list_hosts());
+    assert_eq!(
+        fake.only_deadline(),
+        None,
+        "an ordinary call keeps the default"
+    );
+}
 
 #[test]
 fn a_call_is_a_jsonrpc_tools_call_to_the_hubs_mcp_endpoint() {
@@ -322,6 +426,7 @@ fn sample_session_row() -> SessionRow {
         reviews_session_id: None,
         worktree_key: Some("trn:/home/dev/p/.worktrees/hub".into()),
         lost_at: None,
+        lost_reason: None,
         claude_session_id: Some("0f3a9c1e-1111-4222-8333-444455556666".into()),
         claude_status: Some("working".into()),
         effort_level: None,

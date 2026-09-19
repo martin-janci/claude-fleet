@@ -202,9 +202,32 @@ Each rung is more destructive than the last.
 | REPL wedged, tmux fine | `restart_session` — relaunch Claude in place |
 | `stuck_kind: oom`, frozen, eating RAM | `recreate_session` — kills + rebuilds the tmux session in the same worktree, resuming the conversation |
 | Ghost (`status: "ghost"`, needs `include_lost: true`) | `recreate_session` to revive, or `dismiss_ghost_session` to drop |
+| A whole host's sessions lost together (`lost_reason: "host_reboot"` / `"tmux_server_gone"`) | after a host reboot: `restore_host_sessions {dry_run:true}` then without dry_run |
+| A host rebooted but fleet has no row at all for a conversation (host was on an older fleet version, or the row was deleted) | `discover_lost_sessions {host_alias}` to find it on disk, then `new_session` with `resume_claude_session_id` to restore it |
 
 `recreate_session` kills the running process but keeps the conversation via
 session-id resume; prefer `send_prompt` / `restart_session` for in-place fixes.
+
+`restore_host_sessions` is the batch form of `recreate_session` for a host
+that lost every session at once: `dry_run: true` first returns the plan (no
+ssh, no writes), then call again without it to actually restore — paced by
+`restore.batch_size` / `restore.stagger_ms`, one failing session never stops
+the rest. Pass `session_ids` to restore a subset instead of every lost,
+resumable session on the host.
+
+`discover_lost_sessions {host_alias}` is read-only and finds conversations
+`restore_host_sessions` can't: it scans `~/.claude/projects` on the host
+directly, for transcripts fleet has no row for at all (a host running an
+older fleet version at the time of the reboot, or a deleted row). It ranks
+candidates by `rank_hint` (`before_boot` / `after_boot` / `stale` / `unknown`,
+relative to the host's last boot) and enriches each with whatever it can
+infer — `project_id`, `worktree_id`, `existing_session_id` (a row already
+holding that `claude_session_id`), and `derived_tmux_name` (the name
+`new_session` would deterministically mint — a hint, not a guarantee: it may
+already be taken by a second session on the same worktree). Restore a
+candidate with `new_session { host_alias, project_id, worktree_id, name:
+derived_tmux_name, resume_claude_session_id: claude_session_id }`. `limit`
+caps how many transcripts (newest first) are read — default 50, max 500.
 
 **Workspace gone or broken** (the worktree directory vanished, the pane runs
 in a deleted dir, git lists a stale entry): `repair_session { session_id }`

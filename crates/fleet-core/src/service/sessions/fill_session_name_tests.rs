@@ -16,6 +16,7 @@ fn args(
         kind: kind.map(Into::into),
         start_command: None,
         friendly_name: None,
+        resume_claude_session_id: None,
     }
 }
 

@@ -6,8 +6,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
-import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, restoreHostSessions, discoverLostSessions, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
+import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -33,6 +33,14 @@ describe('usage formatting', () => {
     expect(formatCostMicros(5_000)).toBe('<$0.01');
     expect(formatCostMicros(1_234_567)).toBe('$1.23');
     expect(formatCostMicros(1_234_000_000)).toBe('$1,234');
+  });
+
+  it('labels lost_reason for the reasons with dedicated wording, null otherwise', () => {
+    expect(lostReasonLabel('host_reboot')).toBe('host rebooted');
+    expect(lostReasonLabel('tmux_server_gone')).toBe('tmux server stopped');
+    expect(lostReasonLabel('missing')).toBeNull();
+    expect(lostReasonLabel(null)).toBeNull();
+    expect(lostReasonLabel(undefined)).toBeNull();
   });
 
   it('sums every token counter and treats missing fields as zero', () => {
@@ -122,6 +130,84 @@ describe('sessions store', () => {
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls).toEqual([
       ['repair_session', { args: { session_id: 3, explicit: true } }],
       ['repair_session', { args: { session_id: 4, explicit: false } }],
+    ]);
+  });
+
+  it('restoreHostSessions passes host_alias/dry_run/session_ids and returns the report untouched', async () => {
+    sessions.set(sample);
+    const report = {
+      host_alias: 'mefistos',
+      dry_run: true,
+      plan: [
+        {
+          session_id: 1,
+          tmux_name: 'dev-foo',
+          cwd: '/repo',
+          claude_session_id: 'uuid-1',
+          friendly_name: null,
+          action: 'restore',
+          reason: null,
+        },
+      ],
+      results: [],
+    };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(report); // restore_host_sessions
+    const r = await restoreHostSessions('mefistos', { dryRun: true, sessionIds: [1, 2] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toEqual(report);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'restore_host_sessions',
+      { args: { host_alias: 'mefistos', dry_run: true, session_ids: [1, 2] } },
+    ]);
+    // Row events carry any store change; the wrapper itself merges nothing.
+    expect(get(sessions)).toEqual(sample);
+  });
+
+  it('restoreHostSessions defaults dry_run to false and omitted session_ids to null', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host_alias: 'mefistos',
+      dry_run: false,
+      plan: [],
+      results: [],
+    });
+    await restoreHostSessions('mefistos');
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'restore_host_sessions',
+      { args: { host_alias: 'mefistos', dry_run: false, session_ids: null } },
+    ]);
+  });
+
+  it('discoverLostSessions passes host_alias/limit and returns the candidates untouched', async () => {
+    const candidates = [
+      {
+        cwd: '/repo',
+        git_branch: 'feat',
+        claude_session_id: 'uuid-1',
+        transcript_mtime: 1000,
+        derived_tmux_name: 'dev-o-r--feat',
+        project_id: 1,
+        worktree_id: 2,
+        existing_session_id: null,
+        rank_hint: 'before_boot',
+        resumable: true,
+      },
+    ];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(candidates); // discover_lost_sessions
+    const r = await discoverLostSessions('mefistos', 100);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toEqual(candidates);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'discover_lost_sessions',
+      { args: { host_alias: 'mefistos', limit: 100 } },
+    ]);
+  });
+
+  it('discoverLostSessions defaults omitted limit to null', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await discoverLostSessions('mefistos');
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'discover_lost_sessions',
+      { args: { host_alias: 'mefistos', limit: null } },
     ]);
   });
 

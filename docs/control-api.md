@@ -261,7 +261,16 @@ Index by area (names only; see the reference for details):
   `dismiss_ghost_session`, `move_session` (continue a work session on another
   host: clean + pushed worktree required, transcript copied, `--resume` on
   the target, source killed once the target runs; master token only, since
-  the caller must be allowed on both hosts).
+  the caller must be allowed on both hosts), `restore_host_sessions` (batch
+  resume a host's sessions lost to a reboot or tmux server restart over
+  `recreate_session`; call with `dry_run: true` first for the plan — no ssh,
+  no writes — then without it to run; paced by `restore.batch_size` /
+  `restore.stagger_ms`, one failure never stops the rest), `discover_lost_sessions`
+  (read-only: scan a host's `~/.claude/projects` for Claude conversations
+  fleet has no row for — e.g. right after a reboot, before `restore_host_sessions`
+  has anything to work with — rank them against the host's boot, and enrich
+  each with `project_id`/`worktree_id`/`existing_session_id`/`derived_tmux_name`
+  where inferable; restore a candidate with `new_session`).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
   `repo_commit_diff`.

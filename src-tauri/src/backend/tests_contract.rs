@@ -50,6 +50,7 @@ pub(crate) fn sample_session() -> SessionRow {
         reviews_session_id: Some(4),
         worktree_key: Some("owner/repo:branch".into()),
         lost_at: Some(1_725_000_200),
+        lost_reason: Some("host_reboot".into()),
         claude_session_id: Some("claude-uuid".into()),
         claude_status: Some("working".into()),
         effort_level: Some("high".into()),
@@ -462,6 +463,7 @@ fn a_session_rows_wire_names_are_these_exact_forty_four() {
         "last_stop_at",
         "last_turn_at",
         "lost_at",
+        "lost_reason",
         "notes",
         "parent_session_id",
         "pr_url",
@@ -489,7 +491,7 @@ fn a_session_rows_wire_names_are_these_exact_forty_four() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 44, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 45, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

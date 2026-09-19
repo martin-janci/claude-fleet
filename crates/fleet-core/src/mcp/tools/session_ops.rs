@@ -195,6 +195,7 @@ impl FleetTools {
             // MCP callers don't pick a label; let the service derive one from
             // the branch via `humanize::humanize_branch`.
             friendly_name: None,
+            resume_claude_session_id: p.resume_claude_session_id,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
@@ -233,6 +234,7 @@ impl FleetTools {
             start_command: p.start_command,
             // Let the service derive a humanised label from the branch.
             friendly_name: None,
+            resume_claude_session_id: None,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
@@ -391,6 +393,66 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(
+        description = "Restore sessions a host lost to a reboot or a tmux server restart: \
+        resume each lost tmux session's Claude conversation in its original worktree, under its \
+        original name. Call with dry_run=true first to get the plan (no ssh, no writes). \
+        Concurrency and pacing come from the restore.batch_size / restore.stagger_ms settings. \
+        One failing session never fails the others; the result lists each session's outcome. \
+        One restore per host at a time: a second call while one runs gets E_INVALID_STATE. A \
+        lost fleet controller is skipped (recreate it with recreate_session force=true). A call \
+        that timed out may have partially completed: sessions keep coming back after it; re-run \
+        with dry_run=true to see what is still lost. \
+        First-run prompts in a resumed session are not answered: they surface as stuck_kind."
+    )]
+    pub(super) async fn restore_host_sessions(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<sessions::RestoreHostSessionsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "restore_host_sessions",
+            &format!("host={} dry_run={}", args.host_alias, args.dry_run),
+        );
+        require_host(&caller, &args.host_alias, "the lost sessions")?;
+        let report = sessions::restore_host_sessions(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&report)
+    }
+
+    #[tool(
+        description = "Read-only: scan ~/.claude/projects on a host for recent Claude \
+        conversations (e.g. ones a reboot left without a pane), rank them relative to the host's \
+        boot (rank_hint: before_boot | after_boot | stale | unknown), and enrich each with the \
+        fleet ids it can infer: project_id, worktree_id, and existing_session_id — set when a \
+        fleet session on the host (live or lost) already holds that claude_session_id; restore \
+        such a row with restore_host_sessions, not new_session. resumable is true only when \
+        new_session would start the pane in exactly the transcript's cwd (a registered worktree \
+        or the project root); anywhere else (a subdirectory, an unregistered worktree) \
+        claude --resume cannot find the transcript and a new, empty conversation would start, \
+        so do not resume it. derived_tmux_name is set only for a resumable candidate; it may \
+        differ from a session's original name for a second session on the same worktree, so \
+        treat it as a hint. Restore a resumable one with new_session { host_alias, project_id, \
+        worktree_id, name: derived_tmux_name, resume_claude_session_id }. limit caps how many \
+        transcripts (newest first) are read: default 50, max 500."
+    )]
+    pub(super) async fn discover_lost_sessions(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<sessions::DiscoverLostSessionsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "discover_lost_sessions",
+            &format!("host={} limit={:?}", args.host_alias, args.limit),
+        );
+        require_host(&caller, &args.host_alias, "the lost sessions")?;
+        let candidates = sessions::discover_lost_sessions(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&candidates)
     }
 
     #[tool(description = "Dismiss a ghost session (lost from tmux): permanently \

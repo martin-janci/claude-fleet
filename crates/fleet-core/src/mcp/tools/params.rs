@@ -81,6 +81,16 @@ pub struct NewSessionParams {
     /// branch if the named branch isn't found on the host.
     #[serde(default)]
     pub base_branch: Option<String>,
+    /// Resume this Claude conversation id instead of starting a new one (a
+    /// resumable candidate from discover_lost_sessions). The session starts in
+    /// `worktree_id` (or the project root when omitted), which must be exactly
+    /// the transcript's cwd — Claude finds a transcript only from the
+    /// directory it ran in; elsewhere a new, empty conversation starts under
+    /// this id. Rejected for shell sessions, and when a session on the host
+    /// (live or lost) already holds this conversation — restore that one with
+    /// restore_host_sessions instead.
+    #[serde(default)]
+    pub resume_claude_session_id: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
