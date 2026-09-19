@@ -67,6 +67,10 @@ if ! gh api --method POST \
   "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$name" \
   --input "$file" >/dev/null; then
   if [ "$deleted_existing" = 1 ]; then
+    # STDOUT on purpose, unlike every other message here: Actions parses
+    # workflow commands (`::error::` and friends) out of a step's stdout
+    # only. Redirecting this to stderr would keep the text but lose the
+    # annotation — do not "fix" it to match the lines above.
     echo "::error title=release asset missing::$name was deleted to be replaced, but the re-upload failed — the release has NO $name asset until this job is re-run"
   fi
   exit 1

@@ -37,6 +37,45 @@ version="${TAG#v}"
 bin_dir="target/${TARGET}/release"
 out="dist"
 
+# crate_version CARGO_TOML -> the `version = "..."` from its [package]
+# section, and only that section: a `version` under [dependencies] or any
+# other table must not be picked up. POSIX awk, no GNU-only constructs —
+# this runs on a Linux runner today, but nothing about the script needs it
+# to.
+crate_version() {
+  awk '
+    /^[[:space:]]*\[/ { in_pkg = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/); next }
+    in_pkg && /^[[:space:]]*version[[:space:]]*=/ {
+      # version = "0.2.22"  ->  0.2.22
+      line = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", line)
+      sub(/".*$/, "", line)
+      print line
+      exit
+    }
+  ' "$1"
+}
+
+# The tag names the asset; CARGO_PKG_VERSION is what the binary inside it
+# reports. Nothing made those agree — a re-tag, a hand-made tag, or a run
+# against an older tag would produce a mislabelled tarball whose checksums
+# all verify. Checked once, before anything is packaged.
+for bin in fleet-agent fleet-hub; do
+  manifest="crates/$bin/Cargo.toml"
+  if [ ! -f "$manifest" ]; then
+    echo "package-linux-release.sh: $manifest not found (run from the repository root)" >&2
+    exit 1
+  fi
+  crate_v="$(crate_version "$manifest")"
+  if [ "$crate_v" != "$version" ]; then
+    echo "package-linux-release.sh: $bin is version '$crate_v' in $manifest," \
+         "but TAG=$TAG names version '$version'." >&2
+    echo "package-linux-release.sh: the tag and the built binaries disagree;" \
+         "re-tag, or build from the commit the tag points at." >&2
+    exit 1
+  fi
+done
+
 rm -rf "$out"
 mkdir -p "$out"
 
