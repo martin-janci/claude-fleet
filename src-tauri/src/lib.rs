@@ -1,18 +1,18 @@
 mod app_events;
+pub mod backend;
 mod bootstrap;
 mod commands;
 mod pty;
 
 pub use app_events::AppHandleEventBus;
 
+use backend::{Backend, OsTokenStore};
 use bootstrap::env::{
     appdata_dir, backfill_locale_for_gui_launch, backfill_path_for_gui_launch, env_looks_complete,
     import_login_shell_env,
 };
-use bootstrap::mcp::maybe_start_mcp;
 use bootstrap::singleton::kill_other_instances;
 use commands::cancel::cancel_command;
-use fleet_core::service::tick::{spawn_account_usage_tick, spawn_reconcile_tick};
 use fleet_core::store::Store;
 use pty::PtyState;
 use std::sync::Mutex;
@@ -68,6 +68,11 @@ pub fn run() {
     let tunnels = std::sync::Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new());
     let tunnels_for_exit = std::sync::Arc::clone(&tunnels);
     let tunnels_for_setup = std::sync::Arc::clone(&tunnels);
+    // Cancelled on window destroy, so the hub event bridge's socket does not
+    // keep a background task alive after quit. Standalone mode never starts
+    // the bridge, so nothing observes it there.
+    let shutdown_token = tokio_util::sync::CancellationToken::new();
+    let shutdown_for_exit = shutdown_token.clone();
     // SEC-9: the only local paths `upload_to_session` may read are the ones
     // the OS drag-drop handed the window (recorded below in the window /
     // webview event handlers).
@@ -90,8 +95,13 @@ pub fn run() {
                 fleet_core::rt::install(tokio::runtime::Handle::current());
             });
             let handle = app.handle().clone();
-            let bus: std::sync::Arc<dyn fleet_core::events::EventBus> =
+            // Built concretely and then coerced, rather than built as the
+            // trait object: the hub event bridge needs the concrete type. Both
+            // handles are the same bus, so a hub event and a local one go down
+            // one channel to one drain thread.
+            let frontend_bus =
                 std::sync::Arc::new(crate::app_events::AppHandleEventBus::new(handle));
+            let bus: std::sync::Arc<dyn fleet_core::events::EventBus> = frontend_bus.clone();
             // Kept alongside the clone moved into `Store` below: the account
             // usage poller and its commands emit `account_usage:updated`
             // straight through the bus, not through a `Store` row mutation
@@ -162,38 +172,68 @@ pub fn run() {
                 fleet_core::service::account_usage::UsageCache::new(),
             ));
             app.manage(std::sync::Arc::clone(&usage_cache));
-            // Start the MCP control API if the user has enabled it (off by
-            // default). Reuses the same Store / SshClient / registry as the UI.
-            maybe_start_mcp(
-                app.handle(),
-                &store,
-                &ssh_client_for_setup,
-                &reg_for_setup,
-                &tunnels_for_setup,
-                &guards,
-            );
-            // Task H: proactive background reconcile tick. A Tauri-runtime
-            // spawned interval drives `service::sessions::reconcile_now` on the same
-            // managed Store/SshClient the commands use, so fleet state stays
-            // fresh without the UI having to poll. Reconcile is Tauri-free
-            // (events flow through the store's EventBus), so the loop needs no
-            // AppHandle. Interval comes from settings (`reconcile.interval_secs`,
-            // default 20; 0 disables). A `try_lock` guard skips a tick if the
-            // previous reconcile is still running so slow passes can't stack.
-            spawn_reconcile_tick(
-                std::sync::Arc::clone(&store),
-                std::sync::Arc::clone(&ssh_client_for_setup),
-            );
-            // Task 4: independent 60s account-usage poll loop. Deliberately
-            // separate from the reconcile tick above (which `reconcile
-            // .interval_secs=0` can disable entirely) so usage keeps polling
-            // on its own cadence; `service::account_usage`'s 5-minute floor
-            // still caps real requests to one per account.
-            spawn_account_usage_tick(
-                std::sync::Arc::clone(&store),
-                std::sync::Arc::clone(&ssh_client_for_setup),
-                std::sync::Arc::clone(&usage_cache),
-                bus_for_usage,
+            // Standalone, a window onto a `fleet-hub`, or configured for a hub
+            // this launch cannot use? Decided once, here, from
+            // `hub.remote_url` plus the client token kept outside the
+            // database. It governs what this process starts below and what
+            // every command does, because a desktop pointed at a hub — usable
+            // or not — must not become a second brain reconciling and
+            // mutating the same fleet.
+            // Managed, not built and dropped: `commands::hub` writes to the
+            // same store when the user pairs or disconnects, and there must
+            // be exactly one implementation of "where the token lives".
+            let tokens: std::sync::Arc<dyn backend::TokenStore> =
+                std::sync::Arc::new(OsTokenStore::new(data_dir.clone()));
+            let backend = Backend::resolve(&store, tokens.as_ref());
+            app.manage(std::sync::Arc::clone(&tokens));
+            // Two managed values, one decision. `Backend` is the resolved
+            // answer (what this block branches on below); `FleetBackend` is
+            // what the commands hold — the same answer plus the `HubBackend`
+            // to call when it is remote. Built once here so that every
+            // command shares one client, and so that nothing can re-resolve
+            // the mode mid-run.
+            app.manage(std::sync::Arc::new(backend::FleetBackend::from_resolved(
+                &backend,
+            )));
+            app.manage(backend.clone());
+            // Whether this window's live link to the hub is up — the
+            // disconnected banner. Standalone it never moves off
+            // `Standalone`; a hub client's bridge reports into it.
+            let hub_link = std::sync::Arc::new(match backend.remote() {
+                Some(cfg) => backend::connection::HubConnectionStatus::remote(
+                    std::sync::Arc::clone(&frontend_bus)
+                        as std::sync::Arc<dyn backend::events::RemoteEventSink>,
+                    &cfg.token,
+                ),
+                None => backend::connection::HubConnectionStatus::standalone(),
+            });
+            app.manage(std::sync::Arc::clone(&hub_link));
+            // Which background tasks this process may run is decided in
+            // `backend::startup`, not here, and the real spawns live in
+            // `bootstrap::tasks`. Both moved out of this closure because
+            // nothing can test it — it needs a live `tauri::App` — and the
+            // Task 2 review showed what an untestable guard was worth: it
+            // hoisted `spawn_reconcile_tick` out of the old `else` so both
+            // modes started it, and all 91 tests still passed.
+            //
+            // `lib.rs` may no longer name any of the three; a test asserts
+            // that, which is what makes that exact refactor fail now.
+            backend::startup::start_background_tasks(
+                &backend,
+                &bootstrap::tasks::RealFleetTasks {
+                    app: app.handle().clone(),
+                    store: std::sync::Arc::clone(&store),
+                    ssh: std::sync::Arc::clone(&ssh_client_for_setup),
+                    reg: std::sync::Arc::clone(&reg_for_setup),
+                    tunnels: std::sync::Arc::clone(&tunnels_for_setup),
+                    guards: guards.clone(),
+                    usage_cache: std::sync::Arc::clone(&usage_cache),
+                    bus: bus_for_usage,
+                    frontend: std::sync::Arc::clone(&frontend_bus),
+                    remote: backend.remote().cloned(),
+                    shutdown: shutdown_token.clone(),
+                    hub_link,
+                },
             );
             Ok(())
         })
@@ -287,6 +327,11 @@ pub fn run() {
             commands::mcp::rotate_host_token,
             commands::mcp::mcp_confirm,
             commands::mcp::mcp_pending_confirms,
+            commands::hub::hub_status,
+            commands::hub::hub_pair,
+            commands::hub::hub_disconnect,
+            commands::hub::hub_connection,
+            commands::hub::hub_stranded_token,
             commands::onboarding::check_local_prereqs,
             commands::onboarding::tunnel_status,
             commands::assets::catalog_config,
@@ -340,6 +385,7 @@ pub fn run() {
                 use tauri::Manager;
                 ssh_client_for_exit.shutdown_all();
                 tunnels_for_exit.stop_all();
+                shutdown_for_exit.cancel();
                 if let Some(runtime) = window.try_state::<Mutex<fleet_core::mcp::McpRuntime>>() {
                     if let Ok(mut rt) = runtime.lock() {
                         rt.stop();

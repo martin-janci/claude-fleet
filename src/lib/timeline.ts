@@ -12,7 +12,7 @@ export interface SessionEvent {
   at: number;
   kind: string;
   detail: string | null;
-  /** The conversation the event belongs to (migration 034). */
+  /** The conversation the event belongs to (migration 036). */
   claude_session_id: string | null;
 }
 

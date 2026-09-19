@@ -86,7 +86,9 @@ pub struct MoveSessionArgs {
 }
 
 /// What a completed move did.
-#[derive(Debug, Clone, Serialize)]
+/// Every field is required on the wire, so a hub-read report fails loudly on
+/// a rename rather than defaulting — see `service::repo_read` for the rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveReport {
     pub source_session_id: i64,
     pub target_session_id: i64,

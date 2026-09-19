@@ -473,12 +473,26 @@ pub struct PtyOpenArgs {
     pub rows: u16,
 }
 
+/// Attach the single global PTY to a session's tmux pane.
+///
+/// The only PTY command with a remote-mode guard, and deliberately so: it is
+/// the one that opens an `ssh … tmux attach` from THIS machine, which a
+/// hub-client desktop has no route for. `pty_write`, `pty_resize`,
+/// `pty_drain` and `pty_close` act on whatever is attached, and with the open
+/// refused nothing ever is — they answer `E_PTY_CLOSED`, which is the true
+/// statement. Guarding them too would make `pty_close` fail, which is worse.
 #[tauri::command(async)]
 pub fn pty_open(
     args: PtyOpenArgs,
+    backend: State<'_, std::sync::Arc<crate::backend::FleetBackend>>,
     state: State<'_, Mutex<PtyState>>,
     ssh: State<'_, std::sync::Arc<SshClient>>,
 ) -> Result<(), IpcError> {
+    backend.local_only(
+        "pty_open",
+        "the terminal attaches over this machine's SSH connection to the \
+         session's host; attach from that host, or from a standalone app",
+    )?;
     // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
     fleet_core::validate::host_alias(&args.host_alias)?;
     fleet_core::validate::tmux_name(&args.session_name)?;

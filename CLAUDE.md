@@ -9,7 +9,10 @@ managing long-lived Claude Code sessions running in tmux across multiple
 machines over SSH. ~93,000 LOC Rust, ~27,000 LOC frontend.
 
 The Rust side is a workspace: `crates/fleet-core` (Tauri-free service/store/SSH/MCP),
-`crates/fleet-hub` (headless daemon, see `docs/hub.md`), `src-tauri` (the desktop app).
+`crates/fleet-hub` (headless daemon, see `docs/hub.md`), `crates/fleet-proto` (the
+hub/agent frame types, shared by both ends), `crates/fleet-agent` (the agent binary
+for hosts the hub cannot reach — depends on `fleet-proto` only, never `fleet-core`),
+`src-tauri` (the desktop app).
 
 ## Build & test
 
@@ -91,6 +94,11 @@ REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
   the WKWebView setup. Only one PTY is attached at a time.
 - **Hub daemon** (`crates/fleet-hub`): the same core headless; `hub.*`
   settings, `HubBase` in `service/hub.rs`.
+- **Hub client mode** (`src-tauri/src/backend/`): a desktop paired with a hub
+  (Settings → Hub) resolves once at startup to a window onto that hub; every
+  command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is listed as
+  the same in both modes (`backend/tests_routing.rs`), under the rule *parity
+  or refusal* in `docs/hub.md`.
 
 ## Conventions
 
@@ -121,7 +129,7 @@ event timeline (session_history). Handoff from the original spec is replaced by
 command construction, the PTY, migrations, or the optimistic-merge / event-bus
 paths.
 
-Phase 1 of conversation event tracking is landed (migration 034 `conversations`
+Phase 1 of conversation event tracking is landed (migration 036 `conversations`
 table; `SessionStart`/`PreCompact`/`PostCompact` hooks; `/clear`, `/resume` and
 compaction tracked as conversation switches; `session_conversations` API), per
 `docs/superpowers/specs/2026-09-18-conversation-events-design.md`; the

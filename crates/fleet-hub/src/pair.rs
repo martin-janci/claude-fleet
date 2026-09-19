@@ -164,7 +164,7 @@ pub fn parse_tool_response(raw: &str) -> Result<serde_json::Value, String> {
             _ => format!("the hub answered {status}"),
         });
     }
-    let payload = last_event_payload(body);
+    let payload = fleet_core::mcp::wire::last_event_payload(body);
     let envelope: serde_json::Value =
         serde_json::from_str(&payload).map_err(|e| format!("the hub sent unreadable JSON: {e}"))?;
     if let Some(err) = envelope.get("error") {
@@ -189,38 +189,11 @@ pub fn parse_tool_response(raw: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(text).map_err(|e| format!("the tool's result was not JSON: {e}"))
 }
 
-/// The payload of the LAST server-sent event in `body`, or the trimmed body
-/// itself when there is no `data:` line (a `json_response` transport).
-///
-/// This de-chunks properly rather than assuming one event per response and
-/// one line per event, which the earlier "take the last `data:` line" did:
-/// per the SSE grammar a blank line ends an event and an event may spread its
-/// payload over several `data:` lines, which are joined with `\n`. A keep-alive
-/// comment (`: ping`) or a second frame ahead of the answer is therefore
-/// skipped, and a long envelope split across `data:` lines is reassembled
-/// instead of being truncated to its tail.
-fn last_event_payload(body: &str) -> String {
-    let mut events: Vec<String> = Vec::new();
-    let mut current: Vec<&str> = Vec::new();
-    for line in body.lines() {
-        if line.trim().is_empty() {
-            if !current.is_empty() {
-                events.push(current.join("\n"));
-                current.clear();
-            }
-            continue;
-        }
-        if let Some(data) = line.strip_prefix("data:") {
-            // The spec strips ONE leading space after the colon, no more.
-            current.push(data.strip_prefix(' ').unwrap_or(data));
-        }
-        // Every other field (`event:`, `id:`, a `:` comment) is not payload.
-    }
-    if !current.is_empty() {
-        events.push(current.join("\n"));
-    }
-    events.pop().unwrap_or_else(|| body.trim().to_string())
-}
+// The SSE de-chunking this used to carry now lives in
+// `fleet_core::mcp::wire::last_event_payload`: the desktop's hub-client
+// backend has to undo the same framing, and a second copy of a subtle parser
+// is how the two drift apart. The tests below still exercise it through
+// `parse_tool_response`.
 
 // --- rendering ---------------------------------------------------------------
 

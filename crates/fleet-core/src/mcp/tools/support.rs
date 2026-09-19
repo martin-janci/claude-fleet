@@ -906,6 +906,7 @@ pub(super) const LIFECYCLE_CAP: std::time::Duration = std::time::Duration::from_
 
 /// Everything else: store reads and single SSH round trips.
 pub(super) const QUICK_TOOLS: &[&str] = &[
+    "agent_status",
     "cancel_task",
     "capture_session",
     "discover_hosts",

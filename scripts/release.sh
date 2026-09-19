@@ -7,7 +7,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/martin-janci/claude-fleet"
 CRATE="claude-fleet"
-VERSION_FILES=(package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml crates/fleet-hub/Cargo.toml)
+VERSION_FILES=(package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml crates/fleet-hub/Cargo.toml crates/fleet-proto/Cargo.toml crates/fleet-agent/Cargo.toml)
 
 die() { echo "release.sh: $*" >&2; exit 1; }
 
@@ -73,14 +73,20 @@ SECTION="$(git log --no-merges --format='%s' "$RANGE" | awk '
 - (no commits since ${LAST_TAG:-the beginning of history})
 "
 LINK="[$NEW]: $REPO_URL/releases/tag/v$NEW"
-awk -v header="## [$NEW] - $TODAY" -v section="$SECTION" -v link="$LINK" '
-  !ins && /^## \[/ { print header; print ""; print section; ins = 1 }
+# The section is multi-line, and the BSD awk that ships with macOS rejects
+# `-v` values containing a newline ("newline in string"), so hand it over
+# through the environment. Two statements, not `awk ... && mv`: under
+# `set -e` a failure before the last `&&` is ignored, which would commit and
+# tag a release with no CHANGELOG entry.
+SECTION="$SECTION" awk -v header="## [$NEW] - $TODAY" -v link="$LINK" '
+  !ins && /^## \[/ { print header; print ""; print ENVIRON["SECTION"]; ins = 1 }
   !lnk && /^\[[^]]+\]: /  { print link; lnk = 1 }
   { print }
   END {
-    if (!ins) { print ""; print header; print ""; print section }
+    if (!ins) { print ""; print header; print ""; print ENVIRON["SECTION"] }
     if (!lnk) { print link }
-  }' CHANGELOG.md > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
+  }' CHANGELOG.md > CHANGELOG.md.tmp
+mv CHANGELOG.md.tmp CHANGELOG.md
 echo "  CHANGELOG.md (${LAST_TAG:-<no previous tag>}..HEAD)"
 
 if [[ -n "${RELEASE_DRY_RUN:-}" ]]; then

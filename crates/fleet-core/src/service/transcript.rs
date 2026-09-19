@@ -20,7 +20,7 @@ use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 /// Default / hard cap on the characters returned by `session_transcript`.
@@ -203,19 +203,23 @@ pub const CONV_READ_BYTES: usize = 1_048_576;
 
 /// One turn of a conversation: the human prompt that opened it and what the
 /// assistant said / did in reply.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ConvTurn {
     /// `None` for assistant output whose prompt lies before the read tail.
+    #[serde(default)]
     pub prompt: Option<String>,
     /// ISO timestamp of the prompt entry (else of the first assistant entry).
+    #[serde(default)]
     pub at: Option<String>,
     /// ISO timestamp of the turn's latest assistant entry: with `at`, how
     /// long the reply took so far. `None` for a turn with no assistant entry.
+    #[serde(default)]
     pub ended_at: Option<String>,
+    #[serde(default)]
     pub items: Vec<ConvItem>,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConvItem {
     Text {
@@ -230,7 +234,7 @@ pub enum ConvItem {
     },
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Conversation {
     pub turns: Vec<ConvTurn>,
     /// Older turns or items were dropped to fit the turn / char budget.
@@ -244,7 +248,7 @@ pub struct Conversation {
 /// The context size shown in the Conversation payload (spec §1.5), derived
 /// from a [`crate::service::context::ContextUsage`] read at the same time as
 /// the transcript tail.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ContextView {
     pub tokens: i64,
     pub window: i64,

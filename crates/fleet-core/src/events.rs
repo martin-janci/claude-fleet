@@ -28,7 +28,7 @@ pub enum RowChange {
     SessionCreated(SessionRow),
     SessionUpdated(SessionRow),
     SessionKilled(i64),
-    /// A timeline event was appended (migration 013/034). Carries the row.
+    /// A timeline event was appended (migration 013/036). Carries the row.
     SessionEventAdded(SessionEvent),
     /// A session's conversation list changed (opened / closed / reopened).
     /// Payload is the session id only; the UI refetches the small list.
@@ -289,6 +289,45 @@ pub struct BroadcastEventBus {
     tx: tokio::sync::broadcast::Sender<EventMessage>,
 }
 
+/// Every event name a [`RowChange`] renders to — the exact strings
+/// `src/lib/events.ts` `listen`s for.
+///
+/// Two callers need the whole set rather than one variant's name, and neither
+/// can enumerate `RowChange` (a variant's `name()` needs an instance, and the
+/// row-bearing variants cannot be built without a store row):
+///
+/// - the desktop's hub-client bridge, which must resolve a name that arrived
+///   over the network back to one of these `&'static str`s before emitting
+///   it, so an arbitrary string off the wire can never become a frontend
+///   event;
+/// - `frontend_declares_every_event_name`, which checks them against
+///   `events.ts`.
+///
+/// `every_row_change_variant_is_subscribable` holds this list to `RowChange`
+/// at COMPILE time: the match there is exhaustive, so a new variant does not
+/// build until it has an arm, and the arm's literal is const-checked against
+/// this list and [`EVENT_KINDS`].
+pub const EVENT_NAMES: [&str; 18] = [
+    "session:created",
+    "session:updated",
+    "session:killed",
+    "session:event",
+    "session:conversations",
+    "host:added",
+    "host:probed",
+    "host:removed",
+    "account:upserted",
+    "project:updated",
+    "worktree:updated",
+    "worktree:removed",
+    "task:updated",
+    "account_usage:updated",
+    "asset_inventory:updated",
+    "asset_inventory:cleared",
+    "catalog:loaded",
+    "sync:progress",
+];
+
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
@@ -430,34 +469,10 @@ impl EventBus for RecordingEventBus {
 mod tests {
     use super::*;
 
-    /// The frontend event names, in `src/lib/events.ts` `RowEvent` order.
-    /// These strings are what the frontend `listen`s to, so a rename on one
-    /// side without the other silently drops the event.
-    const FRONTEND_EVENT_NAMES: [&str; 18] = [
-        "session:created",
-        "session:updated",
-        "session:killed",
-        "session:event",
-        "session:conversations",
-        "host:added",
-        "host:probed",
-        "host:removed",
-        "account:upserted",
-        "project:updated",
-        "worktree:updated",
-        "worktree:removed",
-        "task:updated",
-        "account_usage:updated",
-        "asset_inventory:updated",
-        "asset_inventory:cleared",
-        "catalog:loaded",
-        "sync:progress",
-    ];
-
     #[test]
     fn frontend_declares_every_event_name() {
         let events_ts = include_str!("../../../src/lib/events.ts");
-        for name in FRONTEND_EVENT_NAMES {
+        for name in EVENT_NAMES {
             assert!(
                 events_ts.contains(&format!("'{name}'")),
                 "src/lib/events.ts does not declare {name}"
@@ -509,7 +524,7 @@ mod tests {
         ];
         for (change, expected) in &cases {
             assert_eq!(change.name(), *expected);
-            assert!(FRONTEND_EVENT_NAMES.contains(expected));
+            assert!(EVENT_NAMES.contains(expected));
         }
     }
 
@@ -543,12 +558,12 @@ mod tests {
         false
     }
 
-    /// True when `FRONTEND_EVENT_NAMES` contains `name` exactly.
+    /// True when `EVENT_NAMES` contains `name` exactly.
     const fn name_is_declared(name: &str) -> bool {
         let nb = name.as_bytes();
         let mut i = 0;
-        while i < FRONTEND_EVENT_NAMES.len() {
-            let fb = FRONTEND_EVENT_NAMES[i].as_bytes();
+        while i < EVENT_NAMES.len() {
+            let fb = EVENT_NAMES[i].as_bytes();
             if fb.len() == nb.len() {
                 let mut j = 0;
                 while j < nb.len() && fb[j] == nb[j] {
@@ -565,7 +580,7 @@ mod tests {
 
     /// An event name checked against both lists while the crate compiles.
     /// A name whose kind is not in [`EVENT_KINDS`] (it would be
-    /// unsubscribable on `/events`) or which `FRONTEND_EVENT_NAMES` does not
+    /// unsubscribable on `/events`) or which `EVENT_NAMES` does not
     /// declare fails const evaluation — a compile error, not a test failure.
     macro_rules! pinned_name {
         ($name:literal) => {{
@@ -576,7 +591,7 @@ mod tests {
                 );
                 assert!(
                     name_is_declared($name),
-                    "FRONTEND_EVENT_NAMES does not declare this event name"
+                    "EVENT_NAMES does not declare this event name"
                 );
                 $name
             };
@@ -587,7 +602,7 @@ mod tests {
     /// The compile-time pin for `/events` subscribability.
     ///
     /// `EVENT_KINDS` used to be cross-checked only against the hardcoded
-    /// `FRONTEND_EVENT_NAMES` fixture, never against `RowChange` itself: a new
+    /// `EVENT_NAMES` fixture, never against `RowChange` itself: a new
     /// variant added without touching that fixture compiled, passed the suite,
     /// and was silently unsubscribable (`?kinds=<its kind>` would be logged as
     /// unrecognised and drop every one of its events).
@@ -595,7 +610,7 @@ mod tests {
     /// The `match` below is exhaustive, so **a new variant does not compile**
     /// until it has an arm here; the arm's name is checked against both lists
     /// at compile time by `pinned_name!`. Adding a variant therefore forces
-    /// `EVENT_KINDS`, `FRONTEND_EVENT_NAMES` and `RowChange::name` into step
+    /// `EVENT_KINDS`, `EVENT_NAMES` and `RowChange::name` into step
     /// before anything builds.
     #[test]
     fn every_row_change_variant_is_subscribable() {
@@ -644,7 +659,7 @@ mod tests {
     /// every one of its events.
     #[test]
     fn event_kinds_cover_every_name() {
-        for name in FRONTEND_EVENT_NAMES {
+        for name in EVENT_NAMES {
             let kind = name.split_once(':').expect("every name has a kind").0;
             assert!(
                 EVENT_KINDS.contains(&kind),
@@ -653,7 +668,7 @@ mod tests {
         }
         for kind in EVENT_KINDS {
             assert!(
-                FRONTEND_EVENT_NAMES
+                EVENT_NAMES
                     .iter()
                     .any(|n| n.starts_with(&format!("{kind}:"))),
                 "EVENT_KINDS lists {kind}, which no event uses"
