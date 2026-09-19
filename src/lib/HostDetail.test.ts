@@ -279,6 +279,7 @@ function candidate(over: Partial<LostCandidate> = {}): LostCandidate {
     worktree_id: 7,
     existing_session_id: null,
     rank_hint: 'before_boot',
+    resumable: true,
     ...over,
   };
 }
@@ -312,6 +313,7 @@ describe('HostDetail find lost conversations', () => {
       derived_tmux_name: null,
       project_id: null,
       rank_hint: 'stale',
+      resumable: false,
     });
     mockedDiscover.mockResolvedValueOnce({ ok: true, value: [resumable, existing, noProject] });
     mount('mefistos');
@@ -327,6 +329,39 @@ describe('HostDetail find lost conversations', () => {
     expect(list.textContent).toContain('already in fleet');
     expect(list.textContent).toContain('no fleet project for this path');
     expect(screen.getAllByTestId('discover-resume')).toHaveLength(1);
+  });
+
+  it('a candidate in a project but not at a resumable path has no Resume and says why', async () => {
+    const subdir = candidate({
+      cwd: '/work/a/src',
+      claude_session_id: 'cs-sub',
+      derived_tmux_name: null,
+      worktree_id: null,
+      resumable: false,
+    });
+    mockedDiscover.mockResolvedValueOnce({ ok: true, value: [subdir] });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+
+    const list = screen.getByTestId('discover-list');
+    expect(list.textContent).toContain('path is not a fleet worktree');
+    expect(list.textContent).not.toContain('no fleet project for this path');
+    expect(screen.queryByTestId('discover-resume')).toBeNull();
+  });
+
+  it('never offers Resume for a non-resumable candidate even if a name is present', async () => {
+    // Defence in depth: `resumable` is the gate, not the presence of a name.
+    mockedDiscover.mockResolvedValueOnce({
+      ok: true,
+      value: [candidate({ claude_session_id: 'cs-x', resumable: false })],
+    });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+
+    expect(screen.queryByTestId('discover-resume')).toBeNull();
+    expect(screen.getByTestId('discover-list').textContent).toContain('path is not a fleet worktree');
   });
 
   it('Resume calls newSessionAbortable with the exact args, including resume_claude_session_id', async () => {

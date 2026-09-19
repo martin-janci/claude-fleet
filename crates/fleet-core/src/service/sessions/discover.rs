@@ -12,6 +12,7 @@ use super::*;
 #[cfg(test)]
 use crate::ipc_error::codes;
 use crate::ipc_error::lock;
+use crate::store::WorktreeRow;
 use serde::Serialize;
 
 /// One transcript found by [`crate::tmux::discover_transcripts_script`]:
@@ -141,6 +142,15 @@ pub struct LostCandidate {
     pub worktree_id: Option<i64>,
     pub existing_session_id: Option<i64>,
     pub rank_hint: String,
+    /// `new_session { project_id, worktree_id, resume_claude_session_id }`
+    /// would start its pane in exactly `cwd` — the only case where
+    /// `claude --resume` finds the transcript (Claude keys transcripts by the
+    /// cwd). `false` for a subdirectory of a checkout, an unregistered linked
+    /// worktree, or a cwd outside any fleet project: resuming there would
+    /// start a fresh, empty conversation under the same id in the wrong
+    /// directory. `derived_tmux_name` is only set when this is `true`.
+    #[serde(default)]
+    pub resumable: bool,
 }
 
 /// `rank_hint` for one transcript's mtime against the host's boot epoch:
@@ -211,6 +221,7 @@ pub fn rank_candidates(boot: Option<i64>, probes: Vec<TranscriptProbe>) -> Vec<L
             worktree_id: None,
             existing_session_id: None,
             rank_hint: rank_hint_for(boot, p.mtime).to_string(),
+            resumable: false,
         })
         .collect();
 
@@ -264,6 +275,55 @@ pub(crate) fn derive_tmux_name(owner: &str, repo: &str, worktree_key: &str) -> S
     })
 }
 
+/// Where `new_session` would start a resumed pane for a candidate in project
+/// `project`, as `(worktree_id to pass, worktree key for [`derive_tmux_name`])`
+/// — but only when that directory is exactly `cwd`, since `claude --resume`
+/// only finds a transcript under the cwd it was recorded in (a mismatch makes
+/// the pane command's `|| claude --session-id` fallback silently start a new,
+/// empty conversation under the same id, in the wrong directory).
+///
+/// Mirrors `new_session_inner`'s cwd resolution:
+/// - a worktree row on this host whose `path` is `cwd`: `local` starts in the
+///   row's path, a remote host in the row's path for a non-`main` row;
+/// - otherwise the project root: `local` uses the project's `base_path`; a
+///   remote host uses `<projects root>/<owner>/<repo>` (per the host's
+///   `projects.*` settings, the same ones [`HostPaths`] captures), so `cwd`
+///   must sit exactly at the repo directory under the host's root.
+///
+/// Anything else — a subdirectory, an unregistered `.claude/worktrees/<x>`
+/// checkout, a cwd only the github.com regex fallback placed — is `None`.
+fn resume_target(
+    host_alias: &str,
+    cwd: &str,
+    project: &ProjectRow,
+    worktrees: &[WorktreeRow],
+    paths: &HostPaths,
+) -> Option<(Option<i64>, String)> {
+    let row = worktrees
+        .iter()
+        .find(|w| w.path == cwd && w.project_id == project.id);
+    let key_of = |w: &WorktreeRow| {
+        if w.name == "main" {
+            "main".to_string()
+        } else {
+            w.name.clone()
+        }
+    };
+    if host_alias == "local" {
+        if let Some(w) = row {
+            return Some((Some(w.id), key_of(w)));
+        }
+        return (project.base_path == cwd).then(|| (None, "main".to_string()));
+    }
+    if let Some(w) = row.filter(|w| w.name != "main") {
+        return Some((Some(w.id), key_of(w)));
+    }
+    // Remote project root (a `main` row, or no row at all).
+    let (owner, repo, remainder) = paths.locate(cwd)?;
+    let same_repo = repo == project.repo && owner.is_none_or(|o| o == project.owner);
+    (same_repo && remainder.is_empty()).then(|| (row.map(|w| w.id), "main".to_string()))
+}
+
 /// Run [`crate::tmux::discover_transcripts_script`] on `host_alias` via
 /// `shell`, parse + rank its output ([`parse_discover_output`],
 /// [`rank_candidates`]), then enrich each candidate from the store under one
@@ -271,9 +331,9 @@ pub(crate) fn derive_tmux_name(owner: &str, repo: &str, worktree_key: &str) -> S
 /// `.await`): `existing_session_id` (a row — live or lost — on this host
 /// whose `claude_session_id` matches), `project_id`
 /// (`find_project_id_for_path`), `worktree_id` (the worktree row on this
-/// host whose `path` equals the candidate's `cwd`, if any), and
-/// `derived_tmux_name` (via [`derive_tmux_name`], only once `project_id` is
-/// known — an orphan cwd with no project gets no name to restore into).
+/// host whose `path` equals the candidate's `cwd`, if any), and — only when
+/// [`resume_target`] says `new_session` would start in exactly that `cwd` —
+/// `resumable: true` plus `derived_tmux_name` (via [`derive_tmux_name`]).
 /// Mutates nothing. The test seam: production wires this to a real host via
 /// [`discover_lost_sessions`]; tests inject a fake [`HostShell`].
 pub(crate) async fn discover_lost_sessions_with(
@@ -314,18 +374,25 @@ pub(crate) async fn discover_lost_sessions_with(
             &paths,
         );
         c.worktree_id = worktrees.iter().find(|w| w.path == c.cwd).map(|w| w.id);
-        c.derived_tmux_name = c.project_id.and_then(|pid| {
-            let (owner, repo) = fetch_owner_repo(&s, pid).ok()?;
-            let worktree_key = worktree_key_for_host(&c.cwd, &paths)?;
-            Some(derive_tmux_name(&owner, &repo, &worktree_key))
-        });
+        let target = c
+            .project_id
+            .and_then(|pid| projects.iter().find(|p| p.id == pid))
+            .and_then(|p| {
+                resume_target(&args.host_alias, &c.cwd, p, &worktrees, &paths)
+                    .map(|(wid, key)| (wid, derive_tmux_name(&p.owner, &p.repo, &key)))
+            });
+        if let Some((wid, name)) = target {
+            c.resumable = true;
+            c.worktree_id = wid;
+            c.derived_tmux_name = Some(name);
+        }
     }
     Ok(candidates)
 }
 
 /// Discover a host's lost-but-resumable Claude sessions: scans
-/// `~/.claude/projects` on the host for transcripts fleet has no row for
-/// (e.g. after a reboot before this fleet version) and ranks/enriches them —
+/// `~/.claude/projects` on the host for recent transcripts (flagging any a
+/// fleet row already holds via `existing_session_id`) and ranks/enriches them —
 /// see [`discover_lost_sessions_with`]. Read-only.
 pub async fn discover_lost_sessions(
     args: DiscoverLostSessionsArgs,
@@ -636,6 +703,7 @@ mod tests {
         assert_eq!(c.project_id, Some(pid));
         assert_eq!(c.worktree_id, Some(wid));
         assert_eq!(c.derived_tmux_name.as_deref(), Some("dev-o-r--feat"));
+        assert!(c.resumable, "a registered worktree path is resumable");
         assert_eq!(c.existing_session_id, Some(existing));
 
         // Read-only: the store's session rows and event count survive
@@ -647,6 +715,97 @@ mod tests {
             before_events, after_events,
             "discover must not insert events"
         );
+    }
+
+    /// Run discovery on `host` over one transcript per `cwds` entry (distinct
+    /// ids, newest first) and return the candidates keyed by cwd.
+    async fn discover_cwds(
+        store: &Mutex<Store>,
+        host: &str,
+        cwds: &[&str],
+    ) -> std::collections::HashMap<String, LostCandidate> {
+        let mut stdout = String::from("bootsec=1000\n");
+        for (i, cwd) in cwds.iter().enumerate() {
+            let id = format!("{:08x}-1111-1111-1111-111111111111", i + 1);
+            stdout.push_str(&format!(
+                "@@F\t{}\t{id}\n@@L\t{{\"cwd\":\"{cwd}\"}}\n",
+                2000 + i
+            ));
+        }
+        let shell = CannedDiscoverShell { stdout };
+        discover_lost_sessions_with(
+            DiscoverLostSessionsArgs {
+                host_alias: host.to_string(),
+                limit: None,
+            },
+            store,
+            &shell,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.cwd.clone(), c))
+        .collect()
+    }
+
+    /// Only a cwd `new_session` would start the pane in EXACTLY is offered
+    /// for resume: `claude --resume` looks the transcript up by cwd, and a
+    /// miss silently starts a new empty conversation under the same id.
+    #[tokio::test]
+    async fn only_a_cwd_new_session_starts_in_exactly_is_resumable_on_a_remote_host() {
+        let root = "/home/x/projects/github.com/o/r";
+        let registered = format!("{root}/.worktrees/feat");
+        let unregistered = format!("{root}/.claude/worktrees/x");
+        let subdir = format!("{root}/src/lib");
+        let s = Store::open_in_memory().expect("open");
+        s.upsert_host("h").unwrap();
+        let pid = s.upsert_project("o", "r", "/local/o/r").unwrap();
+        let wid = s
+            .upsert_worktree_on("h", pid, "feat", &registered, Some("feat"))
+            .unwrap();
+        let store = Mutex::new(s);
+
+        let by_cwd = discover_cwds(&store, "h", &[root, &registered, &unregistered, &subdir]).await;
+
+        let root_c = &by_cwd[root];
+        assert!(root_c.resumable, "{root_c:?}");
+        assert_eq!(root_c.worktree_id, None);
+        assert_eq!(root_c.derived_tmux_name.as_deref(), Some("dev-o-r"));
+
+        let reg = &by_cwd[registered.as_str()];
+        assert!(reg.resumable, "{reg:?}");
+        assert_eq!(reg.worktree_id, Some(wid));
+        assert_eq!(reg.derived_tmux_name.as_deref(), Some("dev-o-r--feat"));
+
+        for cwd in [&unregistered, &subdir] {
+            let c = &by_cwd[cwd.as_str()];
+            assert_eq!(c.project_id, Some(pid), "still inside the project: {c:?}");
+            assert!(!c.resumable, "{cwd} is not where new_session starts: {c:?}");
+            assert_eq!(c.derived_tmux_name, None, "{c:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn local_project_root_is_resumable_and_a_local_subdirectory_is_not() {
+        let base = "/base/o/r";
+        let subdir = "/base/o/r/src";
+        let s = Store::open_in_memory().expect("open");
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", base).unwrap();
+        let store = Mutex::new(s);
+
+        let by_cwd = discover_cwds(&store, "local", &[base, subdir]).await;
+
+        let root_c = &by_cwd[base];
+        assert_eq!(root_c.project_id, Some(pid));
+        assert!(root_c.resumable, "{root_c:?}");
+        assert_eq!(root_c.worktree_id, None);
+        assert_eq!(root_c.derived_tmux_name.as_deref(), Some("dev-o-r"));
+
+        let sub = &by_cwd[subdir];
+        assert_eq!(sub.project_id, Some(pid));
+        assert!(!sub.resumable, "{sub:?}");
+        assert_eq!(sub.derived_tmux_name, None);
     }
 
     #[tokio::test]

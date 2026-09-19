@@ -189,6 +189,7 @@ describe('sessions store', () => {
         worktree_id: 2,
         existing_session_id: null,
         rank_hint: 'before_boot',
+        resumable: true,
       },
     ];
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(candidates); // discover_lost_sessions

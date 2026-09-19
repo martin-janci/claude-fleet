@@ -132,7 +132,7 @@
   }
 
   async function onResumeCandidate(c: LostCandidate) {
-    if (c.project_id === null || c.derived_tmux_name === null) return;
+    if (!c.resumable || c.project_id === null || c.derived_tmux_name === null) return;
     const { [c.claude_session_id]: _dropped, ...rest } = resumeErrors;
     resumeErrors = rest;
     resumingId = c.claude_session_id;
@@ -365,7 +365,7 @@
                   <span class="muted">already in fleet</span>
                 {:else if resumedIds.has(c.claude_session_id)}
                   <span class="muted">resumed</span>
-                {:else if c.project_id !== null && c.derived_tmux_name !== null}
+                {:else if c.resumable && c.project_id !== null && c.derived_tmux_name !== null}
                   <button
                     type="button"
                     class="small"
@@ -377,6 +377,8 @@
                   {#if resumeErrors[c.claude_session_id]}
                     <p class="error" data-testid="discover-item-error">{resumeErrors[c.claude_session_id]}</p>
                   {/if}
+                {:else if c.project_id !== null}
+                  <span class="muted" title="Resume starts Claude in the project root or a registered worktree; this conversation ran elsewhere, so resuming would start a new, empty one">path is not a fleet worktree</span>
                 {:else}
                   <span class="muted">no fleet project for this path</span>
                 {/if}

@@ -216,8 +216,8 @@ pub async fn restore_host_sessions(
     routed::restore_host_sessions(&backend, args, &store, &ssh).await
 }
 
-/// Scan a host's Claude transcripts for lost sessions fleet has no row for
-/// and rank/enrich them. Read-only. Logic lives in `service::sessions::discover`.
+/// Scan a host's Claude transcripts for lost conversations (rows that already
+/// hold one are flagged via `existing_session_id`) and rank/enrich them. Read-only. Logic lives in `service::sessions::discover`.
 #[tauri::command]
 pub async fn discover_lost_sessions(
     args: DiscoverLostSessionsArgs,
