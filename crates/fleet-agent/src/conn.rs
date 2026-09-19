@@ -22,12 +22,13 @@
 
 use crate::exec::{self, ExecRequest, SeenIds};
 use fleet_proto::{
-    decode_b64, decode_hub_frame, encode_agent_frame, encode_agent_frame_within, encode_b64,
-    result_budget, result_stream_limits, AgentFrame, HubFrame, HEARTBEAT, MAX_FRAME_BYTES,
+    decode_b64, decode_hub_frame_lenient, encode_agent_frame, encode_agent_frame_within,
+    encode_b64, judge_proto, result_budget, result_stream_limits, AgentFrame, Decoded, HubFrame,
+    HEARTBEAT, MAX_FRAME_BYTES, VERSION_REFUSED_CLOSE_CODE,
 };
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -435,6 +436,13 @@ pub enum SessionEnd {
     HubSilent,
     /// The hub sent something that is not a hub frame; the agent closed it.
     Protocol(String),
+    /// Either side's protocol version was out of the other's range — the
+    /// hub's close carried [`fleet_proto::VERSION_REFUSED_CLOSE_CODE`], or
+    /// this agent found the hub's own `welcome.proto` out of ITS range and
+    /// closed first. `run_with` reads this to back off at the maximum
+    /// interval instead of the normal growing sequence: nothing on either
+    /// end fixes itself by retrying sooner.
+    VersionRefused(String),
 }
 
 impl std::fmt::Display for SessionEnd {
@@ -443,6 +451,7 @@ impl std::fmt::Display for SessionEnd {
             Self::Closed(why) => write!(f, "connection closed: {why}"),
             Self::HubSilent => write!(f, "nothing from the hub for {SILENT_BEATS} heartbeats"),
             Self::Protocol(why) => write!(f, "the hub broke the protocol: {why}"),
+            Self::VersionRefused(why) => write!(f, "protocol version refused: {why}"),
         }
     }
 }
@@ -459,8 +468,8 @@ pub struct Served {
 /// What the writer task sends.
 enum Out {
     Frame(String),
-    /// Close the socket with this reason, and stop.
-    Close(String),
+    /// Close the socket with this code and reason, and stop.
+    Close(CloseCode, String),
 }
 
 /// Each in-flight `exec`'s cancel handle. Removing an entry and firing it,
@@ -482,8 +491,9 @@ where
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
         host_name: host_name(),
         os: std::env::consts::OS.to_string(),
+        proto: fleet_proto::PROTO_VERSION,
     };
-    let hello = encode_agent_frame(&hello).expect("a hello is three short strings");
+    let hello = encode_agent_frame(&hello).expect("a hello is three short strings and a number");
     if let Err(e) = sink.send(Message::Text(hello.into())).await {
         return Served {
             end: SessionEnd::Closed(format!("before hello: {e}")),
@@ -498,6 +508,10 @@ where
     let mut missed = 0;
     let mut heard = false;
     let mut heard_any = false;
+    // Kinds already warned about on this connection: a hub that sends many
+    // frames of a kind this build does not know floods the log once, not
+    // once per frame.
+    let mut warned_kinds: HashSet<String> = HashSet::new();
 
     let end = loop {
         tokio::select! {
@@ -513,14 +527,37 @@ where
                 heard = true;
                 heard_any = true;
                 match msg {
-                    Message::Text(text) => match decode_hub_frame(&text) {
-                        Ok(frame) => handle(frame, agent, &out, &inflight),
+                    // Lenient: an unknown `kind` is skipped, not fatal — see
+                    // the crate doc. `welcome` is judged here, not in
+                    // `handle`, because a refusal has to END this loop, which
+                    // a plain function cannot do.
+                    Message::Text(text) => match decode_hub_frame_lenient(&text) {
+                        Ok(Decoded::Frame(HubFrame::Welcome { hub_version, proto })) => {
+                            if let Some(reason) =
+                                judge_proto(proto).refusal_reason("fleet-agent", "the hub")
+                            {
+                                let _ = out.send(Out::Close(
+                                    CloseCode::from(VERSION_REFUSED_CLOSE_CODE),
+                                    reason.clone(),
+                                ));
+                                break SessionEnd::VersionRefused(reason);
+                            }
+                            tracing::info!(
+                                hub_version, proto, "[agent] hub protocol compatible"
+                            );
+                        }
+                        Ok(Decoded::Frame(frame)) => handle(frame, agent, &out, &inflight),
+                        Ok(Decoded::Unknown { kind }) => {
+                            if warned_kinds.insert(kind.clone()) {
+                                tracing::warn!(kind, "[agent] unknown frame kind; skipping");
+                            }
+                        }
                         Err(e) => break SessionEnd::Protocol(e.to_string()),
                     },
                     Message::Binary(_) => {
                         break SessionEnd::Protocol("a binary frame on a text protocol".into())
                     }
-                    Message::Close(_) => break SessionEnd::Closed("the hub closed it".into()),
+                    Message::Close(frame) => break close_end(frame),
                     Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
                 }
             }
@@ -542,8 +579,12 @@ where
     inflight.lock().unwrap_or_else(|e| e.into_inner()).clear();
     match &end {
         SessionEnd::Closed(_) => writer.abort(),
-        SessionEnd::HubSilent | SessionEnd::Protocol(_) => {
-            let _ = out.send(Out::Close(end.to_string()));
+        SessionEnd::HubSilent | SessionEnd::Protocol(_) | SessionEnd::VersionRefused(_) => {
+            let code = match &end {
+                SessionEnd::VersionRefused(_) => CloseCode::from(VERSION_REFUSED_CLOSE_CODE),
+                _ => CloseCode::Policy,
+            };
+            let _ = out.send(Out::Close(code, end.to_string()));
             // Bounded: a hub that stopped reading must not hold this here.
             if tokio::time::timeout(Duration::from_secs(5), &mut writer)
                 .await
@@ -554,6 +595,20 @@ where
         }
     }
     Served { end, heard_any }
+}
+
+/// What a WebSocket close means for this connection: a version refusal (the
+/// hub's [`VERSION_REFUSED_CLOSE_CODE`]) is told apart from every other
+/// close by its CODE, never by parsing the reason text — the reason is
+/// carried through either way, for the log line.
+fn close_end(frame: Option<CloseFrame>) -> SessionEnd {
+    match frame {
+        Some(f) if u16::from(f.code) == VERSION_REFUSED_CLOSE_CODE => {
+            SessionEnd::VersionRefused(f.reason.to_string())
+        }
+        Some(f) if !f.reason.is_empty() => SessionEnd::Closed(f.reason.to_string()),
+        _ => SessionEnd::Closed("the hub closed it".into()),
+    }
 }
 
 async fn write_loop<S>(
@@ -569,14 +624,14 @@ async fn write_loop<S>(
                     return;
                 }
             }
-            Out::Close(reason) => {
+            Out::Close(code, reason) => {
                 // A close reason is at most 123 bytes on the wire.
                 let mut reason = reason;
                 while reason.len() > 123 {
                     reason.pop();
                 }
                 let frame = CloseFrame {
-                    code: CloseCode::Policy,
+                    code,
                     reason: reason.into(),
                 };
                 let _ = sink.send(Message::Close(Some(frame))).await;
@@ -611,6 +666,12 @@ fn handle(
                 let _ = cancel.send(());
             }
         }
+        // Judged, and acted on, at the loop level in `serve` — the ONLY
+        // frame that can end the connection, which this function has no way
+        // to do. Reaching here at all means the version was already found
+        // compatible (or this is an unexpected second `welcome`, which is
+        // not a command either way): nothing to do.
+        HubFrame::Welcome { .. } => {}
         HubFrame::Exec {
             id,
             argv,
@@ -794,6 +855,19 @@ impl Backoff {
     pub fn reset(&mut self) {
         self.attempt = 0;
     }
+
+    /// Jump straight to [`BACKOFF_CAP`] — for a version refusal, where
+    /// retrying sooner cannot help: only a hub upgrade (or an agent one)
+    /// fixes it, and the agent should be reachable for that without
+    /// hammering a hub that has already said no. Every following delay
+    /// (`next`'s `attempt` only ever grows) stays at the cap too, until an
+    /// ordinary reconnect calls [`Backoff::reset`].
+    pub fn force_max(&mut self) {
+        // Whatever step makes `next`'s `1u32 << attempt.min(16)` overflow
+        // `BACKOFF_CAP` on its own; `next` still clamps with `.min`, so this
+        // only has to be big enough, not exact.
+        self.attempt = self.attempt.max(6);
+    }
 }
 
 /// A number in `[0, 1)` that differs between processes and between calls:
@@ -909,20 +983,32 @@ where
     let mut backoff = Backoff::default();
     loop {
         notifier.status(&format!("connecting to {url}"));
-        let why = match dialer.dial().await {
+        let (why, version_refused) = match dialer.dial().await {
             Ok(ws) => {
                 tracing::info!(hub = %url, "[agent] connected");
                 notifier.status(&format!("{CONNECTED} {url} since {}", now_utc()));
                 let served = serve(ws, agent, beats()).await;
-                if served.heard_any {
+                let version_refused = matches!(served.end, SessionEnd::VersionRefused(_));
+                if served.heard_any && !version_refused {
                     backoff.reset();
                 }
-                served.end.to_string()
+                (served.end.to_string(), version_refused)
             }
-            Err(e) => e.to_string(),
+            Err(e) => (e.to_string(), false),
         };
+        if version_refused {
+            // Not the normal growing sequence from the start: a version
+            // mismatch does not heal by retrying sooner, only by a hub (or
+            // agent) upgrade, so jump straight to the slowest interval and
+            // stay there — quietly enough not to spam, but still reachable
+            // once the fix lands.
+            backoff.force_max();
+            tracing::error!(hub = %url, "[agent] {why}");
+        }
         let delay = backoff.next(jitter());
-        tracing::warn!(hub = %url, "[agent] {why}; dialling again in {:.1}s", delay.as_secs_f64());
+        if !version_refused {
+            tracing::warn!(hub = %url, "[agent] {why}; dialling again in {:.1}s", delay.as_secs_f64());
+        }
         notifier.status(&format!(
             "reconnecting in {}s: {why}",
             delay.as_secs_f64().ceil()
@@ -1310,12 +1396,14 @@ mod tests {
                     agent_version,
                     host_name,
                     os,
+                    proto,
                 },
                 _,
             )) => {
                 assert_eq!(agent_version, env!("CARGO_PKG_VERSION"));
                 assert!(!host_name.is_empty());
                 assert_eq!(os, std::env::consts::OS);
+                assert_eq!(proto, fleet_proto::PROTO_VERSION);
             }
             other => panic!("expected hello, got {other:?}"),
         }
@@ -1504,11 +1592,36 @@ mod tests {
         assert!(!err.is_empty());
     }
 
+    /// Once past the handshake, a `kind` this build does not know is
+    /// skipped, not fatal — the connection stays open, and the NEXT, real
+    /// frame is still answered.
     #[tokio::test]
-    async fn a_frame_that_is_not_a_hub_frame_closes_the_connection() {
+    async fn an_unknown_kind_is_skipped_not_fatal() {
         let mut p = pair().await;
         p.hub
             .send(Message::Text(r#"{"kind":"launch_missiles"}"#.into()))
+            .await
+            .unwrap();
+        send(
+            &mut p.hub,
+            &HubFrame::Ping {
+                id: "still-alive".into(),
+            },
+        )
+        .await;
+        match next_frame(&mut p.hub).await {
+            Some((AgentFrame::Pong { id }, _)) => assert_eq!(id, "still-alive"),
+            other => panic!("expected a pong after the unknown frame, got {other:?}"),
+        }
+    }
+
+    /// A `kind` the agent DOES know, but whose body will not parse, is
+    /// corruption, not evolution: it still closes the connection.
+    #[tokio::test]
+    async fn a_known_kind_that_will_not_parse_still_closes_the_connection() {
+        let mut p = pair().await;
+        p.hub
+            .send(Message::Text(r#"{"kind":"exec","id":"1"}"#.into()))
             .await
             .unwrap();
         assert!(
@@ -1713,6 +1826,174 @@ mod tests {
         assert!(
             d[3] >= BACKOFF_BASE * 2 && d[3] <= BACKOFF_BASE * 4,
             "{d:?}"
+        );
+    }
+
+    #[test]
+    fn force_max_jumps_straight_to_the_cap_and_stays_there() {
+        let mut b = Backoff::default();
+        b.force_max();
+        // Same shape as `the_backoff_doubles_to_its_cap...` above: `next`
+        // always returns a point in the upper half of the CURRENT step, so
+        // jitter 0.0 is the step's floor and ~1.0 is its ceiling.
+        let low = b.next(0.0);
+        b.attempt -= 1; // a fresh attempt at the same (already capped) step
+        let high = b.next(0.999_999);
+        assert_eq!(
+            low,
+            BACKOFF_CAP / 2,
+            "the step is already the cap's: {low:?}"
+        );
+        assert!(
+            high <= BACKOFF_CAP && high > BACKOFF_CAP * 9 / 10,
+            "{high:?}"
+        );
+        // And the step stays at the cap on the NEXT call too, with no reset.
+        assert_eq!(b.next(0.0), BACKOFF_CAP / 2);
+    }
+
+    /// A hub whose `welcome.proto` this agent's window refuses: the agent
+    /// closes the connection ITSELF, with the version-refused code and a
+    /// reason naming which side to update — never the normal
+    /// `SessionEnd::Closed`.
+    #[tokio::test]
+    async fn an_incompatible_hub_is_refused_by_the_agent_with_the_version_code() {
+        let mut p = pair().await;
+        p.hub
+            .send(Message::Text(
+                encode_hub_frame(&HubFrame::Welcome {
+                    hub_version: "0.1.0".into(),
+                    proto: 0,
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        match tokio::time::timeout(PATIENCE, p.hub.next())
+            .await
+            .expect("a close in time")
+        {
+            Some(Ok(Message::Close(Some(frame)))) => {
+                assert_eq!(u16::from(frame.code), VERSION_REFUSED_CLOSE_CODE);
+                let reason = frame.reason.to_string();
+                assert!(reason.contains("update the hub"), "{reason}");
+            }
+            other => panic!("expected a version-refused close, got {other:?}"),
+        }
+        let served = tokio::time::timeout(PATIENCE, p.served)
+            .await
+            .unwrap()
+            .unwrap();
+        match served.end {
+            SessionEnd::VersionRefused(reason) => {
+                assert!(reason.contains("update the hub"), "{reason}");
+            }
+            other => panic!("expected VersionRefused, got {other:?}"),
+        }
+    }
+
+    /// The hub side of a version refusal: a close carrying
+    /// `VERSION_REFUSED_CLOSE_CODE` is read back as `SessionEnd::VersionRefused`
+    /// with its reason, not the generic `Closed`.
+    #[tokio::test]
+    async fn a_close_carrying_the_version_code_is_read_as_a_version_refusal() {
+        let mut p = pair().await;
+        let frame = CloseFrame {
+            code: CloseCode::from(VERSION_REFUSED_CLOSE_CODE),
+            reason: "fleet-agent speaks protocol v1; the hub needs at least v2 — update \
+                     fleet-agent"
+                .into(),
+        };
+        p.hub.send(Message::Close(Some(frame))).await.unwrap();
+        let served = tokio::time::timeout(PATIENCE, p.served)
+            .await
+            .unwrap()
+            .unwrap();
+        match served.end {
+            SessionEnd::VersionRefused(reason) => {
+                assert!(reason.contains("update fleet-agent"), "{reason}");
+            }
+            other => panic!("expected VersionRefused, got {other:?}"),
+        }
+    }
+
+    /// End to end through `run_with`: a version refusal forces the maximum
+    /// backoff on the very next delay — not the normal growing sequence —
+    /// and stays there on a following ordinary refusal too.
+    #[tokio::test]
+    async fn a_version_refusal_forces_the_maximum_backoff() {
+        let fake = FakeHub::new().await;
+        let dialer = fake.dialer();
+        let agent = Agent::new(None, 1);
+        let delays = Arc::new(Mutex::new(Vec::<Duration>::new()));
+        let record = Arc::clone(&delays);
+        let (beat_keep, _) = mpsc::unbounded_channel::<oneshot::Sender<bool>>();
+        let run = tokio::spawn(async move {
+            let notifier = Notifier::at(None);
+            run_with(
+                &dialer,
+                &agent,
+                &notifier,
+                || {
+                    // Never fed: the connection only ends when the hub ends it.
+                    let (_tx, rx) = mpsc::unbounded_channel();
+                    std::mem::forget(_tx);
+                    Beats::Manual(rx)
+                },
+                move |d| {
+                    record.lock().unwrap().push(d);
+                    std::future::ready(())
+                },
+            )
+            .await
+        });
+
+        let (mut ws, _) = fake.accept().await;
+        assert!(matches!(
+            next_frame(&mut ws).await,
+            Some((AgentFrame::Hello { .. }, _))
+        ));
+        send(
+            &mut ws,
+            &HubFrame::Welcome {
+                hub_version: "0.1.0".into(),
+                proto: 0,
+            },
+        )
+        .await;
+        // Read the agent's own close, so we know this session has fully
+        // ended — and the delay for it recorded — before checking anything.
+        match tokio::time::timeout(PATIENCE, ws.next()).await {
+            Ok(Some(Ok(Message::Close(_)))) => {}
+            other => panic!("expected the agent to close on the bad version, got {other:?}"),
+        }
+        drop(ws);
+
+        // An ordinary refusal right after: with no version refusal, this
+        // would still be the FIRST step of the growing backoff.
+        fake.refuse(401, "irrelevant").await;
+        // One more dial-and-hello round, the same synchronisation the
+        // growing-backoff test above uses: it guarantees the refusal's own
+        // delay was already recorded before `run.abort()`.
+        let (mut ws2, _) = fake.accept().await;
+        assert!(matches!(
+            next_frame(&mut ws2).await,
+            Some((AgentFrame::Hello { .. }, _))
+        ));
+
+        run.abort();
+        drop(beat_keep);
+
+        let d = delays.lock().unwrap().clone();
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert!(
+            d[0] >= BACKOFF_CAP / 2 && d[0] <= BACKOFF_CAP,
+            "the version refusal forces the max: {d:?}"
+        );
+        assert!(
+            d[1] >= BACKOFF_CAP / 2 && d[1] <= BACKOFF_CAP,
+            "and it stays there: {d:?}"
         );
     }
 
