@@ -39,6 +39,8 @@
 //! step (git inspection, transcript copy, target verification) goes through
 //! `&dyn SshExec`, so the whole flow runs end-to-end over `FakeSsh` in tests.
 
+pub mod carry;
+
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::safe_kill::{parse_porcelain, DirtyFile};
