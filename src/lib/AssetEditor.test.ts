@@ -293,4 +293,62 @@ describe('AssetEditor', () => {
     await fireEvent.input(screen.getByTestId('editor-version'), { target: { value: '1' } });
     expect(screen.getByTestId('editor-save')).toBeDisabled();
   });
+
+  it('renders the install_as input for a skill, prefilled with the current value, and Save sends the edit', async () => {
+    byCmd({
+      catalog_lint_asset: { errors: [], warnings: [] },
+      catalog_update_asset: { commit: 'sha-ia', lint: { errors: [], warnings: [] } },
+    });
+    render(AssetEditor, { asset: skillAsset({ install_as: 'foo_bar' }), onsaved: () => {}, oncancel: () => {} });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_lint_asset', { args: { kind: 'skill', name: 'worktree' } }));
+
+    expect((screen.getByTestId('editor-install-as') as HTMLInputElement).value).toBe('foo_bar');
+    await fireEvent.input(screen.getByTestId('editor-install-as'), { target: { value: 'baz_qux' } });
+    expect(screen.getByTestId('editor-save')).not.toBeDisabled();
+    await fireEvent.click(screen.getByTestId('editor-save'));
+
+    const call = await vi.waitUntil(() => invoke.mock.calls.find((c) => c[0] === 'catalog_update_asset'));
+    const asset = (call![1] as { args: { asset: EditableAsset } }).args.asset;
+    expect(asset.install_as).toBe('baz_qux');
+  });
+
+  it('clearing install_as sends the key absent/null, not an empty string', async () => {
+    byCmd({
+      catalog_lint_asset: { errors: [], warnings: [] },
+      catalog_update_asset: { commit: 'sha-ia2', lint: { errors: [], warnings: [] } },
+    });
+    render(AssetEditor, { asset: skillAsset({ install_as: 'foo_bar' }), onsaved: () => {}, oncancel: () => {} });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_lint_asset', { args: { kind: 'skill', name: 'worktree' } }));
+
+    await fireEvent.input(screen.getByTestId('editor-install-as'), { target: { value: '' } });
+    await fireEvent.click(screen.getByTestId('editor-save'));
+
+    const call = await vi.waitUntil(() => invoke.mock.calls.find((c) => c[0] === 'catalog_update_asset'));
+    const asset = (call![1] as { args: { asset: EditableAsset } }).args.asset;
+    // Either an absent key or an explicit null satisfies "unset" on the
+    // Rust side (`Option<String>` with `#[serde(default)]`).
+    expect([undefined, null]).toContainEqual(asset.install_as);
+  });
+
+  it('rejects an install_as value with an invalid character and blocks Save', async () => {
+    byCmd({ catalog_lint_asset: { errors: [], warnings: [] } });
+    render(AssetEditor, { asset: skillAsset(), onsaved: () => {}, oncancel: () => {} });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_lint_asset', { args: { kind: 'skill', name: 'worktree' } }));
+
+    await fireEvent.input(screen.getByTestId('editor-install-as'), { target: { value: 'bad name' } });
+    expect(screen.getByTestId('editor-save')).toBeDisabled();
+    expect(screen.getByTestId('editor-client-errors').textContent).toContain('install_as');
+
+    await fireEvent.input(screen.getByTestId('editor-install-as'), { target: { value: '..' } });
+    expect(screen.getByTestId('editor-save')).toBeDisabled();
+    expect(screen.getByTestId('editor-client-errors').textContent).toContain('install_as');
+  });
+
+  it('does not render the install_as input for a hook', async () => {
+    byCmd({ catalog_lint_asset: { errors: [], warnings: [] } });
+    render(AssetEditor, { asset: hookAsset(), onsaved: () => {}, oncancel: () => {} });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_lint_asset', { args: { kind: 'hook', name: 'on-stop' } }));
+
+    expect(screen.queryByTestId('editor-install-as')).toBeNull();
+  });
 });
