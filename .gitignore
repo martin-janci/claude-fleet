@@ -23,3 +23,6 @@ vite.config.ts.timestamp-*
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# reticle's scratch directory (an MCP tool's local state, not project content).
+.reticle/
