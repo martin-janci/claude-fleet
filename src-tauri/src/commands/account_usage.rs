@@ -32,11 +32,7 @@ pub fn list_account_usage(
     store: State<'_, Arc<Mutex<Store>>>,
     cache: State<'_, Arc<Mutex<UsageCache>>>,
 ) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
-    backend.local_only(
-        "list_account_usage",
-        "this app does not poll account usage while a hub owns the fleet, so \
-         the cache is empty; read usage on the hub",
-    )?;
+    backend.refuse_local_only("list_account_usage")?;
     account_usage_poll::list_account_usage(&store, &cache)
 }
 
@@ -51,11 +47,7 @@ pub async fn refresh_account_usage(
     cache: State<'_, Arc<Mutex<UsageCache>>>,
     bus: State<'_, Arc<dyn EventBus>>,
 ) -> Result<AccountUsageSnapshot, IpcError> {
-    backend.local_only(
-        "refresh_account_usage",
-        "it reads the account's usage over this machine's SSH connection to \
-         the host; refresh it on the hub",
-    )?;
+    backend.refuse_local_only("refresh_account_usage")?;
     account_usage_poll::refresh_account_usage(&args.account_uuid, &store, &*ssh, &cache, &**bus)
         .await
 }

@@ -44,11 +44,7 @@ pub async fn add_project(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<ProjectTreeRow, IpcError> {
-    backend.local_only(
-        "add_project",
-        "it clones or adopts a checkout using this machine's SSH and GitHub \
-         credentials; add the project on the hub, then it appears here",
-    )?;
+    backend.refuse_local_only("add_project")?;
     add_project::add_project(args, &store, &*ssh, &reg).await
 }
 
@@ -66,11 +62,7 @@ pub async fn list_github_repos(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<GithubRepo>, IpcError> {
-    backend.local_only(
-        "list_github_repos",
-        "it runs `gh` over this machine's SSH connection to the host; browse \
-         repositories from the hub or a standalone app",
-    )?;
+    backend.refuse_local_only("list_github_repos")?;
     add_project::list_github_repos(&args.host_alias, &store, &ssh).await
 }
 

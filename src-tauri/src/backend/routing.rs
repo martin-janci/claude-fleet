@@ -124,7 +124,8 @@ impl FleetBackend {
     }
 
     /// Refuse a command that has no hub counterpart, naming what to do
-    /// instead — with the sentence its own row in [`VERDICTS`] carries.
+    /// instead — with the sentence its own row in
+    /// [`VERDICTS`](super::verdicts::VERDICTS) carries.
     ///
     /// The sentence is a fragment completing "…; " — it must tell the user
     /// where the operation *does* work, because the honest answer is never
@@ -151,10 +152,12 @@ impl FleetBackend {
     }
 
     /// The formatting half, and the one place the "configured but unavailable"
-    /// precedence lives. A command refuses by name, through
-    /// [`Self::refuse_local_only`], so that the sentence it refuses with is
-    /// the one in [`VERDICTS`](super::verdicts::VERDICTS) and nowhere else.
-    pub fn local_only(&self, what: &str, instead: &str) -> Result<(), IpcError> {
+    /// precedence lives. Private on purpose: a command refuses by name,
+    /// through [`Self::refuse_local_only`], so that the sentence it refuses
+    /// with is the one in [`VERDICTS`](super::verdicts::VERDICTS) and nowhere
+    /// else. Pasting a sentence at a call site is now a compile error rather
+    /// than a habit.
+    fn local_only(&self, what: &str, instead: &str) -> Result<(), IpcError> {
         match self.hub() {
             None => Ok(()),
             // A configured hub this launch cannot use: "do it on the hub" is

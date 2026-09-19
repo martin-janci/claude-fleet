@@ -26,11 +26,7 @@ pub fn discover_hosts(backend: State<'_, Arc<FleetBackend>>) -> Result<Vec<SshHo
     // Reads *this machine's* ~/.ssh/config, which says nothing about the hub's
     // hosts — and it only ever feeds the Add-host dialog, which a client
     // cannot complete anyway.
-    backend.local_only(
-        "discover_hosts",
-        "it reads this machine's ~/.ssh/config, not the hub's — register hosts \
-         on the hub itself with `fleet-hub` or a standalone app",
-    )?;
+    backend.refuse_local_only("discover_hosts")?;
     hosts::discover_hosts()
 }
 
@@ -57,11 +53,7 @@ pub async fn add_host(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<HostRow, IpcError> {
-    backend.local_only(
-        "add_host",
-        "registering a host is fleet administration, which the hub reserves \
-         for its own operator — add it there with `fleet-hub`",
-    )?;
+    backend.refuse_local_only("add_host")?;
     hosts::add_host(args, &store, &*ssh).await
 }
 
@@ -72,11 +64,7 @@ pub async fn probe_ssh_alias(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<ProbePreview, IpcError> {
-    backend.local_only(
-        "probe_ssh_alias",
-        "it SSHes from this machine to preview a host for the Add-host dialog; \
-         the hub is the one that must be able to reach it",
-    )?;
+    backend.refuse_local_only("probe_ssh_alias")?;
     hosts::probe_ssh_alias(args, &*ssh, &reg).await
 }
 
@@ -97,11 +85,7 @@ pub fn remove_host(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<HostRow, IpcError> {
-    backend.local_only(
-        "remove_host",
-        "removing a host is fleet administration, which the hub reserves for \
-         its own operator — remove it there with `fleet-hub`",
-    )?;
+    backend.refuse_local_only("remove_host")?;
     hosts::remove_host(args, &store)
 }
 
@@ -111,11 +95,7 @@ pub fn hide_host(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<HostRow, IpcError> {
-    backend.local_only(
-        "hide_host",
-        "hiding a host is fleet administration, which the hub reserves for its \
-         own operator — hide it there with `fleet-hub`",
-    )?;
+    backend.refuse_local_only("hide_host")?;
     hosts::hide_host(args, &store)
 }
 
@@ -125,11 +105,7 @@ pub fn set_account_nickname(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<AccountRow, IpcError> {
-    backend.local_only(
-        "set_account_nickname",
-        "the nickname lives in the hub's database and there is no tool to set \
-         it; rename the account on the hub",
-    )?;
+    backend.refuse_local_only("set_account_nickname")?;
     hosts::set_account_nickname(args, &store)
 }
 

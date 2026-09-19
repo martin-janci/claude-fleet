@@ -29,12 +29,7 @@ pub async fn repo_checkout(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "repo_checkout",
-        "the hub exposes no git-write tool — a remote client must not stage \
-         or commit under a running agent; do it in the session, or from a \
-         standalone app",
-    )?;
+    backend.refuse_local_only("repo_checkout")?;
     repo_mutate::repo_checkout(args, &store, &ssh).await
 }
 
@@ -46,12 +41,7 @@ pub async fn repo_checkout_commit(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "repo_checkout_commit",
-        "the hub exposes no git-write tool — a remote client must not stage \
-         or commit under a running agent; do it in the session, or from a \
-         standalone app",
-    )?;
+    backend.refuse_local_only("repo_checkout_commit")?;
     repo_mutate::repo_checkout_commit(args, &store, &ssh).await
 }
 
@@ -64,12 +54,7 @@ pub async fn repo_create_branch(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "repo_create_branch",
-        "the hub exposes no git-write tool — a remote client must not stage \
-         or commit under a running agent; do it in the session, or from a \
-         standalone app",
-    )?;
+    backend.refuse_local_only("repo_create_branch")?;
     repo_mutate::repo_create_branch(args, &store, &ssh).await
 }
 
@@ -81,12 +66,7 @@ pub async fn repo_delete_branch(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "repo_delete_branch",
-        "the hub exposes no git-write tool — a remote client must not stage \
-         or commit under a running agent; do it in the session, or from a \
-         standalone app",
-    )?;
+    backend.refuse_local_only("repo_delete_branch")?;
     repo_mutate::repo_delete_branch(args, &store, &ssh).await
 }
 
@@ -98,12 +78,7 @@ pub async fn repo_stage(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "repo_stage",
-        "the hub exposes no git-write tool — a remote client must not stage \
-         or commit under a running agent; do it in the session, or from a \
-         standalone app",
-    )?;
+    backend.refuse_local_only("repo_stage")?;
     repo_mutate::repo_stage(args, &store, &ssh).await
 }
 
@@ -115,12 +90,7 @@ pub async fn repo_unstage(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "repo_unstage",
-        "the hub exposes no git-write tool — a remote client must not stage \
-         or commit under a running agent; do it in the session, or from a \
-         standalone app",
-    )?;
+    backend.refuse_local_only("repo_unstage")?;
     repo_mutate::repo_unstage(args, &store, &ssh).await
 }
 
@@ -132,12 +102,7 @@ pub async fn repo_commit_create(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "repo_commit_create",
-        "the hub exposes no git-write tool — a remote client must not stage \
-         or commit under a running agent; do it in the session, or from a \
-         standalone app",
-    )?;
+    backend.refuse_local_only("repo_commit_create")?;
     repo_mutate::repo_commit_create(args, &store, &ssh).await
 }
 
@@ -149,12 +114,7 @@ pub async fn repo_fetch(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "repo_fetch",
-        "the hub exposes no git-write tool — a remote client must not stage \
-         or commit under a running agent; do it in the session, or from a \
-         standalone app",
-    )?;
+    backend.refuse_local_only("repo_fetch")?;
     repo_mutate::repo_fetch(args, &store, &ssh).await
 }
 
@@ -166,12 +126,7 @@ pub async fn repo_pull(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "repo_pull",
-        "the hub exposes no git-write tool — a remote client must not stage \
-         or commit under a running agent; do it in the session, or from a \
-         standalone app",
-    )?;
+    backend.refuse_local_only("repo_pull")?;
     repo_mutate::repo_pull(args, &store, &ssh).await
 }
 
@@ -183,11 +138,6 @@ pub async fn repo_push(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "repo_push",
-        "the hub exposes no git-write tool — a remote client must not stage \
-         or commit under a running agent; do it in the session, or from a \
-         standalone app",
-    )?;
+    backend.refuse_local_only("repo_push")?;
     repo_mutate::repo_push(args, &store, &ssh).await
 }

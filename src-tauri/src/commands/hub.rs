@@ -1,8 +1,9 @@
 //! Pointing this desktop at a `fleet-hub`, and pointing it back.
 //!
 //! Three commands, all of them about **this process** rather than about a
-//! fleet, which is why all three behave identically in both modes (see
-//! `backend::tests_routing::SAME_IN_BOTH_MODES`): `hub_status` reports which
+//! fleet, which is why all three behave identically in both modes (their
+//! rows in `backend::verdicts::VERDICTS` say so, each with its reason):
+//! `hub_status` reports which
 //! fleet this window is onto, `hub_pair` redeems a pairing code, and
 //! `hub_disconnect` forgets the pairing.
 //!

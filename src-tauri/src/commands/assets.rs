@@ -145,12 +145,7 @@ pub fn catalog_config(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Option<CatalogConfigRow>, IpcError> {
-    backend.local_only(
-        "catalog_config",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_config")?;
     catalog::config(&store)
 }
 
@@ -160,12 +155,7 @@ pub fn catalog_configure(
     args: ConfigureArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<CatalogConfigRow, IpcError> {
-    backend.local_only(
-        "catalog_configure",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_configure")?;
     catalog::configure(args, &store)
 }
 
@@ -175,12 +165,7 @@ pub fn catalog_load(
     args: LoadArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<fleet_core::events::CatalogSummary, IpcError> {
-    backend.local_only(
-        "catalog_load",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_load")?;
     catalog::load(args.pull, &store)
 }
 
@@ -189,14 +174,7 @@ pub fn catalog_list_assets(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<AssetListing, IpcError> {
-    backend.local_only(
-        "catalog_list_assets",
-        "the hub does serve this list (its read-only list_assets tool, \
-         open to any paired client), but the Assets panel is built on the \
-         catalog's configuration and git checkout, which only the machine \
-         that owns the fleet has; call list_assets on the hub, or browse the \
-         catalog on that machine",
-    )?;
+    backend.refuse_local_only("catalog_list_assets")?;
     catalog::list_assets(&store)
 }
 
@@ -206,12 +184,7 @@ pub fn catalog_get_asset(
     args: GetAssetArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<AssetDetail, IpcError> {
-    backend.local_only(
-        "catalog_get_asset",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_get_asset")?;
     if !catalog::model::is_valid_name(&args.name) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -226,13 +199,7 @@ pub fn catalog_list_layers(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<catalog::LayerListing, IpcError> {
-    backend.local_only(
-        "catalog_list_layers",
-        "the hub does serve this (its read-only list_layers tool), but the \
-         layer definitions live in the catalog's git checkout, which only the \
-         machine that owns the fleet has; call list_layers on the hub, or \
-         work on the catalog there",
-    )?;
+    backend.refuse_local_only("catalog_list_layers")?;
     catalog::list_layers(&store)
 }
 
@@ -242,14 +209,7 @@ pub fn catalog_resolve_preview(
     args: ResolvePreviewArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<catalog::resolve::Resolution, IpcError> {
-    backend.local_only(
-        "catalog_resolve_preview",
-        "the hub has a resolve_preview tool, but it answers a summary — kind, \
-         name and version per asset — while this command returns the full \
-         Resolution the UI renders, so routing it would silently drop every \
-         asset body; call resolve_preview on the hub for the summary, or \
-         resolve on the machine that owns the fleet",
-    )?;
+    backend.refuse_local_only("catalog_resolve_preview")?;
     catalog::resolve_preview(&args.host_alias, &store)
 }
 
@@ -258,13 +218,7 @@ pub fn catalog_propose_layers(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<catalog::propose::LayerProposal, IpcError> {
-    backend.local_only(
-        "catalog_propose_layers",
-        "the hub does serve this (its read-only propose_layers tool), but a \
-         proposal is only useful where the layers can then be written — the \
-         catalog's git checkout, which only the machine that owns the fleet \
-         has; call propose_layers on the hub, or propose on that machine",
-    )?;
+    backend.refuse_local_only("catalog_propose_layers")?;
     catalog::propose::propose_layers(&store)
 }
 
@@ -274,13 +228,7 @@ pub fn catalog_set_host_layers(
     args: SetHostLayersArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<HostLayerRow>, IpcError> {
-    backend.local_only(
-        "catalog_set_host_layers",
-        "the hub has a set_host_layers tool, but it is master-only — a host's \
-         layer assignment decides what the next apply_sync writes to its \
-         filesystem — and a paired client is never the master; set layers on \
-         the machine that owns the fleet",
-    )?;
+    backend.refuse_local_only("catalog_set_host_layers")?;
     catalog::set_host_layers(
         &args.host_alias,
         args.role.as_deref(),
@@ -294,13 +242,7 @@ pub fn catalog_layer_template(
     backend: State<'_, Arc<FleetBackend>>,
     args: LayerTemplateArgs,
 ) -> Result<catalog::layer::Layer, IpcError> {
-    backend.local_only(
-        "catalog_layer_template",
-        "a template is the first step of authoring a layer into the \
-         catalog's git checkout, and catalog_write_layer refuses here for \
-         want of that checkout; the hub exposes no layer-authoring tool, so \
-         author on the machine that owns the fleet",
-    )?;
+    backend.refuse_local_only("catalog_layer_template")?;
     check_layer_name(&args.name)?;
     Ok(author::layer_template(&args.name, args.axis))
 }
@@ -311,12 +253,7 @@ pub fn catalog_write_layer(
     args: WriteLayerArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<String, IpcError> {
-    backend.local_only(
-        "catalog_write_layer",
-        "writing a layer edits a file in the catalog's git checkout, which \
-         only the machine that owns the fleet has, and the hub exposes no \
-         layer-authoring tool; author on that machine",
-    )?;
+    backend.refuse_local_only("catalog_write_layer")?;
     check_layer_name(&args.layer.name)?;
     author::write_layer(&args.layer, &store)
 }
@@ -327,12 +264,7 @@ pub fn catalog_delete_layer(
     args: LayerRef,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<String, IpcError> {
-    backend.local_only(
-        "catalog_delete_layer",
-        "deleting a layer removes a file from the catalog's git checkout, \
-         which only the machine that owns the fleet has, and the hub exposes \
-         no layer-authoring tool; author on that machine",
-    )?;
+    backend.refuse_local_only("catalog_delete_layer")?;
     check_layer_name(&args.name)?;
     author::delete_layer(&args.name, &store)
 }
@@ -343,13 +275,7 @@ pub fn catalog_import_host(
     args: ImportArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<ImportReport, IpcError> {
-    backend.local_only(
-        "catalog_import_host",
-        "the hub has this as its import_assets tool, but the import \
-         lands in the catalog's git checkout, which only the machine that \
-         owns the fleet has; call import_assets on the hub, or import on \
-         that machine",
-    )?;
+    backend.refuse_local_only("catalog_import_host")?;
     let token = {
         let s = lock(&store)?;
         s.get_setting(fleet_core::mcp::SETTING_TOKEN)?
@@ -364,13 +290,7 @@ pub async fn assets_scan_hosts(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<inventory::HostScanResult>, IpcError> {
-    backend.local_only(
-        "assets_scan_hosts",
-        "the hub has this as its scan_assets tool, but its result feeds \
-         an inventory panel built on the catalog checkout, which only the \
-         machine that owns the fleet has; call scan_assets on the hub, or \
-         scan from that machine",
-    )?;
+    backend.refuse_local_only("assets_scan_hosts")?;
     inventory::scan_hosts(&store, &ssh, args.host_alias.as_deref()).await
 }
 
@@ -379,12 +299,7 @@ pub fn assets_inventory(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<AssetInventoryRow>, IpcError> {
-    backend.local_only(
-        "assets_inventory",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("assets_inventory")?;
     catalog::inventory(&store)
 }
 
@@ -395,13 +310,7 @@ pub async fn catalog_plan_sync(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SyncPlan, IpcError> {
-    backend.local_only(
-        "catalog_plan_sync",
-        "the hub has this as its plan_sync tool, but the plan is shown \
-         in a sync panel built on the catalog checkout, which only the \
-         machine that owns the fleet has; call plan_sync on the hub, or \
-         plan on that machine",
-    )?;
+    backend.refuse_local_only("catalog_plan_sync")?;
     sync::plan_sync(args, &store, &ssh).await
 }
 
@@ -413,12 +322,7 @@ pub async fn catalog_apply_sync(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<SyncRunSummary, IpcError> {
-    backend.local_only(
-        "catalog_apply_sync",
-        "the hub's apply_sync is master-only: a paired client is never \
-         the fleet's administrator, and a sync writes to every host over \
-         SSH; run the sync on the hub",
-    )?;
+    backend.refuse_local_only("catalog_apply_sync")?;
     sync::apply_sync(args, &store, &ssh, &reg).await
 }
 
@@ -427,12 +331,7 @@ pub fn catalog_last_sync(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Option<SyncRunSummary>, IpcError> {
-    backend.local_only(
-        "catalog_last_sync",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_last_sync")?;
     sync::last_sync(&store)
 }
 
@@ -441,12 +340,7 @@ pub fn catalog_list_secrets(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<SecretRow>, IpcError> {
-    backend.local_only(
-        "catalog_list_secrets",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_list_secrets")?;
     let s = lock(&store)?;
     Ok(s.list_secrets()?)
 }
@@ -457,12 +351,7 @@ pub fn catalog_set_secret(
     args: SetSecretArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "catalog_set_secret",
-        "the hub's set_secret is master-only: a paired client is never \
-         the fleet's administrator, and the sync secrets belong to the \
-         machine that runs the sync; set it on the hub",
-    )?;
+    backend.refuse_local_only("catalog_set_secret")?;
     if !is_valid_secret_name(&args.name) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -479,12 +368,7 @@ pub fn catalog_delete_secret(
     args: DeleteSecretArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<bool, IpcError> {
-    backend.local_only(
-        "catalog_delete_secret",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_delete_secret")?;
     let s = lock(&store)?;
     Ok(s.delete_secret(&args.name, args.host_alias.as_deref())?)
 }
@@ -497,12 +381,7 @@ pub fn catalog_create_asset(
     args: CreateArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WriteResult, IpcError> {
-    backend.local_only(
-        "catalog_create_asset",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_create_asset")?;
     check_name(&args.name)?;
     if let Some(from) = args.duplicate_from.as_deref() {
         check_name(from)?;
@@ -516,12 +395,7 @@ pub fn catalog_update_asset(
     args: UpdateArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WriteResult, IpcError> {
-    backend.local_only(
-        "catalog_update_asset",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_update_asset")?;
     check_name(&args.asset.header.name)?;
     for r in &args.asset.resources {
         check_resource_path(&r.rel_path)?;
@@ -535,12 +409,7 @@ pub fn catalog_delete_asset(
     args: AssetRef,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<String, IpcError> {
-    backend.local_only(
-        "catalog_delete_asset",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_delete_asset")?;
     check_name(&args.name)?;
     author::delete_asset(args, &store)
 }
@@ -551,12 +420,7 @@ pub fn catalog_add_resource(
     args: AddResourceArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WriteResult, IpcError> {
-    backend.local_only(
-        "catalog_add_resource",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_add_resource")?;
     check_name(&args.name)?;
     check_local_path(&args.local_path)?;
     if let Some(rel_path) = args.rel_path.as_deref() {
@@ -571,12 +435,7 @@ pub fn catalog_remove_resource(
     args: RemoveResourceArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WriteResult, IpcError> {
-    backend.local_only(
-        "catalog_remove_resource",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_remove_resource")?;
     check_name(&args.name)?;
     check_resource_path(&args.rel_path)?;
     author::remove_resource(args, &store)
@@ -588,12 +447,7 @@ pub fn catalog_lint_asset(
     args: AssetRef,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<LintReport, IpcError> {
-    backend.local_only(
-        "catalog_lint_asset",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_lint_asset")?;
     check_name(&args.name)?;
     author::lint_asset(args, &store)
 }
@@ -603,12 +457,7 @@ pub fn catalog_lint_all(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<LintAll, IpcError> {
-    backend.local_only(
-        "catalog_lint_all",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_lint_all")?;
     author::lint_everything(&store)
 }
 
@@ -618,12 +467,7 @@ pub fn catalog_commit_pending(
     args: CommitPendingArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<String, IpcError> {
-    backend.local_only(
-        "catalog_commit_pending",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_commit_pending")?;
     author::commit_pending(args, &store)
 }
 
@@ -632,12 +476,7 @@ pub fn catalog_push(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<RepoStatus, IpcError> {
-    backend.local_only(
-        "catalog_push",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_push")?;
     author::push(&store)
 }
 
@@ -646,12 +485,7 @@ pub fn catalog_repo_status(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<RepoStatus, IpcError> {
-    backend.local_only(
-        "catalog_repo_status",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_repo_status")?;
     author::repo_status(&store)
 }
 
@@ -660,12 +494,7 @@ pub fn catalog_template(
     backend: State<'_, Arc<FleetBackend>>,
     args: AssetRef,
 ) -> Result<Asset, IpcError> {
-    backend.local_only(
-        "catalog_template",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_template")?;
     check_name(&args.name)?;
     Ok(author::template(args.kind, &args.name))
 }
@@ -678,12 +507,7 @@ pub async fn catalog_spawn_author_session(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<SessionRow, IpcError> {
-    backend.local_only(
-        "catalog_spawn_author_session",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub has no tool for this; work on the catalog \
-         there",
-    )?;
+    backend.refuse_local_only("catalog_spawn_author_session")?;
     if let Some(name) = args.name.as_deref() {
         check_name(name)?;
     }

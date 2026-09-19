@@ -20,7 +20,7 @@
 //!    it SSHes into a host with this machine's keys and mutates a fleet the
 //!    hub also manages.
 
-use super::verdicts::VERDICTS;
+use super::verdicts::{self, Verdict, VERDICTS};
 use super::*;
 use crate::backend::remote;
 use crate::commands;
@@ -1110,7 +1110,7 @@ fn a_configured_but_unavailable_hub_refuses_every_routed_command() {
 #[test]
 fn a_configured_but_unavailable_hub_refuses_local_only_commands_with_the_reason() {
     let err = unavailable_backend()
-        .local_only("provision_hosts", "provision from the hub with `fleet-hub`")
+        .refuse_local_only("provision_hosts")
         .expect_err("nothing may run against the hub's fleet from here");
     assert_eq!(err.code, codes::E_HUB_UNAVAILABLE);
     assert!(err.message.contains("provision_hosts"), "{}", err.message);
@@ -1127,7 +1127,7 @@ fn a_configured_but_unavailable_hub_refuses_local_only_commands_with_the_reason(
 #[test]
 fn a_local_only_command_is_a_no_op_when_standalone() {
     assert!(FleetBackend::local()
-        .local_only("catalog_push", "do it there")
+        .refuse_local_only("catalog_push")
         .is_ok());
 }
 
@@ -1135,7 +1135,7 @@ fn a_local_only_command_is_a_no_op_when_standalone() {
 fn a_local_only_command_refuses_in_remote_mode_and_says_where_to_go() {
     let fake = Fake::answering("[]");
     let err = remote_backend(&fake)
-        .local_only("provision_hosts", "provision from the hub with `fleet-hub`")
+        .refuse_local_only("provision_hosts")
         .expect_err("a local-only command must refuse");
     assert_eq!(err.code, codes::E_LOCAL_ONLY);
     assert!(err.message.contains("provision_hosts"), "{}", err.message);
@@ -1150,6 +1150,45 @@ fn a_local_only_command_refuses_in_remote_mode_and_says_where_to_go() {
         err.message
     );
     fake.was_not_called();
+}
+
+/// The fail-closed arm of [`FleetBackend::refuse_local_only`]: a command the
+/// table cannot answer is refused anyway, never allowed.
+///
+/// It cannot be *called* with such a name from here — the `debug_assert!`
+/// fires first in a test build, which is the point of it. What is checkable is
+/// everything around that assert: that the lookup really does miss (both ways
+/// it can miss), that the fallback sentence still makes a whole refusing
+/// message, and that a miss does not turn a standalone app's command into an
+/// error. `every_refusal_names_a_command_the_table_can_refuse` is what makes
+/// the miss unshippable in the first place.
+#[test]
+fn a_command_the_table_cannot_answer_is_still_refused() {
+    assert!(verdicts::verdict("no_such_command").is_none());
+    assert!(
+        verdicts::verdict("probe_host").unwrap().instead().is_none(),
+        "a routed command has no sentence either, and that is the other miss"
+    );
+
+    let fake = Fake::answering("[]");
+    let err = remote_backend(&fake)
+        .local_only("no_such_command", NO_SENTENCE)
+        .expect_err("a miss must never be a silent allow");
+    assert_eq!(err.code, codes::E_LOCAL_ONLY);
+    assert!(err.message.contains("no_such_command"), "{}", err.message);
+    assert!(
+        err.message.contains("a bug in the app"),
+        "and it must say whose fault it is: {}",
+        err.message
+    );
+    fake.was_not_called();
+
+    assert!(
+        FleetBackend::local()
+            .local_only("no_such_command", NO_SENTENCE)
+            .is_ok(),
+        "standalone owns its own fleet; a missing row is not its problem"
+    );
 }
 
 /// Task 1 (#146), the controller ruling: `repair_session` routes only
@@ -1211,7 +1250,7 @@ fn repair_session_explicit_false_stays_local_only_in_remote_mode() {
 fn a_refusal_never_carries_the_token() {
     let fake = Fake::answering("[]");
     let err = remote_backend(&fake)
-        .local_only("catalog_push", "push from the hub")
+        .refuse_local_only("catalog_push")
         .unwrap_err();
     assert!(!format!("{err:?}").contains("cl_s3cret-token"), "{err:?}");
     assert!(!format!("{:?}", remote_backend(&fake)).contains("cl_s3cret-token"));
@@ -1233,27 +1272,16 @@ fn a_refusal_never_carries_the_token() {
 /// `set_host_layers` is master-only — which is the real reason THAT one
 /// refuses, the same shape as `apply_sync` and `set_secret`.
 ///
-/// Read from source, like `every_command_has_a_verdict`, because a
-/// `#[tauri::command]` cannot be called without a live `tauri::App`.
+/// The sentences used to be read back out of the source, because a
+/// `#[tauri::command]` cannot be called without a live `tauri::App`. They are
+/// in [`VERDICTS`] now, so this asks the table.
 #[test]
 fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
-    fn reason(file: &str, name: &str) -> String {
-        let src = SOURCES
-            .iter()
-            .find(|(f, _)| *f == file)
-            .unwrap_or_else(|| panic!("{file} is not in SOURCES"))
-            .1;
-        let start = src
-            .find(&format!("fn {name}("))
-            .unwrap_or_else(|| panic!("no fn {name} in {file}"));
-        let rest = &src[start..];
-        let body = &rest[..rest.find("#[tauri::command]").unwrap_or(rest.len())];
-        let call = &body[body.find("local_only(").expect("a local_only guard")..];
-        let call = &call[..call.find(")?").expect("the guard's end")];
-        call.replace("\\\n", " ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+    fn reason(command: &str) -> &'static str {
+        verdicts::verdict(command)
+            .unwrap_or_else(|| panic!("no verdict for {command}"))
+            .instead()
+            .unwrap_or_else(|| panic!("{command} no longer refuses"))
     }
     const DENIALS: [&str; 2] = ["exposes no authoring tool", "exposes no tool"];
 
@@ -1269,7 +1297,7 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
         ("catalog_propose_layers", "propose_layers"),
         ("catalog_set_host_layers", "set_host_layers"),
     ] {
-        let said = reason("commands/assets.rs", command);
+        let said = reason(command);
         for d in DENIALS {
             assert!(
                 !said.contains(d),
@@ -1287,11 +1315,11 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
         "catalog_set_secret",
         "catalog_set_host_layers",
     ] {
-        let said = reason("commands/assets.rs", command);
+        let said = reason(command);
         assert!(said.contains("master"), "{command}: {said}");
     }
 
-    let said = reason("commands/sessions.rs", "dismiss_agent_session");
+    let said = reason("dismiss_agent_session");
     for d in DENIALS {
         assert!(!said.contains(d), "dismiss_agent_session: {said}");
     }
@@ -1311,101 +1339,25 @@ const LOCAL_ONLY_GOLDEN_PATH: &str = "src/backend/local_only.golden.json";
 /// diff someone has to read.
 const REGEN_LOCAL_ONLY: &str = "REGEN_LOCAL_ONLY";
 
-/// Read the Rust string literal starting at `src[at]` (which must be the
-/// opening quote), returning its **value** and the index just past the close.
+/// `command -> the whole E_LOCAL_ONLY message`, rendered from the table
+/// through the refusal a command actually calls, for the fixed hub of [`cfg`].
 ///
-/// The one escape that matters here is `\` at end of line: the sentences are
-/// written as continued literals, and the continuation swallows the newline
-/// *and* the indentation of the next line. Getting that wrong would record a
-/// message with stray spaces in it, so it is spelled out rather than
-/// approximated with `split_whitespace`.
-fn rust_string_literal(src: &str, at: usize) -> (String, usize) {
-    let b = src.as_bytes();
-    assert_eq!(b[at], b'"', "not a string literal at {at}");
-    let mut out = String::new();
-    let mut i = at + 1;
-    while i < b.len() {
-        match b[i] {
-            b'"' => return (out, i + 1),
-            b'\\' => {
-                i += 1;
-                match b[i] {
-                    b'\n' => {
-                        i += 1;
-                        while b[i].is_ascii_whitespace() {
-                            i += 1;
-                        }
-                    }
-                    b'"' => {
-                        out.push('"');
-                        i += 1;
-                    }
-                    b'\\' => {
-                        out.push('\\');
-                        i += 1;
-                    }
-                    b'n' => {
-                        out.push('\n');
-                        i += 1;
-                    }
-                    other => panic!("unhandled escape \\{} in a refusal", other as char),
-                }
-            }
-            _ => {
-                let c = src[i..].chars().next().unwrap();
-                out.push(c);
-                i += c.len_utf8();
-            }
-        }
-    }
-    panic!("unterminated string literal");
-}
-
-/// Every `(what, instead)` pair pasted at a `backend.local_only(…)` call site,
-/// read out of the command sources.
-///
-/// This is how the fixture below is *generated*, and it only works while the
-/// sentences are literals at the call sites. Once they come from one table the
-/// generator is gone and the fixture is the record of what they said.
-fn pasted_local_only_pairs() -> BTreeMap<String, String> {
-    const CALL: &str = "backend.local_only(";
-    let mut out = BTreeMap::new();
-    for (file, src) in SOURCES {
-        let mut from = 0;
-        while let Some(rel) = src[from..].find(CALL) {
-            let mut i = from + rel + CALL.len();
-            let b = src.as_bytes();
-            while b[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            let (what, next) = rust_string_literal(src, i);
-            let mut i = next;
-            while b[i] != b'"' {
-                i += 1;
-            }
-            let (instead, next) = rust_string_literal(src, i);
-            assert!(
-                out.insert(what.clone(), instead).is_none(),
-                "{file}: {what} refuses twice with different words"
-            );
-            from = next;
-        }
-    }
-    out
-}
-
-/// `command -> the whole E_LOCAL_ONLY message`, for the fixed hub of [`cfg`].
-fn local_only_messages(pairs: &BTreeMap<String, String>) -> String {
+/// The fixture this feeds was generated the same way from the *pasted*
+/// sentences, before they moved into [`VERDICTS`] (commit "pin every
+/// E_LOCAL_ONLY message in a fixture"). So a green run here is the statement
+/// that the table says, word for word, what the ~74 call sites used to say.
+fn local_only_messages() -> String {
     let fake = Fake::answering("[]");
     let backend = remote_backend(&fake);
-    let rendered: BTreeMap<&str, String> = pairs
+    let rendered: BTreeMap<&str, String> = VERDICTS
         .iter()
-        .map(|(what, instead)| {
+        .filter(|(_, v)| v.instead().is_some())
+        .map(|(command, _)| {
             let err = backend
-                .local_only(what, instead)
+                .refuse_local_only(command)
                 .expect_err("a local-only command must refuse in remote mode");
-            assert_eq!(err.code, codes::E_LOCAL_ONLY, "{what}: {err:?}");
-            (what.as_str(), err.message)
+            assert_eq!(err.code, codes::E_LOCAL_ONLY, "{command}: {err:?}");
+            (*command, err.message)
         })
         .collect();
     fake.was_not_called();
@@ -1424,13 +1376,13 @@ fn local_only_messages(pairs: &BTreeMap<String, String>) -> String {
 /// before they moved. Nothing in this task may change that file.
 #[test]
 fn every_local_only_message_is_the_one_the_fixture_records() {
-    let pairs = pasted_local_only_pairs();
+    let actual = local_only_messages();
     assert!(
-        pairs.len() > 70,
-        "only {} refusals found — the reader broke, not the code",
-        pairs.len()
+        actual.lines().count() > 70,
+        "only {} lines of refusal — the table lost rows, or this stopped \
+         rendering them",
+        actual.lines().count()
     );
-    let actual = local_only_messages(&pairs);
 
     if std::env::var(REGEN_LOCAL_ONLY).is_ok() {
         let abs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(LOCAL_ONLY_GOLDEN_PATH);
@@ -1476,8 +1428,30 @@ fn every_local_only_message_is_the_one_the_fixture_records() {
 ///
 /// `commands::sessions::list_sessions` -> ("commands/sessions.rs", "list_sessions")
 /// `pty::pty_open`                     -> ("pty.rs", "pty_open")
-/// `cancel_command`                    -> ("lib.rs", "cancel_command")
+/// `cancel_command`                    -> ("commands/cancel.rs", "cancel_command")
+///
+/// A bare entry is registered under a `use` at the top of `lib.rs`, so the
+/// file it lives in is that import's, not `lib.rs`. This used to answer
+/// `lib.rs` and nobody noticed, because the only bare entry was on the
+/// exception list and the lookup never ran.
 fn registered_commands() -> Vec<(String, String)> {
+    /// `use commands::cancel::cancel_command;` -> "commands/cancel.rs".
+    fn imported_from(lib: &str, name: &str) -> String {
+        let want = format!("::{name};");
+        for line in lib.lines() {
+            let line = line.trim();
+            if let Some(path) = line.strip_prefix("use ") {
+                if path.ends_with(&want) {
+                    let parts: Vec<&str> = path.trim_end_matches(';').split("::").collect();
+                    if let ["commands", module, _] = parts.as_slice() {
+                        return format!("commands/{module}.rs");
+                    }
+                }
+            }
+        }
+        "lib.rs".to_string()
+    }
+
     let lib = include_str!("../lib.rs");
     let handlers = lib
         .split_once("generate_handler![")
@@ -1498,7 +1472,7 @@ fn registered_commands() -> Vec<(String, String)> {
         let file = match parts.as_slice() {
             ["commands", module, _] => format!("commands/{module}.rs"),
             ["pty", _] => "pty.rs".to_string(),
-            [_] => "lib.rs".to_string(),
+            [_] => imported_from(lib, &name),
             other => panic!("unexpected handler entry {other:?}"),
         };
         entries.push((file, name));
@@ -1575,13 +1549,117 @@ fn every_command_has_a_verdict() {
     );
 }
 
-/// Every source file [`every_command_has_a_verdict`] needs to read.
+/// **And the body agrees with the row.**
+///
+/// [`every_command_has_a_verdict`] proves that every command has an answer;
+/// this proves the answer is the one its code gives. A row is a claim about
+/// what happens at runtime, and a table nobody checks against the code is a
+/// second place to be wrong.
+///
+/// All it needs from the source is the shape of the command's body, which is
+/// why the scanner survives the table in this reduced form: three substrings
+/// per command instead of a free-text search for any guard at all. A
+/// `#[tauri::command]` cannot be *called* from here — it wants a live
+/// `tauri::App` — so its body is read instead.
+///
+/// `RoutedUnless` asks for the routing call only: its refusal lives inside the
+/// `routed::` function, one layer down, and is proven by
+/// `repair_session_explicit_false_stays_local_only_in_remote_mode` and by the
+/// message fixture.
+#[test]
+fn every_commands_body_does_what_its_row_says() {
+    let sources: BTreeMap<&str, &str> = SOURCES.iter().copied().collect();
+    let mut complaints = Vec::new();
+
+    for (file, name) in registered_commands() {
+        let src = sources
+            .get(file.as_str())
+            .unwrap_or_else(|| panic!("add {file} to SOURCES in tests_routing.rs"));
+        let start = src
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("{name} is registered but not defined in {file}"));
+        // This command's body, up to wherever the next one begins.
+        let rest = &src[start..];
+        let body = match rest.find("#[tauri::command]") {
+            Some(i) => &rest[..i],
+            None => rest,
+        };
+        let routes = body.contains("routed::");
+        let refuses = body.contains(&format!("refuse_local_only(\"{name}\")"));
+        let guards_at_all = body.contains("refuse_local_only(");
+
+        let verdict = verdicts::verdict(&name)
+            .unwrap_or_else(|| panic!("{name} has no row — every_command_has_a_verdict first"));
+        let wrong = match verdict {
+            Verdict::Routed { .. } | Verdict::RoutedUnless { .. } if !routes => {
+                Some("its row routes it, but its body never reaches a `routed::` function")
+            }
+            Verdict::LocalOnly { .. } if !refuses => Some(
+                "its row refuses it, but its body never calls \
+                 `backend.refuse_local_only(\"<its own name>\")`",
+            ),
+            Verdict::SameInBoth { .. } if routes || guards_at_all => Some(
+                "its row says it is the same in both modes, but its body routes \
+                 or refuses",
+            ),
+            _ => None,
+        };
+        if let Some(why) = wrong {
+            complaints.push(format!("{file}::{name}: {why}"));
+        }
+    }
+
+    assert!(
+        complaints.is_empty(),
+        "these commands do not do what VERDICTS says they do:\n  {}\n\n\
+         Fix the body, or fix the row — but they are one decision and must \
+         read as one.",
+        complaints.join("\n  ")
+    );
+}
+
+/// A refusal is by name, so a name that the table cannot answer is a refusal
+/// with the fail-closed apology in it. This makes shipping one impossible:
+/// every `refuse_local_only("…")` written anywhere in the command sources must
+/// name a row that has a sentence.
+///
+/// It covers the call sites [`every_commands_body_does_what_its_row_says`]
+/// cannot see — `routed::repair_session`'s, which is not in any
+/// `#[tauri::command]` body.
+#[test]
+fn every_refusal_names_a_command_the_table_can_refuse() {
+    const CALL: &str = "refuse_local_only(\"";
+    let mut found = 0;
+    for (file, src) in SOURCES {
+        for (i, _) in src.match_indices(CALL) {
+            let rest = &src[i + CALL.len()..];
+            let name = &rest[..rest.find('"').expect("an unterminated command name")];
+            found += 1;
+            let verdict = verdicts::verdict(name).unwrap_or_else(|| {
+                panic!("{file} refuses {name}, which has no row in VERDICTS at all")
+            });
+            assert!(
+                verdict.instead().is_some(),
+                "{file} refuses {name}, whose row carries no sentence ({verdict:?}) — \
+                 the user would get the fail-closed apology instead of a reason"
+            );
+        }
+    }
+    assert!(
+        found > 70,
+        "only {found} refusals found in the sources — the reader broke, not \
+         the code"
+    );
+}
+
+/// Every source file the two scanners above need to read.
 const SOURCES: &[(&str, &str)] = &[
     (
         "commands/account_usage.rs",
         include_str!("../commands/account_usage.rs"),
     ),
     ("commands/assets.rs", include_str!("../commands/assets.rs")),
+    ("commands/cancel.rs", include_str!("../commands/cancel.rs")),
     (
         "commands/diagnostics.rs",
         include_str!("../commands/diagnostics.rs"),
