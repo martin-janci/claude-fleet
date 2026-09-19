@@ -279,6 +279,38 @@ Without systemd, `fleet-agent run --config <path>` (or
 - **Offline.** A call for an agent host with no agent connected fails at
   once with `E_AGENT_OFFLINE`; it never waits out a timeout.
 
+### Protocol version negotiation
+
+The hub and `fleet-agent` are separately-released binaries, so a frame kind
+one side adds can reach a peer that predates it. The wire carries a small,
+explicit version to keep that safe:
+
+- The agent's `hello` carries `proto`, its build's protocol version. The
+  hub's `welcome` — the first frame it sends back, right after accepting the
+  `hello` — carries the hub's own, so each side learns the other's.
+- Each side accepts a range, `MIN_SUPPORTED_PROTO..=PROTO_VERSION`, compiled
+  into that binary. A number outside the other side's range is refused with
+  a WebSocket close naming both versions and which one to update — never a
+  bare disconnect. The hub logs `refused a hello: protocol version` at warn
+  and never registers the connection; the agent logs `protocol version
+  refused` at **error** (louder than an ordinary reconnect, which logs at
+  warn) and does not tight-loop over it: it keeps trying, at the slowest
+  backoff interval, quietly, until whichever side is behind is upgraded —
+  no restart needed on the host once that happens.
+- Past that handshake, a frame whose `kind` neither side recognises is
+  **not** fatal: it is logged once per kind, at warn, and skipped, so a
+  hub ahead of an agent (or the reverse) can add a frame kind the older side
+  simply never acts on. A `kind` a side DOES recognise, but cannot parse the
+  rest of, is still corruption and still ends the connection — evolution is
+  forgiven, damage is not.
+- **Which order to upgrade in.** The hub first, or anytime — a hub whose
+  `MIN_SUPPORTED_PROTO` still covers an older agent keeps serving it exactly
+  as before; nothing about upgrading the hub requires touching a single
+  agent. An agent upgraded ahead of the hub is not a problem either, just
+  quieter: it is refused with `update the hub` until the hub catches up, at
+  which point it reconnects and starts working with no further action. There
+  is no order that corrupts anything or requires a host visit either way.
+
 ### Rotating, narrowing or removing an agent host's token
 
 The agent authenticates with the host's per-host token. Any of these cuts a
