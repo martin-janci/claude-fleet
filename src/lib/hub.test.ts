@@ -14,6 +14,7 @@ import {
   hubNextStep,
   hubActionBlocked,
   HUB_ACTIONS,
+  ROUTED_ACTIONS,
   type HubStatus,
 } from './hub';
 import type { HubConnection } from './hub_connection';
@@ -303,5 +304,53 @@ describe('hubActionBlocked', () => {
     expect(why).not.toBeNull();
     expect(why).toContain('no client token is stored');
     expect(why!.toLowerCase()).toContain('settings');
+  });
+
+  // A desktop that owns its fleet locally but isn't the bare STANDALONE
+  // constant — e.g. it still has a hub URL saved from before Disconnect,
+  // pending a restart — must be treated exactly like STANDALONE: `remote` and
+  // `unavailable` are what `ownsTheFleet` actually checks, not object
+  // identity with the constant.
+  const LOCAL_OWNER: HubStatus = {
+    ...STANDALONE,
+    configured_url: 'https://fleet.example.com',
+    restart_required: true,
+  };
+
+  const NOT_CONNECTED: HubConnection[] = [
+    STANDALONE_CONN,
+    CONNECTING,
+    RECONNECTING,
+    OFFLINE,
+    TOO_OLD,
+    TOO_NEW,
+  ];
+  const EVERY_ACTION = [...HUB_ACTIONS, ...ROUTED_ACTIONS];
+
+  // The exhaustive local-mode sweep: every refused key and every routed key,
+  // for both flavours of "owns the fleet locally", across every connection
+  // state that isn't `connected` (including a stale `reconnecting` left over
+  // from a hub this desktop no longer points at) — none of it may ever
+  // block a local desktop.
+  it('every refused and routed action is unblocked for a local-owning desktop, in any connection state', () => {
+    for (const status of [STANDALONE, LOCAL_OWNER]) {
+      for (const conn of NOT_CONNECTED) {
+        for (const action of EVERY_ACTION) {
+          expect(hubActionBlocked(action, status, conn), `${status === STANDALONE ? 'STANDALONE' : 'LOCAL_OWNER'}/${conn.state}/${action}`).toBeNull();
+        }
+      }
+    }
+  });
+
+  // The exhaustive connected-hub-client sweep: every routed key is sendable
+  // once the connection is up, and every refused key still says no — refusal
+  // never depends on the connection being fine.
+  it('on a connected hub client, every routed key is null and every refused key is non-null', () => {
+    for (const action of ROUTED_ACTIONS) {
+      expect(hubActionBlocked(action, remote, CONNECTED), action).toBeNull();
+    }
+    for (const action of HUB_ACTIONS) {
+      expect(hubActionBlocked(action, remote, CONNECTED), action).not.toBeNull();
+    }
   });
 });

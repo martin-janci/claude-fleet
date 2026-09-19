@@ -30,6 +30,7 @@ import {
   snapshot,
 } from './hosts_fixture';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd);
@@ -38,6 +39,7 @@ beforeEach(() => {
   resetTombstonesForTests();
   clearToasts();
   hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
   hosts.set(fleetHosts());
   accounts.set(fleetAccounts());
   sessions.set(fleetSessions());
@@ -469,6 +471,32 @@ describe('HostsView: hub client', () => {
 
   afterEach(() => {
     hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+  });
+
+  // fix round 1, finding 1: `r` and `u` called `reprobe`/`refreshUsage`
+  // directly, bypassing the buttons' `disabled` — the only non-button path
+  // to a gated action this task found. Gated in the handlers themselves.
+  it('r and u do nothing while blocked: no probe_host, no refresh_account_usage', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'offline', attempt: 1, retry_in_secs: 5, reason: 'refused' });
+    mount({ preselect: 'mefistos' });
+    await tick();
+    const before = { probe: calls('probe_host').length, usage: calls('refresh_account_usage').length };
+    await key(list(), 'r');
+    await key(list(), 'u');
+    expect(calls('probe_host')).toHaveLength(before.probe);
+    expect(calls('refresh_account_usage')).toHaveLength(before.usage);
+  });
+
+  it('standalone is untouched: r and u still call probe_host and refresh_account_usage', async () => {
+    mount({ preselect: 'mefistos' });
+    await tick();
+    const before = { probe: calls('probe_host').length, usage: calls('refresh_account_usage').length };
+    await key(list(), 'r');
+    expect(calls('probe_host')).toHaveLength(before.probe + 1);
+    await key(list(), 'u');
+    expect(calls('refresh_account_usage')).toHaveLength(before.usage + 1);
   });
 
   it('does not fire refresh_account_usage on open', async () => {
@@ -494,6 +522,44 @@ describe('HostsView: hub client', () => {
     const refresh = within(detail()).getByTestId('usage-refresh') as HTMLButtonElement;
     expect(refresh).toBeDisabled();
     expect(refresh.title).toContain('fleet.example.com');
+  });
+
+  // fix round 1, finding 4: `list_host_tokens` is also local-only in remote
+  // mode and was still firing unconditionally on open.
+  it('does not fire list_host_tokens on open', async () => {
+    hubStatus.set(remote);
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await tick();
+    expect(calls('list_host_tokens')).toHaveLength(0);
+  });
+
+  it('standalone is untouched: opening still loads host tokens', async () => {
+    mount({ preselect: 'mefistos' });
+    await tick();
+    await tick();
+    expect(calls('list_host_tokens').length).toBeGreaterThan(0);
+  });
+
+  // Never fetching the tokens on a hub client means `tokensLoaded` never
+  // turns true, so the empty-token line must not read "…" forever — it has
+  // to say why, the same as every other disabled control here.
+  it('the empty-token line reads the reason instead of "…" forever', async () => {
+    hubStatus.set(remote);
+    mount({ preselect: 'mefistos' });
+    await tick();
+    const empty = within(detail()).getByTestId('detail-token-empty');
+    expect(empty.textContent).not.toBe('…');
+    expect(empty.textContent).toContain('fleet.example.com');
+  });
+
+  it('standalone is untouched: the empty-token line still reads "…" before tokens load, then the real answer', async () => {
+    mount({ preselect: 'mefistos' });
+    // Before the async `list_host_tokens` resolves, `mefistos` (seeded with
+    // a token by the mock) has not been merged into the store yet.
+    const empty = within(detail()).queryByTestId('detail-token-empty');
+    if (empty) expect(empty.textContent).toBe('…');
+    await waitFor(() => expect(within(detail()).queryByTestId('detail-token-mode')).not.toBeNull());
   });
 });
 
