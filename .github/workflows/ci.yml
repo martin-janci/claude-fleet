@@ -66,6 +66,18 @@ jobs:
       - run: cargo test -p fleet-core -p fleet-hub --locked
       - run: cargo build -p fleet-agent --locked
       - run: cargo test -p fleet-proto -p fleet-agent --locked
+      # scripts/hub-e2e.sh drives the two binaries just built above as real
+      # processes: three hubs, auth (401/403), /healthz, the local-host guard,
+      # pairing and /events, SIGTERM shutdown, and a fleet-agent dialing a hub
+      # over loopback. It needs tmux, which this runner has (ubuntu-24.04
+      # ships /usr/bin/tmux; the macOS runners in the `rust` job do not, so
+      # this step stays on this job only) and builds nothing itself.
+      - name: Run hub end-to-end script
+        env:
+          BIN: target/debug/fleet-hub
+          ABIN: target/debug/fleet-agent
+        timeout-minutes: 5
+        run: bash scripts/hub-e2e.sh
 
   frontend:
     strategy:

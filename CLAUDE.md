@@ -25,7 +25,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cargo deny check                # licenses + advisories (cargo install cargo-deny --locked)
 cargo build -p fleet-hub --locked   # headless hub (no Tauri libs needed)
-scripts/ci-local.sh             # all of the above in CI order; --rust-only / --frontend-only
+scripts/hub-e2e.sh               # real fleet-hub/-agent e2e; needs tmux, opt-in via ci-local.sh --hub-e2e
+scripts/ci-local.sh             # all of the above in CI order; --rust-only / --frontend-only / --hub-e2e
 ```
 
 `devtools` is an off-by-default cargo feature: `cargo tauri build --features

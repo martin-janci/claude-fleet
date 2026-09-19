@@ -11,12 +11,19 @@ set -uo pipefail
 
 BIN="${BIN:?set BIN to the fleet-hub binary}"
 ABIN="${ABIN:-$(dirname "$BIN")/fleet-agent}"
-ROOT="$(mktemp -d -p /tmp/claude-1000 hub-e2e.XXXXXX)"
+# Prefer the Claude Code sandbox scratch dir when this happens to run inside
+# one (short path, already private); otherwise plain /tmp, which is what a
+# CI runner and a bare dev box both have. Deliberately /tmp, not $TMPDIR: on
+# macOS $TMPDIR is a long per-user path that would push the agent's tmux
+# socket (see below) past the 108-byte limit.
+TMP_BASE="/tmp/claude-$(id -u)"
+[ -d "$TMP_BASE" ] || TMP_BASE=/tmp
+ROOT="$(mktemp -d -p "$TMP_BASE" hub-e2e.XXXXXX)" || { echo "hub-e2e: mktemp -p $TMP_BASE failed" >&2; exit 1; }
 # Whatever happens, leave nothing running: every hub and agent this script
 # started records a pid file under $ROOT, and the agent's tmux server lives
 # under $ROOT/tmux (a short path: a tmux socket path is capped at 108 bytes).
 cleanup() {
-  local f pid
+  local f pid n
   for f in "$ROOT"/*.pid; do
     [ -e "$f" ] || continue
     pid=$(cat "$f"); kill -TERM "$pid" 2>/dev/null || continue
@@ -24,6 +31,13 @@ cleanup() {
     wait "$pid" 2>/dev/null
   done
   [ -d "$ROOT/tmux" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$ROOT/tmux" tmux kill-server 2>/dev/null
+  # Hub A manages this machine's own (non-isolated) tmux server directly, so a
+  # session it created there can outlive a run that is interrupted before its
+  # own kill_session step runs. Sweep this run's session names, if any are
+  # still around, on that default server too.
+  for n in "${NAME:-}" "${NAME2:-}" "${NAME3:-}"; do
+    [ -n "$n" ] && tmux has-session -t "$n" 2>/dev/null && tmux kill-session -t "$n" 2>/dev/null
+  done
   return 0
 }
 trap cleanup EXIT
@@ -33,6 +47,10 @@ bad()  { FAIL=$((FAIL+1)); printf 'FAIL  %s\n      %s\n' "$1" "${2:-}"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1" "$3"; fi; }
 
 free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
+
+# filemode PATH -> octal permission bits, portable across GNU (`stat -c`, the
+# CI runner) and BSD (`stat -f`, a macOS dev box) stat.
+filemode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%OLp' "$1" 2>/dev/null; }
 
 # rpc PORT HOST TOKEN METHOD PARAMS_JSON -> prints the JSON-RPC body (SSE "data:" line stripped)
 rpc() {
@@ -72,8 +90,8 @@ PUB=fleet.example.com
 echo "== Hub A (local host on)"
 TOKA=$("$BIN" init --data-dir "$ROOT/a" --public-url "https://$PUB" --port "$PA" --local-host true 2>&1 | grep -E '^[0-9a-f]{64}$')
 check "init prints a 64-hex token" '[ ${#TOKA} -eq 64 ]' "got '${TOKA}'"
-check "state.db is 0600" '[ "$(stat -c %a "$ROOT/a/state.db")" = 600 ]' "$(stat -c %a "$ROOT/a/state.db")"
-check "data dir is 0700" '[ "$(stat -c %a "$ROOT/a")" = 700 ]' "$(stat -c %a "$ROOT/a")"
+check "state.db is 0600" '[ "$(filemode "$ROOT/a/state.db")" = 600 ]' "$(filemode "$ROOT/a/state.db")"
+check "data dir is 0700" '[ "$(filemode "$ROOT/a")" = 700 ]' "$(filemode "$ROOT/a")"
 check "token show prints the same token" '[ "$("$BIN" token show --data-dir "$ROOT/a")" = "$TOKA" ]' "mismatch"
 start_hub a "$PA" --public-url "https://$PUB" --local-host true || bad "hub A starts" "$(tail -5 "$ROOT/a.log")"
 check "healthcheck healthy while running" '"$BIN" healthcheck --port "$PA" >/dev/null 2>&1' "$("$BIN" healthcheck --port "$PA" 2>&1)"
@@ -322,7 +340,7 @@ check "hub C SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
 echo "== ssh-key in an isolated HOME"
 FH="$ROOT/home"; mkdir -p "$FH"
 HOME="$FH" "$BIN" ssh-key >"$ROOT/k1" 2>&1
-check "ssh-key generates a key" 'grep -q "^ssh-ed25519 " "$ROOT/k1" && [ "$(stat -c %a "$FH/.ssh/id_ed25519")" = 600 ]' "$(cat "$ROOT/k1")"
+check "ssh-key generates a key" 'grep -q "^ssh-ed25519 " "$ROOT/k1" && [ "$(filemode "$FH/.ssh/id_ed25519")" = 600 ]' "$(cat "$ROOT/k1")"
 sum=$(sha256sum "$FH/.ssh/id_ed25519" | cut -d" " -f1); rm "$FH/.ssh/id_ed25519.pub"
 HOME="$FH" "$BIN" ssh-key >"$ROOT/k2" 2>&1
 check "private key only -> public key derived, private key untouched" 'grep -q "^ssh-ed25519 " "$ROOT/k2" && [ "$(sha256sum "$FH/.ssh/id_ed25519" | cut -d" " -f1)" = "$sum" ]' "$(cat "$ROOT/k2")"
