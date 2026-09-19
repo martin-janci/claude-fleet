@@ -1,6 +1,6 @@
 # ADR 0001: Descope Freeze, replace Handoff with `move_session`
 
-- Status: accepted
+- Status: accepted; the preflight clause of decision 2 is superseded by ADR 0002
 - Date: 2026-09-11
 - Finding: PROD-8 (plan `docs/plans/2026-09-10-fleet-improvement-plan.md`, Wave 5 G2)
 - Supersedes: design spec `docs/specs/2026-05-19-claude-fleet-design.md` §8.3 (Handoff) and §8.4 (Freeze)

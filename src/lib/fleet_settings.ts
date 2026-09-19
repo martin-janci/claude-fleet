@@ -22,6 +22,9 @@ export const SETTING_KEYS = {
   repairTickIntervalSecs: 'repair.tick_interval_secs',
   tasksMaxAgeSecs: 'tasks.max_age_secs',
   moveMaxTranscriptMb: 'move.max_transcript_mb',
+  moveMaxBundleMb: 'move.max_bundle_mb',
+  moveIgnoredEntryKb: 'move.ignored_entry_kb',
+  moveIgnoredTotalMb: 'move.ignored_total_mb',
   usageEnabled: 'usage.enabled',
   usageIntervalSecs: 'usage.interval_secs',
   usagePricesJson: 'usage.prices_json',
@@ -43,6 +46,15 @@ export const MAX_SECS = 10 * 365 * 24 * 3600;
 
 /** Mirror of `settings::MOVE_MAX_TRANSCRIPT_MB_MAX` (`Kind::Int { min: 1, max }`). */
 export const MOVE_MAX_TRANSCRIPT_MB_MAX = 4096;
+
+/** Mirror of `settings::MOVE_MAX_BUNDLE_MB_MAX` (`Kind::Int { min: 1, max }`). */
+export const MOVE_MAX_BUNDLE_MB_MAX = 4096;
+
+/** Mirror of `settings::MOVE_IGNORED_ENTRY_KB_MAX` (`Kind::Int { min: 1, max }`). */
+export const MOVE_IGNORED_ENTRY_KB_MAX = 1_048_576;
+
+/** Mirror of `settings::MOVE_IGNORED_TOTAL_MB_MAX` (`Kind::Int { min: 1, max }`). */
+export const MOVE_IGNORED_TOTAL_MB_MAX = 1024;
 
 export type ProjectsLayout = 'github' | 'flat';
 
@@ -66,6 +78,9 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'repair.tick_interval_secs': '600',
   'tasks.max_age_secs': '86400',
   'move.max_transcript_mb': '200',
+  'move.max_bundle_mb': '500',
+  'move.ignored_entry_kb': '1024',
+  'move.ignored_total_mb': '20',
   'usage.enabled': 'true',
   'usage.interval_secs': '300',
   'usage.prices_json': '{}',

@@ -796,6 +796,7 @@ impl HubBackend {
                 "session_id": args.session_id,
                 "target_host_alias": args.target_host_alias,
                 "keep_source": args.keep_source,
+                "strict": args.strict,
             }),
         )
         .await

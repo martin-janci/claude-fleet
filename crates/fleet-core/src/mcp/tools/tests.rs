@@ -176,6 +176,19 @@ fn move_needs_a_caller_allowed_on_both_hosts() {
 }
 
 #[test]
+fn move_session_strict_defaults_to_false() {
+    let p: super::params::MoveSessionParams =
+        serde_json::from_value(serde_json::json!({ "session_id": 1, "target_host_alias": "beta" }))
+            .unwrap();
+    assert!(!p.strict && !p.keep_source);
+    let p: super::params::MoveSessionParams = serde_json::from_value(
+        serde_json::json!({ "session_id": 1, "target_host_alias": "beta", "strict": true }),
+    )
+    .unwrap();
+    assert!(p.strict);
+}
+
+#[test]
 fn session_conversation_is_registered_readonly_with_documented_params() {
     let tools = FleetTools::tool_router_for_doc().list_all();
     let t = tools
