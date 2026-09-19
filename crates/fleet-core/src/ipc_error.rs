@@ -145,6 +145,15 @@ pub mod codes {
     /// `move_session`: a step failed after the target session was started;
     /// both sessions were left running (`details.target_session_id`).
     pub const E_MOVE_PARTIAL: &str = "E_MOVE_PARTIAL";
+    /// `move_session`: the source worktree is mid merge / rebase /
+    /// cherry-pick / revert / bisect (`details.operation`); finish or abort it.
+    pub const E_MOVE_MIDOP: &str = "E_MOVE_MIDOP";
+    /// `move_session`: a pre-existing target worktree has uncommitted
+    /// changes; the move never overwrites them.
+    pub const E_MOVE_TARGET_DIRTY: &str = "E_MOVE_TARGET_DIRTY";
+    /// `move_session`: carrying the work failed before the target started
+    /// (`details.step`, `details.stderr`); the source is untouched.
+    pub const E_MOVE_CARRY: &str = "E_MOVE_CARRY";
     /// No Claude transcript was found for the session (it has not written a
     /// turn yet, or runs on another cwd), or it is empty.
     pub const E_NO_TRANSCRIPT: &str = "E_NO_TRANSCRIPT";
