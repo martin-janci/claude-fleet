@@ -2,9 +2,19 @@
 # Packages the fleet-agent and fleet-hub Linux release binaries that
 # `.github/workflows/release.yml`'s `agent-hub-binaries` job just built with
 # `cargo build --release --target "$TARGET"`, into the assets that job
-# attaches to the draft release: one tarball per binary (binary + LICENSE +
-# a one-line README pointing at docs/hub.md) and a SHA256SUMS file covering
-# both.
+# attaches to the draft release: one tarball per binary (binary + a root
+# LICENSE, verbatim, if the checkout has one + a one-line README pointing
+# at docs/hub.md), and this leg's own per-target checksums file.
+#
+# This does NOT write a combined SHA256SUMS: two matrix legs (one per
+# target) each run this script independently, and a file named the same by
+# both would just have whichever leg finishes last silently overwrite the
+# other's on upload — the published checksums would then cover 2 of the 4
+# tarballs, not 4, with nothing to say so. Instead each run writes its own
+# `dist/SHA256SUMS.$TARGET`, uploaded as a distinctly-named workflow
+# artifact; a separate job (`agent-hub-checksums` in release.yml, see
+# scripts/merge-sha256sums.sh) combines both legs' files into the one
+# SHA256SUMS the release actually gets.
 #
 # Run from the repository root, after the cargo build, with:
 #   TARGET   the Rust target triple the binaries were built for, e.g.
@@ -30,35 +40,18 @@ out="dist"
 rm -rf "$out"
 mkdir -p "$out"
 
-# No root LICENSE file exists in this repository yet (every crate's
-# Cargo.toml already declares `license = "MIT"`, but nothing carries the
-# text) — ship the matching MIT text rather than an archive with no license
-# in it at all. If a root LICENSE file is added later, prefer copying that
-# one here instead of this embedded copy.
-license="$out/LICENSE"
-cat >"$license" <<'EOF'
-MIT License
-
-Copyright (c) 2026 martin-janci
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-EOF
+# A root LICENSE file, copied verbatim, if and only if this checkout
+# actually has one — this script must never fabricate license text (there
+# is no root LICENSE in this repository as of this writing; only each
+# crate's Cargo.toml declares `license = "MIT"`). Accepts the common
+# spellings; whichever exists first, unmodified.
+license=""
+for candidate in LICENSE LICENSE.md LICENSE.txt; do
+  if [ -f "$candidate" ]; then
+    license="$candidate"
+    break
+  fi
+done
 
 for bin in fleet-agent fleet-hub; do
   src="$bin_dir/$bin"
@@ -69,19 +62,24 @@ for bin in fleet-agent fleet-hub; do
   stage="$out/${bin}-${version}-${TARGET}"
   mkdir -p "$stage"
   cp "$src" "$stage/"
-  cp "$license" "$stage/LICENSE"
+  license_line="License: MIT (see the repository)"
+  if [ -n "$license" ]; then
+    cp "$license" "$stage/LICENSE"
+    license_line="License: see LICENSE"
+  fi
   cat >"$stage/README.txt" <<EOF
 $bin $version ($TARGET)
 
 See https://github.com/$REPO/blob/$TAG/docs/hub.md for how to install and
 run this binary, including the minimum glibc it needs and how to run it
 without systemd.
+
+$license_line
 EOF
   tar -C "$out" -czf "$out/${bin}-${version}-${TARGET}.tar.gz" "$(basename "$stage")"
   rm -rf "$stage"
 done
 
-rm -f "$license"
-( cd "$out" && sha256sum ./*.tar.gz >SHA256SUMS )
+( cd "$out" && sha256sum ./*.tar.gz >"SHA256SUMS.${TARGET}" )
 
 ls -la "$out"
