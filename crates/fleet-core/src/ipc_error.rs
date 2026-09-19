@@ -153,11 +153,14 @@ pub mod codes {
     /// cherry-pick / revert / bisect (`details.operation`); finish or abort it.
     pub const E_MOVE_MIDOP: &str = "E_MOVE_MIDOP";
     /// `move_session`: the target worktree has uncommitted changes — its
-    /// own, or work carried by an earlier move that did not finish; the
-    /// move never overwrites them.
+    /// own, work carried by an earlier move that did not finish, or the copy
+    /// left behind when this session was moved away from that host (a move
+    /// carries the work, it does not remove it from the source); the move
+    /// never overwrites them and the source is not touched.
     pub const E_MOVE_TARGET_DIRTY: &str = "E_MOVE_TARGET_DIRTY";
     /// `move_session`: carrying the work failed before the target started
-    /// (`details.step`, `details.stderr`); the source is untouched.
+    /// (`details.step`, `details.stderr`, and `details.cause_code` when the
+    /// transport itself failed); the source is untouched.
     pub const E_MOVE_CARRY: &str = "E_MOVE_CARRY";
     /// No Claude transcript was found for the session (it has not written a
     /// turn yet, or runs on another cwd), or it is empty.

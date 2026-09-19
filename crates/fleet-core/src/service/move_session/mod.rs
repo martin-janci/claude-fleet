@@ -506,7 +506,10 @@ pub fn parse_target_prep(stdout: &str, claude_id: &str) -> Result<TargetPrep, Ip
 
 /// Source git state, `\x1e`-separated: worktree, porcelain, HEAD, current
 /// branch, origin sha of `branch`, ahead count, mid-op name (or empty). Tries
-/// the pane's cwd first, then `hint`.
+/// the pane's cwd first, then `hint`. The porcelain goes through
+/// [`carry::STATUS_PORCELAIN`]: it is compared with the target's after the
+/// replay, so a difference between the two hosts' git configs must not be
+/// able to fail a good move.
 pub fn inspect_script(tmux_name: &str, hint: Option<&str>, branch: &str) -> String {
     format!(
         r#"# cf-move:inspect
@@ -523,7 +526,7 @@ if [ -z "$wt" ] && [ -n "$hint" ] && git -C "$hint" rev-parse --git-dir >/dev/nu
 if [ -z "$wt" ]; then printf '{NO_WORKTREE}\n' >&2; exit 3; fi
 top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)
 if [ -n "$top" ]; then wt="$top"; fi
-porcelain=$(git -C "$wt" status --porcelain=v1 2>/dev/null)
+porcelain=$(git -C "$wt" {status} 2>/dev/null)
 head=$(git -C "$wt" rev-parse HEAD 2>/dev/null)
 cur=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
 rsha=$(git -C "$wt" ls-remote --heads origin "refs/heads/$br" 2>/dev/null | cut -f1 | head -n1)
@@ -548,6 +551,7 @@ printf '%s\036%s\036%s\036%s\036%s\036%s\036%s' "$wt" "$porcelain" "$head" "$cur
         name = quote(tmux_name),
         hint = quote(hint.unwrap_or("")),
         br = quote(branch),
+        status = carry::STATUS_PORCELAIN,
     )
 }
 
@@ -686,7 +690,11 @@ exit 0
 /// In the target worktree: fast-forward to the source HEAD when behind
 /// (refuse a divergence), then resolve the physical cwd, create the Claude
 /// project dir and print `<head>\t<encoded dir>\t<transcript path>\t<existing
-/// size or -1>`.
+/// size or -1>`. A target that is merely BEHIND but has uncommitted changes
+/// is not diverged — most often it is the copy this session left behind when
+/// it moved away from that host — so it gets the apply's own
+/// [`carry::TARGET_DIRTY`] sentinel and its truthful message, not
+/// "reconcile the branch".
 pub fn target_prep_script(cwd: &str, want_head: &str, branch: &str, claude_id: &str) -> String {
     format!(
         r#"# cf-move:prep
@@ -700,7 +708,8 @@ git fetch -q origin "+refs/heads/$br:refs/remotes/origin/$br" >/dev/null 2>&1
 h=$(git rev-parse HEAD 2>/dev/null)
 if [ "$h" != "$want" ]; then
   if git merge-base --is-ancestor "$want" HEAD 2>/dev/null; then :
-  elif git merge-base --is-ancestor HEAD "$want" 2>/dev/null && [ -z "$(git status --porcelain)" ]; then
+  elif git merge-base --is-ancestor HEAD "$want" 2>/dev/null; then
+    if [ -n "$(git {status} 2>/dev/null)" ]; then printf '{TARGET_DIRTY}\n' >&2; exit 9; fi
     git merge -q --ff-only "$want" >/dev/null 2>&1 || {{ printf '{DIVERGED} %s\n' "$h" >&2; exit 6; }}
   else
     printf '{DIVERGED} %s\n' "$h" >&2; exit 6
@@ -719,6 +728,8 @@ printf '%s\t%s\t%s\t%s\n' "$h" "$enc" "$f" "$n"
         want = quote(want_head),
         br = quote(branch),
         id = quote(claude_id),
+        status = carry::STATUS_PORCELAIN,
+        TARGET_DIRTY = carry::TARGET_DIRTY,
     )
 }
 
@@ -1232,15 +1243,51 @@ fn bundle_too_large(bytes: u64, cap: u64) -> IpcError {
     .with_details(serde_json::json!({ "bytes": bytes, "cap_bytes": cap, "payload": "bundle" }))
 }
 
+/// The target worktree holds uncommitted changes. Raised from two places —
+/// the prep step (behind the source HEAD and dirty) and the apply — with
+/// one message, because from the user's side it is one situation. The third
+/// case is the common one after this branch: a move leaves its work in the
+/// source worktree, so moving the session BACK finds that copy waiting.
+fn target_dirty(cwd: &str, target: &str) -> IpcError {
+    IpcError::new(
+        codes::E_MOVE_TARGET_DIRTY,
+        format!(
+            "move_session: the target worktree {cwd} on {target} has uncommitted changes — its own, work carried by an earlier move attempt that did not finish, or the copy left behind when this session was moved away from this host; the move never overwrites them, so inspect them there and commit or discard them before retrying (the source session was not touched)"
+        ),
+    )
+}
+
 /// A carry step failed before the target started.
 fn carry_err(step: &str, what: &str, stderr: &str) -> IpcError {
+    carry_err_cause(step, what, stderr, None)
+}
+
+/// [`carry_err`] keeping the code of an underlying failure in
+/// `details.cause_code`.
+fn carry_err_cause(step: &str, what: &str, stderr: &str, cause: Option<&str>) -> IpcError {
     IpcError::new(
         codes::E_MOVE_CARRY,
         format!(
             "move_session: carrying the work failed at {step}: {what} (the source session was not touched)"
         ),
     )
-    .with_details(serde_json::json!({ "step": step, "stderr": stderr }))
+    .with_details(
+        serde_json::json!({ "step": step, "stderr": stderr, "cause_code": cause }),
+    )
+}
+
+/// The transport itself failed on a carry step (`E_SSH`, `E_SSH_TIMEOUT`).
+/// That is still a carry failure — the caller needs `details.step` and the
+/// promise that the source is untouched — so the original code travels in
+/// the message and in `details.cause_code`, where a timeout stays tellable
+/// from a parse failure.
+fn carry_transport(step: &str, e: IpcError) -> IpcError {
+    carry_err_cause(
+        step,
+        &format!("{}: {}", e.code, e.message),
+        "",
+        Some(&e.code),
+    )
 }
 
 fn partial(step: &str, target: &str, name: &str, target_id: Option<i64>, e: &IpcError) -> IpcError {
@@ -1512,7 +1559,9 @@ async fn move_session_inner(
     // 3a. Seed: the target needs a main clone before anything can be fetched
     //     into it. Never prompts; falls back to `git init` without origin.
     let clone_url = crate::repo_url::clone_url_for(&snap.owner, &snap.repo);
-    let out = sh_long(ssh, &target, &carry::seed_script(&project_root, &clone_url)).await?;
+    let out = sh_long(ssh, &target, &carry::seed_script(&project_root, &clone_url))
+        .await
+        .map_err(|e| carry_transport("seed", e))?;
     if !out.status.success() {
         return Err(carry_err(
             "seed",
@@ -1548,10 +1597,11 @@ async fn move_session_inner(
     let out = sh(
         ssh,
         &target,
-        &carry::haves_script(&project_root, &id),
+        &carry::haves_script(&project_root, &id, &snap.branch),
         GIT_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| carry_transport("haves", e))?;
     if !out.status.success() {
         return Err(carry_err(
             "haves",
@@ -1575,7 +1625,8 @@ async fn move_session_inner(
         &src,
         &carry::snapshot_script(&state.worktree, &id, &haves, snap.bundle_cap),
     )
-    .await?;
+    .await
+    .map_err(|e| carry_transport("snapshot", e))?;
     if !out.status.success() {
         let err = stderr_of(&out);
         if let Some(rest) = err.split(carry::BUNDLE_TOO_LARGE).nth(1) {
@@ -1599,6 +1650,11 @@ async fn move_session_inner(
             "",
         )
     })?;
+    // The source script enforces the cap too; this is the orchestrator not
+    // taking a host's word for the size of what it is about to relay.
+    if bundle.bytes > snap.bundle_cap {
+        return Err(bundle_too_large(bundle.bytes, snap.bundle_cap));
+    }
     carried.commits = bundle.commits;
     carried.bundle_bytes = bundle.bytes;
     if bundle.submodules {
@@ -1625,7 +1681,8 @@ async fn move_session_inner(
         &target,
         &carry::fetch_script(&project_root, &target_bundle, &id, &snap.branch),
     )
-    .await?;
+    .await
+    .map_err(|e| carry_transport("fetch", e))?;
     if !out.status.success() {
         return Err(carry_err(
             "fetch",
@@ -1662,6 +1719,11 @@ async fn move_session_inner(
     .map_err(|e| before_target("verifying the target worktree", e))?;
     if !out.status.success() {
         let err = stderr_of(&out);
+        // Behind the source HEAD and dirty: the target's own uncommitted
+        // work, not a divergence.
+        if err.contains(carry::TARGET_DIRTY) {
+            return Err(target_dirty(&cwd, &target));
+        }
         let msg = if err.contains(DIVERGED) {
             format!(
                 "the target worktree {cwd} on {target} has diverged from the source HEAD {}; reconcile the branch there first",
@@ -1725,16 +1787,12 @@ async fn move_session_inner(
             &carry::apply_script(&cwd, &id, &state.head),
             GIT_TIMEOUT,
         )
-        .await?;
+        .await
+        .map_err(|e| carry_transport("apply", e))?;
         if !out.status.success() {
             let err = stderr_of(&out);
             if err.contains(carry::TARGET_DIRTY) {
-                return Err(IpcError::new(
-                    codes::E_MOVE_TARGET_DIRTY,
-                    format!(
-                        "move_session: the target worktree {cwd} on {target} has uncommitted changes — its own, or work carried by an earlier move attempt that did not finish; inspect it there, then commit or discard them and retry (the source session was not touched)"
-                    ),
-                ));
+                return Err(target_dirty(&cwd, &target));
             }
             return Err(carry_err(
                 "apply",
@@ -2872,10 +2930,16 @@ mod tests {
             reply: Reply,
             code: &'static str,
             step: Option<&'static str>,
+            /// The transport code kept in `details.cause_code`, when the
+            /// failure was one (a timeout must stay tellable from a parse
+            /// failure even though both are `E_MOVE_CARRY`).
+            cause: Option<&'static str>,
             /// Hosts that must be sent a cleanup script — and, just as
             /// importantly, the only ones: a host nothing was created on
             /// must never get one (an empty transfer id above all).
             cleaned: &'static [&'static str],
+            /// Shorten the fake's wall clock, for a reply that never comes.
+            wall_clock: Option<Duration>,
         }
         let case = |host, marker, what, reply, code, step, cleaned| Case {
             host,
@@ -2884,7 +2948,9 @@ mod tests {
             reply,
             code,
             step,
+            cause: None,
             cleaned,
+            wall_clock: None,
         };
         let failed = |what: &str| format!("{} {what}", carry::FAILED);
         let cases = vec![
@@ -2937,17 +3003,52 @@ mod tests {
                 Some("haves"),
                 &["beta"][..],
             ),
-            case(
-                "beta",
-                "# cf-carry:haves",
-                "transport",
-                Reply::SpawnError {
-                    message: "No such file or directory (os error 2)".into(),
-                },
-                "E_SSH",
-                None,
-                &["beta"][..],
-            ),
+            // A transport failure on a carry step is still a carry failure:
+            // the caller needs `details.step` and "the source was not
+            // touched", with the original code kept in `cause_code`.
+            Case {
+                cause: Some("E_SSH"),
+                ..case(
+                    "beta",
+                    "# cf-carry:haves",
+                    "transport",
+                    Reply::SpawnError {
+                        message: "No such file or directory (os error 2)".into(),
+                    },
+                    codes::E_MOVE_CARRY,
+                    Some("haves"),
+                    &["beta"][..],
+                )
+            },
+            Case {
+                cause: Some("E_SSH_TIMEOUT"),
+                wall_clock: Some(Duration::from_millis(50)),
+                ..case(
+                    "beta",
+                    "# cf-carry:haves",
+                    "never answers",
+                    Reply::hang(),
+                    codes::E_MOVE_CARRY,
+                    Some("haves"),
+                    &["beta"][..],
+                )
+            },
+            // The same for a step that runs on the long wall clock
+            // (`sh_long`, a different transport call).
+            Case {
+                cause: Some("E_SSH"),
+                ..case(
+                    "alpha",
+                    "# cf-carry:snapshot",
+                    "transport",
+                    Reply::SpawnError {
+                        message: "No such file or directory (os error 2)".into(),
+                    },
+                    codes::E_MOVE_CARRY,
+                    Some("snapshot"),
+                    &["alpha", "beta"][..],
+                )
+            },
             case(
                 "alpha",
                 "# cf-carry:snapshot",
@@ -3028,6 +3129,9 @@ mod tests {
             let f = fixture();
             f.fake
                 .on_host(c.host, Match::script_contains(c.marker), c.reply);
+            if let Some(w) = c.wall_clock {
+                f.fake.set_wall_clock(w);
+            }
             let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
             let err = run(&f, &hooks, false).await.unwrap_err();
             assert_eq!(err.code, c.code, "{name}: {}", err.message);
@@ -3038,6 +3142,23 @@ mod tests {
                     "{name}: {}",
                     err.message
                 );
+            }
+            match c.cause {
+                Some(cause) => {
+                    assert_eq!(
+                        err.details.as_ref().unwrap()["cause_code"],
+                        cause,
+                        "{name}: {}",
+                        err.message
+                    );
+                    assert!(err.message.contains(cause), "{name}: {}", err.message);
+                }
+                None => assert!(
+                    err.details
+                        .as_ref()
+                        .is_none_or(|d| d["cause_code"].is_null()),
+                    "{name}: no transport cause to report"
+                ),
             }
             if c.code == codes::E_MOVE_TOO_LARGE {
                 assert_eq!(err.details.as_ref().unwrap()["payload"], "bundle");
@@ -3218,8 +3339,10 @@ mod tests {
     /// Every carry script runs under `bash -lc`, so a login profile can print
     /// a banner before the script body ever does: the parsers anchor on the
     /// output marker, and the relayed bundle must be the payload alone.
+    /// (Only the carry scripts are marker-protected; inspect, locate and
+    /// read are not — pre-existing, and out of this test's scope.)
     #[tokio::test]
-    async fn a_login_banner_before_every_script_does_not_break_the_move() {
+    async fn a_login_banner_before_every_carry_script_does_not_break_the_move() {
         let f = fixture();
         let banner = |payload: &str| format!("Welcome to alpha!\n{}", out(payload));
         f.fake
@@ -3441,6 +3564,167 @@ mod tests {
         assert_source_untouched(&f, &hooks);
     }
 
+    /// (I5 minimum) A target that is merely BEHIND the source and has
+    /// uncommitted changes is not diverged — most often it is the copy this
+    /// very session left behind when it moved away from that host. Telling
+    /// the user to "reconcile the branch" sends them after a problem they
+    /// do not have.
+    #[tokio::test]
+    async fn a_behind_and_dirty_target_is_reported_as_dirty_not_diverged() {
+        let f = fixture();
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-move:prep"),
+            Reply::fail(9, carry::TARGET_DIRTY),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY, "{}", err.message);
+        assert!(
+            err.message.contains("moved away from this host"),
+            "the third case is named: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("never overwrites")
+                && err.message.contains("source session was not touched"),
+            "{}",
+            err.message
+        );
+        assert!(!err.message.contains("diverged"), "{}", err.message);
+        assert_source_untouched(&f, &hooks);
+    }
+
+    /// The same verdict through the real `target_prep_script`: behind and
+    /// dirty is `TARGET_DIRTY`, a genuine divergence is still `DIVERGED`,
+    /// and a clean target that is merely behind still fast-forwards.
+    #[test]
+    fn target_prep_script_separates_a_dirty_target_from_a_diverged_one() {
+        if !carry::tests::require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let git = |args: &[&str]| -> std::process::Output {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env("HOME", &home)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+        let sha = |rev: &str| {
+            String::from_utf8_lossy(&git(&["rev-parse", rev]).stdout)
+                .trim()
+                .to_string()
+        };
+        let prep = |want: &str| -> std::process::Output {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(target_prep_script(
+                    repo.to_str().unwrap(),
+                    want,
+                    "feat",
+                    SID,
+                ))
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", &home)
+                .output()
+                .unwrap()
+        };
+
+        git(&["init", "-q", "-b", "feat"]);
+        std::fs::write(repo.join("f.txt"), "one\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "-q", "-m", "one"]);
+        let first = sha("HEAD");
+        std::fs::write(repo.join("f.txt"), "two\n").unwrap();
+        git(&["commit", "-q", "-am", "two"]);
+        let want = sha("HEAD");
+        git(&["branch", "later"]); // keep `want` reachable
+
+        // Clean and behind: still fast-forwarded, as before.
+        git(&["checkout", "-q", "-B", "feat", &first]);
+        let out = prep(&want);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(sha("HEAD"), want, "a clean behind target fast-forwards");
+
+        // Behind AND dirty: the target's own uncommitted work, not a
+        // divergence — and nothing is merged over it.
+        git(&["checkout", "-q", "-B", "feat", &first]);
+        std::fs::write(repo.join("f.txt"), "local edit\n").unwrap();
+        let out = prep(&want);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(9), "{err}");
+        assert!(err.contains(carry::TARGET_DIRTY), "{err}");
+        assert!(!err.contains(DIVERGED), "{err}");
+        assert_eq!(sha("HEAD"), first, "nothing was merged onto the dirty tree");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "local edit\n"
+        );
+
+        // A real divergence keeps DIVERGED.
+        git(&["commit", "-q", "-am", "local"]);
+        let out = prep(&want);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(6), "{err}");
+        assert!(err.contains(DIVERGED), "{err}");
+    }
+
+    /// The source script enforces `move.max_bundle_mb`, but the orchestrator
+    /// must not take a source's word for it.
+    #[tokio::test]
+    async fn a_bundle_over_the_cap_is_refused_by_the_orchestrator_too() {
+        let f = fixture();
+        f.store
+            .lock()
+            .unwrap()
+            .set_setting(carry::SETTING_MAX_BUNDLE_MB, "1")
+            .unwrap();
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:snapshot"),
+            Reply::ok(&out(&snapshot_out(2 * 1024 * 1024, 0))),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TOO_LARGE, "{}", err.message);
+        let d = err.details.expect("details");
+        assert_eq!(d["payload"], "bundle");
+        assert_eq!(d["cap_bytes"], 1024 * 1024);
+        // Nothing of the bundle was pulled down or pushed up.
+        assert!(
+            !f.fake
+                .calls_for("alpha")
+                .iter()
+                .any(|c| c.script().is_some_and(|s| s.contains("# cf-carry:chunk"))),
+            "the bundle is never downloaded"
+        );
+        assert_source_untouched(&f, &hooks);
+    }
+
     #[tokio::test]
     async fn a_second_concurrent_move_of_the_same_session_is_refused() {
         let f = fixture();
@@ -3654,16 +3938,7 @@ mod tests {
     /// --abort`. Nobody had run the probe against real git before this test.
     #[test]
     fn inspect_script_probe_detects_a_real_mid_merge() {
-        let git_ok = std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .is_ok();
-        let bash_ok = std::process::Command::new("bash")
-            .arg("--version")
-            .output()
-            .is_ok();
-        if !git_ok || !bash_ok {
-            eprintln!("skipping: git or bash is not available in this environment");
+        if !carry::tests::require(&["git", "bash"]) {
             return;
         }
 

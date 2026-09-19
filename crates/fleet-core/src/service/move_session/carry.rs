@@ -43,6 +43,13 @@ pub const DENYLIST: &[&str] = &[
 ];
 /// Bound on carried ignored entries: they reach `tar` as argv.
 pub const MAX_IGNORED_ENTRIES: usize = 500;
+/// Bound on the target's haves. `run_shell` hands the whole script to the
+/// host as ONE `bash -lc` argument, and Linux caps a single argument at
+/// 128 KiB (`MAX_ARG_STRLEN`) — around 3,000 object names. A tag-heavy
+/// target would make every snapshot fail with "Argument list too long", and
+/// every retry with it. Haves are only an optimisation (a fatter bundle,
+/// never a wrong one), so the list is cut to the ones most likely to help.
+pub const MAX_HAVES: usize = 1000;
 
 /// How the target's main clone came to exist.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +212,15 @@ pub const HEAD_MISMATCH: &str = "__CF_HEAD_MISMATCH__";
 /// Anchoring parsing on this marker, rather than trusting stdout to be
 /// pristine, is what makes the parsers immune to that noise.
 pub const OUT_MARKER: &str = "__CF_OUT__";
+/// The one `git status` invocation the carry ever runs. Everything a host's
+/// config could change about the text is pinned: `core.quotePath` (how a
+/// non-ASCII name is spelled), `status.renames`, and
+/// `status.showUntrackedFiles` — with which a target host can otherwise hide
+/// its own untracked work from the dirty check. The source's porcelain and
+/// the target's are compared for equality, so both must be produced by the
+/// same rules; one const, so the call sites cannot drift apart.
+pub const STATUS_PORCELAIN: &str =
+    "-c core.quotePath=true -c status.renames=true status --porcelain=v1 --untracked-files=normal";
 /// Bytes per relay chunk: the orchestrator's peak memory for a payload.
 pub const CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -270,21 +286,26 @@ fn home_guard() -> String {
 /// Make sure the target's main clone exists. Prints [`OUT_MARKER`] then one
 /// word: `existing`, `cloned` or `initialized`. Never prompts (a host
 /// without credentials falls through to `git init`) and never removes a
-/// directory it did not create.
+/// directory it did not create. An `init`-seeded clone gets a neutral
+/// unborn HEAD: a host whose `init.defaultBranch` happens to BE the session
+/// branch would otherwise make the later `worktree add <branch>` fail as
+/// "already checked out" in the main clone.
 pub fn seed_script(project_root: &str, clone_url: &str) -> String {
     format!(
         r#"# cf-carry:seed
 set +e
 r={r}
 url={url}
-export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -oBatchMode=yes'
-if [ -e "$r/.git" ]; then printf '{OUT_MARKER}\nexisting\n'; exit 0; fi
+export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -oBatchMode=yes -oConnectTimeout=20'
+if [ -e "$r/.git" ]; then printf '\n{OUT_MARKER}\nexisting\n'; exit 0; fi
 if [ -e "$r" ]; then printf '{FAILED} %s exists and is not a git repository\n' "$r" >&2; exit 5; fi
 mkdir -p -- "$(dirname -- "$r")" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
-if git clone -q -- "$url" "$r" >/dev/null 2>&1; then printf '{OUT_MARKER}\ncloned\n'; exit 0; fi
+if git clone -q -- "$url" "$r" >/dev/null 2>&1; then printf '\n{OUT_MARKER}\ncloned\n'; exit 0; fi
 rm -rf -- "$r"
-git init -q -- "$r" >/dev/null 2>&1 && git -C "$r" remote add origin "$url" || {{ printf '{FAILED} init\n' >&2; exit 5; }}
-printf '{OUT_MARKER}\ninitialized\n'
+git init -q -- "$r" >/dev/null 2>&1 \
+  && git -C "$r" symbolic-ref HEAD refs/heads/fleet-seed >/dev/null 2>&1 \
+  && git -C "$r" remote add origin "$url" || {{ printf '{FAILED} init\n' >&2; exit 5; }}
+printf '\n{OUT_MARKER}\ninitialized\n'
 "#,
         r = quote(project_root),
         url = quote(clone_url),
@@ -301,28 +322,36 @@ pub fn parse_seed(stdout: &str) -> Result<TargetSeed, IpcError> {
     }
 }
 
-/// Create the private transfer dir on the target and list every ref tip it
-/// has. Prints [`OUT_MARKER`], then the absolute dir, then one object name
-/// per line.
-pub fn haves_script(project_root: &str, claude_id: &str) -> String {
+/// Create the private transfer dir on the target and list the ref tips it
+/// has, most useful first: the session branch and its origin counterpart,
+/// then every other ref newest-commit-first, de-duplicated. Prints
+/// [`OUT_MARKER`], then the absolute dir, then one object name per line.
+pub fn haves_script(project_root: &str, claude_id: &str, branch: &str) -> String {
     format!(
         r#"# cf-carry:haves
 set +e
 r={r}
 id={id}
+br={br}
 {id_guard}
 {home_guard}
 umask 077
 dir="$HOME/.cache/claude-fleet/transfer/$id"
 rm -rf -- "$dir"
 mkdir -p -- "$dir" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
-printf '{OUT_MARKER}\n'
+printf '\n{OUT_MARKER}\n'
 printf '%s\n' "$dir"
-git -C "$r" for-each-ref --format='%(objectname)' 2>/dev/null | sort -u
+{{
+  git -C "$r" rev-parse --verify --quiet "refs/heads/$br"
+  git -C "$r" rev-parse --verify --quiet "refs/remotes/origin/$br"
+  git -C "$r" for-each-ref --sort=-committerdate --format='%(objectname)'
+}} 2>/dev/null | awk -v m={max} '!seen[$0]++ {{ print; if (++n >= m) exit }}'
 exit 0
 "#,
         r = quote(project_root),
         id = quote(claude_id),
+        br = quote(branch),
+        max = MAX_HAVES,
         id_guard = id_guard(),
         home_guard = home_guard(),
     )
@@ -374,6 +403,7 @@ pub fn snapshot_script(
     let haves: String = haves
         .iter()
         .filter(|h| is_sha(h))
+        .take(MAX_HAVES)
         .map(|h| format!("{h}\n"))
         .collect();
     format!(
@@ -385,6 +415,7 @@ cap={cap}
 fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
 {id_guard}
 {home_guard}
+old=$(umask)
 umask 077
 cd -- "$wt" 2>/dev/null || fail cd
 dir="$HOME/.cache/claude-fleet/transfer/$id"
@@ -393,6 +424,12 @@ mkdir -p -- "$dir" || fail mkdir
 export GIT_AUTHOR_NAME=claude-fleet GIT_AUTHOR_EMAIL=fleet@localhost GIT_COMMITTER_NAME=claude-fleet GIT_COMMITTER_EMAIL=fleet@localhost
 real=$(git rev-parse --git-path index)
 cp -- "$real" "$dir/index.ix" 2>/dev/null && cp -- "$real" "$dir/index.wt" 2>/dev/null || fail index
+# Everything that writes into the USER's repository — the blobs `add`
+# hashes, the trees, the two commits, the refs — runs under the umask the
+# host really has: a 0700 `objects/ab/` or ref file would lock every other
+# writer out of a group-shared clone. Only what lands in the transfer dir
+# stays 0077.
+umask "$old"
 itree=$(GIT_INDEX_FILE="$dir/index.ix" git write-tree 2>/dev/null) || fail write-tree-index
 GIT_INDEX_FILE="$dir/index.wt" git add -A >/dev/null 2>&1 || fail add
 wtree=$(GIT_INDEX_FILE="$dir/index.wt" git write-tree 2>/dev/null) || fail write-tree-worktree
@@ -401,6 +438,7 @@ ix=$(git commit-tree "$itree" -p HEAD -m 'fleet transfer: index' 2>/dev/null) ||
 w=$(git commit-tree "$wtree" -p HEAD -m 'fleet transfer: worktree' 2>/dev/null) || fail commit-worktree
 ref="refs/fleet/transfer/$id"
 git update-ref "$ref/ix" "$ix" && git update-ref "$ref/wt" "$w" && git update-ref "$ref/head" HEAD || fail update-ref
+umask 077
 : > "$dir/nots"
 while IFS= read -r h; do
   [ -n "$h" ] || continue
@@ -415,7 +453,7 @@ n=$(wc -c < "$dir/carry.bundle" | tr -d ' ')
 if [ "$n" -gt "$cap" ]; then printf '{BUNDLE_TOO_LARGE} %s\n' "$n" >&2; exit 8; fi
 sub=0; [ -f .gitmodules ] && sub=1
 lfs=0; grep -qs 'filter=lfs' .gitattributes && lfs=1
-printf '{OUT_MARKER}\n'
+printf '\n{OUT_MARKER}\n'
 printf '%s\t%s\t%s\t%s\t%s\n' "$n" "${{commits:-0}}" "$sub" "$lfs" "$dir/carry.bundle"
 "#,
         wt = quote(worktree),
@@ -453,7 +491,7 @@ pub fn chunk_script(path: &str, offset: u64, len: u64) -> String {
 set +e
 f={f}
 [ -f "$f" ] && [ -r "$f" ] || {{ printf '{FAILED} unreadable\n' >&2; exit 5; }}
-printf '{OUT_MARKER}\n'
+printf '\n{OUT_MARKER}\n'
 tail -c +{offset} -- "$f" | head -c {len}
 "#,
         f = quote(path),
@@ -463,9 +501,15 @@ tail -c +{offset} -- "$f" | head -c {len}
 }
 
 /// Verify and fetch the bundle into the target's main clone; create the
-/// local branch at the source HEAD when the target has none. An existing
-/// local branch is never moved here. Judged by exit status and the stderr
-/// sentinel only — its stdout (`ok`) carries no payload and is not marked.
+/// local branch at the source HEAD when the target has none, tracking
+/// `origin/<branch>` when the clone has one — the workspace step used to
+/// create the branch with `worktree add --track`, and without that upstream
+/// `git pull` and a bare `git push` fail in the moved session. Only a
+/// branch this script created is configured: an existing one's tracking is
+/// the user's, and it is never moved here either. Setting the upstream is
+/// best effort; it can never fail the fetch. Judged by exit status and the
+/// stderr sentinel only — its stdout (`ok`) carries no payload and is not
+/// marked.
 pub fn fetch_script(
     project_root: &str,
     bundle_path: &str,
@@ -482,9 +526,13 @@ br={br}
 {id_guard}
 fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
 git -C "$r" bundle verify "$b" >/dev/null 2>&1 || fail verify
-git -C "$r" fetch -q "$b" '+refs/fleet/transfer/*:refs/fleet/transfer/*' >/dev/null 2>&1 || fail fetch
+git -C "$r" fetch -q "$b" "+refs/fleet/transfer/$id/*:refs/fleet/transfer/$id/*" >/dev/null 2>&1 || fail fetch
 if ! git -C "$r" show-ref --verify --quiet "refs/heads/$br"; then
   git -C "$r" branch -- "$br" "refs/fleet/transfer/$id/head" >/dev/null 2>&1 || fail branch
+  if git -C "$r" config --get remote.origin.url >/dev/null 2>&1 \
+     && git -C "$r" show-ref --verify --quiet "refs/remotes/origin/$br"; then
+    git -C "$r" branch --set-upstream-to="origin/$br" -- "$br" >/dev/null 2>&1
+  fi
 fi
 printf 'ok\n'
 "#,
@@ -498,13 +546,16 @@ printf 'ok\n'
 
 /// Replay the snapshot in the target worktree: working tree := snapshot,
 /// index := what was staged. Refuses a dirty worktree ([`TARGET_DIRTY`]) and
-/// one not at `want_head` ([`HEAD_MISMATCH`]). On success prints
-/// [`OUT_MARKER`] then `git status --porcelain=v1`; parse with
+/// one not at `want_head` ([`HEAD_MISMATCH`]). Both the dirty check and the
+/// printed result go through [`STATUS_PORCELAIN`], so a target host that
+/// hides untracked files from `git status` cannot let the replay overwrite
+/// them. On success prints [`OUT_MARKER`] then that porcelain; parse with
 /// [`parse_apply`]. If either `read-tree` fails partway, the worktree is
-/// restored to a clean `HEAD` (`read-tree -u --reset HEAD` + `git clean
-/// -fdq` — never `-x`, so a pre-existing ignored file is never touched)
-/// before the [`FAILED`] sentinel is reported: a partially replayed
-/// worktree must never be left behind.
+/// restored to a clean `HEAD` before the [`FAILED`] sentinel is reported: a
+/// partially replayed worktree must never be left behind. The rollback
+/// removes EXACTLY what this script can have written — the paths the
+/// snapshot tree adds relative to `HEAD` — never `git clean`, which would
+/// also take the target's own untracked files and empty directories.
 pub fn apply_script(cwd: &str, claude_id: &str, want_head: &str) -> String {
     format!(
         r#"# cf-carry:apply
@@ -515,19 +566,28 @@ want={want}
 fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
 {id_guard}
 cd -- "$cwd" 2>/dev/null || fail cd
-if [ -n "$(git status --porcelain 2>/dev/null)" ]; then printf '{TARGET_DIRTY}\n' >&2; exit 9; fi
+if [ -n "$(git {status} 2>/dev/null)" ]; then printf '{TARGET_DIRTY}\n' >&2; exit 9; fi
 h=$(git rev-parse HEAD 2>/dev/null)
 if [ "$h" != "$want" ]; then printf '{HEAD_MISMATCH} %s\n' "$h" >&2; exit 10; fi
-recover() {{ git read-tree -u --reset HEAD >/dev/null 2>&1; git clean -fdq >/dev/null 2>&1; }}
+recover() {{
+  git read-tree -u --reset HEAD >/dev/null 2>&1
+  git diff-tree -r -z --name-only --diff-filter=A HEAD "refs/fleet/transfer/$id/wt" 2>/dev/null |
+    while IFS= read -r -d '' p; do
+      rm -f -- "$p"
+      d=$(dirname -- "$p")
+      [ "$d" = . ] || rmdir -p -- "$d" 2>/dev/null
+    done
+}}
 git read-tree -u --reset "refs/fleet/transfer/$id/wt^{{tree}}" >/dev/null 2>&1 || {{ recover; fail read-tree-worktree; }}
 git read-tree "refs/fleet/transfer/$id/ix^{{tree}}" >/dev/null 2>&1 || {{ recover; fail read-tree-index; }}
-printf '{OUT_MARKER}\n'
-git status --porcelain=v1
+printf '\n{OUT_MARKER}\n'
+git {status}
 "#,
         cwd = quote(cwd),
         id = quote(claude_id),
         want = quote(want_head),
         id_guard = id_guard(),
+        status = STATUS_PORCELAIN,
     )
 }
 
@@ -537,8 +597,9 @@ pub fn parse_apply(stdout: &str) -> Result<&str, IpcError> {
 }
 
 /// Best effort: drop the private refs and the transfer dir. Always exits 0
-/// — except for a malicious/empty id, which it refuses outright and does
-/// NOTHING for (no ref is touched, no directory is removed).
+/// — except for a malicious/empty id or an empty `$HOME` (which would make
+/// `rm -rf` reach a relative `.cache/...`), which it refuses outright and
+/// does NOTHING for (no ref is touched, no directory is removed).
 pub fn cleanup_script(repo_dir: &str, claude_id: &str) -> String {
     format!(
         r#"# cf-carry:cleanup
@@ -546,6 +607,7 @@ set +e
 r={r}
 id={id}
 {id_guard}
+{home_guard}
 git -C "$r" for-each-ref --format='%(refname)' "refs/fleet/transfer/$id/" 2>/dev/null | while IFS= read -r ref; do
   git -C "$r" update-ref -d "$ref" >/dev/null 2>&1
 done
@@ -555,6 +617,7 @@ exit 0
         r = quote(repo_dir),
         id = quote(claude_id),
         id_guard = id_guard(),
+        home_guard = home_guard(),
     )
 }
 
@@ -578,7 +641,7 @@ wt={wt}
 deny=' {deny} '
 cd -- "$wt" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {{ printf '{FAILED} not-a-repo\n' >&2; exit 5; }}
-printf '{OUT_MARKER}\n'
+printf '\n{OUT_MARKER}\n'
 git ls-files -o -i --exclude-standard --directory -z 2>/dev/null | while IFS= read -r -d '' p; do
   b=$(basename -- "${{p%/}}")
   case "$deny" in
@@ -615,7 +678,7 @@ mkdir -p -- "$dir" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
 COPYFILE_DISABLE=1 tar -czf "$dir/ignored.tgz" {argv} >/dev/null 2>&1 || {{ printf '{FAILED} tar\n' >&2; exit 5; }}
 n=$(wc -c < "$dir/ignored.tgz" | tr -d ' ')
 [ -n "$n" ] || {{ printf '{FAILED} size\n' >&2; exit 5; }}
-printf '{OUT_MARKER}\n'
+printf '\n{OUT_MARKER}\n'
 printf '%s\t%s\n' "$n" "$dir/ignored.tgz"
 "#,
         wt = quote(worktree),
@@ -662,9 +725,38 @@ printf 'ok\n'
     )
 }
 
+/// The real-script tests of both this module and `mod.rs` share the
+/// [`tests::require`] guard, so the module is crate-visible; nothing else in
+/// it is.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// `true` when every binary in `bins` can be run. A missing one lets a
+    /// real-git test skip on a bare workstation — but never on CI, where a
+    /// silent skip would hide the very regression the test exists for.
+    pub(crate) fn require(bins: &[&str]) -> bool {
+        let missing: Vec<&str> = bins
+            .iter()
+            .copied()
+            .filter(|b| {
+                !Command::new(b)
+                    .arg("--version")
+                    .output()
+                    .is_ok_and(|o| o.status.success())
+            })
+            .collect();
+        if missing.is_empty() {
+            return true;
+        }
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{} must be installed on CI; this test may not skip there",
+            missing.join(", ")
+        );
+        eprintln!("skipping: {} is not available", missing.join(", "));
+        false
+    }
 
     fn listed(path: &str, kb: Option<u64>) -> ListedIgnored {
         ListedIgnored {
@@ -757,13 +849,6 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Output};
 
-    fn have(bin: &str) -> bool {
-        Command::new(bin)
-            .arg("--version")
-            .output()
-            .is_ok_and(|o| o.status.success())
-    }
-
     /// Run a generated script the way a host would, with an isolated `$HOME`
     /// (so `~/.cache/claude-fleet/transfer` lands in the temp dir) and no
     /// user/system git config.
@@ -848,6 +933,8 @@ mod tests {
         git(dir, &["add", "both.txt"]);
         std::fs::write(dir.join("both.txt"), "then modified\n").unwrap(); // ...then modified
         std::fs::write(dir.join("it's untracked.txt"), "u\n").unwrap(); // untracked, quote in name
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/nested.txt"), "n\n").unwrap(); // untracked, in a new dir
         std::fs::remove_file(dir.join("del.txt")).unwrap(); // deleted, unstaged
         #[cfg(unix)]
         {
@@ -921,8 +1008,7 @@ mod tests {
         make_source: impl Fn(&Path) -> (std::path::PathBuf, String),
         seed_target: impl Fn(&Path, &Path, &str),
     ) {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
+        if !require(&["git", "bash"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -936,7 +1022,7 @@ mod tests {
         // Target main clone.
         let root = tmp.path().join("tgt");
         seed_target(&src, &root, &base);
-        let out = bash(&haves_script(root.to_str().unwrap(), ID), &home_b);
+        let out = bash(&haves_script(root.to_str().unwrap(), ID, "feat"), &home_b);
         assert!(
             out.status.success(),
             "{}",
@@ -1155,8 +1241,7 @@ mod tests {
 
     #[test]
     fn a_thin_bundle_is_smaller_than_a_full_one_and_a_clean_source_still_bundles() {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
+        if !require(&["git", "bash"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1194,8 +1279,7 @@ mod tests {
 
     #[test]
     fn a_bundle_over_the_cap_and_a_dirty_or_moved_target_are_recognisable() {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
+        if !require(&["git", "bash"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1230,8 +1314,7 @@ mod tests {
 
     #[test]
     fn seed_never_deletes_an_existing_non_git_directory() {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
+        if !require(&["git", "bash"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1290,7 +1373,7 @@ mod tests {
         let q = quote(evil);
         for script in [
             seed_script(evil, evil),
-            haves_script(evil, evil),
+            haves_script(evil, evil, evil),
             snapshot_script(evil, evil, &[], 1),
             chunk_script(evil, 0, 1),
             fetch_script(evil, evil, evil, evil),
@@ -1312,8 +1395,7 @@ mod tests {
 
     #[test]
     fn ignored_files_are_listed_selected_packed_and_extracted_without_overwriting() {
-        if !have("git") || !have("bash") || !have("tar") {
-            eprintln!("skipping: git, bash or tar is not available");
+        if !require(&["git", "bash", "tar"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1461,8 +1543,7 @@ mod tests {
     /// profile would inject one, and compared against a bannerless run.
     #[test]
     fn carry_scripts_survive_a_login_shell_banner() {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
+        if !require(&["git", "bash"]) {
             return;
         }
         let banner = "printf '/usr/local/bin added to PATH\\nWelcome!\\n'; ";
@@ -1476,9 +1557,9 @@ mod tests {
         let src_head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
 
         // haves_script: the banner line must never be mistaken for the transfer dir.
-        let clean = bash(&haves_script(src.to_str().unwrap(), ID), &home_b);
+        let clean = bash(&haves_script(src.to_str().unwrap(), ID, "feat"), &home_b);
         let banner_out = bash(
-            &with_banner(&haves_script(src.to_str().unwrap(), ID)),
+            &with_banner(&haves_script(src.to_str().unwrap(), ID, "feat")),
             &home_b,
         );
         assert!(
@@ -1598,8 +1679,7 @@ mod tests {
 
     #[test]
     fn scripts_refuse_a_malicious_or_empty_id_and_leave_a_sibling_transfer_dir_untouched() {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
+        if !require(&["git", "bash"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1616,7 +1696,7 @@ mod tests {
 
         for bad in ["", "a/b", ".."] {
             for (name, script) in [
-                ("haves", haves_script(root.to_str().unwrap(), bad)),
+                ("haves", haves_script(root.to_str().unwrap(), bad, "feat")),
                 (
                     "snapshot",
                     snapshot_script(src.to_str().unwrap(), bad, &[], u64::MAX),
@@ -1653,8 +1733,7 @@ mod tests {
 
     #[test]
     fn scripts_that_build_the_transfer_dir_refuse_an_empty_home() {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
+        if !require(&["git", "bash"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1672,21 +1751,41 @@ mod tests {
                 .output()
                 .expect("bash")
         };
+        // The cleanup included: with an empty `$HOME` its `rm -rf` would
+        // reach a repo-relative `.cache/claude-fleet/...`, so it must do
+        // nothing at all — not even delete the private refs.
+        git(
+            &src,
+            &[
+                "update-ref",
+                &format!("refs/fleet/transfer/{ID}/wt"),
+                "HEAD",
+            ],
+        );
         for script in [
-            haves_script(root.to_str().unwrap(), ID),
+            haves_script(root.to_str().unwrap(), ID, "feat"),
             snapshot_script(src.to_str().unwrap(), ID, &[], u64::MAX),
             ignored_pack_script(src.to_str().unwrap(), ID, &[]),
+            cleanup_script(src.to_str().unwrap(), ID),
         ] {
             let out = run_with_empty_home(&script);
             assert!(!out.status.success());
             assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
         }
+        assert_eq!(
+            git(
+                &src,
+                &["rev-parse", &format!("refs/fleet/transfer/{ID}/wt")]
+            )
+            .trim(),
+            git(&src, &["rev-parse", "HEAD"]).trim(),
+            "the cleanup touched nothing with an empty HOME"
+        );
     }
 
     #[test]
     fn chunk_script_refuses_a_missing_or_unreadable_file() {
-        if !have("bash") {
-            eprintln!("skipping: bash is not available");
+        if !require(&["bash"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1712,28 +1811,52 @@ mod tests {
         }
     }
 
-    #[test]
-    fn apply_restores_a_clean_worktree_when_a_read_tree_fails_partway() {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let (home_a, home_b) = (tmp.path().join("home-a"), tmp.path().join("home-b"));
+    /// Like [`git`], but a failure is an answer rather than a panic.
+    fn git_try(dir: &Path, args: &[&str]) -> Output {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git")
+    }
+
+    /// Carry `src` into a fresh target main clone under `tmp` and add a
+    /// linked worktree on `feat` at the source HEAD — everything an
+    /// [`apply_script`] test needs. `configure` runs on the target clone
+    /// right after it is created. Returns (source HEAD, target main clone,
+    /// target worktree, target `$HOME`).
+    fn carry_into_target(
+        tmp: &Path,
+        src: &Path,
+        configure: impl Fn(&Path),
+    ) -> (
+        String,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let (home_a, home_b) = (tmp.join("home-a"), tmp.join("home-b"));
         std::fs::create_dir_all(&home_a).unwrap();
         std::fs::create_dir_all(&home_b).unwrap();
-        let (src, _base) = dirty_source(tmp.path());
-        let src_head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+        let src_head = git(src, &["rev-parse", "HEAD"]).trim().to_string();
 
-        let root = tmp.path().join("tgt");
+        let root = tmp.join("tgt");
         std::fs::create_dir_all(&root).unwrap();
         // "main", not "feat": `feat` must stay free for the linked worktree
         // added below (a branch can only be checked out in one place).
         git(&root, &["init", "-q", "-b", "main"]);
-        let out = bash(&haves_script(root.to_str().unwrap(), ID), &home_b);
+        configure(&root);
+        let out = bash(&haves_script(root.to_str().unwrap(), ID, "feat"), &home_b);
         assert!(
             out.status.success(),
-            "{}",
+            "haves: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         let (_tgt_dir, haves) = parse_haves(&String::from_utf8_lossy(&out.stdout)).unwrap();
@@ -1744,7 +1867,7 @@ mod tests {
         );
         assert!(
             out.status.success(),
-            "{}",
+            "snapshot: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         let info = parse_snapshot(&String::from_utf8_lossy(&out.stdout)).unwrap();
@@ -1755,18 +1878,33 @@ mod tests {
         );
         assert!(
             out.status.success(),
-            "{}",
+            "fetch: {}",
             String::from_utf8_lossy(&out.stderr)
         );
 
-        let wt = tmp.path().join("tgt-wt");
+        let wt = tmp.join("tgt-wt");
         git(
             &root,
             &["worktree", "add", "-q", wt.to_str().unwrap(), "feat"],
         );
-        // A pre-existing ignored file: the recovery's `clean -fd` (never `-x`)
-        // must never touch it.
+        (src_head, root, wt, home_b)
+    }
+
+    #[test]
+    fn apply_restores_a_clean_worktree_when_a_read_tree_fails_partway() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, _base) = dirty_source(tmp.path());
+        let (src_head, root, wt, home_b) = carry_into_target(tmp.path(), &src, |_| {});
+
+        // A pre-existing ignored file: the recovery must never touch it.
         std::fs::write(wt.join(".env"), "TARGET_SECRET=1\n").unwrap();
+        // A pre-existing EMPTY untracked directory: `git status` never
+        // reports one, so the apply proceeds — and a recovery that reaches
+        // for `git clean -fd` would take the user's directory with it.
+        std::fs::create_dir_all(wt.join("scratch/deep")).unwrap();
 
         // Break it: delete the `ix` ref so the SECOND read-tree fails after
         // the first (worktree) one already succeeded.
@@ -1787,14 +1925,590 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(wt.join(".env")).unwrap(),
             "TARGET_SECRET=1\n",
-            "a pre-existing ignored file is untouched by the recovery clean"
+            "a pre-existing ignored file is untouched by the recovery"
         );
+        assert!(
+            wt.join("scratch/deep").is_dir(),
+            "a pre-existing empty untracked directory survives the recovery"
+        );
+        assert!(
+            !wt.join("sub").exists(),
+            "a directory the snapshot itself created is pruned again"
+        );
+    }
+
+    /// (I3a) A target host configured with `status.showUntrackedFiles=no`
+    /// must still be seen as dirty: otherwise `read-tree -u --reset`
+    /// overwrites a colliding untracked file the user has work in, and the
+    /// rollback deletes the rest.
+    #[test]
+    fn apply_refuses_a_target_whose_config_hides_untracked_files() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, _base) = dirty_source(tmp.path());
+        let (src_head, _root, wt, home_b) = carry_into_target(tmp.path(), &src, |root| {
+            git(root, &["config", "status.showUntrackedFiles", "no"]);
+        });
+        // The target's own work, under a name the snapshot also carries.
+        std::fs::write(wt.join("it's untracked.txt"), "TARGET WORK\n").unwrap();
+
+        let out = bash(&apply_script(wt.to_str().unwrap(), ID, &src_head), &home_b);
+        assert!(
+            !out.status.success(),
+            "a dirty target must be refused whatever its status config says"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(TARGET_DIRTY),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("it's untracked.txt")).unwrap(),
+            "TARGET WORK\n",
+            "the target's own file is never overwritten"
+        );
+    }
+
+    /// (I3b) The verification compares two porcelain texts produced on two
+    /// different hosts. Hosts disagree about `core.quotePath`, so both sides
+    /// must come from the same pinned invocation — or a file with a
+    /// diacritic in its name fails a perfectly good move.
+    #[test]
+    fn hosts_that_disagree_about_quote_path_still_produce_a_matching_porcelain() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home_a = tmp.path().join("home-a");
+        std::fs::create_dir_all(&home_a).unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        commit_history(&src);
+        // The source host prints non-ASCII names verbatim; the target host
+        // keeps git's default of C-quoting them.
+        git(&src, &["config", "core.quotePath", "false"]);
+        std::fs::write(src.join("ünïcode.txt"), "u\n").unwrap();
+        std::fs::write(src.join("mod.txt"), "v2\n").unwrap();
+
+        // The source porcelain exactly as the move takes it.
+        let out = bash(
+            &super::super::inspect_script("", Some(src.to_str().unwrap()), "feat"),
+            &home_a,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let inspected = String::from_utf8_lossy(&out.stdout).into_owned();
+        let source_porcelain = inspected.split('\x1e').nth(1).expect("porcelain field");
+
+        let (src_head, _root, wt, home_b) = carry_into_target(tmp.path(), &src, |root| {
+            git(root, &["config", "core.quotePath", "true"]);
+        });
+        let out = bash(&apply_script(wt.to_str().unwrap(), ID, &src_head), &home_b);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let applied = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert_eq!(
+            sorted_lines(parse_apply(&applied).unwrap()),
+            sorted_lines(source_porcelain),
+            "the two hosts' porcelain must agree despite their configs"
+        );
+    }
+
+    /// (I2) A branch the fetch creates must keep the upstream the old
+    /// `worktree add --track -b <br> origin/<br>` gave it, or `git pull` and
+    /// a bare `git push` fail on the moved session — and only a branch the
+    /// fetch created: an existing one's config is the user's.
+    #[test]
+    fn fetch_sets_the_upstream_only_for_a_branch_it_creates() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (home_a, home_b) = (tmp.path().join("home-a"), tmp.path().join("home-b"));
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        let (src, base) = dirty_source(tmp.path());
+        let src_head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+
+        // A real origin: `main` is its HEAD, so a clone of it has
+        // `origin/feat` but no local `feat` — exactly the shape a move into
+        // a host that already has the repo finds.
+        let origin = tmp.path().join("origin.git");
+        git(
+            tmp.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                origin.to_str().unwrap(),
+            ],
+        );
+        git(
+            &origin,
+            &[
+                "fetch",
+                "-q",
+                src.to_str().unwrap(),
+                "pushed:refs/heads/feat",
+                "pushed:refs/heads/main",
+            ],
+        );
+
+        let bundle = |root: &Path| -> String {
+            let out = bash(&haves_script(root.to_str().unwrap(), ID, "feat"), &home_b);
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let (_dir, haves) = parse_haves(&String::from_utf8_lossy(&out.stdout)).unwrap();
+            let out = bash(
+                &snapshot_script(src.to_str().unwrap(), ID, &haves, u64::MAX),
+                &home_a,
+            );
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            parse_snapshot(&String::from_utf8_lossy(&out.stdout))
+                .unwrap()
+                .path
+        };
+        let upstream = |root: &Path| -> Option<String> {
+            let out = git_try(root, &["rev-parse", "--abbrev-ref", "feat@{upstream}"]);
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+
+        // 1. A clone of origin: the fetch creates `feat` and tracks it.
+        let cloned = tmp.path().join("cloned");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                cloned.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            upstream(&cloned).is_none(),
+            "no local feat before the fetch"
+        );
+        let out = bash(
+            &fetch_script(cloned.to_str().unwrap(), &bundle(&cloned), ID, "feat"),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let wt = tmp.path().join("cloned-wt");
+        git(
+            &cloned,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "feat"],
+        );
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]).trim(), src_head);
+        assert_eq!(
+            upstream(&cloned).as_deref(),
+            Some("origin/feat"),
+            "the moved branch keeps an upstream to pull and push against"
+        );
+
+        // 2. An init-seeded target with no origin branch: still no upstream,
+        //    and the fetch must not fail over it.
+        let seeded = tmp.path().join("seeded");
+        std::fs::create_dir_all(&seeded).unwrap();
+        git(&seeded, &["init", "-q", "-b", "main"]);
+        let out = bash(
+            &fetch_script(seeded.to_str().unwrap(), &bundle(&seeded), ID, "feat"),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            git(&seeded, &["rev-parse", "refs/heads/feat"]).trim(),
+            src_head
+        );
+        assert_eq!(upstream(&seeded), None, "nothing on origin to track");
+
+        // 3. A branch the fetch did NOT create: its config is left alone.
+        let existing = tmp.path().join("existing");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                existing.to_str().unwrap(),
+            ],
+        );
+        git(
+            &existing,
+            &["branch", "--no-track", "feat", "refs/remotes/origin/feat"],
+        );
+        let out = bash(
+            &fetch_script(existing.to_str().unwrap(), &bundle(&existing), ID, "feat"),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            git(&existing, &["rev-parse", "refs/heads/feat"]).trim(),
+            base
+        );
+        assert_eq!(
+            upstream(&existing),
+            None,
+            "an existing branch's tracking config is the user's, not the move's"
+        );
+    }
+
+    /// (I4) `run_shell` sends the whole script as ONE `bash -lc` argument,
+    /// which Linux caps at 128 KiB: a tag-heavy target would make every
+    /// snapshot fail with "Argument list too long". Haves are only an
+    /// optimisation, so they are capped — with the session branch offered
+    /// first, since that is the one that actually thins the bundle.
+    #[test]
+    fn the_haves_list_is_capped_and_still_offers_the_session_branch() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (src, _base) = dirty_source(tmp.path());
+
+        let root = tmp.path().join("tgt");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(
+            &root,
+            &[
+                "fetch",
+                "-q",
+                src.to_str().unwrap(),
+                "pushed:refs/heads/feat",
+            ],
+        );
+        let tip = git(&root, &["rev-parse", "refs/heads/feat"])
+            .trim()
+            .to_string();
+
+        // Far more refs than one argv word could ever carry, each on its own
+        // object so de-duplication cannot hide the problem.
+        let blobs = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blobs).unwrap();
+        let paths: Vec<String> = (0..MAX_HAVES + 100)
+            .map(|i| {
+                let p = blobs.join(format!("b{i}"));
+                std::fs::write(&p, format!("blob {i}\n")).unwrap();
+                p.to_string_lossy().into_owned()
+            })
+            .collect();
+        let mut args: Vec<&str> = vec!["hash-object", "-w", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        let shas = git(&root, &args);
+        let batch: String = shas
+            .lines()
+            .enumerate()
+            .map(|(i, s)| format!("create refs/tags/t{i} {s}\n"))
+            .collect();
+        let batch_file = tmp.path().join("refs.txt");
+        std::fs::write(&batch_file, batch).unwrap();
+        let out = bash(
+            &format!(
+                "git -C {} update-ref --stdin < {}",
+                quote(root.to_str().unwrap()),
+                quote(batch_file.to_str().unwrap())
+            ),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let out = bash(&haves_script(root.to_str().unwrap(), ID, "feat"), &home);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (_dir, haves) = parse_haves(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert!(
+            haves.len() <= MAX_HAVES,
+            "{} haves reached the orchestrator",
+            haves.len()
+        );
+        assert!(
+            haves.contains(&tip),
+            "the session branch tip is always offered"
+        );
+
+        // The Rust side enforces the same bound, and the script it builds
+        // still fits comfortably in one argument.
+        let over: Vec<String> = (0..MAX_HAVES + 50).map(|i| format!("{i:040x}")).collect();
+        let script = snapshot_script(src.to_str().unwrap(), ID, &over, u64::MAX);
+        assert_eq!(
+            script.lines().filter(|l| is_sha(l)).count(),
+            MAX_HAVES,
+            "the heredoc holds at most MAX_HAVES object names"
+        );
+        assert!(
+            script.len() < 64 * 1024,
+            "the snapshot script is {} bytes",
+            script.len()
+        );
+    }
+
+    /// (F3) A login profile whose last write has no trailing newline would
+    /// otherwise glue itself onto the marker and hide the payload.
+    #[test]
+    fn a_banner_without_a_trailing_newline_still_leaves_the_marker_on_its_own_line() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (home_a, home_b) = (tmp.path().join("home-a"), tmp.path().join("home-b"));
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        let glued = |script: &str| format!("printf 'Welcome'\n{script}");
+        let (src, _base) = dirty_source(tmp.path());
+        let src_head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+
+        let root = tmp.path().join("tgt");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+
+        let out = bash(
+            &glued(&haves_script(root.to_str().unwrap(), ID, "feat")),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).starts_with("Welcome"),
+            "sanity: the banner really landed, unterminated"
+        );
+        let (_dir, haves) = parse_haves(&String::from_utf8_lossy(&out.stdout))
+            .expect("haves parse through an unterminated banner");
+
+        let out = bash(
+            &glued(&snapshot_script(
+                src.to_str().unwrap(),
+                ID,
+                &haves,
+                u64::MAX,
+            )),
+            &home_a,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let info = parse_snapshot(&String::from_utf8_lossy(&out.stdout))
+            .expect("snapshot parse through an unterminated banner");
+
+        let out = bash(&glued(&chunk_script(&info.path, 0, info.bytes)), &home_a);
+        let chunk = payload(&out.stdout).expect("chunk marker after an unterminated banner");
+        assert_eq!(
+            chunk,
+            std::fs::read(&info.path).unwrap().as_slice(),
+            "the chunk bytes are exact"
+        );
+
+        let out = bash(
+            &fetch_script(root.to_str().unwrap(), &info.path, ID, "feat"),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let wt = tmp.path().join("tgt-wt");
+        git(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "feat"],
+        );
+        let out = bash(
+            &glued(&apply_script(wt.to_str().unwrap(), ID, &src_head)),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let applied = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            !parse_apply(&applied)
+                .expect("apply parse through an unterminated banner")
+                .contains("Welcome"),
+            "the banner is not part of the payload"
+        );
+    }
+
+    /// (F4) `umask 077` keeps the transfer directory private, but it must
+    /// not govern what git writes into the USER's repository: a `0700`
+    /// `objects/ab/` locks every other writer out of a group-shared clone.
+    #[test]
+    fn the_snapshot_writes_into_the_users_repo_under_the_original_umask() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let home = tmp.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let (src, _) = dirty_source(tmp.path());
+
+            let script = snapshot_script(src.to_str().unwrap(), ID, &[], u64::MAX);
+            let out = bash(&format!("umask 022\n{script}"), &home);
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let info = parse_snapshot(&String::from_utf8_lossy(&out.stdout)).unwrap();
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode(Path::new(&info.path)),
+                0o600,
+                "the bundle stays private"
+            );
+            assert_eq!(
+                mode(Path::new(&info.path).parent().unwrap()),
+                0o700,
+                "the transfer dir stays private"
+            );
+
+            let wt_ref = src.join(format!(".git/refs/fleet/transfer/{ID}/wt"));
+            assert_eq!(
+                mode(&wt_ref) & 0o044,
+                0o044,
+                "the new ref file keeps the repo's own sharing: {:o}",
+                mode(&wt_ref)
+            );
+            let sha = git(
+                &src,
+                &["rev-parse", &format!("refs/fleet/transfer/{ID}/wt")],
+            )
+            .trim()
+            .to_string();
+            let obj = src.join(format!(".git/objects/{}/{}", &sha[..2], &sha[2..]));
+            assert_eq!(
+                mode(&obj) & 0o044,
+                0o044,
+                "a new loose object keeps the repo's own sharing: {:o}",
+                mode(&obj)
+            );
+        }
+    }
+
+    /// A target seeded by `git init` whose default branch NAME happens to be
+    /// the session branch would make `worktree add <branch>` fail as
+    /// "already checked out", so the seed parks HEAD on a neutral branch.
+    #[test]
+    fn an_init_seeded_target_whose_default_branch_is_the_session_branch_still_works() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (home_a, home_b) = (tmp.path().join("home-a"), tmp.path().join("home-b"));
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        let (src, _base) = dirty_source(tmp.path());
+        let src_head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+
+        // The host's own git config names the session branch as the default.
+        let cfg = tmp.path().join("gitconfig");
+        std::fs::write(&cfg, "[init]\n\tdefaultBranch = feat\n").unwrap();
+        let with_default_branch = |script: &str, home: &Path| -> Output {
+            Command::new("bash")
+                .args(["-c", script])
+                .env("HOME", home)
+                .env("GIT_CONFIG_GLOBAL", &cfg)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("bash")
+        };
+
+        let root = tmp.path().join("tgt");
+        let out = with_default_branch(
+            &seed_script(root.to_str().unwrap(), "/nonexistent/origin.git"),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            parse_seed(&String::from_utf8_lossy(&out.stdout)).unwrap(),
+            TargetSeed::Initialized
+        );
+
+        let out = bash(&haves_script(root.to_str().unwrap(), ID, "feat"), &home_b);
+        let (_dir, haves) = parse_haves(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        let out = bash(
+            &snapshot_script(src.to_str().unwrap(), ID, &haves, u64::MAX),
+            &home_a,
+        );
+        let info = parse_snapshot(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        let out = bash(
+            &fetch_script(root.to_str().unwrap(), &info.path, ID, "feat"),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let wt = tmp.path().join("tgt-wt");
+        let added = git_try(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "feat"],
+        );
+        assert!(
+            added.status.success(),
+            "worktree add: {}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]).trim(), src_head);
     }
 
     #[test]
     fn snapshot_script_fails_cleanly_if_the_bundle_size_cannot_be_determined() {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
+        if !require(&["git", "bash"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1839,8 +2553,7 @@ mod tests {
 
     #[test]
     fn snapshot_and_pack_write_their_transfer_dir_private() {
-        if !have("git") || !have("bash") || !have("tar") {
-            eprintln!("skipping: git, bash or tar is not available");
+        if !require(&["git", "bash", "tar"]) {
             return;
         }
         #[cfg(unix)]
@@ -1887,8 +2600,7 @@ mod tests {
 
     #[test]
     fn fetch_never_moves_an_existing_local_branch() {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
+        if !require(&["git", "bash"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1911,7 +2623,7 @@ mod tests {
         );
         assert_eq!(git(&root, &["rev-parse", "refs/heads/feat"]).trim(), base);
 
-        let out = bash(&haves_script(root.to_str().unwrap(), ID), &home_b);
+        let out = bash(&haves_script(root.to_str().unwrap(), ID, "feat"), &home_b);
         assert!(
             out.status.success(),
             "{}",
@@ -1949,8 +2661,7 @@ mod tests {
 
     #[test]
     fn ignored_list_script_fails_on_a_non_git_dir_but_succeeds_empty_on_a_clean_repo() {
-        if !have("git") || !have("bash") {
-            eprintln!("skipping: git or bash is not available");
+        if !require(&["git", "bash"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
