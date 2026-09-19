@@ -6,11 +6,50 @@ use super::*;
 /// Translate `HostReconcile::probe_started_at` into the `last_reconciled_at`
 /// cutoff used by [`Store::ghost_and_clean`]: rows stamped at or after the
 /// probe start are protected, and `0` ("no guard") protects nothing.
-fn ghost_cutoff(probe_started_at: i64) -> i64 {
+/// `pub(super)`: also reused by [`Store::mark_host_sessions_lost`]
+/// (`store/sessions.rs`) for the identical BE-3 guard against the mass-loss
+/// verdict marking a row a NEWER reconcile pass already saw live.
+pub(super) fn ghost_cutoff(probe_started_at: i64) -> i64 {
     if probe_started_at <= 0 {
         i64::MAX
     } else {
         probe_started_at
+    }
+}
+
+/// Classify a [`RowChange`] as a session lifecycle transition, for the R5
+/// forensics log (Task 7): a host reboot used to leave almost nothing in the
+/// log besides MCP tool calls and tunnel warnings, so every session
+/// created/lost/deleted transition now gets one INFO line. Returns `None`
+/// for changes that are not a session lifecycle event (including a
+/// `SessionUpdated` of a still-live row).
+///
+/// `SessionUpdated` maps to `"lost"` only when the row's `lost_at` is set.
+/// Through the two loops that call this (`apply_host_reconcile`,
+/// `mark_host_sessions_lost`), a session is logged `"lost"` exactly once
+/// per loss episode: `ghost_and_clean` and `mark_host_sessions_lost` both
+/// skip rows already `status = 'ghost'`, and `upsert_session_in_tx` clears
+/// `lost_at` back to `NULL` on every conflict, so a `SessionUpdated` from
+/// the reconcile upsert never carries `lost_at.is_some()`. Other emitters
+/// of `SessionUpdated` (e.g. `set_friendly_name`) go straight to the event
+/// bus and bypass these loops entirely, so they never produce a lifecycle
+/// line. A second `"lost"` line for the same session with no intervening
+/// `"created"`/revival is therefore a bug, not a benign duplicate.
+///
+/// Two lifecycle lines are logged outside this mapping: a row fleet itself
+/// killed is logged `"lost"` (reason `killed`) by `mark_session_killed`, and
+/// is then skipped by both loops above since it is already ghost; and a
+/// `missing` ghost that a later mass-loss verdict upgrades is logged
+/// `"reclassified"` by `mark_host_sessions_lost` — a DISTINCT kind, so a
+/// session ghosted by the routine prune and then reclassified legitimately
+/// carries one `"lost"` line followed by one `"reclassified"` line, never
+/// two `"lost"` lines.
+pub(crate) fn lifecycle_kind(change: &RowChange) -> Option<&'static str> {
+    match change {
+        RowChange::SessionCreated(_) => Some("created"),
+        RowChange::SessionUpdated(row) if row.lost_at.is_some() => Some("lost"),
+        RowChange::SessionKilled(_) => Some("deleted"),
+        _ => None,
     }
 }
 
@@ -178,6 +217,7 @@ impl Store {
                worktree_key=COALESCE(excluded.worktree_key, worktree_key),
                status=CASE WHEN status='ghost' THEN 'running' ELSE status END,
                lost_at=NULL,
+               lost_reason=NULL,
                claude_session_id={new_id},
                -- A new conversation: the old transcript is not its transcript,
                -- and the old context size is not its size.
@@ -316,6 +356,18 @@ impl Store {
     /// tick that listed tmux just before `new_session` created it). Such rows
     /// are left alone; the next pass, whose probe starts later, judges them.
     /// `None` disables the guard (the pane-less pruner has no such race).
+    ///
+    /// `lost_ttl_cutoff` (unix secs) guards Phase 2 against reaping a
+    /// resumable mass-loss row too early: a row with `claude_session_id IS
+    /// NOT NULL`, `lost_reason IN ('host_reboot','tmux_server_gone')`, and
+    /// `lost_at >= lost_ttl_cutoff` is exempt from the hard-delete — the
+    /// session can still be resumed, so it survives past the usual one-cycle
+    /// grace until it ages out of the TTL. A `missing` row (a single session
+    /// that dropped out while its neighbours stayed live) is never exempt,
+    /// so it keeps today's one-cycle reap regardless of this cutoff. `None`
+    /// disables the exemption entirely — today's behaviour, byte-identical
+    /// SQL and bindings.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn ghost_and_clean(
         tx: &rusqlite::Transaction,
         host_alias: &str,
@@ -323,6 +375,7 @@ impl Store {
         now: i64,
         kind_filter: &str,
         cutoff: Option<i64>,
+        lost_ttl_cutoff: Option<i64>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         let not_in = if keep_names.is_empty() {
@@ -334,11 +387,38 @@ impl Store {
         // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
         // so that sessions newly ghosted in Phase 1 are not immediately deleted.
         let pre_ghost_ids: Vec<i64> = {
+            // `exempt` is textually BEFORE `not_in` so its explicit `?2`
+            // claims that slot before `not_in`'s bare `?`s are numbered by
+            // SQLite (which continues from the highest placeholder used so
+            // far in the text) — the keep names then land at ?3.. . When
+            // `lost_ttl_cutoff` is `None`, `exempt` is empty and `?2` never
+            // appears, so `not_in`'s bare `?`s fall back to ?2.. exactly as
+            // before this feature existed.
+            // `COALESCE(..., 0)`: `lost_reason` is NULL on every row ghosted
+            // before migration 036 introduced the column. SQL's
+            // three-valued logic would otherwise make `lost_reason IN (...)`
+            // evaluate to NULL, the inner AND chain NULL, and `NOT NULL`
+            // NULL again — which `WHERE` treats as "leave this row out of
+            // the reaped set", wrongly exempting it. Coalescing the inner
+            // expression to `0` (false) before negating makes a NULL
+            // `lost_reason` explicitly NOT exempt, preserving today's
+            // one-cycle reap for every pre-migration row after an upgrade.
+            let exempt = if lost_ttl_cutoff.is_some() {
+                " AND NOT COALESCE((claude_session_id IS NOT NULL \
+                                    AND lost_reason IN ('host_reboot','tmux_server_gone') \
+                                    AND lost_at >= ?2), 0)"
+            } else {
+                ""
+            };
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND {kind_filter}{not_in}"
+                 WHERE host_alias=?1 AND status='ghost' AND {kind_filter}{exempt}{not_in}"
             );
-            let params = params_then(rusqlite::params![host_alias], keep_names);
+            let head: Vec<&dyn rusqlite::ToSql> = match &lost_ttl_cutoff {
+                Some(c) => vec![&host_alias, c],
+                None => vec![&host_alias],
+            };
+            let params = params_then(&head, keep_names);
             tx.prepare(&sql)?
                 .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -353,7 +433,7 @@ impl Store {
                 ""
             };
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='missing'
                  WHERE host_alias=?2 AND status!='ghost' AND {kind_filter}{guard}{not_in}
                  RETURNING id"
             );
@@ -457,21 +537,55 @@ impl Store {
                 for (pid, ts) in project_touch {
                     Self::touch_project_last_session_at_in_tx(tx, pid, ts, &mut out)?;
                 }
-                Self::ghost_and_clean(
-                    tx,
-                    spec.alias,
-                    spec.keep,
-                    now_unix(),
-                    KIND_TMUX,
-                    Some(ghost_cutoff(spec.probe_started_at)),
-                    &mut out,
-                )?;
+                // Task 6: a pass that just mass-marked this host's sessions
+                // lost (reboot / vanished tmux server) skips the routine
+                // ghost/reap pass entirely — it must not immediately re-ghost
+                // (and restart the reap clock on) rows the mass-loss path
+                // just stamped with their own `lost_reason`.
+                if !spec.skip_prune {
+                    Self::ghost_and_clean(
+                        tx,
+                        spec.alias,
+                        spec.keep,
+                        now_unix(),
+                        KIND_TMUX,
+                        Some(ghost_cutoff(spec.probe_started_at)),
+                        spec.lost_ttl_cutoff,
+                        &mut out,
+                    )?;
+                }
             }
             Ok(out)
         })?;
 
         // Phase 2: transaction committed — now it is safe to emit.
         for change in &changes {
+            // Task 7 (R5): one INFO line per session lifecycle transition —
+            // a host reboot used to leave nothing in the log to forensically
+            // reconstruct what happened to the 8+ sessions it took out.
+            if let Some(kind) = lifecycle_kind(change) {
+                match change {
+                    RowChange::SessionCreated(row) | RowChange::SessionUpdated(row) => {
+                        tracing::info!(
+                            lifecycle = kind,
+                            session_id = row.id,
+                            host_alias = %row.host_alias,
+                            tmux_name = %row.tmux_name,
+                            claude_session_id = row.claude_session_id.as_deref().unwrap_or("-"),
+                            "[session] {kind}"
+                        );
+                    }
+                    RowChange::SessionKilled(id) => {
+                        tracing::info!(
+                            lifecycle = kind,
+                            host_alias = %spec.alias,
+                            session_id = id,
+                            "[session] {kind}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
             self.bus.emit_change(change);
         }
         Ok(())
@@ -506,6 +620,98 @@ impl Store {
 mod tests {
     use super::*;
     use crate::store::test_support::*;
+
+    /// A minimal, DB-free `SessionRow` for `lifecycle_kind` classification
+    /// tests — only `lost_at` varies between cases, every other field is a
+    /// harmless default.
+    fn bare_row(lost_at: Option<i64>) -> SessionRow {
+        SessionRow {
+            id: 1,
+            tmux_name: "work-a".into(),
+            host_alias: "alpha".into(),
+            project_id: None,
+            worktree_id: None,
+            created_at: 0,
+            last_activity_at: 0,
+            status: "running".into(),
+            notes: None,
+            account_uuid: None,
+            kind: "work".into(),
+            reviews_session_id: None,
+            worktree_key: None,
+            lost_at,
+            claude_session_id: None,
+            claude_status: None,
+            effort_level: None,
+            pr_url: None,
+            current_activity: None,
+            context_pct: None,
+            stuck_kind: None,
+            friendly_name: None,
+            safe_kill_state: None,
+            safe_kill_nonce: None,
+            safe_kill_detail: None,
+            safe_kill_requested_at: None,
+            idle_since: None,
+            stuck_since: None,
+            last_playbook_at: None,
+            last_prompt: None,
+            started_at: None,
+            last_turn_at: None,
+            ci_status: None,
+            turn_seq: 0,
+            last_stop_at: None,
+            parent_session_id: None,
+            tags: Vec::new(),
+            usage: Default::default(),
+            context: Default::default(),
+        }
+    }
+
+    fn bare_host() -> HostRow {
+        HostRow {
+            alias: "alpha".into(),
+            ssh_alias: None,
+            reachable: true,
+            claude_version: None,
+            tmux_version: None,
+            hidden: false,
+            last_pinged_at: None,
+            account_uuid: None,
+            provisioned: false,
+            transport: "ssh".to_string(),
+        }
+    }
+
+    #[test]
+    fn lifecycle_kind_classifies_created_lost_deleted() {
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionCreated(bare_row(None))),
+            Some("created")
+        );
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionUpdated(bare_row(Some(500)))),
+            Some("lost")
+        );
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionKilled(1)),
+            Some("deleted")
+        );
+    }
+
+    #[test]
+    fn lifecycle_kind_ignores_live_updates_and_non_session_changes() {
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionUpdated(bare_row(None))),
+            None,
+            "an update to a still-live row is not a lifecycle transition"
+        );
+        assert_eq!(
+            lifecycle_kind(&RowChange::HostProbed(bare_host())),
+            None,
+            "non-session changes never carry a lifecycle kind"
+        );
+    }
 
     #[test]
     fn reconcile_hard_delete_reaps_session_events() {
@@ -1617,6 +1823,296 @@ mod tests {
                 .claude_session_id
                 .as_deref(),
             Some(ID_A)
+        );
+    }
+
+    /// 14 days, matching `SESSIONS_LOST_TTL_SECS`'s default — kept as a
+    /// literal here so these tests don't reach into `service::settings`.
+    const TTL_SECS: i64 = 1_209_600;
+
+    /// Seed a row directly as already-ghost (bypassing Phase 1) with the
+    /// given `lost_at` / `lost_reason` / `claude_session_id`, so a single
+    /// `apply_host_reconcile` pass exercises Phase 2's exemption straight
+    /// away. `lost_reason: None` writes SQL `NULL`, matching a row ghosted
+    /// before migration 036 introduced the column.
+    fn seed_ghost_row(
+        store: &Store,
+        host: &str,
+        name: &str,
+        lost_at: i64,
+        lost_reason: Option<&str>,
+        claude_session_id: Option<&str>,
+    ) -> i64 {
+        let id = store
+            .upsert_session(name, host, None, None, 1, 1, "running", None)
+            .unwrap();
+        if let Some(uuid) = claude_session_id {
+            store.set_claude_session_id(id, uuid).unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2 WHERE id=?3",
+                rusqlite::params![lost_at, lost_reason, id],
+            )
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn a_resumable_mass_loss_row_survives_the_reap() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            now - 100,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_some(),
+            "a resumable host_reboot row within the TTL must survive the reap"
+        );
+    }
+
+    #[test]
+    fn a_missing_row_is_still_reaped_on_the_next_pass() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = store
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store.set_claude_session_id(id, "uuid-a").unwrap();
+        // Pass 1: live and not in keep → ghosted normally with lost_reason='missing'.
+        store
+            .apply_host_reconcile(HostReconcile {
+                lost_ttl_cutoff: Some(cutoff),
+                keep: &[],
+                ..empty_probe("alpha", now)
+            })
+            .unwrap();
+        assert_eq!(
+            store.get_session_by_id(id).unwrap().unwrap().status,
+            "ghost",
+            "pass 1 ghosts the row"
+        );
+        // Pass 2: already ghost before this pass — 'missing' is not exempt,
+        // even with a TTL cutoff set, so the one-cycle grace still applies.
+        store
+            .apply_host_reconcile(HostReconcile {
+                lost_ttl_cutoff: Some(cutoff),
+                keep: &[],
+                ..empty_probe("alpha", now + 10)
+            })
+            .unwrap();
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a 'missing' row keeps the one-cycle reap even with a TTL cutoff set"
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_row_without_a_claude_id_is_reaped() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(&store, "alpha", "s1", now - 100, Some("host_reboot"), None);
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a mass-loss row with no claude_session_id is not resumable and must be reaped"
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_row_older_than_the_ttl_is_reaped() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            cutoff - 1,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a mass-loss row whose lost_at is older than the TTL cutoff must be reaped"
+        );
+    }
+
+    #[test]
+    fn with_no_cutoff_nothing_is_exempt() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            now - 100,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: None,
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a None cutoff means no exemption at all — today's behaviour"
+        );
+    }
+
+    #[test]
+    fn a_resumable_row_and_a_missing_row_are_judged_correctly_alongside_a_kept_live_row() {
+        // The other tests above all pass an EMPTY `keep`, so `not_in` is the
+        // empty string and never appears in the SQL — they can't catch
+        // `exempt` drifting to AFTER `not_in` in the query text, which would
+        // let a non-empty `not_in`'s bare `?`s claim `?2` before `exempt`'s
+        // explicit `?2` does (misbinding the cutoff to a keep name, or
+        // erroring on the parameter count once a real keep set is in play).
+        // This test exercises `exempt` and a non-empty `not_in` together.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+
+        let kept_id = store
+            .upsert_session("keep-me", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let resumable_id = seed_ghost_row(
+            &store,
+            "alpha",
+            "resumable",
+            now - 100,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        let missing_id = seed_ghost_row(&store, "alpha", "gone", now - 100, Some("missing"), None);
+
+        store
+            .apply_host_reconcile(HostReconcile {
+                lost_ttl_cutoff: Some(cutoff),
+                keep: &["keep-me".to_string()],
+                ..empty_probe("alpha", now)
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.get_session_by_id(kept_id).unwrap().unwrap().status,
+            "running",
+            "the kept live row must stay running alongside an active TTL cutoff"
+        );
+        assert!(
+            store.get_session_by_id(resumable_id).unwrap().is_some(),
+            "the resumable ghost must survive alongside a non-empty keep set"
+        );
+        assert!(
+            store.get_session_by_id(missing_id).unwrap().is_none(),
+            "the 'missing' ghost must still be reaped alongside a non-empty keep set"
+        );
+    }
+
+    #[test]
+    fn a_pre_migration_ghost_row_with_null_lost_reason_is_reaped() {
+        // Rows ghosted before migration 036 added `lost_reason` have it
+        // NULL. SQL three-valued logic must not let that NULL silently
+        // exempt them: `lost_reason IN (...)` on NULL is NULL, so an
+        // un-coalesced `NOT (... AND NULL AND ...)` is NULL too, and a
+        // `WHERE` clause treats NULL as "leave this row out of the reaped
+        // set" — i.e. wrongly exempting it. This would be a behaviour
+        // change for every pre-migration row after an upgrade, which the
+        // plan forbids.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(&store, "alpha", "s1", now - 100, None, Some("uuid-a"));
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a NULL lost_reason (a pre-migration row) must not be silently \
+             exempted; it keeps today's one-cycle reap"
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_row_exactly_at_the_ttl_cutoff_survives() {
+        // Pins the `>=` boundary: `lost_at == cutoff` must be inclusive.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            cutoff,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_some(),
+            "lost_at exactly at the cutoff must survive (inclusive >=)"
         );
     }
 }

@@ -380,7 +380,7 @@ pub struct SessionConversationsArgs {
     pub limit: Option<i64>,
 }
 
-/// Conversations a session has run, newest first (migration 036). Default
+/// Conversations a session has run, newest first (migration 037). Default
 /// 50, max 500. Same data as the MCP `session_conversations` tool.
 #[tauri::command]
 pub async fn session_conversations(

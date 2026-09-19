@@ -28,7 +28,7 @@ pub enum RowChange {
     SessionCreated(SessionRow),
     SessionUpdated(SessionRow),
     SessionKilled(i64),
-    /// A timeline event was appended (migration 013/036). Carries the row.
+    /// A timeline event was appended (migration 013/037). Carries the row.
     SessionEventAdded(SessionEvent),
     /// A session's conversation list changed (opened / closed / reopened).
     /// Payload is the session id only; the UI refetches the small list.

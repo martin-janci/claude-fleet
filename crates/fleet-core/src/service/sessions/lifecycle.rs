@@ -836,6 +836,20 @@ pub async fn kill_session(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<i64, IpcError> {
+    let deps = super::reconcile::ReconcileDeps::real(ssh, super::reconcile::local_host(store));
+    kill_session_with(args, store, ssh, &deps).await
+}
+
+/// [`kill_session`] with an injectable tmux executor + reconcile deps, so the
+/// kill → reconcile sequence is testable against a fake host. The tmux kill
+/// and the follow-up single-host reconcile both go through `deps`; the
+/// pane-less (`bg:`) branch still talks to the host over `ssh` directly.
+pub(super) async fn kill_session_with(
+    args: KillSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    deps: &super::reconcile::ReconcileDeps,
+) -> Result<i64, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     // Lookup form: synthetic `bg:<uuid>` rows are killable too (via
     // `claude stop`, below) — only real tmux rows go through tmux.
@@ -893,16 +907,27 @@ pub async fn kill_session(
         if let Ok(s) = store.lock() {
             record_kill(&s, id, Some(&sid));
         }
-        reconcile_one_host(store, ssh, &args.host_alias).await?;
+        super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias).await?;
         return Ok(id);
     }
-    let tmux = exec_for(&args.host_alias, ssh);
+    let tmux = (deps.exec)(&args.host_alias);
     tmux.kill_session(&args.name).await?;
     // Task G: record the kill before reconcile reaps the row. Best-effort.
+    // Then ghost the row as fleet's OWN kill (`lost_reason='killed'`)
+    // before the reconcile below probes the host: tmux exits with its last
+    // session, so killing a host's only session makes that probe see no
+    // tmux server — a `tmux_server_gone` verdict that would otherwise mark
+    // this row a resumable mass loss and keep it for the lost-session TTL.
+    // A ghost row is out of the verdict's reach and reaps on the ordinary
+    // one-cycle schedule. Best-effort: on failure the reconcile below
+    // still ghosts the row, as before.
     if let Ok(s) = store.lock() {
         record_kill(&s, id, claude_sid.as_deref());
+        if let Err(e) = s.mark_session_killed(id, now_unix()) {
+            tracing::warn!(session_id = id, error = %e, "[kill] marking the killed row failed");
+        }
     }
-    reconcile_one_host(store, ssh, &args.host_alias).await?;
+    super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias).await?;
     Ok(id)
 }
 

@@ -106,6 +106,18 @@ fn asset_inventory_has_managed(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 036: `sessions` already has its
+/// `lost_reason` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn sessions_has_lost_reason(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'lost_reason'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 034: `hosts` already has its
 /// `transport` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -118,7 +130,7 @@ fn hosts_has_transport(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 036: `sessions` already has its
+/// `already_applied` guard of migration 037: `sessions` already has its
 /// `tmux_pane_id` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 fn sessions_has_tmux_pane_id(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -255,11 +267,19 @@ const MIGRATIONS: &[Migration] = &[
         35,
         include_str!("../../migrations/035_host_layers_repair.sql"),
     ),
+    // Adds the reboot safety net's columns (`sessions.lost_reason`, the host
+    // boot identity). Guarded like 034: `ALTER TABLE ... ADD COLUMN` fails if
+    // the column is already there.
+    Migration {
+        version: 36,
+        sql: include_str!("../../migrations/036_host_boot_identity.sql"),
+        already_applied: Some(sessions_has_lost_reason),
+    },
     // Conversations table + `sessions.tmux_pane_id`; the ADD COLUMN needs
     // the same guard as 034.
     Migration {
-        version: 36,
-        sql: include_str!("../../migrations/036_conversations.sql"),
+        version: 37,
+        sql: include_str!("../../migrations/037_conversations.sql"),
         already_applied: Some(sessions_has_tmux_pane_id),
     },
 ];
@@ -339,30 +359,50 @@ impl Store {
             }
             restored?;
         }
-        self.repair_host_transport()?;
+        self.repair_skipped_main_migrations()?;
         self.reap_orphan_session_events()?;
         Ok(())
     }
 
-    /// Repair for the 034 collision. The conversation-tracking branch
-    /// numbered its migration 034 before `main` shipped
-    /// `034_host_transport.sql`; it was renumbered to 036 when the two
-    /// merged. A database created by the PRE-MERGE branch therefore recorded
-    /// version 34 for the conversations migration, so `migrate()` never
-    /// offers 034 and `hosts.transport` is never added. 036 is then skipped
-    /// by its own guard, so nothing else would notice.
+    /// Repair for the conversations-migration collision. The
+    /// conversation-tracking branch numbered its migration 034, then 036,
+    /// while `main` shipped 034 (`hosts.transport`), 035 (layers repair) and
+    /// 036 (host boot identity); it is now 037. A database created by an
+    /// earlier build of that branch recorded 34 or 36 for the conversations
+    /// migration, so `migrate()` (which only offers `version >
+    /// MAX(schema_version)`) never runs the `main` migrations numbered at or
+    /// below that, and 037 is then skipped by its own guard.
     ///
-    /// SQLite has no `ADD COLUMN IF NOT EXISTS`, so this cannot be a SQL
-    /// migration like 035: the column is checked and 034 re-run here, in its
-    /// own transaction. A no-op on every database that already has the column.
-    fn repair_host_transport(&self) -> Result<()> {
+    /// SQLite has no `ADD COLUMN IF NOT EXISTS`, so each column those
+    /// migrations add is checked and added here when missing, and 035's
+    /// `IF NOT EXISTS` DDL is re-run. Every step is idempotent, in one
+    /// transaction; a no-op on any database that went through the numbered
+    /// migrations.
+    fn repair_skipped_main_migrations(&self) -> Result<()> {
+        /// `(table, column, column definition)` added by `main`'s 034 and 036.
+        const COLUMNS: &[(&str, &str, &str)] = &[
+            ("hosts", "transport", "TEXT NOT NULL DEFAULT 'ssh'"),
+            ("hosts", "boot_id", "TEXT"),
+            ("hosts", "tmux_server_pid", "INTEGER"),
+            ("sessions", "lost_reason", "TEXT"),
+        ];
         let tx = self.conn.unchecked_transaction()?;
-        if !hosts_has_transport(&tx)? {
-            tracing::warn!(
-                "hosts.transport missing despite schema version; re-running migration 034"
-            );
-            tx.execute_batch(include_str!("../../migrations/034_host_transport.sql"))?;
+        for (table, column, def) in COLUMNS {
+            let n: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                rusqlite::params![table, column],
+                |r| r.get(0),
+            )?;
+            if n == 0 {
+                tracing::warn!(
+                    "{table}.{column} missing despite schema version; adding it (migration collision repair)"
+                );
+                tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {def};"))?;
+            }
         }
+        // 035 is `IF NOT EXISTS` throughout; re-running it is a no-op when
+        // its tables are there.
+        tx.execute_batch(include_str!("../../migrations/035_host_layers_repair.sql"))?;
         tx.commit()?;
         Ok(())
     }
@@ -551,14 +591,14 @@ mod tests {
         assert!(!session_columns(&store).contains(&"frozen_scrollback".to_string()));
     }
 
-    /// Migration 036 backfills exactly one open `conversations` row (matching
+    /// Migration 037 backfills exactly one open `conversations` row (matching
     /// `sessions.claude_session_id`) per session bound to a conversation at
     /// upgrade time, stamped `start_source = 'unknown'` at the session's
     /// `created_at`.
     #[test]
-    fn migration_036_backfills_one_open_conversation_per_bound_session() {
+    fn migration_037_backfills_one_open_conversation_per_bound_session() {
         let conn = Connection::open_in_memory().unwrap();
-        for &Migration { version, sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= 35) {
+        for &Migration { version, sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= 36) {
             let _ = version;
             conn.execute_batch(sql).unwrap();
         }
@@ -1462,38 +1502,79 @@ mod tests {
         assert_eq!(n, 1, "034 did not re-add a column the branch already had");
     }
 
-    /// A database from the PRE-MERGE conversation-tracking branch: 033 from
-    /// `main`, then the conversations migration recorded as 34. On the merged
-    /// head 035 runs, 036 is skipped by its guard, and `repair_host_transport`
-    /// adds the `hosts.transport` column that 034 never got the chance to.
-    #[test]
-    fn premerge_conversation_branch_db_gets_host_transport() {
-        let old = store_at_version(33);
+    /// A database from an earlier build of the conversation-tracking branch,
+    /// which recorded the conversations migration as `recorded_as` after
+    /// running `main`'s migrations up to `main_upto`.
+    fn conversation_branch_db(main_upto: i64, recorded_as: i64) -> Store {
+        let old = store_at_version(main_upto);
         old.conn
             .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
             .unwrap();
-        let branch_034 = include_str!("../../migrations/036_conversations.sql").replace(
-            "INSERT OR IGNORE INTO schema_version (version) VALUES (36);",
-            "INSERT OR IGNORE INTO schema_version (version) VALUES (34);",
+        let conv = include_str!("../../migrations/037_conversations.sql");
+        let branch = conv.replace(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (37);",
+            &format!("INSERT OR IGNORE INTO schema_version (version) VALUES ({recorded_as});"),
         );
-        assert_ne!(
-            branch_034,
-            include_str!("../../migrations/036_conversations.sql")
-        );
-        old.conn.execute_batch(&branch_034).unwrap();
-        old.migrate()
-            .expect("merged head on a pre-merge conversation-branch DB");
-        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
-        let transport: String = old
+        assert_ne!(branch, conv);
+        old.conn.execute_batch(&branch).unwrap();
+        old
+    }
+
+    /// Every column `main`'s 034 and 036 add, and 035's tables, are there.
+    fn assert_main_034_to_036_applied(s: &Store) {
+        for (table, column) in [
+            ("hosts", "transport"),
+            ("hosts", "boot_id"),
+            ("hosts", "tmux_server_pid"),
+            ("sessions", "lost_reason"),
+        ] {
+            let n: i64 = s
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    [table, column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{table}.{column}");
+        }
+        assert!(s.has_table("host_layers").unwrap());
+        let transport: String = s
             .conn
             .query_row("SELECT transport FROM hosts WHERE alias = 'h'", [], |r| {
                 r.get(0)
             })
             .unwrap();
         assert_eq!(transport, "ssh");
-        assert!(old.has_table("conversations").unwrap());
-        // And the repair is a no-op the second time round.
+        assert!(s.has_table("conversations").unwrap());
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Pre-merge branch: `main` up to 033, conversations recorded as 34.
+    /// 035 and 036 run as pending migrations, 037 is guarded out, and the
+    /// repair adds the `hosts.transport` 034 never got to add.
+    #[test]
+    fn a_conversation_branch_db_recorded_as_34_gets_main_034_to_036() {
+        let old = conversation_branch_db(33, 34);
+        old.migrate()
+            .expect("merged head on a pre-merge conversation-branch DB");
+        assert_main_034_to_036_applied(&old);
+        // Idempotent: a second start changes nothing and does not fail.
         old.migrate().expect("second migrate");
+        assert_main_034_to_036_applied(&old);
+    }
+
+    /// Intermediate branch: `main` up to 035, conversations recorded as 36.
+    /// Only 037 is pending and it is guarded out, so without the repair
+    /// `main`'s 036 columns would never be added.
+    #[test]
+    fn a_conversation_branch_db_recorded_as_36_gets_main_036() {
+        let old = conversation_branch_db(35, 36);
+        old.migrate()
+            .expect("merged head on an intermediate conversation-branch DB");
+        assert_main_034_to_036_applied(&old);
+        old.migrate().expect("second migrate");
+        assert_main_034_to_036_applied(&old);
     }
 
     #[test]
