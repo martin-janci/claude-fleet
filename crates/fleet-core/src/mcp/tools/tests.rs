@@ -176,6 +176,19 @@ fn move_needs_a_caller_allowed_on_both_hosts() {
 }
 
 #[test]
+fn move_session_strict_defaults_to_false() {
+    let p: super::params::MoveSessionParams =
+        serde_json::from_value(serde_json::json!({ "session_id": 1, "target_host_alias": "beta" }))
+            .unwrap();
+    assert!(!p.strict && !p.keep_source);
+    let p: super::params::MoveSessionParams = serde_json::from_value(
+        serde_json::json!({ "session_id": 1, "target_host_alias": "beta", "strict": true }),
+    )
+    .unwrap();
+    assert!(p.strict);
+}
+
+#[test]
 fn session_conversation_is_registered_readonly_with_documented_params() {
     let tools = FleetTools::tool_router_for_doc().list_all();
     let t = tools
@@ -1145,7 +1158,7 @@ fn capture_default_cap_matches_docs() {
 /// with the asset-catalog block, 63 with plan_sync/apply_sync/set_secret, 67
 /// with list_layers/resolve_preview/propose_layers/set_host_layers, 71 with
 /// session_conversation/pair_client/list_clients/revoke_client, 72 with
-/// agent_status; bump it when adding a tool.
+/// agent_status, 73 with session_conversations; bump it when adding a tool.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1165,7 +1178,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 72);
+    assert_eq!(served, 73);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 

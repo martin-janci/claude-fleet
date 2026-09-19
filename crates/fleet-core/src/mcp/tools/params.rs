@@ -290,6 +290,14 @@ pub struct SessionHistoryParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionConversationsParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+    /// Max rows, newest first (default 20, max 500).
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct UsageReportParams {
     /// Only this host. A per-host token is always limited to its own host
     /// (asking for another is E_FORBIDDEN).
@@ -452,6 +460,15 @@ pub struct SessionConversationParams {
     /// character budget scales with it (see `conv_limits`).
     #[serde(default)]
     pub turns: Option<usize>,
+    /// Read this earlier conversation of the session instead of the current
+    /// one (a claude_session_id from session_conversations). E_INVALID when
+    /// it is not one of the session's conversations.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
+    /// Most timeline events (compactions, /clear, ops) to return with the
+    /// conversation. Defaults to 50, capped at 200.
+    #[serde(default)]
+    pub events_limit: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -581,6 +598,10 @@ pub struct MoveSessionParams {
     /// Default false (the source is killed through the normal kill path).
     #[serde(default)]
     pub keep_source: bool,
+    /// Refuse a dirty worktree (E_MOVE_DIRTY) or an unpushed branch
+    /// (E_MOVE_UNPUSHED) instead of carrying them along. Default false.
+    #[serde(default)]
+    pub strict: bool,
     /// Nonce from a previous E_CONFIRM_REQUIRED, once approved on the
     /// desktop (only when mcp.confirm_destructive is on).
     #[serde(default)]

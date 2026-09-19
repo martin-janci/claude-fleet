@@ -35,7 +35,7 @@ use std::time::Duration;
 /// The exact list script `RemoteTmux::list_sessions` emits (kept in step
 /// with `fleet_e2e_tests::LIST_SCRIPT`; a drift makes every test here fail
 /// loudly, since the fake would answer the default empty reply).
-const LIST_SCRIPT: &str = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}' 2>&1";
+const LIST_SCRIPT: &str = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}' 2>&1";
 
 /// Pane tails, each chosen to hit exactly one `pane_intel::analyze` branch.
 const IDLE: &str = "All done.\n❯ \n? for shortcuts\n";
@@ -198,11 +198,13 @@ impl Fleet {
 
     /// Session row events (`session:created|updated|killed:<id>`) emitted
     /// since the last call; host/project events are dropped.
+    /// Session ROW events only; the timeline's `session:event` pushes are
+    /// asserted through [`Self::timeline`].
     fn session_row_events(&self) -> Vec<String> {
         self.bus
             .take()
             .into_iter()
-            .filter(|e| e.starts_with("session:"))
+            .filter(|e| e.starts_with("session:") && !e.starts_with("session:event:"))
             .collect()
     }
 
@@ -489,10 +491,207 @@ async fn no_phantom_status_change_when_the_last_hook_at_guard_wins() {
         Some("working"),
         "the hook-stamped status wins over the pane"
     );
+    // Only pass 1's first sighting of `c1` is on the timeline.
     assert_eq!(
         f.timeline(r1.id),
-        Vec::<(String, Option<String>)>::new(),
+        vec![ev("conversation_started", Some("unknown"))],
         "the guard kept the stored status, so nothing transitioned"
+    );
+}
+
+// ── 1b. conversations (fallback rebind, spec §1.4) ──────────────────────────
+
+impl Fleet {
+    /// `(claude_session_id, start_source, end_reason, current)`, newest first.
+    fn conversations(&self, session_id: i64) -> Vec<(String, String, Option<String>, bool)> {
+        self.store
+            .lock()
+            .unwrap()
+            .list_conversations(session_id, 10)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.claude_session_id, c.start_source, c.end_reason, c.current))
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn reconcile_records_the_pane_id_and_rebinds_on_an_agent_id_change() {
+    let f = Fleet::new(&["alpha"]);
+    f.list("alpha", "work|1|2|0|/tmp/w|%3\n");
+    f.pane("alpha", "work", IDLE);
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"aaa","name":"work","cwd":"/tmp/w"}]"#,
+    );
+    f.pass().await;
+    let r = f.row("work", "alpha");
+    assert_eq!(r.context.tmux_pane_id.as_deref(), Some("%3"));
+    // First sighting with an id opens its conversation.
+    assert_eq!(
+        f.conversations(r.id),
+        vec![("aaa".to_string(), "unknown".to_string(), None, true)]
+    );
+
+    // `claude agents` now reports another conversation for the same name.
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"bbb","name":"work","cwd":"/tmp/w"}]"#,
+    );
+    f.pass().await;
+    assert_eq!(
+        f.row("work", "alpha").claude_session_id.as_deref(),
+        Some("bbb")
+    );
+    assert_eq!(
+        f.conversations(r.id),
+        vec![
+            ("bbb".to_string(), "unknown".to_string(), None, true),
+            (
+                "aaa".to_string(),
+                "unknown".to_string(),
+                Some("replaced".to_string()),
+                false
+            ),
+        ]
+    );
+    assert_eq!(
+        f.timeline(r.id)
+            .into_iter()
+            .filter(|(k, _)| k == "conversation_started")
+            .count(),
+        2
+    );
+
+    // An unchanged id opens nothing more.
+    f.pass().await;
+    assert_eq!(f.conversations(r.id).len(), 2);
+}
+
+#[tokio::test]
+async fn a_pass_that_probed_before_a_hook_rebind_does_not_undo_it() {
+    let f = Fleet::new(&["alpha"]);
+    f.list("alpha", "work|1|2|0|/tmp/w|%3\n");
+    f.pane("alpha", "work", IDLE);
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"aaa","name":"work","cwd":"/tmp/w"}]"#,
+    );
+    f.pass().await;
+    let r = f.row("work", "alpha");
+    assert_eq!(r.claude_session_id.as_deref(), Some("aaa"));
+
+    // Pass 2 has read `claude agents` (still reporting `aaa`) and stalls on
+    // the pane capture while the /clear hooks land: SessionEnd(clear)
+    // closes `aaa`, SessionStart(clear) rebinds the row to `bbb` and stamps
+    // `last_hook_at`.
+    f.fake.on_host(
+        "alpha",
+        Match::script_contains("tmux capture-pane -t 'work'"),
+        Reply::Hang {
+            for_: Duration::from_millis(300),
+        },
+    );
+    f.fake.clear_calls();
+    let hook = async {
+        f.called("alpha", "capture-pane").await;
+        let s = f.store.lock().unwrap();
+        s.close_conversation(r.id, "aaa", "clear").unwrap();
+        s.rebind_conversation(
+            r.id,
+            "bbb",
+            crate::store::StartSource::Clear,
+            Some("/t/bbb.jsonl"),
+            None,
+        )
+        .unwrap();
+        s.record_hook_seen(r.id).unwrap();
+    };
+    tokio::join!(f.pass(), hook);
+
+    let row = f.row("work", "alpha");
+    assert_eq!(row.claude_session_id.as_deref(), Some("bbb"));
+    assert!(!row.context.context_stale, "the Clear reset stands");
+    assert_eq!(row.context_pct, Some(0.0));
+    assert_eq!(
+        f.store
+            .lock()
+            .unwrap()
+            .session_transcript_path(r.id)
+            .unwrap()
+            .as_deref(),
+        Some("/t/bbb.jsonl")
+    );
+    assert_eq!(
+        f.conversations(r.id),
+        vec![
+            ("bbb".to_string(), "clear".to_string(), None, true),
+            (
+                "aaa".to_string(),
+                "unknown".to_string(),
+                Some("clear".to_string()),
+                false
+            ),
+        ]
+    );
+    assert_eq!(
+        f.timeline(r.id)
+            .into_iter()
+            .filter(|e| *e == ev("conversation_started", Some("unknown")))
+            .count(),
+        1,
+        "only pass 1's first sighting"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_opens_the_conversation_of_a_row_whose_id_was_null() {
+    let f = Fleet::new(&["alpha"]);
+    f.list("alpha", "work|1|2|0|/tmp/w|%3\n");
+    f.pane("alpha", "work", IDLE);
+    f.agents("alpha", "[]");
+    f.pass().await;
+    let r = f.row("work", "alpha");
+    assert_eq!(r.claude_session_id, None);
+    assert!(f.conversations(r.id).is_empty());
+
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"aaa","name":"work","cwd":"/tmp/w"}]"#,
+    );
+    f.pass().await;
+    assert_eq!(
+        f.conversations(r.id),
+        vec![("aaa".to_string(), "unknown".to_string(), None, true)]
+    );
+}
+
+#[tokio::test]
+async fn reconcile_never_moves_a_held_claude_id_onto_a_second_row() {
+    let f = Fleet::new(&["alpha"]);
+    f.list("alpha", "a|1|2|0|/tmp/a|%1\nb|1|2|0|/tmp/b|%2\n");
+    f.pane("alpha", "a", IDLE);
+    f.pane("alpha", "b", IDLE);
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"aaa","name":"a","cwd":"/tmp/a"}]"#,
+    );
+    f.pass().await;
+    let a = f.row("a", "alpha");
+    assert_eq!(a.claude_session_id.as_deref(), Some("aaa"));
+
+    // An agent row now names `b` with `a`'s conversation.
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"aaa","name":"b","cwd":"/tmp/b"}]"#,
+    );
+    f.pass().await;
+    let b = f.row("b", "alpha");
+    assert_eq!(b.claude_session_id, None);
+    assert!(f.conversations(b.id).is_empty());
+    assert_eq!(
+        f.row("a", "alpha").claude_session_id.as_deref(),
+        Some("aaa")
     );
 }
 

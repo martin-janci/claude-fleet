@@ -357,6 +357,7 @@ mod tests {
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
+            context: Default::default(),
         }
     }
 
@@ -544,6 +545,7 @@ mod tests {
                 intel_observed: true,
                 ci_status: None,
                 pr_observed: false,
+                tmux_pane_id: None,
             }],
             keep: &[name.to_string()],
             lost_ttl_cutoff: None,

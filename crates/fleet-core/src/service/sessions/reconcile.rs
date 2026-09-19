@@ -5,6 +5,8 @@
 use super::*;
 use crate::ipc_error::codes;
 use crate::ipc_error::lock;
+use crate::store::StartSource;
+use std::collections::HashMap;
 
 /// Number of pane lines captured per work session for the reconcile intel
 /// probe. Eight lines covers the REPL footer (status bar / context %) plus the
@@ -437,6 +439,50 @@ pub(crate) fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
     }
 }
 
+/// A known row's stored values read before the reconcile write.
+struct Prior {
+    claude_status: Option<String>,
+    stuck_kind: Option<String>,
+    claude_session_id: Option<String>,
+}
+
+/// Fallback rebind (spec §1.4): after the reconcile write, open the
+/// conversation of a row that `claude agents` moved onto another id (no
+/// hooks, or an old CLI), or first showed carrying one (a new row, or one
+/// whose id was NULL). Opened as `unknown`; the upsert already cleared the
+/// stale transcript path. Best-effort: a failure is logged, never fatal.
+fn open_reconciled_conversation(
+    s: &Store,
+    host_alias: &str,
+    row: &SessionRow,
+    old_claude_id: Option<&str>,
+) {
+    let Some(new_id) = row.claude_session_id.as_deref() else {
+        return;
+    };
+    // The upsert is the one guard for "never bind one id to two rows" and
+    // for "never undo a newer hook rebind": it refuses such an id, so the
+    // stored id only differs from the prior one when this pass may own it.
+    if old_claude_id == Some(new_id) {
+        return;
+    }
+    match s.rebind_conversation(row.id, new_id, StartSource::Unknown, None, None) {
+        Ok(_) => {
+            if let Err(e) = s.insert_session_event_for(
+                row.id,
+                Some(new_id),
+                "conversation_started",
+                Some(StartSource::Unknown.as_str()),
+            ) {
+                tracing::warn!(host = %host_alias, session = %row.tmux_name, error = %e.message,
+                    "[reconcile] session_event insert failed");
+            }
+        }
+        Err(e) => tracing::warn!(host = %host_alias, session = %row.tmux_name, error = %e.message,
+            "[reconcile] conversation rebind failed"),
+    }
+}
+
 /// Apply one host's probe result to the store. Extracted from the reconcile
 /// loop so a per-host write failure can be isolated (logged) without `?`
 /// aborting the whole multi-host reconcile. The write itself goes through the
@@ -485,8 +531,17 @@ pub(super) fn reconcile_write_one_host(
             // candidate that differs from the prior row does not mean the row
             // changed. `s` is the store guard held for this whole function, so
             // no other writer lands between this read, the write and the
-            // read-back.
-            let mut priors: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+            // read-back. `None` is a first sighting (no stored row yet).
+            let mut priors: Vec<(String, Option<Prior>)> = Vec::with_capacity(live.len());
+            // Every row on this host (ghost / lost / pane-less included) with
+            // the Claude id it holds, so an inferred cwd match can be checked
+            // against the ids other rows already own.
+            let stored_ids: HashMap<String, Option<String>> = s
+                .list_sessions_for_host(&host.alias)?
+                .into_iter()
+                .map(|r| (r.tmux_name, r.claude_session_id))
+                .collect();
+            let agents = pair_session_agents(live, agent_rows, &stored_ids, host.alias == "local");
             for sess in live {
                 keep.push(sess.name.clone());
                 let project_id =
@@ -498,16 +553,11 @@ pub(super) fn reconcile_write_one_host(
                     .get_session_account(&host.alias, &sess.name)?
                     .or_else(|| host_account.clone());
                 let worktree_key = worktree_key_for_host(&sess.path.to_string_lossy(), &paths);
-                // Match the running Claude agent by name (sessions launched
-                // with `--name <tmux_name>`) or, for older sessions without a
-                // name, by a unique cwd — so `recreate`/`restart` can resume
-                // the exact conversation instead of "most recent for the cwd".
-                let agent = crate::claude_agents::find_for_session(
-                    agent_rows,
-                    &sess.name,
-                    &sess.path.to_string_lossy(),
-                    host.alias == "local",
-                );
+                // The running Claude agent this session is paired with (see
+                // `pair_session_agents`) — its id lets `recreate`/`restart`
+                // resume the exact conversation instead of "most recent for
+                // the cwd".
+                let agent = agents.get(&sess.name).copied();
                 // Pane-tail intel from the off-lock probe (may be absent if the
                 // capture failed — then all four intel fields stay None and the
                 // upsert's COALESCE preserves the session's prior values).
@@ -525,10 +575,24 @@ pub(super) fn reconcile_write_one_host(
                     .or_else(|| pane.and_then(|p| p.derived_status).map(|s| s.to_string()));
                 let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
                 // Transition-detection: remember the PRIOR stored values (the
-                // upsert below overwrites them). A read failure or a first
-                // sighting just skips detection for this session.
-                if let Ok(Some(prior)) = s.get_session(&sess.name, &host.alias) {
-                    priors.push((sess.name.clone(), prior.claude_status, prior.stuck_kind));
+                // upsert below overwrites them). A first sighting skips the
+                // status/stuck detection but still opens its conversation; a
+                // read failure skips the session entirely.
+                match s.get_session(&sess.name, &host.alias) {
+                    Ok(prior) => priors.push((
+                        sess.name.clone(),
+                        prior.map(|p| Prior {
+                            claude_status: p.claude_status,
+                            stuck_kind: p.stuck_kind,
+                            claude_session_id: p.claude_session_id,
+                        }),
+                    )),
+                    Err(e) => tracing::warn!(
+                        host = %host.alias,
+                        session = %sess.name,
+                        error = %e,
+                        "[reconcile] prior row read failed"
+                    ),
                 }
                 sessions.push(ReconcileSession {
                     tmux_name: &sess.name,
@@ -550,6 +614,7 @@ pub(super) fn reconcile_write_one_host(
                     intel_observed: pane.is_some(),
                     ci_status: pr.and_then(|p| p.ci_status.clone()),
                     pr_observed: pr.is_some(),
+                    tmux_pane_id: sess.pane_id.clone(),
                 });
             }
             let now = now_unix();
@@ -674,17 +739,26 @@ pub(super) fn reconcile_write_one_host(
             // record a transition only where the STORED value changed.
             // Append-only and best-effort — a failed insert is logged and
             // skipped, never blocking reconcile.
-            for (tmux_name, old_status, old_stuck) in &priors {
+            for (tmux_name, prior) in &priors {
                 let Ok(Some(row)) = s.get_session(tmux_name, &host.alias) else {
                     continue;
                 };
+                open_reconciled_conversation(
+                    s,
+                    &host.alias,
+                    &row,
+                    prior.as_ref().and_then(|p| p.claude_session_id.as_deref()),
+                );
+                let Some(prior) = prior else {
+                    continue;
+                };
                 let mut events: Vec<(&str, Option<&str>)> = Vec::new();
-                if row.claude_status != *old_status {
+                if row.claude_status != prior.claude_status {
                     events.push(("status_change", row.claude_status.as_deref()));
                 }
                 // A newly-set (or changed) stuck_kind is the alert-worthy
                 // event; clearing it back to None is not recorded.
-                if row.stuck_kind.is_some() && row.stuck_kind != *old_stuck {
+                if row.stuck_kind.is_some() && row.stuck_kind != prior.stuck_kind {
                     events.push(("stuck", row.stuck_kind.as_deref()));
                 }
                 for (kind, detail) in events {
@@ -749,6 +823,75 @@ pub(super) fn reconcile_write_one_host(
     Ok(())
 }
 
+/// Pair each live tmux session on a host with the Claude agent whose id and
+/// status reconcile records for it, keyed by tmux name. Pure so it's
+/// unit-testable.
+///
+/// A by-name match (a session launched with `--name <tmux_name>`) is
+/// authoritative and always pairs, so its id follows the conversation (e.g.
+/// after `/clear`). A match by unique cwd is only an inference — when two
+/// fleet sessions share a cwd and only one has registered its agent yet,
+/// the cwd match hands the other session the first one's agent. So a cwd
+/// match pairs only when all of these hold:
+///
+/// * the agent has a session id (otherwise nothing ties it to this session);
+/// * the session's stored id (`stored_ids`) is NULL or already that id — an
+///   inference never overwrites an id the row has;
+/// * no OTHER row on the host (any state, pane-less rows included) holds
+///   that id;
+/// * no other live session matched that agent by name, and no other live
+///   session inferred the same agent by cwd this pass.
+///
+/// A rejected cwd match pairs nothing: the agent's status is not attributed
+/// to the session either (it falls back to the pane-derived status).
+pub(super) fn pair_session_agents<'a>(
+    live: &[crate::tmux::TmuxSession],
+    agents: &'a [crate::claude_agents::ClaudeAgentRow],
+    stored_ids: &HashMap<String, Option<String>>,
+    is_local: bool,
+) -> HashMap<String, &'a crate::claude_agents::ClaudeAgentRow> {
+    let matches: Vec<_> = live
+        .iter()
+        .filter_map(|sess| {
+            crate::claude_agents::find_for_session(
+                agents,
+                &sess.name,
+                &sess.path.to_string_lossy(),
+                is_local,
+            )
+            .map(|m| (sess.name.as_str(), m))
+        })
+        .collect();
+    let named: std::collections::HashSet<&str> = matches
+        .iter()
+        .filter(|(_, m)| m.by_name)
+        .filter_map(|(_, m)| m.row.session_id.as_deref())
+        .collect();
+    let mut inferred: HashMap<&str, usize> = HashMap::new();
+    for (_, m) in matches.iter().filter(|(_, m)| !m.by_name) {
+        if let Some(id) = m.row.session_id.as_deref() {
+            *inferred.entry(id).or_default() += 1;
+        }
+    }
+    let mut out = HashMap::new();
+    for (name, m) in matches {
+        let accept = m.by_name
+            || m.row.session_id.as_deref().is_some_and(|id| {
+                let own = stored_ids.get(name).and_then(|v| v.as_deref());
+                own.is_none_or(|own| own == id)
+                    && !named.contains(id)
+                    && inferred.get(id) == Some(&1)
+                    && !stored_ids
+                        .iter()
+                        .any(|(other, v)| other != name && v.as_deref() == Some(id))
+            });
+        if accept {
+            out.insert(name.to_string(), m.row);
+        }
+    }
+    out
+}
+
 /// Select the `claude --bg` agents that did NOT correlate to any live tmux
 /// session — i.e. real background sessions that have no pane. An agent counts
 /// as "matched" if `find_for_session` would resolve some tmux session to it
@@ -763,13 +906,13 @@ pub(super) fn unmatched_bg_agents<'a>(
     // Collect the set of agent session_ids that a tmux session resolved to.
     let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
     for sess in live {
-        if let Some(agent) = crate::claude_agents::find_for_session(
+        if let Some(m) = crate::claude_agents::find_for_session(
             agents,
             &sess.name,
             &sess.path.to_string_lossy(),
             is_local,
         ) {
-            if let Some(id) = agent.session_id.as_deref() {
+            if let Some(id) = m.row.session_id.as_deref() {
                 matched.insert(id.to_string());
             }
         }

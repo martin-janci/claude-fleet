@@ -158,6 +158,24 @@ pub fn commit_hash(value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate a Claude Code `tool_use` block id (`toolu_…`): 1–100 chars of
+/// `[A-Za-z0-9_-]`. It is grepped for in a transcript on the host, so
+/// nothing that could be read as shell or a grep option gets through.
+pub fn tool_use_id(value: &str) -> Result<(), IpcError> {
+    let ok = !value.is_empty()
+        && value.len() <= 100
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid(
+            "tool use id must be 1–100 characters of [A-Za-z0-9_-]",
+        ))
+    }
+}
+
 /// Validate a Claude Code session id (a canonical lowercase UUID,
 /// `8-4-4-4-12` hex). The app generates these as UUIDv4 and interpolates them
 /// into the pane launch command, so this guards a tampered DB value from

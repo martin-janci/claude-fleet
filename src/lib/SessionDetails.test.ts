@@ -33,7 +33,7 @@ const sampleSession = {
   effort_level: null,
   pr_url: null,
   current_activity: null,
-  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
 };
 
 beforeEach(() => {
@@ -187,7 +187,12 @@ describe('SessionDetails', () => {
             source_session_id: 5, target_session_id: 6, from_host: 'mefistos', to_host: 'turanga',
             tmux_name: 'dev-foo', claude_session_id: movable.claude_session_id, branch: 'feat',
             target_cwd: '/r/.claude/worktrees/feat', transcript_bytes: 10, source_killed: true,
-            warnings: [], target,
+            warnings: [],
+            carried: {
+              commits: 0, bundle_bytes: 0, dirty_entries: [], ignored_carried: [],
+              ignored_left_behind: [], target_seeded: 'existing',
+            },
+            target,
           }
         : undefined,
     );
@@ -204,7 +209,7 @@ describe('SessionDetails', () => {
       await tick();
       expect(mockInvoke.mock.calls).toContainEqual([
         'move_session',
-        { args: { session_id: 5, target_host_alias: 'turanga', keep_source: false } },
+        { args: { session_id: 5, target_host_alias: 'turanga', keep_source: false, strict: false } },
       ]);
       const done = get(toasts).find((t) => t.kind === 'success' && t.message.includes('Moved to turanga'));
       expect(done).toBeTruthy();

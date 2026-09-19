@@ -393,7 +393,7 @@ impl<C: SshExec> RemoteTmux<C> {
 #[async_trait]
 impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
-        let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}' 2>&1";
+        let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}' 2>&1";
         let output = self.remote_bash(script).await?;
         let combined = String::from_utf8_lossy(&output.stdout).into_owned();
         if output.status.success() {
@@ -593,6 +593,9 @@ pub struct TmuxSession {
     pub last_activity: i64,
     pub attached: bool,
     pub path: PathBuf,
+    /// The session's active pane (`%N`), used to bind hook calls to the row.
+    /// `None` from an old format / a test fixture.
+    pub pane_id: Option<String>,
 }
 
 /// Lists tmux sessions on the local host. Returns an empty Vec (not an error)
@@ -602,7 +605,7 @@ pub async fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
         .args([
             "list-sessions",
             "-F",
-            "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}",
+            "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}",
         ])
         .output()
         .await;
@@ -647,15 +650,21 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
     input
         .lines()
         .filter_map(|line| {
-            // Destructure the fixed 5-field format off the split iterator —
-            // no per-line `Vec` allocation. A 6th field means the line is
-            // malformed (a `|` inside a session name); reject it.
+            // Destructure the fixed format off the split iterator — no
+            // per-line `Vec` allocation. The optional 6th field is the pane
+            // id (`%N`); anything else there, or a 7th field, means the line
+            // is malformed (a `|` inside a name or path); reject it.
             let mut it = line.split('|');
             let name = it.next()?;
             let created = it.next()?.parse::<i64>().ok()?;
             let last_activity = it.next()?.parse::<i64>().ok()?;
             let attached_int = it.next()?.parse::<i64>().ok()?;
             let path = it.next()?;
+            let pane_id = match it.next() {
+                None => None,
+                Some(p) if p.starts_with('%') => Some(p.to_string()),
+                Some(_) => return None,
+            };
             if it.next().is_some() {
                 return None;
             }
@@ -665,6 +674,7 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
                 last_activity,
                 attached: attached_int > 0,
                 path: PathBuf::from(path),
+                pane_id,
             })
         })
         .collect()
@@ -703,13 +713,19 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
 /// most-recent-for-cwd behavior. The id is single-quoted; externally-supplied
 /// ids should be validated with `validate::claude_session_id` before being
 /// passed in (minted ids are safe by construction).
-pub fn pane_command_for(claude_session_id: Option<&str>) -> String {
+///
+/// Every `cl` also gets `--name <tmux_name>`, so `claude agents` lists the
+/// session under its tmux name and reconcile pairs it with its agent BY NAME
+/// (authoritative) instead of inferring it from the cwd, which is ambiguous
+/// once two sessions share a directory.
+pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> String {
     let tail = "exec ${SHELL:-/bin/zsh} -l";
+    let name = format!("--name {}", crate::shell::quote(tmux_name));
     match claude_session_id {
-        Some(id) => {
-            format!("cl --resume '{id}' 2>/dev/null || cl --session-id '{id}' || cl; {tail}")
-        }
-        None => format!("cl --continue || cl; {tail}"),
+        Some(id) => format!(
+            "cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
+        ),
+        None => format!("cl --continue {name} || cl {name}; {tail}"),
     }
 }
 
@@ -907,6 +923,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_sessions_reads_an_optional_pane_id() {
+        let out = "a|1|2|0|/w|%7\nb|1|2|1|/x\n";
+        let s = parse_sessions(out);
+        assert_eq!(s[0].pane_id.as_deref(), Some("%7"));
+        assert_eq!(s[1].pane_id, None);
+        // A 7th field is still a malformed line (a `|` in the name).
+        assert!(parse_sessions("a|b|1|2|0|/w|%7").is_empty());
+        // A 6th field that is not a pane id is a `|` inside the path.
+        assert!(parse_sessions("a|1|2|0|/w|x").is_empty());
+    }
+
+    #[test]
     fn parse_empty_input() {
         assert!(parse_sessions("").is_empty());
     }
@@ -976,13 +1004,16 @@ mod tests {
 
     #[test]
     fn pane_command_for_none_falls_back_to_shell_after_claude_exits() {
-        let cmd = pane_command_for(None);
+        let cmd = pane_command_for(None, "dev-x");
         // The semicolon (NOT `||`) after the second `cl` is the whole point:
         // it makes the shell always continue to the exec regardless of `cl`'s
         // exit status. Regression test that the next person who edits this
         // doesn't accidentally use `||` and resurrect the "session dies on
         // /exit" bug.
-        assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
+        assert!(
+            cmd.contains("cl --continue --name 'dev-x' || cl --name 'dev-x';"),
+            "got: {cmd}"
+        );
         assert!(cmd.contains("exec ${SHELL:-/bin/zsh}"), "got: {cmd}");
     }
 
@@ -1021,13 +1052,19 @@ mod tests {
     #[test]
     fn pane_command_for_resumes_or_creates_with_id() {
         let id = "550e8400-e29b-41d4-a716-446655440000";
-        let cmd = pane_command_for(Some(id));
-        assert!(cmd.contains(&format!("cl --resume '{id}'")), "got: {cmd}");
+        let cmd = pane_command_for(Some(id), "dev-x");
         assert!(
-            cmd.contains(&format!("cl --session-id '{id}'")),
+            cmd.contains(&format!("cl --resume '{id}' --name 'dev-x'")),
             "got: {cmd}"
         );
-        assert!(cmd.contains("|| cl;"), "bare fallback missing: {cmd}");
+        assert!(
+            cmd.contains(&format!("cl --session-id '{id}' --name 'dev-x'")),
+            "got: {cmd}"
+        );
+        assert!(
+            cmd.contains("|| cl --name 'dev-x';"),
+            "bare fallback missing: {cmd}"
+        );
         assert!(cmd.contains("exec ${SHELL"), "got: {cmd}");
     }
 
@@ -1055,9 +1092,15 @@ mod tests {
 
     #[test]
     fn pane_command_for_none_uses_continue() {
-        let cmd = pane_command_for(None);
-        assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
+        let cmd = pane_command_for(None, "dev-x");
+        assert!(cmd.contains("cl --continue --name 'dev-x'"), "got: {cmd}");
         assert!(!cmd.contains("--session-id"), "got: {cmd}");
+    }
+
+    #[test]
+    fn pane_command_for_quotes_the_session_name() {
+        let cmd = pane_command_for(None, "it's$(x)");
+        assert!(cmd.contains("--name 'it'\\''s$(x)'"), "got: {cmd}");
     }
 
     #[test]

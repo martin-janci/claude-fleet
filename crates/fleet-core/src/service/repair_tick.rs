@@ -1465,6 +1465,7 @@ mod tests {
             last_activity: 1,
             attached: false,
             path: "/repo/.worktrees/a".into(),
+            pane_id: None,
         };
         let deps = crate::service::sessions::ReconcileDeps::fake(
             move |alias| {

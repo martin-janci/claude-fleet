@@ -124,7 +124,18 @@ transfer, async/events rework), plus the MCP control API, background sessions,
 the background reconcile tick, fleet_health roll-up, and the persistent session
 event timeline (session_history). Handoff from the original spec is replaced by
 `move_session` (Move to host…) and Freeze is descoped, per
-`docs/adr/0001-descope-freeze-ship-move.md`. A full hardening review is in
+`docs/adr/0001-descope-freeze-ship-move.md`. `move_session` now CARRIES
+uncommitted and unpushed work plus small git-ignored files to the target
+instead of refusing a dirty or unpushed source (`strict: true` restores the
+ADR 0001 refusals), per `docs/adr/0002-move-carries-work-as-is.md` and
+`docs/superpowers/specs/2026-09-19-move-carry-engine-design.md`. A full
+hardening review is in
 `docs/specs/2026-05-21-hardening-review.md` — consult it before touching SSH
 command construction, the PTY, migrations, or the optimistic-merge / event-bus
 paths.
+
+Phase 1 of conversation event tracking is landed (migration 037 `conversations`
+table; `SessionStart`/`PreCompact`/`PostCompact` hooks; `/clear`, `/resume` and
+compaction tracked as conversation switches; `session_conversations` API), per
+`docs/superpowers/specs/2026-09-18-conversation-events-design.md`; the
+Conversations UI (Phase 2) is not yet built.

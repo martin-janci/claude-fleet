@@ -139,7 +139,7 @@ const HOST_PAYLOAD: &str =
 const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
 /// A complete `MoveReport`: all twelve fields are required on the wire, the
 /// last of them a whole `SessionRow` (the same one as [`SESSION_PAYLOAD`]).
-const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","tmux_name":"demo","claude_session_id":"abc","branch":"main","target_cwd":"/w/demo","transcript_bytes":1024,"source_killed":true,"warnings":[],"target":{"id":43,"tmux_name":"demo","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}}"#;
+const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","tmux_name":"demo","claude_session_id":"abc","branch":"main","target_cwd":"/w/demo","transcript_bytes":1024,"source_killed":true,"warnings":[],"carried":{"commits":2,"bundle_bytes":1234,"dirty_entries":[{"status":" M","path":"src/lib.rs"}],"ignored_carried":[{"path":".env","bytes":4096}],"ignored_left_behind":[{"path":"node_modules/","bytes":null,"reason":"denylisted"}],"target_seeded":"existing"},"target":{"id":43,"tmux_name":"demo","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}}"#;
 
 /// One row of the tables below: what to run, the tool it must name, and the
 /// arguments it must send.
@@ -301,7 +301,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "session_conversation",
-            json!({ "session_id": 7, "turns": 5 }),
+            json!({ "session_id": 7, "turns": 5, "events_limit": 200 }),
             r#"{"turns":[],"truncated":false}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::session_conversation(
@@ -309,9 +309,45 @@ fn routed_read_cases() -> Vec<Case> {
                     commands::sessions::SessionConversationArgs {
                         session_id: 7,
                         turns: Some(5),
+                        claude_session_id: None,
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_conversation",
+            json!({ "session_id": 7, "turns": 5, "claude_session_id": "11111111-1111-1111-1111-111111111111", "events_limit": 200 }),
+            r#"{"turns":[],"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::session_conversation(
+                    b,
+                    commands::sessions::SessionConversationArgs {
+                        session_id: 7,
+                        turns: Some(5),
+                        claude_session_id: Some("11111111-1111-1111-1111-111111111111".into()),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_conversations",
+            // Clamped on this side, like session_history: 10_000 -> 500.
+            json!({ "session_id": 7, "limit": 500 }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_conversations(
+                    b,
+                    commands::sessions::SessionConversationsArgs {
+                        session_id: 7,
+                        limit: Some(10_000),
+                    },
+                    s,
                 ))
                 .map(|_| ())
             }),
@@ -690,7 +726,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "move_session",
-            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false }),
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::move_session::routed::move_session(
@@ -699,6 +735,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         session_id: 7,
                         target_host_alias: "hetzner".into(),
                         keep_source: false,
+                        strict: true,
                     },
                     s,
                     h,
@@ -942,6 +979,7 @@ fn standalone_ssh_backed_reads_take_the_local_path() {
                 commands::sessions::SessionConversationArgs {
                     session_id: 999,
                     turns: None,
+                    claude_session_id: None,
                 },
                 &st,
                 &ssh(),

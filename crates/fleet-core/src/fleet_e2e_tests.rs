@@ -31,7 +31,7 @@ fn deps_over(fake: FakeSsh, probe_timeout: Duration) -> Arc<ReconcileDeps> {
     )
 }
 
-const LIST_SCRIPT: &str = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}' 2>&1";
+const LIST_SCRIPT: &str = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}' 2>&1";
 
 /// A fleet where `local` has no tmux server and `host` answers
 /// `list-sessions` with the single `line` (no agents, a plain pane).

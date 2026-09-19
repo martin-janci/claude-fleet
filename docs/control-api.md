@@ -55,12 +55,13 @@ the host's detail in the **Hosts** view (⌘I):
   `E_FORBIDDEN`; fleet-wide listings (`list_sessions`, …) still see every
   host.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
-  `session_history`, `inbox`, `peer_status`, `session_transcript`,
-  `peek_session` (deprecated), `repo_*`, `get_clipboard`, `wait_for_session`,
-  `wait_for_task`, `list_tasks`, …). Anything that sends, kills, deletes,
-  provisions, dispatches, writes the clipboard, or writes a session row
-  (including `set_friendly_name`, so an agent on a `readonly` host cannot
-  set its sidebar label) returns `E_FORBIDDEN`.
+  `session_history`, `session_conversations`, `inbox`, `peer_status`,
+  `session_transcript`, `peek_session` (deprecated), `repo_*`,
+  `get_clipboard`, `wait_for_session`, `wait_for_task`, `list_tasks`, …).
+  Anything that sends, kills, deletes, provisions, dispatches, writes the
+  clipboard, or writes a session row (including `set_friendly_name`, so an
+  agent on a `readonly` host cannot set its sidebar label) returns
+  `E_FORBIDDEN`.
 
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
 `hide_host` — are **master-token only** in either mode: a token lifted from
@@ -250,7 +251,10 @@ Index by area (names only; see the reference for details):
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),
   `peek_session` (`peek_session` is deprecated: use `session_transcript`),
-  `peer_status`, `session_history`, `send_message`, `inbox`. Rows with
+  `peer_status`, `session_history`, `session_conversations` (the Claude
+  conversations a session has run — `/clear`, `/resume`, compaction; pass a
+  `claude_session_id` from it to `session_conversation` to read an earlier
+  one), `send_message`, `inbox`. Rows with
   `kind: external` are interactive Claude sessions running outside tmux:
   fleet can read them (`session_transcript`) but not control them.
 - **Lifecycle & recovery** — `restart_session`, `recreate_session`,
@@ -259,9 +263,12 @@ Index by area (names only; see the reference for details):
   recreate the branch and respawn the pane; behind the desktop confirmation
   when `mcp.confirm_destructive` is on), `kill_session`, `safe_kill_session`,
   `dismiss_ghost_session`, `move_session` (continue a work session on another
-  host: clean + pushed worktree required, transcript copied, `--resume` on
-  the target, source killed once the target runs; master token only, since
-  the caller must be allowed on both hosts).
+  host: the transcript is copied and the work travels as it is — unpushed
+  commits, uncommitted files and small git-ignored ones, nothing pushed or
+  committed for you (`strict: true` restores the old clean + pushed
+  refusals) — then `--resume` on the target and the source killed once the
+  target runs; master token only, since the caller must be allowed on both
+  hosts).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
   `repo_commit_diff`.
@@ -443,7 +450,7 @@ session's labels (up to 16 of 1–32 chars from `[A-Za-z0-9_.:-]`) and
    that public URL instead (e.g. `https://fleet.example.com`), since every
    host can already reach it directly.
 4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
-5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree)`, `SessionEnd(logout|prompt_input_exit|other)`, `StopFailure` and `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6); on a `fleet-hub` daemon with a public URL, the URL is that public URL's `/hook` instead (e.g. `https://fleet.example.com/hook`) and no tunnel is used. Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq` and task completion on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked` (see *Hook contract*).
+5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree)`, `SessionEnd(logout|prompt_input_exit|other|clear|resume)`, `StopFailure`, `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)`, `PreCompact` and `PostCompact` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. `SessionStart` is the one event Claude Code refuses to fire as `type: "http"`, so it is instead installed as an async `curl` command hook that reads its bearer header from `~/.claude/fleet-hook.headers` (mode `0600`) rather than embedding it in the command string (see *Hook contract*). On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6); on a `fleet-hub` daemon with a public URL, the URL is that public URL's `/hook` instead (e.g. `https://fleet.example.com/hook`) and no tunnel is used. Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file and the headers file are written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq`, task completion and conversation tracking (`session_conversations`) on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked`. **Hosts provisioned before the `SessionStart` / `PreCompact` / `PostCompact` hooks existed must be re-provisioned** to get conversation tracking across `/clear`, `/resume` and compaction (see *Hook contract*).
 6. **Reverse SSH tunnel** (remote hosts only, loopback hubs only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel. A `fleet-hub` daemon configured with a public URL skips this step entirely — every host already reaches the hub's public address directly.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
@@ -486,10 +493,13 @@ the session continues.
 
 | Event | Matcher | Fields read | Effect on the session row | Timeline |
 |---|---|---|---|---|
-| `UserPromptSubmit` | all | `session_id`, `transcript_path` | `claude_status = working`, `idle_since` cleared | — |
-| `Stop` | all | `session_id`, `transcript_path`, `cwd` | `idle`, `turn_seq + 1`, `last_stop_at`; triggers safe-kill and task-marker checks | — |
+| `UserPromptSubmit` | all | `session_id`, `transcript_path` | `claude_status = working`, `idle_since` cleared; a non-current id rebinds the row (fallback for hosts missing `SessionStart`) | — |
+| `Stop` | all | `session_id`, `transcript_path`, `cwd` | `idle`, `turn_seq + 1`, `last_stop_at`; triggers safe-kill and task-marker checks | `turn_done` |
 | `StopFailure` | all | `session_id`, `error`, `error_details` | same as `Stop` | `stop_failure` — `<error>[: <details>]` |
-| `SessionEnd` | `logout\|prompt_input_exit\|other` | `session_id`, `reason` | `stopped`, `idle_since` started, stuck cleared | `session_end` — reason |
+| `SessionEnd` | `logout\|prompt_input_exit\|other\|clear\|resume` | `session_id`, `reason` | `clear`/`resume`: conversation closed, row marked awaiting a rebind, status untouched (the process lives on under a new id); other reasons: `stopped`, `idle_since` started, stuck cleared | `conversation_ended` (clear/resume) or `session_end` (other) — reason |
+| `SessionStart` | all (command hook) | `session_id`, `source`, `model` | `source = compact`: counts the compaction only, no rebind; otherwise the row rebinds onto the new conversation, which becomes current | `conversation_started` — source |
+| `PreCompact` | all | `session_id`, `trigger` | `current_activity = compacting` on the current conversation | `compact_started` — trigger |
+| `PostCompact` | all | `session_id`, `trigger` | counts the compaction (deduped against `SessionStart(compact)`), clears `compacting`, marks context stale for the current conversation | `compact_done` — trigger |
 | `Notification` | `permission_prompt\|elicitation_dialog\|elicitation_url_dialog` | `session_id`, `notification_type` | `blocked` | `notification` — type |
 | `Notification` | `quota_auto_resume_stale` | same | `blocked`, `stuck_kind = press_enter` | `notification` — type |
 | `Notification` | `quota_auto_resume_disabled` | same | `blocked` | `notification` — type |
@@ -497,11 +507,28 @@ the session continues.
 | `PostToolUse` | `EnterWorktree\|ExitWorktree` | `tool_name`, `tool_input`, `tool_response` | worktree row registered / removed | — |
 
 Every hook write stamps `last_hook_at`; a reconcile pass that started before that
-stamp never overwrites the hook's status with its pane heuristic. `SessionEnd`
-with reason `clear` or `resume` is not installed (the process continues under a
-new session id). `SessionStart` is not used: Claude Code accepts only `command` /
-`mcp_tool` hooks there. Fleet never writes `allowedHttpHookUrls` — defining it
-at user level would block every other http hook on the host.
+stamp never overwrites the hook's status with its pane heuristic. Fleet never
+writes `allowedHttpHookUrls` — defining it at user level would block every other
+http hook on the host.
+
+**Conversations.** Each session row tracks the sequence of Claude Code
+conversations (`claude_session_id`s) it has run: `/clear`, `/resume` and
+compaction each replace the transcript's session id while the underlying
+process and tmux pane continue, and fleet keeps one row per id —
+`session_conversations` lists them, `session_conversation { claude_session_id
+}` reads an earlier one (see *Steering & observing* above). `SessionStart` is
+the event that opens a new conversation, but it is also the one event Claude
+Code refuses to fire as `type: "http"`, so fleet installs it as an async
+`curl` command hook instead of the `http` hooks used everywhere else. That
+command POSTs the same JSON body to `/hook` with the bearer header supplied
+via `curl -H @"$HOME/.claude/fleet-hook.headers"` (a single `Authorization:
+Bearer <host-token>` line, mode `0600`, written by the same provisioning /
+local-install code path as `settings.json`) so the token never appears in the
+command string itself, plus `-H "X-Fleet-Pane: ${TMUX_PANE:-}"` so `resolve_hook_row`
+can match the row by pane directly. Hosts pick up the `SessionStart` /
+`PreCompact` / `PostCompact` entries only once re-provisioned —
+`provision_hosts` refreshes them on its next run; the local host installs them
+automatically on app start.
 
 ## Security
 

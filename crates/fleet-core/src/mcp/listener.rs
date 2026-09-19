@@ -71,7 +71,8 @@ impl<A: TlsAcceptor> TlsListener<A> {
     }
 
     /// [`Self::spawn`] with the handshake deadline as a parameter, so a test
-    /// can watch it expire on the real clock in milliseconds.
+    /// can exercise it on the real clock without waiting the full
+    /// [`HANDSHAKE_TIMEOUT`].
     fn spawn_with_handshake_timeout(
         listener: TcpListener,
         acceptor: A,
@@ -115,7 +116,7 @@ impl<A: TlsAcceptor> TlsListener<A> {
                         }
                         Err(_) => tracing::debug!(
                             %peer,
-                            timeout_secs = handshake_timeout.as_secs(),
+                            timeout_ms = handshake_timeout.as_millis(),
                             "[mcp] TLS handshake timed out"
                         ),
                     }
@@ -257,31 +258,29 @@ mod tests {
     /// Without [`HANDSHAKE_TIMEOUT`] such a peer holds a task and a file
     /// descriptor until the TCP stack gives up — minutes, and free to repeat.
     ///
-    /// On the real clock with a short deadline, not a paused one: a paused
-    /// clock jumps to the next timer whenever the runtime is idle, and a
-    /// socket the OS has yet to make readable looks idle. The accept and the
-    /// FIN both raced that jump, so the outer timeout fired first under load.
+    /// Runs on the real clock with a short deadline rather than a paused one:
+    /// a paused clock auto-advances whenever the runtime is idle, and waiting
+    /// on a real socket (the accept, the FIN) looks idle to it, so the outer
+    /// timeout could fire before the listener had even started the handshake.
     #[tokio::test]
     async fn a_connection_that_never_handshakes_is_hung_up_on() {
-        const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
+        const DEADLINE: std::time::Duration = std::time::Duration::from_millis(200);
         let (l, addr) = bound().await;
         let mut listener =
             TlsListener::spawn_with_handshake_timeout(l, NeverCompletes, DEADLINE).unwrap();
-        let connecting = std::time::Instant::now();
+        let started = std::time::Instant::now();
         let mut silent = TcpStream::connect(addr).await.unwrap();
 
         // The server closing its end is what the client sees as a 0-byte read.
-        // The outer bound is liveness only: it is never waited out on a pass.
         let mut buf = [0u8; 1];
-        let n = tokio::time::timeout(std::time::Duration::from_secs(60), silent.read(&mut buf))
+        let n = tokio::time::timeout(std::time::Duration::from_secs(10), silent.read(&mut buf))
             .await
             .expect("the hub must hang up on a peer that never handshakes")
             .unwrap();
         assert_eq!(n, 0, "the connection must be closed, not left open");
-        // `NeverCompletes` holds the stream, so only the deadline can close it.
         assert!(
-            connecting.elapsed() >= DEADLINE,
-            "hung up by the deadline, not before it"
+            started.elapsed() >= DEADLINE,
+            "closed by the handshake deadline, not before it"
         );
 
         // Nothing was handed to axum, and the listener is still accepting.

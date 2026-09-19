@@ -35,7 +35,7 @@ pub struct SafeKillSessionArgs {
 }
 
 /// A single uncommitted entry from `git status --porcelain`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirtyFile {
     /// Two-letter porcelain code (e.g. " M", "??", "AM"). Trimmed of trailing
     /// whitespace but preserves leading spaces — they encode index/worktree
@@ -489,50 +489,74 @@ pub fn scan_pane_for_marker(pane: &str, nonce: &str) -> MarkerOutcome {
 ///   - "requested" → "failed" → records reason, leaves session alive
 ///   - no marker yet → no change (next Stop will try again)
 ///
+/// `session_id` is the row the Stop hook resolved to — never re-derived
+/// from the Claude id, which two rows may share (the pane picked the row).
+///
 /// All errors are logged and swallowed (the hook handler already returned
 /// 204 to Claude Code). This function is fire-and-forget from a tokio
 /// background task.
 pub async fn handle_stop_marker_check(
     store: Arc<Mutex<Store>>,
     ssh: Arc<SshClient>,
-    claude_session_id: String,
+    session_id: i64,
 ) {
-    if let Err(e) = handle_stop_marker_check_inner(&store, &ssh, &claude_session_id).await {
+    if let Err(e) = handle_stop_marker_check_inner(&store, &ssh, session_id).await {
         tracing::warn!(
-            claude_session_id = %claude_session_id,
+            session_id,
             error = %e,
             "[safe_kill] marker check failed"
         );
     }
 }
 
+/// What the marker check needs from the row, when a safe-kill with a nonce
+/// is still requested on it.
+#[derive(Debug)]
+struct MarkerCheckTarget {
+    session_id: i64,
+    tmux_name: String,
+    host_alias: String,
+    nonce: String,
+    worktree_id: Option<i64>,
+    project_id: Option<i64>,
+}
+
+fn marker_check_target(s: &Store, session_id: i64) -> Result<Option<MarkerCheckTarget>, IpcError> {
+    let Some(row) = s.get_session_by_id(session_id)? else {
+        return Ok(None);
+    };
+    if row.safe_kill_state.as_deref() != Some("requested") {
+        return Ok(None);
+    }
+    let Some(nonce) = row.safe_kill_nonce else {
+        return Ok(None);
+    };
+    Ok(Some(MarkerCheckTarget {
+        session_id: row.id,
+        tmux_name: row.tmux_name,
+        host_alias: row.host_alias,
+        nonce,
+        worktree_id: row.worktree_id,
+        project_id: row.project_id,
+    }))
+}
+
 async fn handle_stop_marker_check_inner(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
-    claude_session_id: &str,
+    session_id: i64,
 ) -> Result<(), IpcError> {
     // Snapshot what we need under one lock then drop it.
-    let (session_id, tmux_name, host_alias, nonce, worktree_id, project_id) = {
-        let s = lock(store)?;
-        let row = match s.get_session_by_claude_id(claude_session_id)? {
-            Some(r) => r,
-            None => return Ok(()),
-        };
-        if row.safe_kill_state.as_deref() != Some("requested") {
-            return Ok(());
-        }
-        let nonce = match row.safe_kill_nonce {
-            Some(n) => n,
-            None => return Ok(()),
-        };
-        (
-            row.id,
-            row.tmux_name,
-            row.host_alias,
-            nonce,
-            row.worktree_id,
-            row.project_id,
-        )
+    let Some(MarkerCheckTarget {
+        session_id,
+        tmux_name,
+        host_alias,
+        nonce,
+        worktree_id,
+        project_id,
+    }) = marker_check_target(&*lock(store)?, session_id)?
+    else {
+        return Ok(());
     };
 
     let tmux = exec_for(&host_alias, ssh);
@@ -792,5 +816,28 @@ SAFE_REMOVE_READY_n1";
     fn scan_returns_not_yet_when_no_marker_at_all() {
         let pane = "nothing relevant here";
         assert_eq!(scan_pane_for_marker(pane, "n1"), MarkerOutcome::NotYet);
+    }
+
+    #[test]
+    fn the_marker_check_targets_the_row_the_stop_resolved_to() {
+        // Two rows share one claude id; the Stop resolved (by pane) to the
+        // one with the safe-kill in flight, and the check must read it.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let other = s
+            .upsert_session("other", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        let killed = s
+            .upsert_session("killed", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        for id in [other, killed] {
+            s.set_claude_session_id(id, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+                .unwrap();
+        }
+        s.set_safe_kill_requested(killed, "n1", 0).unwrap();
+        let t = marker_check_target(&s, killed).unwrap().unwrap();
+        assert_eq!((t.session_id, t.tmux_name.as_str()), (killed, "killed"));
+        assert_eq!(t.nonce, "n1");
+        assert!(marker_check_target(&s, other).unwrap().is_none());
     }
 }
