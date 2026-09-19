@@ -103,6 +103,21 @@ status separately after a release. After publishing, spot-check with
 all four tarballs (`agent-hub-checksums`'s log says "complete" or names what
 is missing).
 
+`scripts/upload-release-asset.sh` (both jobs) deletes an existing
+same-named asset before re-uploading, so a re-run replaces assets — but
+that delete-then-upload is **not atomic**: if the re-upload itself fails
+right after the delete succeeded, the release is left with no asset of
+that name until the job is run again. This only matters on a re-run over
+an asset that already exists; a first-time upload can't hit it. The step
+fails loudly when it happens — an `::error::` annotation naming the exact
+asset, and the step/job show failed (both jobs carry
+`continue-on-error: true`, so this shows as the job's "failed but allowed"
+badge, not a red overall run — check job status, not just the run's own
+green checkmark). **If either release job's own status shows failed, or
+`::error::` shows up in its log, re-run the workflow from the same tag**:
+every asset here is reproducible from the tag, so a re-run is always a
+complete fix.
+
 ### Hub image
 
 `.github/workflows/hub-image.yml` also runs on push of any `v*` tag: it
@@ -113,11 +128,14 @@ QEMU), then a `merge` job combines whichever digests exist into the real
 tags. **arm64 is best-effort**: its leg may fail without blocking the
 image — `merge` still runs (`if: !cancelled()`) and publishes an amd64-only
 manifest under the same tags, so amd64's own publication is never slowed or
-blocked by arm64. amd64 failing is different: nothing is published, and
-`merge` fails for real (no `continue-on-error` on that leg or on `merge`
-itself) so it stays visible rather than leaving a stale `latest`. See
-`scripts/merge-hub-digests.sh` and the workflow file for the exact rule and
-the image name/tag scheme.
+blocked by arm64, and the *run stays green* (a `continue-on-error` leg's
+failure never turns the run red). That degradation is still visible: a
+`::warning::` annotation and a job-summary note both say arm64 failed and
+the manifest is amd64-only. amd64 failing is different: nothing is
+published, and `merge` fails for real (no `continue-on-error` on that leg
+or on `merge` itself) so it stays visible rather than leaving a stale
+`latest`. See `scripts/merge-hub-digests.sh` and the workflow file for the
+exact rule and the image name/tag scheme.
 
 ### Signing caveat
 

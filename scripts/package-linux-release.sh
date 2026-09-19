@@ -80,6 +80,12 @@ EOF
   rm -rf "$stage"
 done
 
-( cd "$out" && sha256sum ./*.tar.gz >"SHA256SUMS.${TARGET}" )
+# `--` before the glob, and bare filenames (not `./fleet-...`): asset names
+# are validated to start with a letter (fleet-agent/fleet-hub), so a
+# leading `-` can't happen, but `--` costs nothing and rules it out for
+# good. sha256sum -c expects a bare filename to match a downloaded file in
+# the same directory; a `./` prefix works with --ignore-missing too, but
+# the requirement is bare names, so this is `*.tar.gz`, not `./*.tar.gz`.
+( cd "$out" && sha256sum -- *.tar.gz >"SHA256SUMS.${TARGET}" )
 
 ls -la "$out"

@@ -48,12 +48,30 @@ fi
 
 # Stable order: sorted by the per-target filename (SHA256SUMS.aarch64-... <
 # SHA256SUMS.x86_64-...), so the merge is deterministic regardless of which
-# matrix leg's artifact download finished first.
+# matrix leg's artifact download finished first. Every emitted line is
+# normalised to a BARE filename (never `./name`): package-linux-release.sh
+# already writes bare names, but a foreign or older input file might not,
+# and the requirement here is bare names in what gets published, not just
+# in this script's own internal comparisons.
 for f in $(printf '%s\n' "${files[@]}" | sort); do
-  cat "$f" >>"$merged"
+  sed -E 's#^([0-9a-f]+  )\./#\1#' "$f" >>"$merged"
 done
 
-names="$(awk '{print $2}' "$merged" | sed 's#^\./##' | sort)"
+names="$(awk '{print $2}' "$merged" | sort)"
+
+# A name appearing more than once — whether from one leg's own file or
+# across both — is corruption distinct from "not one of the four": call it
+# out by name rather than folding it into the unexpected-name check below,
+# which (comparing multisets with `comm`) would otherwise misreport a
+# duplicate of a perfectly valid name as "outside the four".
+duplicates="$(echo "$names" | uniq -d)"
+if [ -n "$duplicates" ]; then
+  while IFS= read -r d; do
+    [ -n "$d" ] && echo "merge-sha256sums.sh: duplicate entry for $d" >&2
+  done <<<"$duplicates"
+  exit 1
+fi
+
 unexpected="$(comm -23 <(echo "$names") "$expected" || true)"
 if [ -n "$unexpected" ]; then
   echo "merge-sha256sums.sh: SHA256SUMS names an asset outside the four this tag can produce:" >&2
