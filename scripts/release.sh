@@ -6,7 +6,10 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/martin-janci/claude-fleet"
-CRATE="claude-fleet"
+# crates/fleet-core stays at 0.1.0 and is deliberately NOT in this list: it is
+# an internal library crate consumed only by path within this workspace, not
+# versioned in step with the app. (Its Cargo.toml has no `publish = false`
+# marker, so this is a convention, not an enforced one — see issue #152.)
 VERSION_FILES=(package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml crates/fleet-hub/Cargo.toml crates/fleet-proto/Cargo.toml crates/fleet-agent/Cargo.toml)
 
 die() { echo "release.sh: $*" >&2; exit 1; }
@@ -26,24 +29,83 @@ CUR="$(node -e 'process.stdout.write(require("./package.json").version)')"
 echo "Bumping $CUR -> $NEW"
 
 # --- 1. Version fields (first occurrence only; formatting preserved) ---------
+# For a .toml file the bump is scoped to the [package] table — not just the
+# first `version = "…"` anywhere in the file — so a `[dependencies.foo]` or
+# `[workspace.package]` table ahead of `[package]` can never be bumped by
+# mistake (#152).
 node - "$NEW" "${VERSION_FILES[@]}" <<'JS'
 const fs = require("fs");
 const [next, ...files] = process.argv.slice(2);
+// Returns [from, to): the byte range of the [package] table's body (after
+// its header line, up to the next line starting with `[`, or EOF).
+function packageTableRange(f, src) {
+  const header = src.match(/^\[package\]\s*$/m);
+  if (!header) { console.error(`release.sh: no [package] table in ${f}`); process.exit(1); }
+  const from = header.index + header[0].length;
+  const rest = src.slice(from);
+  const nextHeader = rest.match(/^\[/m);
+  const to = nextHeader ? from + nextHeader.index : src.length;
+  return [from, to];
+}
 for (const f of files) {
   const src = fs.readFileSync(f, "utf8");
-  const re = f.endsWith(".toml") ? /^version = "[^"]+"/m : /"version": "[^"]+"/;
-  if (!re.test(src)) { console.error(`release.sh: no version field in ${f}`); process.exit(1); }
-  const rep = f.endsWith(".toml") ? `version = "${next}"` : `"version": "${next}"`;
-  fs.writeFileSync(f, src.replace(re, rep));
+  if (f.endsWith(".toml")) {
+    const [from, to] = packageTableRange(f, src);
+    const table = src.slice(from, to);
+    const re = /^version = "[^"]+"/m;
+    if (!re.test(table)) { console.error(`release.sh: no version field in [package] of ${f}`); process.exit(1); }
+    fs.writeFileSync(f, src.slice(0, from) + table.replace(re, `version = "${next}"`) + src.slice(to));
+  } else {
+    const re = /"version": "[^"]+"/;
+    if (!re.test(src)) { console.error(`release.sh: no version field in ${f}`); process.exit(1); }
+    fs.writeFileSync(f, src.replace(re, `"version": "${next}"`));
+  }
   console.log(`  ${f}`);
 }
 JS
 
 # --- 2. Cargo.lock follows Cargo.toml ----------------------------------------
 if [[ -z "${RELEASE_DRY_RUN:-}" ]]; then
-  cargo update -p "$CRATE" --offline >/dev/null 2>&1 || cargo update -p "$CRATE"
-  cargo update -p fleet-hub --offline >/dev/null 2>&1 || cargo update -p fleet-hub
-  echo "  Cargo.lock"
+  # Every crate this script just bumped needs Cargo.lock synced, or a
+  # `--locked` build of it fails after the release (#152). Derive the package
+  # list from VERSION_FILES' .toml entries instead of hard-coding a second
+  # list that can drift from the first.
+  CARGO_PKGS=()
+  for f in "${VERSION_FILES[@]}"; do
+    [[ "$f" == *.toml ]] || continue
+    # Scoped to the [package] table only — the first `name = "…"` anywhere in
+    # the file could belong to a `[lib]`/`[[bin]]` table ahead of [package]
+    # and silently name the wrong crate (#152).
+    name="$(node -e '
+      const fs = require("fs");
+      const f = process.argv[1];
+      const src = fs.readFileSync(f, "utf8");
+      const header = src.match(/^\[package\]\s*$/m);
+      if (!header) { console.error("release.sh: no [package] table in " + f); process.exit(1); }
+      const from = header.index + header[0].length;
+      const rest = src.slice(from);
+      const nextHeader = rest.match(/^\[/m);
+      const table = nextHeader ? rest.slice(0, nextHeader.index) : rest;
+      const m = table.match(/^name\s*=\s*"([^"]+)"/m);
+      if (!m) { console.error("release.sh: no name in [package] of " + f); process.exit(1); }
+      process.stdout.write(m[1]);
+    ' "$f")" || die "could not read [package] name from $f"
+    CARGO_PKGS+=("$name")
+  done
+  UPDATE_ARGS=()
+  for p in "${CARGO_PKGS[@]}"; do UPDATE_ARGS+=(-p "$p"); done
+  if ! cargo update "${UPDATE_ARGS[@]}" --offline >/dev/null 2>&1; then
+    # Offline failed silently (redirected above) — the online retry's own
+    # output is captured and always shown, success or failure, since cargo's
+    # error text is what actually names which package in the batch failed.
+    if ONLINE_OUT="$(cargo update "${UPDATE_ARGS[@]}" 2>&1)"; then
+      printf '%s\n' "$ONLINE_OUT"
+    else
+      printf '%s\n' "$ONLINE_OUT" >&2
+      die "cargo update failed for: ${CARGO_PKGS[*]} (both --offline and online) — Cargo.lock was NOT updated; fix and re-run"
+    fi
+  fi
+  echo "  Cargo.lock (${CARGO_PKGS[*]})"
 fi
 
 # --- 3. CHANGELOG.md section, grouped by Conventional Commit type -------------

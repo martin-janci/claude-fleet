@@ -351,7 +351,7 @@ completed` with `structuredContent { code: "E_TIMEOUT", tool, limit_secs }`.
 Session rows carry `claude_status` (one of `working`, `blocked`, `completed`,
 `failed`, `stopped`, `idle`, or null when unknown) and `stuck_kind` (one of
 `auth_menu`, `reconnect`, `trust_prompt`, `oom`, `press_enter`, or null when
-not stuck). The enums in `src-tauri/src/service/pane_intel.rs` are the single
+not stuck). The enums in `crates/fleet-core/src/service/pane_intel.rs` are the single
 source of truth; the tool descriptions, server instructions and the control
 skill quote them, and a test fails if any of those drift.
 

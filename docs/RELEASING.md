@@ -65,12 +65,77 @@ Publishing fires `docs.yml` (`release: published`), which rebuilds the rustdoc
 site. If a leg fails, fix and re-run the workflow from the same tag; the
 existing draft is reused and its assets replaced.
 
+### fleet-agent and fleet-hub binaries
+
+The same workflow also runs an `agent-hub-binaries` job, in parallel with the
+three desktop legs above (same `needs: create-release`, no dependency on or
+from `build`). It builds `fleet-agent` and `fleet-hub` `--release --locked`
+for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` on native
+`ubuntu-22.04` / `ubuntu-22.04-arm` runners (22.04 rather than 24.04 so the
+binaries need only **glibc 2.35+** on the host — see `docs/hub.md`), then
+`scripts/package-linux-release.sh` packs each binary with a `README.txt` and
+this repository's root `LICENSE` file *if one exists* (as of this writing it
+does not — a tarball built today carries no LICENSE rather than a fabricated
+one; once the owner adds a root `LICENSE`/`LICENSE.md`/`LICENSE.txt`, future
+tarballs pick it up automatically, verbatim, with no workflow change needed)
+into `fleet-agent-X.Y.Z-<target>.tar.gz` / `fleet-hub-X.Y.Z-<target>.tar.gz`.
+Each leg uploads its own two tarballs straight to the release (by the
+numeric release id `create-release` produced, not by tag — see
+`scripts/upload-release-asset.sh`: a *draft* release is not resolvable by
+tag through GitHub's REST API) and its own per-target checksums as a
+workflow artifact.
+
+A separate `agent-hub-checksums` job (`needs: [create-release,
+agent-hub-binaries]`, `if: !cancelled()`, also `continue-on-error: true`)
+then combines both legs' checksums into the single `SHA256SUMS` the release
+needs (`scripts/merge-sha256sums.sh`) — this exists because two legs each
+uploading their own same-named `SHA256SUMS` would just have whichever
+finishes last silently overwrite the other's, covering 2 of the 4 tarballs
+instead of 4 with nothing to say so. It cross-checks the merged file against
+the assets actually on the release before uploading, and still produces a
+correct *partial* `SHA256SUMS` (listing only what exists) if one leg failed.
+
+Both jobs depend on nothing the desktop legs depend on and carry
+`continue-on-error: true`, so a failure here never blocks, delays or marks
+failed the desktop bundles or the draft release itself — check their own job
+status separately after a release. After publishing, spot-check with
+`sha256sum -c SHA256SUMS` against a downloaded tarball, and confirm it lists
+all four tarballs (`agent-hub-checksums`'s log says "complete" or names what
+is missing).
+
+`scripts/upload-release-asset.sh` (both jobs) deletes an existing
+same-named asset before re-uploading, so a re-run replaces assets — but
+that delete-then-upload is **not atomic**: if the re-upload itself fails
+right after the delete succeeded, the release is left with no asset of
+that name until the job is run again. This only matters on a re-run over
+an asset that already exists; a first-time upload can't hit it. The step
+fails loudly when it happens — an `::error::` annotation naming the exact
+asset, and the step/job show failed (both jobs carry
+`continue-on-error: true`, so this shows as the job's "failed but allowed"
+badge, not a red overall run — check job status, not just the run's own
+green checkmark). **If either release job's own status shows failed, or
+`::error::` shows up in its log, re-run the workflow from the same tag**:
+every asset here is reproducible from the tag, so a re-run is always a
+complete fix.
+
 ### Hub image
 
 `.github/workflows/hub-image.yml` also runs on push of any `v*` tag: it
-builds and publishes the `fleet-hub` container image (independently of the
-desktop-bundle legs above and of the draft-release review step). See the
-workflow file for the image name/tag scheme.
+builds and publishes the `fleet-hub` container image for `linux/amd64` and
+`linux/arm64` (independently of the desktop-bundle legs above and of the
+draft-release review step) — two native per-arch jobs pushed by digest (no
+QEMU), then a `merge` job combines whichever digests exist into the real
+tags. **arm64 is best-effort**: its leg may fail without blocking the
+image — `merge` still runs (`if: !cancelled()`) and publishes an amd64-only
+manifest under the same tags, so amd64's own publication is never slowed or
+blocked by arm64, and the *run stays green* (a `continue-on-error` leg's
+failure never turns the run red). That degradation is still visible: a
+`::warning::` annotation and a job-summary note both say arm64 failed and
+the manifest is amd64-only. amd64 failing is different: nothing is
+published, and `merge` fails for real (no `continue-on-error` on that leg
+or on `merge` itself) so it stays visible rather than leaving a stale
+`latest`. See `scripts/merge-hub-digests.sh` and the workflow file for the
+exact rule and the image name/tag scheme.
 
 ### Signing caveat
 
@@ -108,7 +173,7 @@ https://v2.tauri.app/distribute/sign/macos/ and pass them via `env:` on the
 | `crates/fleet-hub/Cargo.toml` | `version =` under `[package]` |
 | `crates/fleet-proto/Cargo.toml` | `version =` under `[package]` |
 | `crates/fleet-agent/Cargo.toml` | `version =` under `[package]` |
-| `Cargo.lock` | via `cargo update -p claude-fleet -p fleet-hub` (no dependency changes) |
+| `Cargo.lock` | via `cargo update` scoped to every crate bumped above (`claude-fleet`, `fleet-hub`, `fleet-proto`, `fleet-agent` — derived from `VERSION_FILES`, not hard-coded); no dependency changes |
 | `CHANGELOG.md` | new `## [X.Y.Z] - YYYY-MM-DD` section under the header, bullets from `git log <last-tag>..HEAD` grouped `feat` → Added, `fix` → Fixed, `docs` → Documentation, everything else → Changed; plus a `[X.Y.Z]: …/releases/tag/vX.Y.Z` link reference at the bottom |
 
 Then it commits `chore(release): vX.Y.Z` and creates the annotated tag

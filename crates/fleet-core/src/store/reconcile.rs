@@ -28,13 +28,15 @@ pub(super) fn ghost_cutoff(probe_started_at: i64) -> i64 {
 /// Through the two loops that call this (`apply_host_reconcile`,
 /// `mark_host_sessions_lost`), a session is logged `"lost"` exactly once
 /// per loss episode: `ghost_and_clean` and `mark_host_sessions_lost` both
-/// skip rows already `status = 'ghost'`, and `upsert_session_in_tx` clears
-/// `lost_at` back to `NULL` on every conflict, so a `SessionUpdated` from
-/// the reconcile upsert never carries `lost_at.is_some()`. Other emitters
-/// of `SessionUpdated` (e.g. `set_friendly_name`) go straight to the event
-/// bus and bypass these loops entirely, so they never produce a lifecycle
-/// line. A second `"lost"` line for the same session with no intervening
-/// `"created"`/revival is therefore a bug, not a benign duplicate.
+/// skip rows already `status = 'ghost'`, and `upsert_session_in_tx` either
+/// clears `lost_at` back to `NULL` (the resurrect) or leaves the row — and
+/// so the event — untouched (a stale observation, #170), so a
+/// `SessionUpdated` from the reconcile upsert never carries
+/// `lost_at.is_some()`. Other emitters of `SessionUpdated` (e.g.
+/// `set_friendly_name`) go straight to the event bus and bypass these loops
+/// entirely, so they never produce a lifecycle line. A second `"lost"` line
+/// for the same session with no intervening `"created"`/revival is therefore
+/// a bug, not a benign duplicate.
 ///
 /// Two lifecycle lines are logged outside this mapping: a row fleet itself
 /// killed is logged `"lost"` (reason `killed`) by `mark_session_killed`, and
@@ -191,6 +193,41 @@ impl Store {
         // belonged to another conversation.
         let id_changes =
             format!("claude_session_id IS NOT NULL AND ({NEW_ID}) IS NOT claude_session_id");
+        // Whether this observation may be written onto an EXISTING row at
+        // all (#170). A row that is lost (`lost_at` set — ghosted by the
+        // keep-set prune, by a mass-loss verdict, or by `mark_session_killed`)
+        // is only revived by an observation NEWER than the loss: a pass whose
+        // probe listed tmux before `kill_session` ghosted the row still
+        // carries its name, and its write can land after the kill — reviving
+        // a dead session, dropping its `lost_reason`, and restarting the
+        // one-cycle reap clock (so `session:killed` came a cycle late or
+        // never). `lost_at` and `?20` are both unix SECONDS off the same
+        // clock (`now_unix`), so the comparison is strict: a probe that
+        // started within the losing second cannot be shown to have seen the
+        // session after it died. `?20 <= 0` is "probe time unknown" (see
+        // [`ghost_cutoff`]) — undatable evidence never revives a lost row;
+        // no production caller passes it (reconcile always passes
+        // `probe.started_at`), only store-level tests do.
+        //
+        // Why this cannot strand a live session as lost: `lost_at` is FROZEN
+        // for as long as a row stays ghost. Every writer of it
+        // (`mark_session_killed`, `Store::mark_host_sessions_lost`,
+        // `ghost_and_clean` Phase 1) is gated on `status != 'ghost'`, and the
+        // reclassify path rewrites only `lost_reason`, deliberately leaving
+        // `lost_at` alone — so the threshold never ratchets forward while the
+        // row waits. `probe.started_at` only grows (same `now_unix()` clock,
+        // same process), so the very next pass that observes the name live
+        // clears the bar and revives the row; a backwards clock step costs a
+        // bounded delay, never a permanent ghost.
+        //
+        // The guard covers the WHOLE `DO UPDATE`, not just the three
+        // resurrect columns: a stale sighting of a dead session must not
+        // repaint its `claude_status`, activity stamp or context either. A
+        // live row (`lost_at IS NULL`) takes the branch exactly as before,
+        // and the plain INSERT path above is NOT guarded — a killed row that
+        // has already been reaped is re-inserted by a stale pass as a fresh
+        // session, which needs a tombstone to close (#171).
+        const NOT_STALE: &str = "lost_at IS NULL OR (?20 > 0 AND ?20 > lost_at)";
         // A hook/transcript context value younger than 120 s outranks the
         // pane footer (spec §1.5) — unless it belongs to the conversation
         // this pass moves the row away from.
@@ -215,6 +252,8 @@ impl Store {
                last_activity_at=excluded.last_activity_at,
                account_uuid=COALESCE(excluded.account_uuid, account_uuid),
                worktree_key=COALESCE(excluded.worktree_key, worktree_key),
+               -- The resurrect. Reached only for a row this observation is
+               -- allowed to touch at all (the `WHERE` below, #170).
                status=CASE WHEN status='ghost' THEN 'running' ELSE status END,
                lost_at=NULL,
                lost_reason=NULL,
@@ -260,7 +299,8 @@ impl Store {
                stuck_since=CASE WHEN ({new_stuck}) IS NULL THEN NULL
                                 WHEN ({new_stuck}) IS stuck_kind THEN COALESCE(stuck_since, ?19)
                                 ELSE ?19 END,
-               idle_since={idle}",
+               idle_since={idle}
+             WHERE {not_stale}",
             new_stuck = NEW_STUCK,
             new_status = NEW_STATUS,
             idle = idle_since_sql(NEW_STATUS, "?19"),
@@ -268,6 +308,7 @@ impl Store {
             id_changes = id_changes,
             new_id = NEW_ID,
             fresh = FRESH_CONTEXT,
+            not_stale = NOT_STALE,
         );
         tx.execute(
             &sql,
@@ -1727,6 +1768,11 @@ mod tests {
                 },
             ],
             keep: &["a".to_string(), "b".to_string()],
+            // Newer than the seeding passes: each single-row `reconcile_one`
+            // above incidentally ghosted the other row, and only a probe
+            // newer than that loss revives "a" (#170) — a ghost's claim on
+            // ID_A would otherwise not block "b" at all.
+            probe_started_at: now_unix() + 1,
             ..empty_probe("local", 1)
         })
         .unwrap();
@@ -2114,5 +2160,300 @@ mod tests {
             store.get_session_by_id(id).unwrap().is_some(),
             "lost_at exactly at the cutoff must survive (inclusive >=)"
         );
+    }
+
+    // ── #170: a lost row is revived only by an observation newer than the
+    // loss ──────────────────────────────────────────────────────────────────
+
+    /// One `upsert_session_in_tx` on `alpha`, as a probe that STARTED at
+    /// `probe_started_at` and observed `name` live and `working`, returning
+    /// the changes it pushed. `working` is deliberate: a refused resurrect
+    /// must not repaint a ghost as busy either.
+    fn observe_live(store: &mut Store, name: &str, probe_started_at: i64) -> Vec<RowChange> {
+        store
+            .with_transaction(|tx| {
+                let mut out = Vec::new();
+                Store::upsert_session_in_tx(
+                    tx,
+                    name,
+                    "alpha",
+                    None,
+                    None,
+                    1,
+                    777,
+                    None,
+                    None,
+                    None,
+                    Some("working"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    true,
+                    None,
+                    false,
+                    probe_started_at,
+                    None,
+                    &mut out,
+                )?;
+                Ok(out)
+            })
+            .unwrap()
+    }
+
+    /// The same session as [`observe_live`] sees it, shaped for a full
+    /// `apply_host_reconcile` pass (no project, so no FK to satisfy).
+    fn live_unbound(tmux_name: &'static str) -> ReconcileSession<'static> {
+        ReconcileSession {
+            tmux_name,
+            created_at: 1,
+            last_activity_at: 777,
+            claude_status: Some("working".to_string()),
+            intel_observed: true,
+            ..Default::default()
+        }
+    }
+
+    fn lost_reason_of(store: &Store, id: i64) -> Option<String> {
+        store
+            .conn
+            .query_row("SELECT lost_reason FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    /// The row `kill_session` just ghosted, ready for a stale observation.
+    fn killed_row(store: &Store, name: &str, killed_at: i64) -> i64 {
+        let id = store
+            .upsert_session(name, "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .mark_session_killed(id, killed_at)
+            .unwrap()
+            .expect("ghosted");
+        id
+    }
+
+    #[test]
+    fn a_probe_older_than_the_kill_does_not_resurrect_the_ghost() {
+        // #170: a full pass whose probe listed tmux BEFORE `kill_session`
+        // ghosted the row still carries its name in `keep`. Its write lands
+        // after the kill — and must leave the ghost exactly as it found it.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let id = killed_row(&store, "s1", 200);
+
+        let changes = observe_live(&mut store, "s1", 199);
+
+        let row = store.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "ghost", "a stale probe must not revive");
+        assert_eq!(row.lost_at, Some(200), "lost_at must be left alone");
+        assert_eq!(lost_reason_of(&store, id).as_deref(), Some("killed"));
+        assert_eq!(
+            row.claude_status, None,
+            "a stale observation must not repaint the ghost as working"
+        );
+        assert_eq!(row.last_activity_at, 1, "nor move its activity stamp");
+        assert!(
+            changes.is_empty(),
+            "nothing changed ⇒ nothing to announce; got {} entries",
+            changes.len()
+        );
+    }
+
+    #[test]
+    fn a_probe_newer_than_the_kill_resurrects_the_ghost() {
+        // The other direction: a session genuinely recreated under the same
+        // name still comes back, with one `SessionUpdated` for the revival.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let id = killed_row(&store, "s1", 200);
+
+        let changes = observe_live(&mut store, "s1", 201);
+
+        let row = store.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "running", "a newer probe revives");
+        assert_eq!(row.lost_at, None);
+        assert_eq!(lost_reason_of(&store, id), None);
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        assert_eq!(changes.len(), 1, "exactly one revival change");
+        assert!(matches!(changes[0], RowChange::SessionUpdated(_)));
+    }
+
+    #[test]
+    fn a_probe_started_in_the_same_second_as_the_loss_does_not_resurrect() {
+        // Both stamps are unix SECONDS off the same clock, so a probe that
+        // started within the losing second cannot be shown to have observed
+        // the session after it died: same-instant is not newer.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let id = killed_row(&store, "s1", 200);
+
+        let changes = observe_live(&mut store, "s1", 200);
+
+        let row = store.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "ghost", "same second is not newer");
+        assert_eq!(row.lost_at, Some(200));
+        assert!(changes.is_empty(), "a refused resurrect announces nothing");
+    }
+
+    #[test]
+    fn an_unknown_probe_time_does_not_resurrect_a_lost_row() {
+        // `probe_started_at <= 0` means "no probe time" (see `ghost_cutoff`).
+        // Nothing in production passes it for a real pass; the conservative
+        // reading is that an observation that cannot be dated cannot be shown
+        // to be newer than the loss.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let id = killed_row(&store, "s1", 200);
+
+        assert!(observe_live(&mut store, "s1", 0).is_empty());
+
+        let row = store.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "ghost");
+        assert_eq!(lost_reason_of(&store, id).as_deref(), Some("killed"));
+    }
+
+    #[test]
+    fn a_killed_session_is_reaped_on_schedule_despite_a_stale_pass() {
+        // The whole #170 sequence: create → kill → a stale full pass that
+        // still lists the name → the next (fresh) pass. The row must be
+        // hard-deleted on its ordinary one-cycle schedule, `session:killed`
+        // must fire exactly once, and no second "lost" may be logged in
+        // between (`lifecycle_kind`: a second "lost" with no revival is a bug).
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let live = vec![live_unbound("s1")];
+        let keep = vec!["s1".to_string()];
+
+        // Create, through a real pass.
+        store
+            .apply_host_reconcile(HostReconcile {
+                probe_started_at: 100,
+                sessions: &live,
+                keep: &keep,
+                ..empty_probe("alpha", 100)
+            })
+            .unwrap();
+        let id = store.get_session("s1", "alpha").unwrap().unwrap().id;
+
+        // kill_session: ghost + lost_reason='killed'.
+        store
+            .mark_session_killed(id, 200)
+            .unwrap()
+            .expect("ghosted");
+        bus.take();
+
+        // The stale pass: its probe started before the kill, but its write
+        // lands after it.
+        store
+            .apply_host_reconcile(HostReconcile {
+                probe_started_at: 150,
+                sessions: &live,
+                keep: &keep,
+                ..empty_probe("alpha", 201)
+            })
+            .unwrap();
+        let row = store.get_session_by_id(id).unwrap().expect("still there");
+        assert_eq!(row.status, "ghost", "the stale pass must not revive it");
+        assert_eq!(lost_reason_of(&store, id).as_deref(), Some("killed"));
+        let evts = bus.take();
+        assert!(
+            evts.iter().all(|e| e == "host:probed:alpha"),
+            "the stale pass must announce nothing about the session; got {evts:?}"
+        );
+
+        // The next pass, probed after the kill, no longer sees the session:
+        // the row was already ghost before it, so Phase 2 reaps it.
+        store
+            .apply_host_reconcile(HostReconcile {
+                probe_started_at: 220,
+                keep: &[],
+                ..empty_probe("alpha", 220)
+            })
+            .unwrap();
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "the killed row must be reaped on the ordinary one-cycle schedule"
+        );
+        let evts = bus.take();
+        assert_eq!(
+            evts.iter()
+                .filter(|e| *e == &format!("session:killed:{id}"))
+                .count(),
+            1,
+            "session:killed must fire exactly once; got {evts:?}"
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_row_is_revived_by_a_fresh_probe_but_not_a_stale_one() {
+        // PR #135's rows (`host_reboot` / `tmux_server_gone`) are kept as
+        // ghosts so they can be restored. A session that reappears under the
+        // same name must still be resurrected by a probe that ran after the
+        // verdict — and must not be by one that ran before it.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            200,
+            Some("host_reboot"),
+            Some("uuid-a"),
+        );
+
+        assert!(
+            observe_live(&mut store, "s1", 199).is_empty(),
+            "a probe older than the verdict must not revive the row"
+        );
+        assert_eq!(
+            store.get_session_by_id(id).unwrap().unwrap().status,
+            "ghost"
+        );
+        assert_eq!(lost_reason_of(&store, id).as_deref(), Some("host_reboot"));
+
+        let changes = observe_live(&mut store, "s1", 201);
+        let row = store.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "running", "the host came back: revive");
+        assert_eq!(row.lost_at, None);
+        assert_eq!(lost_reason_of(&store, id), None);
+        assert_eq!(
+            row.claude_session_id.as_deref(),
+            Some("uuid-a"),
+            "the revived row keeps its conversation"
+        );
+        assert_eq!(changes.len(), 1, "exactly one revival change");
+    }
+
+    #[test]
+    fn a_new_session_reusing_a_ghosts_tmux_name_ends_up_live() {
+        // `new_session` has no upsert of its own: it creates the tmux session
+        // and then runs `reconcile_one_host`, whose probe starts after the
+        // create — and therefore after any older ghost's `lost_at`. Reusing a
+        // dead session's name must still end with one live row.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let id = killed_row(&store, "dev-o-r", 200);
+        bus.take();
+
+        // The create's own single-host reconcile.
+        let live = vec![live_unbound("dev-o-r")];
+        store
+            .apply_host_reconcile(HostReconcile {
+                probe_started_at: 205,
+                sessions: &live,
+                keep: &["dev-o-r".to_string()],
+                ..empty_probe("alpha", 205)
+            })
+            .unwrap();
+
+        let row = store.get_session("dev-o-r", "alpha").unwrap().unwrap();
+        assert_eq!(row.id, id, "the same row is reused");
+        assert_eq!(row.status, "running");
+        assert_eq!(row.lost_at, None);
+        assert_eq!(lost_reason_of(&store, id), None);
     }
 }

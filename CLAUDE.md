@@ -6,7 +6,7 @@ Orientation for Claude Code working in this repository.
 
 `claude-fleet` — a Tauri 2 desktop app (Rust backend + Svelte 5 frontend) for
 managing long-lived Claude Code sessions running in tmux across multiple
-machines over SSH. ~93,000 LOC Rust, ~27,000 LOC frontend.
+machines over SSH. ~143,000 LOC Rust, ~55,000 LOC frontend.
 
 The Rust side is a workspace: `crates/fleet-core` (Tauri-free service/store/SSH/MCP),
 `crates/fleet-hub` (headless daemon, see `docs/hub.md`), `crates/fleet-proto` (the
@@ -25,7 +25,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cargo deny check                # licenses + advisories (cargo install cargo-deny --locked)
 cargo build -p fleet-hub --locked   # headless hub (no Tauri libs needed)
-scripts/ci-local.sh             # all of the above in CI order; --rust-only / --frontend-only
+scripts/hub-e2e.sh               # real fleet-hub/-agent e2e; needs tmux, opt-in via ci-local.sh --hub-e2e
+scripts/ci-local.sh             # all of the above in CI order; --rust-only / --frontend-only / --hub-e2e
 ```
 
 `devtools` is an off-by-default cargo feature: `cargo tauri build --features
@@ -46,7 +47,7 @@ known pre-existing frontend test failures.)
 ## Releasing
 
 Releases are cut manually with `scripts/release.sh <new-version>` — it bumps
-the four version files (+ `Cargo.lock`), prefills a `CHANGELOG.md` section
+the six version files (+ `Cargo.lock`), prefills a `CHANGELOG.md` section
 from the Conventional Commits since the last tag, commits, and creates the
 `vX.Y.Z` tag. Never edit the version fields by hand; run the script from a
 clean `main`. See `docs/RELEASING.md`.
@@ -129,8 +130,15 @@ event timeline (session_history). Handoff from the original spec is replaced by
 command construction, the PTY, migrations, or the optimistic-merge / event-bus
 paths.
 
-Phase 1 of conversation event tracking is landed (migration 037 `conversations`
-table; `SessionStart`/`PreCompact`/`PostCompact` hooks; `/clear`, `/resume` and
-compaction tracked as conversation switches; `session_conversations` API), per
-`docs/superpowers/specs/2026-09-18-conversation-events-design.md`; the
-Conversations UI (Phase 2) is not yet built.
+The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
+over SSH, paired-client access for phones/browsers, and hub-client mode
+(pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Host
+reboot survival is landed (sessions are recovered by boot identity rather than
+declared lost on a restart), per
+`docs/superpowers/specs/2026-09-17-host-reboot-session-survival-design.md`.
+
+Conversation event tracking is landed end to end (migration 037
+`conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;
+`/clear`, `/resume` and compaction tracked as conversation switches;
+`session_conversations` API; the Conversations UI panel), per
+`docs/superpowers/specs/2026-09-18-conversation-events-design.md`.
