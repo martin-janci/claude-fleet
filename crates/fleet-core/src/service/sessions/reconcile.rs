@@ -1367,7 +1367,7 @@ pub async fn reconcile_now(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
 
 /// `hub.local_host` for this pass; a poisoned lock counts as "true" (the
 /// desktop default) so reconcile keeps its old behaviour on error.
-fn local_host(store: &Mutex<Store>) -> bool {
+pub(super) fn local_host(store: &Mutex<Store>) -> bool {
     store
         .lock()
         .map(|s| crate::service::hub::read_local_host(&s))

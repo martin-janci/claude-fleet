@@ -35,6 +35,10 @@ pub(super) fn ghost_cutoff(probe_started_at: i64) -> i64 {
 /// bus and bypass these loops entirely, so they never produce a lifecycle
 /// line. A second `"lost"` line for the same session with no intervening
 /// `"created"`/revival is therefore a bug, not a benign duplicate.
+///
+/// One lifecycle line is logged outside this mapping: a row fleet itself
+/// killed is logged `"lost"` (reason `killed`) by `mark_session_killed`,
+/// and is then skipped by both loops above since it is already ghost.
 pub(crate) fn lifecycle_kind(change: &RowChange) -> Option<&'static str> {
     match change {
         RowChange::SessionCreated(_) => Some("created"),

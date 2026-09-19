@@ -282,6 +282,48 @@ impl Store {
         Ok(rows)
     }
 
+    /// Ghost the row `id` right after fleet ITSELF killed its tmux session
+    /// (`kill_session`, which `move_session` also reaches): `status='ghost'`,
+    /// `lost_at=now`, `lost_reason='killed'`. tmux exits when its last
+    /// session closes, so killing a host's only session makes the next probe
+    /// see no tmux server — a `tmux_server_gone` verdict. Recording the kill
+    /// first keeps that verdict (which only marks `status != 'ghost'` rows)
+    /// off this row, and `'killed'` is not TTL-exempt in Phase 2, so the
+    /// ordinary one-cycle reap removes it. A reason distinct from `'missing'`
+    /// keeps fleet's own kills apart from rows that vanished on their own,
+    /// for any later logic that treats `'missing'` ghosts specially. No-op
+    /// (returns `None`) when the row is gone or already ghost. Emits
+    /// `SessionUpdated` like the routine Phase 1 ghosting it stands in for.
+    pub fn mark_session_killed(
+        &self,
+        id: i64,
+        now: i64,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed'
+             WHERE id=?2 AND status!='ghost'",
+            rusqlite::params![now, id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(row) = &row {
+            tracing::info!(
+                lifecycle = "lost",
+                session_id = row.id,
+                host_alias = %row.host_alias,
+                tmux_name = %row.tmux_name,
+                claude_session_id = row.claude_session_id.as_deref().unwrap_or("-"),
+                reason = "killed",
+                "[session] lost"
+            );
+            self.bus
+                .emit_change(&RowChange::SessionUpdated(row.clone()));
+        }
+        Ok(row)
+    }
+
     /// User-initiated removal of an agent row (`claude agents --json`, not a
     /// tmux session) from the list: records `claude_session_id` as dismissed
     /// as of `now` in `dismissed_agents`, then hard-deletes its `sessions`
@@ -1153,6 +1195,30 @@ mod tests {
             Some("host_reboot".to_string()),
             "lost_reason must stay the FIRST reason, not be overwritten by the second call"
         );
+    }
+
+    #[test]
+    fn mark_session_killed_ghosts_the_row_as_an_ordinary_loss() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("x", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "cid-x").unwrap();
+
+        let row = s.mark_session_killed(id, 700).unwrap().expect("row");
+        assert_eq!(row.status, "ghost");
+        assert_eq!(row.lost_at, Some(700));
+        assert_eq!(lost_reason_of(&s, id), Some("killed".to_string()));
+        // Idempotent: an already-ghost row is not re-stamped.
+        assert!(s.mark_session_killed(id, 900).unwrap().is_none());
+        assert_eq!(s.get_session_by_id(id).unwrap().unwrap().lost_at, Some(700));
+        // A later verdict does not mark it.
+        let out = s
+            .mark_host_sessions_lost("h", "tmux_server_gone", &[], 800, 0)
+            .unwrap();
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(lost_reason_of(&s, id), Some("killed".to_string()));
     }
 
     #[test]

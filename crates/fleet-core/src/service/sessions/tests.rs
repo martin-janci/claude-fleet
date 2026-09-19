@@ -4406,3 +4406,88 @@ async fn skip_prune_does_not_delay_the_reap_of_an_unrelated_already_ghost_row() 
          of an unrelated already-ghost row"
     );
 }
+
+/// `session_events` `lost` rows of `id` carrying `reason` as their detail.
+fn lost_events(s: &Store, id: i64, reason: &str) -> usize {
+    s.list_session_events(id, 50)
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == "lost" && e.detail.as_deref() == Some(reason))
+        .count()
+}
+
+/// Final-review Important 1: tmux exits when its last session closes, so
+/// fleet's OWN kill of a host's only session makes the kill's follow-up
+/// reconcile see no tmux server — a `tmux_server_gone` verdict. The killed
+/// row must not become a 14-day "resumable" ghost (it would also duplicate a
+/// moved session's claude id, since `move_session` kills its source through
+/// the same path): it reaps on the ordinary schedule, and no
+/// `tmux_server_gone` loss is ever recorded for it.
+#[tokio::test]
+async fn killing_a_host_s_last_session_is_not_a_resumable_mass_loss() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: server pid 1, one live session "x" bound to "cid-x".
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("x")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("x", "cid-x")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let id = store
+        .lock()
+        .unwrap()
+        .get_session("x", "mefistos")
+        .unwrap()
+        .expect("row created on pass 1")
+        .id;
+    // Same BE-3 timing fix as the other mass-loss e2e tests.
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["x".to_string()], 1)
+        .unwrap();
+
+    // Kill "x" through the real kill path; the host now answers with no
+    // tmux server (its last session closed) and no sessions.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(None)), vec![]);
+    let ssh = Arc::new(SshClient::new());
+    let killed = kill_session_with(
+        KillSessionArgs {
+            host_alias: "mefistos".into(),
+            name: "x".into(),
+            force: false,
+        },
+        &store,
+        &ssh,
+        &deps,
+    )
+    .await
+    .unwrap();
+    assert_eq!(killed, id);
+    {
+        let s = store.lock().unwrap();
+        if s.get_session_by_id(id).unwrap().is_some() {
+            assert_eq!(
+                lost_events(&s, id, "tmux_server_gone"),
+                0,
+                "fleet's own kill must never be recorded as a tmux_server_gone loss"
+            );
+        }
+    }
+
+    // The following pass (server still gone): the killed row must be gone —
+    // not held back by the mass-loss TTL exemption.
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .is_none(),
+        "the killed row must be reaped on the ordinary schedule, not kept as a resumable ghost"
+    );
+}
