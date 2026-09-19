@@ -4,8 +4,21 @@
 //! This crate exists so the two sides compile the *same* types. `fleet-core`
 //! (the hub) and `fleet-agent` both depend on it; `fleet-agent` never depends
 //! on `fleet-core`, because an agent installs on a host that has no business
-//! carrying the hub's tree. Nothing but the wire belongs here — no transport,
-//! no registry, no tokio.
+//! carrying the hub's tree. Nothing but the wire belongs at this level — no
+//! transport, no registry, no tokio.
+//!
+//! Two modules beside it hold what is not a frame but is still spoken by both
+//! ends, for the same reason the frames are here — the agent can depend on
+//! nothing else, so a definition it shares with the hub or the desktop has
+//! only one place to live. Both are pure `std`:
+//!
+//! - [`net`] — is this host the local machine, and what does a hub URL mean.
+//!   The loopback rule is security-relevant and was written four different
+//!   ways before it moved here.
+//! - [`backoff`] — the retry curve every dial-again loop in the fleet uses.
+//!
+//! Neither may grow a dependency. `fleet-agent` builds with nothing but this
+//! crate, and `cargo deny`'s licence surface is meant to stay where it is.
 //!
 //! The frame table in `docs/superpowers/specs/2026-09-18-host-agent-design.md`
 //! is normative; `tests/frames.rs` pins it.
@@ -44,6 +57,9 @@
 //!   carries the hub's own, so each side can refuse the other. Both use
 //!   [`VERSION_REFUSED_CLOSE_CODE`] to close, so the reason for the close
 //!   never has to be guessed from prose.
+
+pub mod backoff;
+pub mod net;
 
 use base64::Engine as _;
 use serde::de::DeserializeOwned;
