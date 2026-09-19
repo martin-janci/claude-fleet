@@ -868,6 +868,12 @@ rule the agent's `--insecure` uses. A name *under* `localhost`
 that subtree on the machine, and one that does not would let a DNS answer
 choose where the token goes. Such a URL needs the opt-in like any other.
 
+**Upgrading.** Both of those are new, and both surface as a desktop that
+resolves to *cannot be used* on its first launch after the upgrade, with the
+reason in the red banner. A desktop that had opted into plaintext must opt in
+again under the new key name, and a hub reached at `http://<name>.localhost`
+now needs the opt-in as well — or, better, be reached at `http://127.0.0.1`.
+
 **Disconnect does not revoke.** It forgets the URL and the token on that
 machine. The client stays in the hub's list and its token stays valid there
 until you revoke it (`fleet-hub client revoke <name>`) — a paired client is

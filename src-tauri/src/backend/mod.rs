@@ -70,9 +70,18 @@ pub const ALLOW_PLAINTEXT_KEY: &str = "hub.client_plaintext_token";
 /// `None` for `https://`, and for `http://` to loopback, which is the tunnelled
 /// or port-forwarded setup and needs no ceremony.
 ///
-/// What counts as loopback is [`fleet_proto::net::is_loopback`], shared with
-/// the agent and the hub. `url` still does the parsing here — it is already a
-/// dependency and it normalises the host — but it no longer gets to decide.
+/// The host is read with the **same parser the socket is opened from**
+/// ([`fleet_proto::net::Endpoint`], via [`remote::Endpoint`]), not with a
+/// second one. `url` answers only "is this `http://` at all", because that is
+/// the question `normalise_base_url` has already been asked. Two parsers over
+/// one string can be talked into seeing two different hosts —
+/// `http://evil.example@localhost` is the short version — and the one that
+/// must win is the one that picks where the token goes.
+///
+/// **Fails closed.** An `http://` URL the shared parser refuses is a URL this
+/// app cannot reach at all, and that must be reported as a risk rather than
+/// as "no risk": a caller that reached here without `normalise_base_url`
+/// would otherwise be cleared for a hop nobody inspected.
 ///
 /// Public because pairing (Task 5) hits `POST /pair` with a URL the user just
 /// typed, *before* any token is stored and therefore before [`Backend::resolve`]
@@ -83,8 +92,7 @@ pub fn plaintext_risk(base_url: &str) -> Option<String> {
     if parsed.scheme() != "http" {
         return None;
     }
-    // `host_str` keeps an IPv6 literal's brackets; `is_loopback` strips them.
-    if parsed.host_str().is_some_and(fleet_proto::net::is_loopback) {
+    if fleet_proto::net::Endpoint::parse(base_url).is_ok_and(|at| at.is_loopback()) {
         return None;
     }
     Some(format!(
@@ -870,6 +878,72 @@ mod tests {
             assert!(resolved.backend.is_remote(), "for {value}");
             let warning = resolved.warning.expect("an opted-in hub still warns");
             assert!(warning.contains("deliberate"), "for {value}: {warning}");
+        }
+    }
+
+    /// **The credential gate and the connect path must read one string one
+    /// way.** `plaintext_risk` answers "may this app's fleet-wide token go
+    /// out in the clear"; `remote::Endpoint` picks the host the socket is
+    /// actually opened to. Two parsers over one string that agree by luck is
+    /// exactly the shape #159 exists to remove, so this pins the invariant
+    /// rather than leaving it to `normalise_base_url` happening to run first:
+    ///
+    /// > whenever `plaintext_risk` clears an `http://` URL, the connect path
+    /// > parses the same string AND lands on a loopback host.
+    ///
+    /// The probes are the spellings where a URL parser can be talked into
+    /// seeing a different host from the next one — userinfo that hides the
+    /// real authority, and the short/hex/decimal IPv4 forms that `inet_aton`
+    /// resolves to 127.0.0.1 but `Ipv4Addr::from_str` does not.
+    #[test]
+    fn whatever_plaintext_risk_clears_the_connect_path_reads_the_same_way() {
+        let probes = [
+            // Ordinary, and cleared.
+            "http://localhost:8787",
+            "http://127.0.0.1:8787",
+            "http://[::1]:4180",
+            "https://anything.example",
+            "https://fleet.example.com/mcp",
+            // Userinfo hiding the authority one parser reads.
+            "http://evil.example@localhost",
+            "http://localhost@evil.example",
+            // Short, hex and decimal IPv4: `inet_aton` reaches 127.0.0.1,
+            // Rust's parser does not.
+            "http://127.1",
+            "http://0x7f.0.0.1",
+            "http://2130706433",
+            // Names that merely look local.
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://x.localhost",
+            "http://localhost.",
+            "http://evil.example",
+            // Local in fact, but not by this rule.
+            "http://[::ffff:127.0.0.1]",
+        ];
+        for probe in probes {
+            // Both the raw string and the form this app actually stores —
+            // the invariant must not depend on `normalise_base_url` having
+            // run.
+            let forms = std::iter::once(probe.to_string()).chain(normalise_base_url(probe));
+            for url in forms {
+                if plaintext_risk(&url).is_some() {
+                    // Naming a risk is always a safe answer.
+                    continue;
+                }
+                if url.starts_with("https://") {
+                    // TLS: the host does not have to be this machine.
+                    continue;
+                }
+                let at = remote::Endpoint::parse(&url).unwrap_or_else(|e| {
+                    panic!("{url}: cleared as no risk, but the connect path refuses it: {e}")
+                });
+                assert!(
+                    fleet_proto::net::is_loopback(at.host()),
+                    "{url}: cleared as no risk, but the socket would go to {}",
+                    at.host()
+                );
+            }
         }
     }
 
