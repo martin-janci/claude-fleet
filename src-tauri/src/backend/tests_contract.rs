@@ -128,24 +128,6 @@ fn sample_event() -> SessionEvent {
     }
 }
 
-pub(crate) fn sample_conversation_row() -> ConversationRow {
-    ConversationRow {
-        id: 1,
-        session_id: 2,
-        claude_session_id: "claude-uuid".into(),
-        transcript_path: Some("/home/dev/.claude/projects/-r-cf/claude-uuid.jsonl".into()),
-        started_at: 1_725_000_000,
-        ended_at: Some(1_725_000_100),
-        start_source: "startup".into(),
-        end_reason: Some("clear".into()),
-        model: Some("claude-opus-5".into()),
-        first_prompt: Some("do the thing".into()),
-        turns: 3,
-        compactions: 1,
-        current: true,
-    }
-}
-
 pub(crate) fn sample_task() -> TaskRow {
     TaskRow {
         id: 1,
@@ -232,6 +214,27 @@ fn sample_health() -> Health {
     }
 }
 
+/// One row of `session_conversations` — the switcher in the Conversations
+/// tab reads every field, and `current` decides which conversation the panel
+/// treats as live.
+fn sample_conversation_row() -> ConversationRow {
+    ConversationRow {
+        id: 1,
+        session_id: 2,
+        claude_session_id: "claude-uuid".into(),
+        transcript_path: Some("/h/.claude/projects/p/claude-uuid.jsonl".into()),
+        started_at: 1_725_000_000,
+        ended_at: Some(1_725_000_900),
+        start_source: "clear".into(),
+        end_reason: Some("replaced".into()),
+        model: Some("claude-opus-5".into()),
+        first_prompt: Some("fix the bug".into()),
+        turns: 3,
+        compactions: 1,
+        current: false,
+    }
+}
+
 fn sample_conversation() -> Conversation {
     Conversation {
         turns: vec![ConvTurn {
@@ -309,7 +312,6 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("HostRow", wire_keys(&sample_host()));
     put("AccountRow", wire_keys(&sample_account()));
     put("SessionEvent", wire_keys(&sample_event()));
-    put("ConversationRow", wire_keys(&sample_conversation_row()));
     put("TaskRow", wire_keys(&sample_task()));
     put("ProjectTreeRow", wire_keys(&sample_project_tree()));
     put("ProjectRow", wire_keys(&sample_project_row()));
@@ -332,6 +334,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         }),
     );
     put("Conversation", wire_keys(&sample_conversation()));
+    put("ConversationRow", wire_keys(&sample_conversation_row()));
     put(
         "ConvTurn",
         wire_keys(&sample_conversation().turns.into_iter().next().unwrap()),

@@ -2082,9 +2082,15 @@ curl() { echo HIJACKED; }
                 .unwrap();
             let pid_file = sb.path("log/curl_pid");
             let started = Instant::now();
+            // The deadline is liveness only, so it is generous: a loaded
+            // machine takes its time over a traced bash, and a script that
+            // gives up before curl is caught by its exit, not by the wait.
             while !pid_file.exists() {
+                if let Some(status) = child.try_wait().unwrap() {
+                    panic!("{tool}: script exited ({status}) before fake curl started");
+                }
                 assert!(
-                    started.elapsed() < Duration::from_secs(20),
+                    started.elapsed() < Duration::from_secs(120),
                     "fake curl never started"
                 );
                 std::thread::sleep(Duration::from_millis(20));

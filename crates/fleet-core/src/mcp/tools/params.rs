@@ -610,6 +610,10 @@ pub struct MoveSessionParams {
     /// Default false (the source is killed through the normal kill path).
     #[serde(default)]
     pub keep_source: bool,
+    /// Refuse a dirty worktree (E_MOVE_DIRTY) or an unpushed branch
+    /// (E_MOVE_UNPUSHED) instead of carrying them along. Default false.
+    #[serde(default)]
+    pub strict: bool,
     /// Nonce from a previous E_CONFIRM_REQUIRED, once approved on the
     /// desktop (only when mcp.confirm_destructive is on).
     #[serde(default)]

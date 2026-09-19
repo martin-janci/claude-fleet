@@ -2291,6 +2291,7 @@ pub async fn spec_for_session(
     let pane_cmd = crate::service::sessions::recreate_pane_command(
         &row.kind,
         row.claude_session_id.as_deref(),
+        &row.tmux_name,
     );
     let is_local = row.host_alias == "local";
     let (project_root, worktree) = if is_local {

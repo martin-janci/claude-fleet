@@ -566,7 +566,7 @@ pub(super) async fn new_session_inner(
     let pane_cmd: String = if is_shell {
         crate::tmux::shell_pane_command(args.start_command.as_deref())
     } else {
-        crate::tmux::pane_command_for(claude_id.as_deref())
+        crate::tmux::pane_command_for(claude_id.as_deref(), &args.name)
     };
 
     // Automatic self-repair for an EXISTING worktree row / main checkout: the
@@ -1037,7 +1037,7 @@ pub async fn restart_session(
             None => ("work".to_string(), None, None),
         }
     };
-    let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref());
+    let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref(), &args.name);
     let tmux = exec_for(&args.host_alias, ssh);
     // Automatic self-repair (create-only) before the pane is respawned, then
     // respawn INTO the verified directory (a pane whose cwd was deleted keeps
@@ -1104,12 +1104,16 @@ pub(super) async fn wait_for_repl_ready(tmux: &dyn TmuxExec, name: &str) {
 /// shell; otherwise resume the session's own Claude id (or `--continue` for a
 /// legacy session with no stored id). A stored id is validated before use so a
 /// tampered DB value can't inject shell — an invalid id degrades to `None`.
-pub(crate) fn recreate_pane_command(kind: &str, claude_session_id: Option<&str>) -> String {
+pub(crate) fn recreate_pane_command(
+    kind: &str,
+    claude_session_id: Option<&str>,
+    tmux_name: &str,
+) -> String {
     if kind == "shell" {
         return crate::tmux::shell_pane_command(None);
     }
     let id = claude_session_id.filter(|id| crate::validate::claude_session_id(id).is_ok());
-    crate::tmux::pane_command_for(id)
+    crate::tmux::pane_command_for(id, tmux_name)
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
@@ -1153,7 +1157,11 @@ pub async fn recreate_session(
             ));
         }
         let cwd_src = cwd_source_for_session(&s, &sess)?;
-        let pane_cmd = recreate_pane_command(&sess.kind, sess.claude_session_id.as_deref());
+        let pane_cmd = recreate_pane_command(
+            &sess.kind,
+            sess.claude_session_id.as_deref(),
+            &sess.tmux_name,
+        );
         (sess, cwd_src, pane_cmd)
     };
     // Automatic self-repair (create-only): re-add a deleted worktree from its
