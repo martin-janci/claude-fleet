@@ -595,9 +595,13 @@ pub(super) fn reconcile_write_one_host(
                     now,
                     probe.started_at,
                 ) {
-                    Ok(rows) => {
-                        marked_any = !rows.is_empty();
-                        for row in &rows {
+                    Ok(lost) => {
+                        // Reclassified rows count too: they are this
+                        // verdict's first loss record (a failed earlier pass
+                        // only ghosted them as `missing`), so the routine
+                        // prune must not reap them this pass either.
+                        marked_any = !lost.is_empty();
+                        for row in lost.marked.iter().chain(&lost.reclassified) {
                             if let Err(e) = s.insert_session_event(row.id, "lost", Some(reason)) {
                                 tracing::warn!(
                                     host = %host.alias,

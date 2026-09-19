@@ -4338,13 +4338,15 @@ async fn a_failed_identity_read_never_overwrites_the_stored_identity() {
     );
 }
 
-/// `skip_prune` only when the verdict actually marked something (finding 4):
-/// a verdict that fires but marks ZERO new rows (every affected row was
-/// already ghost) must not skip the routine prune pass — otherwise an
-/// unrelated, already-ghost `'missing'` row that is due for its one-cycle
-/// reap on this very pass gets an undeserved one-pass reprieve, purely as a
-/// side effect of a verdict elsewhere on the host having "fired" with
-/// nothing left to do.
+/// `skip_prune` only when the verdict actually recorded something (finding
+/// 4): a verdict pass that neither marks NOR reclassifies any row must leave
+/// the routine prune running — otherwise an unrelated already-ghost row due
+/// for its one-cycle reap on this very pass gets an undeserved reprieve,
+/// purely because a verdict elsewhere on the host "fired" with nothing to
+/// do. The ghost used is one fleet killed itself (`lost_reason='killed'`),
+/// which the verdict neither marks (already ghost) nor reclassifies (not
+/// `missing`). (A `missing` ghost IS reclassified and kept — see
+/// `accepted_tradeoff_a_session_that_ended_one_pass_before_a_reboot_is_kept_as_lost`.)
 #[tokio::test]
 async fn skip_prune_does_not_delay_the_reap_of_an_unrelated_already_ghost_row() {
     let store = Mutex::new(Store::open_in_memory().expect("store"));
@@ -4355,36 +4357,21 @@ async fn skip_prune_does_not_delay_the_reap_of_an_unrelated_already_ghost_row() 
         "mefistos",
         vec![tmux_session("old")],
         Some(boot_a_pid(Some(1))),
-        vec![],
+        vec![agent_for_session("old", "cid-old")],
     );
     reconcile_sessions_with(&store, &deps).await.unwrap();
-    store
-        .lock()
-        .unwrap()
-        .mark_sessions_reconciled("mefistos", &["old".to_string()], 1)
-        .unwrap();
+    let id = {
+        let s = store.lock().unwrap();
+        let id = s.get_session("old", "mefistos").unwrap().unwrap().id;
+        // Fleet kills "old" itself: a `killed` ghost before the next pass.
+        s.mark_session_killed(id, 100).unwrap().expect("ghosted");
+        id
+    };
 
-    // Pass 2: "old" disappears with the SAME identity ⇒ no verdict, routine
-    // 'missing' ghost (unrelated to Task 6's mass-loss machinery).
-    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(Some(1))), vec![]);
-    reconcile_sessions_with(&store, &deps).await.unwrap();
-    assert_eq!(
-        store
-            .lock()
-            .unwrap()
-            .get_session("old", "mefistos")
-            .unwrap()
-            .unwrap()
-            .status,
-        "ghost",
-        "pass 2 ghosts 'old' via the routine 'missing' path"
-    );
-
-    // Pass 3: the boot id changes (a genuine host_reboot verdict), but
-    // "old" is ALREADY ghost — `mark_host_sessions_lost`'s `status!='ghost'`
-    // filter means this verdict marks ZERO new rows. The routine prune's
-    // Phase 2 reap for "old" (ghosted last pass, `lost_reason='missing'`,
-    // never TTL-exempt) must still run THIS pass.
+    // Pass 2: the boot id changes (a genuine host_reboot verdict), but the
+    // only row is already a `killed` ghost — the verdict marks and
+    // reclassifies nothing, so the routine prune's Phase 2 must reap "old"
+    // THIS pass.
     let deps = identity_deps(
         "mefistos",
         vec![],
@@ -4399,11 +4386,76 @@ async fn skip_prune_does_not_delay_the_reap_of_an_unrelated_already_ghost_row() 
         store
             .lock()
             .unwrap()
-            .get_session("old", "mefistos")
+            .get_session_by_id(id)
             .unwrap()
             .is_none(),
-        "a verdict that marks nothing new must not delay the routine reap \
-         of an unrelated already-ghost row"
+        "a verdict that marks and reclassifies nothing must not delay the \
+         routine reap of an unrelated already-ghost row"
+    );
+}
+
+/// ACCEPTED TRADE-OFF (Important 2 ruling, option (a)): a `missing` ghost is
+/// indistinguishable from one left by a failed first post-loss pass, so a
+/// session that genuinely ended within the ONE pass before a mass-loss
+/// verdict is reclassified and kept to the TTL (still dismissable). This is
+/// deliberate — the reclassification errs toward keeping.
+#[tokio::test]
+async fn accepted_tradeoff_a_session_that_ended_one_pass_before_a_reboot_is_kept_as_lost() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("old")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("old", "cid-old")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["old".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: "old" ends on its own, identity readable and unchanged ⇒
+    // a routine `missing` ghost.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(Some(1))), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let (id, lost_at) = {
+        let s = store.lock().unwrap();
+        let row = s.get_session("old", "mefistos").unwrap().unwrap();
+        assert_eq!(row.status, "ghost");
+        (row.id, row.lost_at)
+    };
+
+    // Pass 3: an unrelated reboot. The one-pass-old `missing` ghost is
+    // reclassified `host_reboot` (keeping its lost_at) and survives.
+    let deps = identity_deps(
+        "mefistos",
+        vec![],
+        Some(crate::tmux::HostIdentity {
+            boot_id: Some("b".into()),
+            tmux_server_pid: Some(2),
+        }),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().expect("kept on pass 3");
+        assert_eq!(row.lost_at, lost_at);
+        assert_eq!(lost_events(&s, id, "host_reboot"), 1);
+    }
+    // Pass 4: TTL-exempt as a resumable mass loss.
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .is_some(),
+        "the accepted trade-off keeps the row past the routine reap"
     );
 }
 
@@ -4489,6 +4541,83 @@ async fn killing_a_host_s_last_session_is_not_a_resumable_mass_loss() {
             .unwrap()
             .is_none(),
         "the killed row must be reaped on the ordinary schedule, not kept as a resumable ghost"
+    );
+}
+
+/// Final-review Important 2: the FIRST pass after a loss could not record
+/// the verdict (here: one transient ssh failure made the identity
+/// unreadable), so the routine prune ghosted the rows as `missing`. The
+/// verdict that fires on the next pass must still record them as a mass
+/// loss (reclassify them) — otherwise Phase 2 reaps them all, the exact
+/// loss the feature exists to prevent.
+#[tokio::test]
+async fn a_verdict_after_a_failed_first_pass_still_keeps_the_rows() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: identity {a, pid 1}, "x" live with a claude id.
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("x")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("x", "cid-x")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let id = store
+        .lock()
+        .unwrap()
+        .get_session("x", "mefistos")
+        .unwrap()
+        .expect("row created on pass 1")
+        .id;
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["x".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: the server is gone but the identity read failed ⇒ no verdict;
+    // the routine prune ghosts "x" as `missing`.
+    let deps = identity_deps("mefistos", vec![], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let lost_at = {
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().expect("ghosted on pass 2");
+        assert_eq!(row.status, "ghost");
+        row.lost_at.expect("lost_at stamped on pass 2")
+    };
+
+    // Pass 3: the identity reads again — pid None vs stored pid 1 ⇒
+    // `tmux_server_gone`. The `missing` ghost must be reclassified and
+    // survive, keeping its pass-2 `lost_at`.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(None)), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let row = s
+            .get_session_by_id(id)
+            .unwrap()
+            .expect("the verdict must keep the row on pass 3");
+        assert_eq!(row.status, "ghost");
+        assert_eq!(row.lost_at, Some(lost_at), "reclassification keeps lost_at");
+        assert_eq!(row.claude_session_id.as_deref(), Some("cid-x"));
+        assert_eq!(
+            lost_events(&s, id, "tmux_server_gone"),
+            1,
+            "the reclassification records the loss exactly once"
+        );
+    }
+
+    // Pass 4: now TTL-exempt as a resumable mass loss.
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .is_some(),
+        "the reclassified row must be exempt from the routine reap on pass 4"
     );
 }
 

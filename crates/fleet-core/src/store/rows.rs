@@ -421,6 +421,25 @@ pub struct StoredIdentity {
     pub tmux_server_pid: Option<i64>,
 }
 
+/// What one [`Store::mark_host_sessions_lost`] call touched, split by how:
+/// `marked` rows were live and are now ghost (they changed on the wire and
+/// were announced with `SessionUpdated`); `reclassified` rows were ALREADY a
+/// `missing` ghost (a failed first post-loss pass pruned them routinely) and
+/// only had their `lost_reason` upgraded to the verdict's reason — nothing
+/// the frontend sees changed, so no event was emitted for them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MarkedLost {
+    pub marked: Vec<SessionRow>,
+    pub reclassified: Vec<SessionRow>,
+}
+
+impl MarkedLost {
+    /// `true` when the call recorded no loss at all (neither list has a row).
+    pub fn is_empty(&self) -> bool {
+        self.marked.is_empty() && self.reclassified.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct AccountRow {
     pub uuid: String,

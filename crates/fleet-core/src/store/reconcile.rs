@@ -36,9 +36,14 @@ pub(super) fn ghost_cutoff(probe_started_at: i64) -> i64 {
 /// line. A second `"lost"` line for the same session with no intervening
 /// `"created"`/revival is therefore a bug, not a benign duplicate.
 ///
-/// One lifecycle line is logged outside this mapping: a row fleet itself
-/// killed is logged `"lost"` (reason `killed`) by `mark_session_killed`,
-/// and is then skipped by both loops above since it is already ghost.
+/// Two lifecycle lines are logged outside this mapping: a row fleet itself
+/// killed is logged `"lost"` (reason `killed`) by `mark_session_killed`, and
+/// is then skipped by both loops above since it is already ghost; and a
+/// `missing` ghost that a later mass-loss verdict upgrades is logged
+/// `"reclassified"` by `mark_host_sessions_lost` — a DISTINCT kind, so a
+/// session ghosted by the routine prune and then reclassified legitimately
+/// carries one `"lost"` line followed by one `"reclassified"` line, never
+/// two `"lost"` lines.
 pub(crate) fn lifecycle_kind(change: &RowChange) -> Option<&'static str> {
     match change {
         RowChange::SessionCreated(_) => Some("created"),

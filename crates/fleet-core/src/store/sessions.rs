@@ -208,9 +208,30 @@ impl Store {
     /// so those rows are left alone. Any other reason (namely `host_reboot`)
     /// ghosts every kind, since a reboot kills bg agents too.
     ///
+    /// Reclassification: the same call ALSO upgrades already-ghost rows of
+    /// the host that are not in `keep_names` and carry `lost_reason =
+    /// 'missing'` (or NULL) to `reason`, keeping their existing `lost_at`.
+    /// Those are rows the routine keep-set prune ghosted on a FAILED first
+    /// post-loss pass (the identity read, the stored-identity read or this
+    /// very mark failed, so no verdict was recorded and the prune ran); the
+    /// verdict firing on the next pass must still record them as a mass
+    /// loss, or Phase 2 would reap them as ordinary `missing` rows. A
+    /// `missing` ghost is at most one pass old by construction (never
+    /// exempt, reaped next pass). Accepted trade-off: a session that
+    /// genuinely ended within that one pass is indistinguishable from one a
+    /// failed pass ghosted, so it is reclassified and kept to the TTL too
+    /// (still dismissable) — erring toward keeping is the feature's point.
+    /// A row fleet itself killed carries `lost_reason = 'killed'`
+    /// ([`Self::mark_session_killed`]): fleet knows that loss is not
+    /// ambiguous, so it is never reclassified. Same kind
+    /// filter and same BE-3 guard as the main mark. Reclassified rows do not
+    /// change on the wire (`lost_reason` is not a `SessionRow` field), so no
+    /// event is emitted for them; they are logged with the distinct
+    /// lifecycle kind `"reclassified"`.
+    ///
     /// Mirrors [`Self::ghost_and_clean_bg_sessions`]'s shape: its own
     /// `unchecked_transaction`, collect the affected rows, commit, and only
-    /// THEN emit one `SessionUpdated` per row.
+    /// THEN emit one `SessionUpdated` per newly marked row.
     ///
     /// `probe_started_at` is the BE-3 guard, identical to
     /// [`Store::ghost_and_clean`]'s Phase 1: a row whose `last_reconciled_at`
@@ -228,7 +249,7 @@ impl Store {
         keep_names: &[String],
         now: i64,
         probe_started_at: i64,
-    ) -> Result<Vec<SessionRow>, rusqlite::Error> {
+    ) -> Result<MarkedLost, rusqlite::Error> {
         // A tmux restart does not kill `claude --bg` agents; a reboot does.
         let kind_filter = if reason == "tmux_server_gone" {
             KIND_TMUX
@@ -242,6 +263,31 @@ impl Store {
         };
         let cutoff = super::reconcile::ghost_cutoff(probe_started_at);
         let tx = self.conn.unchecked_transaction()?;
+        let fetch_all = |ids: &[i64]| -> Result<Vec<SessionRow>, rusqlite::Error> {
+            let mut rows = Vec::new();
+            for id in ids {
+                if let Some(row) = fetch_session_by_id(&tx, *id)? {
+                    rows.push(row);
+                }
+            }
+            Ok(rows)
+        };
+        // Reclassify FIRST, while the rows the main mark is about to ghost
+        // are still live: those get `reason` directly and must not be
+        // counted twice. `lost_at` is deliberately left untouched.
+        let reclassify_sql = format!(
+            "UPDATE sessions SET lost_reason=?1
+             WHERE host_alias=?2 AND status='ghost'
+               AND COALESCE(lost_reason, 'missing')='missing' AND {kind_filter}
+               AND COALESCE(last_reconciled_at, 0) < ?3{not_in}
+             RETURNING id"
+        );
+        let head: Vec<&dyn rusqlite::ToSql> = vec![&reason, &host_alias, &cutoff];
+        let params = params_then(&head, keep_names);
+        let reclassified_ids: Vec<i64> = tx
+            .prepare(&reclassify_sql)?
+            .query_map(params.as_slice(), |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let sql = format!(
             "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2
              WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
@@ -254,14 +300,26 @@ impl Store {
             .prepare(&sql)?
             .query_map(params.as_slice(), |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut rows = Vec::new();
-        for id in &ids {
-            if let Some(row) = fetch_session_by_id(&tx, *id)? {
-                rows.push(row);
-            }
-        }
+        let out = MarkedLost {
+            marked: fetch_all(&ids)?,
+            reclassified: fetch_all(&reclassified_ids)?,
+        };
         tx.commit()?;
-        for row in &rows {
+        for row in &out.reclassified {
+            // Not a wire change, so no event — but the reboot forensics
+            // still need the line. A distinct kind, NOT "lost": the row was
+            // already logged "lost" when Phase 1 ghosted it.
+            tracing::info!(
+                lifecycle = "reclassified",
+                session_id = row.id,
+                host_alias = %row.host_alias,
+                tmux_name = %row.tmux_name,
+                claude_session_id = row.claude_session_id.as_deref().unwrap_or("-"),
+                reason,
+                "[session] reclassified"
+            );
+        }
+        for row in &out.marked {
             let change = RowChange::SessionUpdated(row.clone());
             // Task 7 (R5): the mass-loss verdict is exactly the reboot-
             // forensics case this logging exists for, so log it with the
@@ -280,7 +338,7 @@ impl Store {
             }
             self.bus.emit_change(&change);
         }
-        Ok(rows)
+        Ok(out)
     }
 
     /// Ghost the row `id` right after fleet ITSELF killed its tmux session
@@ -289,10 +347,9 @@ impl Store {
     /// session closes, so killing a host's only session makes the next probe
     /// see no tmux server — a `tmux_server_gone` verdict. Recording the kill
     /// first keeps that verdict (which only marks `status != 'ghost'` rows)
-    /// off this row, and `'killed'` is not TTL-exempt in Phase 2, so the
-    /// ordinary one-cycle reap removes it. A reason distinct from `'missing'`
-    /// keeps fleet's own kills apart from rows that vanished on their own,
-    /// for any later logic that treats `'missing'` ghosts specially. No-op
+    /// off this row, and `'killed'` is neither TTL-exempt in Phase 2 nor
+    /// eligible for [`Self::mark_host_sessions_lost`]'s reclassification of
+    /// `missing` ghosts, so the ordinary one-cycle reap removes it. No-op
     /// (returns `None`) when the row is gone or already ghost. Emits
     /// `SessionUpdated` like the routine Phase 1 ghosting it stands in for.
     pub fn mark_session_killed(
@@ -1113,7 +1170,8 @@ mod tests {
         let rows = s
             .mark_host_sessions_lost("h", "host_reboot", &["b".to_string()], 500, 0)
             .unwrap();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.marked.len(), 1);
+        assert!(rows.reclassified.is_empty());
 
         let a_row = s.get_session("a", "h").unwrap().unwrap();
         assert_eq!(a_row.status, "ghost");
@@ -1175,7 +1233,7 @@ mod tests {
         let first = s
             .mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
             .unwrap();
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.marked.len(), 1);
 
         let second = s
             .mark_host_sessions_lost("h", "tmux_server_gone", &[], 900, 0)
@@ -1198,6 +1256,108 @@ mod tests {
         );
     }
 
+    /// Force a row into a ghost state straight on the connection, as a
+    /// prior pass (Phase 1 / a verdict / a kill) would have left it.
+    fn set_ghost(s: &Store, id: i64, lost_at: i64, reason: &str) {
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2 WHERE id=?3",
+                rusqlite::params![lost_at, reason, id],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_verdict_reclassifies_a_missing_ghost_and_keeps_its_lost_at() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        // "a": a `missing` ghost with a claude id, left by a failed first
+        // post-loss pass — must be reclassified.
+        let a = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(a, "cid-a").unwrap();
+        set_ghost(&s, a, 400, "missing");
+        // "k": a `missing` ghost that IS in keep — untouched.
+        let k = s
+            .upsert_session("k", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, k, 400, "missing");
+        // "r": already carries a mass-loss reason — untouched.
+        let r = s
+            .upsert_session("r", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, r, 300, "host_reboot");
+        // "f": fleet's own kill — never reclassified.
+        let f = s
+            .upsert_session("f", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, f, 400, "killed");
+
+        let out = s
+            .mark_host_sessions_lost("h", "host_reboot", &["k".to_string()], 500, 0)
+            .unwrap();
+        assert!(out.marked.is_empty(), "nothing was live: {out:?}");
+        assert_eq!(
+            out.reclassified.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![a]
+        );
+
+        let a_row = s.get_session_by_id(a).unwrap().unwrap();
+        assert_eq!(a_row.status, "ghost");
+        assert_eq!(a_row.lost_at, Some(400), "reclassification keeps lost_at");
+        assert_eq!(a_row.claude_session_id.as_deref(), Some("cid-a"));
+        assert_eq!(lost_reason_of(&s, a), Some("host_reboot".to_string()));
+
+        assert_eq!(lost_reason_of(&s, k), Some("missing".to_string()));
+        assert_eq!(s.get_session_by_id(k).unwrap().unwrap().lost_at, Some(400));
+        assert_eq!(lost_reason_of(&s, r), Some("host_reboot".to_string()));
+        assert_eq!(s.get_session_by_id(r).unwrap().unwrap().lost_at, Some(300));
+        assert_eq!(lost_reason_of(&s, f), Some("killed".to_string()));
+    }
+
+    #[test]
+    fn a_tmux_server_verdict_reclassifies_tmux_ghosts_only() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let t = s
+            .upsert_session("t", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, t, 400, "missing");
+        let bg = s
+            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
+            .unwrap();
+        set_ghost(&s, bg, 400, "missing");
+
+        let out = s
+            .mark_host_sessions_lost("h", "tmux_server_gone", &[], 500, 0)
+            .unwrap();
+        assert_eq!(
+            out.reclassified.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![t]
+        );
+        assert_eq!(lost_reason_of(&s, t), Some("tmux_server_gone".to_string()));
+        assert_eq!(lost_reason_of(&s, bg), Some("missing".to_string()));
+    }
+
+    #[test]
+    fn a_reclassification_honours_the_stale_probe_guard() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let a = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, a, 400, "missing");
+        // A newer pass saw it (stamped at 1000) after this probe began (900).
+        s.mark_sessions_reconciled("h", &["a".to_string()], 1000)
+            .unwrap();
+        let out = s
+            .mark_host_sessions_lost("h", "host_reboot", &[], 950, 900)
+            .unwrap();
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(lost_reason_of(&s, a), Some("missing".to_string()));
+    }
+
     #[test]
     fn mark_session_killed_ghosts_the_row_as_an_ordinary_loss() {
         let s = Store::open_in_memory().unwrap();
@@ -1214,7 +1374,7 @@ mod tests {
         // Idempotent: an already-ghost row is not re-stamped.
         assert!(s.mark_session_killed(id, 900).unwrap().is_none());
         assert_eq!(s.get_session_by_id(id).unwrap().unwrap().lost_at, Some(700));
-        // A later verdict does not mark it.
+        // A later verdict neither marks nor reclassifies it.
         let out = s
             .mark_host_sessions_lost("h", "tmux_server_gone", &[], 800, 0)
             .unwrap();
