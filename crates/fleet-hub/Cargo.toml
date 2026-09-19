@@ -30,3 +30,7 @@ rustls-pki-types = { version = "1", features = ["std"] }
 [dev-dependencies]
 rcgen = "0.13"
 tempfile = "3"
+# Only to name the `CancellationToken` type `start_with_listener` returns in
+# a test helper's signature — already in the tree as `fleet-core`'s (non-dev)
+# dependency, not a new crate.
+tokio-util = "0.7"

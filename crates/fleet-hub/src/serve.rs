@@ -386,8 +386,79 @@ async fn probe_exchange(addr: std::net::SocketAddr, tls: bool) -> Result<String,
     let tcp = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| format!("connect {addr}: {e}"))?;
+    let conn = maybe_tls(tcp, addr, tls).await?;
+    exchange(conn, addr).await
+}
+
+/// Either a plain TCP connection or the client half of a TLS handshake over
+/// one, behind one `AsyncRead + AsyncWrite` front — so a caller that already
+/// has its own `TcpStream` (this probe's [`exchange`], and `pair::exchange`)
+/// can read and write it without knowing which transport [`maybe_tls`]
+/// picked.
+pub(crate) enum Conn {
+    Plain(tokio::net::TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>),
+}
+
+impl tokio::io::AsyncRead for Conn {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Conn::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Conn::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for Conn {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Conn::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            Conn::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Conn::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Conn::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Conn::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Conn::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Wrap an already-connected `tcp` in a TLS client handshake when `tls`,
+/// using the probe's no-verification trust story (see
+/// [`crate::tls::insecure_probe_client`]): every caller of this dials
+/// `127.0.0.1` only, and the hub's certificate is issued for its public
+/// domain, which `127.0.0.1` can never match. `pair::exchange` reuses this
+/// rather than carrying a second TLS client.
+pub(crate) async fn maybe_tls(
+    tcp: tokio::net::TcpStream,
+    addr: std::net::SocketAddr,
+    tls: bool,
+) -> Result<Conn, String> {
     if !tls {
-        return exchange(tcp, addr).await;
+        return Ok(Conn::Plain(tcp));
     }
     // The server's certificate is issued for its public domain, so it can
     // never match `127.0.0.1`; `insecure_probe_client` is why that is fine
@@ -397,7 +468,7 @@ async fn probe_exchange(addr: std::net::SocketAddr, tls: bool) -> Result<String,
         .connect(name, tcp)
         .await
         .map_err(|e| format!("TLS handshake with {addr}: {e}"))?;
-    exchange(conn, addr).await
+    Ok(Conn::Tls(Box::new(conn)))
 }
 
 /// The write-read half, over whatever transport [`probe_exchange`] opened.

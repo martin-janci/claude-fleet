@@ -394,10 +394,14 @@ fleet-hub pair --name phone --ttl 120         # seconds the code stays valid (30
 
 Pairing needs a **running** hub (`fleet-hub serve`): the code only means
 something inside the process that will redeem it. `fleet-hub pair` reads the
-master token out of the data dir, resolves the port the same way `serve` does
-(`--port`, `FLEET_HUB_PORT`, the stored setting, then the default) and calls
-the hub's own `/mcp` on loopback — so run it on the hub's machine, as the user
-the daemon runs as.
+master token out of the data dir, resolves the port and the TLS mode the same
+way `serve` does (`--port`/`--tls`, `FLEET_HUB_PORT`/`FLEET_HUB_TLS`, the
+stored setting, then the default) and calls the hub's own `/mcp` on loopback —
+so run it on the hub's machine, as the user the daemon runs as. When the hub
+terminates TLS itself (`--tls cert`), `pair` and `client list|revoke` speak
+TLS too, the same way the `healthcheck` probe does (certificate verification
+off — see *Single binary with its own certificate* and the healthcheck
+paragraph above).
 
 **Changing the public URL needs a restart.** The `hub` field in the `/pair`
 response — the base URL the freshly paired device will talk to — is a snapshot
