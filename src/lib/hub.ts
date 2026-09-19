@@ -313,7 +313,7 @@ export function hubActionBlocked(
   status: HubStatus = get(hubStatus),
   conn: HubConnection = get(hubConnection),
 ): string | null {
-  if (action in REASONS) return hubBlock(action as HubAction, status);
+  if (Object.hasOwn(REASONS, action)) return hubBlock(action as HubAction, status);
   if (!ROUTED_ACTION_SET.has(action)) return null;
   const unavailable = unavailableReason(status);
   if (unavailable) return unavailable;

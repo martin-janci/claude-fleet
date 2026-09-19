@@ -296,6 +296,17 @@ describe('hubActionBlocked', () => {
     }
   });
 
+  // #148 finding 9: `action in REASONS` walks the prototype chain, so an
+  // action name that only collides with an inherited `Object.prototype`
+  // member (never one of this module's own keys) must not be treated as a
+  // refused action.
+  it('an action name that only collides with Object.prototype is not treated as refused', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(hubActionBlocked('toString' as any, remote, CONNECTED)).toBeNull();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(hubActionBlocked('constructor' as any, remote, CONNECTED)).toBeNull();
+  });
+
   // F1: a hub is configured but this launch could not use it — refuses every
   // routed command too (the routing test's `a_configured_but_unavailable_hub_
   // refuses_every_routed_command`), not just the ones with a REASONS entry.
