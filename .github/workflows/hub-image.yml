@@ -40,6 +40,13 @@ jobs:
   # them into one multi-arch manifest under the real tags — the standard
   # docker/build-push-action pattern for a multi-platform image built across
   # more than one runner.
+  #
+  # `allow_failure`/`continue-on-error` differ by arch ON PURPOSE: arm64's
+  # native GitHub-hosted runner has no track record here yet, so its leg is
+  # allowed to fail without blocking the image amd64 alone can still
+  # publish (see `merge` below); amd64 is not allowed to fail; if it does,
+  # `merge` publishes nothing at all and fails visibly rather than leaving
+  # a stale `latest`.
   build:
     needs: meta
     strategy:
@@ -48,8 +55,13 @@ jobs:
         include:
           - platform: linux/amd64
             os: ubuntu-24.04
+            arch: amd64
+            allow_failure: false
           - platform: linux/arm64
             os: ubuntu-24.04-arm
+            arch: arm64
+            allow_failure: true
+    continue-on-error: ${{ matrix.allow_failure }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -80,44 +92,59 @@ jobs:
         run: |
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
+      # Named by `arch`, not `os`: `merge` below needs to tell the two
+      # platforms' artifacts apart (their digest files are each just an
+      # opaque hex name, indistinguishable from each other on their own),
+      # and `arch` stays stable even if the runner label changes.
       - uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.os }}
+          name: digests-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
+  # Publishes whatever `build` produced — never skipped by a failed leg
+  # (`if: !cancelled()`), because a plain `needs: [meta, build]` would skip
+  # this job entirely the moment amd64 (the one leg NOT allowed to fail)
+  # actually fails, silently leaving `latest`/`vX.Y.Z` stale with no visible
+  # error. Rule (enforced by scripts/merge-hub-digests.sh): amd64 digest
+  # present -> publish (multi-arch if arm64 is present too, amd64-only
+  # otherwise — arm64 failing never blocks amd64's own publication); amd64
+  # digest missing -> this job fails for real (no continue-on-error here),
+  # visibly, and nothing is published. An amd64-only publish still leaves
+  # the run non-green overall, because arm64's own leg above already shows
+  # as a distinct "failed but allowed" status — that is the "arm64 is
+  # best-effort until it has a track record" signal docs/hub.md's image
+  # section talks about.
   merge:
+    if: ${{ !cancelled() }} # bare `!cancelled()` is invalid YAML here (leading `!`), so this one keeps the wrapper
     needs: [meta, build]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
           pattern: digests-*
-          merge-multiple: true
+        continue-on-error: true
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
-      - name: Create the multi-arch manifest and push it under the real tags
-        working-directory: /tmp/digests
+      - name: Select which platforms actually have a digest
         env:
-          TAGS: ${{ needs.meta.outputs.tags }}
           IMAGE: ghcr.io/${{ github.repository_owner }}/fleet-hub
+          TAGS: ${{ needs.meta.outputs.tags }}
         run: |
           set -euo pipefail
-          tag_args=()
-          while IFS= read -r t; do
-            [ -n "$t" ] && tag_args+=(-t "$t")
-          done <<<"$TAGS"
-          digest_args=()
-          for f in *; do
-            digest_args+=("$IMAGE@sha256:$f")
-          done
-          docker buildx imagetools create "${tag_args[@]}" "${digest_args[@]}"
+          scripts/merge-hub-digests.sh /tmp/digests >/tmp/imagetools-args.txt
+      - name: Create the manifest and push it under the real tags
+        run: |
+          set -euo pipefail
+          mapfile -t args </tmp/imagetools-args.txt
+          docker buildx imagetools create "${args[@]}"
       - name: Inspect the pushed manifest
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/fleet-hub
