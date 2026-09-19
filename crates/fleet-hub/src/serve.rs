@@ -482,6 +482,9 @@ async fn exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     conn.write_all(req.as_bytes())
         .await
         .map_err(|e| format!("send to {addr}: {e}"))?;
+    conn.flush()
+        .await
+        .map_err(|e| format!("send to {addr}: {e}"))?;
     // Status line plus the short body is all we need; bound what a stray peer
     // can make us read. Bytes already read survive a later read error.
     let mut raw = Vec::new();
@@ -758,6 +761,16 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
 
     wait_for_signal().await?;
     tracing::info!("fleet-hub stopping");
+    // Cancel the ticks BEFORE tearing down the MCP server below: cancellation
+    // is only observed between passes, so cancelling here is strictly safe
+    // (it does not abort a pass already in flight) and it stops a new pass
+    // from starting during the drain. That matters because `/agent`
+    // websockets are served by the same axum app `shutdown` tears down — an
+    // in-flight pass otherwise keeps its SSH masters but loses every
+    // fleet-agent connection mid-drain. This way the in-flight pass gets the
+    // drain window plus TICK_SHUTDOWN_TIMEOUT below, with agent connections
+    // still up.
+    ticks_cancel.cancel();
     shutdown.cancel();
     // Let in-flight requests drain before tearing down what they use.
     match tokio::time::timeout(DRAIN_TIMEOUT, serve_task).await {
@@ -769,10 +782,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         ),
     }
     // The hub-daemon spec's SIGTERM promise (docs/superpowers/specs/2026-09-17-hub-daemon-design.md):
-    // the current reconcile pass finishes, then the loop exits. Cancel both
-    // ticks and await their handles, bounded, BEFORE tearing down the SSH
-    // masters a pass in flight might still be using.
-    ticks_cancel.cancel();
+    // the current reconcile pass finishes, then the loop exits. Await the
+    // (already-cancelled, above) ticks' handles, bounded, BEFORE tearing down
+    // the SSH masters a pass in flight might still be using.
     let mut tick_handles = Vec::new();
     if let Some(h) = reconcile_handle {
         tick_handles.push(h);
@@ -1403,13 +1415,17 @@ mod tests {
     // `spawn_reconcile_tick`/`spawn_account_usage_tick` in fleet-core cover
     // the tick loop's own cancellation behaviour (a pass in flight finishes;
     // a pre-cancelled token starts none). What is specific to `serve` is the
-    // ORDER: ticks are cancelled and awaited, bounded, before
-    // `ssh.shutdown_all()`. Driving that through a real `serve()` would need
-    // a live listener, a real SIGTERM and a real reconcile pass against a
-    // fake host — much heavier scaffolding than the ordering itself
-    // warrants. `await_ticks` is the piece that gives the ordering its
-    // bound, so it is tested directly, with tokio's paused clock so nothing
-    // here touches a real socket or a real sleep.
+    // ORDER: `ticks_cancel.cancel()` fires before `shutdown.cancel()` (so a
+    // new pass cannot start during the drain, while an in-flight one keeps
+    // its `/agent` websockets through the drain window), and ticks are
+    // awaited, bounded, before `ssh.shutdown_all()`. Driving that through a
+    // real `serve()` would need a live listener, a real SIGTERM and a real
+    // reconcile pass against a fake host — much heavier scaffolding than the
+    // ordering itself warrants. `await_ticks` is the piece that gives the
+    // ordering its bound, so it is tested directly, with tokio's paused
+    // clock so nothing here touches a real socket or a real sleep. The
+    // relative order of the two `.cancel()` calls is pinned by this comment
+    // and by review; see `serve`'s body.
 
     #[tokio::test(start_paused = true)]
     async fn await_ticks_returns_once_every_handle_finishes() {

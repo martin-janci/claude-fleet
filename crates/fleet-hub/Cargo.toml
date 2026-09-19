@@ -29,7 +29,7 @@ rustls-pki-types = { version = "1", features = ["std"] }
 # `serve`'s own SIGTERM-cancels-the-ticks token (issue #144), plus naming the
 # `CancellationToken` type `start_with_listener` returns in test helpers —
 # already in the tree as `fleet-core`'s dependency, not a new crate.
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 rcgen = "0.13"

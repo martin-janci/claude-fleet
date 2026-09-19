@@ -105,8 +105,11 @@ fn hub_conn(opts: &HubOptions, env: &HashMap<String, String>) -> Result<HubConn,
     )? {
         Some(v) => TlsMode::parse(&v)?,
         None => TlsMode::default(),
+    };
+    if tls == TlsMode::Auto {
+        return Err(crate::config::ACME_UNAVAILABLE.to_string());
     }
-    .terminates_tls();
+    let tls = tls.terminates_tls();
     // Loopback, like `healthcheck`: the CLI runs next to the daemon, and the
     // master token must not travel over anything but the loopback interface.
     Ok(HubConn {
@@ -160,6 +163,9 @@ async fn exchange(addr: SocketAddr, tls: bool, request: &str) -> Result<String, 
     })?;
     let mut conn = maybe_tls(tcp, addr, tls).await?;
     conn.write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("send to {addr}: {e}"))?;
+    conn.flush()
         .await
         .map_err(|e| format!("send to {addr}: {e}"))?;
     let mut raw = Vec::new();
@@ -541,6 +547,24 @@ mod tests {
             Ok(_) => panic!("--tls yes must be refused"),
         };
         assert!(e.contains("--tls"), "{e}");
+    }
+
+    /// `hub.tls=auto` is refused here the same way `config::resolve` refuses
+    /// it for `serve`/`init` — `terminates_tls()` is true for both `Auto` and
+    /// `Cert`, so without this check `pair`/`client` would silently speak a
+    /// client-side TLS handshake `serve` never offered, against a hub that is
+    /// actually plaintext.
+    #[test]
+    fn tls_auto_is_refused_like_resolve_refuses_it() {
+        let dir = data_dir_with_port("4180");
+        let mut opts = opts_for(&dir, None);
+        opts.tls = Some("auto".to_string());
+        let no_env = HashMap::new();
+        let e = match hub_conn(&opts, &no_env) {
+            Err(e) => e,
+            Ok(_) => panic!("--tls auto must be refused, not silently treated as cert"),
+        };
+        assert_eq!(e, crate::config::ACME_UNAVAILABLE);
     }
 
     /// One `tools/call` answer as the hub really frames it: SSE, so the JSON
