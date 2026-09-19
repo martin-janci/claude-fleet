@@ -19,18 +19,30 @@ ABIN="${ABIN:-$(dirname "$BIN")/fleet-agent}"
 TMP_BASE="/tmp/claude-$(id -u)"
 [ -d "$TMP_BASE" ] || TMP_BASE=/tmp
 ROOT="$(mktemp -d -p "$TMP_BASE" hub-e2e.XXXXXX)" || { echo "hub-e2e: mktemp -p $TMP_BASE failed" >&2; exit 1; }
+# The /events subscriber (below) is a background job with no pid file of its
+# own; initialised empty here, before the trap is installed, so `set -u`
+# never trips on it and cleanup() can always test it safely.
+EV_PID=""
 # Whatever happens, leave nothing running: every hub and agent this script
 # started records a pid file under $ROOT, and the agent's tmux server lives
 # under $ROOT/tmux (a short path: a tmux socket path is capped at 108 bytes).
+# `${ROOT:?}` on every path built from it: cleanup must never act on a path
+# rooted at an empty/unset $ROOT, however a future edit reorders things.
 cleanup() {
   local f pid n
-  for f in "$ROOT"/*.pid; do
+  for f in "${ROOT:?}"/*.pid; do
     [ -e "$f" ] || continue
     pid=$(cat "$f"); kill -TERM "$pid" 2>/dev/null || continue
     until_ok 50 '! kill -0 "$pid" 2>/dev/null' || kill -KILL "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
   done
-  [ -d "$ROOT/tmux" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$ROOT/tmux" tmux kill-server 2>/dev/null
+  [ -d "${ROOT:?}/tmux" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${ROOT:?}/tmux" tmux kill-server 2>/dev/null
+  # Not pid-filed like the hubs/agent above: kill it directly if a SIGTERM
+  # lands between it starting and its own explicit `kill "$EV_PID"`.
+  if [ -n "$EV_PID" ]; then
+    kill "$EV_PID" 2>/dev/null
+    wait "$EV_PID" 2>/dev/null
+  fi
   # Hub A manages this machine's own (non-isolated) tmux server directly, so a
   # session it created there can outlive a run that is interrupted before its
   # own kill_session step runs. Sweep this run's session names, if any are
