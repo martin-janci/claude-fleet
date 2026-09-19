@@ -58,6 +58,28 @@ pub struct HookPayload {
     pub error: Option<String>,
     /// `StopFailure`: free-text detail, when Claude Code has one.
     pub error_details: Option<String>,
+    /// `SessionStart`: startup | resume | clear | compact | fork.
+    pub source: Option<String>,
+    /// `SessionStart`: the model id.
+    pub model: Option<String>,
+    /// `PreCompact` / `PostCompact`: manual | auto.
+    pub trigger: Option<String>,
+    /// `UserPromptSubmit`: the prompt text (first 200 chars stored as the
+    /// conversation's `first_prompt`; never logged).
+    pub prompt: Option<String>,
+    /// `Stop`: the final assistant message (first 200 chars go to the
+    /// `turn_done` timeline event; never logged).
+    pub last_assistant_message: Option<String>,
+}
+
+/// `X-Fleet-Pane`: `$TMUX_PANE` of the hook's process (`%` + digits). Empty
+/// (outside tmux, or a CLI that does not expand header env vars — it then
+/// sends the literal `$TMUX_PANE`) or malformed → `None`.
+pub fn pane_header(headers: &axum::http::HeaderMap) -> Option<String> {
+    let v = headers.get("x-fleet-pane")?.to_str().ok()?.trim();
+    let digits = v.strip_prefix('%')?;
+    (!digits.is_empty() && digits.len() <= 10 && digits.chars().all(|c| c.is_ascii_digit()))
+        .then(|| v.to_string())
 }
 
 /// Axum handler for `POST /hook`. Auth has already happened in the
@@ -66,6 +88,7 @@ pub struct HookPayload {
 pub async fn handle_hook(
     State(state): State<HookState>,
     Extension(caller): Extension<Caller>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<HookPayload>,
 ) -> StatusCode {
     use crate::ipc_error::codes;
@@ -81,16 +104,23 @@ pub async fn handle_hook(
         tracing::debug!(caller = %caller.label(), "[hook] refused: clients do not report hooks");
         return StatusCode::FORBIDDEN;
     }
+    let pane_id = pane_header(&headers);
     // Every hook event lands here (several per turn): debug, not info. Only
-    // identifiers are logged, never the payload body.
+    // identifiers are logged, never the payload body (`prompt`,
+    // `last_assistant_message`, `message` stay out of the log).
     tracing::debug!(
         caller = %caller.label(),
         event = ?payload.hook_event_name,
         session = ?payload.session_id,
+        pane = ?pane_id,
         tool = ?payload.tool_name,
         "[hook] received"
     );
-    match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload, &caller) {
+    let ctx = crate::service::hooks::HookContext {
+        caller: &caller,
+        pane_id,
+    };
+    match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload, &ctx) {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) if e.code == codes::E_VALIDATE || e.code == codes::E_INVALID => {
             tracing::warn!(code = %e.code, error = %e.message, "[hook] rejected payload");
@@ -137,7 +167,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            handle_hook(State(state), Extension(client), Json(payload)).await,
+            handle_hook(
+                State(state),
+                Extension(client),
+                axum::http::HeaderMap::new(),
+                Json(payload)
+            )
+            .await,
             StatusCode::FORBIDDEN,
             "a paired client must never report hook events"
         );
@@ -165,6 +201,39 @@ mod tests {
         assert_eq!(p.title.as_deref(), Some("Permission needed"));
         let d = HookPayload::default();
         assert!(d.session_id.is_none() && d.reason.is_none());
+    }
+
+    #[test]
+    fn pane_header_accepts_only_tmux_pane_ids() {
+        let h = |v: &str| {
+            let mut m = axum::http::HeaderMap::new();
+            m.insert("x-fleet-pane", v.parse().unwrap());
+            pane_header(&m)
+        };
+        assert_eq!(h("%17"), Some("%17".into()));
+        assert_eq!(h(""), None);
+        assert_eq!(h("$TMUX_PANE"), None);
+        assert_eq!(h("%1;rm"), None);
+        assert_eq!(h("%"), None);
+        assert_eq!(h("%12345678901"), None);
+        assert_eq!(pane_header(&axum::http::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn conversation_fields_deserialize() {
+        let p: HookPayload = serde_json::from_str(
+            r#"{"session_id":"s","hook_event_name":"SessionStart","source":"clear","model":"claude-opus-5"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.source.as_deref(), Some("clear"));
+        assert_eq!(p.model.as_deref(), Some("claude-opus-5"));
+        let p: HookPayload = serde_json::from_str(
+            r#"{"hook_event_name":"PreCompact","trigger":"auto","prompt":"hi","last_assistant_message":"done"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.trigger.as_deref(), Some("auto"));
+        assert_eq!(p.prompt.as_deref(), Some("hi"));
+        assert_eq!(p.last_assistant_message.as_deref(), Some("done"));
     }
 
     #[test]

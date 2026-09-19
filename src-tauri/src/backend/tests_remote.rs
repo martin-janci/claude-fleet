@@ -354,6 +354,7 @@ fn sample_session_row() -> SessionRow {
             usage_model: Some("claude-opus-5".into()),
             usage_updated_at: Some(1_757_003_500),
         },
+        context: fleet_core::store::SessionContext::default(),
     }
 }
 

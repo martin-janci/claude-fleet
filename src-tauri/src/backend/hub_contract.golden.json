@@ -58,6 +58,7 @@
     "prompt"
   ],
   "Conversation": [
+    "context",
     "truncated",
     "turns"
   ],
@@ -131,6 +132,7 @@
   ],
   "SessionEvent": [
     "at",
+    "claude_session_id",
     "detail",
     "id",
     "kind",
@@ -141,7 +143,12 @@
     "ci_status",
     "claude_session_id",
     "claude_status",
+    "context_at",
     "context_pct",
+    "context_source",
+    "context_stale",
+    "context_tokens",
+    "context_window",
     "created_at",
     "current_activity",
     "effort_level",
@@ -156,6 +163,7 @@
     "last_stop_at",
     "last_turn_at",
     "lost_at",
+    "model",
     "notes",
     "parent_session_id",
     "pr_url",
@@ -171,6 +179,7 @@
     "stuck_since",
     "tags",
     "tmux_name",
+    "tmux_pane_id",
     "turn_seq",
     "usage_cache_read_tokens",
     "usage_cache_write_tokens",

@@ -393,7 +393,7 @@ impl<C: SshExec> RemoteTmux<C> {
 #[async_trait]
 impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
-        let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}' 2>&1";
+        let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}' 2>&1";
         let output = self.remote_bash(script).await?;
         let combined = String::from_utf8_lossy(&output.stdout).into_owned();
         if output.status.success() {
@@ -593,6 +593,9 @@ pub struct TmuxSession {
     pub last_activity: i64,
     pub attached: bool,
     pub path: PathBuf,
+    /// The session's active pane (`%N`), used to bind hook calls to the row.
+    /// `None` from an old format / a test fixture.
+    pub pane_id: Option<String>,
 }
 
 /// Lists tmux sessions on the local host. Returns an empty Vec (not an error)
@@ -602,7 +605,7 @@ pub async fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
         .args([
             "list-sessions",
             "-F",
-            "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}",
+            "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}",
         ])
         .output()
         .await;
@@ -647,15 +650,21 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
     input
         .lines()
         .filter_map(|line| {
-            // Destructure the fixed 5-field format off the split iterator —
-            // no per-line `Vec` allocation. A 6th field means the line is
-            // malformed (a `|` inside a session name); reject it.
+            // Destructure the fixed format off the split iterator — no
+            // per-line `Vec` allocation. The optional 6th field is the pane
+            // id (`%N`); anything else there, or a 7th field, means the line
+            // is malformed (a `|` inside a name or path); reject it.
             let mut it = line.split('|');
             let name = it.next()?;
             let created = it.next()?.parse::<i64>().ok()?;
             let last_activity = it.next()?.parse::<i64>().ok()?;
             let attached_int = it.next()?.parse::<i64>().ok()?;
             let path = it.next()?;
+            let pane_id = match it.next() {
+                None => None,
+                Some(p) if p.starts_with('%') => Some(p.to_string()),
+                Some(_) => return None,
+            };
             if it.next().is_some() {
                 return None;
             }
@@ -665,6 +674,7 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
                 last_activity,
                 attached: attached_int > 0,
                 path: PathBuf::from(path),
+                pane_id,
             })
         })
         .collect()
@@ -904,6 +914,18 @@ mod tests {
         let sessions = parse_sessions(input);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "good");
+    }
+
+    #[test]
+    fn parse_sessions_reads_an_optional_pane_id() {
+        let out = "a|1|2|0|/w|%7\nb|1|2|1|/x\n";
+        let s = parse_sessions(out);
+        assert_eq!(s[0].pane_id.as_deref(), Some("%7"));
+        assert_eq!(s[1].pane_id, None);
+        // A 7th field is still a malformed line (a `|` in the name).
+        assert!(parse_sessions("a|b|1|2|0|/w|%7").is_empty());
+        // A 6th field that is not a pane id is a `|` inside the path.
+        assert!(parse_sessions("a|1|2|0|/w|x").is_empty());
     }
 
     #[test]

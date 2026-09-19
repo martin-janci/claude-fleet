@@ -27,7 +27,7 @@ use super::{RemoteConfig, UnavailableHub};
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::transcript::Conversation;
 use fleet_core::service::{bg_sessions, move_session, repo_read, safe_kill, sessions, worktrees};
-use fleet_core::store::{AccountRow, HostRow, SessionEvent, SessionRow, TaskRow};
+use fleet_core::store::{AccountRow, ConversationRow, HostRow, SessionEvent, SessionRow, TaskRow};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -495,14 +495,30 @@ impl HubBackend {
     }
 
     /// `commands::sessions::session_conversation`.
+    /// `claude_session_id` is sent only when set, so a read of the current
+    /// conversation asks exactly what it did before conversations existed.
     pub async fn session_conversation(
         &self,
         session_id: i64,
         turns: Option<usize>,
+        claude_session_id: Option<&str>,
     ) -> Result<Conversation, IpcError> {
+        let mut args = json!({ "session_id": session_id, "turns": turns });
+        if let Some(id) = claude_session_id {
+            args["claude_session_id"] = json!(id);
+        }
+        self.call("session_conversation", args).await
+    }
+
+    /// `commands::sessions::session_conversations`.
+    pub async fn session_conversations(
+        &self,
+        session_id: i64,
+        limit: i64,
+    ) -> Result<Vec<ConversationRow>, IpcError> {
         self.call(
-            "session_conversation",
-            json!({ "session_id": session_id, "turns": turns }),
+            "session_conversations",
+            json!({ "session_id": session_id, "limit": limit }),
         )
         .await
     }

@@ -132,6 +132,7 @@ impl Store {
         ci_status: Option<&str>,
         pr_observed: bool,
         probe_started_at: i64,
+        tmux_pane_id: Option<&str>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read the prior row (not just its id) before the write: it tells us
@@ -163,15 +164,52 @@ impl Store {
                                             AND last_hook_at >= ?20 \
                                        THEN claude_status \
                                        ELSE COALESCE(excluded.claude_status, claude_status) END";
+        // The candidate claude_session_id, refused when another live row on
+        // the host already holds it: `claude agents`' cwd match can be
+        // ambiguous, and one conversation must never be bound to two rows
+        // (the hooks' pane binding settles it). Evaluated in VALUES, so
+        // `excluded.claude_session_id` below is already the guarded value and
+        // the id write, the transcript reset and the stale flag all share
+        // this one condition.
+        const GUARDED_ID: &str = "CASE WHEN EXISTS (SELECT 1 FROM sessions o \
+                                      WHERE o.claude_session_id = ?9 AND o.host_alias = ?2 \
+                                        AND o.tmux_name != ?1 AND o.status != 'ghost') \
+                                  THEN NULL ELSE ?9 END";
+        // The post-write claude_session_id. The MCP-1 in-flight guard
+        // applies to the id as to the status: a hook that landed at or after
+        // this probe STARTED (a SessionStart / UserPromptSubmit rebind, a
+        // SessionEnd(clear|resume)) owns the conversation binding (spec
+        // §1.3/§1.4), so a pass that read `claude agents` before it must not
+        // write the replaced id back.
+        const NEW_ID: &str = "CASE WHEN ?20 > 0 AND last_hook_at IS NOT NULL \
+                                        AND last_hook_at >= ?20 \
+                                   THEN claude_session_id \
+                                   ELSE COALESCE(excluded.claude_session_id, claude_session_id) END";
+        // The pass moves the row off a conversation it was bound to. SET
+        // clauses see the OLD row, so this compares against the prior id. A
+        // first sighting (prior id NULL) is not a change: nothing stored
+        // belonged to another conversation.
+        let id_changes =
+            format!("claude_session_id IS NOT NULL AND ({NEW_ID}) IS NOT claude_session_id");
+        // A hook/transcript context value younger than 120 s outranks the
+        // pane footer (spec §1.5) — unless it belongs to the conversation
+        // this pass moves the row away from.
+        const FRESH_CONTEXT: &str = "context_source IN ('transcript','hook') \
+                                     AND context_at >= ?19 - 120";
         let sql = format!(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
                                    created_at, last_activity_at, status, account_uuid,
                                    worktree_key, lost_at,
                                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                                   context_pct, stuck_kind, ci_status, idle_since, stuck_since)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?17,
+                                   context_pct, stuck_kind, ci_status, idle_since, stuck_since,
+                                   tmux_pane_id, context_source, context_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, {guarded_id}, ?10, ?11, ?12, ?13,
+                     ?14, ?15, ?17,
                      CASE WHEN ?10 IN ('idle','completed','stopped') THEN ?19 ELSE NULL END,
-                     CASE WHEN ?15 IS NULL THEN NULL ELSE ?19 END)
+                     CASE WHEN ?15 IS NULL THEN NULL ELSE ?19 END,
+                     ?21,
+                     CASE WHEN ?14 IS NULL THEN NULL ELSE 'pane' END,
+                     CASE WHEN ?14 IS NULL THEN NULL ELSE ?19 END)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                last_activity_at=excluded.last_activity_at,
@@ -180,7 +218,12 @@ impl Store {
                status=CASE WHEN status='ghost' THEN 'running' ELSE status END,
                lost_at=NULL,
                lost_reason=NULL,
-               claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
+               claude_session_id={new_id},
+               -- A new conversation: the old transcript is not its transcript,
+               -- and the old context size is not its size.
+               transcript_path=CASE WHEN {id_changes} THEN NULL ELSE transcript_path END,
+               context_stale=CASE WHEN {id_changes} THEN 1 ELSE context_stale END,
+               tmux_pane_id=COALESCE(excluded.tmux_pane_id, tmux_pane_id),
                claude_status={new_status},
                effort_level=COALESCE(excluded.effort_level, effort_level),
                -- pr_url / ci_status are authoritative when the gh probe ran
@@ -190,7 +233,23 @@ impl Store {
                ci_status=CASE WHEN ?18 THEN excluded.ci_status
                               ELSE COALESCE(excluded.ci_status, ci_status) END,
                current_activity=COALESCE(excluded.current_activity, current_activity),
-               context_pct=COALESCE(excluded.context_pct, context_pct),
+               -- The pane footer is a fallback (spec §1.5): it applies only
+               -- when no fresh hook/transcript value exists, and a missing
+               -- footer never overwrites anything.
+               context_pct=CASE WHEN excluded.context_pct IS NULL THEN context_pct
+                                WHEN {fresh} AND NOT ({id_changes}) THEN context_pct
+                                ELSE excluded.context_pct END,
+               context_source=CASE WHEN excluded.context_pct IS NULL THEN context_source
+                                   WHEN {fresh} AND NOT ({id_changes}) THEN context_source
+                                   ELSE 'pane' END,
+               -- An unchanged footer value keeps its stamp: re-stamping it
+               -- every pass would make each no-op pass emit (BE-11).
+               context_at=CASE WHEN excluded.context_pct IS NULL THEN context_at
+                               WHEN {fresh} AND NOT ({id_changes}) THEN context_at
+                               WHEN context_source IS 'pane'
+                                    AND context_pct IS excluded.context_pct
+                                    AND NOT ({id_changes}) THEN context_at
+                               ELSE ?19 END,
                -- stuck_kind is authoritative when the pane was observed this
                -- pass (?16): a NULL then CLEARS a stale flag. When the pane was
                -- NOT observed (capture failed) we preserve the prior value.
@@ -205,6 +264,10 @@ impl Store {
             new_stuck = NEW_STUCK,
             new_status = NEW_STATUS,
             idle = idle_since_sql(NEW_STATUS, "?19"),
+            guarded_id = GUARDED_ID,
+            id_changes = id_changes,
+            new_id = NEW_ID,
+            fresh = FRESH_CONTEXT,
         );
         tx.execute(
             &sql,
@@ -228,7 +291,8 @@ impl Store {
                 ci_status,
                 pr_observed,
                 now_unix(),
-                probe_started_at
+                probe_started_at,
+                tmux_pane_id
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -462,6 +526,7 @@ impl Store {
                         sess.ci_status.as_deref(),
                         sess.pr_observed,
                         spec.probe_started_at,
+                        sess.tmux_pane_id.as_deref(),
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -599,6 +664,7 @@ mod tests {
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
+            context: Default::default(),
         }
     }
 
@@ -757,6 +823,7 @@ mod tests {
                         None,
                         false,
                         0,
+                        None,
                         &mut out,
                     )?;
                     Ok(out)
@@ -805,6 +872,26 @@ mod tests {
             evts.contains(&format!("project:updated:{pid}")),
             "first pass touches the project; got {evts:?}"
         );
+
+        // Pass 2 runs in a later second than pass 1 on every run: backdate
+        // the footer stamp so a pass that re-stamps an unchanged footer
+        // value fails deterministically, not only across a second boundary.
+        store
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET context_at = context_at - 5 WHERE tmux_name = 's1'",
+                [],
+            )
+            .unwrap();
+        let backdated: Option<i64> = store
+            .conn_ref()
+            .query_row(
+                "SELECT context_at FROM sessions WHERE tmux_name = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(backdated.is_some(), "the footer value was stamped");
 
         // Pass 2: identical observation → only the host probe stamp moves.
         let sessions = vec![live_session("s1", pid, 10)];
@@ -1477,6 +1564,266 @@ mod tests {
         let r = reconcile_one(&mut s, "a", None, None, Some((None, None)));
         assert_eq!(r.pr_url, None);
         assert_eq!(r.ci_status, None);
+    }
+
+    const ID_A: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const ID_B: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+    #[test]
+    fn a_reset_context_is_not_resurrected_by_an_empty_pane_footer() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        s.rebind_conversation(row.id, ID_A, StartSource::Clear, None, None)
+            .unwrap();
+        // pane footer shows nothing this pass
+        let after = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        assert_eq!(after.context_pct, Some(0.0));
+    }
+
+    #[test]
+    fn a_fresh_transcript_value_beats_a_pane_value() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        s.rebind_conversation(row.id, ID_A, StartSource::Fleet, None, None)
+            .unwrap();
+        s.set_context(row.id, ID_A, 100_000, 200_000, "transcript", None)
+            .unwrap();
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[ReconcileSession {
+                tmux_name: "a",
+                created_at: 1,
+                last_activity_at: 1,
+                context_pct: Some(12.0),
+                intel_observed: true,
+                ..Default::default()
+            }],
+            keep: &["a".to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+        let row = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(row.context_pct, Some(50.0));
+        assert_eq!(row.context.context_source.as_deref(), Some("transcript"));
+    }
+
+    #[test]
+    fn a_stale_transcript_value_yields_to_a_pane_value() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        s.rebind_conversation(row.id, ID_A, StartSource::Fleet, None, None)
+            .unwrap();
+        s.set_context(row.id, ID_A, 100_000, 200_000, "transcript", None)
+            .unwrap();
+        // Age the transcript value past the 120 s freshness window.
+        s.conn
+            .execute(
+                "UPDATE sessions SET context_at = context_at - 121 WHERE id = ?1",
+                [row.id],
+            )
+            .unwrap();
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[ReconcileSession {
+                tmux_name: "a",
+                created_at: 1,
+                last_activity_at: 1,
+                context_pct: Some(12.0),
+                intel_observed: true,
+                ..Default::default()
+            }],
+            keep: &["a".to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+        let row = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(row.context_pct, Some(12.0));
+        assert_eq!(row.context.context_source.as_deref(), Some("pane"));
+    }
+
+    #[test]
+    fn a_pane_value_applies_when_no_other_source_wrote() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        reconcile_one(&mut s, "a", Some("idle"), None, None);
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[ReconcileSession {
+                tmux_name: "a",
+                created_at: 1,
+                last_activity_at: 1,
+                context_pct: Some(12.0),
+                tmux_pane_id: Some("%4".into()),
+                intel_observed: true,
+                ..Default::default()
+            }],
+            keep: &["a".to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+        let row = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(row.context_pct, Some(12.0));
+        assert_eq!(row.context.context_source.as_deref(), Some("pane"));
+        assert_eq!(row.context.tmux_pane_id.as_deref(), Some("%4"));
+        // A pass without a pane id keeps the last one seen.
+        let row = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        assert_eq!(row.context.tmux_pane_id.as_deref(), Some("%4"));
+    }
+
+    #[test]
+    fn an_id_change_from_claude_agents_clears_the_transcript_path() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", None, None, None);
+        s.rebind_conversation(
+            row.id,
+            ID_A,
+            StartSource::Fleet,
+            Some("/h/.claude/projects/x/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl"),
+            None,
+        )
+        .unwrap();
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[ReconcileSession {
+                tmux_name: "a",
+                created_at: 1,
+                last_activity_at: 1,
+                claude_session_id: Some(ID_B.into()),
+                ..Default::default()
+            }],
+            keep: &["a".to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+        assert_eq!(s.session_transcript_path(row.id).unwrap(), None);
+    }
+
+    #[test]
+    fn reconcile_never_binds_one_claude_id_to_two_rows() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let a = reconcile_one(&mut s, "a", None, None, None);
+        s.rebind_conversation(a.id, ID_A, StartSource::Fleet, Some("/t/a.jsonl"), None)
+            .unwrap();
+        let b = reconcile_one(&mut s, "b", None, None, None);
+        s.rebind_conversation(b.id, ID_B, StartSource::Fleet, Some("/t/b.jsonl"), None)
+            .unwrap();
+        // `claude agents` matched row `b` by cwd to `a`'s conversation.
+        s.apply_host_reconcile(HostReconcile {
+            sessions: &[
+                ReconcileSession {
+                    tmux_name: "a",
+                    created_at: 1,
+                    last_activity_at: 1,
+                    claude_session_id: Some(ID_A.into()),
+                    ..Default::default()
+                },
+                ReconcileSession {
+                    tmux_name: "b",
+                    created_at: 1,
+                    last_activity_at: 1,
+                    claude_session_id: Some(ID_A.into()),
+                    ..Default::default()
+                },
+            ],
+            keep: &["a".to_string(), "b".to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+        let b = s.get_session("b", "local").unwrap().unwrap();
+        assert_eq!(b.claude_session_id.as_deref(), Some(ID_B));
+        // The transcript reset is gated on the same condition.
+        assert_eq!(
+            s.session_transcript_path(b.id).unwrap().as_deref(),
+            Some("/t/b.jsonl")
+        );
+        assert_eq!(s.sessions_by_claude_id(ID_A).unwrap().len(), 1);
+    }
+
+    fn pass_with_id(s: &mut Store, name: &'static str, id: &str, started: i64) {
+        s.apply_host_reconcile(HostReconcile {
+            probe_started_at: started,
+            sessions: &[ReconcileSession {
+                tmux_name: name,
+                created_at: 1,
+                last_activity_at: 1,
+                claude_session_id: Some(id.into()),
+                ..Default::default()
+            }],
+            keep: &[name.to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn an_id_change_marks_the_context_stale_but_a_first_sighting_does_not() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let stale = |s: &Store, name: &str| {
+            s.get_session(name, "local")
+                .unwrap()
+                .unwrap()
+                .context
+                .context_stale
+        };
+        // First sighting of a new row carrying an id: nothing stored was
+        // stale, so nothing is marked.
+        pass_with_id(&mut s, "a", ID_A, 0);
+        assert!(!stale(&s, "a"));
+        // A real change: the stored size belongs to the old conversation.
+        let a = s.get_session("a", "local").unwrap().unwrap();
+        s.set_context(a.id, ID_A, 50_000, 200_000, "transcript", None)
+            .unwrap();
+        pass_with_id(&mut s, "a", "cccccccc-cccc-cccc-cccc-cccccccccccc", 0);
+        assert!(stale(&s, "a"));
+        // First sighting of an id on a row whose id was NULL: not stale
+        // either. (Each single-row pass ghosts the other row; fine here.)
+        reconcile_one(&mut s, "b", None, None, None);
+        pass_with_id(&mut s, "b", ID_B, 0);
+        assert!(!stale(&s, "b"));
+    }
+
+    #[test]
+    fn reconcile_never_undoes_a_hook_rebind_newer_than_its_probe() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", None, None, None);
+        s.rebind_conversation(row.id, ID_A, StartSource::Fleet, None, None)
+            .unwrap();
+        // /clear: the hook moves the row to B and stamps last_hook_at.
+        s.close_conversation(row.id, ID_A, "clear").unwrap();
+        s.rebind_conversation(row.id, ID_B, StartSource::Clear, Some("/t/b.jsonl"), None)
+            .unwrap();
+        s.record_hook_seen(row.id).unwrap();
+        let hook_at: i64 = s
+            .conn
+            .query_row(
+                "SELECT last_hook_at FROM sessions WHERE id=?1",
+                [row.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // A pass that probed before the hook still reports A.
+        pass_with_id(&mut s, "a", ID_A, hook_at - 1);
+        let after = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(after.claude_session_id.as_deref(), Some(ID_B));
+        assert_eq!(
+            s.session_transcript_path(row.id).unwrap().as_deref(),
+            Some("/t/b.jsonl")
+        );
+        assert!(!after.context.context_stale);
+        assert_eq!(after.context_pct, Some(0.0));
+        // A pass that probed after the hook is authoritative again.
+        pass_with_id(&mut s, "a", ID_A, hook_at + 1);
+        assert_eq!(
+            s.get_session("a", "local")
+                .unwrap()
+                .unwrap()
+                .claude_session_id
+                .as_deref(),
+            Some(ID_A)
+        );
     }
 
     /// 14 days, matching `SESSIONS_LOST_TTL_SECS`'s default — kept as a

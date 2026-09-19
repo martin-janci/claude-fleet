@@ -96,11 +96,12 @@ pub async fn provision_one(
 
 const SETTINGS_JSON: &str = "~/.claude/settings.json";
 
-/// Merge fleet's Stop + PostToolUse(WorktreeCreate) http hooks into the
-/// host's `~/.claude/settings.json`. Idempotent — re-running replaces fleet's
-/// entries (whatever base URL they pointed at) and leaves the user's own
-/// hooks alone. The block carries the host's bearer token, so the file is written
-/// 0600.
+/// Merge fleet's hook block (see [`super::hooks_install::FLEET_HOOK_EVENTS`])
+/// into the host's `~/.claude/settings.json`, and write the SessionStart
+/// command hook's bearer-token headers file. Idempotent — re-running
+/// replaces fleet's entries (whatever base URL they pointed at) and leaves
+/// the user's own hooks alone. Both files carry (or, for settings.json,
+/// reference) the host's bearer token, so both are written 0600.
 pub async fn provision_hook(
     ssh: &dyn SshExec,
     host: &str,
@@ -110,6 +111,19 @@ pub async fn provision_hook(
     let existing = read_host_file(ssh, host, SETTINGS_JSON).await?;
     // Errors (malformed JSON → E_PROVISION) fire BEFORE any write.
     let merged = super::hooks_install::merge_hook_into_settings_json(&existing, hook_url, token)?;
+    // The SessionStart command hook reads its bearer token from this file
+    // (`curl -H @file`) rather than argv or the command string (SEC-3).
+    // Written BEFORE settings.json: a hook installed ahead of its headers
+    // file would post without a token until the next provision.
+    let headers_path = format!("{CLAUDE_DIR}/{}", super::hooks_install::HOOK_HEADERS_FILE);
+    write_host_file_secret(
+        ssh,
+        host,
+        CLAUDE_DIR,
+        &headers_path,
+        &super::hooks_install::hook_headers_content(token),
+    )
+    .await?;
     if !existing.trim().is_empty() {
         // The file carries the user's permissions/env/hooks: back it up
         // first, like ~/.claude.json.
@@ -1185,6 +1199,17 @@ mod tests {
             .unwrap()
     }
 
+    fn headers_path() -> String {
+        format!(
+            "{CLAUDE_DIR}/{}",
+            crate::service::hooks_install::HOOK_HEADERS_FILE
+        )
+    }
+
+    fn expected_headers() -> String {
+        crate::service::hooks_install::hook_headers_content(TOKEN)
+    }
+
     /// The three (or four, first time) steps [`write_host_file_secret`]
     /// issues for one file: touch the `.fleet-tmp` sibling 0600, optionally
     /// resolve `$HOME` (only the first secret write on a fresh `FakeSsh`,
@@ -1241,6 +1266,14 @@ mod tests {
             // 4. Stop / WorktreeCreate hooks ($HOME is cached now).
             Script(remote_read_script(SETTINGS_JSON)),
         ]);
+        // The SessionStart command hook's bearer-token headers file ($HOME
+        // is cached by now), written before the settings that reference it.
+        steps.extend(secret_write_steps(
+            CLAUDE_DIR,
+            &headers_path(),
+            &expected_headers(),
+            true,
+        ));
         steps.extend(secret_write_steps(
             CLAUDE_DIR,
             SETTINGS_JSON,
@@ -1276,6 +1309,7 @@ mod tests {
                         ".claude.json",
                         ".tmux.conf",
                         ".claude/settings.json",
+                        ".claude/fleet-hook.headers",
                     ] {
                         if body.contains(path) {
                             assert!(
@@ -1317,9 +1351,10 @@ mod tests {
         }
         assert_eq!(steps.len(), expected.len(), "step count");
         assert_quoting_invariants(&calls);
-        // The secret reached the host exactly twice, both times over stdin.
+        // The secret reached the host exactly three times (claude.json, the
+        // hook settings, and the SessionStart headers file), all over stdin.
         let uploads = calls.iter().filter(|c| c.stdin.is_some()).count();
-        assert_eq!(uploads, 2);
+        assert_eq!(uploads, 3);
         assert!(calls
             .iter()
             .filter_map(Call::stdin_str)
@@ -1413,6 +1448,15 @@ mod tests {
         assert!(steps.contains(&Step::Script(remote_rename_script(
             &format!("{SETTINGS_JSON}.fleet-bak.fleet-tmp"),
             &format!("{SETTINGS_JSON}.fleet-bak")
+        ))));
+        // The SessionStart headers file has no backup (it carries only the
+        // token, no user content), but is rewritten with byte-identical
+        // content via its own tmp-rename dance every run.
+        let headers_tmp = quote(&format!("{HOME}/.claude/fleet-hook.headers.fleet-tmp"));
+        assert_eq!(content(&headers_tmp), expected_headers());
+        assert!(steps.contains(&Step::Script(remote_rename_script(
+            &format!("{}.fleet-tmp", headers_path()),
+            &headers_path()
         ))));
         // The backups are 0600 too (touch-private before each upload) — on
         // their own `.fleet-tmp` sibling, same as the main files.

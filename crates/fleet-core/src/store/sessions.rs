@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// SQL fragment for the turn-boundary hook writes: a turn starting or
+/// ending ends a `compacting` activity (PreCompact set it; spec: "the next
+/// UserPromptSubmit / Stop clears it"). Any other activity is left alone.
+const END_COMPACTING: &str = ", current_activity = CASE WHEN current_activity = 'compacting' \
+     THEN NULL ELSE current_activity END";
+
 impl Store {
     // ---- Private fetch helpers used after writes to produce emit payloads ----
     //
@@ -533,14 +539,18 @@ impl Store {
         Ok(())
     }
 
-    /// Record the Claude Code session id minted for a session. Reconcile's
+    /// Record the Claude Code session id fleet launched this session with
+    /// (create / recreate / move / review). Opens that conversation with
+    /// source `fleet` via [`Self::rebind_conversation`], which closes any
+    /// previous one as `replaced` and resets the context. Reconcile's
     /// `upsert_session` never writes this column, so the value survives
     /// reconciliation.
-    pub fn set_claude_session_id(&self, id: i64, uuid: &str) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE sessions SET claude_session_id=?1 WHERE id=?2",
-            rusqlite::params![uuid, id],
-        )?;
+    pub fn set_claude_session_id(
+        &self,
+        id: i64,
+        uuid: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.rebind_conversation(id, uuid, StartSource::Fleet, None, None)?;
         Ok(())
     }
 
@@ -744,18 +754,6 @@ impl Store {
         Ok(row)
     }
 
-    /// [`Self::emit_session`] keyed by `claude_session_id` (the hook writes).
-    fn emit_session_by_claude_id(
-        &self,
-        claude_session_id: &str,
-    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
-        let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
-    }
-
     /// Remember the most recent prompt sent to a session (first 200 chars,
     /// migration 019). Emits `session_updated`.
     pub fn set_last_prompt(
@@ -895,90 +893,96 @@ impl Store {
     // ── Orchestration (migration 020) ────────────────────────────────────
 
     /// The Stop hook's write: the turn is over. Sets `claude_status = idle`,
-    /// bumps `turn_seq`, stamps `last_stop_at` / `last_turn_at` and maintains
-    /// `idle_since`. Matches by `claude_session_id`; returns the updated row
-    /// (`None` when no row carries this id yet). Emits `session_updated`.
-    pub fn record_stop_hook(
+    /// bumps `turn_seq`, stamps `last_stop_at` / `last_turn_at`, maintains
+    /// `idle_since` and ends a `compacting` activity. Keyed by row id (the
+    /// hook resolver already picked the row: two rows may share one
+    /// `claude_session_id`); returns the updated row (`None` when the row is
+    /// gone). Emits `session_updated`.
+    pub fn record_stop_hook_for_row(
         &self,
-        claude_session_id: &str,
+        row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
         let changed = self.conn.execute(
-            "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
-                 last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
-                 idle_since = COALESCE(idle_since, ?2) \
-                 WHERE claude_session_id = ?1",
-            rusqlite::params![claude_session_id, now],
+            &format!(
+                "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
+                     last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
+                     idle_since = COALESCE(idle_since, ?2){END_COMPACTING} \
+                 WHERE id = ?1"
+            ),
+            rusqlite::params![row_id, now],
         )?;
         if changed == 0 {
             return Ok(None);
         }
-        self.emit_session_by_claude_id(claude_session_id)
+        Ok(self.emit_session(row_id)?)
     }
 
     /// The UserPromptSubmit hook's write: a turn is starting. Sets
-    /// `claude_status = working` and clears `idle_since` so "idle because
+    /// `claude_status = working`, clears `idle_since` so "idle because
     /// never started" and "idle after a turn" are distinguishable from
-    /// "busy". Returns the updated row (`None` when unmatched). Emits
-    /// `session_updated`.
-    pub fn record_prompt_submit_hook(
+    /// "busy", and ends a `compacting` activity. Returns the updated row
+    /// (`None` when the row is gone). Emits `session_updated`.
+    pub fn record_prompt_submit_hook_for_row(
         &self,
-        claude_session_id: &str,
+        row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let changed = self.conn.execute(
-            "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
-                 last_hook_at = ?2 WHERE claude_session_id = ?1",
-            rusqlite::params![claude_session_id, now_unix()],
+            &format!(
+                "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
+                     last_hook_at = ?2{END_COMPACTING} WHERE id = ?1"
+            ),
+            rusqlite::params![row_id, now_unix()],
         )?;
         if changed == 0 {
             return Ok(None);
         }
-        self.emit_session_by_claude_id(claude_session_id)
+        Ok(self.emit_session(row_id)?)
     }
 
     /// The SessionEnd hook's write: the Claude process is gone. Sets
     /// `claude_status = stopped`, starts `idle_since` if not already idle,
     /// clears any stuck episode and stamps `last_hook_at` so the reconcile
     /// guard keeps the verdict until a later pass observes the pane afresh.
-    /// Returns the row (`None` when unmatched). Emits `session_updated`.
-    pub fn record_session_end_hook(
+    /// Returns the row (`None` when the row is gone). Emits `session_updated`.
+    pub fn record_session_end_hook_for_row(
         &self,
-        claude_session_id: &str,
+        row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
         let changed = self.conn.execute(
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
                  stuck_kind = NULL, stuck_since = NULL \
-                 WHERE claude_session_id = ?1",
-            rusqlite::params![claude_session_id, now],
+                 WHERE id = ?1",
+            rusqlite::params![row_id, now],
         )?;
         if changed == 0 {
             return Ok(None);
         }
-        self.emit_session_by_claude_id(claude_session_id)
+        Ok(self.emit_session(row_id)?)
     }
 
     /// The StopFailure hook's write: the turn ended in an API error. The row
     /// effect is exactly `Stop`'s (idle, `turn_seq` bump, stamps) so waiters
     /// return and read the error from the transcript; the handler records
     /// the `stop_failure` timeline event that tells the two apart.
-    pub fn record_stop_failure_hook(
+    pub fn record_stop_failure_hook_for_row(
         &self,
-        claude_session_id: &str,
+        row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
-        self.record_stop_hook(claude_session_id)
+        self.record_stop_hook_for_row(row_id)
     }
 
     /// The Notification hook's write. `status` is the mapped status;
     /// `stuck` is `Some(Some(kind))` to set (restarting `stuck_since` when
     /// the kind changes, keeping it when equal), `Some(None)` to clear,
     /// `None` to leave the stuck fields untouched. Stamps `last_hook_at`;
-    /// `idle_since` follows the status. Returns the row (`None` when
-    /// unmatched). Emits `session_updated`.
-    pub fn record_notification_hook(
+    /// `idle_since` follows the status. Returns the row (`None` when the row
+    /// is gone). Emits `session_updated`.
+    pub fn record_notification_hook_for_row(
         &self,
-        claude_session_id: &str,
+        row_id: i64,
         status: crate::service::pane_intel::ClaudeStatus,
         stuck: Option<Option<crate::service::pane_intel::StuckKind>>,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
@@ -998,21 +1002,137 @@ impl Store {
         };
         let sql = format!(
             "UPDATE sessions SET claude_status = ?4, last_hook_at = ?2, \
-             idle_since = {idle}{stuck_sql} WHERE claude_session_id = ?1",
+             idle_since = {idle}{stuck_sql} WHERE id = ?1",
             idle = idle_since_sql("?4", "?2"),
         );
         let kind = match stuck {
             Some(Some(k)) => Some(k.as_str()),
             _ => None,
         };
-        let changed = self.conn.execute(
-            &sql,
-            rusqlite::params![claude_session_id, now, kind, status],
-        )?;
+        let changed = self
+            .conn
+            .execute(&sql, rusqlite::params![row_id, now, kind, status])?;
         if changed == 0 {
             return Ok(None);
         }
-        self.emit_session_by_claude_id(claude_session_id)
+        Ok(self.emit_session(row_id)?)
+    }
+
+    /// Test shorthand: [`Self::record_stop_hook_for_row`] on the row bound
+    /// to `claude_session_id`.
+    #[cfg(test)]
+    pub fn record_stop_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id)? {
+            Some(r) => self.record_stop_hook_for_row(r.id),
+            None => Ok(None),
+        }
+    }
+
+    /// Test shorthand: [`Self::record_prompt_submit_hook_for_row`] by
+    /// `claude_session_id`.
+    #[cfg(test)]
+    pub fn record_prompt_submit_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id)? {
+            Some(r) => self.record_prompt_submit_hook_for_row(r.id),
+            None => Ok(None),
+        }
+    }
+
+    /// Test shorthand: [`Self::record_session_end_hook_for_row`] by
+    /// `claude_session_id`.
+    #[cfg(test)]
+    pub fn record_session_end_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id)? {
+            Some(r) => self.record_session_end_hook_for_row(r.id),
+            None => Ok(None),
+        }
+    }
+
+    /// Test shorthand: [`Self::record_stop_failure_hook_for_row`] by
+    /// `claude_session_id`.
+    #[cfg(test)]
+    pub fn record_stop_failure_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id)? {
+            Some(r) => self.record_stop_failure_hook_for_row(r.id),
+            None => Ok(None),
+        }
+    }
+
+    /// Test shorthand: [`Self::record_notification_hook_for_row`] by
+    /// `claude_session_id`.
+    #[cfg(test)]
+    pub fn record_notification_hook(
+        &self,
+        claude_session_id: &str,
+        status: crate::service::pane_intel::ClaudeStatus,
+        stuck: Option<Option<crate::service::pane_intel::StuckKind>>,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id)? {
+            Some(r) => self.record_notification_hook_for_row(r.id, status, stuck),
+            None => Ok(None),
+        }
+    }
+
+    /// Set (or clear) the row's `current_activity`. Emits `session_updated`.
+    pub fn set_current_activity(
+        &self,
+        id: i64,
+        activity: Option<&str>,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE sessions SET current_activity = ?2 WHERE id = ?1",
+            rusqlite::params![id, activity],
+        )?;
+        Ok(self.emit_session(id)?)
+    }
+
+    /// The one live row on `host_alias` whose last-seen pane is `pane_id`.
+    /// `None` when there is none or more than one (a stale pane id after a
+    /// tmux server restart shared with a new row).
+    pub fn find_session_by_pane(
+        &self,
+        host_alias: &str,
+        pane_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions \
+             WHERE host_alias = ?1 AND tmux_pane_id = ?2 AND status != 'ghost' LIMIT 2"
+        ))?;
+        let rows: Vec<SessionRow> = stmt
+            .query_map(rusqlite::params![host_alias, pane_id], map_session_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(match rows.len() {
+            1 => rows.into_iter().next(),
+            _ => None,
+        })
+    }
+
+    /// Every row bound to `claude_session_id` (normally zero or one; two rows
+    /// sharing an id has been observed live, and the hook resolver then
+    /// refuses to guess).
+    pub fn sessions_by_claude_id(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Vec<SessionRow>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"
+        ))?;
+        let rows = stmt
+            .query_map(rusqlite::params![claude_session_id], map_session_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Replace a session's tags (migration 020). Emits `session_updated`.
@@ -1052,6 +1172,21 @@ impl Store {
         self.conn.execute(
             "UPDATE sessions SET transcript_path = ?1 WHERE claude_session_id = ?2",
             rusqlite::params![path, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// [`Self::set_transcript_path_by_claude_id`] for one row, and only while
+    /// `claude_session_id` is still its current conversation.
+    pub fn set_transcript_path_for_row(
+        &self,
+        row_id: i64,
+        claude_session_id: &str,
+        path: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE sessions SET transcript_path = ?1 WHERE id = ?2 AND claude_session_id = ?3",
+            rusqlite::params![path, row_id, claude_session_id],
         )?;
         Ok(())
     }
@@ -2289,7 +2424,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.last_playbook_at, Some(555));
-        assert_eq!(bus.take(), vec![format!("session:updated:{id}")]);
+        assert_eq!(
+            bus.take(),
+            vec![
+                format!("session:event:{id}:playbook_applied"),
+                format!("session:updated:{id}")
+            ]
+        );
         let events = s.list_session_events(id, 10).unwrap();
         assert!(events
             .iter()
