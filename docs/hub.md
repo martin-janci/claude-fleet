@@ -416,10 +416,13 @@ routed to it.
   That touches only the mode, not the token, so nothing has to be
   re-installed on the host. A refused agent is retrying with a backoff
   capped at a minute, so it reconnects by itself; restarting it only hurries
-  that along. The desktop does the same thing through
-  `set_host_token_mode`. A token that `fleet-hub agent-token` mints for a
-  host that had none is `full`, and the command warns on stderr when a
-  token is not.
+  that along. The desktop's `set_host_token_mode` command is `local_only`: it
+  changes the mode in the desktop's *own* store, not the hub's, so it only
+  does something when the desktop is running its own embedded control API
+  (standalone, or as its own agent-accepting server) — never against a hub it
+  is paired to as a client. On a hub, always use `fleet-hub host-token-mode`
+  above. A token that `fleet-hub agent-token` mints for a host that had none
+  is `full`, and the command warns on stderr when a token is not.
 
 ### Limits, and what is still open
 
@@ -816,7 +819,9 @@ only (the hook block is rewritten, not duplicated). A desktop app can still
 see that host's sessions through its own reconcile pass, but it loses the
 hook-driven signals for that host: real-time `idle`/`working` status,
 `turn_seq` updates, task completion, and `safe_kill_session` finalization —
-until the host becomes a client of the hub itself (a future sub-project).
+unless the desktop itself is paired to the hub as a client (see *Point a
+desktop at the hub* below), where it follows the hub's own event stream
+instead of reconciling independently.
 
 Run `provision_hosts` from only one of the two — the hub or the desktop —
 for a given host. Running it from both leaves the host's hook block pointed
@@ -939,15 +944,17 @@ the missing parameters, route it then.
 
 ### Known limitations
 
-- **The terminal works over SSH only.** A hub client has no in-app terminal;
-  attach from a shell with the command the terminal tab shows.
+- **The terminal.** See *The terminal is local-only* under *What is different
+  from standalone* above.
 - **Projects and worktrees are not re-listed on reconnect**, because their
   list tools answer a different shape from their events. They refresh when
   the window regains focus.
 - **Not yet run as an app.** At the time of writing this mode is verified by
-  its test suites only: the desktop has not been launched against a real hub,
-  and the macOS keychain path has not been compiled or run. Report anything
-  that does not match this page.
+  its test suites only: the desktop has not been launched against a real hub.
+  The macOS keychain path (`token_store.rs`) compiles on every macOS CI run,
+  but no test exercises it against a real keychain — only the file-backed
+  fallback used on other platforms has test coverage. Report anything that
+  does not match this page.
 
 ### Going back
 
