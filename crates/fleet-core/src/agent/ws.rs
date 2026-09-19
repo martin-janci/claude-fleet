@@ -2209,6 +2209,38 @@ mod tests {
         assert!(!hub.registry.connected("laptop"));
     }
 
+    /// The other half of the same default: a hello whose JSON carries only
+    /// the kind and an IN-RANGE `proto` — a future agent that stopped
+    /// sending the informational strings — registers, with empty values,
+    /// rather than being hung up on as undecodable. Nothing on this path
+    /// parses those strings, so empty is a sensible record, not a panic
+    /// waiting to happen.
+    #[tokio::test]
+    async fn a_hello_without_the_informational_fields_still_registers() {
+        let hub = hub().await;
+        let mut ws = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("upgrade");
+        ws.send(WsMessage::Text(
+            format!(
+                r#"{{"kind":"hello","proto":{}}}"#,
+                fleet_proto::PROTO_VERSION
+            )
+            .into(),
+        ))
+        .await
+        .unwrap();
+        wait_until("laptop is registered", || hub.registry.connected("laptop")).await;
+        let snap = hub.registry.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].agent_version, "");
+        assert_eq!(snap[0].host_name, "");
+        assert_eq!(snap[0].os, "");
+        // And the connection is a normal one: it gets its welcome.
+        match next_frame(&mut ws).await {
+            Some(HubFrame::Welcome { .. }) => {}
+            other => panic!("expected welcome, got {other:?}"),
+        }
+    }
+
     /// `write_loop`'s `biased` select is what makes `welcome` unconditionally
     /// first (see the comment where it is queued, in `serve`): a heartbeat
     /// firing the instant registration could be visible must not preempt it.

@@ -643,15 +643,24 @@ where
 /// hub's [`VERSION_REFUSED_CLOSE_CODE`]) is told apart from every other
 /// close by its CODE, never by parsing the reason text — the reason is
 /// carried through either way, for the log line.
+///
+/// The reason is hub-controlled text that `run_with` puts straight into a
+/// `tracing::error!`/`warn!`, so it is neutralised first, exactly as an
+/// unknown frame `kind` already is: a newline or an ANSI escape in it must
+/// not be able to forge a journald line.
 fn close_end(frame: Option<CloseFrame>) -> SessionEnd {
+    let reason = |f: &CloseFrame| fleet_proto::sanitize_for_log(&f.reason, CLOSE_REASON_MAX);
     match frame {
         Some(f) if u16::from(f.code) == VERSION_REFUSED_CLOSE_CODE => {
-            SessionEnd::VersionRefused(f.reason.to_string())
+            SessionEnd::VersionRefused(reason(&f))
         }
-        Some(f) if !f.reason.is_empty() => SessionEnd::Closed(f.reason.to_string()),
+        Some(f) if !f.reason.is_empty() => SessionEnd::Closed(reason(&f)),
         _ => SessionEnd::Closed("the hub closed it".into()),
     }
 }
+
+/// The most a WebSocket close frame's reason may carry, per RFC 6455.
+const CLOSE_REASON_MAX: usize = 123;
 
 /// Why the connection ends when the hub sends something other than
 /// `welcome` before ever sending one.
@@ -685,9 +694,10 @@ async fn write_loop<S>(
                 }
             }
             Out::Close(code, reason) => {
-                // A close reason is at most 123 bytes on the wire.
+                // A close reason is at most `CLOSE_REASON_MAX` bytes on the
+                // wire.
                 let mut reason = reason;
-                while reason.len() > 123 {
+                while reason.len() > CLOSE_REASON_MAX {
                     reason.pop();
                 }
                 let frame = CloseFrame {
@@ -2014,6 +2024,32 @@ mod tests {
                 assert!(reason.contains("update the hub"), "{reason}");
             }
             other => panic!("expected VersionRefused, got {other:?}"),
+        }
+    }
+
+    /// A close reason is hub-controlled text that goes straight into
+    /// `tracing::error!`/`warn!` (through `SessionEnd`'s `Display`, in
+    /// `run_with`), so it is neutralised on the way in — the same treatment
+    /// an unknown frame kind already gets. A reason carrying a newline or
+    /// an ANSI escape must not be able to forge a journald line.
+    #[test]
+    fn a_hostile_close_reason_cannot_forge_a_log_line() {
+        let hostile = "closed\nfleet-agent: fake line\x1b[31mred\x1b[0m\r";
+        for code in [
+            CloseCode::Policy,
+            CloseCode::from(VERSION_REFUSED_CLOSE_CODE),
+        ] {
+            let end = close_end(Some(CloseFrame {
+                code,
+                reason: hostile.into(),
+            }));
+            let rendered = end.to_string();
+            assert!(!rendered.contains('\n'), "{rendered:?}");
+            assert!(!rendered.contains('\r'), "{rendered:?}");
+            assert!(!rendered.contains('\x1b'), "{rendered:?}");
+            // Still readable: the neutralisation replaces, it does not drop
+            // the reason.
+            assert!(rendered.contains("fake line"), "{rendered:?}");
         }
     }
 

@@ -89,7 +89,7 @@ fn is_root() -> bool {
 }
 
 /// `libc` is a unix-only dependency (see Cargo.toml): this crate is not
-/// built for anything else yet, but a unconditional `libc::geteuid()` would
+/// built for anything else yet, but an unconditional `libc::geteuid()` would
 /// still fail to compile there, so the one call site is guarded.
 #[cfg(not(unix))]
 fn is_root() -> bool {
