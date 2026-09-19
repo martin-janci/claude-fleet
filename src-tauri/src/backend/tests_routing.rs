@@ -139,7 +139,7 @@ const HOST_PAYLOAD: &str =
 const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
 /// A complete `MoveReport`: all twelve fields are required on the wire, the
 /// last of them a whole `SessionRow` (the same one as [`SESSION_PAYLOAD`]).
-const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","tmux_name":"demo","claude_session_id":"abc","branch":"main","target_cwd":"/w/demo","transcript_bytes":1024,"source_killed":true,"warnings":[],"target":{"id":43,"tmux_name":"demo","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}}"#;
+const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","tmux_name":"demo","claude_session_id":"abc","branch":"main","target_cwd":"/w/demo","transcript_bytes":1024,"source_killed":true,"warnings":[],"carried":{"commits":2,"bundle_bytes":1234,"dirty_entries":[{"status":" M","path":"src/lib.rs"}],"ignored_carried":[{"path":".env","bytes":4096}],"ignored_left_behind":[{"path":"node_modules/","bytes":null,"reason":"denylisted"}],"target_seeded":"existing"},"target":{"id":43,"tmux_name":"demo","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}}"#;
 /// A complete `RepairReport` (`repair_session` uses `ok_json`, not the
 /// null-stripping `ok_json_compact`, so every `Option` is present as a real
 /// key — `null` included — and every non-`Option` field is required).
@@ -732,7 +732,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "move_session",
-            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false }),
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::move_session::routed::move_session(
@@ -741,6 +741,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         session_id: 7,
                         target_host_alias: "hetzner".into(),
                         keep_source: false,
+                        strict: true,
                     },
                     s,
                     h,

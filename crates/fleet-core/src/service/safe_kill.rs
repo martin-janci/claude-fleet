@@ -35,7 +35,7 @@ pub struct SafeKillSessionArgs {
 }
 
 /// A single uncommitted entry from `git status --porcelain`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirtyFile {
     /// Two-letter porcelain code (e.g. " M", "??", "AM"). Trimmed of trailing
     /// whitespace but preserves leading spaces — they encode index/worktree

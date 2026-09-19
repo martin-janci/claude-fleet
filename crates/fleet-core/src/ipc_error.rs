@@ -146,18 +146,35 @@ pub mod codes {
     /// The caller exceeded a per-caller rate limit (`broadcast_prompt`);
     /// `details.retry_after_secs` says when to retry.
     pub const E_RATE_LIMITED: &str = "E_RATE_LIMITED";
-    /// `move_session`: the source worktree has uncommitted changes
-    /// (`details.dirty_files`). A move never carries uncommitted work.
+    /// `move_session` with `strict: true` only: the source worktree has
+    /// uncommitted changes (`details.dirty_files`). Without `strict` a move
+    /// carries them instead of refusing.
     pub const E_MOVE_DIRTY: &str = "E_MOVE_DIRTY";
-    /// `move_session`: the branch is not on origin, or has commits origin
-    /// lacks. Push first; a move never pushes.
+    /// `move_session` with `strict: true` only: the branch is not on origin,
+    /// or has commits origin lacks. Without `strict` a move carries them
+    /// instead of refusing; a move never pushes either way.
     pub const E_MOVE_UNPUSHED: &str = "E_MOVE_UNPUSHED";
-    /// `move_session`: the transcript is over `move.max_transcript_mb`
-    /// (`details.bytes`, `details.cap_bytes`).
+    /// `move_session`: the transcript is over `move.max_transcript_mb`, or
+    /// the git bundle of the carried work is over `move.max_bundle_mb`
+    /// (`details.bytes`, `details.cap_bytes`; `details.payload` is
+    /// `"transcript"` or `"bundle"`).
     pub const E_MOVE_TOO_LARGE: &str = "E_MOVE_TOO_LARGE";
     /// `move_session`: a step failed after the target session was started;
     /// both sessions were left running (`details.target_session_id`).
     pub const E_MOVE_PARTIAL: &str = "E_MOVE_PARTIAL";
+    /// `move_session`: the source worktree is mid merge / rebase /
+    /// cherry-pick / revert / bisect (`details.operation`); finish or abort it.
+    pub const E_MOVE_MIDOP: &str = "E_MOVE_MIDOP";
+    /// `move_session`: the target worktree has uncommitted changes — its
+    /// own, work carried by an earlier move that did not finish, or the copy
+    /// left behind when this session was moved away from that host (a move
+    /// carries the work, it does not remove it from the source); the move
+    /// never overwrites them and the source is not touched.
+    pub const E_MOVE_TARGET_DIRTY: &str = "E_MOVE_TARGET_DIRTY";
+    /// `move_session`: carrying the work failed before the target started
+    /// (`details.step`, `details.stderr`, and `details.cause_code` when the
+    /// transport itself failed); the source is untouched.
+    pub const E_MOVE_CARRY: &str = "E_MOVE_CARRY";
     /// No Claude transcript was found for the session (it has not written a
     /// turn yet, or runs on another cwd), or it is empty.
     pub const E_NO_TRANSCRIPT: &str = "E_NO_TRANSCRIPT";

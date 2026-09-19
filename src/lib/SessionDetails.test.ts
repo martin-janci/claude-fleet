@@ -188,7 +188,12 @@ describe('SessionDetails', () => {
             source_session_id: 5, target_session_id: 6, from_host: 'mefistos', to_host: 'turanga',
             tmux_name: 'dev-foo', claude_session_id: movable.claude_session_id, branch: 'feat',
             target_cwd: '/r/.claude/worktrees/feat', transcript_bytes: 10, source_killed: true,
-            warnings: [], target,
+            warnings: [],
+            carried: {
+              commits: 0, bundle_bytes: 0, dirty_entries: [], ignored_carried: [],
+              ignored_left_behind: [], target_seeded: 'existing',
+            },
+            target,
           }
         : undefined,
     );
@@ -205,7 +210,7 @@ describe('SessionDetails', () => {
       await tick();
       expect(mockInvoke.mock.calls).toContainEqual([
         'move_session',
-        { args: { session_id: 5, target_host_alias: 'turanga', keep_source: false } },
+        { args: { session_id: 5, target_host_alias: 'turanga', keep_source: false, strict: false } },
       ]);
       const done = get(toasts).find((t) => t.kind === 'success' && t.message.includes('Moved to turanga'));
       expect(done).toBeTruthy();

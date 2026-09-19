@@ -263,9 +263,12 @@ Index by area (names only; see the reference for details):
   recreate the branch and respawn the pane; behind the desktop confirmation
   when `mcp.confirm_destructive` is on), `kill_session`, `safe_kill_session`,
   `dismiss_ghost_session`, `move_session` (continue a work session on another
-  host: clean + pushed worktree required, transcript copied, `--resume` on
-  the target, source killed once the target runs; master token only, since
-  the caller must be allowed on both hosts).
+  host: the transcript is copied and the work travels as it is — unpushed
+  commits, uncommitted files and small git-ignored ones, nothing pushed or
+  committed for you (`strict: true` restores the old clean + pushed
+  refusals) — then `--resume` on the target and the source killed once the
+  target runs; master token only, since the caller must be allowed on both
+  hosts).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
   `repo_commit_diff`.

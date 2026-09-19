@@ -8,19 +8,33 @@
 //!    is a `work` row with a `claude_session_id`, a worktree branch and an
 //!    idle Claude (freshly reconciled; a turn in progress or an unknown
 //!    status is refused); both hosts are reachable, the target is
-//!    provisioned; the source worktree is clean (`E_MOVE_DIRTY`) and its
-//!    branch is on origin with nothing unpushed (`E_MOVE_UNPUSHED`). Nothing
-//!    is ever pushed or stashed on the user's behalf.
+//!    provisioned; the source worktree is on the session's branch with a
+//!    readable HEAD and no operation in progress (`E_MOVE_MIDOP`).
+//!    Uncommitted and unpushed work is carried, not refused (see step 3);
+//!    with `strict: true` it is refused as before (`E_MOVE_DIRTY`,
+//!    `E_MOVE_UNPUSHED`). Nothing is ever pushed, committed or stashed on
+//!    the user's behalf, and the source worktree is never modified.
 //! 2. **Transcript** — the source JSONL is located (stored hook path, else
 //!    `~/.claude/projects/*/<id>.jsonl`), size-checked against
 //!    `move.max_transcript_mb` (`E_MOVE_TOO_LARGE`), read over ssh and
 //!    written to the target's `~/.claude/projects/<encoded target cwd>/<id>.jsonl`
 //!    through `SshExec::upload_file` stdin.
-//! 3. **Target** — the worktree is created (or repaired, create-only) with
+//! 3. **Target** — the target's main clone is seeded (present, cloned, or
+//!    `git init` when origin is unreachable), the source worktree is
+//!    snapshotted into private `refs/fleet/transfer/<id>/*` and bundled
+//!    against what the target already has (`move.max_bundle_mb`), the bundle
+//!    is relayed through this process in chunks and fetched there. The
+//!    worktree is then created (or repaired, create-only) with
 //!    `repair::ensure_for_new_session` from the same branch, fast-forwarded to
-//!    the source HEAD when it lags, and tmux starts `cl --resume <id>` there
-//!    (the recreate pane command). The move then waits, bounded, for the row
-//!    to be `running` and the transcript to be in place.
+//!    the source HEAD when it lags; the snapshot is replayed into it and
+//!    verified (its porcelain must equal the source's — `E_MOVE_CARRY`; a
+//!    target worktree that already has uncommitted changes — its own, or an
+//!    unfinished earlier attempt's — is `E_MOVE_TARGET_DIRTY`), and
+//!    the small git-ignored files are carried over (never a failure, only a
+//!    warning). Then tmux starts `cl --resume <id>` there (the recreate pane
+//!    command). The move waits, bounded, for the row to be `running` and the
+//!    transcript to be in place. The carry itself lives in [`carry`]; see
+//!    `docs/adr/0002-move-carries-work-as-is.md`.
 //! 4. **Source** — only once the target is confirmed (the new row's
 //!    `parent_session_id` is the source): unless `keep_source`, and only if
 //!    the source transcript still has the size and mtime the copy was taken
@@ -29,15 +43,21 @@
 //!    then — a `session_moved` event on both rows. A partial move records
 //!    `session_move_partial` (with the failing step) instead.
 //!
-//! Failure handling: every step before the target tmux session starts leaves
-//! the source untouched and returns the step's own error. Any failure after
-//! the target session exists returns `E_MOVE_PARTIAL` (with the new session
-//! id in `details`) and leaves BOTH sessions alive.
+//! Failure handling: every step before the target tmux session starts —
+//! every carry step included — leaves the source untouched and returns the
+//! step's own error (`E_MOVE_MIDOP`, `E_MOVE_CARRY` with `details.step`,
+//! `E_MOVE_TARGET_DIRTY`, `E_MOVE_TOO_LARGE` with `details.payload`). Any
+//! failure after the target session exists returns `E_MOVE_PARTIAL` (with
+//! the new session id in `details`) and leaves BOTH sessions alive. Once the
+//! carry has begun, the private refs and transfer directories on both hosts
+//! are cleaned up on every exit path; a failed cleanup is only logged.
 //!
 //! The lifecycle steps that need the real `SshClient` (workspace repair,
 //! tmux start, reconcile, kill) sit behind [`MoveHooks`]; every data-plane
 //! step (git inspection, transcript copy, target verification) goes through
 //! `&dyn SshExec`, so the whole flow runs end-to-end over `FakeSsh` in tests.
+
+pub mod carry;
 
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
@@ -65,6 +85,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(40);
 /// Connect timeout for the transcript read (wall clock 3× — 6 min — enough
 /// for the 200 MiB default cap over a slow link).
 const COPY_TIMEOUT: Duration = Duration::from_secs(120);
+/// Wall clock for the seed (a clone) and the snapshot + bundle scripts.
+const CARRY_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Longest encoded project directory Claude Code uses verbatim; longer names
 /// are truncated with a hash suffix we cannot reproduce, so `--resume` would
@@ -83,6 +105,10 @@ pub struct MoveSessionArgs {
     /// Leave the source session running after the target is confirmed.
     #[serde(default)]
     pub keep_source: bool,
+    /// Refuse a dirty worktree (`E_MOVE_DIRTY`) or an unpushed branch
+    /// (`E_MOVE_UNPUSHED`) instead of carrying them. Default false.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// What a completed move did.
@@ -103,6 +129,8 @@ pub struct MoveReport {
     pub transcript_bytes: u64,
     pub source_killed: bool,
     pub warnings: Vec<String>,
+    /// What travelled besides the transcript.
+    pub carried: carry::CarryReport,
     pub target: SessionRow,
 }
 
@@ -316,12 +344,15 @@ pub struct SourceState {
     pub remote_sha: Option<String>,
     /// Commits in HEAD not on the origin branch; -1 when unknown.
     pub ahead: i64,
+    /// An operation in progress (`merge`, `rebase`, `cherry-pick`, `revert`,
+    /// `bisect`); its state is not carried, so the move is refused.
+    pub midop: Option<String>,
 }
 
 /// Parse the inspect script's `\x1e`-separated output.
 pub fn parse_inspection(stdout: &str) -> Result<SourceState, IpcError> {
     let parts: Vec<&str> = stdout.split('\x1e').collect();
-    if parts.len() != 6 {
+    if parts.len() != 7 {
         return Err(IpcError::new(
             codes::E_PARSE,
             format!(
@@ -338,11 +369,48 @@ pub fn parse_inspection(stdout: &str) -> Result<SourceState, IpcError> {
         current_branch: parts[3].trim().to_string(),
         remote_sha: (!remote.is_empty()).then(|| remote.to_string()),
         ahead: parts[5].trim().parse().unwrap_or(-1),
+        midop: Some(parts[6].trim())
+            .filter(|m| !m.is_empty())
+            .map(str::to_string),
     })
 }
 
-/// Refuse a source that would lose work or land on the wrong code.
+/// The refusals that hold in every mode: an operation in progress, an
+/// unreadable HEAD, a worktree on another branch. Dirty and unpushed work is
+/// not refused here — the carry engine takes it along.
+pub fn carry_verdict(state: &SourceState, branch: &str) -> Result<(), IpcError> {
+    if let Some(op) = state.midop.as_deref() {
+        return Err(IpcError::new(
+            codes::E_MOVE_MIDOP,
+            format!(
+                "the source worktree {} is in the middle of a {op}; finish or abort it first — move_session does not carry an operation in progress",
+                state.worktree
+            ),
+        )
+        .with_details(serde_json::json!({ "operation": op })));
+    }
+    if state.head.is_empty() {
+        return Err(IpcError::new(
+            codes::E_GIT,
+            format!("could not read HEAD in {}", state.worktree),
+        ));
+    }
+    if state.current_branch != branch {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "the source worktree is on {:?} but the session's branch is {branch:?}; check out {branch} first",
+                state.current_branch
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The strict-mode verdict: [`carry_verdict`] plus today's refusals of
+/// uncommitted and unpushed work.
 pub fn preflight_verdict(state: &SourceState, branch: &str) -> Result<(), IpcError> {
+    carry_verdict(state, branch)?;
     if !state.dirty.is_empty() {
         let shown: Vec<String> = state
             .dirty
@@ -361,21 +429,6 @@ pub fn preflight_verdict(state: &SourceState, branch: &str) -> Result<(), IpcErr
             ),
         )
         .with_details(serde_json::json!({ "dirty_files": state.dirty })));
-    }
-    if state.head.is_empty() {
-        return Err(IpcError::new(
-            codes::E_GIT,
-            format!("could not read HEAD in {}", state.worktree),
-        ));
-    }
-    if state.current_branch != branch {
-        return Err(IpcError::new(
-            codes::E_INVALID_STATE,
-            format!(
-                "the source worktree is on {:?} but the session's branch is {branch:?}; check out {branch} first",
-                state.current_branch
-            ),
-        ));
     }
     if state.remote_sha.is_none() {
         return Err(IpcError::new(
@@ -454,8 +507,11 @@ pub fn parse_target_prep(stdout: &str, claude_id: &str) -> Result<TargetPrep, Ip
 // ── scripts (every interpolated value goes through `shell::quote`) ─────────
 
 /// Source git state, `\x1e`-separated: worktree, porcelain, HEAD, current
-/// branch, origin sha of `branch`, ahead count. Tries the pane's cwd first,
-/// then `hint`.
+/// branch, origin sha of `branch`, ahead count, mid-op name (or empty). Tries
+/// the pane's cwd first, then `hint`. The porcelain goes through
+/// [`carry::STATUS_PORCELAIN`]: it is compared with the target's after the
+/// replay, so a difference between the two hosts' git configs must not be
+/// able to fail a good move.
 pub fn inspect_script(tmux_name: &str, hint: Option<&str>, branch: &str) -> String {
     format!(
         r#"# cf-move:inspect
@@ -472,7 +528,7 @@ if [ -z "$wt" ] && [ -n "$hint" ] && git -C "$hint" rev-parse --git-dir >/dev/nu
 if [ -z "$wt" ]; then printf '{NO_WORKTREE}\n' >&2; exit 3; fi
 top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)
 if [ -n "$top" ]; then wt="$top"; fi
-porcelain=$(git -C "$wt" status --porcelain=v1 2>/dev/null)
+porcelain=$(git -C "$wt" {status} 2>/dev/null)
 head=$(git -C "$wt" rev-parse HEAD 2>/dev/null)
 cur=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
 rsha=$(git -C "$wt" ls-remote --heads origin "refs/heads/$br" 2>/dev/null | cut -f1 | head -n1)
@@ -482,11 +538,22 @@ if [ -n "$rsha" ]; then
   ahead=$(git -C "$wt" rev-list --count "$rsha..HEAD" 2>/dev/null)
   if [ -z "$ahead" ]; then ahead=-1; fi
 fi
-printf '%s\036%s\036%s\036%s\036%s\036%s' "$wt" "$porcelain" "$head" "$cur" "$rsha" "$ahead"
+gd=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)
+midop=''
+if [ -n "$gd" ]; then
+  if [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ]; then midop=rebase
+  elif [ -f "$gd/MERGE_HEAD" ]; then midop=merge
+  elif [ -f "$gd/CHERRY_PICK_HEAD" ]; then midop=cherry-pick
+  elif [ -f "$gd/REVERT_HEAD" ]; then midop=revert
+  elif [ -f "$gd/BISECT_LOG" ]; then midop=bisect
+  fi
+fi
+printf '%s\036%s\036%s\036%s\036%s\036%s\036%s' "$wt" "$porcelain" "$head" "$cur" "$rsha" "$ahead" "$midop"
 "#,
         name = quote(tmux_name),
         hint = quote(hint.unwrap_or("")),
         br = quote(branch),
+        status = carry::STATUS_PORCELAIN,
     )
 }
 
@@ -625,7 +692,11 @@ exit 0
 /// In the target worktree: fast-forward to the source HEAD when behind
 /// (refuse a divergence), then resolve the physical cwd, create the Claude
 /// project dir and print `<head>\t<encoded dir>\t<transcript path>\t<existing
-/// size or -1>`.
+/// size or -1>`. A target that is merely BEHIND but has uncommitted changes
+/// is not diverged — most often it is the copy this session left behind when
+/// it moved away from that host — so it gets the apply's own
+/// [`carry::TARGET_DIRTY`] sentinel and its truthful message, not
+/// "reconcile the branch".
 pub fn target_prep_script(cwd: &str, want_head: &str, branch: &str, claude_id: &str) -> String {
     format!(
         r#"# cf-move:prep
@@ -639,7 +710,8 @@ git fetch -q origin "+refs/heads/$br:refs/remotes/origin/$br" >/dev/null 2>&1
 h=$(git rev-parse HEAD 2>/dev/null)
 if [ "$h" != "$want" ]; then
   if git merge-base --is-ancestor "$want" HEAD 2>/dev/null; then :
-  elif git merge-base --is-ancestor HEAD "$want" 2>/dev/null && [ -z "$(git status --porcelain)" ]; then
+  elif git merge-base --is-ancestor HEAD "$want" 2>/dev/null; then
+    if [ -n "$(git {status} 2>/dev/null)" ]; then printf '{TARGET_DIRTY}\n' >&2; exit 9; fi
     git merge -q --ff-only "$want" >/dev/null 2>&1 || {{ printf '{DIVERGED} %s\n' "$h" >&2; exit 6; }}
   else
     printf '{DIVERGED} %s\n' "$h" >&2; exit 6
@@ -658,6 +730,8 @@ printf '%s\t%s\t%s\t%s\n' "$h" "$enc" "$f" "$n"
         want = quote(want_head),
         br = quote(branch),
         id = quote(claude_id),
+        status = carry::STATUS_PORCELAIN,
+        TARGET_DIRTY = carry::TARGET_DIRTY,
     )
 }
 
@@ -681,6 +755,15 @@ async fn sh(
     crate::ssh::run_shell(ssh, host, script, timeout).await
 }
 
+/// Run a carry script with the long wall clock.
+async fn sh_long(
+    ssh: &dyn SshExec,
+    host: &str,
+    script: &str,
+) -> Result<std::process::Output, IpcError> {
+    crate::ssh::run_shell_bounded(ssh, host, script, GIT_TIMEOUT, CARRY_TIMEOUT).await
+}
+
 fn stderr_of(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).trim().to_string()
 }
@@ -694,8 +777,9 @@ fn stderr_of(out: &std::process::Output) -> String {
 struct TempFile(std::path::PathBuf);
 
 impl TempFile {
-    fn write(bytes: &[u8]) -> Result<Self, IpcError> {
-        use std::io::Write;
+    /// An empty private file plus its open handle, for a payload written in
+    /// pieces (see [`download`]).
+    fn create(ext: &str) -> Result<(Self, std::fs::File), IpcError> {
         use std::os::unix::fs::OpenOptionsExt;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -705,15 +789,20 @@ impl TempFile {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "claude-fleet-move-{}-{seq}-{nanos}.jsonl",
+            "claude-fleet-move-{}-{seq}-{nanos}.{ext}",
             std::process::id()
         ));
-        let mut f = std::fs::OpenOptions::new()
+        let f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&path)?;
-        let guard = TempFile(path);
+        Ok((TempFile(path), f))
+    }
+
+    fn write(bytes: &[u8]) -> Result<Self, IpcError> {
+        use std::io::Write;
+        let (guard, mut f) = Self::create("jsonl")?;
         f.write_all(bytes)?;
         f.sync_all()?;
         Ok(guard)
@@ -778,6 +867,189 @@ async fn put(ssh: &dyn SshExec, host: &str, path: &str, bytes: &[u8]) -> Result<
     ssh.upload_file(host, &tmp.0, path, COPY_TIMEOUT).await
 }
 
+/// Pull `bytes` of `remote_path` on `host` into a private temp file, one
+/// [`carry::CHUNK_BYTES`] at a time, so a payload is never held in memory.
+/// Each chunk is read through [`carry::payload`]: a login-shell banner on
+/// stdout is not part of the file.
+async fn download(
+    ssh: &dyn SshExec,
+    host: &str,
+    remote_path: &str,
+    bytes: u64,
+    ext: &str,
+) -> Result<TempFile, IpcError> {
+    download_chunked(ssh, host, remote_path, bytes, ext, carry::CHUNK_BYTES).await
+}
+
+/// [`download`] with the chunk size as a parameter, so the loop itself can be
+/// tested against a payload that does not have to be megabytes long.
+async fn download_chunked(
+    ssh: &dyn SshExec,
+    host: &str,
+    remote_path: &str,
+    bytes: u64,
+    ext: &str,
+    chunk_bytes: u64,
+) -> Result<TempFile, IpcError> {
+    use std::io::Write;
+    let (guard, mut f) = TempFile::create(ext)?;
+    let mut got = 0u64;
+    while got < bytes {
+        let want = chunk_bytes.min(bytes - got);
+        let out = sh(
+            ssh,
+            host,
+            &carry::chunk_script(remote_path, got, want),
+            COPY_TIMEOUT,
+        )
+        .await?;
+        let chunk = carry::payload(&out.stdout).unwrap_or_default();
+        if !out.status.success() || chunk.is_empty() {
+            return Err(carry_err(
+                "download",
+                &format!("reading {remote_path} on {host} stopped at {got} of {bytes} bytes"),
+                &stderr_of(&out),
+            ));
+        }
+        f.write_all(chunk)?;
+        got += chunk.len() as u64;
+    }
+    f.sync_all()?;
+    if got != bytes {
+        return Err(carry_err(
+            "download",
+            &format!("{remote_path} on {host} gave {got} bytes, expected {bytes}"),
+            "",
+        ));
+    }
+    Ok(guard)
+}
+
+/// Put a local file at `path` on `host` (a plain copy when `host` is local).
+async fn put_file(
+    ssh: &dyn SshExec,
+    host: &str,
+    local: &std::path::Path,
+    path: &str,
+) -> Result<(), IpcError> {
+    if host == LOCAL {
+        crate::service::hub::ensure_local_allowed(host)?;
+        return tokio::fs::copy(local, path)
+            .await
+            .map(|_| ())
+            .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("write {path}: {e}")));
+    }
+    ssh.upload_file(host, local, path, COPY_TIMEOUT).await
+}
+
+/// What the end-of-move cleanup must undo; filled in as the carry progresses.
+#[derive(Default)]
+struct CarryCleanup {
+    id: String,
+    /// (host, source worktree)
+    source: Option<(String, String)>,
+    /// (host, target project root)
+    target: Option<(String, String)>,
+}
+
+impl CarryCleanup {
+    /// Best effort on both hosts: a failure here never changes the move's
+    /// result.
+    async fn run(&self, ssh: &dyn SshExec) {
+        for (host, dir) in self.source.iter().chain(self.target.iter()) {
+            if let Err(e) = sh(
+                ssh,
+                host,
+                &carry::cleanup_script(dir, &self.id),
+                GIT_TIMEOUT,
+            )
+            .await
+            {
+                tracing::warn!(host = %host, error = %e.message, "[move_session] carry cleanup failed");
+            }
+        }
+    }
+}
+
+type Ignored = (Vec<carry::IgnoredEntry>, Vec<carry::LeftBehind>);
+
+/// List, select, pack, relay and extract the small git-ignored files. `Err`
+/// carries what was left behind plus the reason, for a report warning.
+#[allow(clippy::too_many_arguments)]
+async fn carry_ignored(
+    ssh: &dyn SshExec,
+    src: &str,
+    target: &str,
+    worktree: &str,
+    cwd: &str,
+    target_dir: &str,
+    id: &str,
+    snap: &Snapshot,
+) -> Result<Ignored, (Vec<carry::LeftBehind>, String)> {
+    let fail = |left: &[carry::LeftBehind], why: String| (left.to_vec(), why);
+    let out = sh(
+        ssh,
+        src,
+        &carry::ignored_list_script(worktree),
+        COPY_TIMEOUT,
+    )
+    .await
+    .map_err(|e| fail(&[], e.message))?;
+    if !out.status.success() {
+        return Err(fail(
+            &[],
+            format!("listing on {src} failed: {}", stderr_of(&out)),
+        ));
+    }
+    let sel = carry::select_ignored(
+        carry::parse_ignored_list(&out.stdout),
+        snap.ignored_entry_kb,
+        snap.ignored_total_kb,
+    );
+    if sel.carry.is_empty() {
+        return Ok((Vec::new(), sel.left));
+    }
+    let paths: Vec<String> = sel.carry.iter().map(|e| e.path.clone()).collect();
+    let out = sh(
+        ssh,
+        src,
+        &carry::ignored_pack_script(worktree, id, &paths),
+        COPY_TIMEOUT,
+    )
+    .await
+    .map_err(|e| fail(&sel.left, e.message))?;
+    if !out.status.success() {
+        return Err(fail(
+            &sel.left,
+            format!("packing on {src} failed: {}", stderr_of(&out)),
+        ));
+    }
+    let (bytes, archive) = carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|e| fail(&sel.left, e.message))?;
+    let local = download(ssh, src, &archive, bytes, "tgz")
+        .await
+        .map_err(|e| fail(&sel.left, e.message))?;
+    let target_archive = format!("{target_dir}/ignored.tgz");
+    put_file(ssh, target, &local.0, &target_archive)
+        .await
+        .map_err(|e| fail(&sel.left, e.message))?;
+    let out = sh(
+        ssh,
+        target,
+        &carry::ignored_extract_script(cwd, &target_archive),
+        COPY_TIMEOUT,
+    )
+    .await
+    .map_err(|e| fail(&sel.left, e.message))?;
+    if !out.status.success() {
+        return Err(fail(
+            &sel.left,
+            format!("extracting on {target} failed: {}", stderr_of(&out)),
+        ));
+    }
+    Ok((sel.carry, sel.left))
+}
+
 // ── the move ────────────────────────────────────────────────────────────────
 
 /// Everything the move reads from the store, taken under one lock.
@@ -794,6 +1066,9 @@ struct Snapshot {
     project_base: Option<String>,
     stored_transcript: Option<String>,
     cap: u64,
+    bundle_cap: u64,
+    ignored_entry_kb: u64,
+    ignored_total_kb: u64,
     target_projects_root: String,
     layout: crate::projects::Layout,
     target_taken: Vec<String>,
@@ -899,6 +1174,24 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         s,
         SETTING_MAX_TRANSCRIPT_MB,
     )));
+    let setting = |key: &str, default: u64| {
+        crate::service::settings::get_string(s, key)
+            .parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(default)
+    };
+    let bundle_cap = setting(carry::SETTING_MAX_BUNDLE_MB, carry::DEFAULT_MAX_BUNDLE_MB)
+        .saturating_mul(1024 * 1024);
+    let ignored_entry_kb = setting(
+        carry::SETTING_IGNORED_ENTRY_KB,
+        carry::DEFAULT_IGNORED_ENTRY_KB,
+    );
+    let ignored_total_kb = setting(
+        carry::SETTING_IGNORED_TOTAL_MB,
+        carry::DEFAULT_IGNORED_TOTAL_MB,
+    )
+    .saturating_mul(1024);
     let target_taken = s
         .list_sessions_for_host(target)?
         .into_iter()
@@ -916,6 +1209,9 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         project_base: s.project_base_path(project_id)?,
         stored_transcript,
         cap,
+        bundle_cap,
+        ignored_entry_kb,
+        ignored_total_kb,
         target_projects_root: crate::service::projects::project_base_for(s, target),
         layout: crate::service::projects::layout(s),
         target_taken,
@@ -932,7 +1228,68 @@ fn too_large(bytes: u64, cap: u64) -> IpcError {
             cap / (1024 * 1024)
         ),
     )
-    .with_details(serde_json::json!({ "bytes": bytes, "cap_bytes": cap }))
+    .with_details(
+        serde_json::json!({ "bytes": bytes, "cap_bytes": cap, "payload": "transcript" }),
+    )
+}
+
+fn bundle_too_large(bytes: u64, cap: u64) -> IpcError {
+    IpcError::new(
+        codes::E_MOVE_TOO_LARGE,
+        format!(
+            "the git bundle is {bytes} bytes, over the {} MiB cap ({}); push the branch first or raise the setting",
+            cap / (1024 * 1024),
+            carry::SETTING_MAX_BUNDLE_MB
+        ),
+    )
+    .with_details(serde_json::json!({ "bytes": bytes, "cap_bytes": cap, "payload": "bundle" }))
+}
+
+/// The target worktree holds uncommitted changes. Raised from two places —
+/// the prep step (behind the source HEAD and dirty) and the apply — with
+/// one message, because from the user's side it is one situation. The third
+/// case is the common one after this branch: a move leaves its work in the
+/// source worktree, so moving the session BACK finds that copy waiting.
+fn target_dirty(cwd: &str, target: &str) -> IpcError {
+    IpcError::new(
+        codes::E_MOVE_TARGET_DIRTY,
+        format!(
+            "move_session: the target worktree {cwd} on {target} has uncommitted changes — its own, work carried by an earlier move attempt that did not finish, or the copy left behind when this session was moved away from this host; the move never overwrites them, so inspect them there and commit or discard them before retrying (the source session was not touched)"
+        ),
+    )
+}
+
+/// A carry step failed before the target started.
+fn carry_err(step: &str, what: &str, stderr: &str) -> IpcError {
+    carry_err_cause(step, what, stderr, None)
+}
+
+/// [`carry_err`] keeping the code of an underlying failure in
+/// `details.cause_code`.
+fn carry_err_cause(step: &str, what: &str, stderr: &str, cause: Option<&str>) -> IpcError {
+    IpcError::new(
+        codes::E_MOVE_CARRY,
+        format!(
+            "move_session: carrying the work failed at {step}: {what} (the source session was not touched)"
+        ),
+    )
+    .with_details(
+        serde_json::json!({ "step": step, "stderr": stderr, "cause_code": cause }),
+    )
+}
+
+/// The transport itself failed on a carry step (`E_SSH`, `E_SSH_TIMEOUT`).
+/// That is still a carry failure — the caller needs `details.step` and the
+/// promise that the source is untouched — so the original code travels in
+/// the message and in `details.cause_code`, where a timeout stays tellable
+/// from a parse failure.
+fn carry_transport(step: &str, e: IpcError) -> IpcError {
+    carry_err_cause(
+        step,
+        &format!("{}: {}", e.code, e.message),
+        "",
+        Some(&e.code),
+    )
 }
 
 fn partial(step: &str, target: &str, name: &str, target_id: Option<i64>, e: &IpcError) -> IpcError {
@@ -1042,13 +1399,29 @@ pub async fn move_session_with(
         })
 }
 
-/// The move's steps (see the module docs).
+/// The move's steps, with the carry cleanup always run afterwards — on
+/// success and on every failure path once the carry began.
 async fn move_session_steps(
     args: MoveSessionArgs,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     hooks: &dyn MoveHooks,
     opts: MoveOptions,
+) -> Result<MoveReport, IpcError> {
+    let mut cleanup = CarryCleanup::default();
+    let result = move_session_inner(args, store, ssh, hooks, opts, &mut cleanup).await;
+    cleanup.run(ssh).await;
+    result
+}
+
+/// The move's steps (see the module docs).
+async fn move_session_inner(
+    args: MoveSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    hooks: &dyn MoveHooks,
+    opts: MoveOptions,
+    cleanup: &mut CarryCleanup,
 ) -> Result<MoveReport, IpcError> {
     crate::validate::host_alias(&args.target_host_alias)?;
     let _claim = MoveClaim::acquire(store, args.session_id)?;
@@ -1075,7 +1448,8 @@ async fn move_session_steps(
     };
     require_source_idle(status.as_deref())?;
 
-    // 1. Source git state: clean, on its branch, fully pushed.
+    // 1. Source git state: on its branch, nothing in progress — and what the
+    //    carry has to take along (strict: today's clean + pushed refusals).
     let hint = hooks.source_cwd_hint(store, &snap.row).await;
     let out = sh(
         ssh,
@@ -1096,7 +1470,15 @@ async fn move_session_steps(
         return Err(IpcError::new(codes::E_GIT, msg));
     }
     let state = parse_inspection(&String::from_utf8_lossy(&out.stdout))?;
-    preflight_verdict(&state, &snap.branch)?;
+    if args.strict {
+        preflight_verdict(&state, &snap.branch)?;
+    } else {
+        carry_verdict(&state, &snap.branch)?;
+    }
+    let mut carried = carry::CarryReport {
+        dirty_entries: state.dirty.clone(),
+        ..Default::default()
+    };
 
     // 2. Transcript: locate, cap, read (whole lines only).
     let out = sh(
@@ -1176,6 +1558,28 @@ async fn move_session_steps(
             Some(&snap.worktree_name),
         )
     };
+    // 3a. Seed: the target needs a main clone before anything can be fetched
+    //     into it. Never prompts; falls back to `git init` without origin.
+    let clone_url = crate::repo_url::clone_url_for(&snap.owner, &snap.repo);
+    let out = sh_long(ssh, &target, &carry::seed_script(&project_root, &clone_url))
+        .await
+        .map_err(|e| carry_transport("seed", e))?;
+    if !out.status.success() {
+        return Err(carry_err(
+            "seed",
+            &format!("preparing the clone at {project_root} on {target}"),
+            &stderr_of(&out),
+        ));
+    }
+    carried.target_seeded =
+        carry::parse_seed(&String::from_utf8_lossy(&out.stdout)).map_err(|e| {
+            carry_err(
+                "seed",
+                &format!("reading the seed output from {target}: {}", e.message),
+                "",
+            )
+        })?;
+
     // Best effort: a failed fetch surfaces as the workspace step's error.
     let _ = sh(
         ssh,
@@ -1184,6 +1588,110 @@ async fn move_session_steps(
         GIT_TIMEOUT,
     )
     .await;
+
+    // 3b. Carry the git state: snapshot + thin bundle on the source, relayed
+    //     through this process, fetched into the target's main clone.
+    //     `haves_script` creates the target's transfer dir, so the cleanup
+    //     must already know about it when the call goes out: a transport
+    //     failure after the remote `mkdir` would otherwise strand it.
+    cleanup.id = id.clone();
+    cleanup.target = Some((target.clone(), project_root.clone()));
+    let out = sh(
+        ssh,
+        &target,
+        &carry::haves_script(&project_root, &id, &snap.branch),
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|e| carry_transport("haves", e))?;
+    if !out.status.success() {
+        return Err(carry_err(
+            "haves",
+            &format!("listing refs in {project_root} on {target}"),
+            &stderr_of(&out),
+        ));
+    }
+    let (target_dir, haves) =
+        carry::parse_haves(&String::from_utf8_lossy(&out.stdout)).map_err(|e| {
+            carry_err(
+                "haves",
+                &format!("reading the ref listing from {target}: {}", e.message),
+                "",
+            )
+        })?;
+    // The snapshot is the first write on the source.
+    cleanup.source = Some((src.clone(), state.worktree.clone()));
+
+    let out = sh_long(
+        ssh,
+        &src,
+        &carry::snapshot_script(&state.worktree, &id, &haves, snap.bundle_cap),
+    )
+    .await
+    .map_err(|e| carry_transport("snapshot", e))?;
+    if !out.status.success() {
+        let err = stderr_of(&out);
+        if let Some(rest) = err.split(carry::BUNDLE_TOO_LARGE).nth(1) {
+            let bytes = rest
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            return Err(bundle_too_large(bytes, snap.bundle_cap));
+        }
+        return Err(carry_err(
+            "snapshot",
+            &format!("snapshotting {} on {src}", state.worktree),
+            &err,
+        ));
+    }
+    let bundle = carry::parse_snapshot(&String::from_utf8_lossy(&out.stdout)).map_err(|e| {
+        carry_err(
+            "snapshot",
+            &format!("reading the snapshot output from {src}: {}", e.message),
+            "",
+        )
+    })?;
+    // The source script enforces the cap too; this is the orchestrator not
+    // taking a host's word for the size of what it is about to relay.
+    if bundle.bytes > snap.bundle_cap {
+        return Err(bundle_too_large(bundle.bytes, snap.bundle_cap));
+    }
+    carried.commits = bundle.commits;
+    carried.bundle_bytes = bundle.bytes;
+    if bundle.submodules {
+        warnings.push("the repository has submodules; their contents were not carried".into());
+    }
+    if bundle.lfs {
+        warnings.push("the repository uses Git LFS; LFS objects were not carried".into());
+    }
+    let target_bundle = format!("{target_dir}/carry.bundle");
+    {
+        let local = download(ssh, &src, &bundle.path, bundle.bytes, "bundle").await?;
+        put_file(ssh, &target, &local.0, &target_bundle)
+            .await
+            .map_err(|e| {
+                carry_err(
+                    "upload",
+                    &format!("writing {target_bundle} on {target}: {}", e.message),
+                    "",
+                )
+            })?;
+    }
+    let out = sh_long(
+        ssh,
+        &target,
+        &carry::fetch_script(&project_root, &target_bundle, &id, &snap.branch),
+    )
+    .await
+    .map_err(|e| carry_transport("fetch", e))?;
+    if !out.status.success() {
+        return Err(carry_err(
+            "fetch",
+            &format!("fetching the bundle into {project_root} on {target}"),
+            &stderr_of(&out),
+        ));
+    }
 
     let tmux_name = pick_target_name(&snap.row.tmux_name, &snap.target_taken)?;
     crate::validate::tmux_name(&tmux_name)?;
@@ -1213,6 +1721,11 @@ async fn move_session_steps(
     .map_err(|e| before_target("verifying the target worktree", e))?;
     if !out.status.success() {
         let err = stderr_of(&out);
+        // Behind the source HEAD and dirty: the target's own uncommitted
+        // work, not a divergence.
+        if err.contains(carry::TARGET_DIRTY) {
+            return Err(target_dirty(&cwd, &target));
+        }
         let msg = if err.contains(DIVERGED) {
             format!(
                 "the target worktree {cwd} on {target} has diverged from the source HEAD {}; reconcile the branch there first",
@@ -1254,6 +1767,109 @@ async fn move_session_steps(
             prep.existing, prep.path
         ));
     }
+    // 3c. Replay the uncommitted work and check the claim: the target's
+    //     porcelain must equal the source's.
+    if prep.head != state.head {
+        // Today's "newer on origin" case. A clean source has nothing to
+        // replay; a dirty one cannot be replayed onto another base.
+        if !state.dirty.is_empty() {
+            return Err(carry_err(
+                "apply",
+                &format!(
+                    "the target worktree is at {} while the source is at {}; uncommitted work cannot be replayed onto a different commit",
+                    prep.head, state.head
+                ),
+                "",
+            ));
+        }
+    } else {
+        let out = sh(
+            ssh,
+            &target,
+            &carry::apply_script(&cwd, &id, &state.head),
+            GIT_TIMEOUT,
+        )
+        .await
+        .map_err(|e| carry_transport("apply", e))?;
+        if !out.status.success() {
+            let err = stderr_of(&out);
+            if err.contains(carry::TARGET_DIRTY) {
+                return Err(target_dirty(&cwd, &target));
+            }
+            return Err(carry_err(
+                "apply",
+                &format!("replaying the work in {cwd} on {target}"),
+                &err,
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let porcelain = carry::parse_apply(&stdout).map_err(|e| {
+            carry_err(
+                "apply",
+                &format!(
+                    "reading the replayed state of {cwd} on {target}: {}",
+                    e.message
+                ),
+                "",
+            )
+        })?;
+        // `" M"` (unstaged) and `"M "` (staged) differ only in the two status
+        // columns, so they are compared verbatim.
+        let line_set = |files: &[DirtyFile]| -> std::collections::BTreeSet<String> {
+            files
+                .iter()
+                .map(|d| format!("{}\t{}", d.status, d.path))
+                .collect()
+        };
+        let (want, got) = (
+            line_set(&state.dirty),
+            line_set(&parse_porcelain(porcelain)),
+        );
+        if want != got {
+            return Err(IpcError::new(
+                codes::E_MOVE_CARRY,
+                format!(
+                    "move_session: after replaying the work, {cwd} on {target} does not match the source (the source session was not touched)"
+                ),
+            )
+            .with_details(serde_json::json!({ "step": "verify", "source": want, "target": got })));
+        }
+    }
+    if !state.dirty.is_empty() {
+        warnings.push(format!(
+            "the source worktree {} on {src} still holds a copy of the uncommitted work",
+            state.worktree
+        ));
+    }
+    if carried.target_seeded == carry::TargetSeed::Initialized {
+        warnings.push(format!(
+            "origin was unreachable from {target}; the clone was initialised from the bundle and cannot fetch or push until origin is reachable"
+        ));
+    }
+
+    // 3d. Small git-ignored files. Never fails the move.
+    match carry_ignored(
+        ssh,
+        &src,
+        &target,
+        &state.worktree,
+        &cwd,
+        &target_dir,
+        &id,
+        &snap,
+    )
+    .await
+    {
+        Ok((kept, left)) => {
+            carried.ignored_carried = kept;
+            carried.ignored_left_behind = left;
+        }
+        Err((left, why)) => {
+            carried.ignored_left_behind = left;
+            warnings.push(format!("ignored files were not carried: {why}"));
+        }
+    }
+
     put(ssh, &target, &prep.path, &bytes)
         .await
         .map_err(|e| before_target("copying the transcript", e))?;
@@ -1485,6 +2101,7 @@ async fn move_session_steps(
         "bytes": copied,
         "kept_source": args.keep_source,
         "source_killed": source_killed,
+        "carried": &carried,
     })
     .to_string();
     if let Ok(s) = store.lock() {
@@ -1512,6 +2129,7 @@ async fn move_session_steps(
         transcript_bytes: copied,
         source_killed,
         warnings,
+        carried,
         target: target_row,
     })
 }
@@ -1529,9 +2147,25 @@ mod tests {
     const TGT_ENC: &str = "-home-b-p-o-r--claude-worktrees-feat";
     const TRANSCRIPT: &str =
         "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n{\"type\":\"assistant\"}\n";
+    /// Stand-in for the git bundle's bytes.
+    const BUNDLE: &str = "FAKE-BUNDLE-BYTES";
+    const SRC_DIR: &str =
+        "/home/a/.cache/claude-fleet/transfer/550e8400-e29b-41d4-a716-446655440000";
+    const TGT_DIR: &str =
+        "/home/b/.cache/claude-fleet/transfer/550e8400-e29b-41d4-a716-446655440000";
 
     fn tgt_path() -> String {
         format!("/home/b/.claude/projects/{TGT_ENC}/{SID}.jsonl")
+    }
+
+    /// A carry script's stdout as the real scripts print it: marker line,
+    /// then the payload.
+    fn out(payload: &str) -> String {
+        format!("{}\n{payload}", carry::OUT_MARKER)
+    }
+
+    fn snapshot_out(bytes: usize, commits: u32) -> String {
+        format!("{bytes}\t{commits}\t0\t0\t{SRC_DIR}/carry.bundle\n")
     }
 
     /// Test hooks: the workspace step returns a fixed cwd, tmux runs through
@@ -1684,8 +2318,12 @@ mod tests {
     }
 
     fn inspection(porcelain: &str, rsha: &str, ahead: &str) -> String {
+        inspection_midop(porcelain, rsha, ahead, "")
+    }
+
+    fn inspection_midop(porcelain: &str, rsha: &str, ahead: &str, midop: &str) -> String {
         format!(
-            "/home/a/p/o/r/.claude/worktrees/feat\x1e{porcelain}\x1e{HEAD}\x1efeat\x1e{rsha}\x1e{ahead}"
+            "/home/a/p/o/r/.claude/worktrees/feat\x1e{porcelain}\x1e{HEAD}\x1efeat\x1e{rsha}\x1e{ahead}\x1e{midop}"
         )
     }
 
@@ -1751,6 +2389,43 @@ mod tests {
             "beta",
             Match::script_contains("# cf-move:size"),
             Reply::ok(&format!("{}\n", TRANSCRIPT.len())),
+        )
+        // The carry: a target that already has the clone, nothing unpushed,
+        // a clean replay and no git-ignored files worth carrying.
+        .on_host(
+            "beta",
+            Match::script_contains("# cf-carry:seed"),
+            Reply::ok(&out("existing\n")),
+        )
+        .on_host(
+            "beta",
+            Match::script_contains("# cf-carry:haves"),
+            Reply::ok(&out(&format!("{TGT_DIR}\n{HEAD}\n"))),
+        )
+        .on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:snapshot"),
+            Reply::ok(&out(&snapshot_out(BUNDLE.len(), 0))),
+        )
+        .on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:chunk"),
+            Reply::ok(&out(BUNDLE)),
+        )
+        .on_host(
+            "beta",
+            Match::script_contains("# cf-carry:fetch"),
+            Reply::ok("ok\n"),
+        )
+        .on_host(
+            "beta",
+            Match::script_contains("# cf-carry:apply"),
+            Reply::ok(&out("")),
+        )
+        .on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:ignored-list"),
+            Reply::ok(&out("")),
         );
         Fixture {
             store: Mutex::new(s),
@@ -1773,6 +2448,7 @@ mod tests {
             session_id: f.source_id,
             target_host_alias: "beta".into(),
             keep_source,
+            strict: false,
         }
     }
 
@@ -1886,12 +2562,19 @@ mod tests {
             .into_iter()
             .filter(|c| c.stdin.is_some())
             .collect();
-        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads.len(), 2, "the bundle, then the transcript");
         assert_eq!(
             uploads[0].command(),
+            format!("cat > {}", quote(&format!("{TGT_DIR}/carry.bundle")))
+        );
+        // The marker line was stripped, not relayed into the bundle.
+        assert_eq!(uploads[0].stdin_str().as_deref(), Some(BUNDLE));
+        assert_eq!(
+            uploads[1].command(),
             format!("cat > {}", quote(&tgt_path()))
         );
-        assert_eq!(uploads[0].stdin_str().as_deref(), Some(TRANSCRIPT));
+        assert_eq!(uploads[1].stdin_str().as_deref(), Some(TRANSCRIPT));
+        assert_eq!(rep.carried.commits, 0);
 
         // tmux on the target resumes the SAME conversation in the target cwd.
         let start = f
@@ -2011,6 +2694,7 @@ mod tests {
         assert_eq!(d["kept_source"], true);
     }
 
+    /// Strict mode only: the carry takes an unpushed branch along.
     #[tokio::test]
     async fn unpushed_branch_is_refused_before_the_target_is_touched() {
         let f = fixture();
@@ -2020,7 +2704,13 @@ mod tests {
             Reply::ok(&inspection("", "", "-1")),
         );
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
-        let err = run(&f, &hooks, false).await.unwrap_err();
+        let strict = |f: &Fixture| MoveSessionArgs {
+            strict: true,
+            ..args(f, false)
+        };
+        let err = move_session_with(strict(&f), &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_UNPUSHED, "{}", err.message);
         assert!(
             err.message.contains("git push -u origin feat"),
@@ -2038,7 +2728,9 @@ mod tests {
             Match::script_contains("# cf-move:inspect"),
             Reply::ok(&inspection("", HEAD, "2")),
         );
-        let err = run(&f, &hooks, false).await.unwrap_err();
+        let err = move_session_with(strict(&f), &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_UNPUSHED);
         assert!(err.message.contains("2 commit(s)"), "{}", err.message);
         // The inspection never pushes anything itself.
@@ -2049,6 +2741,7 @@ mod tests {
             .all(|c| !c.script().unwrap_or_default().contains("git push")));
     }
 
+    /// Strict mode only: the carry takes uncommitted work along.
     #[tokio::test]
     async fn dirty_source_is_refused_and_lists_the_files() {
         let f = fixture();
@@ -2058,13 +2751,645 @@ mod tests {
             Reply::ok(&inspection(" M src/lib.rs\n?? notes.txt", HEAD, "0")),
         );
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
-        let err = run(&f, &hooks, false).await.unwrap_err();
+        let err = move_session_with(
+            MoveSessionArgs {
+                strict: true,
+                ..args(&f, false)
+            },
+            &f.store,
+            &f.fake,
+            &hooks,
+            fast(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_DIRTY);
         assert!(err.message.contains("src/lib.rs") && err.message.contains("notes.txt"));
         let details = err.details.expect("dirty_files details");
         assert_eq!(details["dirty_files"].as_array().unwrap().len(), 2);
         assert!(f.fake.calls_for("beta").is_empty());
         assert_source_untouched(&f, &hooks);
+    }
+
+    // ── the carry ──
+
+    #[tokio::test]
+    async fn a_dirty_unpushed_source_is_carried_and_reported() {
+        let f = fixture();
+        let porcelain = " M src/lib.rs\n?? notes.txt";
+        let mut listed = out("").into_bytes();
+        listed.extend_from_slice(b"4\t.env\0-1\tnode_modules/\0");
+        f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-move:inspect"),
+                Reply::ok(&inspection(porcelain, "", "-1")),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:snapshot"),
+                Reply::ok(&out(&snapshot_out(BUNDLE.len(), 2))),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:seed"),
+                Reply::ok(&out("initialized\n")),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::ok(&out(&format!("{porcelain}\n"))),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:ignored-list"),
+                Reply::Exit {
+                    code: 0,
+                    stdout: listed,
+                    stderr: Vec::new(),
+                },
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:ignored-pack"),
+                Reply::ok(&out(&format!("{}\t{SRC_DIR}/ignored.tgz\n", BUNDLE.len()))),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:ignored-extract"),
+                Reply::ok("ok\n"),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false)
+            .await
+            .expect("a dirty, unpushed source now moves");
+
+        assert_eq!(rep.carried.commits, 2);
+        assert_eq!(rep.carried.bundle_bytes, BUNDLE.len() as u64);
+        assert_eq!(rep.carried.dirty_entries.len(), 2);
+        assert_eq!(rep.carried.target_seeded, carry::TargetSeed::Initialized);
+        assert_eq!(rep.carried.ignored_carried[0].path, ".env");
+        assert_eq!(rep.carried.ignored_left_behind[0].path, "node_modules/");
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("still holds a copy of the uncommitted work")),
+            "{:?}",
+            rep.warnings
+        );
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("origin was unreachable")),
+            "{:?}",
+            rep.warnings
+        );
+
+        // The bundle reached the target's transfer dir through upload_file.
+        let uploads: Vec<String> = f
+            .fake
+            .calls_for("beta")
+            .into_iter()
+            .filter(|c| c.stdin.is_some())
+            .map(|c| c.command())
+            .collect();
+        assert_eq!(
+            uploads[0],
+            format!("cat > {}", quote(&format!("{TGT_DIR}/carry.bundle")))
+        );
+        // Nothing was pushed, committed or stashed on the source.
+        for c in f.fake.calls_for("alpha") {
+            let s = c.script().unwrap_or_default();
+            assert!(
+                !s.contains("git push") && !s.contains("git stash") && !s.contains("git commit "),
+                "{s}"
+            );
+        }
+        // Both sides were cleaned up, and the event carries the report.
+        for host in ["alpha", "beta"] {
+            assert!(
+                f.fake
+                    .calls_for(host)
+                    .iter()
+                    .any(|c| c.script().is_some_and(|s| s.contains("# cf-carry:cleanup"))),
+                "{host}"
+            );
+        }
+        let ev = events(&f, rep.target_session_id);
+        let detail = ev
+            .iter()
+            .find(|(k, _)| k == EVENT_MOVED)
+            .unwrap()
+            .1
+            .clone()
+            .unwrap();
+        let d: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(d["carried"]["commits"], 2);
+    }
+
+    #[tokio::test]
+    async fn strict_still_refuses_dirty_and_unpushed_before_the_target_is_touched() {
+        let f = fixture();
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection(" M a.rs", HEAD, "0")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.strict = true;
+        let err = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_DIRTY);
+        assert!(f.fake.calls_for("beta").is_empty(), "target untouched");
+        assert_source_untouched(&f, &hooks);
+    }
+
+    #[tokio::test]
+    async fn a_midop_source_is_refused_before_anything_else_runs() {
+        let f = fixture();
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection_midop("UU a.rs", HEAD, "0", "merge")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_MIDOP);
+        assert!(f.fake.calls_for("beta").is_empty());
+        assert_source_untouched(&f, &hooks);
+    }
+
+    #[tokio::test]
+    async fn carry_failures_leave_the_source_untouched_and_still_clean_up() {
+        struct Case {
+            host: &'static str,
+            /// The carry script whose reply is replaced.
+            marker: &'static str,
+            /// What distinguishes this case when the marker repeats.
+            what: &'static str,
+            reply: Reply,
+            code: &'static str,
+            step: Option<&'static str>,
+            /// The transport code kept in `details.cause_code`, when the
+            /// failure was one (a timeout must stay tellable from a parse
+            /// failure even though both are `E_MOVE_CARRY`).
+            cause: Option<&'static str>,
+            /// Hosts that must be sent a cleanup script — and, just as
+            /// importantly, the only ones: a host nothing was created on
+            /// must never get one (an empty transfer id above all).
+            cleaned: &'static [&'static str],
+            /// Shorten the fake's wall clock, for a reply that never comes.
+            wall_clock: Option<Duration>,
+        }
+        let case = |host, marker, what, reply, code, step, cleaned| Case {
+            host,
+            marker,
+            what,
+            reply,
+            code,
+            step,
+            cause: None,
+            cleaned,
+            wall_clock: None,
+        };
+        let failed = |what: &str| format!("{} {what}", carry::FAILED);
+        let cases = vec![
+            // Seeding is the first carry step: nothing exists to clean yet.
+            case(
+                "beta",
+                "# cf-carry:seed",
+                "exit",
+                Reply::fail(5, &failed("init")),
+                codes::E_MOVE_CARRY,
+                Some("seed"),
+                &[][..],
+            ),
+            case(
+                "beta",
+                "# cf-carry:seed",
+                "no marker",
+                Reply::ok("cloned\n"),
+                codes::E_MOVE_CARRY,
+                Some("seed"),
+                &[][..],
+            ),
+            // The haves script creates the target's transfer dir, so a
+            // failure there — including one where the reply never arrives —
+            // must still clean the target, and only the target.
+            case(
+                "beta",
+                "# cf-carry:haves",
+                "exit",
+                Reply::fail(5, &failed("mkdir")),
+                codes::E_MOVE_CARRY,
+                Some("haves"),
+                &["beta"][..],
+            ),
+            case(
+                "beta",
+                "# cf-carry:haves",
+                "no marker",
+                Reply::ok(&format!("{TGT_DIR}\n{HEAD}\n")),
+                codes::E_MOVE_CARRY,
+                Some("haves"),
+                &["beta"][..],
+            ),
+            case(
+                "beta",
+                "# cf-carry:haves",
+                "unreachable",
+                Reply::Unreachable,
+                codes::E_MOVE_CARRY,
+                Some("haves"),
+                &["beta"][..],
+            ),
+            // A transport failure on a carry step is still a carry failure:
+            // the caller needs `details.step` and "the source was not
+            // touched", with the original code kept in `cause_code`.
+            Case {
+                cause: Some("E_SSH"),
+                ..case(
+                    "beta",
+                    "# cf-carry:haves",
+                    "transport",
+                    Reply::SpawnError {
+                        message: "No such file or directory (os error 2)".into(),
+                    },
+                    codes::E_MOVE_CARRY,
+                    Some("haves"),
+                    &["beta"][..],
+                )
+            },
+            Case {
+                cause: Some("E_SSH_TIMEOUT"),
+                wall_clock: Some(Duration::from_millis(50)),
+                ..case(
+                    "beta",
+                    "# cf-carry:haves",
+                    "never answers",
+                    Reply::hang(),
+                    codes::E_MOVE_CARRY,
+                    Some("haves"),
+                    &["beta"][..],
+                )
+            },
+            // The same for a step that runs on the long wall clock
+            // (`sh_long`, a different transport call).
+            Case {
+                cause: Some("E_SSH"),
+                ..case(
+                    "alpha",
+                    "# cf-carry:snapshot",
+                    "transport",
+                    Reply::SpawnError {
+                        message: "No such file or directory (os error 2)".into(),
+                    },
+                    codes::E_MOVE_CARRY,
+                    Some("snapshot"),
+                    &["alpha", "beta"][..],
+                )
+            },
+            case(
+                "alpha",
+                "# cf-carry:snapshot",
+                "exit",
+                Reply::fail(5, &failed("bundle")),
+                codes::E_MOVE_CARRY,
+                Some("snapshot"),
+                &["alpha", "beta"][..],
+            ),
+            case(
+                "alpha",
+                "# cf-carry:snapshot",
+                "no marker",
+                Reply::ok(&snapshot_out(BUNDLE.len(), 0)),
+                codes::E_MOVE_CARRY,
+                Some("snapshot"),
+                &["alpha", "beta"][..],
+            ),
+            case(
+                "alpha",
+                "# cf-carry:snapshot",
+                "over the cap",
+                Reply::fail(8, &format!("{} 999999999", carry::BUNDLE_TOO_LARGE)),
+                codes::E_MOVE_TOO_LARGE,
+                None,
+                &["alpha", "beta"][..],
+            ),
+            // No marker at all, and a marker with an empty payload: both are
+            // a chunk that carried nothing.
+            case(
+                "alpha",
+                "# cf-carry:chunk",
+                "no marker",
+                Reply::ok(""),
+                codes::E_MOVE_CARRY,
+                Some("download"),
+                &["alpha", "beta"][..],
+            ),
+            case(
+                "alpha",
+                "# cf-carry:chunk",
+                "empty payload",
+                Reply::ok(&out("")),
+                codes::E_MOVE_CARRY,
+                Some("download"),
+                &["alpha", "beta"][..],
+            ),
+            case(
+                "beta",
+                "# cf-carry:fetch",
+                "exit",
+                Reply::fail(5, &failed("verify")),
+                codes::E_MOVE_CARRY,
+                Some("fetch"),
+                &["alpha", "beta"][..],
+            ),
+            case(
+                "beta",
+                "# cf-carry:apply",
+                "target dirty",
+                Reply::fail(9, carry::TARGET_DIRTY),
+                codes::E_MOVE_TARGET_DIRTY,
+                None,
+                &["alpha", "beta"][..],
+            ),
+            case(
+                "beta",
+                "# cf-carry:apply",
+                "porcelain mismatch",
+                Reply::ok(&out("?? surprise.txt\n")),
+                codes::E_MOVE_CARRY,
+                Some("verify"),
+                &["alpha", "beta"][..],
+            ),
+        ];
+        for c in cases {
+            let name = format!("{} ({})", c.marker, c.what);
+            let f = fixture();
+            f.fake
+                .on_host(c.host, Match::script_contains(c.marker), c.reply);
+            if let Some(w) = c.wall_clock {
+                f.fake.set_wall_clock(w);
+            }
+            let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            let err = run(&f, &hooks, false).await.unwrap_err();
+            assert_eq!(err.code, c.code, "{name}: {}", err.message);
+            if let Some(step) = c.step {
+                assert_eq!(err.details.as_ref().unwrap()["step"], step, "{name}");
+                assert!(
+                    err.message.contains("the source session was not touched"),
+                    "{name}: {}",
+                    err.message
+                );
+            }
+            match c.cause {
+                Some(cause) => {
+                    assert_eq!(
+                        err.details.as_ref().unwrap()["cause_code"],
+                        cause,
+                        "{name}: {}",
+                        err.message
+                    );
+                    assert!(err.message.contains(cause), "{name}: {}", err.message);
+                }
+                None => assert!(
+                    err.details
+                        .as_ref()
+                        .is_none_or(|d| d["cause_code"].is_null()),
+                    "{name}: no transport cause to report"
+                ),
+            }
+            if c.code == codes::E_MOVE_TOO_LARGE {
+                assert_eq!(err.details.as_ref().unwrap()["payload"], "bundle");
+            }
+            assert!(
+                !f.fake
+                    .calls_for("beta")
+                    .iter()
+                    .any(|c| c.script().is_some_and(|s| s.contains("tmux new-session"))),
+                "{name}: the target session never started"
+            );
+            assert_source_untouched(&f, &hooks);
+            for host in ["alpha", "beta"] {
+                let cleaned = f
+                    .fake
+                    .calls_for(host)
+                    .iter()
+                    .any(|c| c.script().is_some_and(|s| s.contains("# cf-carry:cleanup")));
+                assert_eq!(
+                    cleaned,
+                    c.cleaned.contains(&host),
+                    "{name}: cleanup on {host}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_clean_source_with_a_newer_target_skips_the_apply_and_warns() {
+        let f = fixture();
+        let newer = "2222222222222222222222222222222222222222";
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-move:prep"),
+            Reply::ok(&format!("{newer}\t{TGT_ENC}\t{}\t-1\n", tgt_path())),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        assert!(rep.warnings.iter().any(|w| w.contains("newer on origin")));
+        assert!(!f
+            .fake
+            .calls_for("beta")
+            .iter()
+            .any(|c| c.script().is_some_and(|s| s.contains("# cf-carry:apply"))));
+
+        // The same with a dirty source cannot replay onto another base.
+        let f = fixture();
+        f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-move:inspect"),
+                Reply::ok(&inspection(" M a.rs", HEAD, "0")),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-move:prep"),
+                Reply::ok(&format!("{newer}\t{TGT_ENC}\t{}\t-1\n", tgt_path())),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_CARRY);
+        assert_eq!(err.details.unwrap()["step"], "apply");
+    }
+
+    #[tokio::test]
+    async fn an_ignored_files_failure_is_a_warning_not_a_failed_move() {
+        let f = fixture();
+        let mut listed = out("").into_bytes();
+        listed.extend_from_slice(b"4\t.env\0");
+        f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:ignored-list"),
+                Reply::Exit {
+                    code: 0,
+                    stdout: listed,
+                    stderr: Vec::new(),
+                },
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:ignored-pack"),
+                Reply::fail(5, &format!("{} tar", carry::FAILED)),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false)
+            .await
+            .expect("the move still succeeds");
+        assert!(rep.carried.ignored_carried.is_empty());
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("ignored files were not carried")),
+            "{:?}",
+            rep.warnings
+        );
+    }
+
+    /// The relay loop itself: a payload larger than one chunk is pulled in
+    /// order, the last request asks only for what is left, a chunk shorter
+    /// than requested resumes from where it really ended (no skipped bytes),
+    /// and more bytes than announced is a failure rather than a silent
+    /// oversized file.
+    #[tokio::test]
+    async fn the_chunked_download_walks_the_payload_in_order() {
+        const PAYLOAD: &str = "ABCDEFGHIJKLM"; // 13 bytes
+        const REMOTE: &str = "/tmp/carry.bundle";
+        /// Answer the request at `offset` (as the script spells it) with
+        /// `reply` bytes.
+        fn at(fake: &FakeSsh, offset: u64, reply: &str) {
+            fake.on_host(
+                "h",
+                Match::script_contains(&format!("tail -c +{} ", offset + 1)),
+                Reply::ok(&out(reply)),
+            );
+        }
+        let chunk_scripts = |fake: &FakeSsh| -> Vec<String> {
+            fake.calls_for("h")
+                .iter()
+                .filter_map(|c| c.script())
+                .filter(|s| s.contains("# cf-carry:chunk"))
+                .collect()
+        };
+        let expected = |pairs: &[(u64, u64)]| -> Vec<String> {
+            pairs
+                .iter()
+                .map(|(off, len)| carry::chunk_script(REMOTE, *off, *len))
+                .collect()
+        };
+
+        // Whole chunks, then a short final one asking for the remainder.
+        let fake = FakeSsh::new();
+        at(&fake, 0, "ABCDE");
+        at(&fake, 5, "FGHIJ");
+        at(&fake, 10, "KLM");
+        let got = download_chunked(&fake, "h", REMOTE, PAYLOAD.len() as u64, "bundle", 5)
+            .await
+            .expect("the whole payload");
+        assert_eq!(std::fs::read_to_string(&got.0).unwrap(), PAYLOAD);
+        assert_eq!(
+            chunk_scripts(&fake),
+            expected(&[(0, 5), (5, 5), (10, 3)]),
+            "offsets 0, 5, 10 and a 3-byte tail"
+        );
+
+        // A chunk shorter than requested: the next one resumes at 2, not 5.
+        let fake = FakeSsh::new();
+        at(&fake, 0, "AB");
+        at(&fake, 2, "CDEFG");
+        at(&fake, 7, "HIJKL");
+        at(&fake, 12, "M");
+        let got = download_chunked(&fake, "h", REMOTE, PAYLOAD.len() as u64, "bundle", 5)
+            .await
+            .expect("the whole payload");
+        assert_eq!(std::fs::read_to_string(&got.0).unwrap(), PAYLOAD);
+        assert_eq!(
+            chunk_scripts(&fake),
+            expected(&[(0, 5), (2, 5), (7, 5), (12, 1)])
+        );
+
+        // More than was announced: refused, not written off as fine.
+        let fake = FakeSsh::new();
+        at(&fake, 0, PAYLOAD);
+        // (`TempFile` is deliberately not `Debug`, so no `unwrap_err`.)
+        let err = match download_chunked(&fake, "h", REMOTE, 5, "bundle", 5).await {
+            Ok(_) => panic!("more bytes than announced must be refused"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, codes::E_MOVE_CARRY, "{}", err.message);
+        assert_eq!(err.details.unwrap()["step"], "download");
+        assert!(
+            err.message.contains("gave 13 bytes, expected 5"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// Every carry script runs under `bash -lc`, so a login profile can print
+    /// a banner before the script body ever does: the parsers anchor on the
+    /// output marker, and the relayed bundle must be the payload alone.
+    /// (Only the carry scripts are marker-protected; inspect, locate and
+    /// read are not — pre-existing, and out of this test's scope.)
+    #[tokio::test]
+    async fn a_login_banner_before_every_carry_script_does_not_break_the_move() {
+        let f = fixture();
+        let banner = |payload: &str| format!("Welcome to alpha!\n{}", out(payload));
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:seed"),
+                Reply::ok(&banner("existing\n")),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:haves"),
+                Reply::ok(&banner(&format!("{TGT_DIR}\n{HEAD}\n"))),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:snapshot"),
+                Reply::ok(&banner(&snapshot_out(BUNDLE.len(), 0))),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:chunk"),
+                Reply::ok(&banner(BUNDLE)),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::ok(&banner("")),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:ignored-list"),
+                Reply::ok(&banner("")),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        assert_eq!(rep.carried.commits, 0);
+        assert_eq!(rep.carried.bundle_bytes, BUNDLE.len() as u64);
+        assert_eq!(rep.carried.target_seeded, carry::TargetSeed::Existing);
+        let uploads: Vec<_> = f
+            .fake
+            .calls_for("beta")
+            .into_iter()
+            .filter(|c| c.stdin.is_some())
+            .collect();
+        assert_eq!(uploads[0].stdin_str().as_deref(), Some(BUNDLE));
     }
 
     #[tokio::test]
@@ -2083,7 +3408,10 @@ mod tests {
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         let err = run(&f, &hooks, false).await.unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_TOO_LARGE);
-        assert_eq!(err.details.unwrap()["cap_bytes"], 1024 * 1024);
+        let details = err.details.unwrap();
+        assert_eq!(details["cap_bytes"], 1024 * 1024);
+        // The same code now also reports an over-cap bundle.
+        assert_eq!(details["payload"], "transcript");
         assert!(
             f.fake
                 .calls_for("alpha")
@@ -2225,10 +3553,177 @@ mod tests {
         assert!(err.message.contains("diverged"), "{}", err.message);
         assert!(err.message.contains("source session was not touched"));
         let beta = f.fake.calls_for("beta");
-        assert!(beta.iter().all(|c| c.stdin.is_none()), "no upload");
+        // The carry's bundle goes up before prep; the transcript never does.
+        assert!(
+            !beta
+                .iter()
+                .any(|c| c.stdin.is_some() && c.command().contains(".jsonl")),
+            "the transcript was never copied"
+        );
         assert!(beta
             .iter()
             .all(|c| !c.script().unwrap_or_default().contains("tmux new-session")));
+        assert_source_untouched(&f, &hooks);
+    }
+
+    /// (I5 minimum) A target that is merely BEHIND the source and has
+    /// uncommitted changes is not diverged — most often it is the copy this
+    /// very session left behind when it moved away from that host. Telling
+    /// the user to "reconcile the branch" sends them after a problem they
+    /// do not have.
+    #[tokio::test]
+    async fn a_behind_and_dirty_target_is_reported_as_dirty_not_diverged() {
+        let f = fixture();
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-move:prep"),
+            Reply::fail(9, carry::TARGET_DIRTY),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY, "{}", err.message);
+        assert!(
+            err.message.contains("moved away from this host"),
+            "the third case is named: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("never overwrites")
+                && err.message.contains("source session was not touched"),
+            "{}",
+            err.message
+        );
+        assert!(!err.message.contains("diverged"), "{}", err.message);
+        assert_source_untouched(&f, &hooks);
+    }
+
+    /// The same verdict through the real `target_prep_script`: behind and
+    /// dirty is `TARGET_DIRTY`, a genuine divergence is still `DIVERGED`,
+    /// and a clean target that is merely behind still fast-forwards.
+    #[test]
+    fn target_prep_script_separates_a_dirty_target_from_a_diverged_one() {
+        if !carry::tests::require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let git = |args: &[&str]| -> std::process::Output {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env("HOME", &home)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+        let sha = |rev: &str| {
+            String::from_utf8_lossy(&git(&["rev-parse", rev]).stdout)
+                .trim()
+                .to_string()
+        };
+        let prep = |want: &str| -> std::process::Output {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(target_prep_script(
+                    repo.to_str().unwrap(),
+                    want,
+                    "feat",
+                    SID,
+                ))
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", &home)
+                .output()
+                .unwrap()
+        };
+
+        git(&["init", "-q", "-b", "feat"]);
+        std::fs::write(repo.join("f.txt"), "one\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "-q", "-m", "one"]);
+        let first = sha("HEAD");
+        std::fs::write(repo.join("f.txt"), "two\n").unwrap();
+        git(&["commit", "-q", "-am", "two"]);
+        let want = sha("HEAD");
+        git(&["branch", "later"]); // keep `want` reachable
+
+        // Clean and behind: still fast-forwarded, as before.
+        git(&["checkout", "-q", "-B", "feat", &first]);
+        let out = prep(&want);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(sha("HEAD"), want, "a clean behind target fast-forwards");
+
+        // Behind AND dirty: the target's own uncommitted work, not a
+        // divergence — and nothing is merged over it.
+        git(&["checkout", "-q", "-B", "feat", &first]);
+        std::fs::write(repo.join("f.txt"), "local edit\n").unwrap();
+        let out = prep(&want);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(9), "{err}");
+        assert!(err.contains(carry::TARGET_DIRTY), "{err}");
+        assert!(!err.contains(DIVERGED), "{err}");
+        assert_eq!(sha("HEAD"), first, "nothing was merged onto the dirty tree");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "local edit\n"
+        );
+
+        // A real divergence keeps DIVERGED.
+        git(&["commit", "-q", "-am", "local"]);
+        let out = prep(&want);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(6), "{err}");
+        assert!(err.contains(DIVERGED), "{err}");
+    }
+
+    /// The source script enforces `move.max_bundle_mb`, but the orchestrator
+    /// must not take a source's word for it.
+    #[tokio::test]
+    async fn a_bundle_over_the_cap_is_refused_by_the_orchestrator_too() {
+        let f = fixture();
+        f.store
+            .lock()
+            .unwrap()
+            .set_setting(carry::SETTING_MAX_BUNDLE_MB, "1")
+            .unwrap();
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:snapshot"),
+            Reply::ok(&out(&snapshot_out(2 * 1024 * 1024, 0))),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TOO_LARGE, "{}", err.message);
+        let d = err.details.expect("details");
+        assert_eq!(d["payload"], "bundle");
+        assert_eq!(d["cap_bytes"], 1024 * 1024);
+        // Nothing of the bundle was pulled down or pushed up.
+        assert!(
+            !f.fake
+                .calls_for("alpha")
+                .iter()
+                .any(|c| c.script().is_some_and(|s| s.contains("# cf-carry:chunk"))),
+            "the bundle is never downloaded"
+        );
         assert_source_untouched(&f, &hooks);
     }
 
@@ -2276,6 +3771,7 @@ mod tests {
             session_id: f.source_id,
             target_host_alias: "alpha".into(),
             keep_source: false,
+            strict: false,
         };
         assert_eq!(
             move_session_with(same, &f.store, &f.fake, &hooks, fast())
@@ -2308,7 +3804,14 @@ mod tests {
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         let err = run(&f, &hooks, false).await.unwrap_err();
         assert_eq!(err.code, codes::E_INVALID_STATE, "{}", err.message);
-        assert!(f.fake.calls_for("beta").iter().all(|c| c.stdin.is_none()));
+        // The carry's bundle goes up before prep; the transcript never does.
+        assert!(
+            !f.fake
+                .calls_for("beta")
+                .iter()
+                .any(|c| c.stdin.is_some() && c.command().contains(".jsonl")),
+            "the transcript was never copied"
+        );
         assert_source_untouched(&f, &hooks);
     }
 
@@ -2387,6 +3890,128 @@ mod tests {
             codes::E_INVALID_STATE
         );
         assert!(parse_inspection("garbage").is_err());
+    }
+
+    #[test]
+    fn carry_verdict_accepts_dirty_and_unpushed_but_refuses_midop_and_wrong_branch() {
+        let dirty_unpushed = parse_inspection(&inspection(" M a.rs\n?? n.txt", "", "-1")).unwrap();
+        assert!(carry_verdict(&dirty_unpushed, "feat").is_ok());
+        assert_eq!(
+            preflight_verdict(&dirty_unpushed, "feat").unwrap_err().code,
+            codes::E_MOVE_DIRTY,
+            "strict still refuses"
+        );
+
+        let mid = parse_inspection(&inspection_midop("", HEAD, "0", "rebase")).unwrap();
+        assert_eq!(mid.midop.as_deref(), Some("rebase"));
+        for verdict in [carry_verdict(&mid, "feat"), preflight_verdict(&mid, "feat")] {
+            let e = verdict.unwrap_err();
+            assert_eq!(e.code, codes::E_MOVE_MIDOP);
+            assert!(e.message.contains("rebase"), "{}", e.message);
+            assert_eq!(e.details.unwrap()["operation"], "rebase");
+        }
+
+        let clean = parse_inspection(&inspection("", HEAD, "0")).unwrap();
+        assert_eq!(clean.midop, None);
+        assert_eq!(
+            carry_verdict(&clean, "other").unwrap_err().code,
+            codes::E_INVALID_STATE
+        );
+    }
+
+    #[test]
+    fn inspect_script_probes_every_in_progress_operation() {
+        let s = inspect_script("n", None, "feat");
+        for marker in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "BISECT_LOG",
+            "rebase-merge",
+            "rebase-apply",
+        ] {
+            assert!(s.contains(marker), "{marker}: {s}");
+        }
+    }
+
+    /// Runs the generated `inspect_script` through real `git`/`bash` against a
+    /// temp repo that is genuinely mid-merge (two branches editing the same
+    /// line, `git merge` left conflicted), then again after `git merge
+    /// --abort`. Nobody had run the probe against real git before this test.
+    #[test]
+    fn inspect_script_probe_detects_a_real_mid_merge() {
+        if !carry::tests::require(&["git", "bash"]) {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let git = |args: &[&str]| -> std::process::Output {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", &home)
+                .output()
+                .unwrap()
+        };
+
+        assert!(git(&["init", "-q", "-b", "main"]).status.success());
+        assert!(git(&["config", "user.email", "a@example.com"])
+            .status
+            .success());
+        assert!(git(&["config", "user.name", "A"]).status.success());
+        std::fs::write(repo.join("f.txt"), "one\n").unwrap();
+        assert!(git(&["add", "f.txt"]).status.success());
+        assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+        assert!(git(&["checkout", "-q", "-b", "other"]).status.success());
+        std::fs::write(repo.join("f.txt"), "other\n").unwrap();
+        assert!(git(&["commit", "-q", "-am", "other change"])
+            .status
+            .success());
+        assert!(git(&["checkout", "-q", "main"]).status.success());
+        std::fs::write(repo.join("f.txt"), "main\n").unwrap();
+        assert!(git(&["commit", "-q", "-am", "main change"])
+            .status
+            .success());
+        // Both branches touched the same line, so this merge conflicts and
+        // leaves MERGE_HEAD in place instead of completing.
+        let merge = git(&["merge", "other"]);
+        assert!(
+            !merge.status.success(),
+            "merge must conflict to leave MERGE_HEAD: {}",
+            String::from_utf8_lossy(&merge.stderr)
+        );
+
+        let probe = || -> SourceState {
+            // Empty tmux name: the script skips the tmux lookup and locates
+            // the worktree from `hint` alone.
+            let script = inspect_script("", Some(repo.to_str().unwrap()), "main");
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&script)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", &home)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            parse_inspection(&String::from_utf8_lossy(&out.stdout)).unwrap()
+        };
+
+        assert_eq!(probe().midop.as_deref(), Some("merge"));
+
+        assert!(git(&["merge", "--abort"]).status.success());
+        assert_eq!(probe().midop, None);
     }
 
     #[test]
