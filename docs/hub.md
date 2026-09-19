@@ -349,13 +349,39 @@ explicit version to keep that safe:
   simply never acts on. A `kind` a side DOES recognise, but cannot parse the
   rest of, is still corruption and still ends the connection — evolution is
   forgiven, damage is not.
-- **Which order to upgrade in.** The hub first, or anytime — a hub whose
-  `MIN_SUPPORTED_PROTO` still covers an older agent keeps serving it exactly
-  as before; nothing about upgrading the hub requires touching a single
-  agent. An agent upgraded ahead of the hub is not a problem either, just
-  quieter: it is refused with `update the hub` until the hub catches up, at
-  which point it reconnects and starts working with no further action. There
-  is no order that corrupts anything or requires a host visit either way.
+- **Which order to upgrade in, today.** At `PROTO_VERSION` 1 there is nothing
+  older to be compatible with, so this is moot right now — but it will not
+  stay moot. The rule for whoever bumps `PROTO_VERSION` next (enforced by a
+  doc comment on `MIN_SUPPORTED_PROTO` in `fleet-proto`, not by this doc):
+  hold `MIN_SUPPORTED_PROTO` at the version BEFORE the bump for at least one
+  release. Only under that rule is either order actually safe — the hub
+  first (an agent within the still-wide window keeps working unchanged), or
+  an agent first (it waits, quietly, at the slowest backoff interval — it
+  retries every 30-60 s — until the hub catches up, then reconnects with no
+  further action). If a hub is ever bumped WITHOUT holding the floor down, it
+  refuses every older agent the moment it restarts; that is a mistake in the
+  release, not something an operator can route around by choosing an order.
+- **What a pre-versioning agent looks like, if one is ever run against this
+  hub.** An agent built before `proto` existed sends a `hello` with no
+  `proto` field, which this hub reads as `proto: 0` — below
+  `MIN_SUPPORTED_PROTO` (1) today, always. The hub refuses it at the
+  WebSocket layer with a close naming both versions and closes with
+  `refused a hello: protocol version` in its own log; the agent, being a
+  pre-versioning build, has no special handling for this — from the agent's
+  side it looks like an ordinary rejected connection, so it just reconnects
+  at ITS ordinary (pre-versioning) backoff, indefinitely, `refused a hello:
+  protocol version` repeating in the HUB's log every time it tries. The
+  operator's fix is the same either way: install a proto-1 (or later)
+  `fleet-agent`.
+- **What a version-refused CURRENT agent looks like.** Unlike a
+  pre-versioning agent, a proto-1-or-later `fleet-agent` that gets refused —
+  by the hub (its hello was out of range) or because it decided the hub's own
+  `welcome` was out of ITS range, or because the hub never sent one at all
+  within one heartbeat (30 s) of connecting — logs the reason at **error**,
+  once per attempt, and backs off at the slowest interval (it retries every
+  30-60 s, not the normal 1-2-4-8...-60 s growth) instead of hammering a hub
+  that has already said no. It keeps trying — a hub upgrade heals it without
+  touching the host — just quietly.
 
 ### Rotating, narrowing or removing an agent host's token
 
