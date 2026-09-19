@@ -1,0 +1,220 @@
+{
+  "AccountRow": [
+    "display_name",
+    "email",
+    "has_extra_usage",
+    "last_seen_at",
+    "nickname",
+    "organization_name",
+    "organization_uuid",
+    "seat_tier",
+    "uuid"
+  ],
+  "Branch": [
+    "ahead",
+    "behind",
+    "isCurrent",
+    "isRemote",
+    "name",
+    "tipHash",
+    "upstream"
+  ],
+  "ChangedFile": [
+    "orig_path",
+    "path",
+    "staged",
+    "status"
+  ],
+  "Commit": [
+    "author",
+    "date",
+    "hash",
+    "parents",
+    "refs",
+    "shortHash",
+    "subject"
+  ],
+  "CommitDetail": [
+    "author",
+    "body",
+    "date",
+    "files",
+    "hash",
+    "subject"
+  ],
+  "ConvItem::Text": [
+    "kind",
+    "text"
+  ],
+  "ConvItem::Tool": [
+    "error",
+    "kind",
+    "summary"
+  ],
+  "ConvTurn": [
+    "at",
+    "ended_at",
+    "items",
+    "prompt"
+  ],
+  "Conversation": [
+    "truncated",
+    "turns"
+  ],
+  "DayUsage": [
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "cost_micros",
+    "day",
+    "input_tokens",
+    "output_tokens"
+  ],
+  "FileContent": [
+    "binary",
+    "content",
+    "is_dir",
+    "path",
+    "size",
+    "truncated"
+  ],
+  "FileDiff": [
+    "binary",
+    "diff",
+    "path",
+    "truncated"
+  ],
+  "GitRef": [
+    "kind",
+    "name"
+  ],
+  "Health": [
+    "by_status",
+    "context_red",
+    "db_ready",
+    "ghosts",
+    "hosts_reachable",
+    "hosts_total",
+    "schema_version",
+    "sessions_total",
+    "stuck",
+    "usage_by_day",
+    "usage_by_host",
+    "version"
+  ],
+  "HostRow": [
+    "account_uuid",
+    "alias",
+    "claude_version",
+    "hidden",
+    "last_pinged_at",
+    "provisioned",
+    "reachable",
+    "ssh_alias",
+    "tmux_version",
+    "transport"
+  ],
+  "ProjectRow": [
+    "adopted",
+    "base_path",
+    "id",
+    "last_session_at",
+    "owner",
+    "repo"
+  ],
+  "ProjectTreeRow": [
+    "project",
+    "worktrees"
+  ],
+  "RepoTree": [
+    "entries",
+    "truncated"
+  ],
+  "SessionEvent": [
+    "at",
+    "detail",
+    "id",
+    "kind",
+    "session_id"
+  ],
+  "SessionRow": [
+    "account_uuid",
+    "ci_status",
+    "claude_session_id",
+    "claude_status",
+    "context_pct",
+    "created_at",
+    "current_activity",
+    "effort_level",
+    "friendly_name",
+    "host_alias",
+    "id",
+    "idle_since",
+    "kind",
+    "last_activity_at",
+    "last_playbook_at",
+    "last_prompt",
+    "last_stop_at",
+    "last_turn_at",
+    "lost_at",
+    "notes",
+    "parent_session_id",
+    "pr_url",
+    "project_id",
+    "reviews_session_id",
+    "safe_kill_detail",
+    "safe_kill_nonce",
+    "safe_kill_requested_at",
+    "safe_kill_state",
+    "started_at",
+    "status",
+    "stuck_kind",
+    "stuck_since",
+    "tags",
+    "tmux_name",
+    "turn_seq",
+    "usage_cache_read_tokens",
+    "usage_cache_write_tokens",
+    "usage_cost_micros",
+    "usage_input_tokens",
+    "usage_model",
+    "usage_output_tokens",
+    "usage_updated_at",
+    "worktree_id",
+    "worktree_key"
+  ],
+  "TaskRow": [
+    "created_at",
+    "error",
+    "finished_at",
+    "id",
+    "prompt",
+    "requester_session_id",
+    "result",
+    "started_at",
+    "state",
+    "worker_session_id"
+  ],
+  "UsageTotals": [
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "cost_micros",
+    "input_tokens",
+    "output_tokens"
+  ],
+  "WorktreeOccupancy": [
+    "occupants",
+    "worktree"
+  ],
+  "WorktreeOccupant": [
+    "host_alias",
+    "tmux_name"
+  ],
+  "WorktreeRow": [
+    "branch",
+    "host_alias",
+    "id",
+    "name",
+    "path",
+    "project_id"
+  ]
+}

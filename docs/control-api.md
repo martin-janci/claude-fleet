@@ -41,14 +41,19 @@ into the host's `~/.claude.json` and hook block, and remembers it in the
 the caller: the master token is unrestricted, a per-host token is bound to its
 host — `register_self`, `send_message` (`from_session_id`) and `inbox` refuse
 sessions on any other host with `E_FORBIDDEN`, so a token lifted from one
-machine cannot impersonate another.
+machine cannot impersonate another. The same binding applies to the tools that
+change a session (`recreate_session`, `dismiss_ghost_session`, …) and to the
+pane / transcript reads (`capture_session`, `peek_session`,
+`session_transcript`), checked against the stored row's host.
 
 Each host's token has a **mode**, shown and changed under **Integration** in
 the host's detail in the **Hosts** view (⌘I):
 
-- `full` (default) — whole-fleet **session** control: every tool except the
-  fleet-admin set. Cross-host `send_prompt`, `kill_session`, `new_session`
-  etc. remain allowed by design.
+- `full` (default) — **session** control on its own host: every tool except
+  the fleet-admin set. Session-addressed tools (`send_prompt`,
+  `kill_session`, `new_session`, …) refuse another host's sessions with
+  `E_FORBIDDEN`; fleet-wide listings (`list_sessions`, …) still see every
+  host.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
   `session_history`, `inbox`, `peer_status`, `session_transcript`,
   `peek_session` (deprecated), `repo_*`, `get_clipboard`, `wait_for_session`,
@@ -110,6 +115,7 @@ long poll keeps receiving a keep-alive every 15 s.
 | `GET /healthz` | none | Liveness: `fleet-hub ok`. Outside the Host allowlist. |
 | `GET` / `POST /pair` | **none, by design** | The pairing exchange (below). Outside the Host allowlist. |
 | `GET /events` | bearer | The row-change stream (below). |
+| `GET /agent` | bearer (per-host, `full`, agent host) | The WebSocket a `fleet-agent` dials in on (below). |
 
 ### `/pair` — how a client gets its first credential
 
@@ -180,6 +186,43 @@ the next heartbeat.
   answers `503 events are not enabled on this server`. The `fleet-hub` daemon
   serves it.
 
+### `/agent` — where a `fleet-agent` dials in
+
+`GET /agent` upgrades to the WebSocket a host's `fleet-agent` keeps open when
+the hub cannot reach that host over SSH. Setup, rotation and the operator
+side are in `hub.md` → *A host that cannot be reached*; this is the contract.
+
+- **Who may connect.** The upgrade sits behind the same bearer check as
+  `/mcp`, and then:
+  - only a **per-host** token may connect; the master and paired clients get
+    `403`;
+  - its mode must be `full` (`403`, with the reason in the body);
+  - its host must be on the `agent` transport (`403`);
+  - at most 2 connections per host and 64 in all (`429`).
+
+  The host alias comes from the token, never from the request.
+- **Staying connected.** A live connection's token is re-checked against the
+  store on every heartbeat and before every call routed to it. Rotating the
+  token, narrowing it to `readonly`, removing the host or moving it back to
+  SSH ends the connection. A second connection for the same host replaces
+  the first.
+- **Frames.** Each frame is one JSON object in a WebSocket text message, one
+  request and one response per `id`. The hub sends `exec`, `upload`, `cancel`
+  and `ping`; the agent sends `hello` (first), `result` and `pong`. The table
+  is in `docs/superpowers/specs/2026-09-18-host-agent-design.md`, and
+  `crates/fleet-proto` is the one definition both sides compile.
+- **Heartbeat.** The hub pings every 30 s and drops a connection that misses
+  two beats in a row.
+- **Size.** One frame is at most about 267 MiB (a 200 MiB transcript after
+  base64). Each answer is decoded against the budget of the requests in
+  flight, which is the full ceiling whenever an uncapped call is among them.
+- **Not enabled.** On the desktop, which routes nothing to agents, `/agent`
+  answers `503`.
+
+Tools see an agent host through the same calls as an SSH host. `agent_status`
+reports which agent hosts are connected. `add_host { transport: "agent" }`
+registers one without an SSH probe.
+
 ## Tools
 
 The authoritative per-tool documentation — description and parameter list for
@@ -196,7 +239,8 @@ Index by area (names only; see the reference for details):
 - **Fleet & hosts** — `fleet_health`, `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `probe_host`, `hide_host`, `provision_hosts`,
-  `list_accounts`.
+  `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
+  connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `list_worktrees`, `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
@@ -279,6 +323,19 @@ not a JSON-RPC error. The text block is the documented `E_CODE: message` line;
 candidate rows of `E_AMBIGUOUS` or the `confirm_nonce` of
 `E_CONFIRM_REQUIRED`). JSON-RPC errors are reserved for protocol failures:
 an unknown tool name or arguments that do not match the schema.
+
+Three codes are specific to agent hosts:
+- `E_AGENT_OFFLINE`: no `fleet-agent` is connected for the host. It is
+  returned at once and means what `E_SSH` means for an SSH host.
+- `E_AGENT_PROTOCOL`: the agent answered with something the protocol does
+  not allow.
+- `E_AGENT_REINSTALL`: `provision_hosts { rotate: true }` saved a new token
+  for an agent host and sent it nothing. Install the token on the host out
+  of band (`fleet-hub agent-token <host>`, then
+  `fleet-agent install --token-file -`), then provision again.
+
+A timed-out agent call reports `E_SSH_TIMEOUT`, the same code as SSH, so
+nothing downstream mistakes a timeout for "nothing ran".
 
 Every call runs under a wall clock: 60 s for reads and single round trips,
 300 s for session lifecycle, provisioning and host probes, 660 s for the

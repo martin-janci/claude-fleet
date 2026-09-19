@@ -3,12 +3,13 @@
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectRow {
     pub id: i64,
     pub owner: String,
     pub repo: String,
     pub base_path: String,
+    #[serde(default)]
     pub last_session_at: Option<i64>,
     /// Set by `service::add_project`'s `folder` source (migration 027): this
     /// row was registered from a checkout already on disk, possibly outside
@@ -18,7 +19,7 @@ pub struct ProjectRow {
     pub adopted: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeRow {
     pub id: i64,
     pub project_id: i64,
@@ -27,6 +28,7 @@ pub struct WorktreeRow {
     pub host_alias: String,
     pub name: String,
     pub path: String,
+    #[serde(default)]
     pub branch: Option<String>,
 }
 
@@ -94,54 +96,80 @@ pub(super) const KIND_PANE_LESS: &str = "kind IN ('bg','external')";
 
 /// `PartialEq` covers every wire field, so `upsert_session_in_tx` can tell a
 /// no-op reconcile pass from a real change before emitting `session:updated`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionRow {
     pub id: i64,
     pub tmux_name: String,
     pub host_alias: String,
+    #[serde(default)]
     pub project_id: Option<i64>,
+    #[serde(default)]
     pub worktree_id: Option<i64>,
     pub created_at: i64,
     pub last_activity_at: i64,
     pub status: String,
+    #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default)]
     pub account_uuid: Option<String>,
     pub kind: String,
+    #[serde(default)]
     pub reviews_session_id: Option<i64>,
+    #[serde(default)]
     pub worktree_key: Option<String>,
+    #[serde(default)]
     pub lost_at: Option<i64>,
+    #[serde(default)]
     pub claude_session_id: Option<String>,
+    #[serde(default)]
     pub claude_status: Option<String>,
+    #[serde(default)]
     pub effort_level: Option<String>,
+    #[serde(default)]
     pub pr_url: Option<String>,
+    #[serde(default)]
     pub current_activity: Option<String>,
+    #[serde(default)]
     pub context_pct: Option<f64>,
+    #[serde(default)]
     pub stuck_kind: Option<String>,
     /// Display label set by the in-session agent via the `set_friendly_name`
     /// MCP tool (migration 016). The sidebar shows this when the user's
     /// "friendly names" toggle is on; falls back to `tmux_name` when NULL.
+    #[serde(default)]
     pub friendly_name: Option<String>,
+    #[serde(default)]
     pub safe_kill_state: Option<String>,
+    #[serde(default)]
     pub safe_kill_nonce: Option<String>,
+    #[serde(default)]
     pub safe_kill_detail: Option<String>,
+    #[serde(default)]
     pub safe_kill_requested_at: Option<i64>,
     // ── Lifecycle + outcome fields (migration 019) ──
     /// When `claude_status` last entered idle/completed/stopped; NULL while
     /// working/blocked/unknown. Drives the GC sweeper.
+    #[serde(default)]
     pub idle_since: Option<i64>,
     /// When the current `stuck_kind` episode began; NULL when not stuck.
+    #[serde(default)]
     pub stuck_since: Option<i64>,
     /// When a stuck playbook last acted on this row. One stamp shared by
     /// every playbook kind: it gates "once per stuck episode" for all of
     /// them and the 1 h spacing for `oom`.
+    #[serde(default)]
     pub last_playbook_at: Option<i64>,
     /// First 200 chars of the last prompt sent through fleet.
+    #[serde(default)]
     pub last_prompt: Option<String>,
     /// When fleet created the session (NULL for tmux-discovered rows).
+    #[serde(default)]
     pub started_at: Option<i64>,
     /// Last Stop hook (turn completed).
+    #[serde(default)]
     pub last_turn_at: Option<i64>,
     /// `passing` | `failing` | `pending` from the PR's check rollup.
+    #[serde(default)]
     pub ci_status: Option<String>,
     // ── Orchestration fields (migration 020) ──
     /// Number of completed turns, incremented by every Stop hook. Callers
@@ -149,12 +177,15 @@ pub struct SessionRow {
     pub turn_seq: i64,
     /// Unix secs of the last Stop hook (a hook-stamped status newer than a
     /// reconcile pass's pane observation wins over the pane heuristic).
+    #[serde(default)]
     pub last_stop_at: Option<i64>,
     /// The requester session that dispatched the task this row is working
     /// on; NULL for top-level sessions.
+    #[serde(default)]
     pub parent_session_id: Option<i64>,
     /// Free-form labels set via `set_session_tags`. Stored as a JSON array
     /// (NULL ⇒ empty) and always surfaced as a list on the wire.
+    #[serde(default)]
     pub tags: Vec<String>,
     /// Token usage + estimated cost (migration 025), flattened onto the
     /// wire as the `usage_*` fields.
@@ -251,7 +282,8 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
 
 /// Token usage + estimated cost of a session (migration 025). Flattened
 /// into `SessionRow` on the wire, so the fields keep their `usage_` prefix.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SessionUsage {
     pub usage_input_tokens: i64,
     pub usage_output_tokens: i64,
@@ -279,7 +311,8 @@ impl SessionUsage {
 
 /// Token counts plus estimated cost (micro-USD): the unit of every usage
 /// roll-up.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct UsageTotals {
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -376,23 +409,35 @@ pub(super) fn idle_since_sql(st: &str, now_param: &str) -> String {
     )
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostRow {
     pub alias: String,
+    #[serde(default)]
     pub ssh_alias: Option<String>,
     pub reachable: bool,
+    #[serde(default)]
     pub claude_version: Option<String>,
+    #[serde(default)]
     pub tmux_version: Option<String>,
     pub hidden: bool,
+    #[serde(default)]
     pub last_pinged_at: Option<i64>,
+    #[serde(default)]
     pub account_uuid: Option<String>,
     pub provisioned: bool,
+    /// `"ssh"` | `"agent"` (migration 034). See `Store::set_host_transport`.
+    pub transport: String,
 }
+
+/// The only values `hosts.transport` may hold (migration 034). The single
+/// definition `Store::set_host_transport` and `service::hosts::add_host`
+/// both validate against, so the allowed set can't drift between them.
+pub const HOST_TRANSPORTS: [&str; 2] = ["ssh", "agent"];
 
 /// Columns every `HostRow` query selects, in [`map_host_row`] order.
 pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
-     last_pinged_at, account_uuid, provisioned";
+     last_pinged_at, account_uuid, provisioned, transport";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -406,10 +451,12 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         last_pinged_at: row.get(6)?,
         account_uuid: row.get(7)?,
         provisioned: row.get::<_, i64>(8)? != 0,
+        transport: row.get(9)?,
     })
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct AccountRow {
     pub uuid: String,
     pub email: Option<String>,
@@ -449,12 +496,13 @@ pub(super) fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Accou
 }
 
 /// One row of the append-only per-session event timeline (migration 013).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionEvent {
     pub id: i64,
     pub session_id: i64,
     pub at: i64,
     pub kind: String,
+    #[serde(default)]
     pub detail: Option<String>,
 }
 
@@ -511,24 +559,34 @@ pub(super) const MESSAGE_COLUMNS: &str =
 /// One dispatched unit of work (migration 020). `state` is one of
 /// [`TASK_STATES`]; `result` is the paragraph the worker printed after its
 /// `FLEET_TASK_DONE_<nonce>` marker, `error` the failure/cancel reason.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskRow {
     pub id: i64,
+    #[serde(default)]
     pub requester_session_id: Option<i64>,
+    #[serde(default)]
     pub worker_session_id: Option<i64>,
+    #[serde(default)]
     pub prompt: Option<String>,
     pub state: String,
+    #[serde(default)]
     pub result: Option<String>,
+    #[serde(default)]
     pub error: Option<String>,
     pub created_at: i64,
+    #[serde(default)]
     pub started_at: Option<i64>,
+    #[serde(default)]
     pub finished_at: Option<i64>,
     /// Per-task random tag baked into the completion marker. Never sent to
-    /// the frontend (the marker must not be forgeable from the UI).
-    #[serde(skip_serializing)]
+    /// the frontend (the marker must not be forgeable from the UI), so a row
+    /// read back from a hub carries an empty one — which is right: a client
+    /// must not be able to forge the marker either.
+    #[serde(skip_serializing, default)]
     pub nonce: String,
     /// Worker's `claude_session_id` at dispatch (liveness check; internal).
-    #[serde(skip_serializing)]
+    /// Not serialised either, hence `None` on a row read back from a hub.
+    #[serde(skip_serializing, default)]
     pub worker_claude_session_id: Option<String>,
 }
 

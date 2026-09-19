@@ -697,7 +697,9 @@ fn describe_register_failure_after_gh_success(owner: &str, repo: &str, e: IpcErr
     )
 }
 
-/// Wraps a genuine timeout (`E_TIMEOUT` / `E_SSH_TIMEOUT`) or a cancellation
+/// Wraps a transport failure the command may have outlived
+/// ([`codes::may_have_run`] — a timeout either side of the wire, or an agent
+/// that broke the protocol mid-request) or a cancellation
 /// (`E_CANCELLED`) from running [`new_project_script`] (or the push-only
 /// retry) with `create_remote` set. Either way the run was stopped before it
 /// finished and — unlike a normal failure exit — there is no captured output
@@ -716,7 +718,7 @@ fn note_unknown_github_state(
     if !create_remote {
         return e;
     }
-    if e.code == codes::E_TIMEOUT || e.code == codes::E_SSH_TIMEOUT {
+    if codes::may_have_run(&e.code) {
         return IpcError::new(
             &e.code,
             format!(
@@ -3776,6 +3778,38 @@ mod tests {
             "widget",
         );
         assert_eq!(local_only.message, "local script exceeded 600s");
+    }
+
+    /// An agent host's way of being cut off mid-run. `E_AGENT_PROTOCOL` is
+    /// raised only after the frame left the hub, so — exactly like
+    /// `E_SSH_TIMEOUT` — `gh repo create` may already have run. `E_SSH` is
+    /// deliberately absent from the hedge (a connect failure means nothing
+    /// ran), and `E_AGENT_OFFLINE` is its agent-side twin, so it stays out
+    /// too.
+    #[test]
+    fn note_unknown_github_state_hedges_an_agent_cut_off_mid_run() {
+        let hedged = note_unknown_github_state(
+            IpcError::new(codes::E_AGENT_PROTOCOL, "agent on laptop sent a bad frame"),
+            true,
+            "acme",
+            "widget",
+        );
+        assert_eq!(hedged.code, codes::E_AGENT_PROTOCOL);
+        assert!(
+            hedged.message.contains("GitHub state is unknown"),
+            "{}",
+            hedged.message
+        );
+
+        for code in [codes::E_SSH, codes::E_AGENT_OFFLINE] {
+            let never_ran = note_unknown_github_state(
+                IpcError::new(code, "nothing ran"),
+                true,
+                "acme",
+                "widget",
+            );
+            assert_eq!(never_ran.message, "nothing ran", "{code}");
+        }
     }
 
     // ── real gh-stage failure / resumability, `gh` always a local stub ──────

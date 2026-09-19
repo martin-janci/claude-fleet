@@ -9,9 +9,13 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 ### `add_host`
 
-Register a new SSH host. Probes it first; only persists the host if it is reachable. Returns the host row as JSON.
+Register a new host. transport is "ssh" (the default: probed first, persisted only if reachable) or "agent" (a host the hub cannot reach, which runs fleet-agent and dials in: persisted unprobed and unreachable until its agent connects; get its token on the hub with `fleet-hub agent-token <alias>`). Returns the host row as JSON.
 
-Parameters: `alias`, `ssh_alias`
+Parameters: `alias`, `ssh_alias`, `transport`
+
+### `agent_status`
+
+Which agent hosts (transport "agent") have a fleet-agent connected, since when (unix seconds), which agent version, host name and OS. Offline agent hosts are listed with connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false on a server that accepts no agents (the desktop). Returns JSON.
 
 ### `apply_sync`
 
@@ -496,6 +500,11 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::rotate_host_token`
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
+- `commands::hub::hub_status`
+- `commands::hub::hub_pair`
+- `commands::hub::hub_disconnect`
+- `commands::hub::hub_connection`
+- `commands::hub::hub_stranded_token`
 - `commands::onboarding::check_local_prereqs`
 - `commands::onboarding::tunnel_status`
 - `commands::assets::catalog_config`
