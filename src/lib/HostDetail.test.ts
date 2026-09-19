@@ -4,15 +4,28 @@ import { tick } from 'svelte';
 
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
-  return { ...actual, restoreHostSessions: vi.fn() };
+  return {
+    ...actual,
+    restoreHostSessions: vi.fn(),
+    discoverLostSessions: vi.fn(),
+    newSessionAbortable: vi.fn(),
+  };
 });
 
 import HostDetail from './HostDetail.svelte';
 import { sharedWith } from './hosts_view';
 import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host, session } from './hosts_fixture';
-import { restoreHostSessions, type SessionRow } from './sessions';
+import {
+  restoreHostSessions,
+  discoverLostSessions,
+  newSessionAbortable,
+  type LostCandidate,
+  type SessionRow,
+} from './sessions';
 
 const mockedRestore = restoreHostSessions as unknown as ReturnType<typeof vi.fn>;
+const mockedDiscover = discoverLostSessions as unknown as ReturnType<typeof vi.fn>;
+const mockedNewSession = newSessionAbortable as unknown as ReturnType<typeof vi.fn>;
 
 function mount(alias: string, over: Record<string, unknown> = {}) {
   const hosts = fleetHosts();
@@ -251,5 +264,126 @@ describe('HostDetail restore lost sessions', () => {
     await tick();
     expect(screen.getByTestId('restore-error').textContent).toContain('host unreachable');
     expect(screen.queryByTestId('confirm-dialog')).toBeNull();
+  });
+});
+
+function candidate(over: Partial<LostCandidate> = {}): LostCandidate {
+  return {
+    cwd: '/work/a',
+    git_branch: 'main',
+    claude_session_id: 'cs-a',
+    transcript_mtime: NOW - 300,
+    derived_tmux_name: 'proj-a',
+    project_id: 42,
+    worktree_id: 7,
+    existing_session_id: null,
+    rank_hint: 'before_boot',
+    ...over,
+  };
+}
+
+describe('HostDetail find lost conversations', () => {
+  beforeEach(() => {
+    mockedDiscover.mockReset();
+    mockedNewSession.mockReset();
+  });
+
+  it('is hidden when the host is unreachable', () => {
+    mount('claude-fleet-htz');
+    expect(screen.queryByTestId('discover-lost')).toBeNull();
+  });
+
+  it('renders the three candidate shapes: resumable, already in fleet, no project', async () => {
+    const resumable = candidate();
+    const existing = candidate({
+      cwd: '/work/b',
+      git_branch: null,
+      claude_session_id: 'cs-b',
+      transcript_mtime: NOW - 7200,
+      existing_session_id: 99,
+      rank_hint: 'after_boot',
+    });
+    const noProject = candidate({
+      cwd: '/work/c',
+      git_branch: null,
+      claude_session_id: 'cs-c',
+      transcript_mtime: NOW - 90000,
+      derived_tmux_name: null,
+      project_id: null,
+      rank_hint: 'stale',
+    });
+    mockedDiscover.mockResolvedValueOnce({ ok: true, value: [resumable, existing, noProject] });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+
+    expect(mockedDiscover).toHaveBeenCalledWith('mefistos');
+    const list = screen.getByTestId('discover-list');
+    expect(list.textContent).toContain('/work/a');
+    expect(list.textContent).toContain('main');
+    expect(list.textContent).toContain('before reboot');
+    expect(list.textContent).toContain('proj-a');
+    expect(list.textContent).toContain('already in fleet');
+    expect(list.textContent).toContain('no fleet project for this path');
+    expect(screen.getAllByTestId('discover-resume')).toHaveLength(1);
+  });
+
+  it('Resume calls newSessionAbortable with the exact args, including resume_claude_session_id', async () => {
+    const resumable = candidate();
+    mockedDiscover.mockResolvedValueOnce({ ok: true, value: [resumable] });
+    mockedNewSession.mockResolvedValueOnce({ ok: true, value: session('mefistos', 'proj-a') });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('discover-resume'));
+    await tick();
+
+    expect(mockedNewSession).toHaveBeenCalledWith({
+      host_alias: 'mefistos',
+      project_id: 42,
+      worktree_id: 7,
+      name: 'proj-a',
+      resume_claude_session_id: 'cs-a',
+    });
+    expect(screen.getByTestId('discover-list').textContent).toContain('resumed');
+    expect(screen.queryByTestId('discover-resume')).toBeNull();
+  });
+
+  it('shows a resume error inline and leaves the button in place', async () => {
+    const resumable = candidate();
+    mockedDiscover.mockResolvedValueOnce({ ok: true, value: [resumable] });
+    mockedNewSession.mockResolvedValueOnce({
+      ok: false,
+      error: { code: 'E_EXISTS', message: 'already resumed on this host' },
+    });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('discover-resume'));
+    await tick();
+
+    expect(screen.getByTestId('discover-item-error').textContent).toContain('already resumed on this host');
+    expect(screen.getByTestId('discover-resume')).toBeInTheDocument();
+  });
+
+  it('an empty result says so', async () => {
+    mockedDiscover.mockResolvedValueOnce({ ok: true, value: [] });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+
+    expect(screen.getByTestId('discover-list').textContent).toContain(
+      'No Claude conversations found on mefistos',
+    );
+  });
+
+  it('shows an inline error when the scan itself fails', async () => {
+    mockedDiscover.mockResolvedValueOnce({ ok: false, error: { code: 'E_UNREACHABLE', message: 'host offline' } });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+
+    expect(screen.getByTestId('discover-error').textContent).toContain('host offline');
+    expect(screen.queryByTestId('discover-list')).toBeNull();
   });
 });

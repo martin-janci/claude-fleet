@@ -11,10 +11,18 @@
   import type { AccountRow } from './accounts';
   import type { AccountUsageSnapshot } from './account_usage_store';
   import type { HostTokenInfo, TokenMode } from './mcp';
-  import { restoreHostSessions, type RestorePlanEntry, type SessionRow } from './sessions';
+  import {
+    restoreHostSessions,
+    discoverLostSessions,
+    newSessionAbortable,
+    type RestorePlanEntry,
+    type LostCandidate,
+    type SessionRow,
+  } from './sessions';
   import { selectSession } from './selection';
   import { claudeStatusLabel, stuckKindLabel } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
+  import { timeAgo } from './session_status';
   import { hideHostWithUndo, rotateToken, setTokenMode, showHost } from './host_actions';
   import { pushError, push } from './toasts';
   import { removeHostMessage, rotateTokenMessage, type HostAttention } from './hosts_view';
@@ -83,6 +91,64 @@
   let restoreSummary = $state<{ ok: number; total: number; failures: { name: string; error: string }[] } | null>(
     null,
   );
+
+  // Find lost conversations: transcripts the host has that fleet has no row
+  // for (discover_lost_sessions), each optionally resumable into a new
+  // fleet-managed session (new_session with resume_claude_session_id).
+  let discoverBusy = $state(false);
+  let discoverError = $state<string | null>(null);
+  let discoverList = $state<LostCandidate[] | null>(null);
+  let resumingId = $state<string | null>(null);
+  let resumedIds = $state<Set<string>>(new Set());
+  let resumeErrors = $state<Record<string, string>>({});
+
+  function rankLabel(hint: LostCandidate['rank_hint']): string | null {
+    switch (hint) {
+      case 'before_boot':
+        return 'before reboot';
+      case 'after_boot':
+        return 'since boot';
+      case 'stale':
+        return 'older';
+      default:
+        return null;
+    }
+  }
+
+  async function onDiscoverClick() {
+    discoverError = null;
+    discoverList = null;
+    resumedIds = new Set();
+    resumeErrors = {};
+    discoverBusy = true;
+    const r = await discoverLostSessions(host.alias);
+    discoverBusy = false;
+    if (!r.ok) {
+      discoverError = r.error.message;
+      return;
+    }
+    discoverList = r.value;
+  }
+
+  async function onResumeCandidate(c: LostCandidate) {
+    if (c.project_id === null || c.derived_tmux_name === null) return;
+    const { [c.claude_session_id]: _dropped, ...rest } = resumeErrors;
+    resumeErrors = rest;
+    resumingId = c.claude_session_id;
+    const r = await newSessionAbortable({
+      host_alias: host.alias,
+      project_id: c.project_id,
+      worktree_id: c.worktree_id,
+      name: c.derived_tmux_name,
+      resume_claude_session_id: c.claude_session_id,
+    });
+    resumingId = null;
+    if (r.ok) {
+      resumedIds = new Set(resumedIds).add(c.claude_session_id);
+    } else {
+      resumeErrors = { ...resumeErrors, [c.claude_session_id]: r.error.message };
+    }
+  }
 
   function sessionName(s: SessionRow): string {
     return s.friendly_name?.trim() || s.tmux_name;
@@ -237,16 +303,28 @@
   <section class="block" aria-label="Sessions on {host.alias}">
     <div class="section-head">
       <h3>Sessions <span class="muted">{hostSessions.length}</span></h3>
-      {#if restorable.length > 0}
-        <button
-          type="button"
-          class="small"
-          disabled={busy}
-          data-testid="restore-lost"
-          onclick={onRestoreClick}
-          >Restore {restorable.length} lost session{restorable.length === 1 ? '' : 's'}…</button
-        >
-      {/if}
+      <div class="actions">
+        {#if restorable.length > 0}
+          <button
+            type="button"
+            class="small"
+            disabled={busy}
+            data-testid="restore-lost"
+            onclick={onRestoreClick}
+            >Restore {restorable.length} lost session{restorable.length === 1 ? '' : 's'}…</button
+          >
+        {/if}
+        {#if host.reachable}
+          <button
+            type="button"
+            class="small"
+            disabled={discoverBusy}
+            data-testid="discover-lost"
+            onclick={onDiscoverClick}
+            >{discoverBusy ? 'searching…' : 'Find lost conversations…'}</button
+          >
+        {/if}
+      </div>
     </div>
     {#if restoreError}
       <p class="error" data-testid="restore-error">{restoreError}</p>
@@ -256,6 +334,49 @@
         Restored {restoreSummary.ok} of {restoreSummary.total}
         {#each restoreSummary.failures as f (f.name)}<br />{f.name}: {f.error}{/each}
       </p>
+    {/if}
+    {#if discoverError}
+      <p class="error" data-testid="discover-error">{discoverError}</p>
+    {/if}
+    {#if discoverList}
+      <div data-testid="discover-list">
+        {#if discoverList.length === 0}
+          <p class="muted">No Claude conversations found on {host.alias}.</p>
+        {:else}
+          <ul class="discover-items">
+            {#each discoverList as c (c.claude_session_id)}
+              <li class="discover-item">
+                <div class="d-main">
+                  <span class="d-cwd">{c.cwd}</span>
+                  {#if c.git_branch}<span class="muted">{c.git_branch}</span>{/if}
+                  <span class="muted">{timeAgo(c.transcript_mtime, now)}</span>
+                  {#if rankLabel(c.rank_hint)}<span class="badge">{rankLabel(c.rank_hint)}</span>{/if}
+                  {#if c.derived_tmux_name}<span class="muted">{c.derived_tmux_name}</span>{/if}
+                </div>
+                {#if c.existing_session_id !== null}
+                  <span class="muted">already in fleet</span>
+                {:else if resumedIds.has(c.claude_session_id)}
+                  <span class="muted">resumed</span>
+                {:else if c.project_id !== null && c.derived_tmux_name !== null}
+                  <button
+                    type="button"
+                    class="small"
+                    data-testid="discover-resume"
+                    disabled={resumingId === c.claude_session_id}
+                    onclick={() => onResumeCandidate(c)}
+                    >{resumingId === c.claude_session_id ? 'resuming…' : 'Resume'}</button
+                  >
+                  {#if resumeErrors[c.claude_session_id]}
+                    <p class="error" data-testid="discover-item-error">{resumeErrors[c.claude_session_id]}</p>
+                  {/if}
+                {:else}
+                  <span class="muted">no fleet project for this path</span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
     {/if}
     {#if hostSessions.length === 0}
       <p class="muted">No sessions on this host. Press <kbd>n</kbd> to start one.</p>
@@ -417,6 +538,25 @@
   .restore-plan li { display: flex; flex-wrap: wrap; gap: 0.4rem; }
   .restore-plan .skip { color: var(--usage-warn); }
   .note { margin: 0.4rem 0 0; color: var(--fg-muted); }
+  .discover-items { list-style: none; margin: 0.4rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+  .discover-item {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .d-main { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; flex: 1; min-width: 0; }
+  .d-cwd { font-variant-numeric: tabular-nums; }
+  .badge {
+    font-size: 0.7rem;
+    padding: 0 0.35rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--fg-muted);
+  }
   .sessions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
   .session {
     display: flex;
