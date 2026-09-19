@@ -3,8 +3,13 @@
 //! Pure policy + small in-memory state that `tools.rs` consults before it
 //! hands a call to the service layer:
 //!
-//! - [`is_readonly_tool`] — the allow-list a `readonly` host token is limited
-//!   to. Anything not listed is treated as mutating (fail closed).
+//! - [`TOOL_POLICIES`] — the single source for every router tool's access
+//!   (master-only vs client-callable), whether a `readonly` token may call
+//!   it, whether it needs desktop confirmation, and its deadline class.
+//!   [`is_readonly_tool`], [`is_admin_tool`], [`is_client_tool`],
+//!   [`needs_confirmation`] and `tools::support::tool_deadline` are all
+//!   lookups over it. Anything with no row is treated as mutating and
+//!   master-only (fail closed).
 //! - [`RateLimiter`] — one-slot token bucket per caller for `broadcast_prompt`.
 //! - [`PendingConfirms`] — one-time nonces for the optional desktop
 //!   confirmation of destructive calls (`mcp.confirm_destructive`).
@@ -17,8 +22,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// `settings` key: when `"true"`, every tool in [`CONFIRM_TOOLS`] needs a
-/// desktop confirmation.
+/// `settings` key: when `"true"`, every tool with `confirm: true` in
+/// [`TOOL_POLICIES`] needs a desktop confirmation.
 pub const SETTING_CONFIRM_DESTRUCTIVE: &str = "mcp.confirm_destructive";
 /// `settings` key: minimum seconds between two `broadcast_prompt` calls from
 /// the same caller. Absent / unparseable → [`DEFAULT_BROADCAST_INTERVAL_SECS`].
@@ -27,233 +32,766 @@ pub const DEFAULT_BROADCAST_INTERVAL_SECS: u64 = 30;
 /// How long an unconsumed confirmation nonce stays valid.
 pub const CONFIRM_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// Tools a `readonly` host token may call: everything that only observes the
-/// fleet. `probe_host` / `refresh_projects` re-read external state without
-/// touching sessions. Every other tool — sends, kills, deletes, clipboard
-/// writes, provisioning, session creation, host registration, and any write
-/// to a session row such as `set_friendly_name` — is refused with
-/// `E_FORBIDDEN`.
-pub const READONLY_TOOLS: &[&str] = &[
-    "fleet_health",
-    "list_hosts",
-    "agent_status",
-    "discover_hosts",
-    "list_accounts",
-    "probe_host",
-    "list_projects",
-    "refresh_projects",
-    "list_sessions",
-    "related_sessions",
-    "list_worktrees",
-    "capture_session",
-    "session_history",
-    "session_conversations",
-    "inbox",
-    "peer_status",
-    "peek_session",
-    "repo_changes",
-    "repo_tree",
-    "repo_file",
-    "repo_diff",
-    "repo_log",
-    "repo_branches",
-    "repo_commit",
-    "repo_commit_diff",
-    "get_clipboard",
-    // Orchestration reads (Wave 3 Track E): bounded waits and transcript /
-    // task reads observe state without changing it.
-    "wait_for_session",
-    "session_transcript",
-    "session_conversation",
-    "wait_for_task",
-    "list_tasks",
-    // Estimated token usage / cost roll-up (Wave 5 G1).
-    "usage_report",
-    // Asset catalog: `list_assets` reads the catalog + cached inventory.
-    // `scan_assets` is read-only ON THE HOSTS — like `refresh_projects` it
-    // re-reads external state and refreshes the cache rows that describe it,
-    // changing nothing a session or host depends on. `import_assets` WRITES
-    // the controller's catalog repo working tree and is therefore mutating.
-    "list_assets",
-    "scan_assets",
-    // Paired clients: listing them observes who holds a credential and
-    // changes nothing, so it belongs here — but it is ALSO in
-    // [`ADMIN_TOOLS`], the only tool in both lists. The two answer different
-    // questions: `ADMIN_TOOLS` decides WHO may call it (the master alone),
-    // this list decides whether a *readonly* token may, and a read that
-    // mutates nothing must not be classed as a mutation just because it is
-    // master-only. Minting and revoking are admin and mutating — below.
-    "list_clients",
+// --- tool policy table -------------------------------------------------------
+
+/// Who may call a tool. Being here is about WHO, not WHAT it does — a tool
+/// can be [`Access::Master`] and still be a read; see `list_clients` in
+/// [`TOOL_POLICIES`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Reachable with the master token only — see [`is_admin_tool`]. A
+    /// per-host token — even in `full` mode — must not be able to
+    /// re-provision, rotate, add or remove other hosts, or it could lock the
+    /// whole fleet out. A paired client token is refused these too, whatever
+    /// its mode — it is never the master ([`crate::mcp::Caller::is_master`]
+    /// is false for a client).
+    Master,
+    /// Reachable by a paired `full` client (and, for the readonly-eligible
+    /// subset, a `readonly` one too) as well as a per-host token — see
+    /// [`is_client_tool`]. `full` means whole-fleet *session* control
+    /// (send / kill / new_session across hosts stay allowed by design), not
+    /// fleet admin.
+    Client,
+}
+
+/// Wall-clock class a tool call is bounded to. The caps themselves
+/// (`LONG_POLL_CAP` / `LIFECYCLE_CAP` / `QUICK_CAP`) and the lookup that
+/// applies them per call (`tool_deadline`) live in `tools::support`, next to
+/// `bounded`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Deadline {
+    /// Tools that are themselves bounded long-polls (`timeout_s` ≤ 600): the
+    /// wire cap sits above their own maximum.
+    LongPoll,
+    /// Tools that compose several SSH round trips or spawn processes on a
+    /// host (session lifecycle, provisioning, host probes, fan-outs, reads
+    /// that may page through large files).
+    Lifecycle,
+    /// Everything else: store reads and single SSH round trips.
+    Quick,
+}
+
+/// One router tool's policy: who may call it ([`Access`]), whether a
+/// `readonly` token may too, whether it is gated by `mcp.confirm_destructive`,
+/// and its deadline class. [`TOOL_POLICIES`] is the single source these four
+/// questions are answered from — every predicate in this module is a lookup
+/// over it.
+pub struct ToolPolicy {
+    pub name: &'static str,
+    pub access: Access,
+    pub readonly: bool,
+    pub confirm: bool,
+    pub deadline: Deadline,
+}
+
+/// The single source of truth for every router tool's access, readonly,
+/// confirm and deadline classification. Adding a tool means adding exactly
+/// one row here; the exhaustiveness test in `tools::tests`
+/// (`every_router_tool_has_exactly_one_policy_row`) walks the real router and
+/// fails with the row to add when one is missing, duplicated, or names a tool
+/// that no longer exists.
+pub const TOOL_POLICIES: &[ToolPolicy] = &[
+    // fleet.rs
+    ToolPolicy {
+        name: "fleet_health",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Estimated token usage / cost roll-up (Wave 5 G1); `usage_scope` pins a
+    // per-host caller to its own host, so the read stays available without
+    // exposing another host's numbers.
+    ToolPolicy {
+        name: "usage_report",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "list_hosts",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "agent_status",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "discover_hosts",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "list_accounts",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "add_host",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // Re-reads external (SSH) state without touching sessions — readonly
+    // like `refresh_projects`.
+    ToolPolicy {
+        name: "probe_host",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "remove_host",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "hide_host",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "provision_hosts",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // Client credentials (paired with `revoke_client` below): minting one
+    // hands out fleet access and revoking one takes it away. A per-host token
+    // must not be able to issue itself a second identity, and a paired phone
+    // must not be able to pair another phone or revoke the operator's own
+    // client.
+    ToolPolicy {
+        name: "pair_client",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // The one tool that is BOTH master-only AND readonly: listing paired
+    // clients names every device, its mode, when it was paired and when it
+    // was last seen, so a phone must not be able to enumerate the operator's
+    // other devices (`access: Master`) — but the read changes nothing
+    // (`readonly: true`), and WHO may call a tool must not decide whether a
+    // read that mutates nothing gets classed as a mutation. The two flags
+    // answer different questions on purpose; minting and revoking a client
+    // credential are admin AND mutating, so they stay `readonly: false`
+    // above and below.
+    ToolPolicy {
+        name: "list_clients",
+        access: Access::Master,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "revoke_client",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // session_ops.rs
+    ToolPolicy {
+        name: "list_sessions",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "related_sessions",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "register_self",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "whoami",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "new_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "new_shell_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "capture_session",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "peek_session",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "recreate_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "dismiss_ghost_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "new_bg_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // lifecycle.rs
+    ToolPolicy {
+        name: "kill_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "safe_kill_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "rename_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Writes the session row's label: a mutation, so a readonly token may
+    // not call it.
+    ToolPolicy {
+        name: "set_friendly_name",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "restart_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "spawn_review",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "get_clipboard",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "set_clipboard",
+        access: Access::Client,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Quick,
+    },
+    // Explicit workspace repair: may unregister a worktree entry, re-path a
+    // row, recreate a branch and respawn a live pane.
+    ToolPolicy {
+        name: "repair_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Lifecycle,
+    },
+    // Starts a session on another host and kills the source.
+    ToolPolicy {
+        name: "move_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Lifecycle,
+    },
+    // messaging.rs
+    ToolPolicy {
+        name: "send_prompt",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "broadcast_prompt",
+        access: Access::Client,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "session_history",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "session_conversations",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "send_message",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "inbox",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "peer_status",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // orchestration.rs — bounded waits and transcript / task reads observe
+    // state without changing it (Wave 3 Track E).
+    ToolPolicy {
+        name: "wait_for_session",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::LongPoll,
+    },
+    ToolPolicy {
+        name: "session_transcript",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // Reads over SSH like session_transcript, so it gets the lifecycle
+    // deadline class, not the quick default.
+    ToolPolicy {
+        name: "session_conversation",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "run_prompt",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::LongPoll,
+    },
+    ToolPolicy {
+        name: "dispatch_task",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "wait_for_task",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::LongPoll,
+    },
+    ToolPolicy {
+        name: "list_tasks",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Marks a dispatched task cancelled (the worker session keeps running).
+    ToolPolicy {
+        name: "cancel_task",
+        access: Access::Client,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "set_session_tags",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // repo.rs
+    ToolPolicy {
+        name: "list_projects",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "refresh_projects",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "list_worktrees",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "delete_worktree",
+        access: Access::Client,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "repo_changes",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_tree",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_file",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_diff",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_log",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_branches",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_commit",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_commit_diff",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // assets.rs — asset catalog: `list_assets` reads the catalog + cached
+    // inventory. `scan_assets` is read-only ON THE HOSTS — like
+    // `refresh_projects` it re-reads external state and refreshes the cache
+    // rows that describe it, changing nothing a session or host depends on.
+    // `import_assets` WRITES the controller's catalog repo working tree and
+    // is therefore mutating.
+    ToolPolicy {
+        name: "list_assets",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "scan_assets",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "import_assets",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "plan_sync",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    // Writes files (with backups), merges config and installs plugins across
+    // every host in the plan; a per-host token must not be able to touch
+    // another host's filesystem or plugins through it. Deadline: plan_sync
+    // scans every selected host (pass host_alias to scope the scan/plan to
+    // one host); apply_sync then applies the WHOLE plan — every host it
+    // covers, each bounded at 300 s — so a fleet-wide apply over many hosts
+    // may hit the Lifecycle cap over MCP; scope the plan itself via
+    // plan_sync's host_alias to keep one apply_sync call under it.
+    ToolPolicy {
+        name: "apply_sync",
+        access: Access::Master,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Lifecycle,
+    },
+    // Secret values feed every host's rendered config; scoping this to the
+    // master token keeps a per-host token from setting values another host's
+    // assets would pick up.
+    ToolPolicy {
+        name: "set_secret",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Asset catalog layers: `list_layers` reads layer definitions + host
     // assignments, `resolve_preview` and `propose_layers` compute without
-    // writing anything. `set_host_layers` mutates fleet state and stays out.
-    "list_layers",
-    "resolve_preview",
-    "propose_layers",
+    // writing anything.
+    ToolPolicy {
+        name: "list_layers",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "resolve_preview",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "propose_layers",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // A host's layer assignment decides what the NEXT apply_sync writes to
+    // its filesystem; a per-host token on host A must not be able to change
+    // what host B resolves to, any more than it could call apply_sync or
+    // set_secret against B directly. `set_host_layers` itself mutates fleet
+    // state, so it stays out of readonly.
+    ToolPolicy {
+        name: "set_host_layers",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
 ];
 
+/// This tool's full policy row, or `None` for a name the router does not
+/// serve (an unclassified/unknown name).
+pub fn policy(name: &str) -> Option<&'static ToolPolicy> {
+    TOOL_POLICIES.iter().find(|p| p.name == name)
+}
+
+/// Tools a `readonly` host token may call: everything that only observes the
+/// fleet. Every other tool — sends, kills, deletes, clipboard writes,
+/// provisioning, session creation, host registration, and any write to a
+/// session row such as `set_friendly_name` — is refused with `E_FORBIDDEN`.
 pub fn is_readonly_tool(name: &str) -> bool {
-    READONLY_TOOLS.contains(&name)
+    policy(name).is_some_and(|p| p.readonly)
 }
 
 /// Tools gated by the `mcp.confirm_destructive` toggle.
-pub const CONFIRM_TOOLS: &[&str] = &[
-    "broadcast_prompt",
-    "kill_session",
-    "delete_worktree",
-    "set_clipboard",
-    // Explicit workspace repair: may unregister a worktree entry, re-path a
-    // row, recreate a branch and respawn a live pane.
-    "repair_session",
-    // Marks a dispatched task cancelled (the worker session keeps running).
-    "cancel_task",
-    // Starts a session on another host and kills the source.
-    "move_session",
-    // Writes files (with backups), merges config and installs plugins
-    // across the fleet.
-    "apply_sync",
-];
-
 pub fn needs_confirmation(name: &str) -> bool {
-    CONFIRM_TOOLS.contains(&name)
+    policy(name).is_some_and(|p| p.confirm)
 }
 
-/// Fleet-administration tools: reachable with the master token only. A
-/// per-host token — even in `full` mode — must not be able to re-provision,
-/// rotate, add or remove other hosts, or it could lock the whole fleet out.
-/// `full` therefore means whole-fleet *session* control (send / kill /
-/// new_session across hosts stay allowed by design), not fleet admin. A
-/// paired client token is refused these too, whatever its mode — it is never
-/// the master ([`crate::mcp::Caller::is_master`] is false for a client).
-///
-/// Being here is about WHO may call a tool, not about whether it writes:
-/// `list_clients` is master-only *and* read-only, so it appears in
-/// [`READONLY_TOOLS`] too.
-///
-/// This is a DENYLIST, so a new router tool left off both this and
-/// [`CLIENT_TOOLS`] would otherwise be callable by any paired `full` client
-/// by default. A new tool must therefore be added to exactly one of the
-/// two — the exhaustiveness test in `tools::tests` enforces it.
-pub const ADMIN_TOOLS: &[&str] = &[
-    "provision_hosts",
-    "add_host",
-    "remove_host",
-    "hide_host",
-    // Writes to every host in a plan; a per-host token must not be able to
-    // touch another host's filesystem or plugins through it.
-    "apply_sync",
-    // Secret values feed every host's rendered config; scoping this to the
-    // master token keeps a per-host token from setting values another
-    // host's assets would pick up.
-    "set_secret",
-    // Client credentials: minting one hands out fleet access and revoking
-    // one takes it away. A per-host token must not be able to issue itself a
-    // second identity, and a paired phone must not be able to pair another
-    // phone or revoke the operator's own client.
-    "pair_client",
-    "revoke_client",
-    // Listing them is the same surface read from the other side: it names
-    // every paired device, its mode, when it was paired and when it was last
-    // seen. A phone must not be able to enumerate the operator's other
-    // devices, so the whole client group is master-only. It mutates nothing,
-    // so it stays in [`READONLY_TOOLS`] as well — see the note there.
-    "list_clients",
-    // A host's layer assignment decides what the NEXT apply_sync writes to
-    // its filesystem; a per-host token on host A must not be able to
-    // change what host B resolves to, any more than it could call
-    // apply_sync or set_secret against B directly.
-    "set_host_layers",
-];
-
+/// Fleet-administration tools: reachable with the master token only — see
+/// [`Access::Master`].
 pub fn is_admin_tool(name: &str) -> bool {
-    ADMIN_TOOLS.contains(&name)
+    policy(name).is_some_and(|p| matches!(p.access, Access::Master))
 }
 
-/// Every other router tool: reachable by a paired `full` client (and, for
-/// the readonly-eligible subset, a `readonly` one — see [`READONLY_TOOLS`]).
+/// Every other router tool: reachable by a paired `full` client — see
+/// [`Access::Client`].
 ///
-/// Classification is MANDATORY, not a denylist: a tool that is in neither
-/// this list nor [`ADMIN_TOOLS`] fails the exhaustiveness test in
-/// `tools::tests` (it walks the real router). Adding a tool means picking
-/// exactly one of the two — [`ADMIN_TOOLS`] if only the master may call it,
-/// here otherwise.
-pub const CLIENT_TOOLS: &[&str] = &[
-    // fleet.rs
-    "fleet_health",
-    "usage_report",
-    "list_hosts",
-    "agent_status",
-    "discover_hosts",
-    "list_accounts",
-    "probe_host",
-    // session_ops.rs
-    "list_sessions",
-    "related_sessions",
-    "register_self",
-    "whoami",
-    "new_session",
-    "new_shell_session",
-    "capture_session",
-    "peek_session",
-    "recreate_session",
-    "dismiss_ghost_session",
-    "new_bg_session",
-    // lifecycle.rs
-    "kill_session",
-    "safe_kill_session",
-    "rename_session",
-    "set_friendly_name",
-    "restart_session",
-    "spawn_review",
-    "get_clipboard",
-    "set_clipboard",
-    "repair_session",
-    "move_session",
-    // messaging.rs
-    "send_prompt",
-    "broadcast_prompt",
-    "session_history",
-    "session_conversations",
-    "send_message",
-    "inbox",
-    "peer_status",
-    // orchestration.rs
-    "wait_for_session",
-    "session_transcript",
-    "session_conversation",
-    "run_prompt",
-    "dispatch_task",
-    "wait_for_task",
-    "list_tasks",
-    "cancel_task",
-    "set_session_tags",
-    // repo.rs
-    "list_projects",
-    "refresh_projects",
-    "list_worktrees",
-    "delete_worktree",
-    "repo_changes",
-    "repo_tree",
-    "repo_file",
-    "repo_diff",
-    "repo_log",
-    "repo_branches",
-    "repo_commit",
-    "repo_commit_diff",
-    // assets.rs (apply_sync, set_secret and set_host_layers stay out — see
-    // ADMIN_TOOLS)
-    "list_assets",
-    "scan_assets",
-    "import_assets",
-    "plan_sync",
-    "list_layers",
-    "resolve_preview",
-    "propose_layers",
-];
-
+/// Classification is MANDATORY, not a denylist: a tool with no
+/// [`TOOL_POLICIES`] row fails the exhaustiveness test in `tools::tests` (it
+/// walks the real router). Adding a tool means adding one row and picking
+/// [`Access::Master`] if only the master may call it, [`Access::Client`]
+/// otherwise.
 pub fn is_client_tool(name: &str) -> bool {
-    CLIENT_TOOLS.contains(&name)
+    policy(name).is_some_and(|p| matches!(p.access, Access::Client))
 }
+
+// --- legacy name lists -------------------------------------------------------
+//
+// `tools/fleet.rs`, `tools/assets.rs`, `tools/lifecycle.rs` and
+// `src-tauri/src/commands/mcp.rs` still name these four lists in comments.
+// Rather than touch every one of those (and risk drifting from
+// [`TOOL_POLICIES`] again), they stay as thin DERIVED views computed from the
+// table at compile time — not a second hand-maintained source. The
+// exhaustiveness test in `tools::tests` is what actually guards the table;
+// these are just `&[&str]` projections of it for callers that want a list to
+// iterate.
+
+const fn policy_is_readonly(p: &ToolPolicy) -> bool {
+    p.readonly
+}
+const fn policy_needs_confirm(p: &ToolPolicy) -> bool {
+    p.confirm
+}
+const fn policy_is_admin(p: &ToolPolicy) -> bool {
+    matches!(p.access, Access::Master)
+}
+const fn policy_is_client(p: &ToolPolicy) -> bool {
+    matches!(p.access, Access::Client)
+}
+
+/// Generates `pub const $pub_name: &[&str]`, the names of every
+/// [`TOOL_POLICIES`] row for which `$pred` holds, sized exactly to fit (a
+/// mismatched hardcoded length cannot happen — the size is computed from the
+/// table, not written down).
+macro_rules! derived_tool_names {
+    ($count_fn:ident, $count:ident, $build_fn:ident, $arr:ident, $pub_name:ident, $pred:path) => {
+        const fn $count_fn() -> usize {
+            let mut n = 0;
+            let mut i = 0;
+            while i < TOOL_POLICIES.len() {
+                if $pred(&TOOL_POLICIES[i]) {
+                    n += 1;
+                }
+                i += 1;
+            }
+            n
+        }
+        const $count: usize = $count_fn();
+        const fn $build_fn() -> [&'static str; $count] {
+            let mut out = [""; $count];
+            let mut n = 0;
+            let mut i = 0;
+            while i < TOOL_POLICIES.len() {
+                if $pred(&TOOL_POLICIES[i]) {
+                    out[n] = TOOL_POLICIES[i].name;
+                    n += 1;
+                }
+                i += 1;
+            }
+            out
+        }
+        const $arr: [&str; $count] = $build_fn();
+        pub const $pub_name: &[&str] = &$arr;
+    };
+}
+
+derived_tool_names!(
+    readonly_count,
+    READONLY_COUNT,
+    readonly_build,
+    READONLY_ARR,
+    READONLY_TOOLS,
+    policy_is_readonly
+);
+derived_tool_names!(
+    confirm_count,
+    CONFIRM_COUNT,
+    confirm_build,
+    CONFIRM_ARR,
+    CONFIRM_TOOLS,
+    policy_needs_confirm
+);
+derived_tool_names!(
+    admin_count,
+    ADMIN_COUNT,
+    admin_build,
+    ADMIN_ARR,
+    ADMIN_TOOLS,
+    policy_is_admin
+);
+derived_tool_names!(
+    client_count,
+    CLIENT_COUNT,
+    client_build,
+    CLIENT_ARR,
+    CLIENT_TOOLS,
+    policy_is_client
+);
 
 /// Resolve the broadcast interval from the raw setting value.
 pub fn broadcast_interval(raw: Option<String>) -> Duration {

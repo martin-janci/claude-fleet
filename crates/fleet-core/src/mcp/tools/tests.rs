@@ -290,9 +290,25 @@ fn fleet_admin_tools_are_master_only() {
             "{t}: {}",
             err.message
         );
+        assert_eq!(err.data.as_ref().unwrap()["code"], "E_FORBIDDEN", "{t}");
+        // A REAL master-only tool gets told it IS one — the wording the
+        // unclassified-name case (`enforce_admin_fails_closed_for_an_…`)
+        // must NOT get, since a made-up name is not a real admin tool.
+        assert!(
+            err.message
+                .contains("is a fleet-admin tool: master token only"),
+            "{t}: {}",
+            err.message
+        );
         let err = enforce_admin(&phone, t).expect_err(t);
         assert!(
             err.message.starts_with("E_FORBIDDEN") && err.message.contains("client:phone"),
+            "{t}: {}",
+            err.message
+        );
+        assert!(
+            err.message
+                .contains("is a fleet-admin tool: master token only"),
             "{t}: {}",
             err.message
         );
@@ -1214,91 +1230,53 @@ fn tool_error_result_keeps_protocol_errors_as_errors() {
 }
 
 // ---- per-tool wall clock (spec §4) ----
-
-#[test]
-fn every_router_tool_is_explicitly_classified() {
-    // A new tool must be placed in a class on purpose; the 60 s default is
-    // for the wire, not a way to skip the decision.
-    let listed: Vec<String> = FleetTools::tool_router_for_doc()
-        .list_all()
-        .into_iter()
-        .map(|t| t.name.to_string())
-        .collect();
-    assert!(!listed.is_empty());
-    for name in &listed {
-        assert!(
-            LONG_POLL_TOOLS.contains(&name.as_str())
-                || LIFECYCLE_TOOLS.contains(&name.as_str())
-                || QUICK_TOOLS.contains(&name.as_str()),
-            "tool {name} is not classified in support.rs"
-        );
-    }
-    for name in LONG_POLL_TOOLS
-        .iter()
-        .chain(LIFECYCLE_TOOLS)
-        .chain(QUICK_TOOLS)
-    {
-        assert!(
-            listed.iter().any(|l| l == name),
-            "{name} is classified but not served"
-        );
-    }
-}
-
 // ---- master-only tool gate must not fail open (Task 3: #143) ----
+// ---- one table, one exhaustiveness test (Task 4: #143 part 2) ----
 
+/// Replaces the old per-list exhaustiveness tests
+/// (`every_router_tool_is_explicitly_classified`,
+/// `every_router_tool_is_admin_or_client_exactly_once`,
+/// `guard_lists_name_only_real_router_tools`): `guard::TOOL_POLICIES` is now
+/// the one table every predicate and the deadline lookup derive from, so
+/// there is one shape to enforce — every served tool has EXACTLY ONE row,
+/// and every row names a served tool. "In both ADMIN and CLIENT" and "no
+/// deadline class" can no longer happen at all: `access` is a two-variant
+/// enum and `deadline` is a required field, not an optional list membership.
 #[test]
-fn every_router_tool_is_admin_or_client_exactly_once() {
-    // guard::ADMIN_TOOLS is a denylist: a tool left off both it and
-    // guard::CLIENT_TOOLS used to be callable by any paired `full` client by
-    // default. Walk the real router and force the decision, the same way
-    // `every_router_tool_is_explicitly_classified` forces a deadline class.
-    let listed: Vec<String> = FleetTools::tool_router_for_doc()
+fn every_router_tool_has_exactly_one_tool_policy_row() {
+    let served: Vec<String> = FleetTools::tool_router_for_doc()
         .list_all()
         .into_iter()
         .map(|t| t.name.to_string())
         .collect();
-    assert!(!listed.is_empty());
-    for name in &listed {
-        let admin = guard::ADMIN_TOOLS.contains(&name.as_str());
-        let client = guard::CLIENT_TOOLS.contains(&name.as_str());
+    assert!(!served.is_empty());
+
+    for name in &served {
+        let rows: Vec<&guard::ToolPolicy> = guard::TOOL_POLICIES
+            .iter()
+            .filter(|p| p.name == name.as_str())
+            .collect();
         assert!(
-            admin || client,
-            "tool {name} is in neither guard::ADMIN_TOOLS nor guard::CLIENT_TOOLS \
-             — add it to exactly one so a new tool's access is a decision, not a \
-             default (master-only ⇒ ADMIN_TOOLS, client-callable ⇒ CLIENT_TOOLS)"
+            !rows.is_empty(),
+            "tool {name} has no guard::TOOL_POLICIES row — add a ToolPolicy row \
+             for {name} in mcp/guard.rs"
         );
         assert!(
-            !(admin && client),
-            "tool {name} is in BOTH guard::ADMIN_TOOLS and guard::CLIENT_TOOLS \
-             — a tool is either master-only or client-callable, not both"
+            rows.len() == 1,
+            "tool {name} has {} guard::TOOL_POLICIES rows — remove the duplicate(s) \
+             so {name} has exactly one",
+            rows.len()
         );
     }
-}
 
-#[test]
-fn guard_lists_name_only_real_router_tools() {
-    // Catches a typo or a renamed tool left stale in one of the hand-written
-    // lists: every name they mention must be a tool the router actually
-    // serves.
-    let listed: Vec<String> = FleetTools::tool_router_for_doc()
-        .list_all()
-        .into_iter()
-        .map(|t| t.name.to_string())
-        .collect();
-    for (label, names) in [
-        ("READONLY_TOOLS", guard::READONLY_TOOLS),
-        ("CONFIRM_TOOLS", guard::CONFIRM_TOOLS),
-        ("ADMIN_TOOLS", guard::ADMIN_TOOLS),
-        ("CLIENT_TOOLS", guard::CLIENT_TOOLS),
-    ] {
-        for name in names {
-            assert!(
-                listed.iter().any(|l| l == name),
-                "guard::{label} names {name:?}, which is not a real router tool \
-                 (typo, or the tool was renamed/removed)"
-            );
-        }
+    for row in guard::TOOL_POLICIES {
+        assert!(
+            served.iter().any(|s| s == row.name),
+            "guard::TOOL_POLICIES names {:?}, which is not a real router tool \
+             (typo, or the tool was renamed/removed) — remove or fix that row \
+             in mcp/guard.rs",
+            row.name
+        );
     }
 }
 
@@ -1331,6 +1309,10 @@ fn enforce_admin_fails_closed_for_an_unclassified_tool_name() {
     for caller in [&full_client, &full_host] {
         let err = enforce_admin(caller, made_up).expect_err(made_up);
         assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+        // Same code as a real admin tool's refusal
+        // (`fleet_admin_tools_are_master_only`) — only the wording tells the
+        // two cases apart.
+        assert_eq!(err.data.as_ref().unwrap()["code"], "E_FORBIDDEN");
         // Unlike a real admin tool (see `fleet_admin_tools_are_master_only`),
         // an unclassified name must not be told it IS a fleet-admin tool —
         // it is not one, it is simply not client-callable.
