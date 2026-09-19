@@ -41,14 +41,19 @@ into the host's `~/.claude.json` and hook block, and remembers it in the
 the caller: the master token is unrestricted, a per-host token is bound to its
 host — `register_self`, `send_message` (`from_session_id`) and `inbox` refuse
 sessions on any other host with `E_FORBIDDEN`, so a token lifted from one
-machine cannot impersonate another.
+machine cannot impersonate another. The same binding applies to the tools that
+change a session (`recreate_session`, `dismiss_ghost_session`, …) and to the
+pane / transcript reads (`capture_session`, `peek_session`,
+`session_transcript`), checked against the stored row's host.
 
 Each host's token has a **mode**, shown and changed under **Integration** in
 the host's detail in the **Hosts** view (⌘I):
 
-- `full` (default) — whole-fleet **session** control: every tool except the
-  fleet-admin set. Cross-host `send_prompt`, `kill_session`, `new_session`
-  etc. remain allowed by design.
+- `full` (default) — **session** control on its own host: every tool except
+  the fleet-admin set. Session-addressed tools (`send_prompt`,
+  `kill_session`, `new_session`, …) refuse another host's sessions with
+  `E_FORBIDDEN`; fleet-wide listings (`list_sessions`, …) still see every
+  host.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
   `session_history`, `inbox`, `peer_status`, `session_transcript`,
   `peek_session` (deprecated), `repo_*`, `get_clipboard`, `wait_for_session`,
