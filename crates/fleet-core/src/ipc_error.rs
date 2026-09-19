@@ -139,8 +139,10 @@ pub mod codes {
     /// `move_session`: the branch is not on origin, or has commits origin
     /// lacks. Push first; a move never pushes.
     pub const E_MOVE_UNPUSHED: &str = "E_MOVE_UNPUSHED";
-    /// `move_session`: the transcript is over `move.max_transcript_mb`
-    /// (`details.bytes`, `details.cap_bytes`).
+    /// `move_session`: the transcript is over `move.max_transcript_mb`, or
+    /// the git bundle of the carried work is over `move.max_bundle_mb`
+    /// (`details.bytes`, `details.cap_bytes`; `details.payload` is
+    /// `"transcript"` or `"bundle"`).
     pub const E_MOVE_TOO_LARGE: &str = "E_MOVE_TOO_LARGE";
     /// `move_session`: a step failed after the target session was started;
     /// both sessions were left running (`details.target_session_id`).

@@ -8,19 +8,32 @@
 //!    is a `work` row with a `claude_session_id`, a worktree branch and an
 //!    idle Claude (freshly reconciled; a turn in progress or an unknown
 //!    status is refused); both hosts are reachable, the target is
-//!    provisioned; the source worktree is clean (`E_MOVE_DIRTY`) and its
-//!    branch is on origin with nothing unpushed (`E_MOVE_UNPUSHED`). Nothing
-//!    is ever pushed or stashed on the user's behalf.
+//!    provisioned; the source worktree is on the session's branch with a
+//!    readable HEAD and no operation in progress (`E_MOVE_MIDOP`).
+//!    Uncommitted and unpushed work is carried, not refused (see step 3);
+//!    with `strict: true` it is refused as before (`E_MOVE_DIRTY`,
+//!    `E_MOVE_UNPUSHED`). Nothing is ever pushed, committed or stashed on
+//!    the user's behalf, and the source worktree is never modified.
 //! 2. **Transcript** — the source JSONL is located (stored hook path, else
 //!    `~/.claude/projects/*/<id>.jsonl`), size-checked against
 //!    `move.max_transcript_mb` (`E_MOVE_TOO_LARGE`), read over ssh and
 //!    written to the target's `~/.claude/projects/<encoded target cwd>/<id>.jsonl`
 //!    through `SshExec::upload_file` stdin.
-//! 3. **Target** — the worktree is created (or repaired, create-only) with
+//! 3. **Target** — the target's main clone is seeded (present, cloned, or
+//!    `git init` when origin is unreachable), the source worktree is
+//!    snapshotted into private `refs/fleet/transfer/<id>/*` and bundled
+//!    against what the target already has (`move.max_bundle_mb`), the bundle
+//!    is relayed through this process in chunks and fetched there. The
+//!    worktree is then created (or repaired, create-only) with
 //!    `repair::ensure_for_new_session` from the same branch, fast-forwarded to
-//!    the source HEAD when it lags, and tmux starts `cl --resume <id>` there
-//!    (the recreate pane command). The move then waits, bounded, for the row
-//!    to be `running` and the transcript to be in place.
+//!    the source HEAD when it lags; the snapshot is replayed into it and
+//!    verified (its porcelain must equal the source's — `E_MOVE_CARRY`; a
+//!    target worktree with changes of its own is `E_MOVE_TARGET_DIRTY`), and
+//!    the small git-ignored files are carried over (never a failure, only a
+//!    warning). Then tmux starts `cl --resume <id>` there (the recreate pane
+//!    command). The move waits, bounded, for the row to be `running` and the
+//!    transcript to be in place. The carry itself lives in [`carry`]; see
+//!    `docs/adr/0002-move-carries-work-as-is.md`.
 //! 4. **Source** — only once the target is confirmed (the new row's
 //!    `parent_session_id` is the source): unless `keep_source`, and only if
 //!    the source transcript still has the size and mtime the copy was taken
@@ -29,10 +42,14 @@
 //!    then — a `session_moved` event on both rows. A partial move records
 //!    `session_move_partial` (with the failing step) instead.
 //!
-//! Failure handling: every step before the target tmux session starts leaves
-//! the source untouched and returns the step's own error. Any failure after
-//! the target session exists returns `E_MOVE_PARTIAL` (with the new session
-//! id in `details`) and leaves BOTH sessions alive.
+//! Failure handling: every step before the target tmux session starts —
+//! every carry step included — leaves the source untouched and returns the
+//! step's own error (`E_MOVE_MIDOP`, `E_MOVE_CARRY` with `details.step`,
+//! `E_MOVE_TARGET_DIRTY`, `E_MOVE_TOO_LARGE` with `details.payload`). Any
+//! failure after the target session exists returns `E_MOVE_PARTIAL` (with
+//! the new session id in `details`) and leaves BOTH sessions alive. Once the
+//! carry has begun, the private refs and transfer directories on both hosts
+//! are cleaned up on every exit path; a failed cleanup is only logged.
 //!
 //! The lifecycle steps that need the real `SshClient` (workspace repair,
 //! tmux start, reconcile, kill) sit behind [`MoveHooks`]; every data-plane
@@ -67,6 +84,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(40);
 /// Connect timeout for the transcript read (wall clock 3× — 6 min — enough
 /// for the 200 MiB default cap over a slow link).
 const COPY_TIMEOUT: Duration = Duration::from_secs(120);
+/// Wall clock for the seed (a clone) and the snapshot + bundle scripts.
+const CARRY_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Longest encoded project directory Claude Code uses verbatim; longer names
 /// are truncated with a hash suffix we cannot reproduce, so `--resume` would
@@ -107,6 +126,8 @@ pub struct MoveReport {
     pub transcript_bytes: u64,
     pub source_killed: bool,
     pub warnings: Vec<String>,
+    /// What travelled besides the transcript.
+    pub carried: carry::CarryReport,
     pub target: SessionRow,
 }
 
@@ -720,6 +741,15 @@ async fn sh(
     crate::ssh::run_shell(ssh, host, script, timeout).await
 }
 
+/// Run a carry script with the long wall clock.
+async fn sh_long(
+    ssh: &dyn SshExec,
+    host: &str,
+    script: &str,
+) -> Result<std::process::Output, IpcError> {
+    crate::ssh::run_shell_bounded(ssh, host, script, GIT_TIMEOUT, CARRY_TIMEOUT).await
+}
+
 fn stderr_of(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).trim().to_string()
 }
@@ -733,8 +763,9 @@ fn stderr_of(out: &std::process::Output) -> String {
 struct TempFile(std::path::PathBuf);
 
 impl TempFile {
-    fn write(bytes: &[u8]) -> Result<Self, IpcError> {
-        use std::io::Write;
+    /// An empty private file plus its open handle, for a payload written in
+    /// pieces (see [`download`]).
+    fn create(ext: &str) -> Result<(Self, std::fs::File), IpcError> {
         use std::os::unix::fs::OpenOptionsExt;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -744,15 +775,20 @@ impl TempFile {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "claude-fleet-move-{}-{seq}-{nanos}.jsonl",
+            "claude-fleet-move-{}-{seq}-{nanos}.{ext}",
             std::process::id()
         ));
-        let mut f = std::fs::OpenOptions::new()
+        let f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&path)?;
-        let guard = TempFile(path);
+        Ok((TempFile(path), f))
+    }
+
+    fn write(bytes: &[u8]) -> Result<Self, IpcError> {
+        use std::io::Write;
+        let (guard, mut f) = Self::create("jsonl")?;
         f.write_all(bytes)?;
         f.sync_all()?;
         Ok(guard)
@@ -817,6 +853,176 @@ async fn put(ssh: &dyn SshExec, host: &str, path: &str, bytes: &[u8]) -> Result<
     ssh.upload_file(host, &tmp.0, path, COPY_TIMEOUT).await
 }
 
+/// Pull `bytes` of `remote_path` on `host` into a private temp file, one
+/// [`carry::CHUNK_BYTES`] at a time, so a payload is never held in memory.
+/// Each chunk is read through [`carry::payload`]: a login-shell banner on
+/// stdout is not part of the file.
+async fn download(
+    ssh: &dyn SshExec,
+    host: &str,
+    remote_path: &str,
+    bytes: u64,
+    ext: &str,
+) -> Result<TempFile, IpcError> {
+    use std::io::Write;
+    let (guard, mut f) = TempFile::create(ext)?;
+    let mut got = 0u64;
+    while got < bytes {
+        let want = carry::CHUNK_BYTES.min(bytes - got);
+        let out = sh(
+            ssh,
+            host,
+            &carry::chunk_script(remote_path, got, want),
+            COPY_TIMEOUT,
+        )
+        .await?;
+        let chunk = carry::payload(&out.stdout).unwrap_or_default();
+        if !out.status.success() || chunk.is_empty() {
+            return Err(carry_err(
+                "download",
+                &format!("reading {remote_path} on {host} stopped at {got} of {bytes} bytes"),
+                &stderr_of(&out),
+            ));
+        }
+        f.write_all(chunk)?;
+        got += chunk.len() as u64;
+    }
+    f.sync_all()?;
+    if got != bytes {
+        return Err(carry_err(
+            "download",
+            &format!("{remote_path} on {host} gave {got} bytes, expected {bytes}"),
+            "",
+        ));
+    }
+    Ok(guard)
+}
+
+/// Put a local file at `path` on `host` (a plain copy when `host` is local).
+async fn put_file(
+    ssh: &dyn SshExec,
+    host: &str,
+    local: &std::path::Path,
+    path: &str,
+) -> Result<(), IpcError> {
+    if host == LOCAL {
+        crate::service::hub::ensure_local_allowed(host)?;
+        return tokio::fs::copy(local, path)
+            .await
+            .map(|_| ())
+            .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("write {path}: {e}")));
+    }
+    ssh.upload_file(host, local, path, COPY_TIMEOUT).await
+}
+
+/// What the end-of-move cleanup must undo; filled in as the carry progresses.
+#[derive(Default)]
+struct CarryCleanup {
+    id: String,
+    /// (host, source worktree)
+    source: Option<(String, String)>,
+    /// (host, target project root)
+    target: Option<(String, String)>,
+}
+
+impl CarryCleanup {
+    /// Best effort on both hosts: a failure here never changes the move's
+    /// result.
+    async fn run(&self, ssh: &dyn SshExec) {
+        for (host, dir) in self.source.iter().chain(self.target.iter()) {
+            if let Err(e) = sh(
+                ssh,
+                host,
+                &carry::cleanup_script(dir, &self.id),
+                GIT_TIMEOUT,
+            )
+            .await
+            {
+                tracing::warn!(host = %host, error = %e.message, "[move_session] carry cleanup failed");
+            }
+        }
+    }
+}
+
+type Ignored = (Vec<carry::IgnoredEntry>, Vec<carry::LeftBehind>);
+
+/// List, select, pack, relay and extract the small git-ignored files. `Err`
+/// carries what was left behind plus the reason, for a report warning.
+#[allow(clippy::too_many_arguments)]
+async fn carry_ignored(
+    ssh: &dyn SshExec,
+    src: &str,
+    target: &str,
+    worktree: &str,
+    cwd: &str,
+    target_dir: &str,
+    id: &str,
+    snap: &Snapshot,
+) -> Result<Ignored, (Vec<carry::LeftBehind>, String)> {
+    let fail = |left: &[carry::LeftBehind], why: String| (left.to_vec(), why);
+    let out = sh(
+        ssh,
+        src,
+        &carry::ignored_list_script(worktree),
+        COPY_TIMEOUT,
+    )
+    .await
+    .map_err(|e| fail(&[], e.message))?;
+    if !out.status.success() {
+        return Err(fail(
+            &[],
+            format!("listing on {src} failed: {}", stderr_of(&out)),
+        ));
+    }
+    let sel = carry::select_ignored(
+        carry::parse_ignored_list(&out.stdout),
+        snap.ignored_entry_kb,
+        snap.ignored_total_kb,
+    );
+    if sel.carry.is_empty() {
+        return Ok((Vec::new(), sel.left));
+    }
+    let paths: Vec<String> = sel.carry.iter().map(|e| e.path.clone()).collect();
+    let out = sh(
+        ssh,
+        src,
+        &carry::ignored_pack_script(worktree, id, &paths),
+        COPY_TIMEOUT,
+    )
+    .await
+    .map_err(|e| fail(&sel.left, e.message))?;
+    if !out.status.success() {
+        return Err(fail(
+            &sel.left,
+            format!("packing on {src} failed: {}", stderr_of(&out)),
+        ));
+    }
+    let (bytes, archive) = carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|e| fail(&sel.left, e.message))?;
+    let local = download(ssh, src, &archive, bytes, "tgz")
+        .await
+        .map_err(|e| fail(&sel.left, e.message))?;
+    let target_archive = format!("{target_dir}/ignored.tgz");
+    put_file(ssh, target, &local.0, &target_archive)
+        .await
+        .map_err(|e| fail(&sel.left, e.message))?;
+    let out = sh(
+        ssh,
+        target,
+        &carry::ignored_extract_script(cwd, &target_archive),
+        COPY_TIMEOUT,
+    )
+    .await
+    .map_err(|e| fail(&sel.left, e.message))?;
+    if !out.status.success() {
+        return Err(fail(
+            &sel.left,
+            format!("extracting on {target} failed: {}", stderr_of(&out)),
+        ));
+    }
+    Ok((sel.carry, sel.left))
+}
+
 // ── the move ────────────────────────────────────────────────────────────────
 
 /// Everything the move reads from the store, taken under one lock.
@@ -833,6 +1039,9 @@ struct Snapshot {
     project_base: Option<String>,
     stored_transcript: Option<String>,
     cap: u64,
+    bundle_cap: u64,
+    ignored_entry_kb: u64,
+    ignored_total_kb: u64,
     target_projects_root: String,
     layout: crate::projects::Layout,
     target_taken: Vec<String>,
@@ -938,6 +1147,24 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         s,
         SETTING_MAX_TRANSCRIPT_MB,
     )));
+    let setting = |key: &str, default: u64| {
+        crate::service::settings::get_string(s, key)
+            .parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(default)
+    };
+    let bundle_cap = setting(carry::SETTING_MAX_BUNDLE_MB, carry::DEFAULT_MAX_BUNDLE_MB)
+        .saturating_mul(1024 * 1024);
+    let ignored_entry_kb = setting(
+        carry::SETTING_IGNORED_ENTRY_KB,
+        carry::DEFAULT_IGNORED_ENTRY_KB,
+    );
+    let ignored_total_kb = setting(
+        carry::SETTING_IGNORED_TOTAL_MB,
+        carry::DEFAULT_IGNORED_TOTAL_MB,
+    )
+    .saturating_mul(1024);
     let target_taken = s
         .list_sessions_for_host(target)?
         .into_iter()
@@ -955,6 +1182,9 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         project_base: s.project_base_path(project_id)?,
         stored_transcript,
         cap,
+        bundle_cap,
+        ignored_entry_kb,
+        ignored_total_kb,
         target_projects_root: crate::service::projects::project_base_for(s, target),
         layout: crate::service::projects::layout(s),
         target_taken,
@@ -971,7 +1201,32 @@ fn too_large(bytes: u64, cap: u64) -> IpcError {
             cap / (1024 * 1024)
         ),
     )
-    .with_details(serde_json::json!({ "bytes": bytes, "cap_bytes": cap }))
+    .with_details(
+        serde_json::json!({ "bytes": bytes, "cap_bytes": cap, "payload": "transcript" }),
+    )
+}
+
+fn bundle_too_large(bytes: u64, cap: u64) -> IpcError {
+    IpcError::new(
+        codes::E_MOVE_TOO_LARGE,
+        format!(
+            "the git bundle is {bytes} bytes, over the {} MiB cap ({}); push the branch first or raise the setting",
+            cap / (1024 * 1024),
+            carry::SETTING_MAX_BUNDLE_MB
+        ),
+    )
+    .with_details(serde_json::json!({ "bytes": bytes, "cap_bytes": cap, "payload": "bundle" }))
+}
+
+/// A carry step failed before the target started.
+fn carry_err(step: &str, what: &str, stderr: &str) -> IpcError {
+    IpcError::new(
+        codes::E_MOVE_CARRY,
+        format!(
+            "move_session: carrying the work failed at {step}: {what} (the source session was not touched)"
+        ),
+    )
+    .with_details(serde_json::json!({ "step": step, "stderr": stderr }))
 }
 
 fn partial(step: &str, target: &str, name: &str, target_id: Option<i64>, e: &IpcError) -> IpcError {
@@ -1081,13 +1336,29 @@ pub async fn move_session_with(
         })
 }
 
-/// The move's steps (see the module docs).
+/// The move's steps, with the carry cleanup always run afterwards — on
+/// success and on every failure path once the carry began.
 async fn move_session_steps(
     args: MoveSessionArgs,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     hooks: &dyn MoveHooks,
     opts: MoveOptions,
+) -> Result<MoveReport, IpcError> {
+    let mut cleanup = CarryCleanup::default();
+    let result = move_session_inner(args, store, ssh, hooks, opts, &mut cleanup).await;
+    cleanup.run(ssh).await;
+    result
+}
+
+/// The move's steps (see the module docs).
+async fn move_session_inner(
+    args: MoveSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    hooks: &dyn MoveHooks,
+    opts: MoveOptions,
+    cleanup: &mut CarryCleanup,
 ) -> Result<MoveReport, IpcError> {
     crate::validate::host_alias(&args.target_host_alias)?;
     let _claim = MoveClaim::acquire(store, args.session_id)?;
@@ -1114,7 +1385,8 @@ async fn move_session_steps(
     };
     require_source_idle(status.as_deref())?;
 
-    // 1. Source git state: clean, on its branch, fully pushed.
+    // 1. Source git state: on its branch, nothing in progress — and what the
+    //    carry has to take along (strict: today's clean + pushed refusals).
     let hint = hooks.source_cwd_hint(store, &snap.row).await;
     let out = sh(
         ssh,
@@ -1135,7 +1407,15 @@ async fn move_session_steps(
         return Err(IpcError::new(codes::E_GIT, msg));
     }
     let state = parse_inspection(&String::from_utf8_lossy(&out.stdout))?;
-    preflight_verdict(&state, &snap.branch)?;
+    if args.strict {
+        preflight_verdict(&state, &snap.branch)?;
+    } else {
+        carry_verdict(&state, &snap.branch)?;
+    }
+    let mut carried = carry::CarryReport {
+        dirty_entries: state.dirty.clone(),
+        ..Default::default()
+    };
 
     // 2. Transcript: locate, cap, read (whole lines only).
     let out = sh(
@@ -1215,6 +1495,19 @@ async fn move_session_steps(
             Some(&snap.worktree_name),
         )
     };
+    // 3a. Seed: the target needs a main clone before anything can be fetched
+    //     into it. Never prompts; falls back to `git init` without origin.
+    let clone_url = crate::repo_url::clone_url_for(&snap.owner, &snap.repo);
+    let out = sh_long(ssh, &target, &carry::seed_script(&project_root, &clone_url)).await?;
+    if !out.status.success() {
+        return Err(carry_err(
+            "seed",
+            &format!("preparing the clone at {project_root} on {target}"),
+            &stderr_of(&out),
+        ));
+    }
+    carried.target_seeded = carry::parse_seed(&String::from_utf8_lossy(&out.stdout))?;
+
     // Best effort: a failed fetch surfaces as the workspace step's error.
     let _ = sh(
         ssh,
@@ -1223,6 +1516,85 @@ async fn move_session_steps(
         GIT_TIMEOUT,
     )
     .await;
+
+    // 3b. Carry the git state: snapshot + thin bundle on the source, relayed
+    //     through this process, fetched into the target's main clone.
+    let out = sh(
+        ssh,
+        &target,
+        &carry::haves_script(&project_root, &id),
+        GIT_TIMEOUT,
+    )
+    .await?;
+    if !out.status.success() {
+        return Err(carry_err(
+            "seed",
+            &format!("listing refs in {project_root} on {target}"),
+            &stderr_of(&out),
+        ));
+    }
+    let (target_dir, haves) = carry::parse_haves(&String::from_utf8_lossy(&out.stdout))?;
+    cleanup.id = id.clone();
+    cleanup.target = Some((target.clone(), project_root.clone()));
+    cleanup.source = Some((src.clone(), state.worktree.clone()));
+
+    let out = sh_long(
+        ssh,
+        &src,
+        &carry::snapshot_script(&state.worktree, &id, &haves, snap.bundle_cap),
+    )
+    .await?;
+    if !out.status.success() {
+        let err = stderr_of(&out);
+        if let Some(rest) = err.split(carry::BUNDLE_TOO_LARGE).nth(1) {
+            let bytes = rest
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            return Err(bundle_too_large(bytes, snap.bundle_cap));
+        }
+        return Err(carry_err(
+            "snapshot",
+            &format!("snapshotting {} on {src}", state.worktree),
+            &err,
+        ));
+    }
+    let bundle = carry::parse_snapshot(&String::from_utf8_lossy(&out.stdout))?;
+    carried.commits = bundle.commits;
+    carried.bundle_bytes = bundle.bytes;
+    if bundle.submodules {
+        warnings.push("the repository has submodules; their contents were not carried".into());
+    }
+    if bundle.lfs {
+        warnings.push("the repository uses Git LFS; LFS objects were not carried".into());
+    }
+    let target_bundle = format!("{target_dir}/carry.bundle");
+    {
+        let local = download(ssh, &src, &bundle.path, bundle.bytes, "bundle").await?;
+        put_file(ssh, &target, &local.0, &target_bundle)
+            .await
+            .map_err(|e| {
+                carry_err(
+                    "upload",
+                    &format!("writing {target_bundle} on {target}: {}", e.message),
+                    "",
+                )
+            })?;
+    }
+    let out = sh_long(
+        ssh,
+        &target,
+        &carry::fetch_script(&project_root, &target_bundle, &id, &snap.branch),
+    )
+    .await?;
+    if !out.status.success() {
+        return Err(carry_err(
+            "fetch",
+            &format!("fetching the bundle into {project_root} on {target}"),
+            &stderr_of(&out),
+        ));
+    }
 
     let tmux_name = pick_target_name(&snap.row.tmux_name, &snap.target_taken)?;
     crate::validate::tmux_name(&tmux_name)?;
@@ -1293,6 +1665,113 @@ async fn move_session_steps(
             prep.existing, prep.path
         ));
     }
+    // 3c. Replay the uncommitted work and check the claim: the target's
+    //     porcelain must equal the source's.
+    if prep.head != state.head {
+        // Today's "newer on origin" case. A clean source has nothing to
+        // replay; a dirty one cannot be replayed onto another base.
+        if !state.dirty.is_empty() {
+            return Err(carry_err(
+                "apply",
+                &format!(
+                    "the target worktree is at {} while the source is at {}; uncommitted work cannot be replayed onto a different commit",
+                    prep.head, state.head
+                ),
+                "",
+            ));
+        }
+    } else {
+        let out = sh(
+            ssh,
+            &target,
+            &carry::apply_script(&cwd, &id, &state.head),
+            GIT_TIMEOUT,
+        )
+        .await?;
+        if !out.status.success() {
+            let err = stderr_of(&out);
+            if err.contains(carry::TARGET_DIRTY) {
+                return Err(IpcError::new(
+                    codes::E_MOVE_TARGET_DIRTY,
+                    format!(
+                        "move_session: the target worktree {cwd} on {target} has uncommitted changes of its own; commit or discard them there first (the source session was not touched)"
+                    ),
+                ));
+            }
+            return Err(carry_err(
+                "apply",
+                &format!("replaying the work in {cwd} on {target}"),
+                &err,
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let porcelain = carry::parse_apply(&stdout).map_err(|e| {
+            carry_err(
+                "apply",
+                &format!(
+                    "reading the replayed state of {cwd} on {target}: {}",
+                    e.message
+                ),
+                "",
+            )
+        })?;
+        // `" M"` (unstaged) and `"M "` (staged) differ only in the two status
+        // columns, so they are compared verbatim.
+        let line_set = |files: &[DirtyFile]| -> std::collections::BTreeSet<String> {
+            files
+                .iter()
+                .map(|d| format!("{}\t{}", d.status, d.path))
+                .collect()
+        };
+        let (want, got) = (
+            line_set(&state.dirty),
+            line_set(&parse_porcelain(porcelain)),
+        );
+        if want != got {
+            return Err(IpcError::new(
+                codes::E_MOVE_CARRY,
+                format!(
+                    "move_session: after replaying the work, {cwd} on {target} does not match the source (the source session was not touched)"
+                ),
+            )
+            .with_details(serde_json::json!({ "step": "verify", "source": want, "target": got })));
+        }
+    }
+    if !state.dirty.is_empty() {
+        warnings.push(format!(
+            "the source worktree {} on {src} still holds a copy of the uncommitted work",
+            state.worktree
+        ));
+    }
+    if carried.target_seeded == carry::TargetSeed::Initialized {
+        warnings.push(format!(
+            "origin was unreachable from {target}; the clone was initialised from the bundle and cannot fetch or push until origin is reachable"
+        ));
+    }
+
+    // 3d. Small git-ignored files. Never fails the move.
+    match carry_ignored(
+        ssh,
+        &src,
+        &target,
+        &state.worktree,
+        &cwd,
+        &target_dir,
+        &id,
+        &snap,
+    )
+    .await
+    {
+        Ok((kept, left)) => {
+            carried.ignored_carried = kept;
+            carried.ignored_left_behind = left;
+        }
+        Err((left, why)) => {
+            carried.ignored_left_behind = left;
+            warnings.push(format!("ignored files were not carried: {why}"));
+        }
+    }
+
     put(ssh, &target, &prep.path, &bytes)
         .await
         .map_err(|e| before_target("copying the transcript", e))?;
@@ -1524,6 +2003,7 @@ async fn move_session_steps(
         "bytes": copied,
         "kept_source": args.keep_source,
         "source_killed": source_killed,
+        "carried": &carried,
     })
     .to_string();
     if let Ok(s) = store.lock() {
@@ -1551,6 +2031,7 @@ async fn move_session_steps(
         transcript_bytes: copied,
         source_killed,
         warnings,
+        carried,
         target: target_row,
     })
 }
@@ -1568,9 +2049,25 @@ mod tests {
     const TGT_ENC: &str = "-home-b-p-o-r--claude-worktrees-feat";
     const TRANSCRIPT: &str =
         "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n{\"type\":\"assistant\"}\n";
+    /// Stand-in for the git bundle's bytes.
+    const BUNDLE: &str = "FAKE-BUNDLE-BYTES";
+    const SRC_DIR: &str =
+        "/home/a/.cache/claude-fleet/transfer/550e8400-e29b-41d4-a716-446655440000";
+    const TGT_DIR: &str =
+        "/home/b/.cache/claude-fleet/transfer/550e8400-e29b-41d4-a716-446655440000";
 
     fn tgt_path() -> String {
         format!("/home/b/.claude/projects/{TGT_ENC}/{SID}.jsonl")
+    }
+
+    /// A carry script's stdout as the real scripts print it: marker line,
+    /// then the payload.
+    fn out(payload: &str) -> String {
+        format!("{}\n{payload}", carry::OUT_MARKER)
+    }
+
+    fn snapshot_out(bytes: usize, commits: u32) -> String {
+        format!("{bytes}\t{commits}\t0\t0\t{SRC_DIR}/carry.bundle\n")
     }
 
     /// Test hooks: the workspace step returns a fixed cwd, tmux runs through
@@ -1794,6 +2291,43 @@ mod tests {
             "beta",
             Match::script_contains("# cf-move:size"),
             Reply::ok(&format!("{}\n", TRANSCRIPT.len())),
+        )
+        // The carry: a target that already has the clone, nothing unpushed,
+        // a clean replay and no git-ignored files worth carrying.
+        .on_host(
+            "beta",
+            Match::script_contains("# cf-carry:seed"),
+            Reply::ok(&out("existing\n")),
+        )
+        .on_host(
+            "beta",
+            Match::script_contains("# cf-carry:haves"),
+            Reply::ok(&out(&format!("{TGT_DIR}\n{HEAD}\n"))),
+        )
+        .on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:snapshot"),
+            Reply::ok(&out(&snapshot_out(BUNDLE.len(), 0))),
+        )
+        .on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:chunk"),
+            Reply::ok(&out(BUNDLE)),
+        )
+        .on_host(
+            "beta",
+            Match::script_contains("# cf-carry:fetch"),
+            Reply::ok("ok\n"),
+        )
+        .on_host(
+            "beta",
+            Match::script_contains("# cf-carry:apply"),
+            Reply::ok(&out("")),
+        )
+        .on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:ignored-list"),
+            Reply::ok(&out("")),
         );
         Fixture {
             store: Mutex::new(s),
@@ -1930,12 +2464,19 @@ mod tests {
             .into_iter()
             .filter(|c| c.stdin.is_some())
             .collect();
-        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads.len(), 2, "the bundle, then the transcript");
         assert_eq!(
             uploads[0].command(),
+            format!("cat > {}", quote(&format!("{TGT_DIR}/carry.bundle")))
+        );
+        // The marker line was stripped, not relayed into the bundle.
+        assert_eq!(uploads[0].stdin_str().as_deref(), Some(BUNDLE));
+        assert_eq!(
+            uploads[1].command(),
             format!("cat > {}", quote(&tgt_path()))
         );
-        assert_eq!(uploads[0].stdin_str().as_deref(), Some(TRANSCRIPT));
+        assert_eq!(uploads[1].stdin_str().as_deref(), Some(TRANSCRIPT));
+        assert_eq!(rep.carried.commits, 0);
 
         // tmux on the target resumes the SAME conversation in the target cwd.
         let start = f
@@ -2055,6 +2596,7 @@ mod tests {
         assert_eq!(d["kept_source"], true);
     }
 
+    /// Strict mode only: the carry takes an unpushed branch along.
     #[tokio::test]
     async fn unpushed_branch_is_refused_before_the_target_is_touched() {
         let f = fixture();
@@ -2064,7 +2606,13 @@ mod tests {
             Reply::ok(&inspection("", "", "-1")),
         );
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
-        let err = run(&f, &hooks, false).await.unwrap_err();
+        let strict = |f: &Fixture| MoveSessionArgs {
+            strict: true,
+            ..args(f, false)
+        };
+        let err = move_session_with(strict(&f), &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_UNPUSHED, "{}", err.message);
         assert!(
             err.message.contains("git push -u origin feat"),
@@ -2082,7 +2630,9 @@ mod tests {
             Match::script_contains("# cf-move:inspect"),
             Reply::ok(&inspection("", HEAD, "2")),
         );
-        let err = run(&f, &hooks, false).await.unwrap_err();
+        let err = move_session_with(strict(&f), &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_UNPUSHED);
         assert!(err.message.contains("2 commit(s)"), "{}", err.message);
         // The inspection never pushes anything itself.
@@ -2093,6 +2643,7 @@ mod tests {
             .all(|c| !c.script().unwrap_or_default().contains("git push")));
     }
 
+    /// Strict mode only: the carry takes uncommitted work along.
     #[tokio::test]
     async fn dirty_source_is_refused_and_lists_the_files() {
         let f = fixture();
@@ -2102,13 +2653,392 @@ mod tests {
             Reply::ok(&inspection(" M src/lib.rs\n?? notes.txt", HEAD, "0")),
         );
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
-        let err = run(&f, &hooks, false).await.unwrap_err();
+        let err = move_session_with(
+            MoveSessionArgs {
+                strict: true,
+                ..args(&f, false)
+            },
+            &f.store,
+            &f.fake,
+            &hooks,
+            fast(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_DIRTY);
         assert!(err.message.contains("src/lib.rs") && err.message.contains("notes.txt"));
         let details = err.details.expect("dirty_files details");
         assert_eq!(details["dirty_files"].as_array().unwrap().len(), 2);
         assert!(f.fake.calls_for("beta").is_empty());
         assert_source_untouched(&f, &hooks);
+    }
+
+    // ── the carry ──
+
+    #[tokio::test]
+    async fn a_dirty_unpushed_source_is_carried_and_reported() {
+        let f = fixture();
+        let porcelain = " M src/lib.rs\n?? notes.txt";
+        let mut listed = out("").into_bytes();
+        listed.extend_from_slice(b"4\t.env\0-1\tnode_modules/\0");
+        f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-move:inspect"),
+                Reply::ok(&inspection(porcelain, "", "-1")),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:snapshot"),
+                Reply::ok(&out(&snapshot_out(BUNDLE.len(), 2))),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:seed"),
+                Reply::ok(&out("initialized\n")),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::ok(&out(&format!("{porcelain}\n"))),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:ignored-list"),
+                Reply::Exit {
+                    code: 0,
+                    stdout: listed,
+                    stderr: Vec::new(),
+                },
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:ignored-pack"),
+                Reply::ok(&out(&format!("{}\t{SRC_DIR}/ignored.tgz\n", BUNDLE.len()))),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:ignored-extract"),
+                Reply::ok("ok\n"),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false)
+            .await
+            .expect("a dirty, unpushed source now moves");
+
+        assert_eq!(rep.carried.commits, 2);
+        assert_eq!(rep.carried.bundle_bytes, BUNDLE.len() as u64);
+        assert_eq!(rep.carried.dirty_entries.len(), 2);
+        assert_eq!(rep.carried.target_seeded, carry::TargetSeed::Initialized);
+        assert_eq!(rep.carried.ignored_carried[0].path, ".env");
+        assert_eq!(rep.carried.ignored_left_behind[0].path, "node_modules/");
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("still holds a copy of the uncommitted work")),
+            "{:?}",
+            rep.warnings
+        );
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("origin was unreachable")),
+            "{:?}",
+            rep.warnings
+        );
+
+        // The bundle reached the target's transfer dir through upload_file.
+        let uploads: Vec<String> = f
+            .fake
+            .calls_for("beta")
+            .into_iter()
+            .filter(|c| c.stdin.is_some())
+            .map(|c| c.command())
+            .collect();
+        assert_eq!(
+            uploads[0],
+            format!("cat > {}", quote(&format!("{TGT_DIR}/carry.bundle")))
+        );
+        // Nothing was pushed, committed or stashed on the source.
+        for c in f.fake.calls_for("alpha") {
+            let s = c.script().unwrap_or_default();
+            assert!(
+                !s.contains("git push") && !s.contains("git stash") && !s.contains("git commit "),
+                "{s}"
+            );
+        }
+        // Both sides were cleaned up, and the event carries the report.
+        for host in ["alpha", "beta"] {
+            assert!(
+                f.fake
+                    .calls_for(host)
+                    .iter()
+                    .any(|c| c.script().is_some_and(|s| s.contains("# cf-carry:cleanup"))),
+                "{host}"
+            );
+        }
+        let ev = events(&f, rep.target_session_id);
+        let detail = ev
+            .iter()
+            .find(|(k, _)| k == EVENT_MOVED)
+            .unwrap()
+            .1
+            .clone()
+            .unwrap();
+        let d: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(d["carried"]["commits"], 2);
+    }
+
+    #[tokio::test]
+    async fn strict_still_refuses_dirty_and_unpushed_before_the_target_is_touched() {
+        let f = fixture();
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection(" M a.rs", HEAD, "0")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.strict = true;
+        let err = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_DIRTY);
+        assert!(f.fake.calls_for("beta").is_empty(), "target untouched");
+        assert_source_untouched(&f, &hooks);
+    }
+
+    #[tokio::test]
+    async fn a_midop_source_is_refused_before_anything_else_runs() {
+        let f = fixture();
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection_midop("UU a.rs", HEAD, "0", "merge")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_MIDOP);
+        assert!(f.fake.calls_for("beta").is_empty());
+        assert_source_untouched(&f, &hooks);
+    }
+
+    #[tokio::test]
+    async fn carry_failures_leave_the_source_untouched_and_still_clean_up() {
+        // (host, rule to break, reply, expected code, expected details.step)
+        let cases: Vec<(&str, &str, Reply, &str, Option<&str>)> = vec![
+            (
+                "beta",
+                "# cf-carry:seed",
+                Reply::fail(5, &format!("{} init", carry::FAILED)),
+                codes::E_MOVE_CARRY,
+                Some("seed"),
+            ),
+            (
+                "alpha",
+                "# cf-carry:snapshot",
+                Reply::fail(5, &format!("{} bundle", carry::FAILED)),
+                codes::E_MOVE_CARRY,
+                Some("snapshot"),
+            ),
+            (
+                "alpha",
+                "# cf-carry:snapshot",
+                Reply::fail(8, &format!("{} 999999999", carry::BUNDLE_TOO_LARGE)),
+                codes::E_MOVE_TOO_LARGE,
+                None,
+            ),
+            // No marker at all, and a marker with an empty payload: both are
+            // a chunk that carried nothing.
+            (
+                "alpha",
+                "# cf-carry:chunk",
+                Reply::ok(""),
+                codes::E_MOVE_CARRY,
+                Some("download"),
+            ),
+            (
+                "alpha",
+                "# cf-carry:chunk",
+                Reply::ok(&out("")),
+                codes::E_MOVE_CARRY,
+                Some("download"),
+            ),
+            (
+                "beta",
+                "# cf-carry:fetch",
+                Reply::fail(5, &format!("{} verify", carry::FAILED)),
+                codes::E_MOVE_CARRY,
+                Some("fetch"),
+            ),
+            (
+                "beta",
+                "# cf-carry:apply",
+                Reply::fail(9, carry::TARGET_DIRTY),
+                codes::E_MOVE_TARGET_DIRTY,
+                None,
+            ),
+            (
+                "beta",
+                "# cf-carry:apply",
+                Reply::ok(&out("?? surprise.txt\n")),
+                codes::E_MOVE_CARRY,
+                Some("verify"),
+            ),
+        ];
+        for (host, marker, reply, code, step) in cases {
+            let f = fixture();
+            f.fake.on_host(host, Match::script_contains(marker), reply);
+            let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            let err = run(&f, &hooks, false).await.unwrap_err();
+            assert_eq!(err.code, code, "{marker}: {}", err.message);
+            if let Some(step) = step {
+                assert_eq!(err.details.as_ref().unwrap()["step"], step, "{marker}");
+            }
+            if code == codes::E_MOVE_TOO_LARGE {
+                assert_eq!(err.details.as_ref().unwrap()["payload"], "bundle");
+            }
+            assert!(
+                !f.fake
+                    .calls_for("beta")
+                    .iter()
+                    .any(|c| c.script().is_some_and(|s| s.contains("tmux new-session"))),
+                "{marker}: the target session never started"
+            );
+            assert_source_untouched(&f, &hooks);
+            if marker != "# cf-carry:seed" {
+                assert!(
+                    f.fake
+                        .calls_for("alpha")
+                        .iter()
+                        .any(|c| c.script().is_some_and(|s| s.contains("# cf-carry:cleanup"))),
+                    "{marker}: the source was cleaned up"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_clean_source_with_a_newer_target_skips_the_apply_and_warns() {
+        let f = fixture();
+        let newer = "2222222222222222222222222222222222222222";
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-move:prep"),
+            Reply::ok(&format!("{newer}\t{TGT_ENC}\t{}\t-1\n", tgt_path())),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        assert!(rep.warnings.iter().any(|w| w.contains("newer on origin")));
+        assert!(!f
+            .fake
+            .calls_for("beta")
+            .iter()
+            .any(|c| c.script().is_some_and(|s| s.contains("# cf-carry:apply"))));
+
+        // The same with a dirty source cannot replay onto another base.
+        let f = fixture();
+        f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-move:inspect"),
+                Reply::ok(&inspection(" M a.rs", HEAD, "0")),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-move:prep"),
+                Reply::ok(&format!("{newer}\t{TGT_ENC}\t{}\t-1\n", tgt_path())),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_CARRY);
+        assert_eq!(err.details.unwrap()["step"], "apply");
+    }
+
+    #[tokio::test]
+    async fn an_ignored_files_failure_is_a_warning_not_a_failed_move() {
+        let f = fixture();
+        let mut listed = out("").into_bytes();
+        listed.extend_from_slice(b"4\t.env\0");
+        f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:ignored-list"),
+                Reply::Exit {
+                    code: 0,
+                    stdout: listed,
+                    stderr: Vec::new(),
+                },
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:ignored-pack"),
+                Reply::fail(5, &format!("{} tar", carry::FAILED)),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false)
+            .await
+            .expect("the move still succeeds");
+        assert!(rep.carried.ignored_carried.is_empty());
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("ignored files were not carried")),
+            "{:?}",
+            rep.warnings
+        );
+    }
+
+    /// Every carry script runs under `bash -lc`, so a login profile can print
+    /// a banner before the script body ever does: the parsers anchor on the
+    /// output marker, and the relayed bundle must be the payload alone.
+    #[tokio::test]
+    async fn a_login_banner_before_every_script_does_not_break_the_move() {
+        let f = fixture();
+        let banner = |payload: &str| format!("Welcome to alpha!\n{}", out(payload));
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:seed"),
+                Reply::ok(&banner("existing\n")),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:haves"),
+                Reply::ok(&banner(&format!("{TGT_DIR}\n{HEAD}\n"))),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:snapshot"),
+                Reply::ok(&banner(&snapshot_out(BUNDLE.len(), 0))),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:chunk"),
+                Reply::ok(&banner(BUNDLE)),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::ok(&banner("")),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:ignored-list"),
+                Reply::ok(&banner("")),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        assert_eq!(rep.carried.commits, 0);
+        assert_eq!(rep.carried.bundle_bytes, BUNDLE.len() as u64);
+        assert_eq!(rep.carried.target_seeded, carry::TargetSeed::Existing);
+        let uploads: Vec<_> = f
+            .fake
+            .calls_for("beta")
+            .into_iter()
+            .filter(|c| c.stdin.is_some())
+            .collect();
+        assert_eq!(uploads[0].stdin_str().as_deref(), Some(BUNDLE));
     }
 
     #[tokio::test]
@@ -2127,7 +3057,10 @@ mod tests {
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         let err = run(&f, &hooks, false).await.unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_TOO_LARGE);
-        assert_eq!(err.details.unwrap()["cap_bytes"], 1024 * 1024);
+        let details = err.details.unwrap();
+        assert_eq!(details["cap_bytes"], 1024 * 1024);
+        // The same code now also reports an over-cap bundle.
+        assert_eq!(details["payload"], "transcript");
         assert!(
             f.fake
                 .calls_for("alpha")
@@ -2269,7 +3202,13 @@ mod tests {
         assert!(err.message.contains("diverged"), "{}", err.message);
         assert!(err.message.contains("source session was not touched"));
         let beta = f.fake.calls_for("beta");
-        assert!(beta.iter().all(|c| c.stdin.is_none()), "no upload");
+        // The carry's bundle goes up before prep; the transcript never does.
+        assert!(
+            !beta
+                .iter()
+                .any(|c| c.stdin.is_some() && c.command().contains(".jsonl")),
+            "the transcript was never copied"
+        );
         assert!(beta
             .iter()
             .all(|c| !c.script().unwrap_or_default().contains("tmux new-session")));
@@ -2353,7 +3292,14 @@ mod tests {
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         let err = run(&f, &hooks, false).await.unwrap_err();
         assert_eq!(err.code, codes::E_INVALID_STATE, "{}", err.message);
-        assert!(f.fake.calls_for("beta").iter().all(|c| c.stdin.is_none()));
+        // The carry's bundle goes up before prep; the transcript never does.
+        assert!(
+            !f.fake
+                .calls_for("beta")
+                .iter()
+                .any(|c| c.stdin.is_some() && c.command().contains(".jsonl")),
+            "the transcript was never copied"
+        );
         assert_source_untouched(&f, &hooks);
     }
 
