@@ -60,6 +60,12 @@ pub const RECONCILE_INTERVAL_SECS: &str = "reconcile.interval_secs";
 /// through to `HostReconcile::lost_ttl_cutoff` / `ghost_and_clean_bg_sessions`
 /// by Task 6.
 pub const SESSIONS_LOST_TTL_SECS: &str = "sessions.lost_ttl_secs";
+/// How many resumable lost sessions a batch restore resumes in parallel.
+/// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
+pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
+/// Pause (ms) between starting each resumed session in a batch restore.
+/// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
+pub const RESTORE_STAGGER_MS: &str = "restore.stagger_ms";
 pub const PLAYBOOK_PRESS_ENTER: &str = "playbooks.press_enter";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 pub const GC_ENABLED: &str = "gc.enabled";
@@ -124,6 +130,16 @@ pub const SPECS: &[Spec] = &[
         key: SESSIONS_LOST_TTL_SECS,
         default: "1209600",
         kind: Kind::Secs,
+    },
+    Spec {
+        key: RESTORE_BATCH_SIZE,
+        default: "4",
+        kind: Kind::Int { min: 1, max: 16 },
+    },
+    Spec {
+        key: RESTORE_STAGGER_MS,
+        default: "3000",
+        kind: Kind::Int { min: 0, max: 60000 },
     },
     Spec {
         key: PLAYBOOK_PRESS_ENTER,
