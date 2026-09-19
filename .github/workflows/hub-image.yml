@@ -9,6 +9,10 @@ permissions:
 jobs:
   meta:
     runs-on: ubuntu-24.04
+    # This job only renders tag/label strings — it does not check out the
+    # repository and it does not touch the registry, so it needs none of the
+    # workflow-level `contents: read` / `packages: write` above.
+    permissions: {}
     outputs:
       tags: ${{ steps.meta.outputs.tags }}
       labels: ${{ steps.meta.outputs.labels }}
