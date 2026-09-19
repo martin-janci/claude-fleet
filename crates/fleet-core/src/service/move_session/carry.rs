@@ -86,7 +86,10 @@ pub struct LeftBehind {
 }
 
 /// What a move carried besides the transcript.
-#[derive(Debug, Clone, Default, Serialize)]
+///
+/// Read back from a hub in remote mode, so every field is required on the
+/// wire — see `service::repo_read` for the rule.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CarryReport {
     /// Commits in the bundle besides the two snapshot commits.
     pub commits: u32,
@@ -827,6 +830,42 @@ pub(crate) mod tests {
         assert_eq!(sel.carry.len(), MAX_IGNORED_ENTRIES);
         assert_eq!(sel.left.len(), 3);
         assert!(sel.left.iter().all(|l| l.reason == LeftReason::OverCap));
+    }
+
+    /// A hub answers `move_session` with this report and the desktop reads it
+    /// back (remote mode), so it must round-trip — and a dropped field must
+    /// fail loudly, not default (the `service::repo_read` wire rule).
+    #[test]
+    fn carry_report_round_trips_and_a_missing_field_fails_loudly() {
+        let report = CarryReport {
+            commits: 2,
+            bundle_bytes: 1234,
+            dirty_entries: vec![DirtyFile {
+                status: " M".into(),
+                path: "src/lib.rs".into(),
+            }],
+            ignored_carried: vec![IgnoredEntry {
+                path: ".env".into(),
+                bytes: 4096,
+            }],
+            ignored_left_behind: vec![LeftBehind {
+                path: "node_modules/".into(),
+                bytes: None,
+                reason: LeftReason::Denylisted,
+            }],
+            target_seeded: TargetSeed::Initialized,
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        let back: CarryReport = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+        assert_eq!(
+            back.dirty_entries[0].status, " M",
+            "the leading space survives"
+        );
+
+        let mut missing = json;
+        missing.as_object_mut().unwrap().remove("target_seeded");
+        assert!(serde_json::from_value::<CarryReport>(missing).is_err());
     }
 
     #[test]
