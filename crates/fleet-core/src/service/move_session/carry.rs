@@ -445,6 +445,89 @@ exit 0
     )
 }
 
+/// List the worktree's top-level git-ignored entries as `<kb>\t<path>\0`.
+/// A wholly ignored directory is one entry; a deny-listed name is printed
+/// with `-1` and never walked by `du`.
+pub fn ignored_list_script(worktree: &str) -> String {
+    format!(
+        r#"# cf-carry:ignored-list
+set +e
+wt={wt}
+deny=' {deny} '
+cd -- "$wt" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
+git ls-files -o -i --exclude-standard --directory -z 2>/dev/null | while IFS= read -r -d '' p; do
+  b=$(basename -- "${{p%/}}")
+  case "$deny" in
+    *" $b "*) k=-1 ;;
+    *) k=$(du -sk -- "$p" 2>/dev/null | cut -f1) ;;
+  esac
+  printf '%s\t%s\0' "${{k:-0}}" "$p"
+done
+exit 0
+"#,
+        wt = quote(worktree),
+        deny = DENYLIST.join(" "),
+    )
+}
+
+/// Tar the chosen entries into the transfer dir. Each path is a quoted argv
+/// word prefixed with `./` (so a leading `-` is never an option);
+/// `COPYFILE_DISABLE` keeps macOS `._*` files out. Prints `<bytes>\t<path>`.
+pub fn ignored_pack_script(worktree: &str, claude_id: &str, paths: &[String]) -> String {
+    let argv: Vec<String> = paths.iter().map(|p| quote(&format!("./{p}"))).collect();
+    format!(
+        r#"# cf-carry:ignored-pack
+set +e
+wt={wt}
+id={id}
+cd -- "$wt" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
+dir="$HOME/.cache/claude-fleet/transfer/$id"
+( umask 077; mkdir -p -- "$dir" ) || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
+COPYFILE_DISABLE=1 tar -czf "$dir/ignored.tgz" {argv} >/dev/null 2>&1 || {{ printf '{FAILED} tar\n' >&2; exit 5; }}
+n=$(wc -c < "$dir/ignored.tgz" | tr -d ' ')
+printf '%s\t%s\n' "$n" "$dir/ignored.tgz"
+"#,
+        wt = quote(worktree),
+        id = quote(claude_id),
+        argv = argv.join(" "),
+    )
+}
+
+pub fn parse_pack(stdout: &str) -> Result<(u64, String), IpcError> {
+    let line = stdout.trim_end_matches('\n');
+    let (n, path) = line
+        .split_once('\t')
+        .ok_or_else(|| parse_err("ignored-pack", line))?;
+    let bytes = n
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| parse_err("ignored-pack", line))?;
+    if !path.starts_with('/') {
+        return Err(parse_err("ignored-pack", line));
+    }
+    Ok((bytes, path.to_string()))
+}
+
+/// Extract in the target worktree; a file already there wins
+/// (`--skip-old-files` on GNU tar, `-k` on BSD tar — GNU's `-k` reports
+/// existing files as errors).
+pub fn ignored_extract_script(cwd: &str, archive: &str) -> String {
+    format!(
+        r#"# cf-carry:ignored-extract
+set +e
+cwd={cwd}
+a={a}
+cd -- "$cwd" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
+tar -tzf "$a" >/dev/null 2>&1 || {{ printf '{FAILED} corrupt archive\n' >&2; exit 5; }}
+if tar --version 2>/dev/null | grep -q 'GNU tar'; then k=--skip-old-files; else k=-k; fi
+tar -xzf "$a" $k >/dev/null 2>&1 || {{ printf '{FAILED} extract\n' >&2; exit 5; }}
+printf 'ok\n'
+"#,
+        cwd = quote(cwd),
+        a = quote(archive),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,5 +1071,121 @@ mod tests {
         let s = snapshot_script("/w", ID, &["zz; rm -rf /".into(), "a".repeat(40)], 1);
         assert!(!s.contains("rm -rf /"), "{s}");
         assert!(s.contains(&"a".repeat(40)));
+    }
+
+    #[test]
+    fn ignored_files_are_listed_selected_packed_and_extracted_without_overwriting() {
+        if !have("git") || !have("bash") || !have("tar") {
+            eprintln!("skipping: git, bash or tar is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(src.join("conf.d")).unwrap();
+        git(&src, &["init", "-q", "-b", "feat"]);
+        std::fs::write(
+            src.join(".gitignore"),
+            ".env\nnode_modules/\nbig.bin\nconf.d/\nit's.cfg\n",
+        )
+        .unwrap();
+        std::fs::write(src.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(src.join("it's.cfg"), "q\n").unwrap();
+        std::fs::write(src.join("conf.d/a.conf"), "a\n").unwrap();
+        std::fs::write(src.join("node_modules/pkg/index.js"), "x").unwrap();
+        std::fs::write(src.join("big.bin"), vec![0u8; 3 * 1024 * 1024]).unwrap();
+        std::fs::write(src.join("tracked.txt"), "t\n").unwrap();
+        git(&src, &["add", ".gitignore", "tracked.txt"]);
+        git(&src, &["commit", "-q", "-m", "base"]);
+
+        let out = bash(&ignored_list_script(src.to_str().unwrap()), &home);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let sel = select_ignored(parse_ignored_list(&out.stdout), 1024, 20 * 1024);
+        let mut carried: Vec<&str> = sel.carry.iter().map(|e| e.path.as_str()).collect();
+        carried.sort();
+        assert_eq!(carried, vec![".env", "conf.d/", "it's.cfg"]);
+        let left = |p: &str| sel.left.iter().find(|l| l.path == p).map(|l| l.reason);
+        assert_eq!(left("node_modules/"), Some(LeftReason::Denylisted));
+        assert_eq!(left("big.bin"), Some(LeftReason::OverCap));
+
+        let paths: Vec<String> = sel.carry.iter().map(|e| e.path.clone()).collect();
+        let out = bash(
+            &ignored_pack_script(src.to_str().unwrap(), ID, &paths),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (bytes, archive) = parse_pack(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert_eq!(bytes, std::fs::metadata(&archive).unwrap().len());
+
+        // The target already has its own .env: it must win.
+        let tgt = tmp.path().join("tgt");
+        std::fs::create_dir_all(&tgt).unwrap();
+        std::fs::write(tgt.join(".env"), "SECRET=target\n").unwrap();
+        let out = bash(
+            &ignored_extract_script(tgt.to_str().unwrap(), &archive),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(tgt.join(".env")).unwrap(),
+            "SECRET=target\n",
+            "never overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tgt.join("it's.cfg")).unwrap(),
+            "q\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tgt.join("conf.d/a.conf")).unwrap(),
+            "a\n"
+        );
+        assert!(!tgt.join("node_modules").exists());
+
+        // A corrupt archive is recognised, nothing is extracted.
+        std::fs::write(&archive, b"not a tarball").unwrap();
+        let out = bash(
+            &ignored_extract_script(tgt.to_str().unwrap(), &archive),
+            &home,
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+    }
+
+    #[test]
+    fn ignored_scripts_quote_every_interpolated_value() {
+        let evil = "a b'$(touch /tmp/pwn)\n;x";
+        let q = quote(evil);
+        for script in [
+            ignored_list_script(evil),
+            ignored_pack_script(evil, evil, &[evil.to_string()]),
+            ignored_extract_script(evil, evil),
+        ] {
+            assert!(
+                script.contains(&q) || script.contains(&quote(&format!("./{evil}"))),
+                "{script}"
+            );
+            let without = script
+                .replace(&q, "")
+                .replace(&quote(&format!("./{evil}")), "");
+            assert!(
+                !without.contains("touch /tmp/pwn"),
+                "raw value leaked: {script}"
+            );
+        }
+        assert!(parse_pack("12\t/abs/ignored.tgz\n").is_ok());
+        assert!(parse_pack("12\trelative\n").is_err());
     }
 }
