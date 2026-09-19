@@ -25,11 +25,16 @@ pub(super) fn ghost_cutoff(probe_started_at: i64) -> i64 {
 /// `SessionUpdated` of a still-live row).
 ///
 /// `SessionUpdated` maps to `"lost"` only when the row's `lost_at` is set.
-/// A row that is ALREADY lost can be updated again for an unrelated reason
-/// (e.g. a friendly-name change via `set_friendly_name`) — that re-update
-/// still carries `lost_at.is_some()`, so it logs `"lost"` a second time.
-/// This is expected: do not read a second `lost` line for the same
-/// `tmux_name` as evidence of a second, separate loss.
+/// Through the two loops that call this (`apply_host_reconcile`,
+/// `mark_host_sessions_lost`), a session is logged `"lost"` exactly once
+/// per loss episode: `ghost_and_clean` and `mark_host_sessions_lost` both
+/// skip rows already `status = 'ghost'`, and `upsert_session_in_tx` clears
+/// `lost_at` back to `NULL` on every conflict, so a `SessionUpdated` from
+/// the reconcile upsert never carries `lost_at.is_some()`. Other emitters
+/// of `SessionUpdated` (e.g. `set_friendly_name`) go straight to the event
+/// bus and bypass these loops entirely, so they never produce a lifecycle
+/// line. A second `"lost"` line for the same session with no intervening
+/// `"created"`/revival is therefore a bug, not a benign duplicate.
 pub(crate) fn lifecycle_kind(change: &RowChange) -> Option<&'static str> {
     match change {
         RowChange::SessionCreated(_) => Some("created"),
