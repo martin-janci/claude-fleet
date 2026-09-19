@@ -46,6 +46,15 @@ export const MAX_SECS = 10 * 365 * 24 * 3600;
 /** Mirror of `settings::MOVE_MAX_TRANSCRIPT_MB_MAX` (`Kind::Int { min: 1, max }`). */
 export const MOVE_MAX_TRANSCRIPT_MB_MAX = 4096;
 
+/** Mirror of `settings::MOVE_MAX_BUNDLE_MB_MAX` (`Kind::Int { min: 1, max }`). */
+export const MOVE_MAX_BUNDLE_MB_MAX = 4096;
+
+/** Mirror of `settings::MOVE_IGNORED_ENTRY_KB_MAX` (`Kind::Int { min: 1, max }`). */
+export const MOVE_IGNORED_ENTRY_KB_MAX = 1_048_576;
+
+/** Mirror of `settings::MOVE_IGNORED_TOTAL_MB_MAX` (`Kind::Int { min: 1, max }`). */
+export const MOVE_IGNORED_TOTAL_MB_MAX = 1024;
+
 export type ProjectsLayout = 'github' | 'flat';
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];

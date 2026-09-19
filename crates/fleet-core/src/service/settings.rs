@@ -97,6 +97,13 @@ pub const MOVE_MAX_TRANSCRIPT_MB: &str = crate::service::move_session::SETTING_M
 /// Upper bound for [`MOVE_MAX_TRANSCRIPT_MB`]: the copy is held in memory.
 pub const MOVE_MAX_TRANSCRIPT_MB_MAX: u64 = 4096;
 
+/// Upper bound for [`MOVE_MAX_BUNDLE_MB`]: the copy is held in memory.
+pub const MOVE_MAX_BUNDLE_MB_MAX: u64 = 4096;
+/// Upper bound for [`MOVE_IGNORED_ENTRY_KB`]: no practical I/O constraint.
+pub const MOVE_IGNORED_ENTRY_KB_MAX: u64 = 1_048_576;
+/// Upper bound for [`MOVE_IGNORED_TOTAL_MB`]: one transfer's payload.
+pub const MOVE_IGNORED_TOTAL_MB_MAX: u64 = 1024;
+
 /// Largest git bundle (MiB) `move_session` relays (`E_MOVE_TOO_LARGE` above it).
 pub const MOVE_MAX_BUNDLE_MB: &str = crate::service::move_session::carry::SETTING_MAX_BUNDLE_MB;
 /// Largest single git-ignored entry (KiB) `move_session` carries; bigger ones
@@ -194,20 +201,26 @@ pub const SPECS: &[Spec] = &[
     Spec {
         key: MOVE_MAX_BUNDLE_MB,
         default: "500",
-        kind: Kind::Int { min: 1, max: 4096 },
+        kind: Kind::Int {
+            min: 1,
+            max: MOVE_MAX_BUNDLE_MB_MAX,
+        },
     },
     Spec {
         key: MOVE_IGNORED_ENTRY_KB,
         default: "1024",
         kind: Kind::Int {
             min: 1,
-            max: 1_048_576,
+            max: MOVE_IGNORED_ENTRY_KB_MAX,
         },
     },
     Spec {
         key: MOVE_IGNORED_TOTAL_MB,
         default: "20",
-        kind: Kind::Int { min: 1, max: 1024 },
+        kind: Kind::Int {
+            min: 1,
+            max: MOVE_IGNORED_TOTAL_MB_MAX,
+        },
     },
     Spec {
         key: USAGE_ENABLED,
@@ -523,6 +536,10 @@ mod tests {
         }
         assert!(validate(MOVE_MAX_BUNDLE_MB, "4096").is_ok());
         assert!(validate(MOVE_MAX_BUNDLE_MB, "4097").is_err());
+        assert!(validate(MOVE_IGNORED_ENTRY_KB, "1048576").is_ok());
+        assert!(validate(MOVE_IGNORED_ENTRY_KB, "1048577").is_err());
+        assert!(validate(MOVE_IGNORED_TOTAL_MB, "1024").is_ok());
+        assert!(validate(MOVE_IGNORED_TOTAL_MB, "1025").is_err());
         assert_eq!(resolve(MOVE_IGNORED_TOTAL_MB, None), "20");
         assert_eq!(resolve(MOVE_IGNORED_TOTAL_MB, Some("5")), "5");
     }
