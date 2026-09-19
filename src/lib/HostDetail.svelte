@@ -11,7 +11,7 @@
   import type { AccountRow } from './accounts';
   import type { AccountUsageSnapshot } from './account_usage_store';
   import type { HostTokenInfo, TokenMode } from './mcp';
-  import type { SessionRow } from './sessions';
+  import { restoreHostSessions, type RestorePlanEntry, type SessionRow } from './sessions';
   import { selectSession } from './selection';
   import { claudeStatusLabel, stuckKindLabel } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
@@ -66,10 +66,23 @@
     onrefreshusage: () => void;
   } = $props();
 
-  let confirm = $state<'rotate' | 'remove' | null>(null);
+  let confirm = $state<'rotate' | 'remove' | 'restore' | null>(null);
   let busy = $state(false);
 
   const isLocal = $derived(host.alias === 'local');
+
+  // Sessions the backend marked lost (host reboot / tmux server restart) that
+  // still carry a Claude conversation to resume. `bg`/`external` rows have no
+  // fleet-managed tmux pane to restore into.
+  const restorable = $derived(
+    hostSessions.filter((s) => s.lost_at !== null && s.claude_session_id && s.kind !== 'bg' && s.kind !== 'external'),
+  );
+
+  let restorePlan = $state<RestorePlanEntry[] | null>(null);
+  let restoreError = $state<string | null>(null);
+  let restoreSummary = $state<{ ok: number; total: number; failures: { name: string; error: string }[] } | null>(
+    null,
+  );
 
   function sessionName(s: SessionRow): string {
     return s.friendly_name?.trim() || s.tmux_name;
@@ -113,6 +126,47 @@
     confirm = null;
     if (r.ok) push({ kind: 'info', message: `${alias} removed.` });
     else pushError(r.error, `Remove ${alias} failed`);
+  }
+
+  async function onRestoreClick() {
+    restoreError = null;
+    restoreSummary = null;
+    busy = true;
+    const r = await restoreHostSessions(host.alias, { dryRun: true });
+    busy = false;
+    if (!r.ok) {
+      restoreError = r.error.message;
+      return;
+    }
+    restorePlan = r.value.plan;
+    confirm = 'restore';
+  }
+
+  function cancelRestore() {
+    confirm = null;
+    restorePlan = null;
+  }
+
+  async function confirmRestore() {
+    const alias = host.alias;
+    const ids = (restorePlan ?? []).filter((e) => e.action === 'restore').map((e) => e.session_id);
+    busy = true;
+    const r = await restoreHostSessions(alias, { sessionIds: ids });
+    busy = false;
+    confirm = null;
+    restorePlan = null;
+    if (r.ok) {
+      const results = r.value.results;
+      restoreSummary = {
+        ok: results.filter((x) => x.ok).length,
+        total: results.length,
+        failures: results
+          .filter((x) => !x.ok)
+          .map((x) => ({ name: x.tmux_name, error: x.error ?? 'unknown error' })),
+      };
+    } else {
+      restoreError = r.error.message;
+    }
   }
 </script>
 
@@ -181,7 +235,28 @@
 
   <!-- 3. Sessions -->
   <section class="block" aria-label="Sessions on {host.alias}">
-    <h3>Sessions <span class="muted">{hostSessions.length}</span></h3>
+    <div class="section-head">
+      <h3>Sessions <span class="muted">{hostSessions.length}</span></h3>
+      {#if restorable.length > 0}
+        <button
+          type="button"
+          class="small"
+          disabled={busy}
+          data-testid="restore-lost"
+          onclick={onRestoreClick}
+          >Restore {restorable.length} lost session{restorable.length === 1 ? '' : 's'}…</button
+        >
+      {/if}
+    </div>
+    {#if restoreError}
+      <p class="error" data-testid="restore-error">{restoreError}</p>
+    {/if}
+    {#if restoreSummary}
+      <p data-testid="restore-summary">
+        Restored {restoreSummary.ok} of {restoreSummary.total}
+        {#each restoreSummary.failures as f (f.name)}<br />{f.name}: {f.error}{/each}
+      </p>
+    {/if}
     {#if hostSessions.length === 0}
       <p class="muted">No sessions on this host. Press <kbd>n</kbd> to start one.</p>
     {:else}
@@ -275,6 +350,26 @@
     onconfirm={confirmRemove}
     oncancel={() => (confirm = null)}
   />
+{:else if confirm === 'restore'}
+  <ConfirmDialog
+    title="Restore lost sessions on {host.alias}?"
+    confirmLabel="Restore"
+    {busy}
+    confirmTestId="confirm-restore"
+    onconfirm={confirmRestore}
+    oncancel={cancelRestore}
+  >
+    <ul class="restore-plan">
+      {#each restorePlan ?? [] as entry (entry.session_id)}
+        <li>
+          <span class="name">{entry.friendly_name ?? entry.tmux_name}</span>
+          {#if entry.cwd}<span class="muted">{entry.cwd}</span>{/if}
+          {#if entry.action === 'skip'}<span class="skip">skipped — {entry.reason}</span>{/if}
+        </li>
+      {/each}
+    </ul>
+    <p class="note">Each session resumes its Claude conversation. Any first-run prompt waits for you.</p>
+  </ConfirmDialog>
 {/if}
 
 <style>
@@ -315,6 +410,13 @@
   .block { border-top: 1px solid var(--border); padding-top: 0.6rem; }
   .account-line { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.4rem; min-width: 0; }
   .label { color: var(--fg-muted); min-width: 3.5rem; }
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }
+  .section-head h3 { margin: 0; }
+  .error { color: var(--usage-crit); margin: 0.4rem 0; }
+  .restore-plan { list-style: none; margin: 0.4rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+  .restore-plan li { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .restore-plan .skip { color: var(--usage-warn); }
+  .note { margin: 0.4rem 0 0; color: var(--fg-muted); }
   .sessions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
   .session {
     display: flex;

@@ -1,9 +1,18 @@
 import { render, screen, fireEvent, within } from '@testing-library/svelte';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
+
+vi.mock('./sessions', async () => {
+  const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
+  return { ...actual, restoreHostSessions: vi.fn() };
+});
+
 import HostDetail from './HostDetail.svelte';
 import { sharedWith } from './hosts_view';
-import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host } from './hosts_fixture';
+import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host, session } from './hosts_fixture';
+import { restoreHostSessions, type SessionRow } from './sessions';
+
+const mockedRestore = restoreHostSessions as unknown as ReturnType<typeof vi.fn>;
 
 function mount(alias: string, over: Record<string, unknown> = {}) {
   const hosts = fleetHosts();
@@ -69,5 +78,171 @@ describe('HostDetail', () => {
     expect(screen.queryByTestId('detail-token-mode')).toBeNull();
     expect(screen.queryByTestId('detail-rotate')).toBeNull();
     expect(screen.getByText('none — provision hosts to mint one')).toBeInTheDocument();
+  });
+});
+
+function lost(alias: string, name: string, over: Partial<SessionRow> = {}): SessionRow {
+  return session(alias, name, { lost_at: NOW - 600, claude_session_id: `cs-${name}`, kind: 'work', ...over });
+}
+
+describe('HostDetail restore lost sessions', () => {
+  beforeEach(() => {
+    mockedRestore.mockReset();
+  });
+
+  it('hides the button with no restorable rows, shows a count with some', () => {
+    mount('mefistos', { hostSessions: [] });
+    expect(screen.queryByTestId('restore-lost')).toBeNull();
+
+    const rows = [lost('mefistos', 'mefistos-a'), lost('mefistos', 'mefistos-b')];
+    mount('mefistos', { hostSessions: rows });
+    expect(screen.getByTestId('restore-lost').textContent).toBe('Restore 2 lost sessions…');
+  });
+
+  it('a bg/external lost session, or one without a claude_session_id, is not restorable', () => {
+    const rows = [
+      lost('mefistos', 'a', { kind: 'bg' }),
+      lost('mefistos', 'b', { kind: 'external' }),
+      lost('mefistos', 'c', { claude_session_id: null }),
+    ];
+    mount('mefistos', { hostSessions: rows });
+    expect(screen.queryByTestId('restore-lost')).toBeNull();
+  });
+
+  it('clicking runs a dry run and the dialog lists the plan entries', async () => {
+    const rows = [lost('mefistos', 'a', { friendly_name: 'Alpha' }), lost('mefistos', 'b')];
+    mockedRestore.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        host_alias: 'mefistos',
+        dry_run: true,
+        plan: [
+          {
+            session_id: rows[0].id,
+            tmux_name: rows[0].tmux_name,
+            cwd: '/work/a',
+            claude_session_id: 'cs-a',
+            friendly_name: 'Alpha',
+            action: 'restore',
+            reason: null,
+          },
+          {
+            session_id: rows[1].id,
+            tmux_name: rows[1].tmux_name,
+            cwd: '/work/b',
+            claude_session_id: 'cs-b',
+            friendly_name: null,
+            action: 'restore',
+            reason: null,
+          },
+        ],
+        results: [],
+      },
+    });
+    mount('mefistos', { hostSessions: rows });
+    await fireEvent.click(screen.getByTestId('restore-lost'));
+    await tick();
+    expect(mockedRestore).toHaveBeenCalledWith('mefistos', { dryRun: true });
+    const dialog = screen.getByTestId('confirm-dialog');
+    expect(dialog.textContent).toContain('Restore lost sessions on mefistos?');
+    expect(dialog.textContent).toContain('Alpha');
+    expect(dialog.textContent).toContain(rows[1].tmux_name);
+    expect(dialog.textContent).toContain(
+      'Each session resumes its Claude conversation. Any first-run prompt waits for you.',
+    );
+  });
+
+  it('a skipped plan entry shows its reason', async () => {
+    const rows = [lost('mefistos', 'a')];
+    mockedRestore.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        host_alias: 'mefistos',
+        dry_run: true,
+        plan: [
+          {
+            session_id: rows[0].id,
+            tmux_name: rows[0].tmux_name,
+            cwd: '/work/a',
+            claude_session_id: 'cs-a',
+            friendly_name: null,
+            action: 'skip',
+            reason: 'worktree missing',
+          },
+        ],
+        results: [],
+      },
+    });
+    mount('mefistos', { hostSessions: rows });
+    await fireEvent.click(screen.getByTestId('restore-lost'));
+    await tick();
+    expect(screen.getByTestId('confirm-dialog').textContent).toContain('worktree missing');
+  });
+
+  it('confirming restores by id and reports ok/failure counts', async () => {
+    const rows = [lost('mefistos', 'a'), lost('mefistos', 'b')];
+    mockedRestore.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        host_alias: 'mefistos',
+        dry_run: true,
+        plan: [
+          {
+            session_id: rows[0].id,
+            tmux_name: rows[0].tmux_name,
+            cwd: '/work/a',
+            claude_session_id: 'cs-a',
+            friendly_name: null,
+            action: 'restore',
+            reason: null,
+          },
+          {
+            session_id: rows[1].id,
+            tmux_name: rows[1].tmux_name,
+            cwd: '/work/b',
+            claude_session_id: 'cs-b',
+            friendly_name: null,
+            action: 'restore',
+            reason: null,
+          },
+        ],
+        results: [],
+      },
+    });
+    mockedRestore.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        host_alias: 'mefistos',
+        dry_run: false,
+        plan: [],
+        results: [
+          { session_id: rows[0].id, tmux_name: rows[0].tmux_name, ok: true, error: null },
+          { session_id: rows[1].id, tmux_name: rows[1].tmux_name, ok: false, error: 'worktree gone' },
+        ],
+      },
+    });
+    mount('mefistos', { hostSessions: rows });
+    await fireEvent.click(screen.getByTestId('restore-lost'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('confirm-restore'));
+    await tick();
+    expect(mockedRestore).toHaveBeenLastCalledWith('mefistos', { sessionIds: [rows[0].id, rows[1].id] });
+    expect(screen.queryByTestId('confirm-dialog')).toBeNull();
+    const summary = screen.getByTestId('restore-summary');
+    expect(summary.textContent).toContain('Restored 1 of 2');
+    expect(summary.textContent).toContain(`${rows[1].tmux_name}: worktree gone`);
+  });
+
+  it('shows an inline error when the dry run fails, without opening the dialog', async () => {
+    const rows = [lost('mefistos', 'a')];
+    mockedRestore.mockResolvedValueOnce({
+      ok: false,
+      error: { code: 'E_UNREACHABLE', message: 'host unreachable' },
+    });
+    mount('mefistos', { hostSessions: rows });
+    await fireEvent.click(screen.getByTestId('restore-lost'));
+    await tick();
+    expect(screen.getByTestId('restore-error').textContent).toContain('host unreachable');
+    expect(screen.queryByTestId('confirm-dialog')).toBeNull();
   });
 });
