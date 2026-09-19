@@ -22,9 +22,13 @@
 //!   rather than an error, so a newer peer can add a frame kind an older one
 //!   may skip without dropping the connection. A `kind` the receiver DOES
 //!   know, but whose body will not parse, is corruption either way and stays
-//!   a hard error — see [`decode_lenient`]'s doc. A receiver logging an
-//!   unknown kind bounds and sanitises it first with [`UnknownKinds`], since
-//!   the kind string is peer-controlled.
+//!   a hard error — see [`decode_lenient`]'s doc. **A frame is skipped only
+//!   when the document is an object with exactly one string `kind` and the
+//!   receiving enum rejects THAT string as an unknown variant**; every other
+//!   shape and every other outcome is an error, so a mistake in the
+//!   classification drops the connection rather than swallowing a frame.
+//!   A receiver logging an unknown kind bounds and sanitises it first with
+//!   [`UnknownKinds`], since the kind string is peer-controlled.
 //! - An unknown *field* is **ignored**, so a newer hub can add one without
 //!   taking an older agent's connection down.
 //! - Bytes that are not text (`stdin` excepted) travel base64 in `*_b64`
@@ -346,8 +350,26 @@ pub enum HubFrame {
     Welcome {
         /// The hub's own build string — informational, not itself a
         /// compatibility signal; `proto` is that.
+        ///
+        /// Optional on the wire (`#[serde(default)]` → an empty string), so
+        /// a future hub may stop sending it without becoming unparseable.
+        /// See `proto` for why that matters so much in THIS direction.
+        #[serde(default)]
         hub_version: String,
         /// This hub's [`PROTO_VERSION`].
+        ///
+        /// Optional on the wire too, defaulting to `0` — which
+        /// [`judge_proto`] then refuses as below [`MIN_SUPPORTED_PROTO`],
+        /// with a reason naming the side to update. That is deliberate and
+        /// it is the safer of the two failure modes: `welcome` is the first
+        /// frame down every connection, and a deployed `fleet-agent` has no
+        /// self-update, so a MANDATORY field here would turn any hub that
+        /// ever omitted it into a permanent, unexplained reconnect loop for
+        /// every agent in the field (a known kind with a missing field is
+        /// damage, not an unknown kind — it closes the connection). An
+        /// absent `proto` instead flows into the ordinary version refusal,
+        /// which at least tells an operator what is wrong.
+        #[serde(default)]
         proto: u32,
     },
 }
@@ -359,8 +381,18 @@ pub enum AgentFrame {
     /// The first frame after the upgrade. The hub records it in the registry
     /// once `proto` clears [`judge_proto`] — see [`MIN_SUPPORTED_PROTO`].
     Hello {
+        /// Informational, like `host_name` and `os`: nothing parses these,
+        /// they are what `agent_status` shows an operator. All three are
+        /// `#[serde(default)]` (→ an empty string) for the same reason
+        /// [`HubFrame::Welcome`]'s fields are — a future agent that drops
+        /// one should be refusable, or simply readable, rather than
+        /// unparseable. Less critical in this direction, since a hub CAN be
+        /// upgraded, but it costs nothing.
+        #[serde(default)]
         agent_version: String,
+        #[serde(default)]
         host_name: String,
+        #[serde(default)]
         os: String,
         /// This agent's [`PROTO_VERSION`]. Absent — an agent built before
         /// this field existed — deserialises as `0`, serde's default for
@@ -495,48 +527,98 @@ pub fn decode_agent_frame_lenient_within(
 /// never an error. A `kind` it DOES know, but whose body will not parse — or
 /// no `kind` at all, or invalid JSON — is corruption either way, and stays a
 /// hard [`ProtoError::Malformed`]: the unknown-kind rule forgives evolution,
-/// not damage. See [`unknown_variant_kind`] for how the two are told apart.
+/// not damage. See [`unknown_kind`] for how the two are told apart.
 fn decode_lenient<T: DeserializeOwned>(text: &str, cap: usize) -> Result<Decoded<T>, ProtoError> {
     check_size(text.len(), cap)?;
     match serde_json::from_str::<T>(text) {
         Ok(frame) => Ok(Decoded::Frame(frame)),
-        Err(e) => match unknown_variant_kind(&e) {
+        // Only the failure path pays for the classification below, and it is
+        // already bounded by `cap`.
+        Err(e) => match unknown_kind::<T>(text) {
             Some(kind) => Ok(Decoded::Unknown { kind }),
             None => Err(ProtoError::Malformed(e.to_string())),
         },
     }
 }
 
-/// If `e` is serde's "unknown variant" error for an internally-tagged enum
-/// (`#[serde(tag = "kind")]`, what [`HubFrame`] and [`AgentFrame`] both are),
-/// the offending value — otherwise `None`.
+/// The frame's own top-level `kind`, when that kind is one `T` has no
+/// variant for — otherwise `None`, meaning [`decode_lenient`]'s failure was
+/// damage and must stay a hard error.
 ///
-/// This is how [`decode_lenient`] tells "the kind is not one this build
-/// knows" apart from "the kind IS known, but the rest would not parse" —
-/// deliberately WITHOUT a hand-maintained list of kinds. An earlier version
-/// of this function compared the tag against `known_hub_kind`/
-/// `known_agent_kind` `matches!` lists that had to be kept in sync with the
-/// enums BY HAND; a variant added to the enum but not to the matching list
-/// would make a MALFORMED frame of that real kind decode as `Unknown`
-/// instead of `Malformed` — corruption silently swallowed as evolution,
-/// exactly backwards from the rule this module exists to enforce. Reading
-/// the tag back out of serde's own error removes the list: serde's derive
-/// generates this exact message, and the names in it, from the enum's own
-/// variants, at compile time — it can never claim a real variant is
-/// unknown.
+/// **Exactly two things are guaranteed.** `Some(k)` is returned only when
+/// the document is a JSON object carrying exactly one string `kind`, `k`,
+/// AND `T` rejects `k` as an unknown variant on its own. Everything else —
+/// any other shape, any other probe outcome, any wording this code does not
+/// recognise — is `None`. A bug here therefore fails CLOSED: the connection
+/// is dropped over a frame that might have been skippable, never the other
+/// way round.
+///
+/// **Why the `kind` is read from the JSON, not from serde's error.** An
+/// earlier version classified by the error text alone, and serde's
+/// "unknown variant \`X\`" wording is not unique to the tag: any
+/// enum-typed FIELD produces it too. A frame of a real kind carrying a
+/// `mode` this build does not know reported `X = "mode"`'s bad value and
+/// was skipped — damage swallowed as evolution, exactly backwards. A JSON
+/// array did the same: `["kind","exec"]` made serde complain about an
+/// unknown variant `kind`, and a frame kind called `kind` was invented out
+/// of nothing. Neither wire type has an enum-typed field today; both would
+/// the moment one is added, with nothing to warn whoever adds it.
+///
+/// **Why the probe, rather than comparing the tag against the top-level
+/// `kind`.** That comparison is fooled by the degenerate case where the
+/// nested bad value happens to EQUAL the frame's kind
+/// (`{"kind":"tune","mode":"tune"}`). Re-asking `T` about a document that
+/// contains only the kind removes the ambiguity at its source: a kind-only
+/// document has no field, enum-typed or otherwise, left to trip over, so an
+/// unknown-variant error about it can only be about the kind. Any other
+/// outcome — `Ok` (a unit-like variant), `missing field …`, anything at all
+/// — means `T` recognised the kind, so the original failure was damage.
+///
+/// **No hand-maintained list of kinds**, which was the point of the
+/// error-text approach and is kept: serde's derive answers the probe from
+/// the enum's own variants, at compile time, so a variant added to
+/// [`HubFrame`] or [`AgentFrame`] is known to this function the moment it
+/// compiles.
+fn unknown_kind<T: DeserializeOwned>(text: &str) -> Option<String> {
+    /// Reads the frame's own top-level `kind` and nothing else. A derived
+    /// struct, deliberately: it rejects a document that is not an object,
+    /// a `kind` that is not a string, a missing `kind`, and — unlike a
+    /// `serde_json::Value`, where the last one silently wins — a DUPLICATE
+    /// `kind`, which has no defensible answer and so must be damage.
+    #[derive(Deserialize)]
+    struct KindOnly {
+        kind: String,
+    }
+
+    let KindOnly { kind } = serde_json::from_str::<KindOnly>(text).ok()?;
+    match serde_json::from_value::<T>(serde_json::json!({ "kind": kind })) {
+        // A unit-like variant: the kind alone is a whole frame. Known.
+        Ok(_) => None,
+        Err(e) => match unknown_variant_name(&e) {
+            // Belt and braces: the name serde objected to in a kind-only
+            // document can only be the kind, but if it somehow is not, that
+            // is a surprise, and a surprise is Malformed.
+            Some(name) if name == kind => Some(kind),
+            _ => None,
+        },
+    }
+}
+
+/// If `e` is serde's "unknown variant" error, the offending name —
+/// otherwise `None`.
 ///
 /// The message format (`unknown variant \`X\`, expected ...`) is pinned
 /// against serde_json's actual wording by
-/// `unknown_variant_kind_extracts_the_offending_tag` below, so a serde
-/// upgrade that changes it fails a test here instead of silently
-/// reclassifying "unknown" as "malformed" — and that failure mode is the
-/// SAFE direction: every previously-unknown kind just becomes a hard error
-/// again (today's pre-lenient behaviour), never the other way around.
-fn unknown_variant_kind(e: &serde_json::Error) -> Option<String> {
+/// `the_probe_reports_an_unrecognised_kind_with_the_pinned_wording` below,
+/// so a serde upgrade that changes it fails a test here instead of silently
+/// reclassifying. That failure mode is the SAFE direction too: every
+/// previously-unknown kind just becomes a hard error again (today's
+/// pre-lenient behaviour), never the other way around.
+fn unknown_variant_name(e: &serde_json::Error) -> Option<String> {
     let msg = e.to_string();
     let after = msg.strip_prefix("unknown variant `")?;
-    let (kind, _) = after.split_once('`')?;
-    Some(kind.to_string())
+    let (name, _) = after.split_once('`')?;
+    Some(name.to_string())
 }
 
 /// The longest a `kind` [`UnknownKinds`] stores or hands back for logging,
@@ -615,20 +697,29 @@ impl UnknownKinds {
         }
     }
 
-    /// Truncate to [`UNKNOWN_KIND_MAX_LEN`] bytes on a `char` boundary, and
-    /// replace every control character (a newline, a carriage return, an
-    /// ANSI escape, …) with `U+FFFD`, so the result is always safe to log
-    /// verbatim on one line.
+    /// [`sanitize_for_log`] at [`UNKNOWN_KIND_MAX_LEN`].
     fn sanitize(kind: &str) -> String {
-        let mut end = kind.len().min(UNKNOWN_KIND_MAX_LEN);
-        while end > 0 && !kind.is_char_boundary(end) {
-            end -= 1;
-        }
-        kind[..end]
-            .chars()
-            .map(|c| if c.is_control() { '\u{fffd}' } else { c })
-            .collect()
+        sanitize_for_log(kind, UNKNOWN_KIND_MAX_LEN)
     }
+}
+
+/// Truncate `text` to `max_bytes` on a `char` boundary, and replace every
+/// control character (a newline, a carriage return, an ANSI escape, …) with
+/// `U+FFFD`, so the result is always safe to log verbatim on one line.
+///
+/// Shared because more than one thing on this wire is peer-controlled text a
+/// receiver logs: a frame `kind` (bounded by [`UnknownKinds`], which calls
+/// this) and a WebSocket close reason (bounded by RFC 6455's own 123-byte
+/// limit, and neutralised by `fleet-agent` with this).
+pub fn sanitize_for_log(text: &str, max_bytes: usize) -> String {
+    let mut end = text.len().min(max_bytes);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end]
+        .chars()
+        .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+        .collect()
 }
 
 fn encode<T: Serialize>(frame: &T, cap: usize) -> Result<String, ProtoError> {
@@ -666,39 +757,190 @@ pub fn decode_b64(text: &str) -> Result<Vec<u8>, ProtoError> {
 mod tests {
     use super::*;
 
-    // ── unknown_variant_kind: the drift-proof classifier ────────────────
-
-    #[test]
-    fn unknown_variant_kind_extracts_the_offending_tag() {
-        let e =
-            serde_json::from_str::<HubFrame>(r#"{"kind":"selfdestruct","id":"1"}"#).unwrap_err();
-        assert_eq!(unknown_variant_kind(&e).as_deref(), Some("selfdestruct"));
-
-        let e =
-            serde_json::from_str::<AgentFrame>(r#"{"kind":"selfdestruct","id":"1"}"#).unwrap_err();
-        assert_eq!(unknown_variant_kind(&e).as_deref(), Some("selfdestruct"));
+    /// A stand-in for a frame enum with an **enum-typed field** — a shape
+    /// neither [`HubFrame`] nor [`AgentFrame`] has today, and the one that
+    /// defeats a classifier reading serde's error text alone: a bad value
+    /// for `mode` produces the very same "unknown variant \`…\`" wording a
+    /// bad `kind` does. Test-only on purpose — proving the hazard must not
+    /// require adding a field to a real wire type.
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    // Nothing reads the fields back; they exist so serde has something to
+    // fail on.
+    #[allow(dead_code)]
+    enum ProbeFrame {
+        Tune {
+            id: String,
+            mode: TuneMode,
+        },
+        /// A unit-like variant: a kind-only document parses `Ok` for it,
+        /// which the probe must read as KNOWN, not as an unknown kind.
+        Drain,
     }
 
-    /// The property the whole design rests on: a REAL variant's tag, with a
-    /// body that will not parse, is never mistaken for an unknown one —
-    /// serde's error for it is a different shape entirely ("missing field
-    /// ...", not "unknown variant ..."), so there is no hand-maintained
-    /// list here that could drift and misclassify it.
-    #[test]
-    fn unknown_variant_kind_is_none_for_a_known_kind_that_will_not_parse() {
-        let e = serde_json::from_str::<HubFrame>(r#"{"kind":"exec"}"#).unwrap_err();
-        assert_eq!(unknown_variant_kind(&e), None, "{e}");
-
-        let e = serde_json::from_str::<AgentFrame>(r#"{"kind":"result"}"#).unwrap_err();
-        assert_eq!(unknown_variant_kind(&e), None, "{e}");
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum TuneMode {
+        Slow,
+        Fast,
     }
 
+    fn lenient<T: DeserializeOwned>(text: &str) -> Result<Decoded<T>, ProtoError> {
+        decode_lenient(text, MAX_FRAME_BYTES)
+    }
+
+    // ── the classifier: known-but-damaged vs. genuinely unknown ─────────
+
+    /// Hazard (i): a KNOWN kind whose enum-typed field carries a value this
+    /// build does not know. Serde reports it with the unknown-variant
+    /// wording, but the offending tag is `turbo` — a value nested in the
+    /// body, not the frame's own `kind`. Skipping the frame would swallow
+    /// damage as evolution.
     #[test]
-    fn unknown_variant_kind_is_none_for_junk_with_no_kind_at_all() {
-        for text in ["", "{}", "null", r#"{"kind":null}"#, r#"{"kind":42}"#] {
-            let e = serde_json::from_str::<HubFrame>(text).unwrap_err();
-            assert_eq!(unknown_variant_kind(&e), None, "{text:?}: {e}");
+    fn a_known_kind_with_a_bad_enum_field_is_malformed_not_unknown() {
+        let got = lenient::<ProbeFrame>(r#"{"kind":"tune","id":"1","mode":"turbo"}"#);
+        assert!(matches!(got, Err(ProtoError::Malformed(_))), "{got:?}");
+    }
+
+    /// The degenerate case of hazard (i): the nested bad value happens to
+    /// equal the frame's own `kind`, so even comparing serde's tag against
+    /// the top-level `kind` would be fooled. Only probing the enum with a
+    /// kind-only document tells these apart.
+    #[test]
+    fn a_nested_bad_value_equal_to_the_kind_is_still_malformed() {
+        let got = lenient::<ProbeFrame>(r#"{"kind":"tune","id":"1","mode":"tune"}"#);
+        assert!(matches!(got, Err(ProtoError::Malformed(_))), "{got:?}");
+    }
+
+    /// Hazard (ii): a JSON array. It has no top-level `kind` at all, yet
+    /// serde's error names `kind` as an "unknown variant" — which used to
+    /// be read as a frame kind called `kind`.
+    #[test]
+    fn a_json_array_is_malformed_not_an_unknown_kind() {
+        let got = lenient::<HubFrame>(r#"["kind","exec"]"#);
+        assert!(matches!(got, Err(ProtoError::Malformed(_))), "{got:?}");
+
+        let got = lenient::<AgentFrame>(r#"["kind","hello"]"#);
+        assert!(matches!(got, Err(ProtoError::Malformed(_))), "{got:?}");
+    }
+
+    /// A unit-like variant: the kind-only probe document parses `Ok`. That
+    /// is a KNOWN kind, so the original failure is damage.
+    #[test]
+    fn a_unit_like_known_kind_with_a_bad_body_is_malformed() {
+        let got = lenient::<ProbeFrame>(r#"{"kind":"drain","extra":[1,2,3}"#);
+        assert!(matches!(got, Err(ProtoError::Malformed(_))), "{got:?}");
+    }
+
+    /// The case the leniency exists for, on BOTH enums: a kind no variant
+    /// claims, with a body this build could not parse even if it wanted to.
+    #[test]
+    fn a_genuinely_unknown_kind_with_a_garbage_body_is_unknown() {
+        for text in [
+            r#"{"kind":"selfdestruct","payload":{"nested":[1,2,3]},"n":7}"#,
+            r#"{"kind":"selfdestruct"}"#,
+        ] {
+            assert_eq!(
+                lenient::<HubFrame>(text).expect("classified"),
+                Decoded::Unknown {
+                    kind: "selfdestruct".into()
+                },
+                "{text}"
+            );
+            assert_eq!(
+                lenient::<AgentFrame>(text).expect("classified"),
+                Decoded::Unknown {
+                    kind: "selfdestruct".into()
+                },
+                "{text}"
+            );
         }
+    }
+
+    /// A known kind whose body will not parse stays a hard error — the rule
+    /// the whole module exists to enforce.
+    #[test]
+    fn a_known_kind_that_will_not_parse_is_malformed() {
+        let got = lenient::<HubFrame>(r#"{"kind":"exec"}"#);
+        assert!(matches!(got, Err(ProtoError::Malformed(_))), "{got:?}");
+
+        let got = lenient::<AgentFrame>(r#"{"kind":"result","id":"1"}"#);
+        assert!(matches!(got, Err(ProtoError::Malformed(_))), "{got:?}");
+    }
+
+    /// Anything that is not an object carrying a string `kind` is damage,
+    /// never an unknown kind — including a document with two `kind` keys,
+    /// where which one is "the" kind is not answerable.
+    #[test]
+    fn junk_with_no_usable_kind_is_malformed() {
+        for text in [
+            "",
+            "{}",
+            "null",
+            "[]",
+            "not json at all",
+            r#"{"kind":null}"#,
+            r#"{"kind":42}"#,
+            r#"{"kind":["exec"]}"#,
+            r#"{"kind":"exec","kind":"selfdestruct"}"#,
+        ] {
+            let got = lenient::<HubFrame>(text);
+            assert!(
+                matches!(got, Err(ProtoError::Malformed(_))),
+                "{text:?}: {got:?}"
+            );
+        }
+    }
+
+    // ── the serde wording the probe reads ───────────────────────────────
+
+    /// The pin the probe rests on: asked about a kind-only document whose
+    /// `kind` no variant claims, serde reports it with the exact wording
+    /// `unknown_variant_name` parses — on BOTH real enums. A serde upgrade
+    /// that reworded this fails here, and it fails the safe way: every
+    /// unknown kind would become a hard error again, never a skipped one.
+    #[test]
+    fn the_probe_reports_an_unrecognised_kind_with_the_pinned_wording() {
+        let e = serde_json::from_value::<HubFrame>(serde_json::json!({"kind":"selfdestruct"}))
+            .unwrap_err();
+        assert_eq!(
+            unknown_variant_name(&e).as_deref(),
+            Some("selfdestruct"),
+            "{e}"
+        );
+
+        let e = serde_json::from_value::<AgentFrame>(serde_json::json!({"kind":"selfdestruct"}))
+            .unwrap_err();
+        assert_eq!(
+            unknown_variant_name(&e).as_deref(),
+            Some("selfdestruct"),
+            "{e}"
+        );
+    }
+
+    /// The other half of the pin: a REAL variant's kind, alone, does NOT
+    /// produce that wording — serde's error for it is a different shape
+    /// entirely ("missing field ..."), which is what lets the probe read
+    /// "recognised" off it without a hand-maintained list of kinds.
+    #[test]
+    fn the_probe_reports_a_recognised_kind_some_other_way() {
+        let e = serde_json::from_value::<HubFrame>(serde_json::json!({"kind":"exec"})).unwrap_err();
+        assert_eq!(unknown_variant_name(&e), None, "{e}");
+
+        let e =
+            serde_json::from_value::<AgentFrame>(serde_json::json!({"kind":"result"})).unwrap_err();
+        assert_eq!(unknown_variant_name(&e), None, "{e}");
+    }
+
+    /// And the wording is NOT unique to the tag — the hazard the probe
+    /// exists to sidestep, pinned here so it cannot be forgotten: an
+    /// enum-typed FIELD produces the very same message, about a value that
+    /// is not a frame kind at all.
+    #[test]
+    fn the_same_wording_also_comes_from_a_bad_enum_typed_field() {
+        let e = serde_json::from_str::<ProbeFrame>(r#"{"kind":"tune","id":"1","mode":"turbo"}"#)
+            .unwrap_err();
+        assert_eq!(unknown_variant_name(&e).as_deref(), Some("turbo"), "{e}");
     }
 
     // ── UnknownKinds: bounded, sanitised tracking ───────────────────────

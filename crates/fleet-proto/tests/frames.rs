@@ -486,6 +486,103 @@ fn a_hello_without_proto_decodes_as_zero() {
     );
 }
 
+/// Every INFORMATIONAL field of a `hello` is optional on the wire too, so a
+/// future agent may stop sending one without being unparseable by an
+/// already-deployed hub. Only the kind is mandatory.
+#[test]
+fn a_hello_with_only_its_kind_decodes_with_empty_informational_fields() {
+    let decoded = decode_agent_frame(r#"{"kind":"hello"}"#).expect("decodes bare");
+    assert_eq!(
+        decoded,
+        AgentFrame::Hello {
+            agent_version: String::new(),
+            host_name: String::new(),
+            os: String::new(),
+            proto: 0,
+        }
+    );
+}
+
+/// A `welcome` whose only field is its kind parses — and is then refused by
+/// the VERSION check, cleanly, rather than being unparseable.
+///
+/// This is the field this crate's compatibility story cannot afford to get
+/// wrong: `welcome` is the first frame down every connection, and a
+/// deployed agent has no self-update. A mandatory `proto` would turn a hub
+/// that ever omitted it into a permanent decode error — a known kind with a
+/// missing field is [`Decoded`]-level damage, so the agent would close the
+/// connection and reconnect, forever, with no reason to show an operator.
+#[test]
+fn a_welcome_with_only_its_kind_decodes_and_is_refused_by_version() {
+    let decoded = decode_hub_frame(r#"{"kind":"welcome"}"#).expect("decodes bare");
+    assert_eq!(
+        decoded,
+        HubFrame::Welcome {
+            hub_version: String::new(),
+            proto: 0,
+        }
+    );
+    let HubFrame::Welcome { proto, .. } = decoded else {
+        unreachable!()
+    };
+    let verdict = judge_proto(proto);
+    assert_eq!(
+        verdict,
+        ProtoVerdict::PeerBehind {
+            their: 0,
+            min_supported: MIN_SUPPORTED_PROTO,
+        }
+    );
+    assert!(
+        verdict
+            .refusal_reason("fleet-agent", "the hub")
+            .is_some_and(|r| r.contains("update the hub")),
+        "the refusal must name the side to update"
+    );
+}
+
+/// The case the default exists for: a hub that drops the informational
+/// `hub_version` but is IN range is accepted, not refused and not a decode
+/// error.
+#[test]
+fn a_welcome_without_hub_version_but_in_range_is_accepted() {
+    let text = format!(r#"{{"kind":"welcome","proto":{PROTO_VERSION}}}"#);
+    let decoded = decode_hub_frame(&text).expect("decodes without hub_version");
+    assert_eq!(
+        decoded,
+        HubFrame::Welcome {
+            hub_version: String::new(),
+            proto: PROTO_VERSION,
+        }
+    );
+    assert_eq!(judge_proto(PROTO_VERSION), ProtoVerdict::Compatible);
+}
+
+/// The defaults are for READING only: every field is still written, so the
+/// wire a current build produces is unchanged and
+/// `hub_frames_use_the_spec_s_tag_and_field_names` keeps its bite.
+#[test]
+fn the_optional_fields_are_still_always_written() {
+    let text = encode_hub_frame(&HubFrame::Welcome {
+        hub_version: String::new(),
+        proto: 0,
+    })
+    .expect("encodes");
+    assert_eq!(text, r#"{"kind":"welcome","hub_version":"","proto":0}"#);
+
+    let text = encode_agent_frame(&AgentFrame::Hello {
+        agent_version: String::new(),
+        host_name: String::new(),
+        os: String::new(),
+        proto: 0,
+    })
+    .expect("encodes");
+    assert_eq!(
+        text,
+        r#"{"kind":"hello","agent_version":"","host_name":"","os":"","proto":0}"#
+    );
+}
+
 /// A `hello` that does carry `proto` round-trips it exactly — the ordinary
 /// case, now that every current build sends one.
 #[test]
