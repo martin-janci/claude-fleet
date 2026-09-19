@@ -354,3 +354,65 @@ describe('the Hub section, configured but unavailable', () => {
     }
   });
 });
+
+// A pairing that crashed on the OLD write order (token first, URL last) left a
+// fleet-wide client token on this machine with no hub configured. No launch
+// reads it — a blank URL is standalone, and resolution never queries the
+// keychain there — so this section is the only place it is ever mentioned and
+// the only place it can be cleared.
+describe('a client token stranded by a half-finished pairing', () => {
+  it('is found, explained and clearable from the standalone section', async () => {
+    const inv = route({ hub_stranded_token: true, hub_disconnect: { ...STANDALONE } });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await screen.findByTestId('hub-section');
+
+    const warning = await screen.findByTestId('hub-stranded-token');
+    expect(warning.textContent).toContain('client token');
+    // It must not read as a configured hub: this app still owns its fleet.
+    expect(screen.getByTestId('hub-empty')).toBeInTheDocument();
+    // And it must not promise a revocation it cannot perform.
+    expect(warning.closest('section')!.textContent).toContain('does not revoke');
+
+    await fireEvent.click(screen.getByTestId('hub-disconnect'));
+    await waitFor(() =>
+      expect(inv.mock.calls.some((c) => c[0] === 'hub_disconnect')).toBe(true),
+    );
+    // Cleared: the warning and its button go away without a reload.
+    await waitFor(() => expect(screen.queryByTestId('hub-stranded-token')).toBeNull());
+  });
+
+  it('is not claimed when there is none', async () => {
+    route({ hub_stranded_token: false });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await screen.findByTestId('hub-empty');
+    await tick();
+    await tick();
+    expect(screen.queryByTestId('hub-stranded-token')).toBeNull();
+    expect(screen.queryByTestId('hub-disconnect')).toBeNull();
+  });
+
+  // A keychain that will not open is not evidence of a leftover, and this app
+  // is working normally otherwise. An error toast on every Settings open would
+  // be noise about a state that almost certainly does not exist.
+  it('says nothing, and raises nothing, when the token store cannot be read', async () => {
+    route({ hub_stranded_token: ipcError('E_IO', 'keychain locked') });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await screen.findByTestId('hub-empty');
+    await tick();
+    await tick();
+    expect(screen.queryByTestId('hub-stranded-token')).toBeNull();
+    expect(screen.queryByTestId('hub-error')).toBeNull();
+  });
+
+  // With a hub configured the token belongs to it, Disconnect is already on
+  // screen, and asking would only risk a keychain prompt for nothing.
+  it('is not asked about at all once a hub is configured', async () => {
+    hubStatus.set({ ...remote });
+    const inv = route();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await screen.findByTestId('hub-connected');
+    await tick();
+    await tick();
+    expect(inv.mock.calls.some((c) => c[0] === 'hub_stranded_token')).toBe(false);
+  });
+});

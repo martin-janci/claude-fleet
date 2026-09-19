@@ -116,6 +116,39 @@ pub fn hub_connection(
     status.current()
 }
 
+/// Whether a client token is sitting on this machine with **no hub
+/// configured** — a credential nothing reads and, until this existed, nothing
+/// offered to clear.
+///
+/// # The state this exists for
+///
+/// Pairing writes two stores that no transaction spans. Since `1e14414` the
+/// token is written **last**, so a crash can no longer strand one; before it,
+/// the token went first, and a crash between the two writes left a live
+/// fleet-wide bearer token beside a blank `hub.remote_url`. An install that
+/// took that crash carries the token across the upgrade.
+///
+/// [`Backend::resolve`] deliberately does not look for it: a blank URL is
+/// standalone, and a keychain query on every launch is the call that prompts
+/// or blocks on a locked macOS keychain (see
+/// [`crate::backend::UnavailableHub`]). The question is asked here instead —
+/// once, when a person opens Settings, which is both the moment a keychain
+/// prompt is explicable and the moment the answer can be acted on: Settings
+/// shows Disconnect, and [`hub_disconnect`] clears the token.
+///
+/// Answers `false` whenever a hub **is** configured. The token is not stranded
+/// then — it belongs to that hub, and Settings already offers Disconnect for
+/// the working and the [`crate::backend::Backend::Unavailable`] case alike.
+///
+/// The token never leaves the token store: this returns a bool.
+#[tauri::command]
+pub fn hub_stranded_token(
+    store: State<'_, Arc<Mutex<Store>>>,
+    tokens: State<'_, Arc<dyn TokenStore>>,
+) -> Result<bool, IpcError> {
+    logic::stranded_token(&store, tokens.inner().as_ref())
+}
+
 /// Forget the pairing. **Revokes nothing** — see the module docs.
 #[tauri::command]
 pub fn hub_disconnect(
@@ -348,6 +381,35 @@ pub(crate) mod logic {
             s.set_setting(key, value)?;
         }
         Ok(())
+    }
+
+    /// See [`super::hub_stranded_token`]. The settings are consulted FIRST so
+    /// that a configured hub — the case Settings already handles — never
+    /// reaches the token store at all; the keychain is asked only in the state
+    /// this is about.
+    pub fn stranded_token(store: &Mutex<Store>, tokens: &dyn TokenStore) -> Result<bool, IpcError> {
+        // A settings store that cannot be read is not evidence of a stranded
+        // token: `Backend::resolve` already answers that case loudly
+        // (`unreadable_settings`), and answering `true` here would put a
+        // "leftover credential" warning in front of someone whose actual
+        // problem is a database it also names. Not stranded, as far as this
+        // can tell.
+        let configured = lock(store)?
+            .get_setting(REMOTE_URL_KEY)?
+            .is_some_and(|v| !v.trim().is_empty());
+        if configured {
+            return Ok(false);
+        }
+        // The message is the token store's own diagnostic text, which never
+        // contains the secret (`TokenStore`'s contract). A failure is
+        // reported rather than swallowed, but the caller is free to stay
+        // quiet: a keychain that will not open is not evidence of a leftover.
+        tokens.get().map(|t| t.is_some()).map_err(|e| {
+            IpcError::new(
+                codes::E_IO,
+                format!("could not check this machine's secure storage for a leftover client token: {e}"),
+            )
+        })
     }
 
     /// Forget the pairing on **this machine**. Revokes nothing on the hub —

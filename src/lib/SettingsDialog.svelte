@@ -40,7 +40,14 @@
     type ProjectsLayout,
   } from './fleet_settings';
   import { refreshProjects } from './projects';
-  import { hubStatus, hubPair, hubDisconnect, hubBlock, ownsTheFleet } from './hub';
+  import {
+    hubStatus,
+    hubPair,
+    hubDisconnect,
+    hubBlock,
+    hubStrandedToken,
+    ownsTheFleet,
+  } from './hub';
   import {
     attentionIdleMinutes,
     notificationPermission,
@@ -88,6 +95,10 @@
   let hubBusy = $state(false);
   let hubError: string | null = $state(null);
   let hubRestartNeeded = $state(false);
+  /** A client token left on this machine by a pairing that crashed before it
+   *  wrote its URL. No launch reads it, and nothing else offers to clear it —
+   *  see `hubStrandedToken`. Asked once, on open, and only while standalone. */
+  let hubStranded = $state(false);
 
   const hubPairable = $derived(
     !hubBusy && hubUrlDraft.trim() !== '' && hubCode.trim() !== '',
@@ -118,6 +129,8 @@
     if (r.ok) {
       hubRestartNeeded = r.value.restart_required;
       hubUrlDraft = '';
+      // Disconnect clears the token too, so whatever was stranded is gone.
+      hubStranded = false;
     } else {
       hubError = r.error.message;
     }
@@ -139,6 +152,18 @@
     const fs = await loadFleetSettings();
     if (!fs.ok) automationError = fs.error.message;
     resetProjectDrafts();
+    // Last, and only standalone: on macOS this reads the keychain, which is
+    // the one call here that can block on a locked one. Nothing else on this
+    // screen waits for it, and with a hub configured there is nothing to ask
+    // — that token belongs to that hub and Disconnect is on screen already.
+    if (!$hubStatus.configured_url) {
+      const st = await hubStrandedToken();
+      // A token store that will not open is not evidence of a leftover, and
+      // this app is working normally otherwise; an error toast on every
+      // Settings open would be noise about a state that almost certainly does
+      // not exist. The backend's error carries the reason for a log.
+      hubStranded = st.ok && st.value === true;
+    }
   });
 
   // --- Projects: per-host projects root + layout (backend settings) ---
@@ -426,6 +451,32 @@
           and paste the code it prints. The code can be used once and expires
           in minutes.
         </p>
+        {#if hubStranded}
+          <!-- A pairing that crashed before it wrote its URL (the old write
+               order) left a fleet-wide client token on this machine. No launch
+               reads it — a blank URL is standalone — so this is the only place
+               it is ever mentioned, and the only place it can be cleared. -->
+          <p class="err" data-testid="hub-stranded-token">
+            ⚠ A hub <strong>client token</strong> is still stored on this
+            machine, left behind by a pairing that did not finish. Nothing uses
+            it: no hub is configured, and this app runs its own fleet. It is a
+            credential for someone else's fleet sitting in this machine's
+            secure storage, so clear it unless you are about to pair again.
+          </p>
+          <div class="mcp-field">
+            <button
+              class="hook-btn"
+              onclick={doDisconnect}
+              disabled={hubBusy}
+              data-testid="hub-disconnect">Clear leftover token</button>
+          </div>
+          <p class="hook-desc">
+            This <strong>does not revoke</strong> anything. If that token was
+            ever issued, its client row is still on the hub and the token is
+            still valid there until an operator removes it
+            (<code>fleet-hub client revoke</code>).
+          </p>
+        {/if}
       {/if}
 
       {#if !isRemote || hubRestartNeeded}

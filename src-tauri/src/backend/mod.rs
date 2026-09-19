@@ -116,8 +116,29 @@ pub enum Backend {
     Unavailable(UnavailableHub),
 }
 
-/// A hub is configured — `hub.remote_url` is set, or a stored client token
-/// proves this app was paired — but this launch cannot use it.
+/// A hub is configured but this launch cannot use it.
+///
+/// **Configured means `hub.remote_url` is set.** That setting, and nothing
+/// else, is what points this app at a hub. The single exception is a settings
+/// store that cannot be read at all: the URL is then unknown, and a stored
+/// client token is the only remaining evidence that this app was ever paired,
+/// so [`Backend::unreadable_settings`] treats it as proof and refuses to guess
+/// standalone.
+///
+/// A stored token beside a **readable, blank** URL is deliberately *not* this
+/// state. There is no hub address, so there is nothing to be a client of and
+/// no second brain to collide with; that app is standalone and keeps its tick,
+/// its usage poll and its control API (`tests_startup`'s
+/// `with_no_hub_configured_the_resolved_app_still_starts_all_three`). The
+/// token is then a **leftover**, not a configuration — the only thing it needs
+/// is a way to be cleared, which is
+/// [`crate::commands::hub::hub_stranded_token`] plus Settings' Disconnect,
+/// rather than an app that owns nothing and names no hub to pair with again.
+///
+/// Resolution therefore never reads the token store on a blank URL, and
+/// `standalone_resolution_never_reads_the_token_store` below holds it to that:
+/// a keychain read on every launch is exactly what prompts, or fails, on a
+/// locked macOS keychain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnavailableHub {
     /// The configured hub, normalised. `None` when the stored value is not a
@@ -216,7 +237,14 @@ impl Backend {
         };
         let raw_url = raw_url.trim();
         if raw_url.is_empty() {
-            // The ordinary standalone install. Not a warning.
+            // The ordinary standalone install. Not a warning — and, just as
+            // deliberately, NOT a token-store read: there is no hub address
+            // here, so a stored token cannot make this app a client of
+            // anything, and asking the keychain on every launch is the one
+            // question that can prompt or hang on a locked one. A token found
+            // in this state is a leftover from a pairing that never finished
+            // writing its URL; `hub_stranded_token` is where it is looked for,
+            // once, when someone opens Settings.
             return Resolution {
                 backend: Backend::Local,
                 warning: None,
@@ -417,6 +445,82 @@ mod tests {
             let resolved = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("tok"));
             assert_eq!(resolved.backend, Backend::Local, "for {value:?}");
             assert_eq!(resolved.warning, None, "for {value:?}");
+        }
+    }
+
+    /// Counts reads, so a test can assert one never happened.
+    struct CountingTokenStore {
+        inner: InMemoryTokenStore,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingTokenStore {
+        fn new(inner: InMemoryTokenStore) -> Self {
+            Self {
+                inner,
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl TokenStore for CountingTokenStore {
+        fn get(&self) -> Result<Option<String>, String> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get()
+        }
+        fn set(&self, token: &str) -> Result<(), String> {
+            self.inner.set(token)
+        }
+        fn clear(&self) -> Result<(), String> {
+            self.inner.clear()
+        }
+    }
+
+    /// The decision behind [`UnavailableHub`]'s doc comment, pinned.
+    ///
+    /// A blank `hub.remote_url` is the ordinary standalone install — the
+    /// overwhelming majority of launches — and resolution answers it without
+    /// asking the token store at all. Two things break if that changes:
+    ///
+    /// - every standalone launch starts querying the OS keychain, which is the
+    ///   one call that prompts, or blocks, on a locked macOS keychain;
+    /// - whatever the answer is, it would have to *mean* something, and the
+    ///   only safe meaning is the one already in force — a token with no hub
+    ///   address is a leftover, not a configuration. Treating it as a
+    ///   configuration gives an app that owns nothing and names no hub to pair
+    ///   with again, which is strictly worse than the leftover.
+    ///
+    /// The leftover is cleared from Settings instead
+    /// (`commands::hub::hub_stranded_token`), where the keychain is asked once
+    /// and only because a person opened the screen.
+    #[test]
+    fn standalone_resolution_never_reads_the_token_store() {
+        for settings in [
+            &[][..],
+            &[(REMOTE_URL_KEY, "")][..],
+            &[(REMOTE_URL_KEY, " ")][..],
+        ] {
+            let (_dir, store) = store_with(settings);
+            let tokens = CountingTokenStore::new(InMemoryTokenStore::with_token("cl_left_over"));
+            let resolved = Backend::resolve_detail(&store, &tokens);
+            assert_eq!(
+                resolved.backend,
+                Backend::Local,
+                "a blank hub URL is standalone, whatever the keychain holds: {settings:?}"
+            );
+            assert!(resolved.backend.owns_the_fleet(), "for {settings:?}");
+            assert_eq!(
+                tokens.reads(),
+                0,
+                "standalone resolution asked the token store for {settings:?}; that \
+                 puts a keychain query on every launch of every unpaired app, and a \
+                 locked keychain then prompts or hangs at startup. A leftover token \
+                 is Settings' business (hub_stranded_token), not resolution's."
+            );
         }
     }
 

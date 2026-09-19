@@ -779,3 +779,85 @@ fn disconnect_clears_a_pairing_this_launch_could_not_use() {
         Backend::Local
     );
 }
+
+// ── the stranded token: NIT-A ───────────────────────────────────────────────
+//
+// A pairing that crashed on the OLD write order (token first, URL last) left a
+// live fleet-wide bearer token beside a blank `hub.remote_url`. `1e14414` made
+// that unreachable going forward — the token is written last now — but an
+// install that took the crash carries it across the upgrade. No launch reads
+// it, because a blank URL is standalone and resolution deliberately never asks
+// the token store there; so until `stranded_token` existed, nothing anywhere
+// offered to clear it.
+
+#[test]
+fn a_token_with_no_hub_configured_is_reported_as_stranded() {
+    for settings in [
+        &[][..],
+        &[(REMOTE_URL_KEY, "")][..],
+        &[(REMOTE_URL_KEY, "  ")][..],
+    ] {
+        let (_dir, store) = store_with(settings);
+        let tokens = InMemoryTokenStore::with_token("cl_stranded");
+        assert!(
+            logic::stranded_token(&store, &tokens).unwrap(),
+            "a credential nothing reads must be findable from Settings: {settings:?}"
+        );
+        // And the button Settings offers really does clear it.
+        logic::disconnect(&Backend::Local, &store, &tokens).unwrap();
+        assert_eq!(tokens.get().unwrap(), None);
+        assert!(!logic::stranded_token(&store, &tokens).unwrap());
+    }
+}
+
+#[test]
+fn an_app_that_was_never_paired_has_nothing_stranded() {
+    let (_dir, store) = store_with(&[]);
+    assert!(!logic::stranded_token(&store, &InMemoryTokenStore::empty()).unwrap());
+}
+
+/// A configured hub is not the stranded case, and the token store is not even
+/// asked: that token belongs to that hub, and Settings already shows
+/// Disconnect for it — working (`isRemote`) or `unavailable` alike. Answering
+/// `true` here would put a second, wrong "leftover credential" warning beside
+/// the real one.
+#[test]
+fn a_configured_hub_is_never_stranded_and_the_token_store_is_not_asked() {
+    for url in [
+        "https://fleet.example.com",
+        // Unusable, unreachable, plaintext-refused — still configured.
+        "not a url",
+        "http://fleet.example.com",
+    ] {
+        let (_dir, store) = store_with(&[(REMOTE_URL_KEY, url)]);
+        let tokens = InMemoryTokenStore::failing("the keychain must not be asked");
+        assert!(
+            !logic::stranded_token(&store, &tokens).unwrap(),
+            "for {url:?}: a configured hub's token is not stranded, and asking \
+             the keychain about it can only fail or prompt for nothing"
+        );
+    }
+}
+
+/// A keychain that will not open is not evidence of a leftover. The failure is
+/// reported rather than turned into a `false` the caller cannot tell from a
+/// real answer — and the message carries the store's own diagnostic text,
+/// which by `TokenStore`'s contract never contains the secret.
+#[test]
+fn an_unreadable_token_store_is_an_error_rather_than_a_guess() {
+    let (_dir, store) = store_with(&[]);
+    let e = logic::stranded_token(&store, &InMemoryTokenStore::failing("keychain locked"))
+        .expect_err("a store that cannot be read must not answer");
+    assert_eq!(e.code, codes::E_IO);
+    assert!(e.message.contains("keychain locked"), "{}", e.message);
+}
+
+#[test]
+fn nothing_about_a_stranded_token_carries_the_token() {
+    let (_dir, store) = store_with(&[]);
+    let tokens = InMemoryTokenStore::with_token("cl_s3cret");
+    let answer = logic::stranded_token(&store, &tokens).unwrap();
+    assert!(!format!("{answer:?}").contains("cl_s3cret"));
+    // The whole return type is a bool, so there is nowhere for it to ride.
+    let _: bool = answer;
+}

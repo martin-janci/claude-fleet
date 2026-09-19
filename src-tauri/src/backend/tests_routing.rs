@@ -1169,6 +1169,12 @@ const SAME_IN_BOTH_MODES: &[(&str, &str)] = &[
          exactly when the hub cannot be reached",
     ),
     (
+        "hub_stranded_token",
+        "asks THIS machine's own token store whether a pairing that crashed \
+         before writing its URL left a credential behind. There is no hub to \
+         ask — the whole state is that no hub is configured",
+    ),
+    (
         "hub_disconnect",
         "forgets this machine's own token and setting. It revokes nothing on \
          the hub: only an operator can, and a paired client is refused \

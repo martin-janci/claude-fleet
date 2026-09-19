@@ -111,6 +111,26 @@ export async function hubDisconnect(): Promise<Result<HubStatus>> {
   return r;
 }
 
+/**
+ * Whether a client token is sitting on this machine with **no hub
+ * configured** — a fleet-wide credential no launch reads.
+ *
+ * Pairing used to store the token before the URL, so a crash between the two
+ * writes stranded one. That order is fixed (the token goes last now), but an
+ * install that took the crash carries the token across the upgrade, and
+ * `hub_status` never finds it: a blank URL is standalone, and the backend
+ * deliberately does not query the OS keychain on every launch just in case.
+ *
+ * So Settings asks once, on open — the one moment a keychain prompt is
+ * explicable — and offers {@link hubDisconnect}, which clears it. Deliberately
+ * **not** a field of {@link HubStatus}: it is a one-off question about a legacy
+ * state, not part of which fleet this window is onto, and nothing branches on
+ * it but the Hub section.
+ */
+export async function hubStrandedToken(): Promise<Result<boolean>> {
+  return invokeCmd<boolean>('hub_stranded_token');
+}
+
 // ---- what a hub client cannot do from here ---------------------------------
 
 /**
