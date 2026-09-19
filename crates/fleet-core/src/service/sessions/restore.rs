@@ -67,7 +67,9 @@ pub struct RestoreReport {
 
 /// One in-flight launch in `restore_host_sessions_with`'s batch loop: the
 /// plan index, the session id, its tmux/claude ids (carried through for the
-/// timeline event + log once the call resolves), and the `recreate` result.
+/// timeline event + log once the call resolves), and the `recreate` result —
+/// `None` when the row was no longer lost at launch time, so `recreate` was
+/// never called (see [`still_lost`]).
 type LaunchedRestore<'a> = Pin<
     Box<
         dyn Future<
@@ -76,12 +78,88 @@ type LaunchedRestore<'a> = Pin<
                     i64,
                     String,
                     Option<String>,
-                    Result<SessionRow, IpcError>,
+                    Option<Result<SessionRow, IpcError>>,
                 ),
             > + Send
             + 'a,
     >,
 >;
+
+/// The `error` of a restore entry skipped at launch because its row was no
+/// longer lost — another restore (or a manual recreate) got to it first.
+pub(crate) const RESTORED_ELSEWHERE: &str = "restored elsewhere";
+
+/// Hosts with a non-dry-run restore in progress. A row stays lost until
+/// `recreate_session`'s final `restore_session`, so a second restore of the
+/// same host would re-plan rows the first is still rebuilding, and
+/// `recreate_session`'s kill-then-create would kill the pane the first call
+/// just started. One restore per host at a time; a second is refused with
+/// `E_INVALID_STATE`. Different hosts never block each other.
+#[derive(Default)]
+pub(crate) struct RestoresInFlight {
+    hosts: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl RestoresInFlight {
+    /// Claim `host_alias`, or refuse when a restore of it is already running.
+    /// The claim is released when the returned guard drops — on every exit
+    /// path, including an early `?` return, a panic or the caller's future
+    /// being dropped mid-flight.
+    fn claim(&self, host_alias: &str) -> Result<RestoreClaim<'_>, IpcError> {
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+        if !hosts.insert(host_alias.to_string()) {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                format!(
+                    "a restore of {host_alias} is already in progress; wait for it to finish \
+                     (the host's sessions come back as it goes)"
+                ),
+            ));
+        }
+        Ok(RestoreClaim {
+            owner: self,
+            host_alias: host_alias.to_string(),
+        })
+    }
+
+    #[cfg(test)]
+    fn is_claimed(&self, host_alias: &str) -> bool {
+        self.hosts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(host_alias)
+    }
+}
+
+/// RAII claim on one host in [`RestoresInFlight`].
+struct RestoreClaim<'a> {
+    owner: &'a RestoresInFlight,
+    host_alias: String,
+}
+
+impl Drop for RestoreClaim<'_> {
+    fn drop(&mut self) {
+        self.owner
+            .hosts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.host_alias);
+    }
+}
+
+/// The process-wide registry production restores go through.
+static RESTORES_IN_FLIGHT: std::sync::LazyLock<RestoresInFlight> =
+    std::sync::LazyLock::new(RestoresInFlight::default);
+
+/// Re-read one planned row right before its recreate: `false` when it is no
+/// longer lost (restored by someone else since the plan was made), so the
+/// batch must not kill-and-rebuild a pane that is already back. A row that
+/// vanished counts as still lost — `recreate` then reports it properly.
+fn still_lost(store: &Mutex<Store>, session_id: i64) -> Result<bool, IpcError> {
+    let s = lock(store)?;
+    Ok(s.get_session_by_id(session_id)?
+        .is_none_or(|r| r.lost_at.is_some()))
+}
 
 /// A session kind that is a real tmux pane fleet can recreate — i.e. every
 /// kind except a pane-less `claude --bg` / externally-run agent row (see
@@ -309,9 +387,13 @@ fn record_restore_outcome(
 /// failure isolation are exercisable without a real host.
 ///
 /// `dry_run` returns the plan with empty `results` and never calls
-/// `recreate` or writes anything. Otherwise the host must be known and
-/// `reachable` (checked before any `recreate` call, `E_HOST_OFFLINE`
-/// otherwise); the `restore` entries are then launched in plan order, at
+/// `recreate` or writes anything. Otherwise the host is claimed in
+/// `in_flight` for the whole call (a concurrent restore of the same host gets
+/// `E_INVALID_STATE`), the host must be known and `reachable` (checked
+/// before any `recreate` call, `E_HOST_OFFLINE` otherwise), and each entry's
+/// row is re-read right before its `recreate`: one that is no longer lost is
+/// reported `ok: false` with [`RESTORED_ELSEWHERE`] and not recreated. The
+/// `restore` entries are launched in plan order, at
 /// most `restore.batch_size` in flight, with `restore.stagger_ms` between
 /// successive launches (no stagger wait before the first). One entry's
 /// `Err` never aborts the others; `results` comes back ordered like the
@@ -319,6 +401,7 @@ fn record_restore_outcome(
 pub(crate) async fn restore_host_sessions_with<F, Fut>(
     args: RestoreHostSessionsArgs,
     store: &Mutex<Store>,
+    in_flight: &RestoresInFlight,
     recreate: F,
 ) -> Result<RestoreReport, IpcError>
 where
@@ -337,6 +420,8 @@ where
             results: Vec::new(),
         });
     }
+
+    let _claim = in_flight.claim(&args.host_alias)?;
 
     let (batch_size, stagger_ms) = {
         let s = lock(store)?;
@@ -374,11 +459,11 @@ where
         // At most `batch_size` permits in flight; a launch consumes one, the
         // pushed future's own drop (once it completes) releases it back —
         // `try_acquire` rather than a blocking `.await` because nothing else
-        // would drive `in_flight` forward while a blocking acquire waited.
+        // would drive `launched` forward while a blocking acquire waited.
         let sem = tokio::sync::Semaphore::new(batch_size);
         let stagger_dur = std::time::Duration::from_millis(stagger_ms);
         let recreate_ref = &recreate;
-        let mut in_flight: FuturesUnordered<LaunchedRestore<'_>> = FuturesUnordered::new();
+        let mut launched: FuturesUnordered<LaunchedRestore<'_>> = FuturesUnordered::new();
         let mut idx = 0usize;
         let mut completed = 0usize;
         // `Some` while waiting out the stagger gap before the NEXT launch;
@@ -396,9 +481,13 @@ where
                 let sid = entry.session_id;
                 let tmux_name = entry.tmux_name.clone().unwrap_or_default();
                 let claude_session_id = entry.claude_session_id.clone();
-                in_flight.push(Box::pin(async move {
+                launched.push(Box::pin(async move {
                     let _permit = permit;
-                    let res = recreate_ref(sid).await;
+                    let res = match still_lost(store, sid) {
+                        Ok(true) => Some(recreate_ref(sid).await),
+                        Ok(false) => None,
+                        Err(e) => Some(Err(e)),
+                    };
                     (this_idx, sid, tmux_name, claude_session_id, res)
                 }));
                 idx += 1;
@@ -417,29 +506,47 @@ where
                 }, if pending_sleep.is_some() => {
                     pending_sleep = None;
                 }
-                item = in_flight.next(), if !in_flight.is_empty() => {
+                item = launched.next(), if !launched.is_empty() => {
                     if let Some((i, sid, tmux_name, claude_session_id, res)) = item {
-                        record_restore_outcome(
-                            store,
-                            &host_alias,
-                            sid,
-                            &tmux_name,
-                            claude_session_id.as_deref(),
-                            &res,
-                        );
                         let outcome = match res {
-                            Ok(_) => RestoreOutcome {
-                                session_id: sid,
-                                tmux_name,
-                                ok: true,
-                                error: None,
-                            },
-                            Err(e) => RestoreOutcome {
-                                session_id: sid,
-                                tmux_name,
-                                ok: false,
-                                error: Some(e.message.clone()),
-                            },
+                            None => {
+                                tracing::info!(
+                                    host_alias,
+                                    tmux_name,
+                                    session_id = sid,
+                                    "[restore] skipped: no longer lost"
+                                );
+                                RestoreOutcome {
+                                    session_id: sid,
+                                    tmux_name,
+                                    ok: false,
+                                    error: Some(RESTORED_ELSEWHERE.to_string()),
+                                }
+                            }
+                            Some(res) => {
+                                record_restore_outcome(
+                                    store,
+                                    &host_alias,
+                                    sid,
+                                    &tmux_name,
+                                    claude_session_id.as_deref(),
+                                    &res,
+                                );
+                                match res {
+                                    Ok(_) => RestoreOutcome {
+                                        session_id: sid,
+                                        tmux_name,
+                                        ok: true,
+                                        error: None,
+                                    },
+                                    Err(e) => RestoreOutcome {
+                                        session_id: sid,
+                                        tmux_name,
+                                        ok: false,
+                                        error: Some(e.message.clone()),
+                                    },
+                                }
+                            }
                         };
                         results[i] = Some(outcome);
                         completed += 1;
@@ -466,7 +573,7 @@ pub async fn restore_host_sessions(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<RestoreReport, IpcError> {
-    restore_host_sessions_with(args, store, |id| {
+    restore_host_sessions_with(args, store, &RESTORES_IN_FLIGHT, |id| {
         recreate_session(
             RecreateSessionArgs {
                 session_id: id,
@@ -581,6 +688,7 @@ mod tests {
                 session_ids: None,
             },
             &store,
+            &RestoresInFlight::default(),
             move |_id| {
                 let counter = std::sync::Arc::clone(&counter_for_closure);
                 async move {
@@ -729,6 +837,7 @@ mod tests {
                 session_ids: Some(ids),
             },
             &store,
+            &RestoresInFlight::default(),
             |_id| async move { unreachable!("dry_run never calls recreate") },
         )
         .await
@@ -830,6 +939,7 @@ mod tests {
                 session_ids: None,
             },
             &store,
+            &RestoresInFlight::default(),
             move |id| async move {
                 if id == b {
                     Err(IpcError::new(codes::E_REPAIR_REQUIRED, "worktree gone"))
@@ -900,6 +1010,7 @@ mod tests {
                 session_ids: None,
             },
             &store,
+            &RestoresInFlight::default(),
             move |_id| {
                 let counter = std::sync::Arc::clone(&counter_for_closure);
                 async move {
@@ -913,6 +1024,219 @@ mod tests {
 
         assert_eq!(err.code, codes::E_HOST_OFFLINE);
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    /// Add a reachable `host` with one lost, resumable tmux row per `names`
+    /// entry; returns their ids in order.
+    fn seed_reachable_lost(s: &mut Store, host: &str, names: &[&str]) -> Vec<i64> {
+        s.upsert_host(host).unwrap();
+        s.apply_host_reconcile(HostReconcile {
+            alias: host,
+            reachable: true,
+            claude_version: None,
+            tmux_version: None,
+            last_pinged_at: 0,
+            probe_started_at: 0,
+            sessions: &[],
+            keep: &[],
+            lost_ttl_cutoff: None,
+            skip_prune: false,
+        })
+        .unwrap();
+        let ids: Vec<i64> = names
+            .iter()
+            .map(|n| {
+                let id = s
+                    .upsert_session(n, host, None, None, 1, 1, "running", None)
+                    .unwrap();
+                s.set_claude_session_id(id, &format!("claude-{host}-{n}"))
+                    .unwrap();
+                id
+            })
+            .collect();
+        s.mark_host_sessions_lost(host, "host_reboot", &[], 500, 0)
+            .unwrap();
+        ids
+    }
+
+    fn run_args(host: &str) -> RestoreHostSessionsArgs {
+        RestoreHostSessionsArgs {
+            host_alias: host.to_string(),
+            dry_run: false,
+            session_ids: None,
+        }
+    }
+
+    /// A second restore of a host whose restore is still running is refused
+    /// (it would re-plan rows the first is rebuilding, and recreate's
+    /// kill-then-create would kill the fresh panes); the first call is
+    /// unaffected, a different host is not blocked, and the claim is released
+    /// once the first call returns.
+    #[tokio::test]
+    async fn a_second_restore_of_the_same_host_is_refused_while_one_runs() {
+        let mut s = Store::open_in_memory().expect("open");
+        let h_ids = seed_reachable_lost(&mut s, "h", &["a", "b"]);
+        let h2_ids = seed_reachable_lost(&mut s, "h2", &["c"]);
+        s.set_setting("restore.stagger_ms", "0").unwrap();
+        let store = Mutex::new(s);
+        let store_ref = &store;
+        let registry = RestoresInFlight::default();
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+        let release = tokio::sync::Notify::new();
+        let (entered_ref, release_ref) = (&entered_tx, &release);
+        let first_calls = AtomicUsize::new(0);
+        let first_calls_ref = &first_calls;
+
+        let first =
+            restore_host_sessions_with(run_args("h"), &store, &registry, move |id| async move {
+                first_calls_ref.fetch_add(1, Ordering::SeqCst);
+                let tx = entered_ref.lock().unwrap().take();
+                if let Some(tx) = tx {
+                    let _ = tx.send(());
+                    release_ref.notified().await;
+                }
+                let s = lock(store_ref).unwrap();
+                Ok(s.get_session_by_id(id).unwrap().unwrap())
+            });
+        let second = async {
+            entered_rx.await.unwrap();
+            assert!(registry.is_claimed("h"));
+            let refused =
+                restore_host_sessions_with(run_args("h"), &store, &registry, |_id| async {
+                    unreachable!("a refused restore must not recreate anything")
+                })
+                .await
+                .unwrap_err();
+            let other =
+                restore_host_sessions_with(run_args("h2"), &store, &registry, |id| async move {
+                    let s = lock(store_ref).unwrap();
+                    Ok(s.get_session_by_id(id).unwrap().unwrap())
+                })
+                .await
+                .unwrap();
+            release_ref.notify_one();
+            (refused, other)
+        };
+        let (first, (refused, other)) = tokio::join!(first, second);
+
+        assert_eq!(refused.code, codes::E_INVALID_STATE, "{refused:?}");
+        assert!(
+            refused.message.contains("already in progress"),
+            "{refused:?}"
+        );
+        let first = first.unwrap();
+        assert_eq!(
+            first
+                .results
+                .iter()
+                .map(|r| (r.session_id, r.ok))
+                .collect::<Vec<_>>(),
+            h_ids.iter().map(|&id| (id, true)).collect::<Vec<_>>(),
+            "the first call is unaffected by the refused one"
+        );
+        assert_eq!(first_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            other
+                .results
+                .iter()
+                .map(|r| (r.session_id, r.ok))
+                .collect::<Vec<_>>(),
+            vec![(h2_ids[0], true)],
+            "a different host is not blocked"
+        );
+        assert!(!registry.is_claimed("h"), "released after the call returns");
+        assert!(!registry.is_claimed("h2"));
+    }
+
+    /// The claim is released on an early error return too (RAII), so a
+    /// failed restore never wedges the host until the process restarts.
+    #[tokio::test]
+    async fn the_host_claim_is_released_on_an_error_return() {
+        let mut s = Store::open_in_memory().expect("open");
+        seed_reachable_lost(&mut s, "h", &["a"]);
+        s.apply_host_reconcile(HostReconcile {
+            alias: "h",
+            reachable: false,
+            claude_version: None,
+            tmux_version: None,
+            last_pinged_at: 0,
+            probe_started_at: 0,
+            sessions: &[],
+            keep: &[],
+            lost_ttl_cutoff: None,
+            skip_prune: true,
+        })
+        .unwrap();
+        let store = Mutex::new(s);
+        let registry = RestoresInFlight::default();
+
+        let err = restore_host_sessions_with(run_args("h"), &store, &registry, |_id| async {
+            unreachable!("an offline host is refused before any recreate")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_HOST_OFFLINE);
+        assert!(!registry.is_claimed("h"));
+        // And a retry is not refused as "in progress".
+        let err = restore_host_sessions_with(run_args("h"), &store, &registry, |_id| async {
+            unreachable!("an offline host is refused before any recreate")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_HOST_OFFLINE);
+    }
+
+    /// A row that is no longer lost when its turn comes (restored by someone
+    /// else since the plan was made) is reported, not recreated: recreating
+    /// it would kill a pane that is already back.
+    #[tokio::test]
+    async fn a_row_restored_since_the_plan_is_not_recreated() {
+        let mut s = Store::open_in_memory().expect("open");
+        let ids = seed_reachable_lost(&mut s, "h", &["a", "b"]);
+        let (a, b) = (ids[0], ids[1]);
+        // One at a time, so `b` is launched only after `a`'s recreate ran.
+        s.set_setting("restore.batch_size", "1").unwrap();
+        s.set_setting("restore.stagger_ms", "0").unwrap();
+        let store = Mutex::new(s);
+        let store_ref = &store;
+        let recreated = std::sync::Mutex::new(Vec::<i64>::new());
+        let recreated_ref = &recreated;
+
+        let report = restore_host_sessions_with(
+            run_args("h"),
+            &store,
+            &RestoresInFlight::default(),
+            move |id| async move {
+                recreated_ref.lock().unwrap().push(id);
+                let s = lock(store_ref).unwrap();
+                // While `a` is being recreated, `b` is restored elsewhere.
+                s.restore_session(b).unwrap();
+                Ok(s.get_session_by_id(id).unwrap().unwrap())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *recreated.lock().unwrap(),
+            vec![a],
+            "b must not be recreated"
+        );
+        assert_eq!(report.results.len(), 2);
+        assert!(report.results[0].ok);
+        assert_eq!(report.results[1].session_id, b);
+        assert!(!report.results[1].ok);
+        assert_eq!(report.results[1].error.as_deref(), Some(RESTORED_ELSEWHERE));
+        let s = lock(&store).unwrap();
+        assert!(
+            s.list_session_events(b, 10)
+                .unwrap()
+                .iter()
+                .all(|e| e.kind != "session_restore_failed" && e.kind != "session_restored"),
+            "a skip is not a restore attempt on the timeline"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -963,6 +1287,7 @@ mod tests {
                 session_ids: None,
             },
             &store,
+            &RestoresInFlight::default(),
             move |id| {
                 let in_flight = std::sync::Arc::clone(&in_flight_c);
                 let max_in_flight = std::sync::Arc::clone(&max_in_flight_c);
@@ -1026,6 +1351,7 @@ mod tests {
                 session_ids: None,
             },
             &store,
+            &RestoresInFlight::default(),
             move |id| {
                 let starts = std::sync::Arc::clone(&starts_c);
                 let store = store_for_closure;
