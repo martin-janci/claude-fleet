@@ -1180,8 +1180,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_identity_script_runs_under_local_bash() {
-        // Real bash, real `tmux` if installed — CI's `ubuntu-24.04` and
-        // `macos-latest` runners have NEITHER tmux nor a server, and a
+        // Real bash, real `tmux` if installed — CI's `ubuntu-24.04` runner
+        // has tmux but no server, `macos-latest` has neither, and a
         // `command -v tmux` pre-check is not a safe proxy for "the script's
         // own tmux invocation will succeed": a stale wrapper/shim can
         // resolve as a command yet still fail with exit 127 when run (this
@@ -1231,13 +1231,23 @@ mod tests {
         // The 127 case this whole fix exists for: a login profile edit or a
         // brew relink mid-upgrade drops tmux's directory off PATH entirely,
         // while the server it can no longer reach is still holding every
-        // session. `/usr/bin:/bin` has no `tmux` on macOS (only
-        // `/opt/homebrew/bin/tmux` does) or on a stock Linux box, but keeps
-        // `cat`/`head` (both under `/bin` or `/usr/bin`) resolvable, so only
-        // the tmux half of the script is hidden — the real regression shape.
-        let out = tokio::process::Command::new("bash")
+        // session. A system dir can't stand in for that PATH: GitHub's
+        // `ubuntu-24.04` image ships `/usr/bin/tmux`. So build a PATH of
+        // symlinks to just the script's other tools, which keeps the boot-id
+        // half resolvable and hides only tmux — the real regression shape.
+        let bin = tempfile::tempdir().unwrap();
+        for tool in ["cat", "head", "sysctl"] {
+            let found = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+                .iter()
+                .map(|d| std::path::Path::new(d).join(tool))
+                .find(|p| p.exists());
+            if let Some(target) = found {
+                std::os::unix::fs::symlink(target, bin.path().join(tool)).unwrap();
+            }
+        }
+        let out = tokio::process::Command::new("/bin/bash")
             .args(["-c", HOST_IDENTITY_SCRIPT])
-            .env("PATH", "/usr/bin:/bin")
+            .env("PATH", bin.path())
             .output()
             .await
             .unwrap();
@@ -1252,8 +1262,8 @@ mod tests {
         // This is a claim about the `boot=` line alone, so read it straight
         // off the script's stdout instead of routing through
         // `parse_host_identity`: the parser's outer `None` legitimately
-        // depends on whether tmux is installed (CI's `ubuntu-24.04` and
-        // `macos-latest` runners have neither tmux nor a server), which has
+        // depends on whether tmux is installed (CI's `ubuntu-24.04` runner
+        // has it, `macos-latest` does not; neither runs a server), which has
         // nothing to do with the boot id and must not make this test flaky.
         fn boot_id(stdout: &str) -> Option<String> {
             stdout.lines().find_map(|l| {
