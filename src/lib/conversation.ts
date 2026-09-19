@@ -1,9 +1,37 @@
 import { timeAgo } from './session_status';
 import { invokeCmd, type Result } from './result';
-import type { ClaudeStatus, StuckKind } from './sessions';
-import { stuckKindLabel } from './attention';
+import type { ClaudeStatus, StuckKind, SessionRow } from './sessions';
+import { stuckKindLabel, contextLevel, type ContextLevel } from './attention';
+import type { SessionEvent } from './timeline';
 
-export type ConvItem = { kind: 'text'; text: string } | { kind: 'tool'; summary: string; error?: boolean };
+export type ConvItem =
+  | { kind: 'text'; text: string }
+  | {
+      kind: 'tool';
+      summary: string;
+      error?: boolean;
+      id: string | null;
+      name: string;
+      target: string | null;
+      at: string | null;
+      ended_at: string | null;
+      done: boolean;
+    }
+  | {
+      kind: 'subagent';
+      id: string | null;
+      name: string;
+      agent_type: string | null;
+      description: string | null;
+      result: string | null;
+      error: boolean;
+      at: string | null;
+      ended_at: string | null;
+      done: boolean;
+    }
+  | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
+  | { kind: 'command'; name: string; args: string | null; output: string | null }
+  | { kind: 'interrupt'; during_tool: boolean };
 
 export interface ConvTurn {
   prompt: string | null;
@@ -25,6 +53,8 @@ export interface Conversation {
   turns: ConvTurn[];
   truncated: boolean;
   context: ContextView | null;
+  /** This conversation's timeline events, oldest first. */
+  events: SessionEvent[];
 }
 
 /** Poll cadence for the Conversation tab while it is visible (spec §6). */
@@ -77,6 +107,44 @@ export function listConversations(sessionId: number, limit = 50): Promise<Result
   });
 }
 
+/** The file change of an Edit / MultiEdit / Write call (`session_tool_detail`). */
+export interface EditDetail {
+  file_path: string;
+  old: string;
+  new: string;
+}
+
+/** One tool call's input and result, read on demand (`session_tool_detail`).
+ *  Every text is capped at 8 000 chars ("…" when cut). */
+export interface ToolDetail {
+  id: string;
+  name: string;
+  /** Pretty JSON of the input. */
+  input: string;
+  /** Edit / MultiEdit / Write only. */
+  edit: EditDetail | null;
+  /** Bash only: the full command. */
+  command: string | null;
+  /** Null until the result arrives. */
+  result: string | null;
+  is_error: boolean;
+}
+
+/** The input and result of tool call `toolUseId`; `claudeSessionId` looks in
+ *  an earlier conversation of the session. */
+export function toolDetail(
+  sessionId: number,
+  toolUseId: string,
+  claudeSessionId?: string,
+): Promise<Result<ToolDetail>> {
+  const args: { session_id: number; tool_use_id: string; claude_session_id?: string } = {
+    session_id: sessionId,
+    tool_use_id: toolUseId,
+  };
+  if (claudeSessionId !== undefined) args.claude_session_id = claudeSessionId;
+  return invokeCmd<ToolDetail>('session_tool_detail', { args });
+}
+
 /** Deep (JSON) equality — used to decide whether a poll result actually changed. */
 export function sameConversation(a: Conversation | null, b: Conversation): boolean {
   if (a === null) return false;
@@ -107,12 +175,38 @@ export function relativeTime(iso: string, nowMs: number): string {
 export interface ToolLine {
   summary: string;
   error: boolean;
+  id: string | null;
+  name: string;
+  target: string | null;
+  at: string | null;
+  ended_at: string | null;
+  done: boolean;
 }
 
-/** A reply item after folding: prose, or a run of consecutive tool calls. */
-export type ConvGroup = { kind: 'text'; text: string } | { kind: 'tools'; tools: ToolLine[] };
+/** A reply item after folding: prose, a run of consecutive tool calls, or one
+ *  of the standalone event kinds (each of which also breaks a tool run). */
+export type ConvGroup =
+  | { kind: 'text'; text: string }
+  | { kind: 'tools'; tools: ToolLine[] }
+  | {
+      kind: 'subagent';
+      id: string | null;
+      name: string;
+      agent_type: string | null;
+      description: string | null;
+      result: string | null;
+      error: boolean;
+      at: string | null;
+      ended_at: string | null;
+      done: boolean;
+    }
+  | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
+  | { kind: 'command'; name: string; args: string | null; output: string | null }
+  | { kind: 'interrupt'; during_tool: boolean };
 
-/** Fold consecutive tool one-liners into one group; text items stay apart. */
+/** Fold consecutive tool one-liners into one group; text items stay apart;
+ *  a subagent (and compact/command/interrupt) items are each their own
+ *  group and close any open tool run. */
 export function groupItems(items: ConvItem[]): ConvGroup[] {
   const out: ConvGroup[] = [];
   for (const item of items) {
@@ -120,10 +214,23 @@ export function groupItems(items: ConvItem[]): ConvGroup[] {
       out.push({ kind: 'text', text: item.text });
       continue;
     }
-    const line: ToolLine = { summary: item.summary, error: item.error === true };
-    const last = out[out.length - 1];
-    if (last?.kind === 'tools') last.tools.push(line);
-    else out.push({ kind: 'tools', tools: [line] });
+    if (item.kind === 'tool') {
+      const line: ToolLine = {
+        summary: item.summary,
+        error: item.error === true,
+        id: item.id,
+        name: item.name,
+        target: item.target,
+        at: item.at,
+        ended_at: item.ended_at,
+        done: item.done,
+      };
+      const last = out[out.length - 1];
+      if (last?.kind === 'tools') last.tools.push(line);
+      else out.push({ kind: 'tools', tools: [line] });
+      continue;
+    }
+    out.push(item);
   }
   return out;
 }
@@ -137,12 +244,139 @@ export function toolName(summary: string): string {
 /** `"7 tool calls · Bash, Read, Edit +2"` for a folded group, with
  *  `" · 1 failed"` appended when any call errored. */
 export function toolGroupLabel(tools: ToolLine[]): string {
-  const names = [...new Set(tools.map((t) => toolName(t.summary)))];
+  const names = [...new Set(tools.map((t) => t.name || toolName(t.summary)))];
   const shown = names.slice(0, 3).join(', ');
   const more = names.length > 3 ? ` +${names.length - 3}` : '';
   const failed = tools.filter((t) => t.error).length;
   const suffix = failed > 0 ? ` · ${failed} failed` : '';
   return `${tools.length} tool calls · ${shown}${more}${suffix}`;
+}
+
+// ─── Tool lines / subagents / doing now (phase 3) ───────────────────────────
+
+const TOOL_VERBS: Record<string, string> = {
+  Read: 'Read',
+  Edit: 'Edit',
+  MultiEdit: 'Edit',
+  Write: 'Write',
+  Bash: 'Run',
+  Grep: 'Search',
+  Glob: 'Find',
+  WebFetch: 'Fetch',
+  WebSearch: 'Search web',
+  TodoWrite: 'Update todos',
+};
+
+/** The short verb a tool line leads with; `mcp__srv__tool` → `srv · tool`. */
+export function toolVerb(name: string): string {
+  const known = TOOL_VERBS[name];
+  if (known) return known;
+  if (name.startsWith('mcp__')) {
+    const [server, ...rest] = name.slice('mcp__'.length).split('__');
+    if (server && rest.length > 0) return `${server} · ${rest.join('__')}`;
+  }
+  return name;
+}
+
+/** A path target cut to its last two segments (`…/store/reconcile.rs`),
+ *  relative to `cwdHint` when it lies under it; anything that is not a path
+ *  (a command, a pattern with spaces, a URL) is returned unchanged. */
+export function shortTarget(target: string | null, cwdHint?: string | null): string | null {
+  if (target === null) return null;
+  if (!target.includes('/') || /\s/.test(target) || /^[a-z][a-z0-9+.-]*:\/\//i.test(target)) return target;
+  let path = target;
+  if (cwdHint) {
+    const base = cwdHint.endsWith('/') ? cwdHint : `${cwdHint}/`;
+    if (path.startsWith(base) && path.length > base.length) path = path.slice(base.length);
+  }
+  const segs = path.split('/').filter((p) => p.length > 0);
+  if (segs.length <= 2) return path;
+  return `…/${segs.slice(-2).join('/')}`;
+}
+
+/** `0.4s` under a second, `12s` under a minute, else `3m 05s`. */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
+  const secs = Math.floor(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  return `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s`;
+}
+
+/** How long a tool call took, or (when `endedAt` is null and `nowMs` is
+ *  given) how long it has been running; null when it cannot be told. */
+export function toolDurationMs(at: string | null, endedAt: string | null, nowMs: number | null): number | null {
+  if (!at) return null;
+  const start = Date.parse(at);
+  const end = endedAt ? Date.parse(endedAt) : nowMs;
+  if (end === null || !Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return Math.max(0, end - start);
+}
+
+/** What the running turn is doing right now, for the activity indicator. */
+export interface DoingNow {
+  label: string;
+  /** How long it has been running; null when its start is unknown. */
+  sinceMs: number | null;
+}
+
+/** `Run cargo test` for a tool line (verb + short target). */
+export function toolLineLabel(t: { name: string; summary: string; target: string | null }): string {
+  const verb = toolVerb(t.name || toolName(t.summary));
+  const target = shortTarget(t.target);
+  return target ? `${verb} ${target}` : verb;
+}
+
+/** The last turn's last unfinished tool call or subagent (after its last
+ *  interrupt), while the session is working; null otherwise. */
+export function doingNow(conv: Conversation | null, working: boolean, nowMs: number): DoingNow | null {
+  if (!working || !conv || conv.turns.length === 0) return null;
+  const items = conv.turns[conv.turns.length - 1].items;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    // Anything before an interrupt was cut off, not running.
+    if (it.kind === 'interrupt') return null;
+    if (it.kind === 'tool' && !it.done) {
+      return { label: toolLineLabel(it), sinceMs: toolDurationMs(it.at, null, nowMs) };
+    }
+    if (it.kind === 'subagent' && !it.done) {
+      const who = it.agent_type ?? 'subagent';
+      const label = it.description ? `${who} · ${it.description}` : who;
+      return { label, sinceMs: toolDurationMs(it.at, null, nowMs) };
+    }
+  }
+  return null;
+}
+
+/** The last turn has a tool call or subagent still waiting for its result.
+ *  Only a live turn's pending call has a running clock (see ToolLine). */
+export function hasPendingCall(conv: Conversation | null): boolean {
+  if (!conv || conv.turns.length === 0) return false;
+  return conv.turns[conv.turns.length - 1].items.some((it) => (it.kind === 'tool' || it.kind === 'subagent') && !it.done);
+}
+
+export interface DiffLine {
+  kind: 'del' | 'add' | 'ctx';
+  text: string;
+}
+
+/** Context lines kept on each side of an edit's changed block. */
+const DIFF_CONTEXT = 2;
+
+/** A line diff of an edit: the shared leading / trailing lines as context
+ *  (at most two each side), the changed middle as deletions then additions. */
+export function editDiffLines(old: string, next: string): DiffLine[] {
+  const a = old === '' ? [] : old.split('\n');
+  const b = next === '' ? [] : next.split('\n');
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const out: DiffLine[] = [];
+  for (const text of a.slice(Math.max(0, pre - DIFF_CONTEXT), pre)) out.push({ kind: 'ctx', text });
+  for (const text of a.slice(pre, a.length - suf)) out.push({ kind: 'del', text });
+  for (const text of b.slice(pre, b.length - suf)) out.push({ kind: 'add', text });
+  for (const text of a.slice(a.length - suf, a.length - suf + DIFF_CONTEXT)) out.push({ kind: 'ctx', text });
+  return out;
 }
 
 /** Prompts longer than this are clamped behind "Show more". */
@@ -359,4 +593,194 @@ export function promptHistory(conv: Conversation | null, pending: PendingPrompt 
   for (const t of conv?.turns ?? []) push(t.prompt);
   push(pending?.prompt ?? null);
   return out;
+}
+
+// ─── Header / thread helpers (Task 2) ───────────────────────────────────────
+
+export function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  const m = n / 1_000_000;
+  return `${Number.isInteger(m) ? m : m.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}M`;
+}
+
+export interface ContextMeter {
+  pct: number;
+  level: ContextLevel;
+  label: string;
+  title: string;
+  stale: boolean;
+}
+
+export function contextMeter(
+  s: Pick<SessionRow, 'context_pct' | 'context_tokens' | 'context_window' | 'context_stale'>,
+): ContextMeter | null {
+  const pct =
+    s.context_pct ??
+    (s.context_tokens != null && s.context_window ? (s.context_tokens * 100) / s.context_window : null);
+  const level = contextLevel(pct);
+  if (pct === null || level === null) return null;
+  const rounded = Math.round(pct);
+  const label =
+    s.context_tokens != null && s.context_window
+      ? `${formatTokens(s.context_tokens)} / ${formatTokens(s.context_window)} · ${rounded}%`
+      : `ctx ${rounded}%`;
+  const title = s.context_stale
+    ? 'Context size from before the last compaction or resume — it updates with the next reply'
+    : `Context window ${rounded}% used`;
+  return { pct, level, label, title, stale: !!s.context_stale };
+}
+
+export const SOURCE_LABELS: Record<ConversationSummary['start_source'], string> = {
+  startup: 'started',
+  resume: '/resume',
+  clear: '/clear',
+  compact: '/compact',
+  fork: 'fork',
+  fleet: 'started by fleet',
+  unknown: 'new conversation',
+};
+
+/** Switcher rows: drop empty non-current conversations (a `/clear` right
+ *  after a `/clear`), keep order (newest first). */
+export function switcherEntries(list: ConversationSummary[]): ConversationSummary[] {
+  return list.filter((c) => c.current || c.turns > 0 || c.first_prompt !== null);
+}
+
+function clock(unixSecs: number): string {
+  const d = new Date(unixSecs * 1000);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+export function conversationTitle(c: ConversationSummary): string {
+  const when = c.current ? 'Current' : clock(c.started_at);
+  const turns = `${c.turns} turn${c.turns === 1 ? '' : 's'}`;
+  return `${when} · ${SOURCE_LABELS[c.start_source]} · ${turns}`;
+}
+
+export function statusChip(s: Pick<SessionRow, 'claude_status' | 'current_activity'>): string | null {
+  if (s.current_activity === 'compacting') return 'compacting';
+  return s.claude_status ?? null;
+}
+
+export interface InlineEvent {
+  id: number;
+  at: number;
+  label: string;
+  detail: string | null;
+  tone: 'info' | 'warn' | 'error';
+}
+
+const PERMISSION_KINDS = new Set(['permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog']);
+
+function humanError(detail: string | null): { head: string; rest: string | null } {
+  if (!detail) return { head: 'unknown error', rest: null };
+  const i = detail.indexOf(':');
+  const head = (i < 0 ? detail : detail.slice(0, i)).replace(/_/g, ' ').trim();
+  const rest = i < 0 ? null : detail.slice(i + 1).trim() || null;
+  return { head, rest };
+}
+
+/** The inline row for a timeline event, or null for events the thread does
+ *  not show (turn_done, status changes, prompts and compactions — the
+ *  transcript already carries those). */
+export function inlineEventFor(
+  e: SessionEvent,
+  live: { latestId: number | null; blocked: boolean },
+): InlineEvent | null {
+  switch (e.kind) {
+    case 'conversation_started':
+      return e.detail === 'resume'
+        ? { id: e.id, at: e.at, label: 'Resumed conversation', detail: null, tone: 'info' }
+        : null;
+    case 'stop_failure': {
+      const { head, rest } = humanError(e.detail);
+      return { id: e.id, at: e.at, label: `Turn failed: ${head}`, detail: rest, tone: 'error' };
+    }
+    case 'notification': {
+      if (!e.detail || !PERMISSION_KINDS.has(e.detail)) return null;
+      const waiting = live.blocked && live.latestId === e.id;
+      return {
+        id: e.id,
+        at: e.at,
+        label: waiting ? 'Waiting for permission' : 'Asked for permission',
+        detail: null,
+        tone: waiting ? 'warn' : 'info',
+      };
+    }
+    case 'conversation_ended':
+      return { id: e.id, at: e.at, label: `Conversation ended (${e.detail ?? 'unknown'})`, detail: null, tone: 'info' };
+    default:
+      return null;
+  }
+}
+
+export type ThreadRow =
+  | { kind: 'turn'; turn: ConvTurn; index: number }
+  | { kind: 'event'; event: InlineEvent };
+
+/** Interleave turns (ISO `at`) and inline events (unix secs) by time. An
+ *  event goes after the last turn that started at or before it. When the
+ *  tail is truncated, events older than the first loaded turn are dropped
+ *  (their turns are not on screen). */
+export function buildThread(
+  turns: ConvTurn[],
+  events: SessionEvent[],
+  live: { blocked: boolean },
+  truncated: boolean,
+): ThreadRow[] {
+  const latestId = events.length ? events[events.length - 1].id : null;
+  const inline = events
+    .map((e) => inlineEventFor(e, { latestId, blocked: live.blocked }))
+    .filter((e): e is InlineEvent => e !== null)
+    .sort((a, b) => a.at - b.at || a.id - b.id);
+  const starts: number[] = [];
+  let prev = -Infinity;
+  for (const t of turns) {
+    const ms = t.at ? Date.parse(t.at) : NaN;
+    prev = Number.isNaN(ms) ? prev : ms / 1000;
+    starts.push(prev);
+  }
+  const rows: ThreadRow[] = [];
+  let k = 0;
+  const firstStart = starts.length ? starts[0] : Infinity;
+  while (k < inline.length && inline[k].at < firstStart) {
+    if (!truncated) rows.push({ kind: 'event', event: inline[k] });
+    k++;
+  }
+  turns.forEach((turn, i) => {
+    rows.push({ kind: 'turn', turn, index: i });
+    const next = i + 1 < starts.length ? starts[i + 1] : Infinity;
+    while (k < inline.length && inline[k].at < next) {
+      rows.push({ kind: 'event', event: inline[k] });
+      k++;
+    }
+  });
+  return rows;
+}
+
+const LAST_EVENT_KINDS: Record<string, (d: string | null) => string | null> = {
+  compact_done: () => '/compact',
+  compact_started: () => 'compacting',
+  stop_failure: (d) => humanError(d).head,
+  notification: (d) => (d && PERMISSION_KINDS.has(d) ? 'permission asked' : null),
+  conversation_started: (d) => (d === 'resume' ? '/resume' : d === 'clear' ? '/clear' : null),
+};
+
+/** "`/compact` 3m ago" for the newest notable event, else null. */
+export function lastEventLabel(events: SessionEvent[], nowMs: number): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const f = LAST_EVENT_KINDS[events[i].kind];
+    const label = f ? f(events[i].detail) : null;
+    if (label) return `${label} ${timeAgo(events[i].at, nowMs)}`;
+  }
+  return null;
+}
+
+/** Union by id, oldest first (the panel appends pushed events to the ones
+ *  the fetch returned). */
+export function mergeEvents(base: SessionEvent[], extra: SessionEvent[]): SessionEvent[] {
+  const byId = new Map<number, SessionEvent>();
+  for (const e of [...base, ...extra]) byId.set(e.id, e);
+  return [...byId.values()].sort((a, b) => a.at - b.at || a.id - b.id);
 }

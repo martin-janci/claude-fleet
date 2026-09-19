@@ -477,6 +477,10 @@ pub struct SessionConversationParams {
     /// it is not one of the session's conversations.
     #[serde(default)]
     pub claude_session_id: Option<String>,
+    /// Most timeline events (compactions, /clear, ops) to return with the
+    /// conversation. Defaults to 50, capped at 200.
+    #[serde(default)]
+    pub events_limit: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

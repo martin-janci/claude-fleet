@@ -61,6 +61,10 @@ export type RowEventHandlers = {
   onTaskEvents?: (events: TaskEvent[]) => void;
   /** Task 4: one call per flush with every `account_usage:updated` row. */
   onAccountUsageEvents?: (rows: AccountUsageSnapshot[]) => void;
+  /** One call per flush with every `session:event` (timeline push). */
+  onTimelineEvents?: (events: TimelineEvent[]) => void;
+  /** One call per flush with the ids from every `session:conversations`. */
+  onConversationsChanged?: (sessionIds: number[]) => void;
 };
 
 type Queued =
@@ -114,6 +118,8 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const projectEvents: ProjectEvent[] = [];
     const taskEvents: TaskEvent[] = [];
     const accountUsageEvents: AccountUsageSnapshot[] = [];
+    const timelineEvents: TimelineEvent[] = [];
+    const conversationsChangedIds: number[] = [];
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
@@ -128,10 +134,11 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
           handlers.onSessionKilled?.(ev.payload);
           sessionEvents.push({ type: 'killed', id: ev.payload.id });
           break;
-        // Timeline / conversation pushes: declared so the names stay in step
-        // with the backend; nothing subscribes to them yet.
         case 'session:event':
+          timelineEvents.push(ev.payload);
+          break;
         case 'session:conversations':
+          conversationsChangedIds.push(ev.payload.session_id);
           break;
         case 'host:added':
           handlers.onHostAdded?.(ev.payload);
@@ -187,6 +194,8 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (projectEvents.length > 0) handlers.onProjectEvents?.(projectEvents);
     if (taskEvents.length > 0) handlers.onTaskEvents?.(taskEvents);
     if (accountUsageEvents.length > 0) handlers.onAccountUsageEvents?.(accountUsageEvents);
+    if (timelineEvents.length > 0) handlers.onTimelineEvents?.(timelineEvents);
+    if (conversationsChangedIds.length > 0) handlers.onConversationsChanged?.(conversationsChangedIds);
   };
 
   const enqueue = (ev: Queued) => {
@@ -216,6 +225,8 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     ),
     task: !!handlers.onTaskEvents,
     accountUsage: !!handlers.onAccountUsageEvents,
+    timelineEvents: !!handlers.onTimelineEvents,
+    conversationsChanged: !!handlers.onConversationsChanged,
     assetInventoryUpdated: !!handlers.onAssetInventoryUpdated,
     assetInventoryCleared: !!handlers.onAssetInventoryCleared,
     catalogLoaded: !!handlers.onCatalogLoaded,
@@ -237,6 +248,8 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('session:created', wanted.session),
     sub('session:updated', wanted.session),
     sub('session:killed', wanted.session),
+    sub('session:event', wanted.timelineEvents),
+    sub('session:conversations', wanted.conversationsChanged),
     sub('host:added', wanted.host),
     sub('host:probed', wanted.host),
     sub('host:removed', wanted.host),

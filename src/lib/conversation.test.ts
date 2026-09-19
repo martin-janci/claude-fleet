@@ -6,6 +6,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   sessionConversation,
   listConversations,
+  toolDetail,
   sameConversation,
   isPinned,
   emptyStateText,
@@ -30,8 +31,28 @@ import {
   QUIET_POLL_MS,
   PROMPT_CLAMP_LINES,
   PIN_THRESHOLD_PX,
+  formatTokens,
+  contextMeter,
+  switcherEntries,
+  conversationTitle,
+  statusChip,
+  inlineEventFor,
+  buildThread,
+  lastEventLabel,
+  mergeEvents,
+  toolVerb,
+  shortTarget,
+  formatDuration,
+  toolDurationMs,
+  doingNow,
+  hasPendingCall,
+  editDiffLines,
   type Conversation,
+  type ConversationSummary,
+  type ConvTurn,
+  type ConvItem,
 } from './conversation';
+import type { SessionRow } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -41,6 +62,7 @@ function conv(over: Partial<Conversation> = {}): Conversation {
   return {
     truncated: false,
     context: null,
+    events: [],
     turns: [
       {
         prompt: 'fix the bug',
@@ -88,6 +110,24 @@ describe('listConversations', () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     await listConversations(7, 5);
     expect(mockedInvoke).toHaveBeenCalledWith('session_conversations', { args: { session_id: 7, limit: 5 } });
+  });
+});
+
+describe('toolDetail', () => {
+  it('invokes session_tool_detail with the session and tool ids', async () => {
+    const detail = { id: 'toolu_1', name: 'Bash', input: '{}', edit: null, command: 'ls', result: null, is_error: false };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue(detail);
+    const r = await toolDetail(7, 'toolu_1');
+    expect(mockedInvoke).toHaveBeenCalledWith('session_tool_detail', { args: { session_id: 7, tool_use_id: 'toolu_1' } });
+    expect(r).toEqual({ ok: true, value: detail });
+  });
+
+  it('passes an earlier conversation id', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    await toolDetail(7, 'toolu_1', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+    expect(mockedInvoke).toHaveBeenCalledWith('session_tool_detail', {
+      args: { session_id: 7, tool_use_id: 'toolu_1', claude_session_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' },
+    });
   });
 });
 
@@ -160,12 +200,46 @@ describe('relativeTime', () => {
   });
 });
 
+/** A `tool` ConvItem with the fields not under test defaulted. */
+function tool(summary: string, error = false) {
+  return {
+    kind: 'tool' as const,
+    summary,
+    error,
+    id: null,
+    name: '',
+    target: null,
+    at: null,
+    ended_at: null,
+    done: false,
+  };
+}
+
+/** A `subagent` ConvItem with the fields not under test defaulted. */
+function subagent(over: Partial<Extract<ConvItem, { kind: 'subagent' }>> = {}) {
+  return {
+    kind: 'subagent' as const,
+    id: null,
+    name: 'Task',
+    agent_type: null,
+    description: null,
+    result: null,
+    error: false,
+    at: null,
+    ended_at: null,
+    done: false,
+    ...over,
+  };
+}
+
 describe('groupItems', () => {
   it('keeps text items apart and folds consecutive tool calls together', () => {
     const t = (text: string) => ({ kind: 'text' as const, text });
-    const u = (summary: string, error?: boolean) => ({ kind: 'tool' as const, summary, error });
-    const l = (summary: string, error = false) => ({ summary, error });
-    expect(groupItems([u('Read(a)'), u('Bash(ls)', true), t('x'), u('Edit(b)'), t('y'), t('z')])).toEqual([
+    const l = (summary: string, error = false) => {
+      const { kind: _kind, ...rest } = tool(summary, error);
+      return rest;
+    };
+    expect(groupItems([tool('Read(a)'), tool('Bash(ls)', true), t('x'), tool('Edit(b)'), t('y'), t('z')])).toEqual([
       { kind: 'tools', tools: [l('Read(a)'), l('Bash(ls)', true)] },
       { kind: 'text', text: 'x' },
       { kind: 'tools', tools: [l('Edit(b)')] },
@@ -173,6 +247,17 @@ describe('groupItems', () => {
       { kind: 'text', text: 'z' },
     ]);
     expect(groupItems([])).toEqual([]);
+  });
+
+  it('new item kinds are their own groups and break a tool run', () => {
+    const g = groupItems([tool('Bash(ls)'), { kind: 'interrupt', during_tool: true }, tool('Read(x)')]);
+    expect(g.map((x) => x.kind)).toEqual(['tools', 'interrupt', 'tools']);
+  });
+
+  it('a subagent item is its own group and breaks a tool run', () => {
+    const g = groupItems([tool('Bash(ls)'), subagent({ id: 's1', description: 'Map it' }), tool('Read(x)')]);
+    expect(g.map((x) => x.kind)).toEqual(['tools', 'subagent', 'tools']);
+    expect(g[1]).toEqual(subagent({ id: 's1', description: 'Map it' }));
   });
 });
 
@@ -184,10 +269,15 @@ describe('toolName / toolGroupLabel', () => {
   });
 
   it('counts calls and lists up to three distinct names in order, plus how many failed', () => {
-    const l = (summary: string, error = false) => ({ summary, error });
+    const l = (summary: string, error = false) => tool(summary, error);
     expect(toolGroupLabel([l('Read(a)'), l('Read(b)'), l('Bash(x)')])).toBe('3 tool calls · Read, Bash');
     expect(toolGroupLabel([l('A()'), l('B()'), l('C()'), l('D()'), l('A()')])).toBe('5 tool calls · A, B, C +1');
     expect(toolGroupLabel([l('Bash(x)', true), l('Bash(y)'), l('Read(z)', true)])).toBe('3 tool calls · Bash, Read · 2 failed');
+  });
+
+  it('prefers the structured name over parsing the summary when present', () => {
+    const named = { ...tool('irrelevant(summary=x)'), name: 'Bash' };
+    expect(toolGroupLabel([named])).toBe('1 tool calls · Bash');
   });
 });
 
@@ -346,5 +436,170 @@ describe('promptHistory', () => {
     expect(promptHistory(c, null)).toEqual(['first', 'again']);
     expect(promptHistory(c, { prompt: 'newest', at: '', seen: 0 })).toEqual(['first', 'again', 'newest']);
     expect(promptHistory(null, null)).toEqual([]);
+  });
+});
+
+describe('formatTokens', () => {
+  it('formats', () => {
+    expect(formatTokens(950)).toBe('950');
+    expect(formatTokens(42_300)).toBe('42k');
+    expect(formatTokens(200_000)).toBe('200k');
+    expect(formatTokens(1_000_000)).toBe('1M');
+    expect(formatTokens(1_250_000)).toBe('1.25M');
+  });
+});
+
+describe('contextMeter', () => {
+  const s = (o: Partial<SessionRow>) =>
+    ({ context_pct: null, context_tokens: null, context_window: null, context_stale: false, ...o }) as SessionRow;
+  it('shows tokens and window when known', () => {
+    expect(contextMeter(s({ context_pct: 21, context_tokens: 42_000, context_window: 200_000 }))?.label)
+      .toBe('42k / 200k · 21%');
+  });
+  it('falls back to the percentage', () => {
+    expect(contextMeter(s({ context_pct: 55 }))?.label).toBe('ctx 55%');
+  });
+  it('is 0 after a clear, not null', () => {
+    expect(contextMeter(s({ context_pct: 0, context_tokens: 0, context_window: 200_000 }))?.label)
+      .toBe('0 / 200k · 0%');
+  });
+  it('marks a stale value', () => {
+    const m = contextMeter(s({ context_pct: 80, context_stale: true }))!;
+    expect(m.stale).toBe(true);
+    expect(m.title).toMatch(/before the last compaction/);
+  });
+  it('is null when nothing is known', () => {
+    expect(contextMeter(s({}))).toBeNull();
+  });
+});
+
+describe('switcherEntries / conversationTitle', () => {
+  const c = (o: Partial<ConversationSummary>): ConversationSummary => ({
+    id: 1, session_id: 1, claude_session_id: 'a', transcript_path: null, started_at: 1_789_000_000,
+    ended_at: null, start_source: 'clear', end_reason: null, model: null, first_prompt: null,
+    turns: 0, compactions: 0, current: false, ...o,
+  });
+  it('hides empty earlier conversations but keeps the current one', () => {
+    const list = [c({ id: 3, current: true }), c({ id: 2 }), c({ id: 1, turns: 4 })];
+    expect(switcherEntries(list).map((x) => x.id)).toEqual([3, 1]);
+  });
+  it('titles', () => {
+    expect(conversationTitle(c({ current: true, turns: 1 }))).toBe('Current · /clear · 1 turn');
+  });
+});
+
+describe('inlineEventFor', () => {
+  const e = (kind: string, detail: string | null, id = 1) =>
+    ({ id, session_id: 1, at: 100, kind, detail, claude_session_id: 'a' });
+  it('maps failures, permissions, resume and end; hides the rest', () => {
+    expect(inlineEventFor(e('stop_failure', 'rate_limit: slow down'), { latestId: 1, blocked: false }))
+      .toMatchObject({ label: 'Turn failed: rate limit', detail: 'slow down', tone: 'error' });
+    expect(inlineEventFor(e('notification', 'permission_prompt'), { latestId: 1, blocked: true }))
+      .toMatchObject({ label: 'Waiting for permission', tone: 'warn' });
+    expect(inlineEventFor(e('notification', 'permission_prompt'), { latestId: 2, blocked: true }))
+      .toMatchObject({ label: 'Asked for permission', tone: 'info' });
+    expect(inlineEventFor(e('conversation_started', 'resume'), { latestId: 1, blocked: false })?.label)
+      .toBe('Resumed conversation');
+    expect(inlineEventFor(e('conversation_started', 'clear'), { latestId: 1, blocked: false })).toBeNull();
+    expect(inlineEventFor(e('turn_done', 'x'), { latestId: 1, blocked: false })).toBeNull();
+    expect(inlineEventFor(e('compact_done', 'auto'), { latestId: 1, blocked: false })).toBeNull();
+  });
+});
+
+describe('buildThread', () => {
+  const turn = (at: string, prompt: string): ConvTurn => ({ prompt, at, ended_at: null, items: [] });
+  const ev = (id: number, at: number) =>
+    ({ id, session_id: 1, at, kind: 'stop_failure', detail: 'overloaded', claude_session_id: 'a' });
+  const t0 = Date.parse('2026-09-18T10:00:00Z') / 1000;
+  it('places events after the turn they follow', () => {
+    const rows = buildThread(
+      [turn('2026-09-18T10:00:00Z', 'a'), turn('2026-09-18T10:05:00Z', 'b')],
+      [ev(1, t0 + 60), ev(2, t0 + 400)],
+      { blocked: false },
+      false,
+    );
+    expect(rows.map((r) => (r.kind === 'turn' ? r.turn.prompt : `e${r.event.id}`))).toEqual(['a', 'e1', 'b', 'e2']);
+  });
+  it('drops events older than the first loaded turn when truncated', () => {
+    const rows = buildThread([turn('2026-09-18T10:00:00Z', 'a')], [ev(1, t0 - 60)], { blocked: false }, true);
+    expect(rows).toHaveLength(1);
+  });
+  it('keeps them first when not truncated', () => {
+    const rows = buildThread([turn('2026-09-18T10:00:00Z', 'a')], [ev(1, t0 - 60)], { blocked: false }, false);
+    expect(rows[0].kind).toBe('event');
+  });
+});
+
+describe('lastEventLabel / mergeEvents / statusChip', () => {
+  it('labels the newest notable event', () => {
+    const now = 1_000_000 * 1000;
+    const evs = [
+      { id: 1, session_id: 1, at: 999_700, kind: 'compact_done', detail: 'auto', claude_session_id: 'a' },
+      { id: 2, session_id: 1, at: 999_900, kind: 'turn_done', detail: null, claude_session_id: 'a' },
+    ];
+    expect(lastEventLabel(evs, now)).toMatch(/^\/compact /);
+  });
+  it('merges by id, oldest first', () => {
+    const a = { id: 2, session_id: 1, at: 5, kind: 'x', detail: null, claude_session_id: 'a' };
+    const b = { id: 1, session_id: 1, at: 4, kind: 'y', detail: null, claude_session_id: 'a' };
+    expect(mergeEvents([a], [b, a]).map((e) => e.id)).toEqual([1, 2]);
+  });
+  it('status chip prefers compacting', () => {
+    expect(statusChip({ claude_status: 'working', current_activity: 'compacting' })).toBe('compacting');
+    expect(statusChip({ claude_status: 'idle', current_activity: null })).toBe('idle');
+  });
+});
+
+describe('tool helpers', () => {
+  it('verbs', () => {
+    expect(toolVerb('Bash')).toBe('Run');
+    expect(toolVerb('MultiEdit')).toBe('Edit');
+    expect(toolVerb('mcp__claude-fleet__list_sessions')).toBe('claude-fleet · list_sessions');
+    expect(toolVerb('Whatever')).toBe('Whatever');
+  });
+  it('short targets', () => {
+    expect(shortTarget('/Users/m/p/claude-fleet/crates/fleet-core/src/store/reconcile.rs')).toBe('…/store/reconcile.rs');
+    expect(shortTarget('src/a.rs')).toBe('src/a.rs');
+    expect(shortTarget('cargo test -p fleet-core')).toBe('cargo test -p fleet-core');
+    expect(shortTarget(null)).toBeNull();
+  });
+  it('durations', () => {
+    expect(formatDuration(400)).toBe('0.4s');
+    expect(formatDuration(12_300)).toBe('12s');
+    expect(formatDuration(185_000)).toBe('3m 05s');
+    expect(toolDurationMs('2026-09-18T09:00:00Z', '2026-09-18T09:00:12Z', null)).toBe(12_000);
+    expect(toolDurationMs('2026-09-18T09:00:00Z', null, Date.parse('2026-09-18T09:00:05Z'))).toBe(5_000);
+    expect(toolDurationMs(null, null, 1)).toBeNull();
+  });
+  it('doing now is the last unfinished tool of the last turn while working', () => {
+    const t = (o: object) => ({ kind: 'tool', summary: 'Bash(x)', error: false, id: 'i', name: 'Bash', target: 'cargo test', at: '2026-09-18T09:00:00Z', ended_at: null, done: false, ...o });
+    const c = { turns: [{ prompt: 'p', at: null, ended_at: null, items: [t({ done: true, name: 'Read', target: '/a' }), t({})] }], truncated: false, context: null, events: [] } as Conversation;
+    expect(doingNow(c, true, Date.parse('2026-09-18T09:00:07Z'))).toEqual({ label: 'Run cargo test', sinceMs: 7_000 });
+    expect(doingNow(c, false, 0)).toBeNull();
+    const cut = { ...c, turns: [{ ...c.turns[0], items: [...c.turns[0].items, { kind: 'interrupt', during_tool: true }] }] } as Conversation;
+    expect(doingNow(cut, true, 0)).toBeNull();
+    const sub = { ...c, turns: [{ ...c.turns[0], items: [{ kind: 'subagent', id: 's', name: 'Task', agent_type: 'Explore', description: 'Map it', result: null, error: false, at: null, ended_at: null, done: false }] }] } as Conversation;
+    expect(doingNow(sub, true, 0)).toEqual({ label: 'Explore · Map it', sinceMs: null });
+  });
+  it('edit diff keeps shared context and marks changes', () => {
+    expect(editDiffLines('a\nb\nc', 'a\nB\nc')).toEqual([
+      { kind: 'ctx', text: 'a' }, { kind: 'del', text: 'b' }, { kind: 'add', text: 'B' }, { kind: 'ctx', text: 'c' },
+    ]);
+    expect(editDiffLines('', 'new')).toEqual([{ kind: 'add', text: 'new' }]);
+  });
+});
+
+describe('hasPendingCall', () => {
+  const toolItem = (done: boolean) => ({
+    kind: 'tool' as const, summary: 'Bash(ls)', error: false, id: 't', name: 'Bash', target: 'ls', at: null, ended_at: null, done,
+  });
+  const c = (items: unknown[]): Conversation =>
+    ({ truncated: false, context: null, events: [], turns: [{ prompt: 'q', at: null, ended_at: null, items }] }) as unknown as Conversation;
+  it('is true only while the last turn has an unfinished call', () => {
+    expect(hasPendingCall(null)).toBe(false);
+    expect(hasPendingCall(c([{ kind: 'text', text: 'x' }]))).toBe(false);
+    expect(hasPendingCall(c([toolItem(true)]))).toBe(false);
+    expect(hasPendingCall(c([toolItem(false), { kind: 'text', text: 'x' }]))).toBe(true);
+    expect(hasPendingCall(c([{ kind: 'subagent', id: 's', name: 'Task', agent_type: null, description: null, result: null, error: false, at: null, ended_at: null, done: false }]))).toBe(true);
   });
 });

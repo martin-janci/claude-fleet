@@ -563,7 +563,7 @@ pub(super) fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Accou
 }
 
 /// One row of the append-only per-session event timeline (migration 013).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionEvent {
     pub id: i64,
     pub session_id: i64,

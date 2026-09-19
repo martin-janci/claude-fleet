@@ -366,6 +366,12 @@ actually on.
 
 ## Phase 2 — Conversations UI
 
+**Status: implemented.** Inline compaction (§2.2) renders from the transcript's
+`compact` item, not from `compact_started` / `compact_done` events — the
+events drive the timeline and the header's `compacting` status chip, the
+transcript item carries the summary shown inline. `api_error` system entries
+are not rendered; `stop_failure` events already cover failed turns.
+
 ### 2.1 Header
 
 A single sticky bar above the transcript:
@@ -422,6 +428,13 @@ prepends the event, instead of refetching on field changes. The field-based
 ---
 
 ## Phase 3 — Detail UX
+
+**Status: implemented.** Tool detail (input/result) is fetched lazily per
+call through the `session_tool_detail` Tauri command — a grep of one
+`tool_use` id, capped at 8 000 chars, never part of the poll payload — rather
+than being carried in `ConvItem`. Find in conversation (§3.3) uses the CSS
+Custom Highlight API where the browser supports it, falling back to a row
+outline otherwise.
 
 ### 3.1 Tool calls
 

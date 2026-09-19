@@ -44,14 +44,48 @@
       "hash",
       "subject"
     ],
+    "ConvItem::Command": [
+      "args",
+      "kind",
+      "name",
+      "output"
+    ],
+    "ConvItem::Compact": [
+      "kind",
+      "pre_tokens",
+      "summary",
+      "trigger"
+    ],
+    "ConvItem::Interrupt": [
+      "during_tool",
+      "kind"
+    ],
+    "ConvItem::Subagent": [
+      "agent_type",
+      "at",
+      "description",
+      "done",
+      "ended_at",
+      "error",
+      "id",
+      "kind",
+      "name",
+      "result"
+    ],
     "ConvItem::Text": [
       "kind",
       "text"
     ],
     "ConvItem::Tool": [
+      "at",
+      "done",
+      "ended_at",
       "error",
+      "id",
       "kind",
-      "summary"
+      "name",
+      "summary",
+      "target"
     ],
     "ConvTurn": [
       "at",
@@ -61,6 +95,7 @@
     ],
     "Conversation": [
       "context",
+      "events",
       "truncated",
       "turns"
     ],

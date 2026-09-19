@@ -305,7 +305,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "session_conversation",
-            json!({ "session_id": 7, "turns": 5 }),
+            json!({ "session_id": 7, "turns": 5, "events_limit": 200 }),
             r#"{"turns":[],"truncated":false}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::session_conversation(
@@ -323,7 +323,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "session_conversation",
-            json!({ "session_id": 7, "turns": 5, "claude_session_id": "11111111-1111-1111-1111-111111111111" }),
+            json!({ "session_id": 7, "turns": 5, "claude_session_id": "11111111-1111-1111-1111-111111111111", "events_limit": 200 }),
             r#"{"turns":[],"truncated":false}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::session_conversation(

@@ -499,13 +499,20 @@ impl HubBackend {
     /// `commands::sessions::session_conversation`.
     /// `claude_session_id` is sent only when set, so a read of the current
     /// conversation asks exactly what it did before conversations existed.
+    /// `events_limit` asks for the UI's larger event window; a hub that
+    /// predates the parameter ignores it and answers its own default.
     pub async fn session_conversation(
         &self,
         session_id: i64,
         turns: Option<usize>,
         claude_session_id: Option<&str>,
+        events_limit: i64,
     ) -> Result<Conversation, IpcError> {
-        let mut args = json!({ "session_id": session_id, "turns": turns });
+        let mut args = json!({
+            "session_id": session_id,
+            "turns": turns,
+            "events_limit": events_limit,
+        });
         if let Some(id) = claude_session_id {
             args["claude_session_id"] = json!(id);
         }
