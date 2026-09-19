@@ -172,6 +172,41 @@ pub fn types_that_lost_fields(
     lost
 }
 
+/// What a `REGEN_HUB_CONTRACT=1` run should do, decided BEFORE anything
+/// touches disk.
+///
+/// Pure and file-free like [`types_that_lost_fields`], and for the same
+/// reason: the regenerate path used to compute `lost` and the revision
+/// check, write the file regardless, and only panic afterwards — so a
+/// developer who read the "bump CONTRACT_REVISION" panic and committed the
+/// already-rewritten file had already shipped the non-additive change at
+/// the old revision, with the write done before anyone could refuse it.
+/// Deciding first and writing only on [`RegenVerdict::Write`] closes that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegenVerdict {
+    /// Nothing was lost, or the revision already accounts for what was:
+    /// safe to write the regenerated golden.
+    Write,
+    /// A field was renamed or removed and
+    /// [`fleet_core::wire_contract::CONTRACT_REVISION`] does not reflect
+    /// it yet. The golden must NOT be written — see the regenerate path in
+    /// `tests_contract.rs`.
+    Refuse { lost: Vec<String> },
+}
+
+/// `lost` is [`types_that_lost_fields`]'s output; `old_revision` the
+/// on-disk golden's recorded revision; `current_revision` the compiled
+/// `CONTRACT_REVISION`. A revision that did not move past `old_revision`
+/// does not cover a loss — moving it below `old_revision` (a hand-edited
+/// rollback) does not either.
+pub fn regen_verdict(lost: Vec<String>, old_revision: u32, current_revision: u32) -> RegenVerdict {
+    if !lost.is_empty() && current_revision <= old_revision {
+        RegenVerdict::Refuse { lost }
+    } else {
+        RegenVerdict::Write
+    }
+}
+
 #[cfg(test)]
 #[path = "tests_contract.rs"]
 // `pub(crate)` so the event-bridge tests can build their rows from the

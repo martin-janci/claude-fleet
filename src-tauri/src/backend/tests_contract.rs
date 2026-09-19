@@ -393,42 +393,48 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
     let actual = the_whole_contract();
     if std::env::var(REGEN_ENV).is_ok() {
         let old = golden_on_disk();
-        // The one thing worth checking automatically before rewriting: did
-        // this regeneration rename or drop a field (the dangerous case)
-        // without CONTRACT_REVISION moving? An additive regen — a brand new
-        // type, an extra key — is fine at the same revision; this only
-        // fires for the change the whole module exists to catch.
+        // The decision is made BEFORE anything touches disk — see
+        // `regen_verdict`'s doc comment for why the write used to come
+        // first and what that let through.
         let lost = types_that_lost_fields(&old.types, &actual);
-        let revision_bumped = fleet_core::wire_contract::CONTRACT_REVISION > old.revision;
-        let golden = Golden {
-            revision: fleet_core::wire_contract::CONTRACT_REVISION,
-            types: actual.clone(),
-        };
-        let mut json = serde_json::to_string_pretty(&golden).unwrap();
-        json.push('\n');
-        std::fs::write(golden_abs(), json).expect("write the golden");
-        if !lost.is_empty() && !revision_bumped {
-            panic!(
-                "{GOLDEN_PATH} was regenerated with a field renamed or removed, \
-                 but fleet_core::wire_contract::CONTRACT_REVISION is still {}:\n\n{}\n\n\
-                 Bump CONTRACT_REVISION in crates/fleet-core/src/wire_contract.rs \
-                 before regenerating, so a hub still shaped like the old \
-                 contract is refused by an updated desktop rather than \
-                 silently trusted.",
-                old.revision,
-                lost.join("\n"),
-            );
+        match regen_verdict(
+            lost,
+            old.revision,
+            fleet_core::wire_contract::CONTRACT_REVISION,
+        ) {
+            RegenVerdict::Refuse { lost } => {
+                panic!(
+                    "refusing to regenerate {GOLDEN_PATH}: a field was renamed or \
+                     removed without bumping the wire-contract revision (still {}):\n\n\
+                     {}\n\n\
+                     Review crates/fleet-core/src/wire_contract.rs's CONTRACT_REVISION \
+                     and this file's MIN_HUB_CONTRACT/MAX_HUB_CONTRACT, bump \
+                     CONTRACT_REVISION, then regenerate again. {GOLDEN_PATH} was NOT \
+                     written.",
+                    old.revision,
+                    lost.join("\n"),
+                );
+            }
+            RegenVerdict::Write => {
+                let golden = Golden {
+                    revision: fleet_core::wire_contract::CONTRACT_REVISION,
+                    types: actual.clone(),
+                };
+                let mut json = serde_json::to_string_pretty(&golden).unwrap();
+                json.push('\n');
+                std::fs::write(golden_abs(), json).expect("write the golden");
+                // Deliberately fails after rewriting. Regenerating this file
+                // is never the end of the job — someone has to read the diff
+                // and decide whether the hub renaming that field was meant
+                // to happen. A green run would let it pass unread, which is
+                // the failure mode the whole module exists to close.
+                panic!(
+                    "{GOLDEN_PATH} was regenerated. Read `git diff -- {GOLDEN_PATH}`: \
+                     a key that changed name is a field the desktop will silently \
+                     default from here on. Then unset {REGEN_ENV} and run again."
+                );
+            }
         }
-        // Deliberately fails after rewriting. Regenerating this file is never
-        // the end of the job — someone has to read the diff and decide
-        // whether the hub renaming that field was meant to happen. A green
-        // run would let it pass unread, which is the failure mode the whole
-        // module exists to close.
-        panic!(
-            "{GOLDEN_PATH} was regenerated. Read `git diff -- {GOLDEN_PATH}`: \
-             a key that changed name is a field the desktop will silently \
-             default from here on. Then unset {REGEN_ENV} and run again."
-        );
     }
     let golden = golden_on_disk();
     assert_eq!(
@@ -804,4 +810,34 @@ fn types_that_lost_fields_is_empty_for_a_purely_additive_change() {
         ("B".to_string(), vec!["z".to_string()]),
     ]);
     assert!(types_that_lost_fields(&old, &new).is_empty());
+}
+
+#[test]
+fn regen_verdict_writes_a_purely_additive_change_at_the_same_revision() {
+    assert_eq!(regen_verdict(vec![], 1, 1), RegenVerdict::Write);
+}
+
+#[test]
+fn regen_verdict_refuses_a_lossy_change_at_the_same_revision() {
+    let lost = vec!["SessionRow: lost [\"lost_at\"]".to_string()];
+    assert_eq!(
+        regen_verdict(lost.clone(), 1, 1),
+        RegenVerdict::Refuse { lost }
+    );
+}
+
+#[test]
+fn regen_verdict_writes_a_lossy_change_once_the_revision_moved_past_the_old_one() {
+    let lost = vec!["SessionRow: lost [\"lost_at\"]".to_string()];
+    assert_eq!(regen_verdict(lost, 1, 2), RegenVerdict::Write);
+}
+
+#[test]
+fn regen_verdict_refuses_a_lossy_change_even_if_the_revision_moved_backward() {
+    // A hand-edited rollback does not retroactively cover a loss either.
+    let lost = vec!["SessionRow: lost [\"lost_at\"]".to_string()];
+    assert_eq!(
+        regen_verdict(lost.clone(), 2, 1),
+        RegenVerdict::Refuse { lost }
+    );
 }
