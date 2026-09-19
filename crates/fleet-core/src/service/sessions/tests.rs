@@ -1297,7 +1297,9 @@ fn send_commands_no_submit_when_submit_false() {
     assert!(cmds.iter().all(|c| !c.ends_with("Enter")));
 }
 
-#[tokio::test]
+// Paused clock: nothing here but timers, so virtual time is exact where a
+// wall-clock bound was at the mercy of the scheduler on a loaded machine.
+#[tokio::test(start_paused = true)]
 async fn parallel_reconcile_does_not_serialise_on_slow_host() {
     use crate::tmux::TmuxSession;
     use async_trait::async_trait;
@@ -1346,17 +1348,17 @@ async fn parallel_reconcile_does_not_serialise_on_slow_host() {
     }
 
     // Spawn 3 tasks with sleeps 50ms, 500ms, 50ms.
-    // Sequential sum ≈ 600ms; parallel max ≈ 500ms.
+    // Sequential sum = 600ms; parallel max = 500ms.
     let mut set = tokio::task::JoinSet::new();
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
     for ms in [50u64, 500, 50] {
         set.spawn(async move { SleepyTmux { sleep_ms: ms }.list_sessions().await });
     }
     while set.join_next().await.is_some() {}
     let elapsed = start.elapsed();
     assert!(
-        elapsed < Duration::from_millis(700),
-        "parallel reconcile took {elapsed:?}, expected ≈max not sum",
+        elapsed < Duration::from_millis(600),
+        "parallel reconcile took {elapsed:?}, expected max not sum",
     );
 }
 
