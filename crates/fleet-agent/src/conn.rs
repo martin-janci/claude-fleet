@@ -21,6 +21,7 @@
 //! against.
 
 use crate::exec::{self, ExecRequest, SeenIds};
+use fleet_proto::backoff::{jitter, Backoff};
 use fleet_proto::{
     decode_b64, decode_hub_frame_lenient, encode_agent_frame, encode_agent_frame_within,
     encode_b64, judge_proto, result_budget, result_stream_limits, AgentFrame, Decoded, HubFrame,
@@ -66,12 +67,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 pub type Socket = WebSocketStream<Box<dyn Io>>;
 
 /// Where the hub is, as a WebSocket URL ending in `/agent`.
+///
+/// The parsing, the host/port/TLS answers and the loopback rule are
+/// [`fleet_proto::net`]'s, shared with the hub and the desktop. What stays
+/// here is the agent's own policy — a plain hub needs `--insecure` and must
+/// be loopback — and the `/agent` path the dial actually uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     url: String,
-    host: String,
-    port: u16,
-    tls: bool,
+    at: fleet_proto::net::Endpoint,
 }
 
 impl Endpoint {
@@ -79,63 +83,32 @@ impl Endpoint {
     /// URL (`wss://hub.example/agent`). A plain `http://`/`ws://` hub is
     /// refused unless `insecure`: the token would cross the network in clear.
     pub fn parse(hub: &str, insecure: bool) -> Result<Self, String> {
-        let not_a_hub =
-            || format!("{hub:?} is not a hub URL (expected https://host[:port][/path])");
-        let (scheme, rest) = hub.split_once("://").ok_or_else(not_a_hub)?;
-        let tls = match scheme.to_ascii_lowercase().as_str() {
-            "https" | "wss" => true,
-            "http" | "ws" if insecure => false,
-            "http" | "ws" => {
+        let at = fleet_proto::net::Endpoint::parse(hub).map_err(|why| {
+            format!("{hub:?} is not a hub URL (expected https://host[:port][/path]): {why}")
+        })?;
+        if !at.is_tls() {
+            if !insecure {
                 return Err(format!(
-                    "refusing the plain {scheme}:// hub {hub}: this host's token would cross \
-                     the network in clear. Use https://, or pass --insecure for a loopback test"
-                ))
+                    "refusing the plain {}:// hub {hub}: this host's token would cross \
+                     the network in clear. Use https://, or pass --insecure for a loopback test",
+                    at.scheme()
+                ));
             }
-            _ => return Err(not_a_hub()),
-        };
-        if rest.contains(['?', '#']) {
-            return Err(format!("{hub:?}: a hub URL has no query or fragment"));
-        }
-        let (authority, path) = match rest.find('/') {
-            Some(i) => rest.split_at(i),
-            None => (rest, ""),
-        };
-        if authority.is_empty() || authority.contains('@') {
-            return Err(not_a_hub());
-        }
-        let default_port = if tls { 443 } else { 80 };
-        let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-            let (host, after) = v6.split_once(']').ok_or_else(not_a_hub)?;
-            let port = match after.strip_prefix(':') {
-                Some(p) => p.parse().map_err(|_| not_a_hub())?,
-                None if after.is_empty() => default_port,
-                None => return Err(not_a_hub()),
-            };
-            (host.to_string(), port)
-        } else {
-            match authority.rsplit_once(':') {
-                Some((host, p)) => (host.to_string(), p.parse().map_err(|_| not_a_hub())?),
-                None => (authority.to_string(), default_port),
+            if !at.is_loopback() {
+                return Err(format!(
+                    "refusing the plain hub {hub}: --insecure is for a loopback test only, and \
+                     {} is not loopback. Use https://",
+                    at.host()
+                ));
             }
-        };
-        if host.is_empty() {
-            return Err(not_a_hub());
         }
-        if !tls && !is_loopback(&host) {
-            return Err(format!(
-                "refusing the plain hub {hub}: --insecure is for a loopback test only, and \
-                 {host} is not loopback. Use https://"
-            ));
-        }
-        let mut path = path.trim_end_matches('/').to_string();
+        let mut path = at.path().to_string();
         if !path.ends_with("/agent") {
             path.push_str("/agent");
         }
         Ok(Self {
-            url: format!("{}://{authority}{path}", if tls { "wss" } else { "ws" }),
-            host,
-            port,
-            tls,
+            url: format!("{}://{}{path}", at.scheme().websocket(), at.authority()),
+            at,
         })
     }
 
@@ -144,16 +117,17 @@ impl Endpoint {
     }
 
     pub fn is_tls(&self) -> bool {
-        self.tls
+        self.at.is_tls()
     }
-}
 
-/// `localhost`, or an address in 127.0.0.0/8 or `::1`.
-fn is_loopback(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+    /// Unbracketed, so an IPv6 literal resolves and parses as a TLS name.
+    pub fn host(&self) -> &str {
+        self.at.host()
+    }
+
+    pub fn port(&self) -> u16 {
+        self.at.port()
+    }
 }
 
 /// Why a dial did not produce a socket.
@@ -186,7 +160,7 @@ pub struct Dialer {
 impl Dialer {
     /// `ca_file` replaces the host's system roots, for a hub with a private CA.
     pub fn new(endpoint: Endpoint, token: String, ca_file: Option<&Path>) -> Result<Self, String> {
-        let tls = if endpoint.tls {
+        let tls = if endpoint.is_tls() {
             Some(tls_connector(ca_file)?)
         } else {
             None
@@ -207,7 +181,7 @@ impl Dialer {
             Ok(result) => result,
             Err(_) => Err(DialError::Failed(format!(
                 "no answer from {} within {}s",
-                self.endpoint.url,
+                self.endpoint.url(),
                 DIAL_TIMEOUT.as_secs()
             ))),
         }
@@ -215,27 +189,26 @@ impl Dialer {
 
     async fn dial_once(&self) -> Result<Socket, DialError> {
         let ep = &self.endpoint;
-        let tcp = tokio::net::TcpStream::connect((ep.host.as_str(), ep.port))
+        let tcp = tokio::net::TcpStream::connect((ep.host(), ep.port()))
             .await
-            .map_err(|e| DialError::Failed(format!("{}:{}: {e}", ep.host, ep.port)))?;
+            .map_err(|e| DialError::Failed(format!("{}:{}: {e}", ep.host(), ep.port())))?;
         let _ = tcp.set_nodelay(true);
         let io: Box<dyn Io> = match &self.tls {
             None => Box::new(tcp),
             Some(tls) => {
-                let name = rustls_pki_types::ServerName::try_from(ep.host.clone())
-                    .map_err(|e| DialError::Failed(format!("{}: {e}", ep.host)))?;
+                let name = rustls_pki_types::ServerName::try_from(ep.host().to_string())
+                    .map_err(|e| DialError::Failed(format!("{}: {e}", ep.host())))?;
                 let stream = tls
                     .connect(name, tcp)
                     .await
-                    .map_err(|e| DialError::Failed(format!("TLS with {}: {e}", ep.host)))?;
+                    .map_err(|e| DialError::Failed(format!("TLS with {}: {e}", ep.host())))?;
                 Box::new(stream)
             }
         };
         let mut request = ep
-            .url
-            .as_str()
+            .url()
             .into_client_request()
-            .map_err(|e| DialError::Failed(format!("{}: {e}", ep.url)))?;
+            .map_err(|e| DialError::Failed(format!("{}: {e}", ep.url())))?;
         let bearer = format!("Bearer {}", self.token)
             .parse()
             .map_err(|_| DialError::Failed("the token cannot be sent as a header".into()))?;
@@ -251,7 +224,7 @@ impl Dialer {
                     .map(|b| String::from_utf8_lossy(b).trim().to_string())
                     .unwrap_or_default(),
             }),
-            Err(e) => Err(DialError::Failed(format!("{}: {e}", ep.url))),
+            Err(e) => Err(DialError::Failed(format!("{}: {e}", ep.url()))),
         }
     }
 }
@@ -902,54 +875,10 @@ fn host_name() -> String {
     "unknown".to_string()
 }
 
-/// Capped exponential backoff with jitter.
-#[derive(Debug, Default)]
-pub struct Backoff {
-    attempt: u32,
-}
-
-impl Backoff {
-    /// The next delay. `jitter` in `[0, 1)` picks a point in the upper half of
-    /// the current step, so dials never bunch at zero and a fleet of agents
-    /// restarted together does not dial the hub in lockstep.
-    pub fn next(&mut self, jitter: f64) -> Duration {
-        let step = BACKOFF_BASE
-            .checked_mul(1u32 << self.attempt.min(16))
-            .unwrap_or(BACKOFF_CAP)
-            .min(BACKOFF_CAP);
-        self.attempt = self.attempt.saturating_add(1);
-        let half = step / 2;
-        half + half.mul_f64(jitter.clamp(0.0, 1.0))
-    }
-
-    pub fn reset(&mut self) {
-        self.attempt = 0;
-    }
-
-    /// Jump straight to [`BACKOFF_CAP`] — for a version refusal, where
-    /// retrying sooner cannot help: only a hub upgrade (or an agent one)
-    /// fixes it, and the agent should be reachable for that without
-    /// hammering a hub that has already said no. Every following delay
-    /// (`next`'s `attempt` only ever grows) stays at the cap too, until an
-    /// ordinary reconnect calls [`Backoff::reset`].
-    pub fn force_max(&mut self) {
-        // Whatever step makes `next`'s `1u32 << attempt.min(16)` overflow
-        // `BACKOFF_CAP` on its own; `next` still clamps with `.min`, so this
-        // only has to be big enough, not exact.
-        self.attempt = self.attempt.max(6);
-    }
-}
-
-/// A number in `[0, 1)` that differs between processes and between calls:
-/// std's per-process random hash keys, fed a counter. No crate needed for a
-/// reconnect delay.
-pub fn jitter() -> f64 {
-    use std::hash::{BuildHasher, Hasher};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static CALLS: AtomicU64 = AtomicU64::new(0);
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u64(CALLS.fetch_add(1, Ordering::Relaxed));
-    (h.finish() >> 11) as f64 / (1u64 << 53) as f64
+/// This agent's reconnect curve: [`BACKOFF_BASE`] doubling to
+/// [`BACKOFF_CAP`], jittered, from the shared [`fleet_proto::backoff`].
+fn backoff() -> Backoff {
+    Backoff::new(BACKOFF_BASE, BACKOFF_CAP)
 }
 
 /// Reports to systemd what the agent is doing (`sd_notify`'s `STATUS=`), which
@@ -1050,7 +979,7 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let url = dialer.endpoint().url().to_string();
-    let mut backoff = Backoff::default();
+    let mut backoff = backoff();
     loop {
         notifier.status(&format!("connecting to {url}"));
         let (why, version_refused) = match dialer.dial().await {
@@ -1421,7 +1350,7 @@ mod tests {
         for (hub, want, port) in cases {
             let ep = Endpoint::parse(hub, false).unwrap_or_else(|e| panic!("{hub}: {e}"));
             assert_eq!(ep.url(), want, "{hub}");
-            assert_eq!(ep.port, port, "{hub}");
+            assert_eq!(ep.port(), port, "{hub}");
             assert!(ep.is_tls());
         }
     }
@@ -1436,7 +1365,7 @@ mod tests {
         }
         let ep = Endpoint::parse("http://127.0.0.1:7777", true).unwrap();
         assert_eq!(ep.url(), "ws://127.0.0.1:7777/agent");
-        assert_eq!(ep.port, 7777);
+        assert_eq!(ep.port(), 7777);
         assert!(!ep.is_tls());
     }
 
@@ -1865,15 +1794,16 @@ mod tests {
 
     // ── reconnecting ───────────────────────────────────────────────────────
 
+    /// The curve itself is [`fleet_proto::backoff`]'s and tested there; what
+    /// this pins is that the AGENT still dials on 1 s doubling to 60 s.
     #[test]
     fn the_backoff_doubles_to_its_cap_and_stays_in_the_upper_half_of_each_step() {
-        let mut b = Backoff::default();
+        let mut b = backoff();
         let mut step = BACKOFF_BASE;
         for _ in 0..12 {
+            // A clone at the same attempt gives the high end of the step.
+            let high = b.clone().next(0.999_999);
             let low = b.next(0.0);
-            // Fresh attempt at the same step for the high end.
-            b.attempt -= 1;
-            let high = b.next(0.999_999);
             assert_eq!(low, step / 2, "the floor of the step");
             assert!(high <= step && high > step * 9 / 10, "{high:?} vs {step:?}");
             step = (step * 2).min(BACKOFF_CAP);
@@ -1881,13 +1811,6 @@ mod tests {
         assert_eq!(step, BACKOFF_CAP);
         b.reset();
         assert_eq!(b.next(0.0), BACKOFF_BASE / 2);
-    }
-
-    #[test]
-    fn jitter_is_in_range_and_varies() {
-        let draws: Vec<f64> = (0..64).map(|_| jitter()).collect();
-        assert!(draws.iter().all(|j| (0.0..1.0).contains(j)), "{draws:?}");
-        assert!(draws.windows(2).any(|w| w[0] != w[1]), "{draws:?}");
     }
 
     /// A lost connection is dialled again, after a recorded (not slept)
@@ -1965,14 +1888,13 @@ mod tests {
 
     #[test]
     fn force_max_jumps_straight_to_the_cap_and_stays_there() {
-        let mut b = Backoff::default();
+        let mut b = backoff();
         b.force_max();
         // Same shape as `the_backoff_doubles_to_its_cap...` above: `next`
         // always returns a point in the upper half of the CURRENT step, so
         // jitter 0.0 is the step's floor and ~1.0 is its ceiling.
+        let high = b.clone().next(0.999_999);
         let low = b.next(0.0);
-        b.attempt -= 1; // a fresh attempt at the same (already capped) step
-        let high = b.next(0.999_999);
         assert_eq!(
             low,
             BACKOFF_CAP / 2,
