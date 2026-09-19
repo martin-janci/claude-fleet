@@ -4,7 +4,9 @@
 //! target without origin. Pure: no I/O, no `async`; `mod.rs` runs the
 //! scripts. See `docs/superpowers/specs/2026-09-19-move-carry-engine-design.md`.
 
+use crate::ipc_error::{codes, IpcError};
 use crate::service::safe_kill::DirtyFile;
+use crate::shell::quote;
 use serde::{Deserialize, Serialize};
 
 /// `settings` key: largest git bundle (MiB) a move relays.
@@ -187,6 +189,262 @@ pub fn select_ignored(
     sel
 }
 
+pub const FAILED: &str = "__CF_CARRY_FAILED__";
+pub const BUNDLE_TOO_LARGE: &str = "__CF_BUNDLE_TOO_LARGE__";
+pub const TARGET_DIRTY: &str = "__CF_TARGET_DIRTY__";
+pub const HEAD_MISMATCH: &str = "__CF_HEAD_MISMATCH__";
+/// Bytes per relay chunk: the orchestrator's peak memory for a payload.
+pub const CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+
+fn is_sha(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn parse_err(what: &str, got: &str) -> IpcError {
+    IpcError::new(codes::E_PARSE, format!("unexpected {what} output: {got:?}"))
+}
+
+/// Make sure the target's main clone exists. Prints `existing`, `cloned` or
+/// `initialized`. Never prompts (a host without credentials falls through to
+/// `git init`) and never removes a directory it did not create.
+pub fn seed_script(project_root: &str, clone_url: &str) -> String {
+    format!(
+        r#"# cf-carry:seed
+set +e
+r={r}
+url={url}
+export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -oBatchMode=yes'
+if [ -e "$r/.git" ]; then printf 'existing\n'; exit 0; fi
+if [ -e "$r" ]; then printf '{FAILED} %s exists and is not a git repository\n' "$r" >&2; exit 5; fi
+mkdir -p -- "$(dirname -- "$r")" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
+if git clone -q -- "$url" "$r" >/dev/null 2>&1; then printf 'cloned\n'; exit 0; fi
+rm -rf -- "$r"
+git init -q -- "$r" >/dev/null 2>&1 && git -C "$r" remote add origin "$url" || {{ printf '{FAILED} init\n' >&2; exit 5; }}
+printf 'initialized\n'
+"#,
+        r = quote(project_root),
+        url = quote(clone_url),
+    )
+}
+
+pub fn parse_seed(stdout: &str) -> Result<TargetSeed, IpcError> {
+    match stdout.trim() {
+        "existing" => Ok(TargetSeed::Existing),
+        "cloned" => Ok(TargetSeed::Cloned),
+        "initialized" => Ok(TargetSeed::Initialized),
+        other => Err(parse_err("seed", other)),
+    }
+}
+
+/// Create the private transfer dir on the target and list every ref tip it
+/// has. Line 1: the absolute dir; then one object name per line.
+pub fn haves_script(project_root: &str, claude_id: &str) -> String {
+    format!(
+        r#"# cf-carry:haves
+set +e
+r={r}
+id={id}
+dir="$HOME/.cache/claude-fleet/transfer/$id"
+rm -rf -- "$dir"
+( umask 077; mkdir -p -- "$dir" ) || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
+printf '%s\n' "$dir"
+git -C "$r" for-each-ref --format='%(objectname)' 2>/dev/null | sort -u
+exit 0
+"#,
+        r = quote(project_root),
+        id = quote(claude_id),
+    )
+}
+
+pub fn parse_haves(stdout: &str) -> Result<(String, Vec<String>), IpcError> {
+    let mut lines = stdout.lines();
+    let dir = lines
+        .next()
+        .map(str::trim)
+        .filter(|d| d.starts_with('/'))
+        .ok_or_else(|| parse_err("haves", stdout))?;
+    let haves = lines
+        .map(str::trim)
+        .filter(|l| is_sha(l))
+        .map(str::to_string)
+        .collect();
+    Ok((dir.to_string(), haves))
+}
+
+/// What the snapshot script produced on the source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleInfo {
+    pub bytes: u64,
+    /// Commits the target lacked, not counting the two snapshot commits.
+    pub commits: u32,
+    pub submodules: bool,
+    pub lfs: bool,
+    /// Absolute path of the bundle on the source.
+    pub path: String,
+}
+
+/// Snapshot the worktree (temporary index — the real index, the working tree
+/// and every user ref stay untouched), park it under `refs/fleet/transfer/`,
+/// and bundle what the target lacks. Both index reads go through COPIES:
+/// even `git write-tree` rewrites the index it reads (the cache-tree
+/// extension). The target's haves reach `git rev-list` on stdin (there can be
+/// thousands); only the resulting boundary — a handful of hex shas, left
+/// unquoted on purpose — reaches `git bundle create` as argv, because
+/// `bundle create --stdin` regressed in some git releases. Prints `<bytes>\t<commits>\t<submodules 0|1>\t<lfs 0|1>\t<path>`.
+pub fn snapshot_script(
+    worktree: &str,
+    claude_id: &str,
+    haves: &[String],
+    cap_bytes: u64,
+) -> String {
+    let haves: String = haves
+        .iter()
+        .filter(|h| is_sha(h))
+        .map(|h| format!("{h}\n"))
+        .collect();
+    format!(
+        r#"# cf-carry:snapshot
+set +e
+wt={wt}
+id={id}
+cap={cap}
+fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
+cd -- "$wt" 2>/dev/null || fail cd
+dir="$HOME/.cache/claude-fleet/transfer/$id"
+rm -rf -- "$dir"
+( umask 077; mkdir -p -- "$dir" ) || fail mkdir
+export GIT_AUTHOR_NAME=claude-fleet GIT_AUTHOR_EMAIL=fleet@localhost GIT_COMMITTER_NAME=claude-fleet GIT_COMMITTER_EMAIL=fleet@localhost
+real=$(git rev-parse --git-path index)
+cp -- "$real" "$dir/index.ix" 2>/dev/null && cp -- "$real" "$dir/index.wt" 2>/dev/null || fail index
+itree=$(GIT_INDEX_FILE="$dir/index.ix" git write-tree 2>/dev/null) || fail write-tree-index
+GIT_INDEX_FILE="$dir/index.wt" git add -A >/dev/null 2>&1 || fail add
+wtree=$(GIT_INDEX_FILE="$dir/index.wt" git write-tree 2>/dev/null) || fail write-tree-worktree
+rm -f -- "$dir/index.ix" "$dir/index.wt"
+ix=$(git commit-tree "$itree" -p HEAD -m 'fleet transfer: index' 2>/dev/null) || fail commit-index
+w=$(git commit-tree "$wtree" -p HEAD -m 'fleet transfer: worktree' 2>/dev/null) || fail commit-worktree
+ref="refs/fleet/transfer/$id"
+git update-ref "$ref/ix" "$ix" && git update-ref "$ref/wt" "$w" && git update-ref "$ref/head" HEAD || fail update-ref
+: > "$dir/nots"
+while IFS= read -r h; do
+  [ -n "$h" ] || continue
+  if git cat-file -e "$h^{{commit}}" 2>/dev/null; then printf '^%s\n' "$h" >> "$dir/nots"; fi
+done <<'CF_HAVES'
+{haves}CF_HAVES
+commits=$(git rev-list --count "$ref/head" --stdin < "$dir/nots" 2>/dev/null)
+bnd=$(git rev-list --boundary "$ref/head" "$ref/ix" "$ref/wt" --stdin < "$dir/nots" 2>/dev/null | sed -n 's/^-/^/p' | tr '\n' ' ')
+git bundle create "$dir/carry.bundle" "$ref/head" "$ref/ix" "$ref/wt" $bnd >/dev/null 2>&1 || fail bundle
+n=$(wc -c < "$dir/carry.bundle" | tr -d ' ')
+if [ "$n" -gt "$cap" ]; then printf '{BUNDLE_TOO_LARGE} %s\n' "$n" >&2; exit 8; fi
+sub=0; [ -f .gitmodules ] && sub=1
+lfs=0; grep -qs 'filter=lfs' .gitattributes && lfs=1
+printf '%s\t%s\t%s\t%s\t%s\n' "$n" "${{commits:-0}}" "$sub" "$lfs" "$dir/carry.bundle"
+"#,
+        wt = quote(worktree),
+        id = quote(claude_id),
+        cap = cap_bytes,
+    )
+}
+
+pub fn parse_snapshot(stdout: &str) -> Result<BundleInfo, IpcError> {
+    let line = stdout.trim_end_matches('\n');
+    let p: Vec<&str> = line.splitn(5, '\t').collect();
+    let bad = || parse_err("snapshot", line);
+    if p.len() != 5 || !p[4].starts_with('/') {
+        return Err(bad());
+    }
+    Ok(BundleInfo {
+        bytes: p[0].trim().parse().map_err(|_| bad())?,
+        commits: p[1].trim().parse().map_err(|_| bad())?,
+        submodules: p[2].trim() == "1",
+        lfs: p[3].trim() == "1",
+        path: p[4].to_string(),
+    })
+}
+
+/// `len` bytes of `path` starting at `offset` (binary-safe, GNU and BSD).
+pub fn chunk_script(path: &str, offset: u64, len: u64) -> String {
+    format!(
+        "# cf-carry:chunk\ntail -c +{} -- {} | head -c {len}\n",
+        offset + 1,
+        quote(path)
+    )
+}
+
+/// Verify and fetch the bundle into the target's main clone; create the
+/// local branch at the source HEAD when the target has none. An existing
+/// local branch is never moved here.
+pub fn fetch_script(
+    project_root: &str,
+    bundle_path: &str,
+    claude_id: &str,
+    branch: &str,
+) -> String {
+    format!(
+        r#"# cf-carry:fetch
+set +e
+r={r}
+b={b}
+id={id}
+br={br}
+fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
+git -C "$r" bundle verify "$b" >/dev/null 2>&1 || fail verify
+git -C "$r" fetch -q "$b" '+refs/fleet/transfer/*:refs/fleet/transfer/*' >/dev/null 2>&1 || fail fetch
+if ! git -C "$r" show-ref --verify --quiet "refs/heads/$br"; then
+  git -C "$r" branch -- "$br" "refs/fleet/transfer/$id/head" >/dev/null 2>&1 || fail branch
+fi
+printf 'ok\n'
+"#,
+        r = quote(project_root),
+        b = quote(bundle_path),
+        id = quote(claude_id),
+        br = quote(branch),
+    )
+}
+
+/// Replay the snapshot in the target worktree: working tree := snapshot,
+/// index := what was staged. Refuses a dirty worktree ([`TARGET_DIRTY`]) and
+/// one not at `want_head` ([`HEAD_MISMATCH`]). Prints the resulting
+/// `git status --porcelain=v1`.
+pub fn apply_script(cwd: &str, claude_id: &str, want_head: &str) -> String {
+    format!(
+        r#"# cf-carry:apply
+set +e
+cwd={cwd}
+id={id}
+want={want}
+fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
+cd -- "$cwd" 2>/dev/null || fail cd
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then printf '{TARGET_DIRTY}\n' >&2; exit 9; fi
+h=$(git rev-parse HEAD 2>/dev/null)
+if [ "$h" != "$want" ]; then printf '{HEAD_MISMATCH} %s\n' "$h" >&2; exit 10; fi
+git read-tree -u --reset "refs/fleet/transfer/$id/wt^{{tree}}" >/dev/null 2>&1 || fail read-tree-worktree
+git read-tree "refs/fleet/transfer/$id/ix^{{tree}}" >/dev/null 2>&1 || fail read-tree-index
+git status --porcelain=v1
+"#,
+        cwd = quote(cwd),
+        id = quote(claude_id),
+        want = quote(want_head),
+    )
+}
+
+/// Best effort: drop the private refs and the transfer dir. Always exits 0.
+pub fn cleanup_script(repo_dir: &str, claude_id: &str) -> String {
+    format!(
+        r#"# cf-carry:cleanup
+set +e
+r={r}
+id={id}
+git -C "$r" for-each-ref --format='%(refname)' "refs/fleet/transfer/$id/" 2>/dev/null | while IFS= read -r ref; do
+  git -C "$r" update-ref -d "$ref" >/dev/null 2>&1
+done
+rm -rf -- "$HOME/.cache/claude-fleet/transfer/$id"
+exit 0
+"#,
+        r = quote(repo_dir),
+        id = quote(claude_id),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +534,459 @@ mod tests {
         assert_eq!(v["target_seeded"], "initialized");
         assert_eq!(v["ignored_left_behind"][0]["reason"], "denylisted");
         assert!(v["ignored_left_behind"][0]["bytes"].is_null());
+    }
+
+    use std::path::Path;
+    use std::process::{Command, Output};
+
+    fn have(bin: &str) -> bool {
+        Command::new(bin)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// Run a generated script the way a host would, with an isolated `$HOME`
+    /// (so `~/.cache/claude-fleet/transfer` lands in the temp dir) and no
+    /// user/system git config.
+    fn bash(script: &str, home: &Path) -> Output {
+        Command::new("bash")
+            .args(["-c", script])
+            .env("HOME", home)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("bash")
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn sorted_lines(s: &str) -> Vec<String> {
+        let mut v: Vec<String> = s
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        v.sort();
+        v
+    }
+
+    const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    /// A source repo with every kind of state the carry must reproduce.
+    /// Returns (repo dir, sha of the "pushed" base commit).
+    fn dirty_source(root: &Path) -> (std::path::PathBuf, String) {
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        git(&src, &["init", "-q", "-b", "feat"]);
+        for (f, body) in [
+            ("keep.txt", "keep\n"),
+            ("mod.txt", "v1\n"),
+            ("del.txt", "bye\n"),
+            ("both.txt", "v1\n"),
+            ("mode.sh", "#!/bin/sh\n"),
+        ] {
+            std::fs::write(src.join(f), body).unwrap();
+        }
+        std::fs::write(src.join(".gitignore"), ".env\nnode_modules/\n").unwrap();
+        git(&src, &["add", "-A"]);
+        git(&src, &["commit", "-q", "-m", "base"]);
+        let base = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+        git(&src, &["branch", "pushed"]); // stands in for origin/feat: a sha is only fetchable as a ref tip
+        for n in ["one", "two"] {
+            std::fs::write(src.join(format!("{n}.txt")), n).unwrap();
+            git(&src, &["add", "-A"]);
+            git(&src, &["commit", "-q", "-m", n]); // two "unpushed" commits
+        }
+        std::fs::write(src.join("mod.txt"), "v2\n").unwrap(); // modified, unstaged
+        std::fs::write(src.join("staged new.txt"), "new\n").unwrap(); // staged, space in name
+        git(&src, &["add", "staged new.txt"]);
+        std::fs::write(src.join("both.txt"), "staged\n").unwrap(); // staged...
+        git(&src, &["add", "both.txt"]);
+        std::fs::write(src.join("both.txt"), "then modified\n").unwrap(); // ...then modified
+        std::fs::write(src.join("it's untracked.txt"), "u\n").unwrap(); // untracked, quote in name
+        std::fs::remove_file(src.join("del.txt")).unwrap(); // deleted, unstaged
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(src.join("mode.sh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            std::os::unix::fs::symlink("keep.txt", src.join("link")).unwrap();
+        }
+        std::fs::write(src.join(".env"), "SECRET=1\n").unwrap(); // ignored: must NOT be in the snapshot
+        (src, base)
+    }
+
+    /// Everything that must be byte-identical on the source before and after.
+    fn source_fingerprint(src: &Path) -> (String, Vec<u8>, String) {
+        (
+            // --no-optional-locks: a plain `git status` may refresh and rewrite the index.
+            git(src, &["--no-optional-locks", "status", "--porcelain=v1"]),
+            std::fs::read(src.join(".git/index")).unwrap(),
+            git(
+                src,
+                &["for-each-ref", "refs/heads", "refs/remotes", "refs/tags"],
+            ),
+        )
+    }
+
+    /// snapshot → bundle → fetch → worktree add → apply, all through the real
+    /// generated scripts. `seed_target` prepares the target's main clone.
+    fn round_trip(seed_target: impl Fn(&Path, &Path, &str)) {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (home_a, home_b) = (tmp.path().join("home-a"), tmp.path().join("home-b"));
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        let (src, base) = dirty_source(tmp.path());
+        let before = source_fingerprint(&src);
+        let src_head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+
+        // Target main clone.
+        let root = tmp.path().join("tgt");
+        seed_target(&src, &root, &base);
+        let out = bash(&haves_script(root.to_str().unwrap(), ID), &home_b);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (tgt_dir, haves) = parse_haves(&String::from_utf8_lossy(&out.stdout)).unwrap();
+
+        // Source: snapshot + bundle.
+        let out = bash(
+            &snapshot_script(src.to_str().unwrap(), ID, &haves, u64::MAX),
+            &home_a,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let info = parse_snapshot(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert_eq!(info.bytes, std::fs::metadata(&info.path).unwrap().len());
+        assert_eq!(
+            source_fingerprint(&src),
+            before,
+            "the source tree, index and refs are untouched"
+        );
+
+        // Relay: chunked read (tiny chunk to exercise the loop), plain copy in.
+        let mut got = Vec::new();
+        while (got.len() as u64) < info.bytes {
+            let out = bash(&chunk_script(&info.path, got.len() as u64, 1000), &home_a);
+            assert!(!out.stdout.is_empty(), "empty chunk at {}", got.len());
+            got.extend_from_slice(&out.stdout);
+        }
+        assert_eq!(
+            got,
+            std::fs::read(&info.path).unwrap(),
+            "chunks reassemble the bundle"
+        );
+        let tgt_bundle = format!("{tgt_dir}/carry.bundle");
+        std::fs::write(&tgt_bundle, &got).unwrap();
+
+        // Target: fetch, worktree add from the LOCAL branch (no origin), apply.
+        let out = bash(
+            &fetch_script(root.to_str().unwrap(), &tgt_bundle, ID, "feat"),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let wt = tmp.path().join("tgt-wt");
+        git(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "feat"],
+        );
+        assert_eq!(
+            git(&wt, &["rev-parse", "HEAD"]).trim(),
+            src_head,
+            "unpushed commits arrived"
+        );
+        let out = bash(&apply_script(wt.to_str().unwrap(), ID, &src_head), &home_b);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // The claim: identical porcelain, contents, modes.
+        assert_eq!(
+            sorted_lines(&String::from_utf8_lossy(&out.stdout)),
+            sorted_lines(&before.0),
+            "target porcelain equals the source's"
+        );
+        for f in [
+            "mod.txt",
+            "staged new.txt",
+            "both.txt",
+            "it's untracked.txt",
+            "one.txt",
+        ] {
+            assert_eq!(
+                std::fs::read(wt.join(f)).unwrap(),
+                std::fs::read(src.join(f)).unwrap(),
+                "{f}"
+            );
+        }
+        assert!(!wt.join("del.txt").exists(), "the deletion travelled");
+        assert!(
+            !wt.join(".env").exists(),
+            "ignored files are not in the snapshot"
+        );
+        assert_eq!(
+            git(&wt, &["diff", "--cached", "--name-only"]),
+            git(&src, &["diff", "--cached", "--name-only"]),
+            "the same files are staged"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(wt.join("mode.sh"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0o111
+            );
+            assert_eq!(
+                std::fs::read_link(wt.join("link")).unwrap().to_str(),
+                Some("keep.txt")
+            );
+        }
+
+        // Cleanup leaves no private refs and no temp dirs on either side.
+        assert!(bash(&cleanup_script(src.to_str().unwrap(), ID), &home_a)
+            .status
+            .success());
+        assert!(bash(&cleanup_script(root.to_str().unwrap(), ID), &home_b)
+            .status
+            .success());
+        assert_eq!(git(&src, &["for-each-ref", "refs/fleet"]), "");
+        assert_eq!(git(&root, &["for-each-ref", "refs/fleet"]), "");
+        assert!(!home_a
+            .join(".cache/claude-fleet/transfer")
+            .join(ID)
+            .exists());
+        assert!(!home_b
+            .join(".cache/claude-fleet/transfer")
+            .join(ID)
+            .exists());
+        assert_eq!(
+            source_fingerprint(&src),
+            before,
+            "still untouched after cleanup"
+        );
+    }
+
+    #[test]
+    fn round_trip_into_a_target_that_has_the_base_commit() {
+        round_trip(|src, root, base| {
+            // A clone cut back to the "pushed" base: the bundle must be thin.
+            std::fs::create_dir_all(root).unwrap();
+            git(root, &["init", "-q", "-b", "main"]);
+            git(
+                root,
+                &[
+                    "fetch",
+                    "-q",
+                    src.to_str().unwrap(),
+                    "pushed:refs/remotes/origin/feat",
+                ],
+            );
+            assert_eq!(
+                git(root, &["rev-parse", "refs/remotes/origin/feat"]).trim(),
+                base
+            );
+        });
+    }
+
+    #[test]
+    fn round_trip_into_an_initialized_empty_target() {
+        round_trip(|_src, root, _base| {
+            let tmp_home = root.parent().unwrap().join("home-seed");
+            std::fs::create_dir_all(&tmp_home).unwrap();
+            // An unreachable origin: the seed falls through to `git init`.
+            let out = bash(
+                &seed_script(root.to_str().unwrap(), "/nonexistent/origin.git"),
+                &tmp_home,
+            );
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                parse_seed(&String::from_utf8_lossy(&out.stdout)).unwrap(),
+                TargetSeed::Initialized
+            );
+        });
+    }
+
+    #[test]
+    fn a_thin_bundle_is_smaller_than_a_full_one_and_a_clean_source_still_bundles() {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (src, base) = dirty_source(tmp.path());
+        let size = |haves: &[String]| {
+            let out = bash(
+                &snapshot_script(src.to_str().unwrap(), ID, haves, u64::MAX),
+                &home,
+            );
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            parse_snapshot(&String::from_utf8_lossy(&out.stdout)).unwrap()
+        };
+        let full = size(&[]);
+        let thin = size(std::slice::from_ref(&base));
+        assert!(
+            thin.bytes < full.bytes,
+            "thin {} < full {}",
+            thin.bytes,
+            full.bytes
+        );
+        assert_eq!(thin.commits, 2, "the two unpushed commits");
+        assert_eq!(full.commits, 3);
+        // Even when the target has HEAD, the snapshot commits make a bundle.
+        let head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+        let none = size(&[head]);
+        assert_eq!(none.commits, 0);
+        assert!(none.bytes > 0);
+    }
+
+    #[test]
+    fn a_bundle_over_the_cap_and_a_dirty_or_moved_target_are_recognisable() {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (src, _) = dirty_source(tmp.path());
+        let out = bash(&snapshot_script(src.to_str().unwrap(), ID, &[], 10), &home);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(BUNDLE_TOO_LARGE));
+
+        let head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+        // The source itself is dirty: applying onto it must refuse, not overwrite.
+        let out = bash(&apply_script(src.to_str().unwrap(), ID, &head), &home);
+        assert!(String::from_utf8_lossy(&out.stderr).contains(TARGET_DIRTY));
+        // A clean checkout at another commit: refused as a head mismatch.
+        let clean = tmp.path().join("clean");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                src.to_str().unwrap(),
+                clean.to_str().unwrap(),
+            ],
+        );
+        let out = bash(
+            &apply_script(clean.to_str().unwrap(), ID, &"0".repeat(40)),
+            &home,
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains(HEAD_MISMATCH));
+    }
+
+    #[test]
+    fn seed_never_deletes_an_existing_non_git_directory() {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("precious");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("data.txt"), "mine").unwrap();
+        let out = bash(
+            &seed_script(root.to_str().unwrap(), "/nonexistent/origin.git"),
+            tmp.path(),
+        );
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        assert_eq!(
+            std::fs::read_to_string(root.join("data.txt")).unwrap(),
+            "mine"
+        );
+    }
+
+    #[test]
+    fn parsers_reject_malformed_output() {
+        assert!(parse_seed("weird\n").is_err());
+        assert_eq!(parse_seed("cloned\n").unwrap(), TargetSeed::Cloned);
+        assert!(parse_haves("relative/dir\n").is_err());
+        let (dir, haves) = parse_haves(&format!(
+            "/h/.cache/x\n{}\nnot-a-sha\n{}\n",
+            "a".repeat(40),
+            "b".repeat(64)
+        ))
+        .unwrap();
+        assert_eq!(dir, "/h/.cache/x");
+        assert_eq!(haves.len(), 2, "non-hex lines are dropped");
+        assert!(parse_snapshot("12\t3\t0\t1\t/abs/carry.bundle\n").is_ok());
+        assert!(parse_snapshot("12\t3\t0\t1\trelative\n").is_err());
+        assert!(parse_snapshot("x\t3\t0\t1\t/abs\n").is_err());
+    }
+
+    #[test]
+    fn carry_scripts_quote_every_interpolated_value() {
+        let evil = "a b'$(touch /tmp/pwn)\n;x";
+        let q = quote(evil);
+        for script in [
+            seed_script(evil, evil),
+            haves_script(evil, evil),
+            snapshot_script(evil, evil, &[], 1),
+            chunk_script(evil, 0, 1),
+            fetch_script(evil, evil, evil, evil),
+            apply_script(evil, evil, evil),
+            cleanup_script(evil, evil),
+        ] {
+            assert!(script.contains(&q), "quoted value present: {script}");
+            let without = script.replace(&q, "");
+            assert!(
+                !without.contains("touch /tmp/pwn"),
+                "raw value leaked: {script}"
+            );
+        }
+        // Haves are hex-only: anything else never reaches the heredoc.
+        let s = snapshot_script("/w", ID, &["zz; rm -rf /".into(), "a".repeat(40)], 1);
+        assert!(!s.contains("rm -rf /"), "{s}");
+        assert!(s.contains(&"a".repeat(40)));
     }
 }
