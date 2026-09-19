@@ -12,12 +12,15 @@
 //! 3. **A local-only command refuses with `E_LOCAL_ONLY`** and names where to
 //!    go instead.
 //! 4. **Nothing falls through unclassified.** `every_command_has_a_verdict`
-//!    reads `lib.rs`'s `generate_handler!` list and fails on any command that
-//!    neither routes nor guards nor is on an explicit exception list. That is
-//!    the test that matters six months from now: a command quietly left on
-//!    the local path in remote mode does not fail — it SSHes into a host with
-//!    this machine's keys and mutates a fleet the hub also manages.
+//!    reads `lib.rs`'s `generate_handler!` list and holds it to exactly the
+//!    set of names in [`VERDICTS`](super::verdicts::VERDICTS), and
+//!    `every_commands_body_does_what_its_row_says` holds each command's body
+//!    to the row it has. That is the pair that matters six months from now: a
+//!    command quietly left on the local path in remote mode does not fail —
+//!    it SSHes into a host with this machine's keys and mutates a fleet the
+//!    hub also manages.
 
+use super::verdicts::VERDICTS;
 use super::*;
 use crate::backend::remote;
 use crate::commands;
@@ -26,6 +29,7 @@ use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::ssh::SshClient;
 use fleet_core::store::Store;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 // ── the doubles ─────────────────────────────────────────────────────────────
@@ -1363,9 +1367,9 @@ fn rust_string_literal(src: &str, at: usize) -> (String, usize) {
 /// This is how the fixture below is *generated*, and it only works while the
 /// sentences are literals at the call sites. Once they come from one table the
 /// generator is gone and the fixture is the record of what they said.
-fn pasted_local_only_pairs() -> std::collections::BTreeMap<String, String> {
+fn pasted_local_only_pairs() -> BTreeMap<String, String> {
     const CALL: &str = "backend.local_only(";
-    let mut out = std::collections::BTreeMap::new();
+    let mut out = BTreeMap::new();
     for (file, src) in SOURCES {
         let mut from = 0;
         while let Some(rel) = src[from..].find(CALL) {
@@ -1391,10 +1395,10 @@ fn pasted_local_only_pairs() -> std::collections::BTreeMap<String, String> {
 }
 
 /// `command -> the whole E_LOCAL_ONLY message`, for the fixed hub of [`cfg`].
-fn local_only_messages(pairs: &std::collections::BTreeMap<String, String>) -> String {
+fn local_only_messages(pairs: &BTreeMap<String, String>) -> String {
     let fake = Fake::answering("[]");
     let backend = remote_backend(&fake);
-    let rendered: std::collections::BTreeMap<&str, String> = pairs
+    let rendered: BTreeMap<&str, String> = pairs
         .iter()
         .map(|(what, instead)| {
             let err = backend
@@ -1440,10 +1444,9 @@ fn every_local_only_message_is_the_one_the_fixture_records() {
 
     let golden = include_str!("local_only.golden.json");
     if golden != actual {
-        let want: std::collections::BTreeMap<String, String> =
+        let want: BTreeMap<String, String> =
             serde_json::from_str(golden).expect("the fixture must be command -> message");
-        let got: std::collections::BTreeMap<String, String> =
-            serde_json::from_str(&actual).unwrap();
+        let got: BTreeMap<String, String> = serde_json::from_str(&actual).unwrap();
         let mut complaints = Vec::new();
         for (name, msg) in &want {
             match got.get(name) {
@@ -1469,85 +1472,12 @@ fn every_local_only_message_is_the_one_the_fixture_records() {
 
 // ── 4. nothing falls through unclassified ───────────────────────────────────
 
-/// Commands that are deliberately the same in both modes, each with its
-/// reason. Anything not routed, not guarded and not on this list fails
-/// [`every_command_has_a_verdict`].
-const SAME_IN_BOTH_MODES: &[(&str, &str)] = &[
-    (
-        "collect_diagnostics",
-        "describes THIS process — its log tail, its tunnels, its SSH counters \
-         — and is the first thing asked for when remote mode misbehaves",
-    ),
-    (
-        "open_log_folder",
-        "this app's own log folder, which it has either way",
-    ),
-    (
-        "cancel_command",
-        "the cancellation registry is this process's, and the call it cancels \
-         is one this process started",
-    ),
-    (
-        "mcp_confirm",
-        "answers this process's own confirm queue, which is empty in remote \
-         mode — answering nothing is correct",
-    ),
-    ("mcp_pending_confirms", "the same queue, the same reason"),
-    (
-        "hub_status",
-        "reports which fleet THIS window is onto. Asking a hub would be \
-         circular, and Settings needs the answer most when the hub is \
-         unreachable",
-    ),
-    (
-        "hub_pair",
-        "points this process at a hub. It talks to POST /pair — the one \
-         unauthenticated route, and not an MCP tool at all",
-    ),
-    (
-        "hub_connection",
-        "reports whether THIS process's event stream to the hub is up. \
-         Asking the hub would be circular, and the answer matters most \
-         exactly when the hub cannot be reached",
-    ),
-    (
-        "hub_stranded_token",
-        "asks THIS machine's own token store whether a pairing that crashed \
-         before writing its URL left a credential behind. There is no hub to \
-         ask — the whole state is that no hub is configured",
-    ),
-    (
-        "hub_disconnect",
-        "forgets this machine's own token and setting. It revokes nothing on \
-         the hub: only an operator can, and a paired client is refused \
-         revoke_client by design",
-    ),
-    (
-        "pty_write",
-        "acts on whatever is attached; with pty_open refused nothing ever is, \
-         so E_PTY_CLOSED is the true answer",
-    ),
-    ("pty_resize", "the same as pty_write"),
-    ("pty_drain", "the same as pty_write"),
-    (
-        "pty_close",
-        "the same as pty_write — guarding it would make closing fail",
-    ),
-];
-
-/// **The test that matters six months from now.**
+/// `lib.rs`'s `generate_handler!` list, as `(file, command)`.
 ///
-/// Reads the `generate_handler!` list out of `lib.rs` and checks that every
-/// command in it has a verdict: it either routes on the backend, refuses with
-/// `local_only`, or is named in [`SAME_IN_BOTH_MODES`] with a reason.
-///
-/// Source-scanning is a blunt instrument, and this is the one place it earns
-/// its keep. What it guards against is not a wrong answer but a *missing
-/// decision*: a command added later, wired into the handler list, and left
-/// running the local service path — which in remote mode means SSHing into
-/// hosts with this machine's keys and mutating a fleet the hub also manages.
-#[test]
-fn every_command_has_a_verdict() {
+/// `commands::sessions::list_sessions` -> ("commands/sessions.rs", "list_sessions")
+/// `pty::pty_open`                     -> ("pty.rs", "pty_open")
+/// `cancel_command`                    -> ("lib.rs", "cancel_command")
+fn registered_commands() -> Vec<(String, String)> {
     let lib = include_str!("../lib.rs");
     let handlers = lib
         .split_once("generate_handler![")
@@ -1557,9 +1487,6 @@ fn every_command_has_a_verdict() {
         .expect("an unterminated generate_handler! list")
         .0;
 
-    // `commands::sessions::list_sessions` -> ("commands/sessions.rs", "list_sessions")
-    // `pty::pty_open`                     -> ("pty.rs", "pty_open")
-    // `cancel_command`                    -> ("lib.rs", "cancel_command")
     let mut entries: Vec<(String, String)> = Vec::new();
     for raw in handlers.split(',') {
         let path = raw.trim();
@@ -1581,39 +1508,70 @@ fn every_command_has_a_verdict() {
         "only {} handlers parsed — the parser broke, not the code",
         entries.len()
     );
+    entries
+}
 
-    let sources: std::collections::BTreeMap<&str, &str> = SOURCES.iter().copied().collect();
-    let mut unclassified = Vec::new();
-    for (file, name) in &entries {
-        if SAME_IN_BOTH_MODES.iter().any(|(n, _)| n == name) {
-            continue;
-        }
-        let src = sources
-            .get(file.as_str())
-            .unwrap_or_else(|| panic!("add {file} to SOURCES in tests_routing.rs"));
-        let start = src
-            .find(&format!("fn {name}("))
-            .unwrap_or_else(|| panic!("{name} is registered but not defined in {file}"));
-        // This command's body, up to wherever the next one begins.
-        let rest = &src[start..];
-        let body = match rest.find("#[tauri::command]") {
-            Some(i) => &rest[..i],
-            None => rest,
-        };
-        if !body.contains("routed::") && !body.contains("local_only(") {
-            unclassified.push(format!("{file}::{name}"));
+/// **The test that matters six months from now.**
+///
+/// Reads the `generate_handler!` list out of `lib.rs` and holds it to exactly
+/// the set of names in [`VERDICTS`] — no command without a verdict, no verdict
+/// for a command that no longer exists, no name twice.
+///
+/// What it guards against is not a wrong answer but a *missing decision*: a
+/// command added later, wired into the handler list, and left running the
+/// local service path — which in remote mode means SSHing into hosts with
+/// this machine's keys and mutating a fleet the hub also manages.
+///
+/// This replaces the old `SAME_IN_BOTH_MODES` exception list: "deliberately
+/// the same in both modes" is now a verdict like the other two, with its
+/// reason in the same row, so a deliberate decision and a forgotten one still
+/// cannot look alike.
+#[test]
+fn every_command_has_a_verdict() {
+    let registered: BTreeSet<String> = registered_commands()
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+
+    let mut seen = BTreeSet::new();
+    let mut twice = Vec::new();
+    for (name, _) in VERDICTS {
+        if !seen.insert((*name).to_string()) {
+            twice.push(*name);
         }
     }
-
     assert!(
-        unclassified.is_empty(),
-        "these commands neither route on the backend nor refuse with \
-         E_LOCAL_ONLY, so in remote mode they silently run against THIS \
-         machine's database and SSH keys, on a fleet the hub also \
-         manages:\n  {}\n\nGive each one a verdict: route it through a \
-         `routed::` function, guard it with `backend.local_only(...)`, or add \
-         it to SAME_IN_BOTH_MODES with the reason.",
-        unclassified.join("\n  ")
+        twice.is_empty(),
+        "VERDICTS names these commands more than once, so which row wins is \
+         whichever comes first: {twice:?}"
+    );
+
+    let missing: Vec<&String> = registered.difference(&seen).collect();
+    assert!(
+        missing.is_empty(),
+        "these commands are registered in generate_handler! but have no row in \
+         VERDICTS, so in remote mode they silently run against THIS machine's \
+         database and SSH keys, on a fleet the hub also manages:\n  {}\n\n\
+         Give each one a row: Routed with the hub tool it calls, LocalOnly \
+         with the sentence it refuses with, or SameInBoth with the reason.",
+        missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    let stale: Vec<&String> = seen.difference(&registered).collect();
+    assert!(
+        stale.is_empty(),
+        "VERDICTS has rows for commands that generate_handler! no longer \
+         registers — a verdict about nothing reads like a verdict about \
+         something:\n  {}",
+        stale
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
     );
 }
 

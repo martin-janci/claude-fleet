@@ -28,6 +28,7 @@ pub mod remote;
 pub mod routing;
 pub mod startup;
 pub mod token_store;
+pub mod verdicts;
 
 use fleet_core::store::Store;
 pub use routing::FleetBackend;
