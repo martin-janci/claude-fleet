@@ -262,8 +262,22 @@ impl Store {
         }
         tx.commit()?;
         for row in &rows {
-            self.bus
-                .emit_change(&RowChange::SessionUpdated(row.clone()));
+            let change = RowChange::SessionUpdated(row.clone());
+            // Task 7 (R5): the mass-loss verdict is exactly the reboot-
+            // forensics case this logging exists for, so log it with the
+            // `reason` this call already knows (`host_reboot` /
+            // `tmux_server_gone`) alongside the shared `lifecycle` kind.
+            if let Some(kind) = super::reconcile::lifecycle_kind(&change) {
+                tracing::info!(
+                    lifecycle = kind,
+                    host_alias = %row.host_alias,
+                    tmux_name = %row.tmux_name,
+                    claude_session_id = row.claude_session_id.as_deref().unwrap_or("-"),
+                    reason,
+                    "[session] {kind}"
+                );
+            }
+            self.bus.emit_change(&change);
         }
         Ok(rows)
     }

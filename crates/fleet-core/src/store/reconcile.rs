@@ -17,6 +17,28 @@ pub(super) fn ghost_cutoff(probe_started_at: i64) -> i64 {
     }
 }
 
+/// Classify a [`RowChange`] as a session lifecycle transition, for the R5
+/// forensics log (Task 7): a host reboot used to leave almost nothing in the
+/// log besides MCP tool calls and tunnel warnings, so every session
+/// created/lost/deleted transition now gets one INFO line. Returns `None`
+/// for changes that are not a session lifecycle event (including a
+/// `SessionUpdated` of a still-live row).
+///
+/// `SessionUpdated` maps to `"lost"` only when the row's `lost_at` is set.
+/// A row that is ALREADY lost can be updated again for an unrelated reason
+/// (e.g. a friendly-name change via `set_friendly_name`) — that re-update
+/// still carries `lost_at.is_some()`, so it logs `"lost"` a second time.
+/// This is expected: do not read a second `lost` line for the same
+/// `tmux_name` as evidence of a second, separate loss.
+pub(crate) fn lifecycle_kind(change: &RowChange) -> Option<&'static str> {
+    match change {
+        RowChange::SessionCreated(_) => Some("created"),
+        RowChange::SessionUpdated(row) if row.lost_at.is_some() => Some("lost"),
+        RowChange::SessionKilled(_) => Some("deleted"),
+        _ => None,
+    }
+}
+
 impl Store {
     // ---- Reconcile write-burst: single transaction + emit-after-commit ----
     //
@@ -459,6 +481,31 @@ impl Store {
 
         // Phase 2: transaction committed — now it is safe to emit.
         for change in &changes {
+            // Task 7 (R5): one INFO line per session lifecycle transition —
+            // a host reboot used to leave nothing in the log to forensically
+            // reconstruct what happened to the 8+ sessions it took out.
+            if let Some(kind) = lifecycle_kind(change) {
+                match change {
+                    RowChange::SessionCreated(row) | RowChange::SessionUpdated(row) => {
+                        tracing::info!(
+                            lifecycle = kind,
+                            host_alias = %row.host_alias,
+                            tmux_name = %row.tmux_name,
+                            claude_session_id = row.claude_session_id.as_deref().unwrap_or("-"),
+                            "[session] {kind}"
+                        );
+                    }
+                    RowChange::SessionKilled(id) => {
+                        tracing::info!(
+                            lifecycle = kind,
+                            host_alias = %spec.alias,
+                            session_id = id,
+                            "[session] {kind}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
             self.bus.emit_change(change);
         }
         Ok(())
@@ -493,6 +540,96 @@ impl Store {
 mod tests {
     use super::*;
     use crate::store::test_support::*;
+
+    /// A minimal, DB-free `SessionRow` for `lifecycle_kind` classification
+    /// tests — only `lost_at` varies between cases, every other field is a
+    /// harmless default.
+    fn bare_row(lost_at: Option<i64>) -> SessionRow {
+        SessionRow {
+            id: 1,
+            tmux_name: "work-a".into(),
+            host_alias: "alpha".into(),
+            project_id: None,
+            worktree_id: None,
+            created_at: 0,
+            last_activity_at: 0,
+            status: "running".into(),
+            notes: None,
+            account_uuid: None,
+            kind: "work".into(),
+            reviews_session_id: None,
+            worktree_key: None,
+            lost_at,
+            claude_session_id: None,
+            claude_status: None,
+            effort_level: None,
+            pr_url: None,
+            current_activity: None,
+            context_pct: None,
+            stuck_kind: None,
+            friendly_name: None,
+            safe_kill_state: None,
+            safe_kill_nonce: None,
+            safe_kill_detail: None,
+            safe_kill_requested_at: None,
+            idle_since: None,
+            stuck_since: None,
+            last_playbook_at: None,
+            last_prompt: None,
+            started_at: None,
+            last_turn_at: None,
+            ci_status: None,
+            turn_seq: 0,
+            last_stop_at: None,
+            parent_session_id: None,
+            tags: Vec::new(),
+            usage: Default::default(),
+        }
+    }
+
+    fn bare_host() -> HostRow {
+        HostRow {
+            alias: "alpha".into(),
+            ssh_alias: None,
+            reachable: true,
+            claude_version: None,
+            tmux_version: None,
+            hidden: false,
+            last_pinged_at: None,
+            account_uuid: None,
+            provisioned: false,
+        }
+    }
+
+    #[test]
+    fn lifecycle_kind_classifies_created_lost_deleted() {
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionCreated(bare_row(None))),
+            Some("created")
+        );
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionUpdated(bare_row(Some(500)))),
+            Some("lost")
+        );
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionKilled(1)),
+            Some("deleted")
+        );
+    }
+
+    #[test]
+    fn lifecycle_kind_ignores_live_updates_and_non_session_changes() {
+        assert_eq!(
+            lifecycle_kind(&RowChange::SessionUpdated(bare_row(None))),
+            None,
+            "an update to a still-live row is not a lifecycle transition"
+        );
+        assert_eq!(
+            lifecycle_kind(&RowChange::HostProbed(bare_host())),
+            None,
+            "non-session changes never carry a lifecycle kind"
+        );
+    }
 
     #[test]
     fn reconcile_hard_delete_reaps_session_events() {
