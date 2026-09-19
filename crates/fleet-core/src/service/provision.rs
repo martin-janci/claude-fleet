@@ -280,7 +280,9 @@ pub async fn provision_host_with_token(
     commit_host_token(store, host, &token, minted)?;
     // A public hub is reached directly; only a loopback hub needs the
     // reverse tunnel so the host's 127.0.0.1:<port> lands on this machine.
-    if host != "local" && !base.public {
+    // An agent host is never dialed over SSH at all, so it has no use for
+    // one either — it reaches the hub over its own outbound connection.
+    if host != "local" && !base.public && !routes_to_agent(store, host)? {
         tunnels.ensure(host, base.port, base.port);
     }
     if let Ok(s) = store.lock() {
@@ -437,7 +439,7 @@ pub fn reestablish_tunnels(
     }
     let hosts = { lock(store)?.list_hosts()? };
     for h in hosts {
-        if h.provisioned && h.alias != "local" && !h.hidden {
+        if h.provisioned && h.alias != "local" && !h.hidden && h.transport != "agent" {
             tunnels.ensure(&h.alias, base.port, base.port);
         }
     }
@@ -1870,6 +1872,35 @@ mod tests {
         tunnels.stop_all();
     }
 
+    /// An agent host is by definition not dialable over SSH, so a reverse
+    /// tunnel to it would just be `ssh -R` restarting forever against an
+    /// address that never accepts a connection. `provision_host_with_token`
+    /// must skip the tunnel for it even on a loopback hub.
+    #[tokio::test]
+    async fn provisioning_an_agent_host_starts_no_reverse_tunnel() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("laptop", Some("laptop")).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            // An existing token, so this re-provision does not mint a new
+            // one — minting one would instead hit E_AGENT_REINSTALL (an
+            // agent host's new token can never travel over the connection
+            // it is replacing), which is a different, already-tested path.
+            s.upsert_host_token("laptop", "existing-token").unwrap();
+        }
+        let tunnels = quiet_tunnels();
+        let fake = fresh_host();
+        provision_host_with_token(&store, &fake, &tunnels, "laptop", &base(), false)
+            .await
+            .unwrap();
+        assert!(
+            tunnels.snapshot().is_empty(),
+            "an agent host has no way to reach an ssh -R tunnel: {:?}",
+            tunnels.snapshot()
+        );
+    }
+
     #[tokio::test]
     async fn reestablish_tunnels_is_a_no_op_for_a_public_base() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -1911,6 +1942,36 @@ mod tests {
         let argv = spawned.lock().unwrap().clone();
         assert_eq!(argv.len(), 1, "{argv:?}");
         assert!(argv[0].contains("mefistos"), "{argv:?}");
+        tunnels.stop_all();
+    }
+
+    /// A provisioned agent host is skipped on the app-start reconcile pass
+    /// too, the same as on first provisioning: it has no address for the hub
+    /// to dial, so `ssh -R` against it would just restart forever.
+    #[tokio::test]
+    async fn reestablish_tunnels_skips_agent_transport_hosts() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("laptop", Some("laptop")).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            s.set_host_provisioned("laptop", true).unwrap();
+            s.upsert_host("mefistos").unwrap();
+            s.set_host_provisioned("mefistos", true).unwrap();
+        }
+        let tunnels = quiet_tunnels();
+        reestablish_tunnels(&store, &tunnels, &HubBase::loopback(4180)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !tunnels.snapshot().contains_key("laptop"),
+            "an agent host has no way to reach an ssh -R tunnel: {:?}",
+            tunnels.snapshot()
+        );
+        assert_eq!(
+            tunnels.snapshot().get("mefistos"),
+            Some(&true),
+            "an ssh-transport host is still tunneled"
+        );
         tunnels.stop_all();
     }
 
