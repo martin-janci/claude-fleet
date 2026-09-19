@@ -227,7 +227,14 @@ fn sample_conversation() -> Conversation {
                 ConvItem::Tool {
                     summary: "Read(src/lib.rs)".into(),
                     error: true,
+                    id: Some("toolu_1".into()),
+                    name: "Read".into(),
+                    target: Some("src/lib.rs".into()),
+                    at: Some("2026-09-18T10:00:01Z".into()),
+                    ended_at: Some("2026-09-18T10:00:02Z".into()),
+                    done: true,
                 },
+                sample_subagent(),
             ],
         }],
         truncated: true,
@@ -238,6 +245,20 @@ fn sample_conversation() -> Conversation {
             stale: false,
         }),
         events: vec![sample_event()],
+    }
+}
+
+fn sample_subagent() -> ConvItem {
+    ConvItem::Subagent {
+        id: Some("toolu_2".into()),
+        name: "Task".into(),
+        agent_type: Some("Explore".into()),
+        description: Some("find it".into()),
+        result: Some("found".into()),
+        error: false,
+        at: Some("2026-09-18T10:00:03Z".into()),
+        ended_at: Some("2026-09-18T10:00:04Z".into()),
+        done: true,
     }
 }
 
@@ -305,8 +326,15 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         wire_keys(&ConvItem::Tool {
             summary: "s".into(),
             error: false,
+            id: Some("toolu_1".into()),
+            name: "Bash".into(),
+            target: Some("t".into()),
+            at: Some("2026-09-18T10:00:01Z".into()),
+            ended_at: Some("2026-09-18T10:00:02Z".into()),
+            done: true,
         }),
     );
+    put("ConvItem::Subagent", wire_keys(&sample_subagent()));
     put(
         "ConvItem::Compact",
         wire_keys(&ConvItem::Compact {
@@ -685,4 +713,28 @@ fn a_task_row_never_puts_its_nonce_on_the_wire() {
         .expect("a TaskRow read back from a hub must still parse");
     assert_eq!(back.nonce, "", "a hub-read TaskRow carries no nonce");
     assert_eq!(back.worker_claude_session_id, None);
+}
+
+/// A hub that predates the structured tool lines sends a `Tool` item with
+/// only `summary` / `error`; the desktop must still parse it (and the
+/// Conversation around it) rather than fail the whole read.
+#[test]
+fn an_older_hubs_tool_item_still_parses_with_defaults() {
+    let item: ConvItem =
+        serde_json::from_value(serde_json::json!({ "kind": "tool", "summary": "Read(x)" }))
+            .expect("an older hub's tool item must parse");
+    assert_eq!(
+        item,
+        ConvItem::Tool {
+            summary: "Read(x)".into(),
+            error: false,
+            id: None,
+            name: String::new(),
+            target: None,
+            at: None,
+            ended_at: None,
+            // Finished, not "no result": an older hub's line is history.
+            done: true,
+        }
+    );
 }

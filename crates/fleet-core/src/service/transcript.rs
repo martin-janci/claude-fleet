@@ -40,6 +40,14 @@ const READ_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(20);
 /// Cap on a single tool_use summary line.
 const TOOL_SUMMARY_CHARS: usize = 160;
 
+/// Chars kept of a tool target (plus "…").
+const TOOL_TARGET_MAX_CHARS: usize = 120;
+/// Chars kept of a subagent's final text.
+const SUBAGENT_RESULT_MAX_CHARS: usize = 1_500;
+/// `tool_use` names that get their own [`ConvItem::Subagent`] item instead
+/// of a plain [`ConvItem::Tool`].
+const SUBAGENT_TOOLS: [&str; 2] = ["Task", "Agent"];
+
 /// Encode a working directory the way Claude Code names its per-project
 /// transcript directory: every char outside `[A-Za-z0-9]` becomes `-`.
 /// The read script does this on the host (after `pwd -P`) with an
@@ -84,6 +92,41 @@ pub fn read_script(
     claude_session_id: &str,
     max_bytes: usize,
 ) -> String {
+    let mut s = locate_script(tmux_name, stored_path, fallback_dir, claude_session_id);
+    s.push_str(&format!("tail -c {max_bytes} \"$f\"\n"));
+    s
+}
+
+/// The bash script that prints the transcript lines mentioning
+/// `tool_use_id` (a fixed-string grep), at most `max_bytes` of them. A
+/// missing id prints nothing and still exits 0; a missing transcript exits
+/// 4 as in [`read_script`]. `tool_use_id` is validated by the caller
+/// (`validate::tool_use_id`) and quoted here.
+pub fn tool_lines_script(
+    tmux_name: Option<&str>,
+    stored_path: Option<&str>,
+    fallback_dir: Option<&str>,
+    claude_session_id: &str,
+    tool_use_id: &str,
+    max_bytes: usize,
+) -> String {
+    let mut s = locate_script(tmux_name, stored_path, fallback_dir, claude_session_id);
+    s.push_str(&format!(
+        "{{ grep -F -- {} \"$f\" || true; }} | head -c {max_bytes}\n",
+        quote(tool_use_id)
+    ));
+    s
+}
+
+/// The shared prefix of [`read_script`] / [`tool_lines_script`]: locate the
+/// transcript (resolution order documented on [`read_script`]) and leave it
+/// in `$f`, or print the `NO_TRANSCRIPT` sentinel on stderr and `exit 4`.
+fn locate_script(
+    tmux_name: Option<&str>,
+    stored_path: Option<&str>,
+    fallback_dir: Option<&str>,
+    claude_session_id: &str,
+) -> String {
     let tmux_q = quote(tmux_name.unwrap_or(""));
     // Exact pane target: a bare name would let tmux prefix-match another session.
     let tmux_target_q = quote(&crate::tmux::exact_pane(tmux_name.unwrap_or("")));
@@ -115,7 +158,6 @@ if [ -z "$f" ]; then
   done
 fi
 if [ -z "$f" ]; then printf '{NO_TRANSCRIPT} %s\n' "$id" >&2; exit 4; fi
-tail -c {max_bytes} "$f"
 "#
     )
 }
@@ -176,6 +218,50 @@ fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// What a tool call touched, for its compact line: a path, a pattern, a
+/// URL, a query or the first line of a command. `None` when nothing
+/// identifying is in the input.
+pub fn tool_target(_name: &str, input: Option<&serde_json::Value>) -> Option<String> {
+    let map = input?.as_object()?;
+    for key in [
+        "file_path",
+        "notebook_path",
+        "pattern",
+        "url",
+        "query",
+        "command",
+        "path",
+        "skill",
+        "description",
+    ] {
+        if let Some(s) = map.get(key).and_then(|v| v.as_str()) {
+            let first = s.lines().next().unwrap_or("").trim();
+            if first.is_empty() {
+                continue;
+            }
+            return Some(cap_chars(first, TOOL_TARGET_MAX_CHARS));
+        }
+    }
+    None
+}
+
+/// The text of a tool_result's content (a string, or its text blocks
+/// joined); images are skipped.
+fn tool_result_text(block: &serde_json::Value) -> Option<String> {
+    match block.get("content") {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(parts)) => {
+            let texts: Vec<&str> = parts
+                .iter()
+                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        }
+        _ => None,
+    }
+}
+
 /// Turns kept by `session_conversation`, and its character budget.
 pub const CONV_TURNS: usize = 10;
 /// Most turns the Conversation tab may ask for with "Load older".
@@ -231,6 +317,58 @@ pub enum ConvItem {
         summary: String,
         #[serde(default)]
         error: bool,
+        /// The `tool_use` id, so a lazy detail fetch can find it again.
+        #[serde(default)]
+        id: Option<String>,
+        /// The tool's name: `"Bash"`, `"Edit"`, `"mcp__x__y"`, …
+        #[serde(default)]
+        name: String,
+        /// What the tool touched; see [`tool_target`].
+        #[serde(default)]
+        target: Option<String>,
+        /// ISO timestamp of the `tool_use` entry.
+        #[serde(default)]
+        at: Option<String>,
+        /// ISO timestamp of its `tool_result` entry.
+        #[serde(default)]
+        ended_at: Option<String>,
+        /// A `tool_result` was seen for this call. Defaults to `true` for
+        /// a hub that predates the field, so its lines render as finished
+        /// rather than as a call that never got a result.
+        #[serde(default = "serde_true")]
+        done: bool,
+    },
+    /// A `Task` / `Agent` call, kept apart from other tools so its final
+    /// text can be shown without cramming a subagent transcript into the
+    /// tool one-liner.
+    Subagent {
+        /// The `tool_use` id.
+        #[serde(default)]
+        id: Option<String>,
+        /// `"Task"` or `"Agent"`.
+        #[serde(default)]
+        name: String,
+        /// `input.subagent_type`.
+        #[serde(default)]
+        agent_type: Option<String>,
+        /// `input.description`.
+        #[serde(default)]
+        description: Option<String>,
+        /// The final text of its `tool_result`, capped at
+        /// [`SUBAGENT_RESULT_MAX_CHARS`].
+        #[serde(default)]
+        result: Option<String>,
+        #[serde(default)]
+        error: bool,
+        /// ISO timestamp of the `tool_use` entry.
+        #[serde(default)]
+        at: Option<String>,
+        /// ISO timestamp of its `tool_result` entry.
+        #[serde(default)]
+        ended_at: Option<String>,
+        /// A `tool_result` was seen for this call.
+        #[serde(default)]
+        done: bool,
     },
     /// A compaction (`system/compact_boundary`). `summary` is the text of
     /// the following `isCompactSummary` user entry when the read tail has
@@ -257,6 +395,10 @@ pub enum ConvItem {
         #[serde(default)]
         during_tool: bool,
     },
+}
+
+fn serde_true() -> bool {
+    true
 }
 
 /// Cap on a compaction's carried summary text (chars).
@@ -432,15 +574,41 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     for b in blocks
                         .iter()
                         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-                        .filter(|b| b.get("is_error").and_then(|e| e.as_bool()) == Some(true))
                     {
+                        let is_err = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
                         let idx = b
                             .get("tool_use_id")
                             .and_then(|i| i.as_str())
                             .and_then(|i| tool_items.get(i).copied());
                         if let (Some(idx), Some(turn)) = (idx, current.as_mut()) {
-                            if let Some(ConvItem::Tool { error, .. }) = turn.items.get_mut(idx) {
-                                *error = true;
+                            let ended = at();
+                            match turn.items.get_mut(idx) {
+                                Some(ConvItem::Tool {
+                                    error,
+                                    done,
+                                    ended_at,
+                                    ..
+                                }) => {
+                                    *error |= is_err;
+                                    *done = true;
+                                    *ended_at = ended;
+                                }
+                                Some(ConvItem::Subagent {
+                                    error,
+                                    done,
+                                    ended_at,
+                                    result,
+                                    ..
+                                }) => {
+                                    *error |= is_err;
+                                    *done = true;
+                                    *ended_at = ended;
+                                    if let Some(t) = tool_result_text(b) {
+                                        *result =
+                                            Some(cap_chars(t.trim(), SUBAGENT_RESULT_MAX_CHARS));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -554,13 +722,47 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 }
                             }
                             Some("tool_use") => {
-                                if let Some(id) = b.get("id").and_then(|i| i.as_str()) {
-                                    tool_items.insert(id.to_string(), turn.items.len());
+                                let id = b.get("id").and_then(|i| i.as_str()).map(String::from);
+                                let name = b
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("tool")
+                                    .to_string();
+                                if let Some(id) = &id {
+                                    tool_items.insert(id.clone(), turn.items.len());
                                 }
-                                turn.items.push(ConvItem::Tool {
-                                    summary: tool_summary(b),
-                                    error: false,
-                                });
+                                let input = b.get("input");
+                                if SUBAGENT_TOOLS.contains(&name.as_str()) {
+                                    turn.items.push(ConvItem::Subagent {
+                                        id,
+                                        agent_type: input
+                                            .and_then(|v| v.get("subagent_type"))
+                                            .and_then(|v| v.as_str())
+                                            .map(String::from),
+                                        description: input
+                                            .and_then(|v| v.get("description"))
+                                            .and_then(|v| v.as_str())
+                                            .map(String::from),
+                                        result: None,
+                                        error: false,
+                                        at: at(),
+                                        ended_at: None,
+                                        done: false,
+                                        name,
+                                    });
+                                } else {
+                                    let target = tool_target(&name, input);
+                                    turn.items.push(ConvItem::Tool {
+                                        summary: tool_summary(b),
+                                        error: false,
+                                        id,
+                                        name,
+                                        target,
+                                        at: at(),
+                                        ended_at: None,
+                                        done: false,
+                                    });
+                                }
                             }
                             _ => {}
                         }
@@ -588,6 +790,12 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
                 .map(|i| match i {
                     ConvItem::Text { text } => text.clone(),
                     ConvItem::Tool { summary, .. } => format!("{TOOL_USE_PREFIX}{summary}"),
+                    ConvItem::Subagent {
+                        name, description, ..
+                    } => format!(
+                        "{TOOL_USE_PREFIX}{name}(description={})",
+                        one_line(description.as_deref().unwrap_or(""))
+                    ),
                     ConvItem::Compact { trigger, .. } => {
                         format!("[compacted] {}", trigger.as_deref().unwrap_or("unknown"))
                     }
@@ -608,7 +816,17 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
 fn item_chars(item: &ConvItem) -> usize {
     match item {
         ConvItem::Text { text } => text.chars().count(),
-        ConvItem::Tool { summary, .. } => summary.chars().count(),
+        ConvItem::Tool {
+            summary, target, ..
+        } => summary.chars().count() + target.as_deref().map_or(0, |s| s.chars().count()),
+        ConvItem::Subagent {
+            description,
+            result,
+            ..
+        } => {
+            description.as_deref().map_or(0, |s| s.chars().count())
+                + result.as_deref().map_or(0, |s| s.chars().count())
+        }
         ConvItem::Compact { summary, .. } => summary.as_deref().map_or(0, |s| s.chars().count()),
         ConvItem::Command { name, args, output } => {
             name.chars().count()
@@ -852,6 +1070,166 @@ pub async fn fetch_conversation_for_row(
     Ok(conv)
 }
 
+/// Cap on every text field of a [`ToolDetail`] (chars; "…" appended when cut).
+pub const TOOL_DETAIL_MAX_CHARS: usize = 8_000;
+/// Most bytes of matching transcript lines [`fetch_tool_detail`] reads.
+pub const TOOL_DETAIL_READ_BYTES: usize = 2 * 1_048_576;
+
+/// One tool call's input and result, read on demand (`session_tool_detail`)
+/// so the conversation poll never carries them.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ToolDetail {
+    pub id: String,
+    pub name: String,
+    /// Pretty JSON of the input, ≤ 8 000 chars ("…" when cut).
+    pub input: String,
+    /// Edit / MultiEdit / Write: the file path and the before/after text,
+    /// each ≤ 8 000 chars; None for other tools.
+    pub edit: Option<EditDetail>,
+    /// Bash: the full command (≤ 8 000 chars); None otherwise.
+    pub command: Option<String>,
+    /// Result text (string or joined text blocks), ≤ 8 000 chars; None until it arrives.
+    pub result: Option<String>,
+    pub is_error: bool,
+}
+
+/// The file change of an Edit / MultiEdit / Write call.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct EditDetail {
+    pub file_path: String,
+    pub old: String,
+    pub new: String,
+}
+
+/// PURE: [`EditDetail`] for a file-editing tool's `input`; `None` for other
+/// tools. MultiEdit joins its edits' strings with `"\n…\n"`; Write has an
+/// empty `old`.
+fn edit_detail(name: &str, input: &serde_json::Value) -> Option<EditDetail> {
+    let str_of = |v: &serde_json::Value, k: &str| {
+        v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    };
+    let (old, new) = match name {
+        "Edit" => (str_of(input, "old_string"), str_of(input, "new_string")),
+        "MultiEdit" => {
+            let edits: &[serde_json::Value] = input
+                .get("edits")
+                .and_then(|e| e.as_array())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let join = |k: &str| {
+                edits
+                    .iter()
+                    .map(|e| str_of(e, k))
+                    .collect::<Vec<_>>()
+                    .join("\n…\n")
+            };
+            (join("old_string"), join("new_string"))
+        }
+        "Write" => (String::new(), str_of(input, "content")),
+        _ => return None,
+    };
+    Some(EditDetail {
+        file_path: str_of(input, "file_path"),
+        old: cap_chars(&old, TOOL_DETAIL_MAX_CHARS),
+        new: cap_chars(&new, TOOL_DETAIL_MAX_CHARS),
+    })
+}
+
+/// PURE: the detail of tool call `id` from transcript JSONL `lines` (the
+/// whole file or just the lines mentioning the id). `None` when no
+/// `tool_use` block has that id. Unparseable lines (a cut last line) and
+/// blocks of other ids are skipped.
+pub fn parse_tool_detail(lines: &str, id: &str) -> Option<ToolDetail> {
+    let mut detail: Option<ToolDetail> = None;
+    let mut result: Option<(Option<String>, bool)> = None;
+    for line in lines.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(blocks) = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for b in blocks {
+            match b.get("type").and_then(|t| t.as_str()) {
+                Some("tool_use")
+                    if detail.is_none() && b.get("id").and_then(|x| x.as_str()) == Some(id) =>
+                {
+                    let name = b
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let input = b.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                    let pretty = serde_json::to_string_pretty(&input).unwrap_or_default();
+                    let command = (name == "Bash")
+                        .then(|| input.get("command").and_then(|c| c.as_str()))
+                        .flatten()
+                        .map(|c| cap_chars(c, TOOL_DETAIL_MAX_CHARS));
+                    detail = Some(ToolDetail {
+                        id: id.to_string(),
+                        edit: edit_detail(&name, &input),
+                        name,
+                        input: cap_chars(&pretty, TOOL_DETAIL_MAX_CHARS),
+                        command,
+                        result: None,
+                        is_error: false,
+                    });
+                }
+                Some("tool_result")
+                    if b.get("tool_use_id").and_then(|x| x.as_str()) == Some(id) =>
+                {
+                    let is_error = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
+                    result = Some((tool_result_text(b), is_error));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut d = detail?;
+    if let Some((text, is_error)) = result {
+        // A result with no text blocks (e.g. only an image) still arrived.
+        d.result = Some(cap_chars(&text.unwrap_or_default(), TOOL_DETAIL_MAX_CHARS));
+        d.is_error = is_error;
+    }
+    Some(d)
+}
+
+/// `session_tool_detail`: the input and result of one tool call of the
+/// row's current conversation (or the earlier one `claude_session_id`
+/// names), grepped from its transcript on the host. Errors: `E_INVALID`
+/// (bad id / not one of the row's conversations), `E_INVALID_STATE`,
+/// `E_NO_TRANSCRIPT`, `E_NOTFOUND` (the call is not in the transcript),
+/// transport codes. The store lock is never held across the read.
+pub async fn fetch_tool_detail(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    row: &SessionRow,
+    claude_session_id: Option<&str>,
+    tool_use_id: &str,
+) -> Result<ToolDetail, IpcError> {
+    crate::validate::tool_use_id(tool_use_id)?;
+    let args = match claude_session_id {
+        Some(id) => resolve_args_for(store, row, id, CONV_TURNS, CONV_MAX_CHARS)?,
+        None => resolve_args(store, row, CONV_TURNS, CONV_MAX_CHARS)?,
+    };
+    validate_args(&args)?;
+    let script = tool_lines_script(
+        args.tmux_name.as_deref(),
+        args.transcript_path.as_deref(),
+        args.cwd.as_deref(),
+        &args.claude_session_id,
+        tool_use_id,
+        TOOL_DETAIL_READ_BYTES,
+    );
+    let lines = read_tail(&args, &script, ssh).await?;
+    parse_tool_detail(&lines, tool_use_id)
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "tool call not in transcript"))
+}
+
 /// Most timeline events [`fetch_conversation_for_row`] attaches to a
 /// `Conversation` for the UI (the `session_conversation` Tauri command).
 pub const CONV_EVENTS_LIMIT_UI: i64 = 200;
@@ -868,14 +1246,21 @@ pub fn conv_events_limit(requested: Option<i64>) -> i64 {
         .clamp(1, CONV_EVENTS_LIMIT_UI)
 }
 
-/// Validate `args` and build the script that prints the last `max_bytes` of
-/// its transcript. Errors: `E_INVALID` (bad id / host / pane name).
-fn tail_script(args: &TranscriptArgs, max_bytes: usize) -> Result<String, IpcError> {
+/// Validate the values of `args` that are interpolated into a read script.
+/// Errors: `E_INVALID` (bad id / host / pane name).
+fn validate_args(args: &TranscriptArgs) -> Result<(), IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::claude_session_id(&args.claude_session_id)?;
     if let Some(name) = args.tmux_name.as_deref() {
         crate::validate::tmux_name_addressable(name)?;
     }
+    Ok(())
+}
+
+/// Validate `args` and build the script that prints the last `max_bytes` of
+/// its transcript. Errors: `E_INVALID` (bad id / host / pane name).
+fn tail_script(args: &TranscriptArgs, max_bytes: usize) -> Result<String, IpcError> {
+    validate_args(args)?;
     Ok(read_script(
         args.tmux_name.as_deref(),
         args.transcript_path.as_deref(),
@@ -1309,11 +1694,23 @@ mod tests {
             vec![
                 ConvItem::Tool {
                     summary: "Bash(command=cargo test)".into(),
-                    error: true
+                    error: true,
+                    id: Some("t1".into()),
+                    name: "Bash".into(),
+                    target: Some("cargo test".into()),
+                    at: None,
+                    ended_at: None,
+                    done: true,
                 },
                 ConvItem::Tool {
                     summary: "Read(file_path=a.rs)".into(),
-                    error: false
+                    error: false,
+                    id: Some("t2".into()),
+                    name: "Read".into(),
+                    target: Some("a.rs".into()),
+                    at: None,
+                    ended_at: None,
+                    done: true,
                 },
                 ConvItem::Text {
                     text: "One failed.".into()
@@ -1355,7 +1752,13 @@ mod tests {
                 },
                 ConvItem::Tool {
                     summary: "Bash(command=ls -la)".into(),
-                    error: false
+                    error: false,
+                    id: None,
+                    name: "Bash".into(),
+                    target: Some("ls -la".into()),
+                    at: None,
+                    ended_at: None,
+                    done: false,
                 },
             ]
         );
@@ -1388,6 +1791,241 @@ mod tests {
     fn asst(text: &str) -> serde_json::Value {
         serde_json::json!({"type":"assistant","timestamp":"2026-09-18T10:00:05Z",
             "message":{"content":[{"type":"text","text":text}]}})
+    }
+    fn tool_use(ts: &str, id: &str, name: &str, input: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"type":"assistant","timestamp":ts,
+            "message":{"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}})
+    }
+    fn tool_result(ts: &str, id: &str, content: serde_json::Value, err: bool) -> serde_json::Value {
+        serde_json::json!({"type":"user","timestamp":ts,
+            "message":{"content":[{"type":"tool_result","tool_use_id":id,"content":content,"is_error":err}]}})
+    }
+    /// A `Tool` item with only `summary`/`error` set, for synthetic
+    /// (non-parsed) test turns that don't exercise the new fields.
+    fn tool_item(summary: &str, error: bool) -> ConvItem {
+        ConvItem::Tool {
+            summary: summary.into(),
+            error,
+            id: None,
+            name: String::new(),
+            target: None,
+            at: None,
+            ended_at: None,
+            done: false,
+        }
+    }
+
+    #[test]
+    fn a_tool_item_carries_id_name_target_times_and_done() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T09:00:20.100Z",
+                "toolu_1",
+                "Bash",
+                serde_json::json!({"command":"cargo test -p fleet-core\nsecond line"}),
+            ),
+            tool_result(
+                "2026-09-18T09:00:41.900Z",
+                "toolu_1",
+                serde_json::json!("ok"),
+                false,
+            ),
+            tool_use(
+                "2026-09-18T09:00:42Z",
+                "toolu_2",
+                "Edit",
+                serde_json::json!({"file_path":"/w/src/a.rs","old_string":"a","new_string":"b"}),
+            ),
+        ]));
+        match &t[0].items[0] {
+            ConvItem::Tool {
+                id,
+                name,
+                target,
+                at,
+                ended_at,
+                done,
+                error,
+                ..
+            } => {
+                assert_eq!(id.as_deref(), Some("toolu_1"));
+                assert_eq!(name, "Bash");
+                assert_eq!(target.as_deref(), Some("cargo test -p fleet-core"));
+                assert_eq!(at.as_deref(), Some("2026-09-18T09:00:20.100Z"));
+                assert_eq!(ended_at.as_deref(), Some("2026-09-18T09:00:41.900Z"));
+                assert!(*done && !*error);
+            }
+            other => panic!("{other:?}"),
+        }
+        match &t[0].items[1] {
+            ConvItem::Tool {
+                target,
+                done,
+                ended_at,
+                ..
+            } => {
+                assert_eq!(target.as_deref(), Some("/w/src/a.rs"));
+                assert!(!*done);
+                assert_eq!(*ended_at, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_and_agent_calls_become_subagent_items_with_their_final_text() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T09:00:00Z",
+                "toolu_3",
+                "Task",
+                serde_json::json!({"description":"Map the store","prompt":"p","subagent_type":"Explore"}),
+            ),
+            tool_result(
+                "2026-09-18T09:02:00Z",
+                "toolu_3",
+                serde_json::json!([{"type":"text","text":"Final report: all good"}]),
+                false,
+            ),
+            tool_use(
+                "2026-09-18T09:03:00Z",
+                "toolu_4",
+                "Agent",
+                serde_json::json!({"description":"Second"}),
+            ),
+        ]));
+        assert_eq!(
+            t[0].items[0],
+            ConvItem::Subagent {
+                id: Some("toolu_3".into()),
+                name: "Task".into(),
+                agent_type: Some("Explore".into()),
+                description: Some("Map the store".into()),
+                result: Some("Final report: all good".into()),
+                error: false,
+                at: Some("2026-09-18T09:00:00Z".into()),
+                ended_at: Some("2026-09-18T09:02:00Z".into()),
+                done: true,
+            }
+        );
+        assert!(matches!(
+            &t[0].items[1],
+            ConvItem::Subagent {
+                done: false,
+                agent_type: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_subagent_result_is_capped_at_1500_chars_in_the_poll_payload() {
+        let long = "é".repeat(SUBAGENT_RESULT_MAX_CHARS + 500);
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T09:00:00Z",
+                "toolu_9",
+                "Task",
+                serde_json::json!({"description":"Long"}),
+            ),
+            tool_result(
+                "2026-09-18T09:01:00Z",
+                "toolu_9",
+                serde_json::json!([{"type":"text","text": long}]),
+                false,
+            ),
+        ]));
+        assert_eq!(SUBAGENT_RESULT_MAX_CHARS, 1_500);
+        let ConvItem::Subagent {
+            result: Some(r), ..
+        } = &t[0].items[0]
+        else {
+            panic!("{:?}", t[0].items[0]);
+        };
+        assert_eq!(r.chars().count(), 1_501);
+        assert!(r.ends_with('…'));
+        assert!(r.starts_with(&"é".repeat(1_500)));
+    }
+
+    #[test]
+    fn tool_target_prefers_what_the_tool_touched() {
+        let j = |v: serde_json::Value| Some(v);
+        assert_eq!(
+            tool_target(
+                "Read",
+                j(serde_json::json!({"file_path":"/a/b.rs"})).as_ref()
+            )
+            .as_deref(),
+            Some("/a/b.rs")
+        );
+        assert_eq!(
+            tool_target(
+                "Grep",
+                j(serde_json::json!({"pattern":"fn x","path":"src"})).as_ref()
+            )
+            .as_deref(),
+            Some("fn x")
+        );
+        assert_eq!(
+            tool_target(
+                "WebFetch",
+                j(serde_json::json!({"url":"https://x.y"})).as_ref()
+            )
+            .as_deref(),
+            Some("https://x.y")
+        );
+        assert_eq!(
+            tool_target("Bash", j(serde_json::json!({"command":"a\nb"})).as_ref()).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            tool_target("TodoWrite", j(serde_json::json!({"todos":[]})).as_ref()),
+            None
+        );
+        let long = "x".repeat(300);
+        assert_eq!(
+            tool_target("Bash", j(serde_json::json!({"command": long})).as_ref())
+                .unwrap()
+                .chars()
+                .count(),
+            121
+        );
+    }
+
+    #[test]
+    fn the_mcp_text_rendering_of_tools_is_unchanged() {
+        let turns = parse_turns(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T09:00:00Z",
+                "toolu_1",
+                "Bash",
+                serde_json::json!({"command":"ls"}),
+            ),
+        ]));
+        assert!(turns.join("\n").contains("[tool_use] Bash(command=ls)"));
+    }
+
+    #[test]
+    fn subagent_calls_render_like_the_old_tool_summary_in_plain_text() {
+        // parse_turns pins the plain-text (MCP) projection: a Subagent
+        // renders the same "Name(description=…)" shape tool_summary used
+        // to produce for Task/Agent before they were split out.
+        let turns = parse_turns(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T09:00:00Z",
+                "toolu_5",
+                "Task",
+                serde_json::json!({"description":"Map the store","prompt":"p","subagent_type":"Explore"}),
+            ),
+        ]));
+        assert!(turns
+            .join("\n")
+            .contains("[tool_use] Task(description=Map the store)"));
     }
 
     #[test]
@@ -1605,10 +2243,7 @@ mod tests {
                 ended_at: None,
                 items: vec![
                     ConvItem::Text { text: "hi".into() },
-                    ConvItem::Tool {
-                        summary: "Bash(command=ls)".into(),
-                        error: false,
-                    },
+                    tool_item("Bash(command=ls)", false),
                 ],
             }],
             truncated: false,
@@ -1618,7 +2253,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"items":[
-                {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)","error":false}]}],
+                {"kind":"text","text":"hi"},
+                {"kind":"tool","summary":"Bash(command=ls)","error":false,"id":null,"name":"","target":null,"at":null,"ended_at":null,"done":false}]}],
                 "truncated":false,"context":null,"events":[]})
         );
     }
@@ -1644,10 +2280,7 @@ mod tests {
                 ConvItem::Text {
                     text: "a".repeat(10),
                 },
-                ConvItem::Tool {
-                    summary: "b".repeat(10),
-                    error: false,
-                },
+                tool_item(&"b".repeat(10), false),
             ],
         };
         // 30 chars total; a 25 budget drops the oldest item only.
@@ -1655,13 +2288,7 @@ mod tests {
         assert!(c.truncated);
         assert_eq!(c.turns.len(), 1);
         assert_eq!(c.turns[0].prompt.as_deref(), Some("pppppppppp"));
-        assert_eq!(
-            c.turns[0].items,
-            vec![ConvItem::Tool {
-                summary: "b".repeat(10),
-                error: false
-            }]
-        );
+        assert_eq!(c.turns[0].items, vec![tool_item(&"b".repeat(10), false)]);
         // Exactly at budget: nothing dropped.
         assert!(!trim_conversation(vec![turn], 10, 30).truncated);
     }
@@ -1720,10 +2347,7 @@ mod tests {
             at: None,
             ended_at: None,
             items: vec![
-                ConvItem::Tool {
-                    summary: "Bash(command=ls)".into(),
-                    error: false,
-                },
+                tool_item("Bash(command=ls)", false),
                 ConvItem::Text {
                     text: "the reply!".into(),
                 },
@@ -2164,5 +2788,200 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, "E_NO_TRANSCRIPT");
+    }
+
+    #[test]
+    fn tool_use_id_validation() {
+        assert!(crate::validate::tool_use_id("toolu_01AbC-9").is_ok());
+        for bad in ["", "a b", "x;rm", &"a".repeat(101), "toolu_$x"] {
+            assert!(crate::validate::tool_use_id(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn detail_of_an_edit_with_its_result() {
+        let lines = jl(&[
+            tool_use(
+                "t",
+                "toolu_2",
+                "Edit",
+                serde_json::json!({"file_path":"/w/a.rs","old_string":"let a = 1;","new_string":"let a = 2;"}),
+            ),
+            tool_result(
+                "t",
+                "toolu_2",
+                serde_json::json!("The file /w/a.rs has been updated."),
+                false,
+            ),
+        ]);
+        let d = parse_tool_detail(&lines, "toolu_2").unwrap();
+        assert_eq!(d.name, "Edit");
+        assert_eq!(
+            d.edit,
+            Some(EditDetail {
+                file_path: "/w/a.rs".into(),
+                old: "let a = 1;".into(),
+                new: "let a = 2;".into()
+            })
+        );
+        assert_eq!(
+            d.result.as_deref(),
+            Some("The file /w/a.rs has been updated.")
+        );
+        assert!(!d.is_error);
+        assert_eq!(d.command, None);
+    }
+
+    #[test]
+    fn detail_of_a_failed_bash_and_of_a_pending_call() {
+        let lines = jl(&[
+            tool_use(
+                "t",
+                "toolu_1",
+                "Bash",
+                serde_json::json!({"command":"cargo test"}),
+            ),
+            tool_result(
+                "t",
+                "toolu_1",
+                serde_json::json!([{"type":"text","text":"error: 2 failed"}]),
+                true,
+            ),
+            tool_use(
+                "t",
+                "toolu_9",
+                "Read",
+                serde_json::json!({"file_path":"/x"}),
+            ),
+        ]);
+        let d = parse_tool_detail(&lines, "toolu_1").unwrap();
+        assert_eq!(d.command.as_deref(), Some("cargo test"));
+        assert_eq!(d.result.as_deref(), Some("error: 2 failed"));
+        assert!(d.is_error);
+        let p = parse_tool_detail(&lines, "toolu_9").unwrap();
+        assert_eq!(p.result, None);
+        assert!(p.input.contains("\"file_path\""));
+        assert_eq!(parse_tool_detail(&lines, "toolu_missing"), None);
+    }
+
+    #[test]
+    fn detail_text_is_capped() {
+        let big = "y".repeat(20_000);
+        let lines = jl(&[
+            tool_use(
+                "t",
+                "toolu_5",
+                "Bash",
+                serde_json::json!({"command": big.clone()}),
+            ),
+            tool_result("t", "toolu_5", serde_json::json!(big), false),
+        ]);
+        let d = parse_tool_detail(&lines, "toolu_5").unwrap();
+        assert_eq!(d.command.unwrap().chars().count(), 8_001);
+        assert_eq!(d.result.unwrap().chars().count(), 8_001);
+        assert!(d.input.chars().count() <= 8_001);
+    }
+
+    #[test]
+    fn detail_of_multiedit_and_write() {
+        let lines = jl(&[
+            tool_use(
+                "t",
+                "toolu_m",
+                "MultiEdit",
+                serde_json::json!({"file_path":"/w/b.rs","edits":[
+                {"old_string":"a","new_string":"b"},{"old_string":"c","new_string":"d"}]}),
+            ),
+            tool_use(
+                "t",
+                "toolu_w",
+                "Write",
+                serde_json::json!({"file_path":"/w/c.rs","content":"fn main() {}"}),
+            ),
+        ]);
+        let m = parse_tool_detail(&lines, "toolu_m").unwrap();
+        assert_eq!(
+            m.edit,
+            Some(EditDetail {
+                file_path: "/w/b.rs".into(),
+                old: "a\n…\nc".into(),
+                new: "b\n…\nd".into()
+            })
+        );
+        let w = parse_tool_detail(&lines, "toolu_w").unwrap();
+        assert_eq!(
+            w.edit,
+            Some(EditDetail {
+                file_path: "/w/c.rs".into(),
+                old: "".into(),
+                new: "fn main() {}".into()
+            })
+        );
+        assert_eq!(w.command, None);
+    }
+
+    #[test]
+    fn detail_ignores_a_truncated_line_and_other_ids_that_share_a_prefix() {
+        // `grep -F toolu_1` also matches `toolu_12`, and `head -c` may cut
+        // the last line mid-JSON.
+        let lines = format!(
+            "{}\n{}\n{{\"type\":\"user\",\"mess",
+            tool_use(
+                "t",
+                "toolu_12",
+                "Bash",
+                serde_json::json!({"command":"other"})
+            ),
+            tool_use(
+                "t",
+                "toolu_1",
+                "Bash",
+                serde_json::json!({"command":"mine"})
+            ),
+        );
+        let d = parse_tool_detail(&lines, "toolu_1").unwrap();
+        assert_eq!(d.command.as_deref(), Some("mine"));
+        assert_eq!(d.result, None);
+    }
+
+    #[test]
+    fn the_tool_lines_script_quotes_the_id_and_greps_fixed_strings() {
+        let s = tool_lines_script(
+            None,
+            Some("/h/.claude/projects/x/a.jsonl"),
+            None,
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "toolu_1",
+            262_144,
+        );
+        assert!(s.contains("grep -F -- 'toolu_1'"));
+        assert!(s.contains("head -c 262144"));
+    }
+
+    #[test]
+    fn the_tool_lines_script_prints_matching_lines_and_succeeds_on_no_match() {
+        let home = tempfile::tempdir().unwrap();
+        let proj = home.path().join(".claude/projects/-x");
+        let text = jl(&[
+            tool_use("t", "toolu_a", "Bash", serde_json::json!({"command":"ls"})),
+            asst("unrelated"),
+        ]);
+        write_transcript(&proj, &text);
+        let hit = run_script(
+            home.path(),
+            &tool_lines_script(None, None, None, SID, "toolu_a", 1024),
+        );
+        assert!(hit.status.success());
+        let out = String::from_utf8_lossy(&hit.stdout);
+        assert!(
+            out.contains("toolu_a") && !out.contains("unrelated"),
+            "{out}"
+        );
+        let miss = run_script(
+            home.path(),
+            &tool_lines_script(None, None, None, SID, "toolu_zz", 1024),
+        );
+        assert!(miss.status.success(), "a missing id is not a shell failure");
+        assert!(miss.stdout.is_empty());
     }
 }

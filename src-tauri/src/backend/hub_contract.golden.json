@@ -58,14 +58,32 @@
     "during_tool",
     "kind"
   ],
+  "ConvItem::Subagent": [
+    "agent_type",
+    "at",
+    "description",
+    "done",
+    "ended_at",
+    "error",
+    "id",
+    "kind",
+    "name",
+    "result"
+  ],
   "ConvItem::Text": [
     "kind",
     "text"
   ],
   "ConvItem::Tool": [
+    "at",
+    "done",
+    "ended_at",
     "error",
+    "id",
     "kind",
-    "summary"
+    "name",
+    "summary",
+    "target"
   ],
   "ConvTurn": [
     "at",

@@ -6,6 +6,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   sessionConversation,
   listConversations,
+  toolDetail,
   sameConversation,
   isPinned,
   emptyStateText,
@@ -39,9 +40,17 @@ import {
   buildThread,
   lastEventLabel,
   mergeEvents,
+  toolVerb,
+  shortTarget,
+  formatDuration,
+  toolDurationMs,
+  doingNow,
+  hasPendingCall,
+  editDiffLines,
   type Conversation,
   type ConversationSummary,
   type ConvTurn,
+  type ConvItem,
 } from './conversation';
 import type { SessionRow } from './sessions';
 
@@ -101,6 +110,24 @@ describe('listConversations', () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     await listConversations(7, 5);
     expect(mockedInvoke).toHaveBeenCalledWith('session_conversations', { args: { session_id: 7, limit: 5 } });
+  });
+});
+
+describe('toolDetail', () => {
+  it('invokes session_tool_detail with the session and tool ids', async () => {
+    const detail = { id: 'toolu_1', name: 'Bash', input: '{}', edit: null, command: 'ls', result: null, is_error: false };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue(detail);
+    const r = await toolDetail(7, 'toolu_1');
+    expect(mockedInvoke).toHaveBeenCalledWith('session_tool_detail', { args: { session_id: 7, tool_use_id: 'toolu_1' } });
+    expect(r).toEqual({ ok: true, value: detail });
+  });
+
+  it('passes an earlier conversation id', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    await toolDetail(7, 'toolu_1', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+    expect(mockedInvoke).toHaveBeenCalledWith('session_tool_detail', {
+      args: { session_id: 7, tool_use_id: 'toolu_1', claude_session_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' },
+    });
   });
 });
 
@@ -173,12 +200,46 @@ describe('relativeTime', () => {
   });
 });
 
+/** A `tool` ConvItem with the fields not under test defaulted. */
+function tool(summary: string, error = false) {
+  return {
+    kind: 'tool' as const,
+    summary,
+    error,
+    id: null,
+    name: '',
+    target: null,
+    at: null,
+    ended_at: null,
+    done: false,
+  };
+}
+
+/** A `subagent` ConvItem with the fields not under test defaulted. */
+function subagent(over: Partial<Extract<ConvItem, { kind: 'subagent' }>> = {}) {
+  return {
+    kind: 'subagent' as const,
+    id: null,
+    name: 'Task',
+    agent_type: null,
+    description: null,
+    result: null,
+    error: false,
+    at: null,
+    ended_at: null,
+    done: false,
+    ...over,
+  };
+}
+
 describe('groupItems', () => {
   it('keeps text items apart and folds consecutive tool calls together', () => {
     const t = (text: string) => ({ kind: 'text' as const, text });
-    const u = (summary: string, error?: boolean) => ({ kind: 'tool' as const, summary, error });
-    const l = (summary: string, error = false) => ({ summary, error });
-    expect(groupItems([u('Read(a)'), u('Bash(ls)', true), t('x'), u('Edit(b)'), t('y'), t('z')])).toEqual([
+    const l = (summary: string, error = false) => {
+      const { kind: _kind, ...rest } = tool(summary, error);
+      return rest;
+    };
+    expect(groupItems([tool('Read(a)'), tool('Bash(ls)', true), t('x'), tool('Edit(b)'), t('y'), t('z')])).toEqual([
       { kind: 'tools', tools: [l('Read(a)'), l('Bash(ls)', true)] },
       { kind: 'text', text: 'x' },
       { kind: 'tools', tools: [l('Edit(b)')] },
@@ -189,12 +250,14 @@ describe('groupItems', () => {
   });
 
   it('new item kinds are their own groups and break a tool run', () => {
-    const g = groupItems([
-      { kind: 'tool', summary: 'Bash(ls)' },
-      { kind: 'interrupt', during_tool: true },
-      { kind: 'tool', summary: 'Read(x)' },
-    ]);
+    const g = groupItems([tool('Bash(ls)'), { kind: 'interrupt', during_tool: true }, tool('Read(x)')]);
     expect(g.map((x) => x.kind)).toEqual(['tools', 'interrupt', 'tools']);
+  });
+
+  it('a subagent item is its own group and breaks a tool run', () => {
+    const g = groupItems([tool('Bash(ls)'), subagent({ id: 's1', description: 'Map it' }), tool('Read(x)')]);
+    expect(g.map((x) => x.kind)).toEqual(['tools', 'subagent', 'tools']);
+    expect(g[1]).toEqual(subagent({ id: 's1', description: 'Map it' }));
   });
 });
 
@@ -206,10 +269,15 @@ describe('toolName / toolGroupLabel', () => {
   });
 
   it('counts calls and lists up to three distinct names in order, plus how many failed', () => {
-    const l = (summary: string, error = false) => ({ summary, error });
+    const l = (summary: string, error = false) => tool(summary, error);
     expect(toolGroupLabel([l('Read(a)'), l('Read(b)'), l('Bash(x)')])).toBe('3 tool calls · Read, Bash');
     expect(toolGroupLabel([l('A()'), l('B()'), l('C()'), l('D()'), l('A()')])).toBe('5 tool calls · A, B, C +1');
     expect(toolGroupLabel([l('Bash(x)', true), l('Bash(y)'), l('Read(z)', true)])).toBe('3 tool calls · Bash, Read · 2 failed');
+  });
+
+  it('prefers the structured name over parsing the summary when present', () => {
+    const named = { ...tool('irrelevant(summary=x)'), name: 'Bash' };
+    expect(toolGroupLabel([named])).toBe('1 tool calls · Bash');
   });
 });
 
@@ -479,5 +547,59 @@ describe('lastEventLabel / mergeEvents / statusChip', () => {
   it('status chip prefers compacting', () => {
     expect(statusChip({ claude_status: 'working', current_activity: 'compacting' })).toBe('compacting');
     expect(statusChip({ claude_status: 'idle', current_activity: null })).toBe('idle');
+  });
+});
+
+describe('tool helpers', () => {
+  it('verbs', () => {
+    expect(toolVerb('Bash')).toBe('Run');
+    expect(toolVerb('MultiEdit')).toBe('Edit');
+    expect(toolVerb('mcp__claude-fleet__list_sessions')).toBe('claude-fleet · list_sessions');
+    expect(toolVerb('Whatever')).toBe('Whatever');
+  });
+  it('short targets', () => {
+    expect(shortTarget('/Users/m/p/claude-fleet/crates/fleet-core/src/store/reconcile.rs')).toBe('…/store/reconcile.rs');
+    expect(shortTarget('src/a.rs')).toBe('src/a.rs');
+    expect(shortTarget('cargo test -p fleet-core')).toBe('cargo test -p fleet-core');
+    expect(shortTarget(null)).toBeNull();
+  });
+  it('durations', () => {
+    expect(formatDuration(400)).toBe('0.4s');
+    expect(formatDuration(12_300)).toBe('12s');
+    expect(formatDuration(185_000)).toBe('3m 05s');
+    expect(toolDurationMs('2026-09-18T09:00:00Z', '2026-09-18T09:00:12Z', null)).toBe(12_000);
+    expect(toolDurationMs('2026-09-18T09:00:00Z', null, Date.parse('2026-09-18T09:00:05Z'))).toBe(5_000);
+    expect(toolDurationMs(null, null, 1)).toBeNull();
+  });
+  it('doing now is the last unfinished tool of the last turn while working', () => {
+    const t = (o: object) => ({ kind: 'tool', summary: 'Bash(x)', error: false, id: 'i', name: 'Bash', target: 'cargo test', at: '2026-09-18T09:00:00Z', ended_at: null, done: false, ...o });
+    const c = { turns: [{ prompt: 'p', at: null, ended_at: null, items: [t({ done: true, name: 'Read', target: '/a' }), t({})] }], truncated: false, context: null, events: [] } as Conversation;
+    expect(doingNow(c, true, Date.parse('2026-09-18T09:00:07Z'))).toEqual({ label: 'Run cargo test', sinceMs: 7_000 });
+    expect(doingNow(c, false, 0)).toBeNull();
+    const cut = { ...c, turns: [{ ...c.turns[0], items: [...c.turns[0].items, { kind: 'interrupt', during_tool: true }] }] } as Conversation;
+    expect(doingNow(cut, true, 0)).toBeNull();
+    const sub = { ...c, turns: [{ ...c.turns[0], items: [{ kind: 'subagent', id: 's', name: 'Task', agent_type: 'Explore', description: 'Map it', result: null, error: false, at: null, ended_at: null, done: false }] }] } as Conversation;
+    expect(doingNow(sub, true, 0)).toEqual({ label: 'Explore · Map it', sinceMs: null });
+  });
+  it('edit diff keeps shared context and marks changes', () => {
+    expect(editDiffLines('a\nb\nc', 'a\nB\nc')).toEqual([
+      { kind: 'ctx', text: 'a' }, { kind: 'del', text: 'b' }, { kind: 'add', text: 'B' }, { kind: 'ctx', text: 'c' },
+    ]);
+    expect(editDiffLines('', 'new')).toEqual([{ kind: 'add', text: 'new' }]);
+  });
+});
+
+describe('hasPendingCall', () => {
+  const toolItem = (done: boolean) => ({
+    kind: 'tool' as const, summary: 'Bash(ls)', error: false, id: 't', name: 'Bash', target: 'ls', at: null, ended_at: null, done,
+  });
+  const c = (items: unknown[]): Conversation =>
+    ({ truncated: false, context: null, events: [], turns: [{ prompt: 'q', at: null, ended_at: null, items }] }) as unknown as Conversation;
+  it('is true only while the last turn has an unfinished call', () => {
+    expect(hasPendingCall(null)).toBe(false);
+    expect(hasPendingCall(c([{ kind: 'text', text: 'x' }]))).toBe(false);
+    expect(hasPendingCall(c([toolItem(true)]))).toBe(false);
+    expect(hasPendingCall(c([toolItem(false), { kind: 'text', text: 'x' }]))).toBe(true);
+    expect(hasPendingCall(c([{ kind: 'subagent', id: 's', name: 'Task', agent_type: null, description: null, result: null, error: false, at: null, ended_at: null, done: false }]))).toBe(true);
   });
 });

@@ -1,17 +1,21 @@
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, within } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 
 vi.mock('./conversation', async () => {
   const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
-  return { ...actual, sessionConversation: vi.fn(), sessionActivity: vi.fn(), listConversations: vi.fn() };
+  return { ...actual, sessionConversation: vi.fn(), sessionActivity: vi.fn(), listConversations: vi.fn(), toolDetail: vi.fn() };
+});
+vi.mock('./clipboard', async () => {
+  const actual = await vi.importActual<typeof import('./clipboard')>('./clipboard');
+  return { ...actual, copyText: vi.fn() };
 });
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
 });
-import { sessionConversation, sessionActivity, listConversations, type ConversationSummary, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
+import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, type SessionRow } from './sessions';
 import { composerPresets, resetComposerPresets } from './composer_presets';
@@ -19,11 +23,13 @@ import { composerDrafts } from './conversation';
 import { openPathRequest } from './app_views';
 import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_events';
 import type { SessionEvent } from './timeline';
+import { copyText } from './clipboard';
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
 const mockedAct = sessionActivity as unknown as ReturnType<typeof vi.fn>;
 const mockedList = listConversations as unknown as ReturnType<typeof vi.fn>;
+const mockedDetail = toolDetail as unknown as ReturnType<typeof vi.fn>;
 
 function session(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -39,6 +45,23 @@ function session(over: Partial<SessionRow> = {}): SessionRow {
   } as SessionRow;
 }
 
+/** A `tool` ConvItem with the fields not under test defaulted (a finished
+ *  call, so it does not take over the activity indicator's label). */
+function tool(summary: string, over: Partial<{ error: boolean; id: string | null; name: string; target: string | null; at: string | null; ended_at: string | null; done: boolean }> = {}) {
+  return {
+    kind: 'tool' as const,
+    summary,
+    error: false,
+    id: null,
+    name: '',
+    target: null,
+    at: null,
+    ended_at: null,
+    done: true,
+    ...over,
+  };
+}
+
 function conv(over: Partial<Conversation> = {}): Conversation {
   return {
     truncated: false,
@@ -49,10 +72,7 @@ function conv(over: Partial<Conversation> = {}): Conversation {
         prompt: 'fix the bug',
         at: '2026-09-13T10:00:00.000Z',
         ended_at: null,
-        items: [
-          { kind: 'text', text: 'looking into it' },
-          { kind: 'tool', summary: 'Bash(command=ls -la)' },
-        ],
+        items: [{ kind: 'text', text: 'looking into it' }, tool('Bash(command=ls -la)', { name: 'Bash', target: 'ls -la' })],
       },
     ],
     ...over,
@@ -75,6 +95,11 @@ beforeEach(() => {
   mockedSend.mockReset();
   mockedAct.mockReset();
   mockedList.mockReset();
+  mockedDetail.mockReset();
+  mockedDetail.mockResolvedValue({
+    ok: true,
+    value: { id: 't1', name: 'Bash', input: '{}', edit: null, command: 'ls', result: 'out', is_error: false },
+  });
   mockedList.mockResolvedValue({ ok: true, value: [] });
   mockedAct.mockResolvedValue({ ok: false, error: { code: 'E_INVALID_STATE', message: 'no pane' } });
   composerDrafts.clear();
@@ -96,7 +121,8 @@ describe('ConversationPanel', () => {
     await tick();
     expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
     expect(screen.getByTestId('conv-text').textContent).toContain('looking into it');
-    expect(screen.getByTestId('conv-tool').textContent).toContain('Bash(command=ls -la)');
+    expect(screen.getByTestId('conv-tool').textContent).toContain('Run');
+    expect(screen.getByTestId('conv-tool').textContent).toContain('ls -la');
     expect(screen.getByText(/Older turns not shown/)).toBeTruthy();
   });
 
@@ -306,7 +332,7 @@ describe('ConversationPanel', () => {
     await rerender({ session: session({ id: 2 }), visible: true });
     await tick();
     expect(mockedConv).toHaveBeenCalledTimes(2);
-    expect(mockedConv).toHaveBeenLastCalledWith(2, undefined, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(2, undefined, 'sess-abc');
   });
 
   it('does not render an empty quote block for a turn without a prompt', async () => {
@@ -396,11 +422,11 @@ describe('ConversationPanel', () => {
               at: null,
               ended_at: null,
               items: [
-                { kind: 'tool', summary: 'Read(file_path=a)' },
-                { kind: 'tool', summary: 'Bash(command=ls)' },
-                { kind: 'tool', summary: 'Read(file_path=b)' },
+                tool('Read(file_path=a)'),
+                tool('Bash(command=ls)'),
+                tool('Read(file_path=b)'),
                 { kind: 'text', text: 'between' },
-                { kind: 'tool', summary: 'Edit(file_path=c)' },
+                tool('Edit(file_path=c)', { name: 'Edit', target: '/r/src/lib/c.ts' }),
               ],
             },
           ],
@@ -417,8 +443,9 @@ describe('ConversationPanel', () => {
     expect(group.querySelectorAll('[data-testid="conv-tool"]')).toHaveLength(3);
     const all = screen.getAllByTestId('conv-tool');
     expect(all).toHaveLength(4);
-    expect(all[3].closest('details')).toBeNull();
-    expect(all[3].textContent).toContain('Edit(file_path=c)');
+    expect(all[3].closest('[data-testid="conv-tools"]')).toBeNull();
+    expect(all[3].textContent).toContain('Edit');
+    expect(all[3].textContent).toContain('…/lib/c.ts');
   });
 
   it('clamps a long prompt with Show more / Show less', async () => {
@@ -839,15 +866,12 @@ describe('ConversationPanel tool outcomes', () => {
       ok(
         conv({
           turns: [
-            { prompt: 'p', at: null, ended_at: null, items: [{ kind: 'tool', summary: 'Bash(cargo test)', error: true }] },
+            { prompt: 'p', at: null, ended_at: null, items: [tool('Bash(cargo test)', { error: true })] },
             {
               prompt: 'q',
               at: null,
               ended_at: null,
-              items: [
-                { kind: 'tool', summary: 'Read(a)' },
-                { kind: 'tool', summary: 'Bash(b)', error: true },
-              ],
+              items: [tool('Read(a)'), tool('Bash(b)', { error: true })],
             },
           ],
         }),
@@ -893,10 +917,7 @@ describe('ConversationPanel turn duration and open tool group', () => {
   });
 
   it("keeps the running turn's last tool group open, earlier groups folded", async () => {
-    const tools = (n: string) => [
-      { kind: 'tool' as const, summary: `${n}1()` },
-      { kind: 'tool' as const, summary: `${n}2()` },
-    ];
+    const tools = (n: string) => [tool(`${n}1()`), tool(`${n}2()`)];
     mockedConv.mockReturnValue(
       ok(
         conv({
@@ -1002,22 +1023,22 @@ describe('ConversationPanel load older', () => {
     mockedConv.mockReturnValue(ok(conv({ truncated: true })));
     const { rerender } = render(ConversationPanel, { session: session(), visible: true });
     await settle();
-    expect(mockedConv).toHaveBeenLastCalledWith(1, undefined, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(1, undefined, 'sess-abc');
 
     await fireEvent.click(screen.getByTestId('conv-load-older'));
     await settle();
-    expect(mockedConv).toHaveBeenLastCalledWith(1, 20, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(1, 20, 'sess-abc');
     await fireEvent.click(screen.getByTestId('conv-load-older'));
     await settle();
-    expect(mockedConv).toHaveBeenLastCalledWith(1, 30, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(1, 30, 'sess-abc');
 
     vi.advanceTimersByTime(CONVERSATION_POLL_MS);
     await settle();
-    expect(mockedConv).toHaveBeenLastCalledWith(1, 30, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(1, 30, 'sess-abc');
 
     await rerender({ session: session({ id: 2 }), visible: true });
     await settle();
-    expect(mockedConv).toHaveBeenLastCalledWith(2, undefined, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(2, undefined, 'sess-abc');
   });
 
   it('offers Load older only when the read was truncated', async () => {
@@ -1186,7 +1207,7 @@ describe('ConversationPanel second review-round fixes', () => {
 
   it('a manually closed running group stays closed on refresh; a manually opened finished group stays open', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    const tools = (n: string, k: number) => Array.from({ length: k }, (_, i) => ({ kind: 'tool' as const, summary: `${n}${i}()` }));
+    const tools = (n: string, k: number) => Array.from({ length: k }, (_, i) => tool(`${n}${i}()`));
     const base = conv({
       turns: [
         { prompt: 'a', at: '2026-09-13T10:00:00Z', ended_at: null, items: tools('A', 2) },
@@ -1217,7 +1238,7 @@ describe('ConversationPanel second review-round fixes', () => {
       await fireEvent.click(screen.getByTestId('conv-load-older'));
       await settle();
     }
-    expect(mockedConv).toHaveBeenLastCalledWith(1, CONV_MAX_TURNS, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(1, CONV_MAX_TURNS, 'sess-abc');
     expect(screen.queryByTestId('conv-load-older')).toBeNull();
     expect(screen.getByText(/Older turns not shown/)).toBeTruthy();
   });
@@ -1438,7 +1459,7 @@ describe('ConversationPanel conversations', () => {
     await fireEvent.click(screen.getByTestId('conv-back-current'));
     await settle();
     expect(mockedConv.mock.calls.length).toBe(calls + 1);
-    expect(mockedConv.mock.calls.at(-1)![2]).toBeUndefined();
+    expect(mockedConv.mock.calls.at(-1)![2]).toBe('sess-abc');
     expect(screen.queryByTestId('conv-viewing-banner')).toBeNull();
     expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).disabled).toBe(false);
   });
@@ -1526,7 +1547,7 @@ describe('ConversationPanel conversations', () => {
     await rerender({ session: session({ id: 3, claude_session_id: 'yyy' }), visible: true });
     await settle();
     expect(screen.queryByTestId('conv-switch-notice')).toBeNull();
-    expect(mockedConv).toHaveBeenLastCalledWith(3, undefined, undefined);
+    expect(mockedConv).toHaveBeenLastCalledWith(3, undefined, 'yyy');
   });
 
   it('while viewing an earlier conversation, a new id only lights the switcher dot', async () => {
@@ -1749,5 +1770,577 @@ describe('ConversationPanel final phase-2 review fixes', () => {
     const notice = screen.getByTestId('conv-switch-notice').textContent!;
     expect(notice).toContain('New conversation');
     expect(notice).not.toContain('(');
+  });
+});
+
+describe('ConversationPanel detail UX', () => {
+  it('tool groups render ToolLine rows', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: 'q',
+              at: null,
+              ended_at: null,
+              items: [
+                tool('Read(/r/a/b/c.rs)', { id: 't1', name: 'Read', target: '/r/a/b/c.rs', done: true }),
+                tool('Bash(cargo test)', { id: 't2', name: 'Bash', target: 'cargo test', done: true, at: '2026-09-18T09:00:00Z', ended_at: '2026-09-18T09:00:12Z' }),
+                { kind: 'text', text: 'between' },
+                tool('Grep(foo)', { id: null, name: 'Grep', target: 'foo', done: true }),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const group = screen.getByTestId('conv-tools');
+    expect(group.querySelector('summary')?.textContent).toContain('2 tool calls · Read, Bash');
+    const rows = screen.getAllByTestId('conv-tool');
+    expect(rows).toHaveLength(3);
+    expect(rows[0].tagName).toBe('BUTTON');
+    expect(rows[0].textContent).toContain('Read');
+    expect(rows[0].textContent).toContain('…/b/c.rs');
+    expect(rows[1].textContent).toContain('Run');
+    expect(rows[1].textContent).toContain('12s');
+    expect(rows[2].closest('[data-testid="conv-tools"]')).toBeNull();
+    expect(rows[2].tagName).toBe('DIV');
+    expect(rows[2].textContent).toContain('Search');
+  });
+
+  it('a subagent renders as a block', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: 'q',
+              at: null,
+              ended_at: null,
+              items: [
+                {
+                  kind: 'subagent',
+                  id: 'toolu_9',
+                  name: 'Task',
+                  agent_type: 'Explore',
+                  description: 'Map the store',
+                  result: 'Found it.',
+                  error: false,
+                  at: '2026-09-18T09:00:00Z',
+                  ended_at: '2026-09-18T09:02:00Z',
+                  done: true,
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const block = screen.getByTestId('conv-subagent');
+    expect(block.textContent).toContain('Explore');
+    expect(block.textContent).toContain('Map the store');
+    expect(block.textContent).toContain('2m 00s');
+    expect(block.textContent).toContain('Found it.');
+  });
+
+  it('the indicator shows what is running', async () => {
+    const at = new Date(Date.now() - 3_000).toISOString();
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: 'q',
+              at,
+              ended_at: null,
+              items: [
+                tool('Read(/a)', { id: 't1', name: 'Read', target: '/a', done: true, at, ended_at: at }),
+                tool('Bash(cargo test)', { id: 't2', name: 'Bash', target: 'cargo test', done: false, at }),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    const ind = screen.getByTestId('conv-indicator');
+    expect(ind.textContent).toContain('Run cargo test');
+    expect(ind.textContent).toMatch(/Run cargo test · \d+s/);
+  });
+
+  it('the running timer ticks every second while something runs', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(Date.parse('2026-09-18T09:00:05Z'));
+    const running = conv({
+      turns: [
+        {
+          prompt: 'q',
+          at: '2026-09-18T09:00:00Z',
+          ended_at: null,
+          items: [tool('Bash(cargo test)', { id: 't2', name: 'Bash', target: 'cargo test', done: false, at: '2026-09-18T09:00:00Z' })],
+        },
+      ],
+    });
+    mockedConv.mockReturnValue(ok(running));
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test · 5s');
+    vi.advanceTimersByTime(1_000);
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test · 6s');
+    expect(screen.getByTestId('conv-tool').textContent).toContain('running 6s');
+  });
+
+  it('the indicator keeps the spinner label when nothing is running', async () => {
+    mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (3s)' } });
+    mockedConv.mockReturnValue(
+      ok(conv({ turns: [{ prompt: 'q', at: null, ended_at: null, items: [tool('Bash(ls)', { id: 't1', name: 'Bash', target: 'ls', done: true })] }] })),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'working', turn_seq: 1 }), visible: true });
+    await settle();
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+  });
+});
+
+describe('ConversationPanel find, copy and turn index', () => {
+  const mockedCopy = copyText as unknown as ReturnType<typeof vi.fn>;
+  let scrolled: Element[];
+  const realScroll = Element.prototype.scrollIntoView;
+
+  beforeEach(() => {
+    scrolled = [];
+    mockedCopy.mockReset();
+    mockedCopy.mockResolvedValue(true);
+    Element.prototype.scrollIntoView = vi.fn(function (this: Element) {
+      scrolled.push(this);
+    });
+  });
+  afterEach(() => {
+    Element.prototype.scrollIntoView = realScroll;
+  });
+
+  function threeTurns() {
+    return conv({
+      turns: [
+        { prompt: 'Fix the parser', at: '2026-09-18T09:00:00Z', ended_at: null, items: [{ kind: 'text', text: 'on it' }] },
+        { prompt: 'and the lexer', at: '2026-09-18T09:05:00Z', ended_at: null, items: [{ kind: 'text', text: 'the PARSER calls it' }] },
+        { prompt: null, at: '2026-09-18T09:06:00Z', ended_at: null, items: [{ kind: 'command', name: '/model', args: 'opus', output: null }] },
+      ],
+    });
+  }
+
+  it('Ctrl+F opens find; typing marks matches; Enter moves to the next; Escape closes', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+
+    // Outside the panel the shortcut is left alone.
+    const outside = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+    document.body.dispatchEvent(outside);
+    await settle();
+    expect(outside.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+
+    const inside = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+    screen.getByTestId('conv-scroller').dispatchEvent(inside);
+    await settle();
+    expect(inside.defaultPrevented).toBe(true);
+    expect(screen.getByTestId('conv-find')).toBeTruthy();
+    const input = screen.getByTestId('conv-find-input') as HTMLInputElement;
+    expect(document.activeElement).toBe(input);
+
+    await fireEvent.input(input, { target: { value: 'parser' } });
+    await settle();
+    const marked = Array.from(document.querySelectorAll('[data-match]')).map((el) => el.getAttribute('data-row-key'));
+    expect(marked).toEqual(['t0', 't1']);
+    expect(screen.getByTestId('conv-find-count').textContent).toBe('1 / 2');
+    const current = () => document.querySelector('[data-current-match]');
+    expect(current()?.getAttribute('data-row-key')).toBe('t0');
+    expect(scrolled.at(-1)).toBe(current());
+    expect(Element.prototype.scrollIntoView).toHaveBeenLastCalledWith({ block: 'center' });
+
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await settle();
+    expect(current()?.getAttribute('data-row-key')).toBe('t1');
+    expect(screen.getByTestId('conv-find-count').textContent).toBe('2 / 2');
+    expect(scrolled.at(-1)).toBe(current());
+
+    await fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    await settle();
+    expect(current()?.getAttribute('data-row-key')).toBe('t0');
+
+    await fireEvent.click(screen.getByTestId('conv-find-next'));
+    await settle();
+    expect(current()?.getAttribute('data-row-key')).toBe('t1');
+    await fireEvent.click(screen.getByTestId('conv-find-prev'));
+    await settle();
+    expect(current()?.getAttribute('data-row-key')).toBe('t0');
+
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    await settle();
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+    expect(document.querySelector('[data-match]')).toBeNull();
+    expect(current()).toBeNull();
+    expect(screen.getByTestId('conv-turns-button')).toBeTruthy();
+  });
+
+  it('paints matches with the Custom Highlight API when it exists', async () => {
+    const g = globalThis as unknown as { CSS?: unknown; Highlight?: unknown };
+    const savedCss = g.CSS;
+    const savedHl = g.Highlight;
+    const registry = new Map<string, { ranges: Range[] }>();
+    g.CSS = { highlights: registry };
+    g.Highlight = class {
+      ranges: Range[];
+      constructor(...ranges: Range[]) {
+        this.ranges = ranges;
+      }
+    };
+    try {
+      mockedConv.mockReturnValue(ok(threeTurns()));
+      render(ConversationPanel, { session: session(), visible: true });
+      await settle();
+      await fireEvent.keyDown(screen.getByTestId('conv-scroller'), { key: 'f', ctrlKey: true });
+      await settle();
+      await fireEvent.input(screen.getByTestId('conv-find-input'), { target: { value: 'parser' } });
+      await settle();
+      const names = [...registry.keys()];
+      const allName = names.find((n) => /^conv-find-\d+$/.test(n))!;
+      const curName = names.find((n) => /^conv-find-current-\d+$/.test(n))!;
+      const all = registry.get(allName)!.ranges.map((r) => r.toString().toLowerCase());
+      expect(all).toEqual(['parser', 'parser']);
+      expect(registry.get(curName)!.ranges).toHaveLength(1);
+      // Control labels (the Copy buttons, times) are not painted.
+      await fireEvent.input(screen.getByTestId('conv-find-input'), { target: { value: 'copy' } });
+      await settle();
+      expect(registry.get(allName)?.ranges ?? []).toHaveLength(0);
+      await fireEvent.click(screen.getByTestId('conv-find-close'));
+      await settle();
+      expect(registry.size).toBe(0);
+    } finally {
+      g.CSS = savedCss;
+      g.Highlight = savedHl;
+    }
+  });
+
+  it('on macOS find is Cmd+F; Ctrl+F in the composer keeps its caret meaning', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true, isMac: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input');
+    const ctrl = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+    box.dispatchEvent(ctrl);
+    await settle();
+    expect(ctrl.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+    const cmd = new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true });
+    box.dispatchEvent(cmd);
+    await settle();
+    expect(cmd.defaultPrevented).toBe(true);
+    expect(screen.getByTestId('conv-find')).toBeTruthy();
+  });
+
+  it('elsewhere find is Ctrl+F, not Cmd+F', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true, isMac: false });
+    await settle();
+    const cmd = new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true });
+    screen.getByTestId('conv-scroller').dispatchEvent(cmd);
+    await settle();
+    expect(cmd.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+  });
+
+  it('the shortcut does nothing while there is no thread on screen', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    render(ConversationPanel, { session: session(), visible: true, isMac: false });
+    await settle();
+    expect(screen.getByTestId('conv-empty')).toBeTruthy();
+    const ev = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+    screen.getByTestId('conv-composer-input').dispatchEvent(ev);
+    await settle();
+    expect(ev.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+  });
+
+  it('while blocked on a prompt the last turn\'s pending tool call keeps running, not "no result"', async () => {
+    const at = new Date(Date.now() - 3_000).toISOString();
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            { prompt: 'a', at, ended_at: null, items: [tool('Bash(sleep)', { id: 't1', name: 'Bash', target: 'sleep', done: false, at })] },
+            { prompt: 'b', at, ended_at: null, items: [tool('Bash(rm x)', { id: 't2', name: 'Bash', target: 'rm x', done: false, at })] },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'blocked' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-blocked')).toBeTruthy();
+    const rows = screen.getAllByTestId('conv-tool');
+    expect(rows[0].textContent).toContain('no result');
+    expect(rows[1].textContent).toMatch(/running \d+s/);
+    expect(rows[1].textContent).not.toContain('no result');
+  });
+
+  it('the find bar closes with its close button', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    await fireEvent.keyDown(screen.getByTestId('conv-composer-input'), { key: 'f', ctrlKey: true });
+    await settle();
+    await fireEvent.input(screen.getByTestId('conv-find-input'), { target: { value: 'nothing like this' } });
+    await settle();
+    expect(screen.getByTestId('conv-find-count').textContent).toBe('0 / 0');
+    await fireEvent.click(screen.getByTestId('conv-find-close'));
+    await settle();
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+  });
+
+  it('copy on a prompt calls copyText with the prompt', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const prompt = screen.getAllByTestId('conv-prompt')[1];
+    const btn = prompt.querySelector('[data-testid="conv-copy"]') as HTMLButtonElement;
+    expect(btn.getAttribute('aria-label')).toBe('Copy prompt');
+    await fireEvent.click(btn);
+    await settle();
+    expect(mockedCopy).toHaveBeenCalledWith('and the lexer');
+    expect(btn.textContent).toContain('Copied');
+  });
+
+  it('copy on a text group copies its markdown source', async () => {
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'q', at: null, ended_at: null, items: [{ kind: 'text', text: 'see **this**' }] }] })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const btn = screen.getByTestId('conv-text').querySelector('[data-testid="conv-copy"]') as HTMLButtonElement;
+    expect(btn.getAttribute('aria-label')).toBe('Copy reply');
+    await fireEvent.click(btn);
+    await settle();
+    expect(mockedCopy).toHaveBeenCalledWith('see **this**');
+  });
+
+  it('the turn index lists prompts and jumps', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const button = screen.getByTestId('conv-turns-button');
+    expect(button.textContent).toContain('3 turns');
+    await fireEvent.click(button);
+    await settle();
+    const items = screen.getAllByTestId('conv-turn-index-item');
+    expect(items.map((i) => i.textContent)).toEqual([
+      expect.stringContaining('Fix the parser'),
+      expect.stringContaining('and the lexer'),
+      expect.stringContaining('/model opus'),
+    ]);
+    scrolled = [];
+    await fireEvent.click(items[1]);
+    await settle();
+    expect(scrolled).toHaveLength(1);
+    expect(scrolled[0].getAttribute('data-row-key')).toBe('t1');
+    expect(screen.queryByTestId('conv-turn-index')).toBeNull();
+
+    // Escape and an outside pointerdown close it too.
+    await fireEvent.click(button);
+    await settle();
+    await fireEvent.keyDown(screen.getByTestId('conv-turn-index'), { key: 'Escape' });
+    await settle();
+    expect(screen.queryByTestId('conv-turn-index')).toBeNull();
+    await fireEvent.click(button);
+    await settle();
+    await fireEvent.pointerDown(document.body);
+    await settle();
+    expect(screen.queryByTestId('conv-turn-index')).toBeNull();
+  });
+
+  it('an unfinished tool call in an earlier turn shows "no result"; the running turn counts up', async () => {
+    const at = new Date(Date.now() - 3_000).toISOString();
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            { prompt: 'a', at, ended_at: null, items: [tool('Bash(sleep)', { id: 't1', name: 'Bash', target: 'sleep', done: false, at })] },
+            { prompt: 'b', at, ended_at: null, items: [tool('Bash(make)', { id: 't2', name: 'Bash', target: 'make', done: false, at })] },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    const rows = screen.getAllByTestId('conv-tool');
+    expect(rows[0].textContent).toContain('no result');
+    expect(rows[1].textContent).toMatch(/running \d+s/);
+  });
+});
+
+describe('ConversationPanel detail UX fixes', () => {
+  const AT = '2026-09-18T09:00:00Z';
+  function withTools(tools: ReturnType<typeof tool>[]): Conversation {
+    return conv({ turns: [{ prompt: 'q', at: AT, ended_at: null, items: [{ kind: 'text', text: 'on it' }, ...tools] }] });
+  }
+
+  it('the view names its conversation when read, and tool detail is read from that same one', async () => {
+    // The backend's row can already be on a newer conversation this row has
+    // not seen: the read names the one the row shows, and so does detail.
+    mockedConv.mockReturnValue(ok(withTools([tool('Bash(ls)', { id: 't1', name: 'Bash', target: 'ls' })])));
+    render(ConversationPanel, { session: session({ claude_session_id: 'conv-A' }), visible: true });
+    await settle();
+    expect(mockedConv).toHaveBeenLastCalledWith(1, undefined, 'conv-A');
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(mockedDetail).toHaveBeenCalledWith(1, 't1', 'conv-A');
+  });
+
+  it('after /clear the tool lines of the new conversation read from the new id', async () => {
+    mockedConv.mockReturnValue(ok(withTools([tool('Bash(ls)', { id: 't1', name: 'Bash', target: 'ls' })])));
+    const { rerender } = render(ConversationPanel, { session: session({ claude_session_id: 'conv-A' }), visible: true });
+    await settle();
+    mockedConv.mockReturnValue(ok(withTools([tool('Read(/b)', { id: 't9', name: 'Read', target: '/b' })])));
+    await rerender({ session: session({ claude_session_id: 'conv-B' }), visible: true });
+    await settle();
+    expect(mockedConv).toHaveBeenLastCalledWith(1, undefined, 'conv-B');
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(mockedDetail).toHaveBeenLastCalledWith(1, 't9', 'conv-B');
+  });
+
+  it('tool detail of an earlier conversation is read from that conversation', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true }), summary({ id: 1, claude_session_id: 'aaa' })]));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    mockedConv.mockReturnValue(ok(withTools([tool('Bash(ls)', { id: 'old1', name: 'Bash', target: 'ls' })])));
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    await fireEvent.click(screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!);
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(mockedDetail).toHaveBeenCalledWith(1, 'old1', 'aaa');
+  });
+
+  it('while viewing an earlier conversation the doing-now label is not shown', async () => {
+    const running = withTools([tool('Bash(cargo test)', { id: 't2', name: 'Bash', target: 'cargo test', done: false, at: AT })]);
+    mockedConv.mockReturnValue(ok(running));
+    mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true }), summary({ id: 1, claude_session_id: 'aaa' })]));
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test');
+    // The earlier conversation also ends in an unfinished call.
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    await fireEvent.click(screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!);
+    await settle();
+    expect(screen.queryByTestId('conv-indicator')).toBeNull();
+    expect(document.body.textContent).not.toMatch(/Run cargo test ·/);
+    expect(screen.getByTestId('conv-tool').textContent).toContain('no result');
+  });
+
+  it('an open tool line stays open when a second call joins its group', async () => {
+    mockedConv.mockReturnValue(ok(withTools([tool('Bash(ls)', { id: 't1', name: 'Bash', target: 'ls' })])));
+    const { rerender } = render(ConversationPanel, { session: session({ turn_seq: 1 }), visible: true });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(screen.getByTestId('conv-tool-detail')).toBeTruthy();
+    expect(mockedDetail).toHaveBeenCalledTimes(1);
+
+    mockedConv.mockReturnValue(
+      ok(withTools([tool('Bash(ls)', { id: 't1', name: 'Bash', target: 'ls' }), tool('Read(/a)', { id: 't2', name: 'Read', target: '/a' })])),
+    );
+    await rerender({ session: session({ turn_seq: 2 }), visible: true });
+    await settle();
+    await settle();
+    const rows = screen.getAllByTestId('conv-tool');
+    expect(rows).toHaveLength(2);
+    expect(screen.getByTestId('conv-tools').querySelectorAll('[data-testid="conv-tool"]')).toHaveLength(2);
+    expect(rows[0].getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByTestId('conv-tool-detail')).toBeTruthy();
+    expect((screen.getByTestId('conv-tools') as HTMLDetailsElement).open).toBe(true);
+    expect(mockedDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it('a pending call keeps a 1 s clock while Claude is blocked on the terminal', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(Date.parse('2026-09-18T09:00:05Z'));
+    mockedConv.mockReturnValue(ok(withTools([tool('Bash(rm x)', { id: 't1', name: 'Bash', target: 'rm x', done: false, at: AT })])));
+    render(ConversationPanel, { session: session({ claude_status: 'blocked' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-blocked')).toBeTruthy();
+    expect(screen.getByTestId('conv-tool').textContent).toContain('running 5s');
+    vi.advanceTimersByTime(1_000);
+    await settle();
+    expect(screen.getByTestId('conv-tool').textContent).toContain('running 6s');
+  });
+
+  it('switching conversation closes find and clears its marks', async () => {
+    const g = globalThis as unknown as { CSS?: unknown; Highlight?: unknown };
+    const savedCss = g.CSS;
+    const savedHl = g.Highlight;
+    const registry = new Map<string, unknown>();
+    g.CSS = { highlights: registry };
+    g.Highlight = class {};
+    try {
+      mockedConv.mockReturnValue(ok(conv()));
+      mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true }), summary({ id: 1, claude_session_id: 'aaa' })]));
+      render(ConversationPanel, { session: session(), visible: true });
+      await settle();
+      await fireEvent.keyDown(screen.getByTestId('conv-scroller'), { key: 'f', ctrlKey: true });
+      await settle();
+      await fireEvent.input(screen.getByTestId('conv-find-input'), { target: { value: 'bug' } });
+      await settle();
+      expect(document.querySelector('[data-match]')).toBeTruthy();
+      expect(registry.size).toBe(2);
+      await fireEvent.click(screen.getByTestId('conv-switcher'));
+      await fireEvent.click(screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!);
+      await settle();
+      expect(screen.queryByTestId('conv-find')).toBeNull();
+      expect(document.querySelector('[data-match]')).toBeNull();
+      expect(registry.size).toBe(0);
+    } finally {
+      g.CSS = savedCss;
+      g.Highlight = savedHl;
+    }
+  });
+
+  it('two panels keep their own find highlights; unmounting one clears only its own', async () => {
+    const g = globalThis as unknown as { CSS?: unknown; Highlight?: unknown };
+    const savedCss = g.CSS;
+    const savedHl = g.Highlight;
+    const registry = new Map<string, unknown>();
+    g.CSS = { highlights: registry };
+    g.Highlight = class {};
+    try {
+      mockedConv.mockReturnValue(ok(conv()));
+      const a = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+      const b = render(ConversationPanel, { session: session({ id: 2 }), visible: true });
+      await settle();
+      for (const r of [a, b]) {
+        const w = within(r.container);
+        await fireEvent.keyDown(w.getByTestId('conv-scroller'), { key: 'f', ctrlKey: true });
+        await settle();
+        await fireEvent.input(w.getByTestId('conv-find-input'), { target: { value: 'bug' } });
+        await settle();
+      }
+      expect(registry.size).toBe(4);
+      const before = new Set(registry.keys());
+      a.unmount();
+      await settle();
+      expect(registry.size).toBe(2);
+      for (const k of registry.keys()) expect(before.has(k)).toBe(true);
+      // b's rule sheet survives a's unmount.
+      const sheets = Array.from(document.head.querySelectorAll('style')).map((el) => el.textContent ?? '');
+      for (const k of registry.keys()) expect(sheets.some((t) => t.includes(`::highlight(${k})`))).toBe(true);
+    } finally {
+      g.CSS = savedCss;
+      g.Highlight = savedHl;
+    }
   });
 });

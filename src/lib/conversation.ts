@@ -6,7 +6,29 @@ import type { SessionEvent } from './timeline';
 
 export type ConvItem =
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; summary: string; error?: boolean }
+  | {
+      kind: 'tool';
+      summary: string;
+      error?: boolean;
+      id: string | null;
+      name: string;
+      target: string | null;
+      at: string | null;
+      ended_at: string | null;
+      done: boolean;
+    }
+  | {
+      kind: 'subagent';
+      id: string | null;
+      name: string;
+      agent_type: string | null;
+      description: string | null;
+      result: string | null;
+      error: boolean;
+      at: string | null;
+      ended_at: string | null;
+      done: boolean;
+    }
   | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
   | { kind: 'command'; name: string; args: string | null; output: string | null }
   | { kind: 'interrupt'; during_tool: boolean };
@@ -85,6 +107,44 @@ export function listConversations(sessionId: number, limit = 50): Promise<Result
   });
 }
 
+/** The file change of an Edit / MultiEdit / Write call (`session_tool_detail`). */
+export interface EditDetail {
+  file_path: string;
+  old: string;
+  new: string;
+}
+
+/** One tool call's input and result, read on demand (`session_tool_detail`).
+ *  Every text is capped at 8 000 chars ("…" when cut). */
+export interface ToolDetail {
+  id: string;
+  name: string;
+  /** Pretty JSON of the input. */
+  input: string;
+  /** Edit / MultiEdit / Write only. */
+  edit: EditDetail | null;
+  /** Bash only: the full command. */
+  command: string | null;
+  /** Null until the result arrives. */
+  result: string | null;
+  is_error: boolean;
+}
+
+/** The input and result of tool call `toolUseId`; `claudeSessionId` looks in
+ *  an earlier conversation of the session. */
+export function toolDetail(
+  sessionId: number,
+  toolUseId: string,
+  claudeSessionId?: string,
+): Promise<Result<ToolDetail>> {
+  const args: { session_id: number; tool_use_id: string; claude_session_id?: string } = {
+    session_id: sessionId,
+    tool_use_id: toolUseId,
+  };
+  if (claudeSessionId !== undefined) args.claude_session_id = claudeSessionId;
+  return invokeCmd<ToolDetail>('session_tool_detail', { args });
+}
+
 /** Deep (JSON) equality — used to decide whether a poll result actually changed. */
 export function sameConversation(a: Conversation | null, b: Conversation): boolean {
   if (a === null) return false;
@@ -115,6 +175,12 @@ export function relativeTime(iso: string, nowMs: number): string {
 export interface ToolLine {
   summary: string;
   error: boolean;
+  id: string | null;
+  name: string;
+  target: string | null;
+  at: string | null;
+  ended_at: string | null;
+  done: boolean;
 }
 
 /** A reply item after folding: prose, a run of consecutive tool calls, or one
@@ -122,13 +188,25 @@ export interface ToolLine {
 export type ConvGroup =
   | { kind: 'text'; text: string }
   | { kind: 'tools'; tools: ToolLine[] }
+  | {
+      kind: 'subagent';
+      id: string | null;
+      name: string;
+      agent_type: string | null;
+      description: string | null;
+      result: string | null;
+      error: boolean;
+      at: string | null;
+      ended_at: string | null;
+      done: boolean;
+    }
   | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
   | { kind: 'command'; name: string; args: string | null; output: string | null }
   | { kind: 'interrupt'; during_tool: boolean };
 
 /** Fold consecutive tool one-liners into one group; text items stay apart;
- *  compact/command/interrupt items are each their own group and close any
- *  open tool run. */
+ *  a subagent (and compact/command/interrupt) items are each their own
+ *  group and close any open tool run. */
 export function groupItems(items: ConvItem[]): ConvGroup[] {
   const out: ConvGroup[] = [];
   for (const item of items) {
@@ -137,7 +215,16 @@ export function groupItems(items: ConvItem[]): ConvGroup[] {
       continue;
     }
     if (item.kind === 'tool') {
-      const line: ToolLine = { summary: item.summary, error: item.error === true };
+      const line: ToolLine = {
+        summary: item.summary,
+        error: item.error === true,
+        id: item.id,
+        name: item.name,
+        target: item.target,
+        at: item.at,
+        ended_at: item.ended_at,
+        done: item.done,
+      };
       const last = out[out.length - 1];
       if (last?.kind === 'tools') last.tools.push(line);
       else out.push({ kind: 'tools', tools: [line] });
@@ -157,12 +244,139 @@ export function toolName(summary: string): string {
 /** `"7 tool calls · Bash, Read, Edit +2"` for a folded group, with
  *  `" · 1 failed"` appended when any call errored. */
 export function toolGroupLabel(tools: ToolLine[]): string {
-  const names = [...new Set(tools.map((t) => toolName(t.summary)))];
+  const names = [...new Set(tools.map((t) => t.name || toolName(t.summary)))];
   const shown = names.slice(0, 3).join(', ');
   const more = names.length > 3 ? ` +${names.length - 3}` : '';
   const failed = tools.filter((t) => t.error).length;
   const suffix = failed > 0 ? ` · ${failed} failed` : '';
   return `${tools.length} tool calls · ${shown}${more}${suffix}`;
+}
+
+// ─── Tool lines / subagents / doing now (phase 3) ───────────────────────────
+
+const TOOL_VERBS: Record<string, string> = {
+  Read: 'Read',
+  Edit: 'Edit',
+  MultiEdit: 'Edit',
+  Write: 'Write',
+  Bash: 'Run',
+  Grep: 'Search',
+  Glob: 'Find',
+  WebFetch: 'Fetch',
+  WebSearch: 'Search web',
+  TodoWrite: 'Update todos',
+};
+
+/** The short verb a tool line leads with; `mcp__srv__tool` → `srv · tool`. */
+export function toolVerb(name: string): string {
+  const known = TOOL_VERBS[name];
+  if (known) return known;
+  if (name.startsWith('mcp__')) {
+    const [server, ...rest] = name.slice('mcp__'.length).split('__');
+    if (server && rest.length > 0) return `${server} · ${rest.join('__')}`;
+  }
+  return name;
+}
+
+/** A path target cut to its last two segments (`…/store/reconcile.rs`),
+ *  relative to `cwdHint` when it lies under it; anything that is not a path
+ *  (a command, a pattern with spaces, a URL) is returned unchanged. */
+export function shortTarget(target: string | null, cwdHint?: string | null): string | null {
+  if (target === null) return null;
+  if (!target.includes('/') || /\s/.test(target) || /^[a-z][a-z0-9+.-]*:\/\//i.test(target)) return target;
+  let path = target;
+  if (cwdHint) {
+    const base = cwdHint.endsWith('/') ? cwdHint : `${cwdHint}/`;
+    if (path.startsWith(base) && path.length > base.length) path = path.slice(base.length);
+  }
+  const segs = path.split('/').filter((p) => p.length > 0);
+  if (segs.length <= 2) return path;
+  return `…/${segs.slice(-2).join('/')}`;
+}
+
+/** `0.4s` under a second, `12s` under a minute, else `3m 05s`. */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
+  const secs = Math.floor(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  return `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s`;
+}
+
+/** How long a tool call took, or (when `endedAt` is null and `nowMs` is
+ *  given) how long it has been running; null when it cannot be told. */
+export function toolDurationMs(at: string | null, endedAt: string | null, nowMs: number | null): number | null {
+  if (!at) return null;
+  const start = Date.parse(at);
+  const end = endedAt ? Date.parse(endedAt) : nowMs;
+  if (end === null || !Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return Math.max(0, end - start);
+}
+
+/** What the running turn is doing right now, for the activity indicator. */
+export interface DoingNow {
+  label: string;
+  /** How long it has been running; null when its start is unknown. */
+  sinceMs: number | null;
+}
+
+/** `Run cargo test` for a tool line (verb + short target). */
+export function toolLineLabel(t: { name: string; summary: string; target: string | null }): string {
+  const verb = toolVerb(t.name || toolName(t.summary));
+  const target = shortTarget(t.target);
+  return target ? `${verb} ${target}` : verb;
+}
+
+/** The last turn's last unfinished tool call or subagent (after its last
+ *  interrupt), while the session is working; null otherwise. */
+export function doingNow(conv: Conversation | null, working: boolean, nowMs: number): DoingNow | null {
+  if (!working || !conv || conv.turns.length === 0) return null;
+  const items = conv.turns[conv.turns.length - 1].items;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    // Anything before an interrupt was cut off, not running.
+    if (it.kind === 'interrupt') return null;
+    if (it.kind === 'tool' && !it.done) {
+      return { label: toolLineLabel(it), sinceMs: toolDurationMs(it.at, null, nowMs) };
+    }
+    if (it.kind === 'subagent' && !it.done) {
+      const who = it.agent_type ?? 'subagent';
+      const label = it.description ? `${who} · ${it.description}` : who;
+      return { label, sinceMs: toolDurationMs(it.at, null, nowMs) };
+    }
+  }
+  return null;
+}
+
+/** The last turn has a tool call or subagent still waiting for its result.
+ *  Only a live turn's pending call has a running clock (see ToolLine). */
+export function hasPendingCall(conv: Conversation | null): boolean {
+  if (!conv || conv.turns.length === 0) return false;
+  return conv.turns[conv.turns.length - 1].items.some((it) => (it.kind === 'tool' || it.kind === 'subagent') && !it.done);
+}
+
+export interface DiffLine {
+  kind: 'del' | 'add' | 'ctx';
+  text: string;
+}
+
+/** Context lines kept on each side of an edit's changed block. */
+const DIFF_CONTEXT = 2;
+
+/** A line diff of an edit: the shared leading / trailing lines as context
+ *  (at most two each side), the changed middle as deletions then additions. */
+export function editDiffLines(old: string, next: string): DiffLine[] {
+  const a = old === '' ? [] : old.split('\n');
+  const b = next === '' ? [] : next.split('\n');
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const out: DiffLine[] = [];
+  for (const text of a.slice(Math.max(0, pre - DIFF_CONTEXT), pre)) out.push({ kind: 'ctx', text });
+  for (const text of a.slice(pre, a.length - suf)) out.push({ kind: 'del', text });
+  for (const text of b.slice(pre, b.length - suf)) out.push({ kind: 'add', text });
+  for (const text of a.slice(a.length - suf, a.length - suf + DIFF_CONTEXT)) out.push({ kind: 'ctx', text });
+  return out;
 }
 
 /** Prompts longer than this are clamped behind "Show more". */
