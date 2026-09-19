@@ -17,7 +17,13 @@
 //! ([`crate::serve::maybe_tls`], [`crate::tls::insecure_probe_client`])
 //! rather than a second TLS client: the only endpoint these commands ever
 //! talk to is `127.0.0.1`, so an HTTP client crate would be a large
-//! dependency for one loopback POST.
+//! dependency for one loopback POST. The write-then-read-to-end is shared
+//! too ([`crate::serve::write_and_read`]), parameterised by a
+//! `tolerate_partial` flag so this module keeps its original strict
+//! behaviour (any read error fails the call) while the healthcheck probe
+//! keeps its own tolerance for bytes already read; the connect step (this
+//! module's own [`NOT_RUNNING`] wording) and what each side does with the
+//! bytes afterward stay separate from the healthcheck probe.
 
 use crate::config::{resolve_data_dir, HubOptions, TlsMode};
 use crate::out;
@@ -151,9 +157,17 @@ async fn call_tool(
 
 /// Write `request` to `addr` and read the whole response back — over TLS
 /// first when `tls`, reusing the healthcheck probe's own connect/handshake
-/// code ([`maybe_tls`]) rather than a second TLS client.
+/// code ([`maybe_tls`]) and its write-then-read-to-end
+/// ([`crate::serve::write_and_read`]) rather than a second copy of either.
+/// This connect step keeps its own error wording: [`NOT_RUNNING`] is what an
+/// operator sees when nothing is listening, which the probe's connect (never
+/// pointed at a hub the operator started themselves) has no need to say.
+///
+/// `tolerate_partial: false` — unlike the probe, this call wants the plain
+/// network error when the read itself fails, even if some bytes already
+/// arrived: a truncated response would otherwise surface as a confusing
+/// downstream JSON-RPC parse failure instead of naming the reset.
 async fn exchange(addr: SocketAddr, tls: bool, request: &str) -> Result<String, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::ConnectionRefused {
             format!("no hub is answering on {addr} — {NOT_RUNNING}")
@@ -161,18 +175,8 @@ async fn exchange(addr: SocketAddr, tls: bool, request: &str) -> Result<String, 
             format!("connect {addr}: {e}")
         }
     })?;
-    let mut conn = maybe_tls(tcp, addr, tls).await?;
-    conn.write_all(request.as_bytes())
-        .await
-        .map_err(|e| format!("send to {addr}: {e}"))?;
-    conn.flush()
-        .await
-        .map_err(|e| format!("send to {addr}: {e}"))?;
-    let mut raw = Vec::new();
-    conn.take(MAX_RESPONSE)
-        .read_to_end(&mut raw)
-        .await
-        .map_err(|e| format!("read from {addr}: {e}"))?;
+    let conn = maybe_tls(tcp, addr, tls).await?;
+    let raw = crate::serve::write_and_read(conn, addr, request, MAX_RESPONSE, false).await?;
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 

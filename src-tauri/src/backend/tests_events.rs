@@ -1221,37 +1221,11 @@ fn take_utf8_does_not_stall_on_genuinely_invalid_bytes() {
     assert!(buf.is_empty());
 }
 
-#[test]
-fn the_dechunker_is_transparent_when_the_body_is_not_chunked() {
-    let mut d = Dechunker::new(false);
-    let mut raw = b"data: 1\n\n".to_vec();
-    assert_eq!(d.take(&mut raw).unwrap(), b"data: 1\n\n");
-    assert!(raw.is_empty());
-    assert!(!d.finished());
-}
-
-/// THE case that made a whole-body de-chunker useless here: a size line
-/// arriving in one read and its data in the next.
-#[test]
-fn the_dechunker_waits_for_a_size_line_that_has_not_finished_arriving() {
-    let mut d = Dechunker::new(true);
-    // 0xb = 11, the length of "data: 12345".
-    let mut raw = b"b".to_vec();
-    assert!(d.take(&mut raw).unwrap().is_empty(), "'b' might be 'be'");
-    raw.extend_from_slice(b"\r\ndata: 12345");
-    assert_eq!(d.take(&mut raw).unwrap(), b"data: 12345");
-    raw.extend_from_slice(b"\r\n5\r\nabcde\r\n0\r\n\r\n");
-    assert_eq!(d.take(&mut raw).unwrap(), b"abcde");
-    assert!(d.finished());
-}
-
-#[test]
-fn the_dechunker_refuses_a_size_it_cannot_read() {
-    let mut d = Dechunker::new(true);
-    let mut raw = b"zz\r\nxx".to_vec();
-    let err = d.take(&mut raw).unwrap_err();
-    assert!(err.contains("chunk size"), "{err}");
-}
+// `Dechunker` itself moved to `backend::http1` and its unit tests moved with
+// it: `the_dechunker_is_transparent_when_the_body_is_not_chunked`,
+// `the_dechunker_waits_for_a_size_line_that_has_not_finished_arriving` and
+// `the_dechunker_refuses_a_size_it_cannot_read` are now in `tests_http1.rs`.
+// The real-socket test below is this module's own integration coverage of it.
 
 // --- the real stream, against a real socket ----------------------------------
 

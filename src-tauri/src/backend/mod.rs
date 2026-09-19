@@ -22,6 +22,7 @@
 pub mod connection;
 pub mod contract;
 pub mod events;
+mod http1;
 pub mod pairing;
 pub mod remote;
 pub mod routing;
