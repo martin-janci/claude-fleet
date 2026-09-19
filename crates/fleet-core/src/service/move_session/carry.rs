@@ -107,10 +107,14 @@ pub struct IgnoredSelection {
     pub left: Vec<LeftBehind>,
 }
 
-/// Parse `<kb>\t<path>\0` records; a record without a tab is dropped.
+/// Parse `<kb>\t<path>\0` records after [`OUT_MARKER`]; a record without a
+/// tab is dropped. No marker (the script failed before listing anything) —
+/// an empty list, since a failed listing never fails the move.
 pub fn parse_ignored_list(stdout: &[u8]) -> Vec<ListedIgnored> {
-    stdout
-        .split(|b| *b == 0)
+    let Some(body) = payload(stdout) else {
+        return Vec::new();
+    };
+    body.split(|b| *b == 0)
         .filter(|rec| !rec.is_empty())
         .filter_map(|rec| {
             let tab = rec.iter().position(|b| *b == b'\t')?;
@@ -193,6 +197,14 @@ pub const FAILED: &str = "__CF_CARRY_FAILED__";
 pub const BUNDLE_TOO_LARGE: &str = "__CF_BUNDLE_TOO_LARGE__";
 pub const TARGET_DIRTY: &str = "__CF_TARGET_DIRTY__";
 pub const HEAD_MISMATCH: &str = "__CF_HEAD_MISMATCH__";
+/// Printed on its own line immediately before a script's real payload, with
+/// nothing else reaching stdout after it. `ssh.rs` runs every carry script
+/// as `bash -lc` — a LOGIN shell that sources `/etc/profile` and
+/// `~/.bash_profile` — so a chatty profile (motd, nvm/conda/rvm init, a
+/// "welcome" banner) can write to stdout BEFORE the script body ever runs.
+/// Anchoring parsing on this marker, rather than trusting stdout to be
+/// pristine, is what makes the parsers immune to that noise.
+pub const OUT_MARKER: &str = "__CF_OUT__";
 /// Bytes per relay chunk: the orchestrator's peak memory for a payload.
 pub const CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -204,9 +216,61 @@ fn parse_err(what: &str, got: &str) -> IpcError {
     IpcError::new(codes::E_PARSE, format!("unexpected {what} output: {got:?}"))
 }
 
-/// Make sure the target's main clone exists. Prints `existing`, `cloned` or
-/// `initialized`. Never prompts (a host without credentials falls through to
-/// `git init`) and never removes a directory it did not create.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The bytes after the FIRST line that is exactly [`OUT_MARKER`]: after the
+/// first `__CF_OUT__\n` that either opens the output or is directly
+/// preceded by `\n`. First, not last: a login-shell banner prints BEFORE
+/// the script body runs, and nothing legitimate prints after the payload
+/// begins — so the first marker line is always the real one. This also
+/// matters for [`chunk_script`], whose payload is an arbitrary binary slice
+/// of a git bundle: a later marker-shaped run of bytes inside that payload
+/// must never be mistaken for a second boundary.
+/// `None` when no such line exists — the script failed before reaching its
+/// payload, or produced no output at all.
+pub fn payload(stdout: &[u8]) -> Option<&[u8]> {
+    let marker = OUT_MARKER.as_bytes();
+    let mut start = 0usize;
+    while start <= stdout.len() {
+        let idx = find_subslice(&stdout[start..], marker)?;
+        let pos = start + idx;
+        let at_line_start = pos == 0 || stdout[pos - 1] == b'\n';
+        let after = pos + marker.len();
+        if at_line_start && stdout.get(after) == Some(&b'\n') {
+            return Some(&stdout[after + 1..]);
+        }
+        start = pos + 1;
+    }
+    None
+}
+
+fn payload_str(stdout: &str) -> Option<&str> {
+    std::str::from_utf8(payload(stdout.as_bytes())?).ok()
+}
+
+/// Shell `case` guard rejecting an empty `$id`, or one containing `/` or
+/// `..`, before it reaches a path (`$HOME/.cache/claude-fleet/transfer/$id`)
+/// or a ref name (`refs/fleet/transfer/$id`). Interpolated right after
+/// `id=...` in every script that builds one of those.
+fn id_guard() -> String {
+    format!(r#"case "$id" in ''|*/*|*..*) printf '{FAILED} id\n' >&2; exit 5;; esac"#)
+}
+
+/// Guard for scripts that build `$HOME/.cache/claude-fleet/transfer/...`: an
+/// empty `$HOME` would otherwise silently resolve to a repo-relative path.
+fn home_guard() -> String {
+    format!(r#"[ -n "$HOME" ] || {{ printf '{FAILED} HOME\n' >&2; exit 5; }}"#)
+}
+
+/// Make sure the target's main clone exists. Prints [`OUT_MARKER`] then one
+/// word: `existing`, `cloned` or `initialized`. Never prompts (a host
+/// without credentials falls through to `git init`) and never removes a
+/// directory it did not create.
 pub fn seed_script(project_root: &str, clone_url: &str) -> String {
     format!(
         r#"# cf-carry:seed
@@ -214,13 +278,13 @@ set +e
 r={r}
 url={url}
 export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -oBatchMode=yes'
-if [ -e "$r/.git" ]; then printf 'existing\n'; exit 0; fi
+if [ -e "$r/.git" ]; then printf '{OUT_MARKER}\nexisting\n'; exit 0; fi
 if [ -e "$r" ]; then printf '{FAILED} %s exists and is not a git repository\n' "$r" >&2; exit 5; fi
 mkdir -p -- "$(dirname -- "$r")" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
-if git clone -q -- "$url" "$r" >/dev/null 2>&1; then printf 'cloned\n'; exit 0; fi
+if git clone -q -- "$url" "$r" >/dev/null 2>&1; then printf '{OUT_MARKER}\ncloned\n'; exit 0; fi
 rm -rf -- "$r"
 git init -q -- "$r" >/dev/null 2>&1 && git -C "$r" remote add origin "$url" || {{ printf '{FAILED} init\n' >&2; exit 5; }}
-printf 'initialized\n'
+printf '{OUT_MARKER}\ninitialized\n'
 "#,
         r = quote(project_root),
         url = quote(clone_url),
@@ -228,7 +292,8 @@ printf 'initialized\n'
 }
 
 pub fn parse_seed(stdout: &str) -> Result<TargetSeed, IpcError> {
-    match stdout.trim() {
+    let body = payload_str(stdout).ok_or_else(|| parse_err("seed", stdout))?;
+    match body.trim() {
         "existing" => Ok(TargetSeed::Existing),
         "cloned" => Ok(TargetSeed::Cloned),
         "initialized" => Ok(TargetSeed::Initialized),
@@ -237,27 +302,35 @@ pub fn parse_seed(stdout: &str) -> Result<TargetSeed, IpcError> {
 }
 
 /// Create the private transfer dir on the target and list every ref tip it
-/// has. Line 1: the absolute dir; then one object name per line.
+/// has. Prints [`OUT_MARKER`], then the absolute dir, then one object name
+/// per line.
 pub fn haves_script(project_root: &str, claude_id: &str) -> String {
     format!(
         r#"# cf-carry:haves
 set +e
 r={r}
 id={id}
+{id_guard}
+{home_guard}
+umask 077
 dir="$HOME/.cache/claude-fleet/transfer/$id"
 rm -rf -- "$dir"
-( umask 077; mkdir -p -- "$dir" ) || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
+mkdir -p -- "$dir" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
+printf '{OUT_MARKER}\n'
 printf '%s\n' "$dir"
 git -C "$r" for-each-ref --format='%(objectname)' 2>/dev/null | sort -u
 exit 0
 "#,
         r = quote(project_root),
         id = quote(claude_id),
+        id_guard = id_guard(),
+        home_guard = home_guard(),
     )
 }
 
 pub fn parse_haves(stdout: &str) -> Result<(String, Vec<String>), IpcError> {
-    let mut lines = stdout.lines();
+    let body = payload_str(stdout).ok_or_else(|| parse_err("haves", stdout))?;
+    let mut lines = body.lines();
     let dir = lines
         .next()
         .map(str::trim)
@@ -290,7 +363,8 @@ pub struct BundleInfo {
 /// extension). The target's haves reach `git rev-list` on stdin (there can be
 /// thousands); only the resulting boundary — a handful of hex shas, left
 /// unquoted on purpose — reaches `git bundle create` as argv, because
-/// `bundle create --stdin` regressed in some git releases. Prints `<bytes>\t<commits>\t<submodules 0|1>\t<lfs 0|1>\t<path>`.
+/// `bundle create --stdin` regressed in some git releases. Prints
+/// [`OUT_MARKER`] then `<bytes>\t<commits>\t<submodules 0|1>\t<lfs 0|1>\t<path>`.
 pub fn snapshot_script(
     worktree: &str,
     claude_id: &str,
@@ -309,10 +383,13 @@ wt={wt}
 id={id}
 cap={cap}
 fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
+{id_guard}
+{home_guard}
+umask 077
 cd -- "$wt" 2>/dev/null || fail cd
 dir="$HOME/.cache/claude-fleet/transfer/$id"
 rm -rf -- "$dir"
-( umask 077; mkdir -p -- "$dir" ) || fail mkdir
+mkdir -p -- "$dir" || fail mkdir
 export GIT_AUTHOR_NAME=claude-fleet GIT_AUTHOR_EMAIL=fleet@localhost GIT_COMMITTER_NAME=claude-fleet GIT_COMMITTER_EMAIL=fleet@localhost
 real=$(git rev-parse --git-path index)
 cp -- "$real" "$dir/index.ix" 2>/dev/null && cp -- "$real" "$dir/index.wt" 2>/dev/null || fail index
@@ -334,19 +411,24 @@ commits=$(git rev-list --count "$ref/head" --stdin < "$dir/nots" 2>/dev/null)
 bnd=$(git rev-list --boundary "$ref/head" "$ref/ix" "$ref/wt" --stdin < "$dir/nots" 2>/dev/null | sed -n 's/^-/^/p' | tr '\n' ' ')
 git bundle create "$dir/carry.bundle" "$ref/head" "$ref/ix" "$ref/wt" $bnd >/dev/null 2>&1 || fail bundle
 n=$(wc -c < "$dir/carry.bundle" | tr -d ' ')
+[ -n "$n" ] || fail size
 if [ "$n" -gt "$cap" ]; then printf '{BUNDLE_TOO_LARGE} %s\n' "$n" >&2; exit 8; fi
 sub=0; [ -f .gitmodules ] && sub=1
 lfs=0; grep -qs 'filter=lfs' .gitattributes && lfs=1
+printf '{OUT_MARKER}\n'
 printf '%s\t%s\t%s\t%s\t%s\n' "$n" "${{commits:-0}}" "$sub" "$lfs" "$dir/carry.bundle"
 "#,
         wt = quote(worktree),
         id = quote(claude_id),
         cap = cap_bytes,
+        id_guard = id_guard(),
+        home_guard = home_guard(),
     )
 }
 
 pub fn parse_snapshot(stdout: &str) -> Result<BundleInfo, IpcError> {
-    let line = stdout.trim_end_matches('\n');
+    let body = payload_str(stdout).ok_or_else(|| parse_err("snapshot", stdout))?;
+    let line = body.trim_end_matches('\n');
     let p: Vec<&str> = line.splitn(5, '\t').collect();
     let bad = || parse_err("snapshot", line);
     if p.len() != 5 || !p[4].starts_with('/') {
@@ -362,17 +444,28 @@ pub fn parse_snapshot(stdout: &str) -> Result<BundleInfo, IpcError> {
 }
 
 /// `len` bytes of `path` starting at `offset` (binary-safe, GNU and BSD).
+/// On success prints [`OUT_MARKER`] followed immediately by the raw bytes;
+/// callers read the payload back with [`payload`] directly rather than a
+/// dedicated parser, since it is an opaque binary slice, not text.
 pub fn chunk_script(path: &str, offset: u64, len: u64) -> String {
     format!(
-        "# cf-carry:chunk\ntail -c +{} -- {} | head -c {len}\n",
-        offset + 1,
-        quote(path)
+        r#"# cf-carry:chunk
+set +e
+f={f}
+[ -f "$f" ] && [ -r "$f" ] || {{ printf '{FAILED} unreadable\n' >&2; exit 5; }}
+printf '{OUT_MARKER}\n'
+tail -c +{offset} -- "$f" | head -c {len}
+"#,
+        f = quote(path),
+        offset = offset + 1,
+        len = len,
     )
 }
 
 /// Verify and fetch the bundle into the target's main clone; create the
 /// local branch at the source HEAD when the target has none. An existing
-/// local branch is never moved here.
+/// local branch is never moved here. Judged by exit status and the stderr
+/// sentinel only — its stdout (`ok`) carries no payload and is not marked.
 pub fn fetch_script(
     project_root: &str,
     bundle_path: &str,
@@ -386,6 +479,7 @@ r={r}
 b={b}
 id={id}
 br={br}
+{id_guard}
 fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
 git -C "$r" bundle verify "$b" >/dev/null 2>&1 || fail verify
 git -C "$r" fetch -q "$b" '+refs/fleet/transfer/*:refs/fleet/transfer/*' >/dev/null 2>&1 || fail fetch
@@ -398,13 +492,19 @@ printf 'ok\n'
         b = quote(bundle_path),
         id = quote(claude_id),
         br = quote(branch),
+        id_guard = id_guard(),
     )
 }
 
 /// Replay the snapshot in the target worktree: working tree := snapshot,
 /// index := what was staged. Refuses a dirty worktree ([`TARGET_DIRTY`]) and
-/// one not at `want_head` ([`HEAD_MISMATCH`]). Prints the resulting
-/// `git status --porcelain=v1`.
+/// one not at `want_head` ([`HEAD_MISMATCH`]). On success prints
+/// [`OUT_MARKER`] then `git status --porcelain=v1`; parse with
+/// [`parse_apply`]. If either `read-tree` fails partway, the worktree is
+/// restored to a clean `HEAD` (`read-tree -u --reset HEAD` + `git clean
+/// -fdq` — never `-x`, so a pre-existing ignored file is never touched)
+/// before the [`FAILED`] sentinel is reported: a partially replayed
+/// worktree must never be left behind.
 pub fn apply_script(cwd: &str, claude_id: &str, want_head: &str) -> String {
     format!(
         r#"# cf-carry:apply
@@ -413,27 +513,39 @@ cwd={cwd}
 id={id}
 want={want}
 fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
+{id_guard}
 cd -- "$cwd" 2>/dev/null || fail cd
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then printf '{TARGET_DIRTY}\n' >&2; exit 9; fi
 h=$(git rev-parse HEAD 2>/dev/null)
 if [ "$h" != "$want" ]; then printf '{HEAD_MISMATCH} %s\n' "$h" >&2; exit 10; fi
-git read-tree -u --reset "refs/fleet/transfer/$id/wt^{{tree}}" >/dev/null 2>&1 || fail read-tree-worktree
-git read-tree "refs/fleet/transfer/$id/ix^{{tree}}" >/dev/null 2>&1 || fail read-tree-index
+recover() {{ git read-tree -u --reset HEAD >/dev/null 2>&1; git clean -fdq >/dev/null 2>&1; }}
+git read-tree -u --reset "refs/fleet/transfer/$id/wt^{{tree}}" >/dev/null 2>&1 || {{ recover; fail read-tree-worktree; }}
+git read-tree "refs/fleet/transfer/$id/ix^{{tree}}" >/dev/null 2>&1 || {{ recover; fail read-tree-index; }}
+printf '{OUT_MARKER}\n'
 git status --porcelain=v1
 "#,
         cwd = quote(cwd),
         id = quote(claude_id),
         want = quote(want_head),
+        id_guard = id_guard(),
     )
 }
 
-/// Best effort: drop the private refs and the transfer dir. Always exits 0.
+/// The `git status --porcelain=v1` text [`apply_script`] printed.
+pub fn parse_apply(stdout: &str) -> Result<&str, IpcError> {
+    payload_str(stdout).ok_or_else(|| parse_err("apply", stdout))
+}
+
+/// Best effort: drop the private refs and the transfer dir. Always exits 0
+/// — except for a malicious/empty id, which it refuses outright and does
+/// NOTHING for (no ref is touched, no directory is removed).
 pub fn cleanup_script(repo_dir: &str, claude_id: &str) -> String {
     format!(
         r#"# cf-carry:cleanup
 set +e
 r={r}
 id={id}
+{id_guard}
 git -C "$r" for-each-ref --format='%(refname)' "refs/fleet/transfer/$id/" 2>/dev/null | while IFS= read -r ref; do
   git -C "$r" update-ref -d "$ref" >/dev/null 2>&1
 done
@@ -442,12 +554,22 @@ exit 0
 "#,
         r = quote(repo_dir),
         id = quote(claude_id),
+        id_guard = id_guard(),
     )
 }
 
-/// List the worktree's top-level git-ignored entries as `<kb>\t<path>\0`.
-/// A wholly ignored directory is one entry; a deny-listed name is printed
-/// with `-1` and never walked by `du`.
+/// List the worktree's top-level git-ignored entries as [`OUT_MARKER`]
+/// followed by `<kb>\t<path>\0` records. A wholly ignored directory is one
+/// entry; a deny-listed name is printed with `-1` and never walked by `du`.
+/// Refuses with the [`FAILED`] sentinel (non-zero exit) when `$wt` is not a
+/// git work tree, or when `git ls-files` itself fails — a real failure must
+/// never look identical to "no ignored files exist". `PIPESTATUS` is read
+/// immediately after the pipeline, before any other command can reset it.
+/// The one place [`OUT_MARKER`] may already have been printed when a
+/// failure is later detected (`ls-files` fails mid-stream, after some
+/// records were already emitted): callers always check the exit status
+/// before parsing, so a marker followed by an incomplete or bogus listing
+/// is harmless.
 pub fn ignored_list_script(worktree: &str) -> String {
     format!(
         r#"# cf-carry:ignored-list
@@ -455,6 +577,8 @@ set +e
 wt={wt}
 deny=' {deny} '
 cd -- "$wt" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {{ printf '{FAILED} not-a-repo\n' >&2; exit 5; }}
+printf '{OUT_MARKER}\n'
 git ls-files -o -i --exclude-standard --directory -z 2>/dev/null | while IFS= read -r -d '' p; do
   b=$(basename -- "${{p%/}}")
   case "$deny" in
@@ -463,6 +587,7 @@ git ls-files -o -i --exclude-standard --directory -z 2>/dev/null | while IFS= re
   esac
   printf '%s\t%s\0' "${{k:-0}}" "$p"
 done
+[ "${{PIPESTATUS[0]}}" -eq 0 ] || {{ printf '{FAILED} ls-files\n' >&2; exit 5; }}
 exit 0
 "#,
         wt = quote(worktree),
@@ -472,7 +597,8 @@ exit 0
 
 /// Tar the chosen entries into the transfer dir. Each path is a quoted argv
 /// word prefixed with `./` (so a leading `-` is never an option);
-/// `COPYFILE_DISABLE` keeps macOS `._*` files out. Prints `<bytes>\t<path>`.
+/// `COPYFILE_DISABLE` keeps macOS `._*` files out. Prints [`OUT_MARKER`]
+/// then `<bytes>\t<path>`.
 pub fn ignored_pack_script(worktree: &str, claude_id: &str, paths: &[String]) -> String {
     let argv: Vec<String> = paths.iter().map(|p| quote(&format!("./{p}"))).collect();
     format!(
@@ -480,21 +606,29 @@ pub fn ignored_pack_script(worktree: &str, claude_id: &str, paths: &[String]) ->
 set +e
 wt={wt}
 id={id}
+{id_guard}
+{home_guard}
+umask 077
 cd -- "$wt" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
 dir="$HOME/.cache/claude-fleet/transfer/$id"
-( umask 077; mkdir -p -- "$dir" ) || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
+mkdir -p -- "$dir" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
 COPYFILE_DISABLE=1 tar -czf "$dir/ignored.tgz" {argv} >/dev/null 2>&1 || {{ printf '{FAILED} tar\n' >&2; exit 5; }}
 n=$(wc -c < "$dir/ignored.tgz" | tr -d ' ')
+[ -n "$n" ] || {{ printf '{FAILED} size\n' >&2; exit 5; }}
+printf '{OUT_MARKER}\n'
 printf '%s\t%s\n' "$n" "$dir/ignored.tgz"
 "#,
         wt = quote(worktree),
         id = quote(claude_id),
         argv = argv.join(" "),
+        id_guard = id_guard(),
+        home_guard = home_guard(),
     )
 }
 
 pub fn parse_pack(stdout: &str) -> Result<(u64, String), IpcError> {
-    let line = stdout.trim_end_matches('\n');
+    let body = payload_str(stdout).ok_or_else(|| parse_err("ignored-pack", stdout))?;
+    let line = body.trim_end_matches('\n');
     let (n, path) = line
         .split_once('\t')
         .ok_or_else(|| parse_err("ignored-pack", line))?;
@@ -542,7 +676,8 @@ mod tests {
 
     #[test]
     fn ignored_list_parses_nul_records_and_flags_bad_names() {
-        let mut out = b"4\t.env\0-1\tnode_modules/\0".to_vec();
+        let mut out = format!("{OUT_MARKER}\n").into_bytes();
+        out.extend_from_slice(b"4\t.env\0-1\tnode_modules/\0");
         out.extend_from_slice(b"1\tbad\xff.txt\0");
         out.extend_from_slice(b"garbage-without-tab\0");
         let got = parse_ignored_list(&out);
@@ -675,12 +810,11 @@ mod tests {
 
     const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
-    /// A source repo with every kind of state the carry must reproduce.
-    /// Returns (repo dir, sha of the "pushed" base commit).
-    fn dirty_source(root: &Path) -> (std::path::PathBuf, String) {
-        let src = root.join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        git(&src, &["init", "-q", "-b", "feat"]);
+    /// Commit history shared by every fixture: a `base` commit, a `pushed`
+    /// branch standing in for `origin/feat` (a sha is only fetchable as a
+    /// ref tip), and two "unpushed" commits on `feat`. Returns the base sha.
+    fn commit_history(dir: &Path) -> String {
+        git(dir, &["init", "-q", "-b", "feat"]);
         for (f, body) in [
             ("keep.txt", "keep\n"),
             ("mod.txt", "v1\n"),
@@ -688,43 +822,90 @@ mod tests {
             ("both.txt", "v1\n"),
             ("mode.sh", "#!/bin/sh\n"),
         ] {
-            std::fs::write(src.join(f), body).unwrap();
+            std::fs::write(dir.join(f), body).unwrap();
         }
-        std::fs::write(src.join(".gitignore"), ".env\nnode_modules/\n").unwrap();
-        git(&src, &["add", "-A"]);
-        git(&src, &["commit", "-q", "-m", "base"]);
-        let base = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
-        git(&src, &["branch", "pushed"]); // stands in for origin/feat: a sha is only fetchable as a ref tip
+        std::fs::write(dir.join(".gitignore"), ".env\nnode_modules/\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "base"]);
+        let base = git(dir, &["rev-parse", "HEAD"]).trim().to_string();
+        git(dir, &["branch", "pushed"]);
         for n in ["one", "two"] {
-            std::fs::write(src.join(format!("{n}.txt")), n).unwrap();
-            git(&src, &["add", "-A"]);
-            git(&src, &["commit", "-q", "-m", n]); // two "unpushed" commits
+            std::fs::write(dir.join(format!("{n}.txt")), n).unwrap();
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "-q", "-m", n]); // two "unpushed" commits
         }
-        std::fs::write(src.join("mod.txt"), "v2\n").unwrap(); // modified, unstaged
-        std::fs::write(src.join("staged new.txt"), "new\n").unwrap(); // staged, space in name
-        git(&src, &["add", "staged new.txt"]);
-        std::fs::write(src.join("both.txt"), "staged\n").unwrap(); // staged...
-        git(&src, &["add", "both.txt"]);
-        std::fs::write(src.join("both.txt"), "then modified\n").unwrap(); // ...then modified
-        std::fs::write(src.join("it's untracked.txt"), "u\n").unwrap(); // untracked, quote in name
-        std::fs::remove_file(src.join("del.txt")).unwrap(); // deleted, unstaged
+        base
+    }
+
+    /// The dirty mutations every fixture applies on top of `commit_history`:
+    /// modified/staged/untracked/deleted files, a mode bit, a symlink and an
+    /// ignored file — every kind of state the carry must reproduce.
+    fn make_dirty(dir: &Path) {
+        std::fs::write(dir.join("mod.txt"), "v2\n").unwrap(); // modified, unstaged
+        std::fs::write(dir.join("staged new.txt"), "new\n").unwrap(); // staged, space in name
+        git(dir, &["add", "staged new.txt"]);
+        std::fs::write(dir.join("both.txt"), "staged\n").unwrap(); // staged...
+        git(dir, &["add", "both.txt"]);
+        std::fs::write(dir.join("both.txt"), "then modified\n").unwrap(); // ...then modified
+        std::fs::write(dir.join("it's untracked.txt"), "u\n").unwrap(); // untracked, quote in name
+        std::fs::remove_file(dir.join("del.txt")).unwrap(); // deleted, unstaged
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(src.join("mode.sh"), std::fs::Permissions::from_mode(0o755))
+            std::fs::set_permissions(dir.join("mode.sh"), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
-            std::os::unix::fs::symlink("keep.txt", src.join("link")).unwrap();
+            std::os::unix::fs::symlink("keep.txt", dir.join("link")).unwrap();
         }
-        std::fs::write(src.join(".env"), "SECRET=1\n").unwrap(); // ignored: must NOT be in the snapshot
+        std::fs::write(dir.join(".env"), "SECRET=1\n").unwrap(); // ignored: must NOT be in the snapshot
+    }
+
+    /// A source repo with every kind of state the carry must reproduce.
+    /// Returns (repo dir, sha of the "pushed" base commit).
+    fn dirty_source(root: &Path) -> (std::path::PathBuf, String) {
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let base = commit_history(&src);
+        make_dirty(&src);
         (src, base)
     }
 
+    /// Same fixture, but the "source" the carry operates on is a LINKED
+    /// WORKTREE (`git worktree add`) of a separate main repo — the shape
+    /// claude-fleet actually moves. Returns (worktree dir, main repo dir,
+    /// base sha).
+    fn dirty_source_via_linked_worktree(
+        root: &Path,
+    ) -> (std::path::PathBuf, std::path::PathBuf, String) {
+        let main = root.join("main-repo");
+        std::fs::create_dir_all(&main).unwrap();
+        let base = commit_history(&main);
+        git(&main, &["checkout", "-q", "--detach"]); // free "feat" for the worktree
+        let wt = root.join("src-wt");
+        git(
+            &main,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "feat"],
+        );
+        make_dirty(&wt);
+        (wt, main, base)
+    }
+
     /// Everything that must be byte-identical on the source before and after.
+    /// The index path goes through `git rev-parse --git-path index` rather
+    /// than a hardcoded `.git/index`: for a LINKED WORKTREE, `.git` is a
+    /// file (a pointer to the main repo), not a directory, and the
+    /// worktree's own index lives under the main repo's
+    /// `.git/worktrees/<name>/index`.
     fn source_fingerprint(src: &Path) -> (String, Vec<u8>, String) {
+        let index_path = git(
+            src,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        )
+        .trim()
+        .to_string();
         (
             // --no-optional-locks: a plain `git status` may refresh and rewrite the index.
             git(src, &["--no-optional-locks", "status", "--porcelain=v1"]),
-            std::fs::read(src.join(".git/index")).unwrap(),
+            std::fs::read(&index_path).unwrap(),
             git(
                 src,
                 &["for-each-ref", "refs/heads", "refs/remotes", "refs/tags"],
@@ -733,8 +914,13 @@ mod tests {
     }
 
     /// snapshot → bundle → fetch → worktree add → apply, all through the real
-    /// generated scripts. `seed_target` prepares the target's main clone.
-    fn round_trip(seed_target: impl Fn(&Path, &Path, &str)) {
+    /// generated scripts. `make_source` builds the fixture (a plain repo, or
+    /// a linked worktree of one); `seed_target` prepares the target's main
+    /// clone.
+    fn round_trip(
+        make_source: impl Fn(&Path) -> (std::path::PathBuf, String),
+        seed_target: impl Fn(&Path, &Path, &str),
+    ) {
         if !have("git") || !have("bash") {
             eprintln!("skipping: git or bash is not available");
             return;
@@ -743,7 +929,7 @@ mod tests {
         let (home_a, home_b) = (tmp.path().join("home-a"), tmp.path().join("home-b"));
         std::fs::create_dir_all(&home_a).unwrap();
         std::fs::create_dir_all(&home_b).unwrap();
-        let (src, base) = dirty_source(tmp.path());
+        let (src, base) = make_source(tmp.path());
         let before = source_fingerprint(&src);
         let src_head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
 
@@ -780,8 +966,9 @@ mod tests {
         let mut got = Vec::new();
         while (got.len() as u64) < info.bytes {
             let out = bash(&chunk_script(&info.path, got.len() as u64, 1000), &home_a);
-            assert!(!out.stdout.is_empty(), "empty chunk at {}", got.len());
-            got.extend_from_slice(&out.stdout);
+            let chunk = payload(&out.stdout).expect("chunk marker");
+            assert!(!chunk.is_empty(), "empty chunk at {}", got.len());
+            got.extend_from_slice(chunk);
         }
         assert_eq!(
             got,
@@ -819,8 +1006,10 @@ mod tests {
         );
 
         // The claim: identical porcelain, contents, modes.
+        let apply_out = String::from_utf8_lossy(&out.stdout);
+        let porcelain = parse_apply(&apply_out).unwrap();
         assert_eq!(
-            sorted_lines(&String::from_utf8_lossy(&out.stdout)),
+            sorted_lines(porcelain),
             sorted_lines(&before.0),
             "target porcelain equals the source's"
         );
@@ -890,7 +1079,7 @@ mod tests {
 
     #[test]
     fn round_trip_into_a_target_that_has_the_base_commit() {
-        round_trip(|src, root, base| {
+        round_trip(dirty_source, |src, root, base| {
             // A clone cut back to the "pushed" base: the bundle must be thin.
             std::fs::create_dir_all(root).unwrap();
             git(root, &["init", "-q", "-b", "main"]);
@@ -912,7 +1101,7 @@ mod tests {
 
     #[test]
     fn round_trip_into_an_initialized_empty_target() {
-        round_trip(|_src, root, _base| {
+        round_trip(dirty_source, |_src, root, _base| {
             let tmp_home = root.parent().unwrap().join("home-seed");
             std::fs::create_dir_all(&tmp_home).unwrap();
             // An unreachable origin: the seed falls through to `git init`.
@@ -930,6 +1119,38 @@ mod tests {
                 TargetSeed::Initialized
             );
         });
+    }
+
+    #[test]
+    fn round_trip_from_a_linked_worktree_source() {
+        // The shape claude-fleet actually moves: the "source" is a linked
+        // worktree, not the main repo clone. `source_fingerprint` must read
+        // the worktree's OWN index (via `git rev-parse --git-path index`),
+        // and cleanup (run with the worktree path) must still reach the
+        // shared refs.
+        round_trip(
+            |root| {
+                let (wt, _main, base) = dirty_source_via_linked_worktree(root);
+                (wt, base)
+            },
+            |src, root, base| {
+                std::fs::create_dir_all(root).unwrap();
+                git(root, &["init", "-q", "-b", "main"]);
+                git(
+                    root,
+                    &[
+                        "fetch",
+                        "-q",
+                        src.to_str().unwrap(),
+                        "pushed:refs/remotes/origin/feat",
+                    ],
+                );
+                assert_eq!(
+                    git(root, &["rev-parse", "refs/remotes/origin/feat"]).trim(),
+                    base
+                );
+            },
+        );
     }
 
     #[test]
@@ -1031,20 +1252,36 @@ mod tests {
 
     #[test]
     fn parsers_reject_malformed_output() {
-        assert!(parse_seed("weird\n").is_err());
-        assert_eq!(parse_seed("cloned\n").unwrap(), TargetSeed::Cloned);
-        assert!(parse_haves("relative/dir\n").is_err());
-        let (dir, haves) = parse_haves(&format!(
+        // Every real parser now requires the OUT_MARKER line: without it,
+        // stdout is treated as banner noise the script never got past.
+        let marked = |body: &str| format!("{OUT_MARKER}\n{body}");
+
+        assert!(
+            parse_seed("cloned\n").is_err(),
+            "no marker: not a valid payload"
+        );
+        assert!(parse_seed(&marked("weird\n")).is_err());
+        assert_eq!(parse_seed(&marked("cloned\n")).unwrap(), TargetSeed::Cloned);
+
+        assert!(parse_haves(&marked("relative/dir\n")).is_err());
+        let (dir, haves) = parse_haves(&marked(&format!(
             "/h/.cache/x\n{}\nnot-a-sha\n{}\n",
             "a".repeat(40),
             "b".repeat(64)
-        ))
+        )))
         .unwrap();
         assert_eq!(dir, "/h/.cache/x");
         assert_eq!(haves.len(), 2, "non-hex lines are dropped");
-        assert!(parse_snapshot("12\t3\t0\t1\t/abs/carry.bundle\n").is_ok());
-        assert!(parse_snapshot("12\t3\t0\t1\trelative\n").is_err());
-        assert!(parse_snapshot("x\t3\t0\t1\t/abs\n").is_err());
+
+        assert!(parse_snapshot(&marked("12\t3\t0\t1\t/abs/carry.bundle\n")).is_ok());
+        assert!(parse_snapshot(&marked("12\t3\t0\t1\trelative\n")).is_err());
+        assert!(parse_snapshot(&marked("x\t3\t0\t1\t/abs\n")).is_err());
+
+        assert!(parse_apply("M file.txt\n").is_err(), "no marker");
+        assert_eq!(
+            parse_apply(&marked(" M file.txt\n")).unwrap(),
+            " M file.txt\n"
+        );
     }
 
     #[test]
@@ -1185,7 +1422,565 @@ mod tests {
                 "raw value leaked: {script}"
             );
         }
-        assert!(parse_pack("12\t/abs/ignored.tgz\n").is_ok());
-        assert!(parse_pack("12\trelative\n").is_err());
+        assert!(parse_pack(&format!("{OUT_MARKER}\n12\t/abs/ignored.tgz\n")).is_ok());
+        assert!(parse_pack(&format!("{OUT_MARKER}\n12\trelative\n")).is_err());
+        assert!(parse_pack("12\t/abs/ignored.tgz\n").is_err(), "no marker");
+    }
+
+    #[test]
+    fn payload_finds_the_first_marker_line_only() {
+        assert_eq!(payload(b"no marker here"), None, "no marker");
+        assert_eq!(
+            payload(format!("{OUT_MARKER}\nhello").as_bytes()),
+            Some(b"hello".as_slice()),
+            "marker at offset 0"
+        );
+        assert_eq!(
+            payload(format!("some banner\nnoise\n{OUT_MARKER}\nhello").as_bytes()),
+            Some(b"hello".as_slice()),
+            "banner before the marker is skipped"
+        );
+        assert_eq!(
+            payload(format!("xx{OUT_MARKER}\nhello").as_bytes()),
+            None,
+            "marker text not at a line start is not a marker"
+        );
+        // A payload that itself contains the marker text later on: the FIRST one wins.
+        let body = format!("{OUT_MARKER}\nfirst\n{OUT_MARKER}\nsecond");
+        assert_eq!(
+            payload(body.as_bytes()),
+            Some(format!("first\n{OUT_MARKER}\nsecond").as_bytes()),
+            "the first marker line determines where the payload starts"
+        );
+    }
+
+    /// End-to-end proof that a login-shell banner (`bash -lc` sources
+    /// `/etc/profile` / `~/.bash_profile` on a real host) never corrupts a
+    /// script's parsed output: haves, snapshot, chunk and apply are each run
+    /// with a banner injected before the script body, exactly as a chatty
+    /// profile would inject one, and compared against a bannerless run.
+    #[test]
+    fn carry_scripts_survive_a_login_shell_banner() {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let banner = "printf '/usr/local/bin added to PATH\\nWelcome!\\n'; ";
+        let with_banner = |script: &str| format!("{banner}{script}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (home_a, home_b) = (tmp.path().join("home-a"), tmp.path().join("home-b"));
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        let (src, _base) = dirty_source(tmp.path());
+        let src_head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+
+        // haves_script: the banner line must never be mistaken for the transfer dir.
+        let clean = bash(&haves_script(src.to_str().unwrap(), ID), &home_b);
+        let banner_out = bash(
+            &with_banner(&haves_script(src.to_str().unwrap(), ID)),
+            &home_b,
+        );
+        assert!(
+            banner_out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&banner_out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&banner_out.stdout).contains("added to PATH"),
+            "sanity: the banner really landed in stdout"
+        );
+        let (dir_clean, haves_clean) =
+            parse_haves(&String::from_utf8_lossy(&clean.stdout)).unwrap();
+        let (dir_banner, haves_banner) =
+            parse_haves(&String::from_utf8_lossy(&banner_out.stdout)).unwrap();
+        assert_eq!(
+            dir_banner, dir_clean,
+            "banner line must not be mistaken for the transfer dir"
+        );
+        assert_eq!(haves_banner, haves_clean);
+
+        // snapshot_script: must still parse to a sane BundleInfo.
+        let out = bash(
+            &with_banner(&snapshot_script(src.to_str().unwrap(), ID, &[], u64::MAX)),
+            &home_a,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("added to PATH"));
+        let info = parse_snapshot(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert_eq!(info.bytes, std::fs::metadata(&info.path).unwrap().len());
+        assert_eq!(
+            info.commits, 3,
+            "no haves passed: base + the two unpushed commits"
+        );
+
+        // chunk_script: the reassembled bytes must equal the file, banner excluded.
+        let out = bash(
+            &with_banner(&chunk_script(&info.path, 0, info.bytes)),
+            &home_a,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("added to PATH"));
+        let chunk = payload(&out.stdout).expect("marker present");
+        assert_eq!(chunk, std::fs::read(&info.path).unwrap().as_slice());
+
+        // apply_script: fetch the (real, bannerless-written) bundle into a target,
+        // then apply it TWICE — once under a banner, once clean — into two
+        // separate clean worktrees at the same HEAD, and compare the results.
+        let root = tmp.path().join("tgt");
+        std::fs::create_dir_all(&root).unwrap();
+        // "main", not "feat": `feat` must stay free for the two linked
+        // worktrees added below (a branch can only be checked out once).
+        git(&root, &["init", "-q", "-b", "main"]);
+        let out = bash(
+            &fetch_script(root.to_str().unwrap(), &info.path, ID, "feat"),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let wt1 = tmp.path().join("wt1");
+        let wt2 = tmp.path().join("wt2");
+        git(
+            &root,
+            &["worktree", "add", "-q", wt1.to_str().unwrap(), "feat"],
+        );
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                wt2.to_str().unwrap(),
+                "feat",
+            ],
+        );
+
+        let out_banner = bash(
+            &with_banner(&apply_script(wt1.to_str().unwrap(), ID, &src_head)),
+            &home_b,
+        );
+        assert!(
+            out_banner.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out_banner.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out_banner.stdout).contains("added to PATH"));
+        let banner_apply_out = String::from_utf8_lossy(&out_banner.stdout);
+        let porcelain_banner = parse_apply(&banner_apply_out).unwrap();
+
+        let out_clean = bash(&apply_script(wt2.to_str().unwrap(), ID, &src_head), &home_b);
+        assert!(
+            out_clean.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out_clean.stderr)
+        );
+        let clean_apply_out = String::from_utf8_lossy(&out_clean.stdout);
+        let porcelain_clean = parse_apply(&clean_apply_out).unwrap();
+
+        assert_eq!(
+            sorted_lines(porcelain_banner),
+            sorted_lines(porcelain_clean),
+            "banner text must not appear as phantom dirty entries"
+        );
+    }
+
+    #[test]
+    fn scripts_refuse_a_malicious_or_empty_id_and_leave_a_sibling_transfer_dir_untouched() {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let other_dir = home.join(".cache/claude-fleet/transfer/other");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(other_dir.join("sentinel.txt"), "keep").unwrap();
+
+        let (src, _base) = dirty_source(tmp.path());
+        let root = tmp.path().join("tgt");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "feat"]);
+
+        for bad in ["", "a/b", ".."] {
+            for (name, script) in [
+                ("haves", haves_script(root.to_str().unwrap(), bad)),
+                (
+                    "snapshot",
+                    snapshot_script(src.to_str().unwrap(), bad, &[], u64::MAX),
+                ),
+                (
+                    "fetch",
+                    fetch_script(root.to_str().unwrap(), "/nonexistent.bundle", bad, "feat"),
+                ),
+                (
+                    "apply",
+                    apply_script(src.to_str().unwrap(), bad, "deadbeef"),
+                ),
+                ("cleanup", cleanup_script(root.to_str().unwrap(), bad)),
+                (
+                    "ignored-pack",
+                    ignored_pack_script(src.to_str().unwrap(), bad, &[]),
+                ),
+            ] {
+                let out = bash(&script, &home);
+                assert!(!out.status.success(), "{name} must refuse id {bad:?}");
+                assert!(
+                    String::from_utf8_lossy(&out.stderr).contains(FAILED),
+                    "{name} id {bad:?}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(other_dir.join("sentinel.txt")).unwrap(),
+                "keep",
+                "a sibling transfer dir must survive a bad id {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scripts_that_build_the_transfer_dir_refuse_an_empty_home() {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, _base) = dirty_source(tmp.path());
+        let root = tmp.path().join("tgt");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "feat"]);
+
+        let run_with_empty_home = |script: &str| {
+            Command::new("bash")
+                .args(["-c", script])
+                .env("HOME", "")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("bash")
+        };
+        for script in [
+            haves_script(root.to_str().unwrap(), ID),
+            snapshot_script(src.to_str().unwrap(), ID, &[], u64::MAX),
+            ignored_pack_script(src.to_str().unwrap(), ID, &[]),
+        ] {
+            let out = run_with_empty_home(&script);
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        }
+    }
+
+    #[test]
+    fn chunk_script_refuses_a_missing_or_unreadable_file() {
+        if !have("bash") {
+            eprintln!("skipping: bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let missing = tmp.path().join("nope.bundle");
+        let out = bash(&chunk_script(missing.to_str().unwrap(), 0, 10), &home);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        assert!(payload(&out.stdout).is_none(), "no payload on failure");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unreadable = tmp.path().join("secret.bundle");
+            std::fs::write(&unreadable, b"data").unwrap();
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let out = bash(&chunk_script(unreadable.to_str().unwrap(), 0, 4), &home);
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+
+    #[test]
+    fn apply_restores_a_clean_worktree_when_a_read_tree_fails_partway() {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (home_a, home_b) = (tmp.path().join("home-a"), tmp.path().join("home-b"));
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        let (src, _base) = dirty_source(tmp.path());
+        let src_head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+
+        let root = tmp.path().join("tgt");
+        std::fs::create_dir_all(&root).unwrap();
+        // "main", not "feat": `feat` must stay free for the linked worktree
+        // added below (a branch can only be checked out in one place).
+        git(&root, &["init", "-q", "-b", "main"]);
+        let out = bash(&haves_script(root.to_str().unwrap(), ID), &home_b);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (_tgt_dir, haves) = parse_haves(&String::from_utf8_lossy(&out.stdout)).unwrap();
+
+        let out = bash(
+            &snapshot_script(src.to_str().unwrap(), ID, &haves, u64::MAX),
+            &home_a,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let info = parse_snapshot(&String::from_utf8_lossy(&out.stdout)).unwrap();
+
+        let out = bash(
+            &fetch_script(root.to_str().unwrap(), &info.path, ID, "feat"),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let wt = tmp.path().join("tgt-wt");
+        git(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "feat"],
+        );
+        // A pre-existing ignored file: the recovery's `clean -fd` (never `-x`)
+        // must never touch it.
+        std::fs::write(wt.join(".env"), "TARGET_SECRET=1\n").unwrap();
+
+        // Break it: delete the `ix` ref so the SECOND read-tree fails after
+        // the first (worktree) one already succeeded.
+        git(
+            &root,
+            &["update-ref", "-d", &format!("refs/fleet/transfer/{ID}/ix")],
+        );
+
+        let out = bash(&apply_script(wt.to_str().unwrap(), ID, &src_head), &home_b);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+
+        assert_eq!(
+            git(&wt, &["status", "--porcelain"]),
+            "",
+            "no half-applied leftovers"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join(".env")).unwrap(),
+            "TARGET_SECRET=1\n",
+            "a pre-existing ignored file is untouched by the recovery clean"
+        );
+    }
+
+    #[test]
+    fn snapshot_script_fails_cleanly_if_the_bundle_size_cannot_be_determined() {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (src, _) = dirty_source(tmp.path());
+
+        // A `wc` that prints nothing for `-c`, simulating a `wc -c` failure.
+        let fakebin = tmp.path().join("fakebin");
+        std::fs::create_dir_all(&fakebin).unwrap();
+        std::fs::write(
+            fakebin.join("wc"),
+            "#!/bin/sh\ncase \"$1\" in -c) exit 0;; esac\nexec /usr/bin/wc \"$@\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(fakebin.join("wc"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            fakebin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let out = Command::new("bash")
+            .args([
+                "-c",
+                &snapshot_script(src.to_str().unwrap(), ID, &[], u64::MAX),
+            ])
+            .env("HOME", &home)
+            .env("PATH", path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("bash");
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+    }
+
+    #[test]
+    fn snapshot_and_pack_write_their_transfer_dir_private() {
+        if !have("git") || !have("bash") || !have("tar") {
+            eprintln!("skipping: git, bash or tar is not available");
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let home = tmp.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let (src, _) = dirty_source(tmp.path());
+
+            let out = bash(
+                &snapshot_script(src.to_str().unwrap(), ID, &[], u64::MAX),
+                &home,
+            );
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let info = parse_snapshot(&String::from_utf8_lossy(&out.stdout)).unwrap();
+            let bundle_mode = std::fs::metadata(&info.path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(bundle_mode, 0o600, "umask 077 keeps the bundle private");
+            let dir_mode = std::fs::metadata(Path::new(&info.path).parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700, "umask 077 keeps the transfer dir private");
+
+            let out = bash(
+                &ignored_pack_script(src.to_str().unwrap(), ID, &["keep.txt".to_string()]),
+                &home,
+            );
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let (_bytes, archive) = parse_pack(&String::from_utf8_lossy(&out.stdout)).unwrap();
+            let archive_mode = std::fs::metadata(&archive).unwrap().permissions().mode() & 0o777;
+            assert_eq!(archive_mode, 0o600, "umask 077 keeps the archive private");
+        }
+    }
+
+    #[test]
+    fn fetch_never_moves_an_existing_local_branch() {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (home_a, home_b) = (tmp.path().join("home-a"), tmp.path().join("home-b"));
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        let (src, base) = dirty_source(tmp.path());
+
+        let root = tmp.path().join("tgt");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(
+            &root,
+            &[
+                "fetch",
+                "-q",
+                src.to_str().unwrap(),
+                "pushed:refs/heads/feat",
+            ],
+        );
+        assert_eq!(git(&root, &["rev-parse", "refs/heads/feat"]).trim(), base);
+
+        let out = bash(&haves_script(root.to_str().unwrap(), ID), &home_b);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (_dir, haves) = parse_haves(&String::from_utf8_lossy(&out.stdout)).unwrap();
+
+        let out = bash(
+            &snapshot_script(src.to_str().unwrap(), ID, &haves, u64::MAX),
+            &home_a,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let info = parse_snapshot(&String::from_utf8_lossy(&out.stdout)).unwrap();
+
+        let out = bash(
+            &fetch_script(root.to_str().unwrap(), &info.path, ID, "feat"),
+            &home_b,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        assert_eq!(
+            git(&root, &["rev-parse", "refs/heads/feat"]).trim(),
+            base,
+            "an existing local branch is never moved by fetch_script"
+        );
+    }
+
+    #[test]
+    fn ignored_list_script_fails_on_a_non_git_dir_but_succeeds_empty_on_a_clean_repo() {
+        if !have("git") || !have("bash") {
+            eprintln!("skipping: git or bash is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        // Not a git repo at all: a real failure, never "nothing to carry".
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let out = bash(&ignored_list_script(plain.to_str().unwrap()), &home);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        assert!(
+            payload(&out.stdout).is_none(),
+            "no marker on a real failure"
+        );
+
+        // A real repo with nothing ignored: a genuinely empty listing.
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        let out = bash(&ignored_list_script(repo.to_str().unwrap()), &home);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(parse_ignored_list(&out.stdout), Vec::new());
     }
 }
