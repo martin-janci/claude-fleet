@@ -106,7 +106,7 @@ fn asset_inventory_has_managed(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 033: `hosts` already has its
+/// `already_applied` guard of migration 034: `hosts` already has its
 /// `transport` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
 fn hosts_has_transport(conn: &Connection) -> rusqlite::Result<bool> {
@@ -228,12 +228,22 @@ const MIGRATIONS: &[Migration] = &[
     // `CREATE TABLE IF NOT EXISTS` plus two `CREATE UNIQUE INDEX IF NOT
     // EXISTS`, safe to re-run.
     Migration::plain(32, include_str!("../../migrations/032_client_tokens.sql")),
+    // `CREATE TABLE IF NOT EXISTS` + `CREATE UNIQUE INDEX IF NOT EXISTS`,
+    // safe to re-run.
+    Migration::plain(33, include_str!("../../migrations/033_asset_layers.sql")),
     // `ALTER TABLE ... ADD COLUMN` fails if the column is already there.
     Migration {
-        version: 33,
-        sql: include_str!("../../migrations/033_host_transport.sql"),
+        version: 34,
+        sql: include_str!("../../migrations/034_host_transport.sql"),
         already_applied: Some(hosts_has_transport),
     },
+    // Re-runs 033's layer DDL for databases the pre-merge host-agent branch
+    // created, which recorded 33 for a different migration and so never get
+    // offered 033. `IF NOT EXISTS` throughout, safe to re-run.
+    Migration::plain(
+        35,
+        include_str!("../../migrations/035_host_layers_repair.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1268,18 +1278,28 @@ mod tests {
         assert_eq!(scanned_at, 7, "the inventory row survives a re-run");
     }
 
-    /// 033 on a database stopped at 032 with a host row: `transport` is
+    /// 034 on a database stopped at 033 with a host row: `transport` is
     /// added, defaulting to `ssh` for the existing row. Rolling the recorded
     /// version back and migrating again (tests do this to simulate re-running
     /// an already-applied migration) is a no-op that keeps a changed value
     /// and does not re-add the column.
+    /// The 033 collision, forward direction: a database at main's RELEASED
+    /// schema (33, with `host_layers` and no `transport`) migrates to the
+    /// merged head, and 034's `ALTER TABLE` runs exactly once.
     #[test]
-    fn migration_033_is_idempotent() {
-        let old = store_at_version(32);
+    fn a_released_main_db_migrates_to_the_merged_head() {
+        let old = store_at_version(33);
         old.conn
             .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
             .unwrap();
-        old.migrate().expect("033 on an existing DB");
+        // main's 033 really did run: the layers table is already there.
+        old.conn
+            .execute_batch(
+                "INSERT INTO host_layers (host_alias, layer_name, axis) \
+                 VALUES ('h', 'base', 'role');",
+            )
+            .unwrap();
+        old.migrate().expect("merged head on a released main DB");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let transport: String = old
             .conn
@@ -1287,14 +1307,92 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(transport, "ssh", "a pre-033 row defaults to ssh");
+        assert_eq!(transport, "ssh", "034 added the column, defaulting to ssh");
+        let n: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'transport'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "034's ALTER TABLE ran exactly once");
+        // 035 is a no-op here: the pre-existing layer row survives.
+        let rows: i64 = old
+            .conn
+            .query_row("SELECT COUNT(*) FROM host_layers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "035 did not clobber the existing layers table");
+    }
+
+    /// The 033 collision, from the other side: a database created by the
+    /// PRE-MERGE host-agent branch, where `033` was host_transport. It
+    /// records version 33 and already has `transport`, so on the merged head
+    /// `migrate()` never offers 033 (asset_layers) — 33 is not `> 33` — and
+    /// 034 is skipped by its `already_applied` guard. Migration 035 is what
+    /// puts `host_layers` there anyway.
+    #[test]
+    fn a_pre_merge_branch_db_still_gets_the_layers_table() {
+        let old = store_at_version(32);
+        // Replay exactly what the pre-merge branch's 033 did.
+        old.conn
+            .execute_batch(
+                "ALTER TABLE hosts ADD COLUMN transport TEXT NOT NULL DEFAULT 'ssh';
+                 INSERT OR IGNORE INTO schema_version (version) VALUES (33);",
+            )
+            .unwrap();
+        old.migrate().expect("merged head on a pre-merge branch DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        // The table main's 033 would have created is present…
+        old.conn
+            .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "INSERT INTO host_layers (host_alias, layer_name, axis) \
+                 VALUES ('h', 'base', 'role');",
+            )
+            .expect("host_layers exists and accepts a row");
+        // …and its unique-active-role index came with it.
+        let err = old.conn.execute_batch(
+            "INSERT INTO host_layers (host_alias, layer_name, axis) \
+             VALUES ('h', 'other', 'role');",
+        );
+        assert!(err.is_err(), "the active-role index is in place");
+        // The column the branch had already added was not added twice.
+        let n: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'transport'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "034 did not re-add a column the branch already had");
+    }
+
+    #[test]
+    fn migration_034_is_idempotent() {
+        let old = store_at_version(33);
+        old.conn
+            .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
+            .unwrap();
+        old.migrate().expect("034 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let transport: String = old
+            .conn
+            .query_row("SELECT transport FROM hosts WHERE alias='h'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(transport, "ssh", "a pre-034 row defaults to ssh");
         old.conn
             .execute("UPDATE hosts SET transport='agent' WHERE alias='h'", [])
             .unwrap();
         old.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 33;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 34;")
             .unwrap();
-        old.migrate().expect("re-running 033 is safe");
+        old.migrate().expect("re-running 034 is safe");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let n: i64 = old
             .conn
@@ -1304,7 +1402,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 1, "re-running 033 does not duplicate the column");
+        assert_eq!(n, 1, "re-running 034 does not duplicate the column");
         let transport: String = old
             .conn
             .query_row("SELECT transport FROM hosts WHERE alias='h'", [], |r| {

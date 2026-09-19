@@ -167,12 +167,18 @@ impl SyncPlan {
 
 /// Narrows a plan to one host / kind / name. `host_alias` is applied by the
 /// caller when choosing which hosts to visit; `compute_host_plan` honours
-/// `kind` and `name` only.
+/// `kind`, `name` and `layered` only.
 #[derive(Debug, Clone, Default)]
 pub struct PlanFilter {
     pub host_alias: Option<String>,
     pub kind: Option<Kind>,
     pub name: Option<String>,
+    /// Whether this host has any `host_layers` row (role or context). A host
+    /// with none resolves to the whole catalog (backward compat), and a
+    /// `plugin_ref` orphan on it must plan exactly what it planned before
+    /// layers existed: `Remove`. Only a host that actually has a layer
+    /// assignment gets the "reported, not removed" `Noop`.
+    pub layered: bool,
 }
 
 impl PlanFilter {
@@ -315,6 +321,29 @@ pub fn compute_host_plan(
             continue;
         };
         if !filter.matches(kind, &name) {
+            continue;
+        }
+        if kind == Kind::PluginRef && filter.layered {
+            actions.push(Action {
+                kind: kind.as_str().to_string(),
+                name: name.clone(),
+                op: ActionOp::Noop,
+                reason: Some(
+                    "no longer in this host's effective catalog; plugins are not removed \
+                     automatically"
+                        .to_string(),
+                ),
+                files: Vec::new(),
+                merges: Vec::new(),
+                backup: false,
+                secrets: Vec::new(),
+                missing_secrets: Vec::new(),
+                plan: None,
+                expected: BTreeMap::new(),
+                secret_files: BTreeSet::new(),
+                remove_entry: None,
+                plugin: None,
+            });
             continue;
         }
         actions.push(Action {
@@ -1227,6 +1256,65 @@ mod tests {
         );
         assert!(a.remove_entry.is_some());
         assert!(a.plan.is_none());
+    }
+
+    #[test]
+    fn a_dropped_plugin_ref_is_reported_but_never_removed_on_a_layered_host() {
+        // The manifest remembers a plugin the (resolved) catalog no longer
+        // has. Uninstalling is slow and network-bound, so a context switch
+        // must not depend on it: report, never remove. This is conditional
+        // on the host actually having a layer assignment (Fix 3b) — the
+        // filter's `layered` flag stands in for that here.
+        let manifest = manifest_with(&[("plugin_ref/graphify", "h")]);
+        let hp = compute_host_plan(
+            &catalog_of(&[]),
+            &Claude,
+            "local",
+            &host_with(&[]),
+            &manifest,
+            &BTreeMap::new(),
+            &PlanFilter {
+                layered: true,
+                ..Default::default()
+            },
+        );
+        let a = act(&hp, "graphify");
+        assert_eq!(a.op, ActionOp::Noop);
+        assert_eq!(a.kind, "plugin_ref");
+        assert!(
+            a.reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not removed automatically"),
+            "{:?}",
+            a.reason
+        );
+        // The reason must be true regardless of whether the host has any
+        // layers at all — it must not assert "no longer in this host's
+        // layers" for a host that has none (Fix 3a).
+        assert!(
+            !a.reason.as_deref().unwrap_or_default().contains("layers"),
+            "{:?}",
+            a.reason
+        );
+    }
+
+    #[test]
+    fn a_dropped_plugin_ref_on_an_unassigned_host_still_plans_remove() {
+        // A host with no `host_layers` row must plan a dropped `plugin_ref`
+        // exactly as it did before layers existed: `Remove`, restoring the
+        // load-bearing backward-compat promise (Fix 3b).
+        let manifest = manifest_with(&[("plugin_ref/graphify", "h")]);
+        let hp = plan_for(
+            &catalog_of(&[]),
+            &Claude,
+            &host_with(&[]),
+            &manifest,
+            &BTreeMap::new(),
+        );
+        let a = act(&hp, "graphify");
+        assert_eq!(a.op, ActionOp::Remove);
+        assert_eq!(a.kind, "plugin_ref");
     }
 
     #[test]

@@ -5,4 +5,4 @@
 -- See docs/superpowers/plans/2026-09-18-host-agent.md.
 ALTER TABLE hosts ADD COLUMN transport TEXT NOT NULL DEFAULT 'ssh';
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (33);
+INSERT OR IGNORE INTO schema_version (version) VALUES (34);

@@ -689,3 +689,21 @@ pub struct RevokeClientParams {
     /// refused; the name becomes free to pair again.
     pub name: String,
 }
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ResolvePreviewParams {
+    /// The host whose effective asset set to compute.
+    pub host_alias: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SetHostLayersParams {
+    /// The host whose layer assignment to replace.
+    pub host_alias: String,
+    /// The role layer, or null to clear it. A host has at most one.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Context layers, in application order. Omit for none.
+    #[serde(default)]
+    pub contexts: Vec<String>,
+}

@@ -32,7 +32,7 @@
 | `crates/fleet-agent/src/proto.rs` | The frame types, shared by construction with the hub side |
 | `crates/fleet-core/src/agent/mod.rs` (new) | `AgentRegistry`, `AgentTransport`, the `/agent` upgrade handler |
 | `crates/fleet-core/src/ssh.rs` | Unchanged trait; a resolver picks the implementation per host |
-| `crates/fleet-core/migrations/033_host_transport.sql` | `hosts.transport` |
+| `crates/fleet-core/migrations/034_host_transport.sql` | `hosts.transport` |
 | `crates/fleet-core/src/store/hosts_accounts.rs` | Read and write `transport` |
 | `crates/fleet-core/src/mcp/mod.rs` | Mount `/agent` behind the bearer check |
 | `crates/fleet-hub/src/serve.rs` | Build the registry and hand it to the transport resolver |
@@ -42,7 +42,7 @@
 
 ### Task 1: `hosts.transport` and the store
 
-**Files:** `crates/fleet-core/migrations/033_host_transport.sql`, `store/schema.rs`, `store/rows.rs`, `store/hosts_accounts.rs`, tests
+**Files:** `crates/fleet-core/migrations/034_host_transport.sql`, `store/schema.rs`, `store/rows.rs`, `store/hosts_accounts.rs`, tests
 
 **Interfaces:** `HostRow.transport: String` (`"ssh"` | `"agent"`); `Store::set_host_transport(alias, transport) -> Result<(), IpcError>` refusing anything else; `add_host` takes the transport with `"ssh"` as the default.
 

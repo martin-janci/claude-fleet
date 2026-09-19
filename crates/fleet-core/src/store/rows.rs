@@ -387,11 +387,11 @@ pub struct HostRow {
     pub last_pinged_at: Option<i64>,
     pub account_uuid: Option<String>,
     pub provisioned: bool,
-    /// `"ssh"` | `"agent"` (migration 033). See `Store::set_host_transport`.
+    /// `"ssh"` | `"agent"` (migration 034). See `Store::set_host_transport`.
     pub transport: String,
 }
 
-/// The only values `hosts.transport` may hold (migration 033). The single
+/// The only values `hosts.transport` may hold (migration 034). The single
 /// definition `Store::set_host_transport` and `service::hosts::add_host`
 /// both validate against, so the allowed set can't drift between them.
 pub const HOST_TRANSPORTS: [&str; 2] = ["ssh", "agent"];

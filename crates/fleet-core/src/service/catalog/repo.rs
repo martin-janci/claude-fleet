@@ -17,6 +17,9 @@ pub struct Catalog {
     pub problems: Vec<Problem>,
     pub head: String,
     pub loaded_at: i64,
+    /// Layer definitions from `layers/*.yaml`. Empty ⇒ no layering, and
+    /// every host resolves to the whole catalog (backward compatibility).
+    pub layers: crate::service::catalog::layer::LayerSet,
 }
 
 impl Catalog {
@@ -391,6 +394,90 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
             }
         }
     }
+
+    // Layers are NOT a Kind: they must never reach compute_host_plan as an
+    // asset. Own directory, own pass.
+    let layer_dir = root.join("layers");
+    if layer_dir.is_dir() {
+        let mut parsed: Vec<crate::service::catalog::layer::Layer> = Vec::new();
+        let mut entries: Vec<PathBuf> = match std::fs::read_dir(&layer_dir) {
+            Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+            Err(e) => {
+                cat.problems.push(Problem {
+                    path: rel(root, &layer_dir),
+                    message: e.to_string(),
+                });
+                Vec::new()
+            }
+        };
+        entries.sort();
+        for p in entries {
+            if p.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let stem = p
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            match std::fs::read_to_string(&p)
+                .map_err(|e| e.to_string())
+                .and_then(|t| crate::service::catalog::layer::Layer::from_yaml(&t))
+            {
+                Ok(l) if l.name != stem => cat.problems.push(Problem {
+                    path: rel(root, &p),
+                    message: format!("layer name '{}' does not match file stem '{stem}'", l.name),
+                }),
+                Ok(l) => parsed.push(l),
+                Err(message) => cat.problems.push(Problem {
+                    path: rel(root, &p),
+                    message,
+                }),
+            }
+        }
+        let (set, errors) = crate::service::catalog::layer::LayerSet::from_layers(parsed);
+        for message in errors {
+            cat.problems.push(Problem {
+                path: "layers".to_string(),
+                message,
+            });
+        }
+        // A member, exclude or override key naming an unknown asset is a
+        // WARNING: the layer still resolves, matching load_dir's existing
+        // tolerance elsewhere. Exclude is checked too — a typo there would
+        // otherwise silently exclude nothing.
+        for l in set.iter() {
+            for key in l
+                .members
+                .iter()
+                .chain(l.exclude.iter())
+                .chain(l.overrides.keys())
+            {
+                if let Some((kind, name)) = crate::service::catalog::layer::split_key(key) {
+                    if cat.find(kind, &name).is_none() {
+                        cat.problems.push(Problem {
+                            path: format!("layers/{}.yaml", l.name),
+                            message: format!("'{key}' is not in the catalog"),
+                        });
+                    }
+                }
+            }
+        }
+        // `extends` is flattened at load, not by `resolve`, so a cycle (or a
+        // missing/cross-axis parent) is caught here as a Problem instead of
+        // surfacing only when a host that happens to be assigned the bad
+        // layer is planned — or never, if nobody is assigned it.
+        for l in set.iter() {
+            if let Err(message) = set.chain_for(&l.name) {
+                cat.problems.push(Problem {
+                    path: format!("layers/{}.yaml", l.name),
+                    message,
+                });
+            }
+        }
+        cat.layers = set;
+    }
+
     Ok(cat)
 }
 
@@ -658,6 +745,126 @@ mod tests {
         assert_eq!(err.code, "E_CATALOG_PARSE");
         write(&root, "catalog.yaml", "schema_version: 99\n");
         assert_eq!(load_dir(&root).unwrap_err().code, "E_CATALOG_PARSE");
+    }
+
+    /// An `extends` cycle must be caught at load (Fix 2), regardless of
+    /// whether any host is assigned the offending layer — otherwise it is
+    /// invisible until (or unless) a host happens to be planned with it.
+    #[test]
+    fn load_dir_reports_an_extends_cycle_as_a_problem_and_does_not_hang() {
+        let root = tmp("layer-cycle");
+        write(&root, "catalog.yaml", "schema_version: 1\nname: test\n");
+        write(
+            &root,
+            "layers/a.yaml",
+            "kind: layer\nname: a\naxis: role\nextends: b\n",
+        );
+        write(
+            &root,
+            "layers/b.yaml",
+            "kind: layer\nname: b\naxis: role\nextends: a\n",
+        );
+
+        let cat = load_dir(&root).unwrap();
+        assert!(
+            cat.problems
+                .iter()
+                .any(|p| p.path == "layers/a.yaml" && p.message.contains("cycle")),
+            "{:?}",
+            cat.problems
+        );
+        assert!(
+            cat.problems
+                .iter()
+                .any(|p| p.path == "layers/b.yaml" && p.message.contains("cycle")),
+            "{:?}",
+            cat.problems
+        );
+        // The layers still load into the set — only the chain is unusable.
+        assert!(cat.layers.get("a").is_some());
+        assert!(cat.layers.get("b").is_some());
+    }
+
+    fn catalog_with_skill_s(label: &str) -> std::path::PathBuf {
+        let root = tmp(label);
+        write(&root, "catalog.yaml", "schema_version: 1\nname: test\n");
+        write(
+            &root,
+            "skills/s/asset.yaml",
+            "kind: skill\nname: s\ndescription: d\n",
+        );
+        write(&root, "skills/s/body.md", "b\n");
+        root
+    }
+
+    fn has_problem(cat: &Catalog, path: &str, needle: &str) -> bool {
+        cat.problems
+            .iter()
+            .any(|p| p.path == path && p.message.contains(needle))
+    }
+
+    #[test]
+    fn load_dir_reports_each_bad_layer_and_keeps_the_good_ones() {
+        let root = catalog_with_skill_s("layer-problems");
+        // File stem and `name` disagree: the loader would otherwise register
+        // a layer under a name no file carries.
+        write(
+            &root,
+            "layers/wrong.yaml",
+            "kind: layer\nname: right\naxis: role\n",
+        );
+        // An unknown member is a warning only — the layer still loads.
+        write(
+            &root,
+            "layers/warn.yaml",
+            "kind: layer\nname: warn\naxis: role\nmembers:\n  - skill/s\n  - skill/ghost\n",
+        );
+        // A key in both members and exclude of one layer is rejected.
+        write(
+            &root,
+            "layers/clash.yaml",
+            "kind: layer\nname: clash\naxis: role\nmembers:\n  - skill/s\nexclude:\n  - skill/s\n",
+        );
+
+        let cat = load_dir(&root).unwrap();
+        assert!(
+            has_problem(&cat, "layers/wrong.yaml", "does not match file stem"),
+            "{:?}",
+            cat.problems
+        );
+        assert!(cat.layers.get("right").is_none());
+        assert!(
+            has_problem(&cat, "layers/warn.yaml", "skill/ghost"),
+            "{:?}",
+            cat.problems
+        );
+        assert!(cat.layers.get("warn").is_some());
+        assert!(
+            has_problem(&cat, "layers", "both members and exclude"),
+            "{:?}",
+            cat.problems
+        );
+        assert!(cat.layers.get("clash").is_none());
+    }
+
+    #[test]
+    fn load_dir_warns_about_an_excluded_key_the_catalog_does_not_have() {
+        // The spec checks members, exclude and overrides alike; a typo'd
+        // exclude would otherwise silently exclude nothing.
+        let root = catalog_with_skill_s("layer-exclude-typo");
+        write(
+            &root,
+            "layers/r.yaml",
+            "kind: layer\nname: r\naxis: role\nexclude:\n  - skill/typo\n",
+        );
+
+        let cat = load_dir(&root).unwrap();
+        assert!(
+            has_problem(&cat, "layers/r.yaml", "skill/typo"),
+            "{:?}",
+            cat.problems
+        );
+        assert!(cat.layers.get("r").is_some());
     }
 
     #[test]

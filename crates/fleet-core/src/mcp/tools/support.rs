@@ -906,6 +906,7 @@ pub(super) const LIFECYCLE_CAP: std::time::Duration = std::time::Duration::from_
 
 /// Everything else: store reads and single SSH round trips.
 pub(super) const QUICK_TOOLS: &[&str] = &[
+    "agent_status",
     "cancel_task",
     "capture_session",
     "discover_hosts",
@@ -918,7 +919,7 @@ pub(super) const QUICK_TOOLS: &[&str] = &[
     "list_assets",
     "list_clients",
     "list_hosts",
-    "agent_status",
+    "list_layers",
     "list_projects",
     "list_sessions",
     "list_tasks",
@@ -926,11 +927,14 @@ pub(super) const QUICK_TOOLS: &[&str] = &[
     "pair_client",
     "peek_session",
     "peer_status",
+    "propose_layers",
     "register_self",
     "related_sessions",
     "remove_host",
     "rename_session",
+    "resolve_preview",
     "revoke_client",
+    "set_host_layers",
     "set_secret",
     "repo_branches",
     "repo_changes",

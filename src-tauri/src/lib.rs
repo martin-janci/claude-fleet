@@ -293,6 +293,13 @@ pub fn run() {
             commands::assets::catalog_load,
             commands::assets::catalog_list_assets,
             commands::assets::catalog_get_asset,
+            commands::assets::catalog_list_layers,
+            commands::assets::catalog_resolve_preview,
+            commands::assets::catalog_propose_layers,
+            commands::assets::catalog_set_host_layers,
+            commands::assets::catalog_layer_template,
+            commands::assets::catalog_write_layer,
+            commands::assets::catalog_delete_layer,
             commands::assets::catalog_import_host,
             commands::assets::assets_scan_hosts,
             commands::assets::assets_inventory,
@@ -338,9 +345,7 @@ pub fn run() {
                     }
                 }
                 if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
-                    if let Ok(mut s) = pty.lock() {
-                        s.close();
-                    }
+                    pty::close_pty(pty.inner());
                 }
             }
         })

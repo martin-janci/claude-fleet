@@ -21,7 +21,9 @@ use fleet_core::service::catalog::{
     AssetDetail, AssetListing, ConfigureArgs, ImportArgs,
 };
 use fleet_core::ssh::SshClient;
-use fleet_core::store::{AssetInventoryRow, CatalogConfigRow, SecretRow, SessionRow, Store};
+use fleet_core::store::{
+    AssetInventoryRow, CatalogConfigRow, HostLayerRow, SecretRow, SessionRow, Store,
+};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -35,6 +37,17 @@ fn check_name(name: &str) -> Result<(), IpcError> {
         Ok(())
     } else {
         Err(invalid_name(name))
+    }
+}
+
+fn check_layer_name(name: &str) -> Result<(), IpcError> {
+    if is_valid_name(name) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            format!("invalid layer name '{name}'"),
+        ))
     }
 }
 
@@ -96,6 +109,36 @@ pub struct ScanArgs {
     pub host_alias: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+pub struct ResolvePreviewArgs {
+    pub host_alias: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct SetHostLayersArgs {
+    pub host_alias: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub contexts: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct LayerTemplateArgs {
+    pub name: String,
+    pub axis: catalog::layer::Axis,
+}
+
+#[derive(serde::Deserialize)]
+pub struct WriteLayerArgs {
+    pub layer: catalog::layer::Layer,
+}
+
+#[derive(serde::Deserialize)]
+pub struct LayerRef {
+    pub name: String,
+}
+
 #[tauri::command]
 pub fn catalog_config(
     store: State<'_, Arc<Mutex<Store>>>,
@@ -136,6 +179,65 @@ pub fn catalog_get_asset(
         ));
     }
     catalog::get_asset(args.kind, &args.name, &store)
+}
+
+#[tauri::command]
+pub fn catalog_list_layers(
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::LayerListing, IpcError> {
+    catalog::list_layers(&store)
+}
+
+#[tauri::command]
+pub fn catalog_resolve_preview(
+    args: ResolvePreviewArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::resolve::Resolution, IpcError> {
+    catalog::resolve_preview(&args.host_alias, &store)
+}
+
+#[tauri::command]
+pub fn catalog_propose_layers(
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::propose::LayerProposal, IpcError> {
+    catalog::propose::propose_layers(&store)
+}
+
+#[tauri::command]
+pub fn catalog_set_host_layers(
+    args: SetHostLayersArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<HostLayerRow>, IpcError> {
+    catalog::set_host_layers(
+        &args.host_alias,
+        args.role.as_deref(),
+        &args.contexts.iter().map(String::as_str).collect::<Vec<_>>(),
+        &store,
+    )
+}
+
+#[tauri::command]
+pub fn catalog_layer_template(args: LayerTemplateArgs) -> Result<catalog::layer::Layer, IpcError> {
+    check_layer_name(&args.name)?;
+    Ok(author::layer_template(&args.name, args.axis))
+}
+
+#[tauri::command]
+pub fn catalog_write_layer(
+    args: WriteLayerArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<String, IpcError> {
+    check_layer_name(&args.layer.name)?;
+    author::write_layer(&args.layer, &store)
+}
+
+#[tauri::command]
+pub fn catalog_delete_layer(
+    args: LayerRef,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<String, IpcError> {
+    check_layer_name(&args.name)?;
+    author::delete_layer(&args.name, &store)
 }
 
 #[tauri::command]

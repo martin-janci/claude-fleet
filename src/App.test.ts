@@ -235,6 +235,22 @@ describe('App: the Conversation tab', () => {
     expect(selected('tab-hosts')).toBe('true');
   });
 
+  it('Esc leaves Files even with focus parked on the terminal input proxy (F9)', async () => {
+    await mountAndSelect(work);
+    const grid = await screen.findByTestId('terminal-host');
+    // Focus lands on the terminal's hidden IME textarea, not the grid. App's
+    // "is the user typing in a field?" guard must not mistake it for one, or
+    // Esc stops leaving the panel that covers the terminal.
+    grid.focus();
+    expect(grid.contains(document.activeElement)).toBe(true);
+    await fireEvent.click(tab('tab-files'));
+    await tick();
+    expect(selected('tab-files')).toBe('true');
+    await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    await tick();
+    expect(selected('tab-files')).toBe('false');
+  });
+
   it.each([
     ['bg', bg],
     ['external', ext],
