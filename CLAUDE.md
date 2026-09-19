@@ -9,7 +9,10 @@ managing long-lived Claude Code sessions running in tmux across multiple
 machines over SSH. ~93,000 LOC Rust, ~27,000 LOC frontend.
 
 The Rust side is a workspace: `crates/fleet-core` (Tauri-free service/store/SSH/MCP),
-`crates/fleet-hub` (headless daemon, see `docs/hub.md`), `src-tauri` (the desktop app).
+`crates/fleet-hub` (headless daemon, see `docs/hub.md`), `crates/fleet-proto` (the
+hub/agent frame types, shared by both ends), `crates/fleet-agent` (the agent binary
+for hosts the hub cannot reach — depends on `fleet-proto` only, never `fleet-core`),
+`src-tauri` (the desktop app).
 
 ## Build & test
 

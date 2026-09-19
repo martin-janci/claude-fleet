@@ -30,7 +30,7 @@
 //! `Retry-After` honoured on 429. The floor is never bypassed, not even by a
 //! forced refresh.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshExec;
 use crate::store::HostRow;
@@ -971,10 +971,10 @@ enum HostRun {
 
 fn classify_run(res: Result<std::process::Output, IpcError>) -> HostRun {
     match res {
-        Err(e) if e.code == "E_SSH_TIMEOUT" || e.code == "E_CANCELLED" => {
+        Err(e) if codes::may_have_run(&e.code) || e.code == codes::E_CANCELLED => {
             HostRun::FailedAfterConnect(first_line(&e.message))
         }
-        // A spawn failure: ssh never ran.
+        // A spawn failure, or an agent that is not connected: nothing ran.
         Err(e) => HostRun::NeverConnected(first_line(&e.message)),
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1144,6 +1144,35 @@ mod tests {
             last_pinged_at: None,
             account_uuid: account.map(str::to_string),
             provisioned: true,
+            transport: "ssh".to_string(),
+        }
+    }
+
+    /// The usage request is not idempotent — a second one against the same
+    /// account is a second billed call — so a failure that may already have
+    /// left the hub must stop the sweep, and one that provably did not must
+    /// let it move to the next host. An agent host maps onto the SSH codes
+    /// one for one: `E_AGENT_OFFLINE` is `E_SSH` (no connection, nothing
+    /// left), `E_TIMEOUT` is `E_SSH_TIMEOUT` (it left and never came back),
+    /// and `E_AGENT_PROTOCOL` is only ever raised after the frame was sent.
+    #[test]
+    fn an_agent_failure_classifies_like_its_ssh_twin() {
+        let run = |code: &str| classify_run(Err(IpcError::new(code, "x")));
+        for code in [
+            codes::E_SSH_TIMEOUT,
+            codes::E_TIMEOUT,
+            codes::E_AGENT_PROTOCOL,
+        ] {
+            assert!(
+                matches!(run(code), HostRun::FailedAfterConnect(_)),
+                "{code} must stop the sweep"
+            );
+        }
+        for code in [codes::E_SSH, codes::E_AGENT_OFFLINE] {
+            assert!(
+                matches!(run(code), HostRun::NeverConnected(_)),
+                "{code} must let the sweep try the next host"
+            );
         }
     }
 
