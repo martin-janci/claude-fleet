@@ -2,7 +2,17 @@
 # End-to-end test of a real fleet-hub binary on this machine.
 # Isolation: every hub gets its own temp data dir and its own HOME for ssh-key.
 # Nothing here provisions a host or edits ~/.claude.json / ~/.ssh.
-# Hub A: --local-host true  -> manages this machine's tmux directly.
+# Hub A: --local-host true  -> manages this machine's tmux directly (the real
+#   default tmux server, by design: that IS the behavior under test). Its
+#   PROJECT list is hermetic, though: a throwaway fixture repo under $ROOT,
+#   found via CLAUDE_FLEET_PROJECTS_BASE (the supported env override in
+#   crates/fleet-core/src/service/projects.rs, `local` host only), not this
+#   checkout's own path or a real ~/projects layout -- a CI runner's checkout
+#   does not live at the developer's path shape, so the old "grep the project
+#   list for claude-fleet" check found nothing there and left project_id at
+#   its 0 fallback. HOME is left alone for Hub A (unlike the agent leg below),
+#   so it still reads this account's real ~/.claude and ~/.ssh -- nothing here
+#   needed to change that to make discovery hermetic.
 # Hub B: --local-host false -> must refuse host `local`.
 # Hub C: --local-host false, plus a fleet-agent dialing it over loopback. The
 #   agent is started with `run` (never `install`: no systemd, nothing written
@@ -116,13 +126,36 @@ check "routable bind without https or --allow-plaintext is refused" '[ $rc -ne 0
 PA=$(free_port); PB=$(free_port)
 PUB=fleet.example.com
 
+# A private projects root for Hub A's local project discovery, entirely under
+# $ROOT: one deterministic fixture repo, plain git, no global config touched
+# (identity passed with -c, never written to ~/.gitconfig), default branch
+# set explicitly so this does not depend on the runner's init.defaultBranch,
+# and a fake, never-contacted origin (the Github layout derives the owner
+# from the directory name, not the remote, but a real checkout normally has
+# one, so the fixture does too).
+PROJ_BASE="$ROOT/projects-base"
+FIXTURE="$PROJ_BASE/e2e/hub-e2e-fixture"
+mkdir -p "$FIXTURE"
+git init -q -b main "$FIXTURE"
+git -C "$FIXTURE" -c user.name="hub-e2e" -c user.email="hub-e2e@example.invalid" \
+  commit -q --allow-empty -m "hub-e2e fixture"
+git -C "$FIXTURE" remote add origin https://example.invalid/e2e/hub-e2e-fixture.git
+
 echo "== Hub A (local host on)"
 TOKA=$("$BIN" init --data-dir "$ROOT/a" --public-url "https://$PUB" --port "$PA" --local-host true 2>&1 | grep -E '^[0-9a-f]{64}$')
 check "init prints a 64-hex token" '[ ${#TOKA} -eq 64 ]' "got '${TOKA}'"
 check "state.db is 0600" '[ "$(filemode "$ROOT/a/state.db")" = 600 ]' "$(filemode "$ROOT/a/state.db")"
 check "data dir is 0700" '[ "$(filemode "$ROOT/a")" = 700 ]' "$(filemode "$ROOT/a")"
 check "token show prints the same token" '[ "$("$BIN" token show --data-dir "$ROOT/a")" = "$TOKA" ]' "mismatch"
+# CLAUDE_FLEET_PROJECTS_BASE is exported only around Hub A's own start: the
+# background `serve` process inherits it at fork and keeps it for its whole
+# life (local_env_base() re-reads the process env on every call, so this does
+# not need to stay exported in this shell). Hub B/C never scan `local`
+# projects, so this would be harmless even left set, but scoping it keeps the
+# intent obvious.
+export CLAUDE_FLEET_PROJECTS_BASE="$PROJ_BASE"
 start_hub a "$PA" --public-url "https://$PUB" --local-host true || bad "hub A starts" "$(tail -5 "$ROOT/a.log")"
+unset CLAUDE_FLEET_PROJECTS_BASE
 check "healthcheck healthy while running" '"$BIN" healthcheck --port "$PA" >/dev/null 2>&1' "$("$BIN" healthcheck --port "$PA" 2>&1)"
 check "/healthz needs no token and no allowlisted Host" '[ "$(code "http://127.0.0.1:$PA/healthz" -H "Host: evil.example.com")" = 200 ]' "$(code "http://127.0.0.1:$PA/healthz" -H "Host: evil.example.com")"
 check "/healthz answers the liveness body and nothing else" 'curl -s -m 10 "http://127.0.0.1:$PA/healthz" | grep -qx "fleet-hub ok"' "$(curl -s -m 10 "http://127.0.0.1:$PA/healthz")"
@@ -142,19 +175,31 @@ NAME="hube2e$RANDOM"
 refr=$(tool "$PA" "$PUB" "$TOKA" refresh_projects '{}')
 check "refresh_projects scans this machine" 'echo "$refr" | grep -q "\"isError\":false"' "${refr:0:300}"
 projs=$(tool "$PA" "$PUB" "$TOKA" list_projects '{}')
-check "list_projects finds this machine's repositories" 'echo "$projs" | grep -q claude-fleet' "${projs:0:300}"
-PID_=$(echo "$projs" | grep -oE '\\"id\\": ?[0-9]+' | head -1 | grep -oE '[0-9]+$')
-mk=$(tool "$PA" "$PUB" "$TOKA" new_shell_session "{\"host_alias\":\"local\",\"project_id\":${PID_:-0},\"name\":\"$NAME\"}")
-check "new_shell_session on local creates a tmux session" 'tmux has-session -t "$NAME" 2>/dev/null' "${mk:0:400}"
-SID=$(echo "$mk" | grep -oE '\\"id\\": ?[0-9]+' | head -1 | grep -oE '[0-9]+$')
-if [ -n "$SID" ]; then
-  tmux send-keys -t "$NAME" "echo hub-e2e-marker" Enter; sleep 1
-  cap=$(tool "$PA" "$PUB" "$TOKA" capture_session "{\"session_id\":$SID}")
-  check "capture_session sees the marker" 'echo "$cap" | grep -q hub-e2e-marker' "${cap:0:400}"
-  k=$(tool "$PA" "$PUB" "$TOKA" kill_session "{\"session_id\":$SID}")
-  check "kill_session removes the tmux session" '! tmux has-session -t "$NAME" 2>/dev/null' "${k:0:400}"
+check "list_projects finds the fixture repository" 'echo "$projs" | grep -q hub-e2e-fixture' "${projs:0:300}"
+# The fixture's own id -- never "whichever project sorts first". ProjectSummary
+# serializes id before repo, so matching id..repo within one object (the
+# `[^}]*` never crosses a `}`) pins the id to THIS repo -- the same technique
+# sid_of() below uses for id..tmux_name.
+PID_=$(echo "$projs" | grep -oE '\\"id\\": ?[0-9]+,[^}]*\\"repo\\": ?\\"hub-e2e-fixture\\"' | grep -oE '[0-9]+' | head -1)
+if [ -n "$PID_" ]; then
+  mk=$(tool "$PA" "$PUB" "$TOKA" new_shell_session "{\"host_alias\":\"local\",\"project_id\":${PID_},\"name\":\"$NAME\"}")
+  check "new_shell_session on local creates a tmux session" 'tmux has-session -t "$NAME" 2>/dev/null' "${mk:0:400}"
+  SID=$(echo "$mk" | grep -oE '\\"id\\": ?[0-9]+' | head -1 | grep -oE '[0-9]+$')
+  if [ -n "$SID" ]; then
+    tmux send-keys -t "$NAME" "echo hub-e2e-marker" Enter; sleep 1
+    cap=$(tool "$PA" "$PUB" "$TOKA" capture_session "{\"session_id\":$SID}")
+    check "capture_session sees the marker" 'echo "$cap" | grep -q hub-e2e-marker' "${cap:0:400}"
+    k=$(tool "$PA" "$PUB" "$TOKA" kill_session "{\"session_id\":$SID}")
+    check "kill_session removes the tmux session" '! tmux has-session -t "$NAME" 2>/dev/null' "${k:0:400}"
+  else
+    bad "session id parsed from new_shell_session" "${mk:0:400}"
+  fi
 else
-  bad "session id parsed from new_shell_session" "${mk:0:400}"
+  # A root failure (the fixture project itself was never discovered) must not
+  # print six misleading "project 0 not found" cascades: one clear reason
+  # above, and every check that needs a real session id explicitly skipped.
+  bad "new_shell_session on local creates a tmux session" "skipped: no fixture project id (see 'list_projects finds the fixture repository' above)"
+  bad "session id parsed from new_shell_session" "skipped: no fixture project id"
 fi
 check "hook with master token, unknown session -> 204" '[ "$(code -X POST "http://127.0.0.1:$PA/hook" -H "Host: $PUB" -H "Authorization: Bearer $TOKA" -H "Content-Type: application/json" -d "{\"hook_event_name\":\"Stop\",\"session_id\":\"00000000-0000-0000-0000-000000000000\"}")" = 204 ]' ""
 check "legacy ?token= on a public hub -> 401" '[ "$(code -X POST "http://127.0.0.1:$PA/hook?token=$TOKA" -H "Host: $PUB" -H "Content-Type: application/json" -d "{}")" = 401 ]' ""
@@ -221,26 +266,33 @@ EV_PID=$!
 await() { for _ in $(seq 120); do grep -q "^event: $1" "$SSE" 2>/dev/null && return 0; sleep 0.25; done; return 1; }
 await ready
 check "/events opens with a ready frame naming the kinds" 'grep -q "^event: ready" "$SSE" && grep -q "session" "$SSE"' "$(head -5 "$SSE" 2>/dev/null)"
-NAME3="hube2eE$RANDOM"
-mk3=$(tool "$PA" "$PUB" "$TOKA" new_shell_session "{\"host_alias\":\"local\",\"project_id\":${PID_:-0},\"name\":\"$NAME3\"}")
-SID3=$(echo "$mk3" | grep -oE '\\"id\\": ?[0-9]+' | head -1 | grep -oE '[0-9]+$')
-await session:created
-check "a row change reaches the stream as its own frame" 'grep -q "^event: session:created" "$SSE"' "$(head -20 "$SSE" 2>/dev/null)"
-check "the frame carries the row payload, not just a name" 'grep -A1 "^event: session:created" "$SSE" | grep -q "$NAME3"' "$(head -20 "$SSE" 2>/dev/null)"
-# A shell session has no Claude transcript, so the tool must answer one of the
-# two codes its description documents — never a 500 and never an empty result.
-# Which of the two depends on whether reconcile has yet attached a
-# claude_session_id to the pane, so both are accepted.
-conv=$(tool "$PA" "$PUB" "$CTOK" session_conversation "{\"session_id\":${SID3:-0}}")
-check "session_conversation on a session with no transcript -> a documented error" 'echo "$conv" | grep -qE "E_INVALID_STATE|E_NO_TRANSCRIPT"' "session_id=${SID3:-0} ${conv:0:400}"
-k3=$(tool "$PA" "$PUB" "$TOKA" kill_session "{\"session_id\":${SID3:-0}}")
-# A kill's own reconcile only marks the row `ghost` (that is a session:updated
-# frame); the hard delete — and with it session:killed — happens on the NEXT
-# pass, so that a session missing from one probe is not deleted on the strength
-# of that single probe. Force that pass rather than waiting for the tick.
-tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}' >/dev/null
-await session:killed
-check "killing the session streams session:killed too" 'grep -q "^event: session:killed" "$SSE"' "$(tail -20 "$SSE" 2>/dev/null)"
+if [ -n "$PID_" ]; then
+  NAME3="hube2eE$RANDOM"
+  mk3=$(tool "$PA" "$PUB" "$TOKA" new_shell_session "{\"host_alias\":\"local\",\"project_id\":${PID_},\"name\":\"$NAME3\"}")
+  SID3=$(echo "$mk3" | grep -oE '\\"id\\": ?[0-9]+' | head -1 | grep -oE '[0-9]+$')
+  await session:created
+  check "a row change reaches the stream as its own frame" 'grep -q "^event: session:created" "$SSE"' "$(head -20 "$SSE" 2>/dev/null)"
+  check "the frame carries the row payload, not just a name" 'grep -A1 "^event: session:created" "$SSE" | grep -q "$NAME3"' "$(head -20 "$SSE" 2>/dev/null)"
+  # A shell session has no Claude transcript, so the tool must answer one of the
+  # two codes its description documents — never a 500 and never an empty result.
+  # Which of the two depends on whether reconcile has yet attached a
+  # claude_session_id to the pane, so both are accepted.
+  conv=$(tool "$PA" "$PUB" "$CTOK" session_conversation "{\"session_id\":${SID3:-0}}")
+  check "session_conversation on a session with no transcript -> a documented error" 'echo "$conv" | grep -qE "E_INVALID_STATE|E_NO_TRANSCRIPT"' "session_id=${SID3:-0} ${conv:0:400}"
+  k3=$(tool "$PA" "$PUB" "$TOKA" kill_session "{\"session_id\":${SID3:-0}}")
+  # A kill's own reconcile only marks the row `ghost` (that is a session:updated
+  # frame); the hard delete — and with it session:killed — happens on the NEXT
+  # pass, so that a session missing from one probe is not deleted on the strength
+  # of that single probe. Force that pass rather than waiting for the tick.
+  tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}' >/dev/null
+  await session:killed
+  check "killing the session streams session:killed too" 'grep -q "^event: session:killed" "$SSE"' "$(tail -20 "$SSE" 2>/dev/null)"
+else
+  bad "a row change reaches the stream as its own frame" "skipped: no fixture project id"
+  bad "the frame carries the row payload, not just a name" "skipped: no fixture project id"
+  bad "session_conversation on a session with no transcript -> a documented error" "skipped: no fixture project id"
+  bad "killing the session streams session:killed too" "skipped: no fixture project id"
+fi
 kill "$EV_PID" 2>/dev/null; wait "$EV_PID" 2>/dev/null
 
 # --- the operator's CLI, and revocation ---------------------------------------
