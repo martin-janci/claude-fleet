@@ -475,20 +475,34 @@ pub(crate) async fn maybe_tls(
 /// Write `request` to `conn` and read the whole response back, capped at
 /// `cap` bytes — the one write-then-read-to-end both this probe and
 /// [`crate::pair`]'s `exchange` need, over whatever transport [`maybe_tls`]
-/// produced. Bytes already read survive a later read error (a peer that
-/// answers and then resets — e.g. because it never read this connection's own
-/// request out of its receive buffer before closing — has still answered);
-/// only an error with NOTHING read yet is a real failure.
+/// produced.
+///
+/// `tolerate_partial` is what each caller does when the read itself fails
+/// AFTER some bytes already arrived (a peer that answers and then resets —
+/// e.g. because it never read this connection's own request out of its
+/// receive buffer before closing — has still answered, in one caller's eyes
+/// but not the other's):
+/// - `true` (this probe, [`exchange`] below): keep the bytes, exactly as
+///   [`exchange`]'s liveness check has always tolerated — proven by
+///   `healthcheck_fails_on_a_closed_port_or_a_non_http_answer`, whose fixture
+///   never drains the client's request and so gets reset after answering.
+/// - `false` ([`crate::pair::exchange`]): propagate the read error, same as
+///   before this write-then-read was shared — `pair`/`client` want the plain
+///   network error, not a downstream JSON-RPC parse failure over truncated
+///   bytes.
+///
+/// An error with NOTHING read yet is always a real failure, in both modes.
 ///
 /// The request text, the cap, and what each caller does with the bytes
 /// afterward (validate a liveness body here; parse an HTTP response there)
-/// differ and stay with each caller — only this shape is identical between
-/// them.
+/// also differ and stay with each caller — only this shape is identical
+/// between them.
 pub(crate) async fn write_and_read(
     mut conn: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     addr: std::net::SocketAddr,
     request: &str,
     cap: u64,
+    tolerate_partial: bool,
 ) -> Result<Vec<u8>, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     conn.write_all(request.as_bytes())
@@ -500,7 +514,7 @@ pub(crate) async fn write_and_read(
         .map_err(|e| format!("send to {addr}: {e}"))?;
     let mut raw = Vec::new();
     let read = conn.take(cap).read_to_end(&mut raw).await;
-    if raw.is_empty() {
+    if !tolerate_partial || raw.is_empty() {
         read.map_err(|e| format!("read from {addr}: {e}"))?;
     }
     Ok(raw)
@@ -515,7 +529,7 @@ async fn exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     // Status line plus the short body is all we need; bound what a stray peer
     // can make us read.
     let req = format!("GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    let raw = write_and_read(conn, addr, &req, 1024).await?;
+    let raw = write_and_read(conn, addr, &req, 1024, true).await?;
     if raw.is_empty() {
         return Err(format!("{addr} closed without answering"));
     }
@@ -1176,6 +1190,87 @@ mod tests {
         assert_eq!(key_action(false, true), KeyAction::PrintOrphaned);
         assert!(KeyAction::PrintOrphaned.prints());
         assert!(KeyAction::Print.prints());
+    }
+
+    /// An in-memory stream that hands back `first` on its first read, then
+    /// fails every read after with `kind` — a deterministic stand-in for a
+    /// peer that answers and then resets, independent of any real socket's
+    /// RST timing (which is what the fixture below relies on today).
+    struct PartialThenError {
+        first: Option<Vec<u8>>,
+        kind: std::io::ErrorKind,
+    }
+
+    impl tokio::io::AsyncRead for PartialThenError {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if let Some(bytes) = self.first.take() {
+                buf.put_slice(&bytes);
+                return std::task::Poll::Ready(Ok(()));
+            }
+            std::task::Poll::Ready(Err(std::io::Error::new(self.kind, "peer went away")))
+        }
+    }
+
+    impl tokio::io::AsyncWrite for PartialThenError {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// `pair::exchange` must keep its original strict behaviour: ANY read
+    /// error is a failure, even with bytes already in hand. Before
+    /// `tolerate_partial` existed, `write_and_read` had one behaviour shared
+    /// by both callers, and this is exactly the case that behaviour got
+    /// wrong for `pair` — a reset after partial data used to come back as
+    /// `Ok(partial)` instead of the network error.
+    #[tokio::test]
+    async fn write_and_read_strict_propagates_a_read_error_even_with_bytes_in_hand() {
+        let addr: std::net::SocketAddr = "127.0.0.1:4180".parse().unwrap();
+        let conn = PartialThenError {
+            first: Some(b"partial".to_vec()),
+            kind: std::io::ErrorKind::ConnectionReset,
+        };
+        let e = write_and_read(conn, addr, "GET / HTTP/1.1\r\n\r\n", 1024, false)
+            .await
+            .expect_err("pair's strict mode must not swallow a read error");
+        assert!(e.contains("read from"), "{e}");
+    }
+
+    /// The healthcheck probe keeps ITS original tolerance: bytes already read
+    /// survive a later read error, which is what lets it read the SSH banner
+    /// in `healthcheck_fails_on_a_closed_port_or_a_non_http_answer` below even
+    /// though the fixture there resets the connection.
+    #[tokio::test]
+    async fn write_and_read_tolerant_keeps_bytes_already_read_despite_a_later_error() {
+        let addr: std::net::SocketAddr = "127.0.0.1:4180".parse().unwrap();
+        let conn = PartialThenError {
+            first: Some(b"partial".to_vec()),
+            kind: std::io::ErrorKind::ConnectionReset,
+        };
+        let raw = write_and_read(conn, addr, "GET / HTTP/1.1\r\n\r\n", 1024, true)
+            .await
+            .expect("the probe's tolerant mode must keep bytes already read");
+        assert_eq!(raw, b"partial");
     }
 
     /// One listener that answers a single request with `reply`, handing back

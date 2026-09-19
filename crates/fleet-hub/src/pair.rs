@@ -18,9 +18,12 @@
 //! rather than a second TLS client: the only endpoint these commands ever
 //! talk to is `127.0.0.1`, so an HTTP client crate would be a large
 //! dependency for one loopback POST. The write-then-read-to-end is shared
-//! too ([`crate::serve::write_and_read`]); only the connect step (this
+//! too ([`crate::serve::write_and_read`]), parameterised by a
+//! `tolerate_partial` flag so this module keeps its original strict
+//! behaviour (any read error fails the call) while the healthcheck probe
+//! keeps its own tolerance for bytes already read; the connect step (this
 //! module's own [`NOT_RUNNING`] wording) and what each side does with the
-//! bytes stay separate from the healthcheck probe.
+//! bytes afterward stay separate from the healthcheck probe.
 
 use crate::config::{resolve_data_dir, HubOptions, TlsMode};
 use crate::out;
@@ -159,6 +162,11 @@ async fn call_tool(
 /// This connect step keeps its own error wording: [`NOT_RUNNING`] is what an
 /// operator sees when nothing is listening, which the probe's connect (never
 /// pointed at a hub the operator started themselves) has no need to say.
+///
+/// `tolerate_partial: false` — unlike the probe, this call wants the plain
+/// network error when the read itself fails, even if some bytes already
+/// arrived: a truncated response would otherwise surface as a confusing
+/// downstream JSON-RPC parse failure instead of naming the reset.
 async fn exchange(addr: SocketAddr, tls: bool, request: &str) -> Result<String, String> {
     let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::ConnectionRefused {
@@ -168,7 +176,7 @@ async fn exchange(addr: SocketAddr, tls: bool, request: &str) -> Result<String, 
         }
     })?;
     let conn = maybe_tls(tcp, addr, tls).await?;
-    let raw = crate::serve::write_and_read(conn, addr, request, MAX_RESPONSE).await?;
+    let raw = crate::serve::write_and_read(conn, addr, request, MAX_RESPONSE, false).await?;
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
