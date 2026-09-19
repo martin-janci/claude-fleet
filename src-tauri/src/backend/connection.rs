@@ -60,6 +60,22 @@ pub enum HubConnection {
         retry_in_secs: u64,
         reason: String,
     },
+    /// The hub's `ready` frame reported a wire-contract revision below
+    /// [`MIN_HUB_CONTRACT`](super::contract::MIN_HUB_CONTRACT) — a rename
+    /// this build has seen may still be the old name on the wire. Row events
+    /// and re-lists from that connection are not applied; update the hub.
+    HubTooOld {
+        hub_contract: u32,
+        min_contract: u32,
+    },
+    /// The hub's `ready` frame reported a wire-contract revision above
+    /// [`MAX_HUB_CONTRACT`](super::contract::MAX_HUB_CONTRACT) — this build
+    /// predates a shape the hub may now be sending. Row events and re-lists
+    /// from that connection are not applied; update this app.
+    HubTooNew {
+        hub_contract: u32,
+        max_contract: u32,
+    },
 }
 
 /// Told about every transition. A trait so the bridge's tests can record the

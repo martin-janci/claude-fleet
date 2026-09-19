@@ -80,6 +80,35 @@ fn a_reason_never_carries_the_token_and_stays_one_capped_line() {
     assert!(!emitted.contains("cl_s3cret"), "{emitted}");
 }
 
+/// The frontend's `HubConnection` type in `hub_connection.ts` reads these
+/// two variants by their exact `state` tag and field names.
+#[test]
+fn the_skew_states_serialise_as_the_frontend_expects() {
+    let (s, sink) = status("cl_t");
+    s.report(HubConnection::HubTooOld {
+        hub_contract: 0,
+        min_contract: 2,
+    });
+    assert_eq!(
+        sink.seen.lock().unwrap().last().unwrap(),
+        &(
+            CONNECTION_EVENT,
+            json!({ "state": "hub_too_old", "hub_contract": 0, "min_contract": 2 })
+        )
+    );
+    s.report(HubConnection::HubTooNew {
+        hub_contract: 5,
+        max_contract: 1,
+    });
+    assert_eq!(
+        sink.seen.lock().unwrap().last().unwrap(),
+        &(
+            CONNECTION_EVENT,
+            json!({ "state": "hub_too_new", "hub_contract": 5, "max_contract": 1 })
+        )
+    );
+}
+
 #[test]
 fn a_standalone_status_emits_nothing() {
     let s = HubConnectionStatus::standalone();

@@ -75,6 +75,103 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
     }
 }
 
+// ── the hub's wire-contract revision ────────────────────────────────────────
+//
+// The golden file above pins the *names*. This pins whether this build
+// trusts the hub it is talking to at all — see `fleet_core::wire_contract`
+// for what the number means and when it moves. `super::events::pump` is the
+// call site: it reads a hub's `ready` frame, classifies its `contract`
+// against the range below, and — outside that range — reports a distinct
+// [`super::connection::HubConnection`] state and ends the connection without
+// resyncing or applying a single row from it.
+
+/// The lowest hub wire-contract revision this build still trusts.
+///
+/// A hub that sends no `contract` field at all — every hub released before
+/// this mechanism existed — is read as revision `0`
+/// ([`hub_contract_revision`]). Starting the minimum at `0`
+/// means today's released hubs and this build's own hub (revision
+/// [`fleet_core::wire_contract::CONTRACT_REVISION`], currently `1`) are both
+/// accepted: the mechanism lands with nothing to reject yet. Raise this the
+/// day a hub ships whose rows this build can no longer read — from then on
+/// an old hub is refused instead of trusted with a silent default.
+pub const MIN_HUB_CONTRACT: u32 = 0;
+
+/// The highest hub wire-contract revision this build understands. A hub
+/// ahead of this is running row shapes compiled after this build was —
+/// safer to say so than to guess at fields it has never seen.
+pub const MAX_HUB_CONTRACT: u32 = 1;
+
+/// Where a hub's wire-contract revision stands against what this build
+/// accepts. A pure function of the three numbers on purpose: the real bounds
+/// are `0..=1` today, which cannot exercise "too old" through a live
+/// `u32` (nothing is below `0`) — this is the shape the "too old" edge is
+/// actually tested through (see `tests_contract.rs`), independent of
+/// whichever bounds a future release ships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractFit {
+    /// Inside `[min, max]`: trust this hub's rows.
+    InRange,
+    /// Below `min`: this build has seen a rename this hub still uses the old
+    /// name for. Update the hub.
+    TooOld,
+    /// Above `max`: this hub may be speaking a shape this build predates.
+    /// Update this app.
+    TooNew,
+}
+
+/// A hub's wire-contract revision, read out of a `ready` frame's raw JSON —
+/// `0` for a hub that sends no `contract` field (every hub released before
+/// this mechanism existed) or a frame that fails to parse at all (a hub that
+/// HAS a contract to report always JSON-encodes it correctly, so treating an
+/// unparsable frame the same as a missing field costs nothing real).
+pub fn hub_contract_revision(ready_frame_data: &str) -> u32 {
+    serde_json::from_str::<serde_json::Value>(ready_frame_data)
+        .ok()
+        .and_then(|v| v.get("contract").and_then(serde_json::Value::as_u64))
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0)
+}
+
+/// Classify `hub` against `[min, max]`. See [`ContractFit`].
+pub fn classify_hub_contract(hub: u32, min: u32, max: u32) -> ContractFit {
+    if hub < min {
+        ContractFit::TooOld
+    } else if hub > max {
+        ContractFit::TooNew
+    } else {
+        ContractFit::InRange
+    }
+}
+
+/// Every type in `new` that lost a wire key `old` had — a rename or removal,
+/// the only change [`fleet_core::wire_contract::CONTRACT_REVISION`] must be
+/// bumped for. A type that only gained keys, or is new outright, is not
+/// reported: that is exactly the additive case the revision must NOT move
+/// for.
+///
+/// Pure and file-free on purpose, unlike the regenerate path that calls it:
+/// this is the part of "does the golden diff need a bump" worth testing
+/// directly.
+pub fn types_that_lost_fields(
+    old: &std::collections::BTreeMap<String, Vec<String>>,
+    new: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut lost = Vec::new();
+    for (ty, want) in old {
+        match new.get(ty) {
+            None => lost.push(format!("{ty}: the whole type is gone")),
+            Some(got) => {
+                let gone: Vec<&String> = want.iter().filter(|k| !got.contains(k)).collect();
+                if !gone.is_empty() {
+                    lost.push(format!("{ty}: lost {gone:?}"));
+                }
+            }
+        }
+    }
+    lost
+}
+
 #[cfg(test)]
 #[path = "tests_contract.rs"]
 // `pub(crate)` so the event-bridge tests can build their rows from the

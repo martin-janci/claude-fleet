@@ -475,6 +475,13 @@ dropped from the filter and logged as a warning by the hub, and it is missing
 from the `ready` frame's `kinds` — which is how you spot the typo instead of
 watching a stream that never says anything.
 
+The `ready` frame also carries `contract`, the wire-contract revision of the
+row shapes and tool results this hub sends (`fleet_core::wire_contract`,
+starting at `1`). It moves only when a client's assumptions about the wire
+would actually break — a field removed or renamed, never an addition — and a
+hub built before this field existed sends nothing, which a client reads as
+revision `0`. See *Version skew* below for what a client does with it.
+
 The stream sits behind the same bearer token as `/mcp` (a change stream names
 sessions, hosts, projects and prompts), and a caller may hold eight of them at
 once. A subscriber that falls far enough behind gets one `lagged` frame and
@@ -792,6 +799,20 @@ standalone exactly as before.
   panel is built on.)
 - **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
   the error says to pair again in Settings → Hub.
+
+### Version skew
+
+Every `/events` hello frame carries the hub's wire-contract revision (see
+*Events* above). The desktop only trusts a hub whose revision falls inside
+the range this build understands (`MIN_HUB_CONTRACT..=MAX_HUB_CONTRACT`,
+`src-tauri/src/backend/contract.rs`). Outside it, the banner says which side
+is behind and what to do — the hub is too old (update the hub) or this app
+predates the hub (update this app) — and, for as long as that connection
+lasts, the desktop applies no row event and re-lists nothing from it:
+stale-but-honest beats fresh-but-wrong. It keeps retrying on the same
+backoff rather than hammering a hub it cannot use, and re-checks the
+revision on every reconnect, so an upgrade on either side is picked up on
+its own without restarting the app.
 
 ### Parity or refusal
 

@@ -1491,6 +1491,16 @@ mod tests {
             head.contains(crate::app_version::get()) && head.contains("\"now\""),
             "the ready frame must carry version and now:\n{head}"
         );
+        // The wire-contract revision: additive next to `version`/`now`, and
+        // this is a client's only way to tell "an older hub whose rows I
+        // still understand" from "a hub whose rows changed shape under me".
+        assert!(
+            head.contains(&format!(
+                "\"contract\":{}",
+                crate::wire_contract::CONTRACT_REVISION
+            )),
+            "the ready frame must carry the wire-contract revision:\n{head}"
+        );
 
         // Emitted only now, with the subscription already live.
         bus.session_killed(42);

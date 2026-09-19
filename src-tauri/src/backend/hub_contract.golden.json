@@ -1,4 +1,6 @@
 {
+  "revision": 1,
+  "types": {
   "AccountRow": [
     "display_name",
     "email",
@@ -217,4 +219,5 @@
     "path",
     "project_id"
   ]
+  }
 }
