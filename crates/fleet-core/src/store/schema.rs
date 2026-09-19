@@ -339,7 +339,31 @@ impl Store {
             }
             restored?;
         }
+        self.repair_host_transport()?;
         self.reap_orphan_session_events()?;
+        Ok(())
+    }
+
+    /// Repair for the 034 collision. The conversation-tracking branch
+    /// numbered its migration 034 before `main` shipped
+    /// `034_host_transport.sql`; it was renumbered to 036 when the two
+    /// merged. A database created by the PRE-MERGE branch therefore recorded
+    /// version 34 for the conversations migration, so `migrate()` never
+    /// offers 034 and `hosts.transport` is never added. 036 is then skipped
+    /// by its own guard, so nothing else would notice.
+    ///
+    /// SQLite has no `ADD COLUMN IF NOT EXISTS`, so this cannot be a SQL
+    /// migration like 035: the column is checked and 034 re-run here, in its
+    /// own transaction. A no-op on every database that already has the column.
+    fn repair_host_transport(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        if !hosts_has_transport(&tx)? {
+            tracing::warn!(
+                "hosts.transport missing despite schema version; re-running migration 034"
+            );
+            tx.execute_batch(include_str!("../../migrations/034_host_transport.sql"))?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1436,6 +1460,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1, "034 did not re-add a column the branch already had");
+    }
+
+    /// A database from the PRE-MERGE conversation-tracking branch: 033 from
+    /// `main`, then the conversations migration recorded as 34. On the merged
+    /// head 035 runs, 036 is skipped by its guard, and `repair_host_transport`
+    /// adds the `hosts.transport` column that 034 never got the chance to.
+    #[test]
+    fn premerge_conversation_branch_db_gets_host_transport() {
+        let old = store_at_version(33);
+        old.conn
+            .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
+            .unwrap();
+        let branch_034 = include_str!("../../migrations/036_conversations.sql").replace(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (36);",
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (34);",
+        );
+        assert_ne!(
+            branch_034,
+            include_str!("../../migrations/036_conversations.sql")
+        );
+        old.conn.execute_batch(&branch_034).unwrap();
+        old.migrate()
+            .expect("merged head on a pre-merge conversation-branch DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let transport: String = old
+            .conn
+            .query_row("SELECT transport FROM hosts WHERE alias = 'h'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(transport, "ssh");
+        assert!(old.has_table("conversations").unwrap());
+        // And the repair is a no-op the second time round.
+        old.migrate().expect("second migrate");
     }
 
     #[test]
