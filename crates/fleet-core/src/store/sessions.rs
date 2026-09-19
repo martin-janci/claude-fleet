@@ -534,8 +534,10 @@ impl Store {
     }
 
     /// Record the Claude Code session id minted for a session. Reconcile's
-    /// `upsert_session` never writes this column, so the value survives
-    /// reconciliation.
+    /// upsert only replaces it with the id of an agent matched BY NAME (or
+    /// fills a NULL from an unambiguous cwd match — see
+    /// `service::sessions::reconcile::pair_session_agents`), so a minted id
+    /// survives reconciliation.
     pub fn set_claude_session_id(&self, id: i64, uuid: &str) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE sessions SET claude_session_id=?1 WHERE id=?2",

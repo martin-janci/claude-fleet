@@ -5,6 +5,7 @@
 use super::*;
 use crate::ipc_error::codes;
 use crate::ipc_error::lock;
+use std::collections::HashMap;
 
 /// Number of pane lines captured per work session for the reconcile intel
 /// probe. Eight lines covers the REPL footer (status bar / context %) plus the
@@ -487,6 +488,15 @@ pub(super) fn reconcile_write_one_host(
             // no other writer lands between this read, the write and the
             // read-back.
             let mut priors: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+            // Every row on this host (ghost / lost / pane-less included) with
+            // the Claude id it holds, so an inferred cwd match can be checked
+            // against the ids other rows already own.
+            let stored_ids: HashMap<String, Option<String>> = s
+                .list_sessions_for_host(&host.alias)?
+                .into_iter()
+                .map(|r| (r.tmux_name, r.claude_session_id))
+                .collect();
+            let agents = pair_session_agents(live, agent_rows, &stored_ids, host.alias == "local");
             for sess in live {
                 keep.push(sess.name.clone());
                 let project_id =
@@ -498,16 +508,11 @@ pub(super) fn reconcile_write_one_host(
                     .get_session_account(&host.alias, &sess.name)?
                     .or_else(|| host_account.clone());
                 let worktree_key = worktree_key_for_host(&sess.path.to_string_lossy(), &paths);
-                // Match the running Claude agent by name (sessions launched
-                // with `--name <tmux_name>`) or, for older sessions without a
-                // name, by a unique cwd — so `recreate`/`restart` can resume
-                // the exact conversation instead of "most recent for the cwd".
-                let agent = crate::claude_agents::find_for_session(
-                    agent_rows,
-                    &sess.name,
-                    &sess.path.to_string_lossy(),
-                    host.alias == "local",
-                );
+                // The running Claude agent this session is paired with (see
+                // `pair_session_agents`) — its id lets `recreate`/`restart`
+                // resume the exact conversation instead of "most recent for
+                // the cwd".
+                let agent = agents.get(&sess.name).copied();
                 // Pane-tail intel from the off-lock probe (may be absent if the
                 // capture failed — then all four intel fields stay None and the
                 // upsert's COALESCE preserves the session's prior values).
@@ -749,6 +754,75 @@ pub(super) fn reconcile_write_one_host(
     Ok(())
 }
 
+/// Pair each live tmux session on a host with the Claude agent whose id and
+/// status reconcile records for it, keyed by tmux name. Pure so it's
+/// unit-testable.
+///
+/// A by-name match (a session launched with `--name <tmux_name>`) is
+/// authoritative and always pairs, so its id follows the conversation (e.g.
+/// after `/clear`). A match by unique cwd is only an inference — when two
+/// fleet sessions share a cwd and only one has registered its agent yet,
+/// the cwd match hands the other session the first one's agent. So a cwd
+/// match pairs only when all of these hold:
+///
+/// * the agent has a session id (otherwise nothing ties it to this session);
+/// * the session's stored id (`stored_ids`) is NULL or already that id — an
+///   inference never overwrites an id the row has;
+/// * no OTHER row on the host (any state, pane-less rows included) holds
+///   that id;
+/// * no other live session matched that agent by name, and no other live
+///   session inferred the same agent by cwd this pass.
+///
+/// A rejected cwd match pairs nothing: the agent's status is not attributed
+/// to the session either (it falls back to the pane-derived status).
+pub(super) fn pair_session_agents<'a>(
+    live: &[crate::tmux::TmuxSession],
+    agents: &'a [crate::claude_agents::ClaudeAgentRow],
+    stored_ids: &HashMap<String, Option<String>>,
+    is_local: bool,
+) -> HashMap<String, &'a crate::claude_agents::ClaudeAgentRow> {
+    let matches: Vec<_> = live
+        .iter()
+        .filter_map(|sess| {
+            crate::claude_agents::find_for_session(
+                agents,
+                &sess.name,
+                &sess.path.to_string_lossy(),
+                is_local,
+            )
+            .map(|m| (sess.name.as_str(), m))
+        })
+        .collect();
+    let named: std::collections::HashSet<&str> = matches
+        .iter()
+        .filter(|(_, m)| m.by_name)
+        .filter_map(|(_, m)| m.row.session_id.as_deref())
+        .collect();
+    let mut inferred: HashMap<&str, usize> = HashMap::new();
+    for (_, m) in matches.iter().filter(|(_, m)| !m.by_name) {
+        if let Some(id) = m.row.session_id.as_deref() {
+            *inferred.entry(id).or_default() += 1;
+        }
+    }
+    let mut out = HashMap::new();
+    for (name, m) in matches {
+        let accept = m.by_name
+            || m.row.session_id.as_deref().is_some_and(|id| {
+                let own = stored_ids.get(name).and_then(|v| v.as_deref());
+                own.is_none_or(|own| own == id)
+                    && !named.contains(id)
+                    && inferred.get(id) == Some(&1)
+                    && !stored_ids
+                        .iter()
+                        .any(|(other, v)| other != name && v.as_deref() == Some(id))
+            });
+        if accept {
+            out.insert(name.to_string(), m.row);
+        }
+    }
+    out
+}
+
 /// Select the `claude --bg` agents that did NOT correlate to any live tmux
 /// session — i.e. real background sessions that have no pane. An agent counts
 /// as "matched" if `find_for_session` would resolve some tmux session to it
@@ -763,13 +837,13 @@ pub(super) fn unmatched_bg_agents<'a>(
     // Collect the set of agent session_ids that a tmux session resolved to.
     let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
     for sess in live {
-        if let Some(agent) = crate::claude_agents::find_for_session(
+        if let Some(m) = crate::claude_agents::find_for_session(
             agents,
             &sess.name,
             &sess.path.to_string_lossy(),
             is_local,
         ) {
-            if let Some(id) = agent.session_id.as_deref() {
+            if let Some(id) = m.row.session_id.as_deref() {
                 matched.insert(id.to_string());
             }
         }

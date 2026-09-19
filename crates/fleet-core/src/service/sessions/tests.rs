@@ -2717,27 +2717,27 @@ fn worktree_key_non_repo_path_is_none() {
 fn recreate_pane_command_matches_kind_and_id() {
     let id = "550e8400-e29b-41d4-a716-446655440000";
     assert_eq!(
-        recreate_pane_command("shell", Some(id)),
+        recreate_pane_command("shell", Some(id), "dev-x"),
         crate::tmux::shell_pane_command(None)
     );
     assert_eq!(
-        recreate_pane_command("work", Some(id)),
-        crate::tmux::pane_command_for(Some(id))
+        recreate_pane_command("work", Some(id), "dev-x"),
+        crate::tmux::pane_command_for(Some(id), "dev-x")
     );
     assert_eq!(
-        recreate_pane_command("work", None),
-        crate::tmux::pane_command_for(None)
+        recreate_pane_command("work", None, "dev-x"),
+        crate::tmux::pane_command_for(None, "dev-x")
     );
     // A corrupt/non-UUID stored id must NOT inject — it degrades to the
     // --continue form (same as no id).
     assert_eq!(
-        recreate_pane_command("work", Some("not-a-uuid; rm -rf /")),
-        crate::tmux::pane_command_for(None)
+        recreate_pane_command("work", Some("not-a-uuid; rm -rf /"), "dev-x"),
+        crate::tmux::pane_command_for(None, "dev-x")
     );
     // "review" is a non-shell kind → same resume behavior as "work".
     assert_eq!(
-        recreate_pane_command("review", Some(id)),
-        crate::tmux::pane_command_for(Some(id))
+        recreate_pane_command("review", Some(id), "dev-x"),
+        crate::tmux::pane_command_for(Some(id), "dev-x")
     );
 }
 
@@ -4678,4 +4678,170 @@ async fn a_reboot_verdict_spares_a_bg_agent_live_in_the_same_probe() {
         .expect("tmux row kept");
     assert_eq!(y.status, "ghost");
     assert_eq!(lost_events(&s, y.id, "host_reboot"), 1);
+}
+
+// ── claude_session_id pairing: a cwd match is an inference, not an identity ──
+
+fn live_in(name: &str, cwd: &str) -> crate::tmux::TmuxSession {
+    crate::tmux::TmuxSession {
+        name: name.into(),
+        created: 1,
+        last_activity: 1,
+        attached: false,
+        path: PathBuf::from(cwd),
+    }
+}
+
+/// One reconcile write pass for host `vps` (remote: no cwd canonicalizing).
+fn pair_pass(
+    s: &mut Store,
+    live: Vec<crate::tmux::TmuxSession>,
+    agents: Vec<crate::claude_agents::ClaudeAgentRow>,
+) {
+    let host = s
+        .list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == "vps")
+        .unwrap();
+    let probe = HostProbe {
+        host,
+        result: Ok(live),
+        agent_rows: agents,
+        agent_mtimes: Some(std::collections::HashMap::new()),
+        intel: PaneIntelMap::new(),
+        account: None,
+        pr_info: PrInfoMap::new(),
+        identity: None,
+        started_at: now_unix(),
+    };
+    let projects = s.list_projects().unwrap();
+    reconcile_write_one_host(s, &probe, &projects).unwrap();
+}
+
+fn stored_claude_id(s: &Store, name: &str) -> Option<String> {
+    s.get_session(name, "vps")
+        .unwrap()
+        .unwrap()
+        .claude_session_id
+}
+
+/// The 2026-09-19 host-reboot restore bug: `rt-a` and `rt-b` share a cwd,
+/// only `rt-a`'s agent is registered, and the unique-cwd fallback handed
+/// `rt-b` `rt-a`'s id on every pass — overwriting the id new_session minted.
+#[test]
+fn two_sessions_in_one_cwd_keep_distinct_claude_ids_across_passes() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let agent_a = agent("uuid-a", None, Some("/p"));
+
+    // rt-a alone: its NULL id is filled by the unique cwd match.
+    pair_pass(&mut s, vec![live_in("rt-a", "/p")], vec![agent_a.clone()]);
+    assert_eq!(stored_claude_id(&s, "rt-a").as_deref(), Some("uuid-a"));
+
+    // rt-b appears in the same cwd before its agent registers: rt-a already
+    // holds uuid-a, so rt-b must not be handed it.
+    let both = || vec![live_in("rt-a", "/p"), live_in("rt-b", "/p")];
+    pair_pass(&mut s, both(), vec![agent_a.clone()]);
+    assert_eq!(stored_claude_id(&s, "rt-b"), None);
+
+    // new_session records rt-b's minted id; later passes must keep it.
+    let b_id = s.get_session("rt-b", "vps").unwrap().unwrap().id;
+    s.set_claude_session_id(b_id, "uuid-b").unwrap();
+    for _ in 0..3 {
+        pair_pass(&mut s, both(), vec![agent_a.clone()]);
+        assert_eq!(stored_claude_id(&s, "rt-a").as_deref(), Some("uuid-a"));
+        assert_eq!(stored_claude_id(&s, "rt-b").as_deref(), Some("uuid-b"));
+    }
+    // Once both agents run in /p the cwd is ambiguous: nothing changes.
+    let agent_b = agent("uuid-b", None, Some("/p"));
+    pair_pass(&mut s, both(), vec![agent_a, agent_b]);
+    assert_eq!(stored_claude_id(&s, "rt-a").as_deref(), Some("uuid-a"));
+    assert_eq!(stored_claude_id(&s, "rt-b").as_deref(), Some("uuid-b"));
+}
+
+/// A cwd match never overwrites an id the row already has, even when the
+/// agent's id is held by no other row.
+#[test]
+fn a_cwd_match_does_not_overwrite_a_stored_claude_id() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    pair_pass(&mut s, vec![live_in("rt-b", "/p")], vec![]);
+    let id = s.get_session("rt-b", "vps").unwrap().unwrap().id;
+    s.set_claude_session_id(id, "uuid-b").unwrap();
+    pair_pass(
+        &mut s,
+        vec![live_in("rt-b", "/p")],
+        vec![agent("uuid-other", None, Some("/p"))],
+    );
+    assert_eq!(stored_claude_id(&s, "rt-b").as_deref(), Some("uuid-b"));
+}
+
+/// A by-name match is authoritative: it replaces the stored id (e.g. the
+/// conversation id changed after `/clear`), even with another agent in the
+/// same cwd.
+#[test]
+fn a_by_name_match_still_updates_the_claude_id() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    pair_pass(&mut s, vec![live_in("rt-b", "/p")], vec![]);
+    let id = s.get_session("rt-b", "vps").unwrap().unwrap().id;
+    s.set_claude_session_id(id, "uuid-b").unwrap();
+    pair_pass(
+        &mut s,
+        vec![live_in("rt-b", "/p")],
+        vec![
+            agent("uuid-b2", Some("rt-b"), Some("/p")),
+            agent("uuid-x", None, Some("/p")),
+        ],
+    );
+    assert_eq!(stored_claude_id(&s, "rt-b").as_deref(), Some("uuid-b2"));
+}
+
+#[test]
+fn pair_session_agents_rejects_an_id_another_session_claims() {
+    let stored = |pairs: &[(&str, Option<&str>)]| -> std::collections::HashMap<_, _> {
+        pairs
+            .iter()
+            .map(|(n, id)| (n.to_string(), id.map(String::from)))
+            .collect()
+    };
+    let live = vec![live_in("rt-a", "/p"), live_in("rt-b", "/p")];
+
+    // rt-a's agent is named; rt-b's cwd match finds only that agent → no pair.
+    let agents = vec![agent("uuid-a", Some("rt-a"), Some("/p"))];
+    let got = pair_session_agents(&live, &agents, &stored(&[]), false);
+    assert_eq!(got["rt-a"].session_id.as_deref(), Some("uuid-a"));
+    assert!(!got.contains_key("rt-b"));
+
+    // Two NULL sessions inferring the one unnamed agent: ambiguous → neither.
+    let agents = vec![agent("uuid-a", None, Some("/p"))];
+    let got = pair_session_agents(&live, &agents, &stored(&[]), false);
+    assert!(got.is_empty(), "{got:?}");
+
+    // The id is held by another stored row (a ghost / pane-less row) → no pair.
+    let live_b = vec![live_in("rt-b", "/p")];
+    let got = pair_session_agents(
+        &live_b,
+        &agents,
+        &stored(&[("rt-a", Some("uuid-a")), ("rt-b", None)]),
+        false,
+    );
+    assert!(got.is_empty(), "{got:?}");
+
+    // The row already holds exactly that id → paired (status still flows).
+    let got = pair_session_agents(
+        &live_b,
+        &agents,
+        &stored(&[("rt-b", Some("uuid-a"))]),
+        false,
+    );
+    assert_eq!(got["rt-b"].session_id.as_deref(), Some("uuid-a"));
+
+    // A cwd-matched agent without a session id can't be tied to the session.
+    let mut anon = agent("x", None, Some("/p"));
+    anon.session_id = None;
+    let anon = [anon];
+    let got = pair_session_agents(&live_b, &anon, &stored(&[]), false);
+    assert!(got.is_empty(), "{got:?}");
 }
