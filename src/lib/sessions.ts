@@ -37,6 +37,9 @@ export interface SessionRow {
   reviews_session_id: number | null;
   worktree_key: string | null;
   lost_at: number | null;
+  /** Why the row was marked lost: "host_reboot" | "tmux_server_gone" |
+   *  "missing" | "killed" | null (never lost, or still live). */
+  lost_reason?: string | null;
   // Claude agent fields — null when claude CLI not installed or session not managed by Claude Code
   claude_session_id: string | null;
   claude_status: ClaudeStatus | null;
@@ -132,6 +135,19 @@ export function formatCostMicros(micros: number | null | undefined): string {
   if (usd < 0.01) return '<$0.01';
   if (usd < 100) return `$${usd.toFixed(2)}`;
   return `$${Math.round(usd).toLocaleString('en-US')}`;
+}
+
+/** Human label for a ghost row's `lost_reason`, or null when the reason has
+ *  no dedicated wording (e.g. "missing", "killed", or none recorded). */
+export function lostReasonLabel(reason: string | null | undefined): string | null {
+  switch (reason) {
+    case 'host_reboot':
+      return 'host rebooted';
+    case 'tmux_server_gone':
+      return 'tmux server stopped';
+    default:
+      return null;
+  }
 }
 
 const rows = createRowStore<SessionRow, number>({

@@ -7,7 +7,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
-import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
+import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -33,6 +33,14 @@ describe('usage formatting', () => {
     expect(formatCostMicros(5_000)).toBe('<$0.01');
     expect(formatCostMicros(1_234_567)).toBe('$1.23');
     expect(formatCostMicros(1_234_000_000)).toBe('$1,234');
+  });
+
+  it('labels lost_reason for the reasons with dedicated wording, null otherwise', () => {
+    expect(lostReasonLabel('host_reboot')).toBe('host rebooted');
+    expect(lostReasonLabel('tmux_server_gone')).toBe('tmux server stopped');
+    expect(lostReasonLabel('missing')).toBeNull();
+    expect(lostReasonLabel(null)).toBeNull();
+    expect(lostReasonLabel(undefined)).toBeNull();
   });
 
   it('sums every token counter and treats missing fields as zero', () => {

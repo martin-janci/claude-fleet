@@ -224,10 +224,11 @@ impl Store {
     /// A row fleet itself killed carries `lost_reason = 'killed'`
     /// ([`Self::mark_session_killed`]): fleet knows that loss is not
     /// ambiguous, so it is never reclassified. Same kind
-    /// filter and same BE-3 guard as the main mark. Reclassified rows do not
-    /// change on the wire (`lost_reason` is not a `SessionRow` field), so no
-    /// event is emitted for them; they are logged with the distinct
-    /// lifecycle kind `"reclassified"`.
+    /// filter and same BE-3 guard as the main mark. Reclassified rows DO
+    /// change on the wire (`lost_reason` is a `SessionRow` field), so a
+    /// `SessionUpdated` is emitted for each of them too, after the tx
+    /// commits, the same way `marked` rows are; they are also logged with
+    /// the distinct lifecycle kind `"reclassified"`.
     ///
     /// Mirrors [`Self::ghost_and_clean_bg_sessions`]'s shape: its own
     /// `unchecked_transaction`, collect the affected rows, commit, and only
@@ -306,9 +307,11 @@ impl Store {
         };
         tx.commit()?;
         for row in &out.reclassified {
-            // Not a wire change, so no event — but the reboot forensics
-            // still need the line. A distinct kind, NOT "lost": the row was
-            // already logged "lost" when Phase 1 ghosted it.
+            // `lost_reason` is on the wire now, so this IS a change the
+            // frontend sees — emit it, re-reading the committed row the same
+            // way every other mutation here announces itself. A distinct
+            // lifecycle kind, NOT "lost": the row was already logged "lost"
+            // when Phase 1 ghosted it.
             tracing::info!(
                 lifecycle = "reclassified",
                 session_id = row.id,
@@ -318,6 +321,7 @@ impl Store {
                 reason,
                 "[session] reclassified"
             );
+            let _ = self.emit_session(row.id);
         }
         for row in &out.marked {
             let change = RowChange::SessionUpdated(row.clone());
@@ -1135,8 +1139,9 @@ mod tests {
         assert!(s.get_session("bg:e1", "local").unwrap().is_none());
     }
 
-    /// `lost_reason` deliberately has no field on `SessionRow` yet (PR 2) —
-    /// read it straight off the connection.
+    /// `lost_reason` is also on `SessionRow` now, but most of these tests
+    /// predate that and read it straight off the connection; kept as a
+    /// terser assertion helper than `get_session_by_id(id)...lost_reason`.
     fn lost_reason_of(s: &Store, id: i64) -> Option<String> {
         s.conn_ref()
             .query_row(
@@ -1314,6 +1319,42 @@ mod tests {
         assert_eq!(lost_reason_of(&s, r), Some("host_reboot".to_string()));
         assert_eq!(s.get_session_by_id(r).unwrap().unwrap().lost_at, Some(300));
         assert_eq!(lost_reason_of(&s, f), Some("killed".to_string()));
+    }
+
+    #[test]
+    fn reclassifying_a_missing_ghost_emits_an_update() {
+        // `lost_reason` is on the wire now, so upgrading a `missing` ghost's
+        // reason to a verdict must announce it — the sidebar's "host
+        // rebooted" label depends on this event, not just a future refetch.
+        let (s, bus) = store_with_recorder();
+        s.upsert_host("h").unwrap();
+        let a = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, a, 400, "missing");
+        bus.take(); // drain the create/ghost setup
+
+        let out = s
+            .mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+        assert_eq!(
+            out.reclassified.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![a]
+        );
+
+        let evts = bus.take();
+        assert!(
+            evts.contains(&format!("session:updated:{a}")),
+            "reclassification must emit session:updated; got {evts:?}"
+        );
+        assert_eq!(
+            s.get_session_by_id(a)
+                .unwrap()
+                .unwrap()
+                .lost_reason
+                .as_deref(),
+            Some("host_reboot")
+        );
     }
 
     #[test]
@@ -1961,6 +2002,37 @@ mod tests {
             lost_reason_of(&s, id),
             None,
             "a manually restored row must not keep the old lost_reason"
+        );
+    }
+
+    #[test]
+    fn lost_reason_is_on_the_row() {
+        // PR 2: `lost_reason` is now a `SessionRow` field, not just a raw
+        // column — assert on it directly, the way the frontend will read it
+        // off the wire.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "abc").unwrap();
+
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+        assert_eq!(
+            s.get_session_by_id(id)
+                .unwrap()
+                .unwrap()
+                .lost_reason
+                .as_deref(),
+            Some("host_reboot")
+        );
+
+        s.restore_session(id).unwrap();
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().lost_reason,
+            None,
+            "a restored row carries no lost_reason"
         );
     }
 
