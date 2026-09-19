@@ -843,6 +843,39 @@ async fn restore_host_sessions_is_host_scoped_and_dry_run_returns_the_plan() {
 }
 
 #[tokio::test]
+async fn discover_lost_sessions_is_readonly_and_host_scoped() {
+    assert!(guard::is_readonly_tool("discover_lost_sessions"));
+
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let t = test_tools(s);
+
+    // A token bound to another host is refused outright — no ssh happens for
+    // a forbidden caller.
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.discover_lost_sessions(
+            Extension(a),
+            Parameters(sessions::DiscoverLostSessionsArgs {
+                host_alias: "hostb".into(),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+
+    // A readonly token bound to its own host passes both gates the tool
+    // actually runs behind — the same guards every other readonly tool is
+    // proved against (`enforce_mode` in the MCP dispatch, `require_host` in
+    // the handler body).
+    let ro = host_caller("hostb", TokenMode::Readonly);
+    assert!(enforce_mode(&ro, "discover_lost_sessions").is_ok());
+    assert!(require_host(&ro, "hostb", "the lost sessions").is_ok());
+}
+
+#[tokio::test]
 async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
@@ -1079,7 +1112,8 @@ fn capture_default_cap_matches_docs() {
 /// with the asset-catalog block, 63 with plan_sync/apply_sync/set_secret, 67
 /// with list_layers/resolve_preview/propose_layers/set_host_layers, 71 with
 /// session_conversation/pair_client/list_clients/revoke_client, 72 with
-/// restore_host_sessions; bump it when adding a tool.
+/// restore_host_sessions, 73 with discover_lost_sessions; bump it when
+/// adding a tool.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1099,7 +1133,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 72);
+    assert_eq!(served, 73);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 

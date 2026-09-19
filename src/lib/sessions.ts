@@ -567,6 +567,39 @@ export async function restoreHostSessions(
   });
 }
 
+/** Mirrors `service::sessions::discover::LostCandidate`: one transcript the
+ *  host has but fleet has no row for, ranked and enriched from the store.
+ *  `rank_hint` is relative to the host's last boot; `derived_tmux_name` is
+ *  only set once `project_id` is known, and is a hint for `new_session`'s
+ *  `name` — it may already be taken by a second session on the same
+ *  worktree. Restore a candidate with `new_session({ hostAlias, projectId,
+ *  worktreeId, name: derivedTmuxName, resumeClaudeSessionId:
+ *  claudeSessionId })`. */
+export interface LostCandidate {
+  cwd: string;
+  git_branch: string | null;
+  claude_session_id: string;
+  transcript_mtime: number;
+  derived_tmux_name: string | null;
+  project_id: number | null;
+  worktree_id: number | null;
+  existing_session_id: number | null;
+  rank_hint: 'before_boot' | 'after_boot' | 'stale' | 'unknown';
+}
+
+/** Scan a host's Claude transcripts (`~/.claude/projects`) for lost sessions
+ *  fleet has no row for and rank/enrich them from the store. Read-only: no
+ *  writes, nothing to merge into the sessions store. `limit` caps how many
+ *  transcripts (newest first) are read; omit for the backend default (50). */
+export async function discoverLostSessions(
+  hostAlias: string,
+  limit?: number,
+): Promise<Result<LostCandidate[]>> {
+  return invokeCmd<LostCandidate[]>('discover_lost_sessions', {
+    args: { host_alias: hostAlias, limit: limit ?? null },
+  });
+}
+
 export async function dismissGhostSession(sessionId: number): Promise<Result<void>> {
   const r = await invokeCmd<void>('dismiss_ghost_session', {
     args: { session_id: sessionId },

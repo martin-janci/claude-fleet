@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, restoreHostSessions, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, restoreHostSessions, discoverLostSessions, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
 import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel } from './sessions';
 
 beforeEach(() => {
@@ -174,6 +174,39 @@ describe('sessions store', () => {
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
       'restore_host_sessions',
       { args: { host_alias: 'mefistos', dry_run: false, session_ids: null } },
+    ]);
+  });
+
+  it('discoverLostSessions passes host_alias/limit and returns the candidates untouched', async () => {
+    const candidates = [
+      {
+        cwd: '/repo',
+        git_branch: 'feat',
+        claude_session_id: 'uuid-1',
+        transcript_mtime: 1000,
+        derived_tmux_name: 'dev-o-r--feat',
+        project_id: 1,
+        worktree_id: 2,
+        existing_session_id: null,
+        rank_hint: 'before_boot',
+      },
+    ];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(candidates); // discover_lost_sessions
+    const r = await discoverLostSessions('mefistos', 100);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toEqual(candidates);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'discover_lost_sessions',
+      { args: { host_alias: 'mefistos', limit: 100 } },
+    ]);
+  });
+
+  it('discoverLostSessions defaults omitted limit to null', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await discoverLostSessions('mefistos');
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'discover_lost_sessions',
+      { args: { host_alias: 'mefistos', limit: null } },
     ]);
   });
 

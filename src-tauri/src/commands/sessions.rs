@@ -13,9 +13,10 @@ use fleet_core::service::safe_kill::{
     self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
 };
 use fleet_core::service::sessions::{
-    self, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
-    RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
-    RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
+    self, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs, LostCandidate,
+    NewSessionArgs, RecreateSessionArgs, RelatedSessionsArgs, RenameSessionArgs,
+    RestartSessionArgs, RestoreHostSessionsArgs, RestoreReport, SendPromptArgs,
+    SetFriendlyNameArgs, SpawnReviewArgs,
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store};
@@ -162,6 +163,17 @@ pub async fn restore_host_sessions(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<RestoreReport, IpcError> {
     sessions::restore_host_sessions(args, &store, &ssh).await
+}
+
+/// Scan a host's Claude transcripts for lost sessions fleet has no row for
+/// and rank/enrich them. Read-only. Logic lives in `service::sessions::discover`.
+#[tauri::command]
+pub async fn discover_lost_sessions(
+    args: DiscoverLostSessionsArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<Vec<LostCandidate>, IpcError> {
+    sessions::discover_lost_sessions(args, &store, &ssh).await
 }
 
 #[tauri::command]

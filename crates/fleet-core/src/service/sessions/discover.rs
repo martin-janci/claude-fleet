@@ -1,11 +1,17 @@
-//! Host-reboot recovery, discovery half (Task 7 of the host-reboot recovery
-//! plan): parse and rank the Claude transcripts a host actually has on disk,
-//! independent of anything fleet's own DB knows about. Pure/read-only — no
-//! ssh, no store, no writes. Task 8 wires this to a live host (running
+//! Host-reboot recovery, discovery half. Task 7 (below) parses and ranks the
+//! Claude transcripts a host actually has on disk, independent of anything
+//! fleet's own DB knows about — pure/read-only, no ssh, no store, no writes.
+//! Task 8 ([`discover_lost_sessions`]) wires that to a live host (running
 //! [`crate::tmux::discover_transcripts_script`] over ssh/local exec) and
 //! fills in `derived_tmux_name`/`project_id`/`worktree_id`/
-//! `existing_session_id`, which this module deliberately leaves `None`.
+//! `existing_session_id`, which Task 7's [`rank_candidates`] deliberately
+//! leaves `None`. Also read-only: one short store lock AFTER the ssh call
+//! enriches the candidates the script found — nothing is written.
 
+use super::*;
+#[cfg(test)]
+use crate::ipc_error::codes;
+use crate::ipc_error::lock;
 use serde::Serialize;
 
 /// One transcript found by [`crate::tmux::discover_transcripts_script`]:
@@ -216,6 +222,123 @@ pub fn rank_candidates(boot: Option<i64>, probes: Vec<TranscriptProbe>) -> Vec<L
     candidates
 }
 
+// ---- Task 8: live host + store enrichment ---------------------------------
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "DiscoverLostSessionsParams")]
+pub struct DiscoverLostSessionsArgs {
+    /// Host to scan.
+    pub host_alias: String,
+    /// Max transcripts to read, newest first. Default 50, max 500.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Wall clock for one host's discover-transcripts script. It reads up to
+/// [`crate::tmux::discover_transcripts_script`]'s clamp of 500 transcripts,
+/// each up to a 4 MiB `tail`, sequentially in one ssh round trip — generous
+/// next to `HOST_PROBE_TIMEOUT` (30s, a whole reconcile pass across every
+/// live tmux session) since this is a single on-demand call, not something
+/// gating every host's sidebar refresh.
+const DISCOVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `limit` when the caller omits it entirely.
+const DEFAULT_DISCOVER_LIMIT: usize = 50;
+
+/// The deterministic tmux name `fill_session_name` would mint for a fresh
+/// session in `owner/repo` at `worktree_key` (`"main"` for the repo root,
+/// else a linked worktree's name — see `worktree_key_for_host`) — extracted
+/// from `fill_session_name`'s deterministic branch so both callers derive the
+/// exact same name from the exact same inputs. Does not consult the store
+/// for a collision (unlike `fill_session_name`'s fallback-to-generated-pair
+/// path): a discovery candidate's derived name is a hint for `new_session`'s
+/// `name` argument, not a guarantee, and may already be taken by a second
+/// session on the same worktree — the MCP tool description says so.
+pub(crate) fn derive_tmux_name(owner: &str, repo: &str, worktree_key: &str) -> String {
+    use crate::service::names::tmux_safe;
+    let base = format!("dev-{owner}-{repo}");
+    tmux_safe(&if worktree_key == "main" {
+        base
+    } else {
+        format!("{base}--{worktree_key}")
+    })
+}
+
+/// Run [`crate::tmux::discover_transcripts_script`] on `host_alias` via
+/// `shell`, parse + rank its output ([`parse_discover_output`],
+/// [`rank_candidates`]), then enrich each candidate from the store under one
+/// short lock taken AFTER the ssh call returns (never held across an
+/// `.await`): `existing_session_id` (a row — live or lost — on this host
+/// whose `claude_session_id` matches), `project_id`
+/// (`find_project_id_for_path`), `worktree_id` (the worktree row on this
+/// host whose `path` equals the candidate's `cwd`, if any), and
+/// `derived_tmux_name` (via [`derive_tmux_name`], only once `project_id` is
+/// known — an orphan cwd with no project gets no name to restore into).
+/// Mutates nothing. The test seam: production wires this to a real host via
+/// [`discover_lost_sessions`]; tests inject a fake [`HostShell`].
+pub(crate) async fn discover_lost_sessions_with(
+    args: DiscoverLostSessionsArgs,
+    store: &Mutex<Store>,
+    shell: &dyn HostShell,
+) -> Result<Vec<LostCandidate>, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    // `None` defaults to 50; an explicit value (including <= 0) is cast to
+    // `usize` and handed straight to `discover_transcripts_script`, whose own
+    // `.clamp(1, 500)` is the single source of truth for bounding it — a
+    // negative `i64` wraps to a huge `usize` under the cast, which the clamp
+    // pins to 500 (the max), and `0` clamps to 1. Not re-validated here on
+    // purpose, so that one clamp never has a second copy to drift from.
+    let limit: usize = match args.limit {
+        Some(n) => n as usize,
+        None => DEFAULT_DISCOVER_LIMIT,
+    };
+    let script = crate::tmux::discover_transcripts_script(limit);
+    let stdout = shell.run_script(&args.host_alias, &script).await?;
+    let (boot, probes) = parse_discover_output(&stdout);
+    let mut candidates = rank_candidates(boot, probes);
+
+    let s = lock(store)?;
+    let sessions_on_host = s.list_sessions_for_host(&args.host_alias)?;
+    let paths = HostPaths::for_host(&s, &args.host_alias);
+    let projects = s.list_projects()?;
+    let worktrees = s.list_worktrees_on_host(&args.host_alias)?;
+    for c in &mut candidates {
+        c.existing_session_id = sessions_on_host
+            .iter()
+            .find(|r| r.claude_session_id.as_deref() == Some(c.claude_session_id.as_str()))
+            .map(|r| r.id);
+        c.project_id = find_project_id_for_path(
+            &projects,
+            &args.host_alias,
+            std::path::Path::new(&c.cwd),
+            &paths,
+        );
+        c.worktree_id = worktrees.iter().find(|w| w.path == c.cwd).map(|w| w.id);
+        c.derived_tmux_name = c.project_id.and_then(|pid| {
+            let (owner, repo) = fetch_owner_repo(&s, pid).ok()?;
+            let worktree_key = worktree_key_for_host(&c.cwd, &paths)?;
+            Some(derive_tmux_name(&owner, &repo, &worktree_key))
+        });
+    }
+    Ok(candidates)
+}
+
+/// Discover a host's lost-but-resumable Claude sessions: scans
+/// `~/.claude/projects` on the host for transcripts fleet has no row for
+/// (e.g. after a reboot before this fleet version) and ranks/enriches them —
+/// see [`discover_lost_sessions_with`]. Read-only.
+pub async fn discover_lost_sessions(
+    args: DiscoverLostSessionsArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<Vec<LostCandidate>, IpcError> {
+    let shell = RealHostShell {
+        ssh: Arc::clone(ssh),
+        timeout: DISCOVER_TIMEOUT,
+    };
+    discover_lost_sessions_with(args, store, &shell).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +546,124 @@ mod tests {
         assert!(out.iter().all(|c| c.rank_hint == "unknown"), "{out:?}");
         let order: Vec<&str> = out.iter().map(|c| c.cwd.as_str()).collect();
         assert_eq!(order, vec!["/b", "/c", "/a"]);
+    }
+
+    // ---- derive_tmux_name ---------------------------------------------------
+
+    #[test]
+    fn derive_tmux_name_matches_fill_session_names_deterministic_branch() {
+        assert_eq!(derive_tmux_name("o", "r", "main"), "dev-o-r");
+        assert_eq!(derive_tmux_name("o", "r", "feat-x"), "dev-o-r--feat-x");
+        // tmux_safe still runs: a `.` in an owner/repo is not the norm, but
+        // must come out the same way it would through fill_session_name.
+        assert_eq!(derive_tmux_name("o.rg", "r", "main"), "dev-o-rg-r");
+    }
+
+    // ---- discover_lost_sessions_with ----------------------------------------
+
+    /// A shell that always answers with the same canned stdout, regardless of
+    /// host/script — enough to drive `discover_lost_sessions_with` without a
+    /// real host.
+    struct CannedDiscoverShell {
+        stdout: String,
+    }
+
+    #[async_trait::async_trait]
+    impl HostShell for CannedDiscoverShell {
+        async fn run_script(&self, _host: &str, _script: &str) -> Result<String, IpcError> {
+            Ok(self.stdout.clone())
+        }
+    }
+
+    fn session_events_count(s: &Store, session_id: i64) -> usize {
+        s.list_session_events(session_id, 1000).unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn enriches_candidates_from_the_store_and_writes_nothing() {
+        let claude_id = "44366faf-ae97-426a-91cd-beaf3c74f1d7";
+        let cwd = "/home/x/projects/github.com/o/r/.worktrees/feat";
+        let stdout = format!(
+            "bootsec=1000\n@@F\t2000\t{claude_id}\n@@L\t{{\"cwd\":\"{cwd}\",\"gitBranch\":\"feat\"}}\n"
+        );
+
+        let s = Store::open_in_memory().expect("open");
+        s.upsert_host("h").unwrap();
+        let pid = s
+            .upsert_project("o", "r", "/home/x/projects/github.com/o/r")
+            .unwrap();
+        let wid = s
+            .upsert_worktree_on("h", pid, "feat", cwd, Some("feat"))
+            .unwrap();
+        // An existing lost row whose claude_session_id matches the candidate
+        // — `existing_session_id` must resolve to it.
+        let existing = s
+            .upsert_session(
+                "dev-o-r--feat",
+                "h",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        s.set_claude_session_id(existing, claude_id).unwrap();
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+
+        let store = Mutex::new(s);
+        let before = lock(&store).unwrap().list_sessions_for_host("h").unwrap();
+        let before_events = session_events_count(&lock(&store).unwrap(), existing);
+
+        let shell = CannedDiscoverShell { stdout };
+        let candidates = discover_lost_sessions_with(
+            DiscoverLostSessionsArgs {
+                host_alias: "h".to_string(),
+                limit: None,
+            },
+            &store,
+            &shell,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        let c = &candidates[0];
+        assert_eq!(c.claude_session_id, claude_id);
+        assert_eq!(c.cwd, cwd);
+        assert_eq!(c.project_id, Some(pid));
+        assert_eq!(c.worktree_id, Some(wid));
+        assert_eq!(c.derived_tmux_name.as_deref(), Some("dev-o-r--feat"));
+        assert_eq!(c.existing_session_id, Some(existing));
+
+        // Read-only: the store's session rows and event count survive
+        // untouched.
+        let after = lock(&store).unwrap().list_sessions_for_host("h").unwrap();
+        assert_eq!(before, after, "discover must not write anything");
+        let after_events = session_events_count(&lock(&store).unwrap(), existing);
+        assert_eq!(
+            before_events, after_events,
+            "discover must not insert events"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shell_error_propagates() {
+        let store = Mutex::new(Store::open_in_memory().expect("open"));
+        lock(&store).unwrap().upsert_host("h").unwrap();
+
+        let err = discover_lost_sessions_with(
+            DiscoverLostSessionsArgs {
+                host_alias: "h".to_string(),
+                limit: None,
+            },
+            &store,
+            &NoHostShell,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_SHELL);
     }
 }

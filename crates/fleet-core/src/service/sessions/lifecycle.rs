@@ -459,10 +459,16 @@ pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<Stri
     } else {
         None
     };
-    let deterministic = tmux_safe(&match &wt {
-        Some(w) => format!("{base}--{w}{term}"),
-        None => format!("{base}{term}"),
-    });
+    // `derive_tmux_name` (`discover.rs`) mints the same `dev-<owner>-<repo>`
+    // / `dev-<owner>-<repo>--<worktree>` shape from a worktree key, "main"
+    // meaning the repo root — the same convention `wt: None` encodes here.
+    // `tmux_safe` is idempotent (it only ever removes `.`/`:`), so applying
+    // it again after appending `term` is safe.
+    let worktree_key = wt.as_deref().unwrap_or("main");
+    let deterministic = tmux_safe(&format!(
+        "{}{term}",
+        derive_tmux_name(&owner, &repo, worktree_key)
+    ));
     let on_host = s.list_sessions_for_host(&args.host_alias)?;
     if !on_host.iter().any(|r| r.tmux_name == deterministic) {
         return Ok(deterministic);

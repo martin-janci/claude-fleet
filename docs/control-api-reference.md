@@ -47,6 +47,12 @@ Parameters: `confirm_nonce`, `force`, `worktree_id`
 
 Discover SSH hosts from the user's ~/.ssh/config. These are candidates for add_host. Returns JSON.
 
+### `discover_lost_sessions`
+
+Read-only: scan ~/.claude/projects on a host for recent Claude conversations fleet has no row for (e.g. after a reboot before this fleet version), rank them relative to the host's boot (rank_hint: before_boot | after_boot | stale | unknown), and enrich each with the fleet ids it can infer (project_id, worktree_id, existing_session_id — a row already holding that claude_session_id) plus a derived_tmux_name hint. The derived name may differ from a session's original name for a second session on the same worktree; treat it as a hint, not a guarantee. Restore one with new_session { host_alias, project_id, worktree_id, name: derived_tmux_name, resume_claude_session_id }. limit caps how many transcripts (newest first) are read: default 50, max 500.
+
+Parameters: `host_alias`, `limit`
+
 ### `dismiss_ghost_session`
 
 Dismiss a ghost session (lost from tmux): permanently delete its row. Use when a ghost is not worth reviving — the row is the only thing left to clean up. Errors if the session is not a ghost.
@@ -455,6 +461,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`
 - `commands::sessions::restore_host_sessions`
+- `commands::sessions::discover_lost_sessions`
 - `commands::move_session::move_session`
 - `commands::sessions::dismiss_ghost_session`
 - `commands::sessions::dismiss_agent_session`

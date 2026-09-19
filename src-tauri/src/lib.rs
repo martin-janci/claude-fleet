@@ -239,6 +239,7 @@ pub fn run() {
             commands::sessions::spawn_review,
             commands::sessions::recreate_session,
             commands::sessions::restore_host_sessions,
+            commands::sessions::discover_lost_sessions,
             commands::move_session::move_session,
             commands::sessions::dismiss_ghost_session,
             commands::sessions::dismiss_agent_session,

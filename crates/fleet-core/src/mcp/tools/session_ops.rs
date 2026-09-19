@@ -392,6 +392,34 @@ impl FleetTools {
         ok_json(&report)
     }
 
+    #[tool(
+        description = "Read-only: scan ~/.claude/projects on a host for recent Claude \
+        conversations fleet has no row for (e.g. after a reboot before this fleet version), \
+        rank them relative to the host's boot (rank_hint: before_boot | after_boot | stale | \
+        unknown), and enrich each with the fleet ids it can infer (project_id, worktree_id, \
+        existing_session_id — a row already holding that claude_session_id) plus a \
+        derived_tmux_name hint. The derived name may differ from a session's original name for a \
+        second session on the same worktree; treat it as a hint, not a guarantee. Restore one \
+        with new_session { host_alias, project_id, worktree_id, name: derived_tmux_name, \
+        resume_claude_session_id }. limit caps how many transcripts (newest first) are read: \
+        default 50, max 500."
+    )]
+    pub(super) async fn discover_lost_sessions(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<sessions::DiscoverLostSessionsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "discover_lost_sessions",
+            &format!("host={} limit={:?}", args.host_alias, args.limit),
+        );
+        require_host(&caller, &args.host_alias, "the lost sessions")?;
+        let candidates = sessions::discover_lost_sessions(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&candidates)
+    }
+
     #[tool(description = "Dismiss a ghost session (lost from tmux): permanently \
         delete its row. Use when a ghost is not worth reviving — the row is \
         the only thing left to clean up. Errors if the session is not a \
