@@ -181,6 +181,7 @@
       </div>
     {/if}
     <p class="desc">{detail.asset.description}</p>
+    {#if detail.asset.install_as}<p class="install-as" data-testid="asset-install-as">installs as <code>{detail.asset.install_as}</code></p>{/if}
     {#if detail.asset.tags?.length}<p class="tags">{#each detail.asset.tags ?? [] as t}<span class="tag">{t}</span>{/each}</p>{/if}
 
     <h4>Hosts</h4>
@@ -273,7 +274,7 @@
   h3 { margin: 0 0 4px; font-size: 15px; font-family: ui-monospace, monospace; }
   .kind, .ver { color: var(--fg-muted); font-size: 11px; font-family: system-ui; }
   h4 { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; color: var(--fg-muted); }
-  .desc { margin: 0; } .tags { margin: 4px 0 0; } .tag { border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; font-size: 11px; margin-right: 4px; }
+  .desc { margin: 0; } .install-as { margin: 4px 0 0; font-size: 11px; color: var(--fg-muted); } .tags { margin: 4px 0 0; } .tag { border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; font-size: 11px; margin-right: 4px; }
   .matrix { border-collapse: collapse; } .matrix th, .matrix td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--border); }
   .state-in-sync { color: #16a34a; } .state-drifted { color: #d97706; } .state-skipped, .state-not-scanned, .state-missing, .state-unsupported, .state-orphan { color: var(--fg-muted); }
   .tabs { display: flex; gap: 2px; margin-bottom: 6px; } .tabs button { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; color: var(--fg-muted); cursor: pointer; } .tabs button.active { color: var(--fg); border-color: var(--accent); }

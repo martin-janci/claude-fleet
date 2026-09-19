@@ -271,7 +271,8 @@ Index by area (names only; see the reference for details):
   read-only on the hosts, and recompute asset states), `import_assets`
   (import the controller's `~/.claude` into the catalog working tree;
   `dry_run` supported), `plan_sync` (compute a fleet-wide sync plan with
-  per-host actions; mutating classification to update inventory), `apply_sync`
+  per-host actions, including `plugin_update` once a pinned plugin's catalog
+  version changes; mutating classification to update inventory), `apply_sync`
   (apply a `plan_sync` plan; master token only, behind desktop confirmation
   when `mcp.confirm_destructive` is enabled, and needs a `confirm_nonce` for
   ANY apply — not only one whose plan includes an overwrite or remove —
