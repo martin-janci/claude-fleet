@@ -28,7 +28,8 @@
 //!    `repair::ensure_for_new_session` from the same branch, fast-forwarded to
 //!    the source HEAD when it lags; the snapshot is replayed into it and
 //!    verified (its porcelain must equal the source's — `E_MOVE_CARRY`; a
-//!    target worktree with changes of its own is `E_MOVE_TARGET_DIRTY`), and
+//!    target worktree that already has uncommitted changes — its own, or an
+//!    unfinished earlier attempt's — is `E_MOVE_TARGET_DIRTY`), and
 //!    the small git-ignored files are carried over (never a failure, only a
 //!    warning). Then tmux starts `cl --resume <id>` there (the recreate pane
 //!    command). The move waits, bounded, for the row to be `running` and the
@@ -864,11 +865,24 @@ async fn download(
     bytes: u64,
     ext: &str,
 ) -> Result<TempFile, IpcError> {
+    download_chunked(ssh, host, remote_path, bytes, ext, carry::CHUNK_BYTES).await
+}
+
+/// [`download`] with the chunk size as a parameter, so the loop itself can be
+/// tested against a payload that does not have to be megabytes long.
+async fn download_chunked(
+    ssh: &dyn SshExec,
+    host: &str,
+    remote_path: &str,
+    bytes: u64,
+    ext: &str,
+    chunk_bytes: u64,
+) -> Result<TempFile, IpcError> {
     use std::io::Write;
     let (guard, mut f) = TempFile::create(ext)?;
     let mut got = 0u64;
     while got < bytes {
-        let want = carry::CHUNK_BYTES.min(bytes - got);
+        let want = chunk_bytes.min(bytes - got);
         let out = sh(
             ssh,
             host,
@@ -1506,7 +1520,14 @@ async fn move_session_inner(
             &stderr_of(&out),
         ));
     }
-    carried.target_seeded = carry::parse_seed(&String::from_utf8_lossy(&out.stdout))?;
+    carried.target_seeded =
+        carry::parse_seed(&String::from_utf8_lossy(&out.stdout)).map_err(|e| {
+            carry_err(
+                "seed",
+                &format!("reading the seed output from {target}: {}", e.message),
+                "",
+            )
+        })?;
 
     // Best effort: a failed fetch surfaces as the workspace step's error.
     let _ = sh(
@@ -1519,6 +1540,11 @@ async fn move_session_inner(
 
     // 3b. Carry the git state: snapshot + thin bundle on the source, relayed
     //     through this process, fetched into the target's main clone.
+    //     `haves_script` creates the target's transfer dir, so the cleanup
+    //     must already know about it when the call goes out: a transport
+    //     failure after the remote `mkdir` would otherwise strand it.
+    cleanup.id = id.clone();
+    cleanup.target = Some((target.clone(), project_root.clone()));
     let out = sh(
         ssh,
         &target,
@@ -1528,14 +1554,20 @@ async fn move_session_inner(
     .await?;
     if !out.status.success() {
         return Err(carry_err(
-            "seed",
+            "haves",
             &format!("listing refs in {project_root} on {target}"),
             &stderr_of(&out),
         ));
     }
-    let (target_dir, haves) = carry::parse_haves(&String::from_utf8_lossy(&out.stdout))?;
-    cleanup.id = id.clone();
-    cleanup.target = Some((target.clone(), project_root.clone()));
+    let (target_dir, haves) =
+        carry::parse_haves(&String::from_utf8_lossy(&out.stdout)).map_err(|e| {
+            carry_err(
+                "haves",
+                &format!("reading the ref listing from {target}: {}", e.message),
+                "",
+            )
+        })?;
+    // The snapshot is the first write on the source.
     cleanup.source = Some((src.clone(), state.worktree.clone()));
 
     let out = sh_long(
@@ -1560,7 +1592,13 @@ async fn move_session_inner(
             &err,
         ));
     }
-    let bundle = carry::parse_snapshot(&String::from_utf8_lossy(&out.stdout))?;
+    let bundle = carry::parse_snapshot(&String::from_utf8_lossy(&out.stdout)).map_err(|e| {
+        carry_err(
+            "snapshot",
+            &format!("reading the snapshot output from {src}: {}", e.message),
+            "",
+        )
+    })?;
     carried.commits = bundle.commits;
     carried.bundle_bytes = bundle.bytes;
     if bundle.submodules {
@@ -1694,7 +1732,7 @@ async fn move_session_inner(
                 return Err(IpcError::new(
                     codes::E_MOVE_TARGET_DIRTY,
                     format!(
-                        "move_session: the target worktree {cwd} on {target} has uncommitted changes of its own; commit or discard them there first (the source session was not touched)"
+                        "move_session: the target worktree {cwd} on {target} has uncommitted changes — its own, or work carried by an earlier move attempt that did not finish; inspect it there, then commit or discard them and retry (the source session was not touched)"
                     ),
                 ));
             }
@@ -2825,77 +2863,183 @@ mod tests {
 
     #[tokio::test]
     async fn carry_failures_leave_the_source_untouched_and_still_clean_up() {
-        // (host, rule to break, reply, expected code, expected details.step)
-        let cases: Vec<(&str, &str, Reply, &str, Option<&str>)> = vec![
-            (
+        struct Case {
+            host: &'static str,
+            /// The carry script whose reply is replaced.
+            marker: &'static str,
+            /// What distinguishes this case when the marker repeats.
+            what: &'static str,
+            reply: Reply,
+            code: &'static str,
+            step: Option<&'static str>,
+            /// Hosts that must be sent a cleanup script — and, just as
+            /// importantly, the only ones: a host nothing was created on
+            /// must never get one (an empty transfer id above all).
+            cleaned: &'static [&'static str],
+        }
+        let case = |host, marker, what, reply, code, step, cleaned| Case {
+            host,
+            marker,
+            what,
+            reply,
+            code,
+            step,
+            cleaned,
+        };
+        let failed = |what: &str| format!("{} {what}", carry::FAILED);
+        let cases = vec![
+            // Seeding is the first carry step: nothing exists to clean yet.
+            case(
                 "beta",
                 "# cf-carry:seed",
-                Reply::fail(5, &format!("{} init", carry::FAILED)),
+                "exit",
+                Reply::fail(5, &failed("init")),
                 codes::E_MOVE_CARRY,
                 Some("seed"),
+                &[][..],
             ),
-            (
+            case(
+                "beta",
+                "# cf-carry:seed",
+                "no marker",
+                Reply::ok("cloned\n"),
+                codes::E_MOVE_CARRY,
+                Some("seed"),
+                &[][..],
+            ),
+            // The haves script creates the target's transfer dir, so a
+            // failure there — including one where the reply never arrives —
+            // must still clean the target, and only the target.
+            case(
+                "beta",
+                "# cf-carry:haves",
+                "exit",
+                Reply::fail(5, &failed("mkdir")),
+                codes::E_MOVE_CARRY,
+                Some("haves"),
+                &["beta"][..],
+            ),
+            case(
+                "beta",
+                "# cf-carry:haves",
+                "no marker",
+                Reply::ok(&format!("{TGT_DIR}\n{HEAD}\n")),
+                codes::E_MOVE_CARRY,
+                Some("haves"),
+                &["beta"][..],
+            ),
+            case(
+                "beta",
+                "# cf-carry:haves",
+                "unreachable",
+                Reply::Unreachable,
+                codes::E_MOVE_CARRY,
+                Some("haves"),
+                &["beta"][..],
+            ),
+            case(
+                "beta",
+                "# cf-carry:haves",
+                "transport",
+                Reply::SpawnError {
+                    message: "No such file or directory (os error 2)".into(),
+                },
+                "E_SSH",
+                None,
+                &["beta"][..],
+            ),
+            case(
                 "alpha",
                 "# cf-carry:snapshot",
-                Reply::fail(5, &format!("{} bundle", carry::FAILED)),
+                "exit",
+                Reply::fail(5, &failed("bundle")),
                 codes::E_MOVE_CARRY,
                 Some("snapshot"),
+                &["alpha", "beta"][..],
             ),
-            (
+            case(
                 "alpha",
                 "# cf-carry:snapshot",
+                "no marker",
+                Reply::ok(&snapshot_out(BUNDLE.len(), 0)),
+                codes::E_MOVE_CARRY,
+                Some("snapshot"),
+                &["alpha", "beta"][..],
+            ),
+            case(
+                "alpha",
+                "# cf-carry:snapshot",
+                "over the cap",
                 Reply::fail(8, &format!("{} 999999999", carry::BUNDLE_TOO_LARGE)),
                 codes::E_MOVE_TOO_LARGE,
                 None,
+                &["alpha", "beta"][..],
             ),
             // No marker at all, and a marker with an empty payload: both are
             // a chunk that carried nothing.
-            (
+            case(
                 "alpha",
                 "# cf-carry:chunk",
+                "no marker",
                 Reply::ok(""),
                 codes::E_MOVE_CARRY,
                 Some("download"),
+                &["alpha", "beta"][..],
             ),
-            (
+            case(
                 "alpha",
                 "# cf-carry:chunk",
+                "empty payload",
                 Reply::ok(&out("")),
                 codes::E_MOVE_CARRY,
                 Some("download"),
+                &["alpha", "beta"][..],
             ),
-            (
+            case(
                 "beta",
                 "# cf-carry:fetch",
-                Reply::fail(5, &format!("{} verify", carry::FAILED)),
+                "exit",
+                Reply::fail(5, &failed("verify")),
                 codes::E_MOVE_CARRY,
                 Some("fetch"),
+                &["alpha", "beta"][..],
             ),
-            (
+            case(
                 "beta",
                 "# cf-carry:apply",
+                "target dirty",
                 Reply::fail(9, carry::TARGET_DIRTY),
                 codes::E_MOVE_TARGET_DIRTY,
                 None,
+                &["alpha", "beta"][..],
             ),
-            (
+            case(
                 "beta",
                 "# cf-carry:apply",
+                "porcelain mismatch",
                 Reply::ok(&out("?? surprise.txt\n")),
                 codes::E_MOVE_CARRY,
                 Some("verify"),
+                &["alpha", "beta"][..],
             ),
         ];
-        for (host, marker, reply, code, step) in cases {
+        for c in cases {
+            let name = format!("{} ({})", c.marker, c.what);
             let f = fixture();
-            f.fake.on_host(host, Match::script_contains(marker), reply);
+            f.fake
+                .on_host(c.host, Match::script_contains(c.marker), c.reply);
             let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
             let err = run(&f, &hooks, false).await.unwrap_err();
-            assert_eq!(err.code, code, "{marker}: {}", err.message);
-            if let Some(step) = step {
-                assert_eq!(err.details.as_ref().unwrap()["step"], step, "{marker}");
+            assert_eq!(err.code, c.code, "{name}: {}", err.message);
+            if let Some(step) = c.step {
+                assert_eq!(err.details.as_ref().unwrap()["step"], step, "{name}");
+                assert!(
+                    err.message.contains("the source session was not touched"),
+                    "{name}: {}",
+                    err.message
+                );
             }
-            if code == codes::E_MOVE_TOO_LARGE {
+            if c.code == codes::E_MOVE_TOO_LARGE {
                 assert_eq!(err.details.as_ref().unwrap()["payload"], "bundle");
             }
             assert!(
@@ -2903,16 +3047,19 @@ mod tests {
                     .calls_for("beta")
                     .iter()
                     .any(|c| c.script().is_some_and(|s| s.contains("tmux new-session"))),
-                "{marker}: the target session never started"
+                "{name}: the target session never started"
             );
             assert_source_untouched(&f, &hooks);
-            if marker != "# cf-carry:seed" {
-                assert!(
-                    f.fake
-                        .calls_for("alpha")
-                        .iter()
-                        .any(|c| c.script().is_some_and(|s| s.contains("# cf-carry:cleanup"))),
-                    "{marker}: the source was cleaned up"
+            for host in ["alpha", "beta"] {
+                let cleaned = f
+                    .fake
+                    .calls_for(host)
+                    .iter()
+                    .any(|c| c.script().is_some_and(|s| s.contains("# cf-carry:cleanup")));
+                assert_eq!(
+                    cleaned,
+                    c.cleaned.contains(&host),
+                    "{name}: cleanup on {host}"
                 );
             }
         }
@@ -2986,6 +3133,85 @@ mod tests {
                 .any(|w| w.contains("ignored files were not carried")),
             "{:?}",
             rep.warnings
+        );
+    }
+
+    /// The relay loop itself: a payload larger than one chunk is pulled in
+    /// order, the last request asks only for what is left, a chunk shorter
+    /// than requested resumes from where it really ended (no skipped bytes),
+    /// and more bytes than announced is a failure rather than a silent
+    /// oversized file.
+    #[tokio::test]
+    async fn the_chunked_download_walks_the_payload_in_order() {
+        const PAYLOAD: &str = "ABCDEFGHIJKLM"; // 13 bytes
+        const REMOTE: &str = "/tmp/carry.bundle";
+        /// Answer the request at `offset` (as the script spells it) with
+        /// `reply` bytes.
+        fn at(fake: &FakeSsh, offset: u64, reply: &str) {
+            fake.on_host(
+                "h",
+                Match::script_contains(&format!("tail -c +{} ", offset + 1)),
+                Reply::ok(&out(reply)),
+            );
+        }
+        let chunk_scripts = |fake: &FakeSsh| -> Vec<String> {
+            fake.calls_for("h")
+                .iter()
+                .filter_map(|c| c.script())
+                .filter(|s| s.contains("# cf-carry:chunk"))
+                .collect()
+        };
+        let expected = |pairs: &[(u64, u64)]| -> Vec<String> {
+            pairs
+                .iter()
+                .map(|(off, len)| carry::chunk_script(REMOTE, *off, *len))
+                .collect()
+        };
+
+        // Whole chunks, then a short final one asking for the remainder.
+        let fake = FakeSsh::new();
+        at(&fake, 0, "ABCDE");
+        at(&fake, 5, "FGHIJ");
+        at(&fake, 10, "KLM");
+        let got = download_chunked(&fake, "h", REMOTE, PAYLOAD.len() as u64, "bundle", 5)
+            .await
+            .expect("the whole payload");
+        assert_eq!(std::fs::read_to_string(&got.0).unwrap(), PAYLOAD);
+        assert_eq!(
+            chunk_scripts(&fake),
+            expected(&[(0, 5), (5, 5), (10, 3)]),
+            "offsets 0, 5, 10 and a 3-byte tail"
+        );
+
+        // A chunk shorter than requested: the next one resumes at 2, not 5.
+        let fake = FakeSsh::new();
+        at(&fake, 0, "AB");
+        at(&fake, 2, "CDEFG");
+        at(&fake, 7, "HIJKL");
+        at(&fake, 12, "M");
+        let got = download_chunked(&fake, "h", REMOTE, PAYLOAD.len() as u64, "bundle", 5)
+            .await
+            .expect("the whole payload");
+        assert_eq!(std::fs::read_to_string(&got.0).unwrap(), PAYLOAD);
+        assert_eq!(
+            chunk_scripts(&fake),
+            expected(&[(0, 5), (2, 5), (7, 5), (12, 1)])
+        );
+
+        // More than was announced: refused, not written off as fine.
+        let fake = FakeSsh::new();
+        at(&fake, 0, PAYLOAD);
+        // (`TempFile` is deliberately not `Debug`, so no `unwrap_err`.)
+        let err = match download_chunked(&fake, "h", REMOTE, 5, "bundle", 5).await {
+            Ok(_) => panic!("more bytes than announced must be refused"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, codes::E_MOVE_CARRY, "{}", err.message);
+        assert_eq!(err.details.unwrap()["step"], "download");
+        assert!(
+            err.message.contains("gave 13 bytes, expected 5"),
+            "{}",
+            err.message
         );
     }
 
