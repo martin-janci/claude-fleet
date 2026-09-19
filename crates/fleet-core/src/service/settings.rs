@@ -104,6 +104,25 @@ pub const MOVE_MAX_TRANSCRIPT_MB: &str = crate::service::move_session::SETTING_M
 /// Upper bound for [`MOVE_MAX_TRANSCRIPT_MB`]: the copy is held in memory.
 pub const MOVE_MAX_TRANSCRIPT_MB_MAX: u64 = 4096;
 
+/// Upper bound for [`MOVE_MAX_BUNDLE_MB`]: the bundle is relayed through the
+/// orchestrator in 8 MiB chunks via a private temp file, so this bounds relay
+/// time and temp-disk use on the orchestrator and both hosts, not memory.
+pub const MOVE_MAX_BUNDLE_MB_MAX: u64 = 4096;
+/// Upper bound for [`MOVE_IGNORED_ENTRY_KB`]: no practical I/O constraint.
+pub const MOVE_IGNORED_ENTRY_KB_MAX: u64 = 1_048_576;
+/// Upper bound for [`MOVE_IGNORED_TOTAL_MB`]: one transfer's payload.
+pub const MOVE_IGNORED_TOTAL_MB_MAX: u64 = 1024;
+
+/// Largest git bundle (MiB) `move_session` relays (`E_MOVE_TOO_LARGE` above it).
+pub const MOVE_MAX_BUNDLE_MB: &str = crate::service::move_session::carry::SETTING_MAX_BUNDLE_MB;
+/// Largest single git-ignored entry (KiB) `move_session` carries; bigger ones
+/// are reported as left behind.
+pub const MOVE_IGNORED_ENTRY_KB: &str =
+    crate::service::move_session::carry::SETTING_IGNORED_ENTRY_KB;
+/// Total git-ignored payload (MiB) `move_session` carries.
+pub const MOVE_IGNORED_TOTAL_MB: &str =
+    crate::service::move_session::carry::SETTING_IGNORED_TOTAL_MB;
+
 /// Collect per-session token usage from Claude transcripts (Wave 5 G1).
 pub const USAGE_ENABLED: &str = "usage.enabled";
 /// Seconds between usage passes (one batched script per host). `0` stops
@@ -191,6 +210,30 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Int {
             min: 1,
             max: MOVE_MAX_TRANSCRIPT_MB_MAX,
+        },
+    },
+    Spec {
+        key: MOVE_MAX_BUNDLE_MB,
+        default: "500",
+        kind: Kind::Int {
+            min: 1,
+            max: MOVE_MAX_BUNDLE_MB_MAX,
+        },
+    },
+    Spec {
+        key: MOVE_IGNORED_ENTRY_KB,
+        default: "1024",
+        kind: Kind::Int {
+            min: 1,
+            max: MOVE_IGNORED_ENTRY_KB_MAX,
+        },
+    },
+    Spec {
+        key: MOVE_IGNORED_TOTAL_MB,
+        default: "20",
+        kind: Kind::Int {
+            min: 1,
+            max: MOVE_IGNORED_TOTAL_MB_MAX,
         },
     },
     Spec {
@@ -489,6 +532,30 @@ mod tests {
         // A stored garbage value resolves to the default.
         assert_eq!(resolve(MOVE_MAX_TRANSCRIPT_MB, Some("0")), "200");
         assert_eq!(resolve(MOVE_MAX_TRANSCRIPT_MB, Some("64")), "64");
+    }
+
+    #[test]
+    fn carry_settings_have_specs_defaults_and_bounds() {
+        assert_eq!(spec(MOVE_MAX_BUNDLE_MB).unwrap().default, "500");
+        assert_eq!(spec(MOVE_IGNORED_ENTRY_KB).unwrap().default, "1024");
+        assert_eq!(spec(MOVE_IGNORED_TOTAL_MB).unwrap().default, "20");
+        for key in [
+            MOVE_MAX_BUNDLE_MB,
+            MOVE_IGNORED_ENTRY_KB,
+            MOVE_IGNORED_TOTAL_MB,
+        ] {
+            assert!(validate(key, "1").is_ok(), "{key}");
+            assert!(validate(key, "0").is_err(), "{key}");
+            assert!(validate(key, "abc").is_err(), "{key}");
+        }
+        assert!(validate(MOVE_MAX_BUNDLE_MB, "4096").is_ok());
+        assert!(validate(MOVE_MAX_BUNDLE_MB, "4097").is_err());
+        assert!(validate(MOVE_IGNORED_ENTRY_KB, "1048576").is_ok());
+        assert!(validate(MOVE_IGNORED_ENTRY_KB, "1048577").is_err());
+        assert!(validate(MOVE_IGNORED_TOTAL_MB, "1024").is_ok());
+        assert!(validate(MOVE_IGNORED_TOTAL_MB, "1025").is_err());
+        assert_eq!(resolve(MOVE_IGNORED_TOTAL_MB, None), "20");
+        assert_eq!(resolve(MOVE_IGNORED_TOTAL_MB, Some("5")), "5");
     }
 
     #[test]
