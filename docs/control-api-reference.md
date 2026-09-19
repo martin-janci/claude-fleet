@@ -500,6 +500,11 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::rotate_host_token`
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
+- `commands::hub::hub_status`
+- `commands::hub::hub_pair`
+- `commands::hub::hub_disconnect`
+- `commands::hub::hub_connection`
+- `commands::hub::hub_stranded_token`
 - `commands::onboarding::check_local_prereqs`
 - `commands::onboarding::tunnel_status`
 - `commands::assets::catalog_config`

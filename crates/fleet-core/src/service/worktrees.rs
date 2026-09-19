@@ -14,13 +14,14 @@ use std::time::Duration;
 
 /// One worktree row with its alive-session occupants attached. `occupants`
 /// is empty when the worktree is free to delete.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeOccupancy {
     pub worktree: WorktreeRow,
+    #[serde(default)]
     pub occupants: Vec<WorktreeOccupant>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeOccupant {
     pub host_alias: String,
     pub tmux_name: String,

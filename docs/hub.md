@@ -695,6 +695,143 @@ Run `provision_hosts` from only one of the two — the hub or the desktop —
 for a given host. Running it from both leaves the host's hook block pointed
 at whichever one provisioned it last.
 
+## Point a desktop at the hub
+
+Settings → **Hub**. On the hub, mint a code and paste it:
+
+```bash
+fleet-hub pair --name laptop     # prints a code; it dies on first use
+```
+
+The desktop pairs as an ordinary client — the hub cannot tell it from a phone
+and should not. It stores the client token in the OS keychain (macOS) or an
+owner-only 0600 file (elsewhere), never in `state.db` and never in a log
+line. Off macOS that file is *not* an OS secret store: anything running as
+your user can read it, so treat that machine's account as holding a fleet
+credential. Which fleet the app is a window onto is decided **once, at startup**, so
+pairing and Disconnect both take effect at the next launch; Settings says so
+rather than looking like nothing happened.
+
+Plain `http://` to anything but loopback is refused unless you say otherwise:
+the client token is a credential for the whole fleet, and it would cross the
+network in the clear on every call, forever. The pairing dialog names the risk
+and offers to do it anyway (mirroring the hub's own `--allow-plaintext`), and
+an opted-in plaintext hub keeps saying so beside its badge on every launch.
+
+**Disconnect does not revoke.** It forgets the URL and the token on that
+machine. The client stays in the hub's list and its token stays valid there
+until you revoke it (`fleet-hub client revoke <name>`) — a paired client is
+refused `revoke_client` by design, so the app could not do it even if it
+tried. For a lost laptop, revoke on the hub.
+
+### When the configured hub cannot be used
+
+If a hub is configured but a launch cannot use it, the desktop **owns
+nothing** until that is fixed. It does not fall back to standalone. The
+causes are:
+
+- no client token is stored;
+- the token cannot be read, for example because the macOS keychain was locked
+  at launch or its prompt was denied;
+- the URL is plain `http://` to a host that is not loopback, and
+  `hub.allow_plaintext` is not set;
+- `hub.remote_url` does not parse;
+- the settings cannot be read, but a client token is stored, which proves the
+  app was paired.
+
+In that state it runs no reconcile tick, no account-usage poll, no embedded
+control API and no event stream. Every fleet command is refused with
+`E_HUB_UNAVAILABLE` and the reason. A red banner at the top of the window
+names the hub and the reason, with a button to Settings → Hub. There you can
+pair again, or Disconnect to go back to standalone. Either takes effect at the
+next launch.
+
+Falling back to standalone would be the dangerous choice. You pointed the app
+at a hub, so the fleet is the hub's. An app that quietly started reconciling
+it again would be a second brain for the same hosts, and that is the failure
+this mode exists to prevent. With no `hub.remote_url` at all, the app is
+standalone exactly as before.
+
+### What is different from standalone
+
+- **Live, from the hub.** The desktop follows the hub's `GET /events` and
+  re-emits every change as the same frontend event a local change would have
+  produced, so the window updates itself. When that stream drops it reconnects
+  with backoff, re-lists sessions, hosts, tasks and accounts once, and shows a
+  banner — "what you see may be out of date", the attempt number and the
+  reason — until it is back. A stream that goes silent (not even the hub's
+  15-second keep-alive) for about 40 seconds is treated as dead, which is what
+  a laptop that slept and woke on another network looks like.
+- **The fleet is the hub's.** No reconcile tick, no account-usage poll and no
+  embedded control API in the desktop; two brains for one fleet is the failure
+  this mode exists to prevent. The footer's version, database and schema are
+  the hub's too — the badge beside them says whose.
+- **A prompt sent from the desktop reaches the agent marked *untrusted*,**
+  exactly as one typed on a phone does. `apply_marker` refuses `raw=true` to
+  any non-master caller and a paired client is never the master. Correct
+  behaviour, and the one behavioural difference in the common path.
+- **Destructive confirmations are answered on the hub.** With
+  `mcp.confirm_destructive` on, `kill_session`, `delete_worktree`,
+  `move_session` and `cancel_task` come back `E_CONFIRM_REQUIRED`. The
+  desktop's confirmation dialog answers *its own* queue, which is empty in
+  this mode. Approve it on the hub — this window will follow: the approved
+  change arrives over the hub's event stream like any other, so there is
+  nothing to refresh.
+- **Fleet administration is refused.** Adding, removing and hiding hosts,
+  provisioning, per-host tokens, asset sync and sync secrets: a client is not
+  the fleet's administrator. Those controls are disabled in the interface with
+  the reason rather than failing at the click.
+- **The terminal is local-only.** The PTY attaches a local `ssh`/`tmux`
+  process and the hub streams no pane. The terminal tab shows the
+  `ssh <host>` / `tmux attach -t <session>` line for the selected session
+  instead of a dead pane.
+- **The asset catalog and the setup checklist** are about the machine that
+  owns the fleet, so they show the reason instead of their panels. (The hub
+  does serve the catalog's asset list, `list_assets`, to any paired client;
+  what it does not serve is the configuration and git checkout the Assets
+  panel is built on.)
+- **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
+  the error says to pair again in Settings → Hub.
+
+### Parity or refusal
+
+A desktop mutation is routed to the hub **only where the desktop's arguments
+map one-to-one onto the tool's parameters**, checked field by field. Where
+they do not, the command *refuses* instead of routing.
+
+`new_session` set the rule. `NewSessionArgs` carries `kind`, `start_command`
+and `friendly_name`; the tool's `NewSessionParams` carries none of them, and a
+shell session is a different tool entirely. Routing it would have
+**succeeded** while silently dropping the label the user typed. A refusal is
+visible; a dropped field is not. `repair_session` is refused for the same
+reason: the tool always runs the *explicit* repair, and the desktop's
+automatic pre-attach check has no counterpart.
+
+Do not "fix" one of these refusals by wiring a lossy mapping. If a tool grows
+the missing parameters, route it then.
+
+### Known limitations
+
+- **The terminal works over SSH only.** A hub client has no in-app terminal;
+  attach from a shell with the command the terminal tab shows.
+- **Projects and worktrees are not re-listed on reconnect**, because their
+  list tools answer a different shape from their events. They refresh when
+  the window regains focus.
+- **Not yet run as an app.** At the time of writing this mode is verified by
+  its test suites only: the desktop has not been launched against a real hub,
+  and the macOS keychain path has not been compiled or run. Report anything
+  that does not match this page.
+
+### Going back
+
+Disconnect in Settings and restart. Disconnect is also offered while the
+configured hub cannot be used (see above), so a half-finished pairing can
+always be cleared. The desktop's own `state.db` is untouched
+throughout — pointing it at a hub is a view change, not a data move — so it
+resumes managing whatever it managed before. Nothing migrates in either
+direction; see *Migrating from the desktop* above for moving a database
+deliberately.
+
 ## Security notes
 
 - **Bearer tokens.** Same model as the desktop's Control API: a master token

@@ -16,6 +16,7 @@
   import LintAllDialog from './LintAllDialog.svelte';
   import PromptDialog from './PromptDialog.svelte';
   import { authorSessionOpened, clearAuthorSessionOpened } from './AuthorSessionDialog.svelte';
+  import { hubStatus, hubBlock, ownsTheFleet } from './hub';
 
   let { visible }: { visible: boolean } = $props();
 
@@ -67,7 +68,16 @@
     await Promise.all([refresh(), repoStatus()]);
   }
 
+  // The whole catalog is a git checkout on the machine that owns the fleet.
+  // The hub serves the asset list (`list_assets`) but not the configuration
+  // and checkout this panel is built on, so every `catalog_*` command is
+  // guarded. `catalog_config` is one of the six this UI calls UNPROMPTED, so
+  // without this opening the Assets tab raised an error where the panel
+  // should be.
+  const catalogBlocked = $derived(hubBlock('catalog_config', $hubStatus));
+
   onMount(async () => {
+    if (!ownsTheFleet($hubStatus)) return;
     const c = await loadCatalogConfig();
     if (c.ok && c.value) {
       await reload(false);
@@ -198,7 +208,17 @@
 </script>
 
 <div class="assets-panel">
-  {#if !$catalogConfig}
+  {#if catalogBlocked}
+    <div class="setup" data-testid="assets-remote">
+      <h3>Asset catalog</h3>
+      <p class="muted">{catalogBlocked}</p>
+      <p class="muted">
+        Sync and secrets are fleet administration besides: a paired client
+        does not write to the hosts, and the sync secrets belong to whichever
+        machine runs the sync.
+      </p>
+    </div>
+  {:else if !$catalogConfig}
     <div class="setup" data-testid="assets-setup">
       <h3>Asset catalog</h3>
       <p class="muted">Point fleet at a git repo of skills, agents, hooks, MCP servers and plugin refs. A remote URL is cloned into the path when the path is empty.</p>

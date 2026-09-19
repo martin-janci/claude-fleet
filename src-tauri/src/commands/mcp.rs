@@ -9,6 +9,7 @@
 //! confirmation toggle (`confirm_destructive` on `mcp_configure`) and its
 //! answer path (`mcp_confirm`, `mcp_pending_confirms`).
 
+use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::lock;
 use fleet_core::ipc_error::{codes, IpcError};
@@ -79,15 +80,27 @@ fn status(store: &Mutex<Store>, runtime: &Mutex<McpRuntime>) -> Result<McpStatus
 
 #[tauri::command]
 pub fn mcp_status(
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     runtime: State<'_, Mutex<McpRuntime>>,
 ) -> Result<McpStatus, IpcError> {
+    backend.local_only(
+        "mcp_status",
+        "this app runs no embedded control API while a hub owns the fleet \
+         (Task 1 skips it); the hub is the control API",
+    )?;
     status(&store, &runtime)
 }
 
+// Seven `State` parameters plus the args. Every one is injected by Tauri, not
+// passed by a caller, so the argument count is a property of what this command
+// touches rather than of its interface — the readability the lint protects is
+// not at risk here.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn mcp_configure(
     args: McpConfigureArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
@@ -95,6 +108,11 @@ pub async fn mcp_configure(
     tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
     guards: State<'_, McpGuards>,
 ) -> Result<McpStatus, IpcError> {
+    backend.local_only(
+        "mcp_configure",
+        "starting a second control API against a fleet the hub already owns \
+         is the failure remote mode exists to prevent; configure the hub's",
+    )?;
     // 1. Persist the requested settings.
     {
         let s = lock(&store)?;
@@ -184,10 +202,18 @@ pub async fn mcp_configure(
 #[tauri::command]
 pub async fn provision_hosts(
     rotate: Option<bool>,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
     tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
 ) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
+    // Master-only on the hub too (`enforce_admin`), and provisioning from
+    // here would point every host's hooks at THIS app instead of the hub.
+    backend.local_only(
+        "provision_hosts",
+        "it rewrites every host's hook block to report to this app; provision \
+         from the hub with `fleet-hub`",
+    )?;
     let base = HubBase::read(&*lock(&store)?)?;
     fleet_core::service::provision::provision_hosts(
         &store,
@@ -225,8 +251,14 @@ impl From<fleet_core::store::HostTokenRow> for HostTokenInfo {
 
 #[tauri::command]
 pub fn list_host_tokens(
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<HostTokenInfo>, IpcError> {
+    backend.local_only(
+        "list_host_tokens",
+        "these are this app's own per-host tokens, not the hub's; list them \
+         on the hub",
+    )?;
     let s = lock(&store)?;
     Ok(s.list_host_tokens()?
         .into_iter()
@@ -250,8 +282,14 @@ pub fn parse_mode(mode: &str) -> Result<&'static str, IpcError> {
 pub fn set_host_token_mode(
     host_alias: String,
     mode: String,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<HostTokenInfo, IpcError> {
+    backend.local_only(
+        "set_host_token_mode",
+        "these are this app's own per-host tokens, not the hub's; change the \
+         mode on the hub",
+    )?;
     fleet_core::validate::host_alias(&host_alias)?;
     let mode = parse_mode(&mode)?;
     let s = lock(&store)?;
@@ -267,10 +305,16 @@ pub fn set_host_token_mode(
 #[tauri::command]
 pub async fn rotate_host_token(
     host_alias: String,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
     tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
 ) -> Result<HostTokenInfo, IpcError> {
+    backend.local_only(
+        "rotate_host_token",
+        "it re-provisions the host to report to this app; rotate the token on \
+         the hub",
+    )?;
     fleet_core::validate::host_alias(&host_alias)?;
     let base = HubBase::read(&*lock(&store)?)?;
     fleet_core::service::provision::provision_host_with_token(
@@ -337,9 +381,15 @@ pub fn mcp_pending_confirms(guards: State<'_, McpGuards>) -> Result<Vec<PendingC
 #[tauri::command]
 pub fn install_fleet_hook(
     host_alias: String,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     runtime: State<'_, Mutex<McpRuntime>>,
 ) -> Result<String, IpcError> {
+    backend.local_only(
+        "install_fleet_hook",
+        "the hook it installs points at this app's control API, which is not \
+         running; install it from the hub",
+    )?;
     if host_alias != "local" {
         return Err(IpcError::new(
             codes::E_UNSUPPORTED,
