@@ -67,6 +67,16 @@ pub struct TlsListener<A: TlsAcceptor> {
 impl<A: TlsAcceptor> TlsListener<A> {
     /// Take over `listener`, wrapping every connection with `acceptor`.
     pub fn spawn(listener: TcpListener, acceptor: A) -> std::io::Result<Self> {
+        Self::spawn_with_handshake_timeout(listener, acceptor, HANDSHAKE_TIMEOUT)
+    }
+
+    /// [`Self::spawn`] with the handshake deadline as a parameter, so a test
+    /// can watch it expire on the real clock in milliseconds.
+    fn spawn_with_handshake_timeout(
+        listener: TcpListener,
+        acceptor: A,
+        handshake_timeout: std::time::Duration,
+    ) -> std::io::Result<Self> {
         let local_addr = listener.local_addr()?;
         let (tx, rx) = mpsc::channel(HANDSHAKE_BACKLOG);
         let acceptor = Arc::new(acceptor);
@@ -92,7 +102,7 @@ impl<A: TlsAcceptor> TlsListener<A> {
                 let tx = tx.clone();
                 let acceptor = Arc::clone(&acceptor);
                 crate::rt::spawn(async move {
-                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                    match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
                         Ok(Ok(conn)) => {
                             // An `Err` here means the server is gone; the
                             // connection is dropped with it.
@@ -105,7 +115,7 @@ impl<A: TlsAcceptor> TlsListener<A> {
                         }
                         Err(_) => tracing::debug!(
                             %peer,
-                            timeout_secs = HANDSHAKE_TIMEOUT.as_secs(),
+                            timeout_secs = handshake_timeout.as_secs(),
                             "[mcp] TLS handshake timed out"
                         ),
                     }
@@ -246,19 +256,33 @@ mod tests {
 
     /// Without [`HANDSHAKE_TIMEOUT`] such a peer holds a task and a file
     /// descriptor until the TCP stack gives up — minutes, and free to repeat.
-    #[tokio::test(start_paused = true)]
+    ///
+    /// On the real clock with a short deadline, not a paused one: a paused
+    /// clock jumps to the next timer whenever the runtime is idle, and a
+    /// socket the OS has yet to make readable looks idle. The accept and the
+    /// FIN both raced that jump, so the outer timeout fired first under load.
+    #[tokio::test]
     async fn a_connection_that_never_handshakes_is_hung_up_on() {
+        const DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
         let (l, addr) = bound().await;
-        let mut listener = TlsListener::spawn(l, NeverCompletes).unwrap();
+        let mut listener =
+            TlsListener::spawn_with_handshake_timeout(l, NeverCompletes, DEADLINE).unwrap();
+        let connecting = std::time::Instant::now();
         let mut silent = TcpStream::connect(addr).await.unwrap();
 
         // The server closing its end is what the client sees as a 0-byte read.
+        // The outer bound is liveness only: it is never waited out on a pass.
         let mut buf = [0u8; 1];
-        let n = tokio::time::timeout(HANDSHAKE_TIMEOUT * 3, silent.read(&mut buf))
+        let n = tokio::time::timeout(std::time::Duration::from_secs(60), silent.read(&mut buf))
             .await
             .expect("the hub must hang up on a peer that never handshakes")
             .unwrap();
         assert_eq!(n, 0, "the connection must be closed, not left open");
+        // `NeverCompletes` holds the stream, so only the deadline can close it.
+        assert!(
+            connecting.elapsed() >= DEADLINE,
+            "hung up by the deadline, not before it"
+        );
 
         // Nothing was handed to axum, and the listener is still accepting.
         assert!(
