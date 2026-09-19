@@ -442,8 +442,17 @@ pub(super) fn apply_marker(
 /// (`pair_client` / `revoke_client` / `list_clients`) are master-only,
 /// whatever the host token's mode — and whatever a paired client's mode,
 /// since [`Caller::is_master`] is false for a client too.
+///
+/// Fails CLOSED on the tool name: refuses unless the caller is master OR the
+/// tool is on [`guard::CLIENT_TOOLS`] — not merely "unless it's on
+/// `guard::ADMIN_TOOLS`". `guard::ADMIN_TOOLS` and `guard::CLIENT_TOOLS`
+/// partition every real router tool (enforced by the exhaustiveness test in
+/// `tools::tests`), so this refuses exactly the same tools as an
+/// `is_admin_tool` check for every tool that exists today; the difference is
+/// a tool that exists but was never classified — that now needs the master
+/// too, instead of defaulting open.
 pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError> {
-    if guard::is_admin_tool(tool) && !caller.is_master() {
+    if !caller.is_master() && !guard::is_client_tool(tool) {
         return Err(mcp_err(
             "E_FORBIDDEN",
             format!(
