@@ -48,6 +48,7 @@ use super::remote::{connect, Endpoint, HubBackend};
 use super::RemoteConfig;
 use fleet_core::events::EVENT_NAMES;
 use fleet_core::mcp::wire::SseDecoder;
+use fleet_proto::backoff::{jitter, Backoff};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -133,6 +134,21 @@ pub const FIRST_BACKOFF: Duration = Duration::from_secs(1);
 /// up on it.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// This client's reconnect curve, from the shared [`fleet_proto::backoff`]:
+/// [`FIRST_BACKOFF`] doubling to [`MAX_BACKOFF`], each delay jittered into
+/// the upper half of its step so that a fleet of desktops that lost the same
+/// hub does not come back at it in one wave.
+pub fn backoff() -> Backoff {
+    Backoff::new(FIRST_BACKOFF, MAX_BACKOFF)
+}
+
+/// A jittered delay as whole seconds, for the banner that says "next try in
+/// N s". Rounded, and never zero: the first step is half a second to a
+/// second, and a banner promising a retry in 0 s reads as a bug.
+fn retry_in_secs(wait: Duration) -> u64 {
+    (wait.as_secs_f64().round() as u64).max(1)
+}
+
 /// How long a stream may say nothing at all before it is presumed dead.
 ///
 /// The hub writes a keep-alive comment every
@@ -151,11 +167,6 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_millis(
 /// [`IDLE_TIMEOUT`], so a stream that said `ready` and then went silent does
 /// not qualify.
 pub const HEALTHY_AFTER: Duration = Duration::from_secs(60);
-
-/// The next wait after `previous` failed: doubling, capped.
-pub fn next_backoff(previous: Duration) -> Duration {
-    std::cmp::min(previous.saturating_mul(2), MAX_BACKOFF)
-}
 
 /// The `&'static str` the frontend listens for, or `None` if this is not one
 /// of them.
@@ -265,13 +276,16 @@ impl EventBridge {
     /// is down is a hub that may come back, and giving up would leave a
     /// desktop showing a frozen fleet with nothing to say why.
     pub async fn run(&self) {
-        let mut backoff = FIRST_BACKOFF;
+        let mut backoff = backoff();
         // Retries since the stream last worked — what the banner counts.
         let mut attempt: u32 = 0;
         loop {
             if self.cancel.is_cancelled() {
                 return;
             }
+            // Drawn before anything is reported, so the banner names the
+            // delay this loop will really wait rather than a nominal one.
+            let wait;
             match self.stream.open().await {
                 Ok(body) => {
                     // Reporting `Connected` and re-listing both move into
@@ -289,33 +303,36 @@ impl EventBridge {
                             // Never resets: a hub that fails the version
                             // check has proven nothing about the connection.
                             attempt = attempt.saturating_add(1);
+                            wait = backoff.next(jitter());
                         }
                         StreamEnd::Gap { delivered, why } => {
                             // A connection that carried nothing is not a
                             // working connection, whatever the socket said.
                             if delivered {
-                                backoff = FIRST_BACKOFF;
+                                backoff.reset();
                                 attempt = 0;
                             }
                             attempt = attempt.saturating_add(1);
+                            wait = backoff.next(jitter());
                             self.status.report(HubConnection::Reconnecting {
                                 attempt,
-                                retry_in_secs: backoff.as_secs(),
+                                retry_in_secs: retry_in_secs(wait),
                                 reason: why,
                             });
                         }
                     }
                 }
                 Err(e) => {
+                    attempt = attempt.saturating_add(1);
+                    wait = backoff.next(jitter());
                     tracing::warn!(
                         error = %e,
-                        retry_in = ?backoff,
+                        retry_in = ?wait,
                         "[hub events] could not open the hub's event stream"
                     );
-                    attempt = attempt.saturating_add(1);
                     self.status.report(HubConnection::Offline {
                         attempt,
-                        retry_in_secs: backoff.as_secs(),
+                        retry_in_secs: retry_in_secs(wait),
                         reason: e,
                     });
                 }
@@ -323,8 +340,7 @@ impl EventBridge {
             if self.cancel.is_cancelled() {
                 return;
             }
-            self.delay.sleep(backoff).await;
-            backoff = next_backoff(backoff);
+            self.delay.sleep(wait).await;
         }
     }
 
@@ -803,14 +819,15 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
          Accept: text/event-stream\r\nCache-Control: no-cache\r\n\r\n",
-        at.target, at.authority
+        at.target(),
+        at.authority()
     );
     conn.write_all(request.as_bytes())
         .await
-        .map_err(|e| format!("send to {}:{}: {e}", at.host, at.port))?;
+        .map_err(|e| format!("send to {}:{}: {e}", at.host(), at.port()))?;
     conn.flush()
         .await
-        .map_err(|e| format!("send to {}:{}: {e}", at.host, at.port))?;
+        .map_err(|e| format!("send to {}:{}: {e}", at.host(), at.port()))?;
 
     // Read until the blank line that ends the head. Anything past it is the
     // first of the body and must not be thrown away.
@@ -826,7 +843,7 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
         let n = conn
             .read(&mut buf)
             .await
-            .map_err(|e| format!("read from {}:{}: {e}", at.host, at.port))?;
+            .map_err(|e| format!("read from {}:{}: {e}", at.host(), at.port()))?;
         if n == 0 {
             return Err("the hub closed the connection before answering".to_string());
         }
@@ -841,7 +858,7 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| format!("unreadable status line from {}", at.authority))?;
+        .ok_or_else(|| format!("unreadable status line from {}", at.authority()))?;
     if status != 200 {
         // `/events` answers 503 with `events are not enabled on this server`
         // and 429 with `too many concurrent event streams`, both as plain
@@ -863,7 +880,7 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
         // that follows.
         pending: leftover,
         payload: Vec::new(),
-        where_from: format!("{}:{}", at.host, at.port),
+        where_from: format!("{}:{}", at.host(), at.port()),
     }))
 }
 

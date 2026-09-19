@@ -1,6 +1,7 @@
 //! Supervised reverse SSH tunnels: expose the central localhost MCP server on
 //! each remote host's localhost via `ssh -R`.
 
+use fleet_proto::backoff::{jitter, Backoff};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -12,11 +13,6 @@ use tokio::task::JoinHandle;
 /// `MAX_BACKOFF`.
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-
-/// The delay to wait after `current` before the next restart attempt.
-fn next_backoff(current: Duration) -> Duration {
-    (current * 2).min(MAX_BACKOFF)
-}
 
 /// Spawns one `ssh` tunnel process from its argv and resolves when it exits
 /// (with the exit code, `None` if the spawn itself failed). Injected so the
@@ -120,25 +116,28 @@ impl TunnelSupervisor {
         let spawner = Arc::clone(&self.spawner);
         let initial_backoff = self.initial_backoff;
         let handle = tokio::spawn(async move {
-            let mut backoff = initial_backoff;
+            // Jittered (`fleet_proto::backoff`), so that a central machine
+            // whose network dropped does not re-dial every host in the fleet
+            // in the same instant when it comes back.
+            let mut backoff = Backoff::new(initial_backoff, MAX_BACKOFF);
             loop {
                 let argv = tunnel_argv(&host_s, remote_port, mcp_port);
                 let status = spawner(argv).await;
+                let restart_in = backoff.next(jitter());
                 match status {
                     Some(code) => tracing::warn!(
                         host = %host_s,
                         exit_code = code,
-                        restart_in = ?backoff,
+                        restart_in = ?restart_in,
                         "[tunnel] ssh exited; restarting"
                     ),
                     None => tracing::warn!(
                         host = %host_s,
-                        restart_in = ?backoff,
+                        restart_in = ?restart_in,
                         "[tunnel] ssh ended without an exit code (killed by a signal, or it never spawned); restarting"
                     ),
                 }
-                tokio::time::sleep(backoff).await;
-                backoff = next_backoff(backoff);
+                tokio::time::sleep(restart_in).await;
             }
         });
         tasks.insert(host.to_string(), handle);
@@ -219,21 +218,22 @@ mod tests {
         sup.stop_all();
     }
 
+    /// The curve is [`fleet_proto::backoff`]'s and pinned there; what this
+    /// pins is the supervisor's own numbers — 1 s doubling to 30 s — and
+    /// that each delay lands in the upper half of its step, which is the
+    /// jitter this loop gained when it stopped having a curve of its own.
     #[test]
-    fn next_backoff_doubles_and_caps_at_30s() {
-        assert_eq!(next_backoff(Duration::from_secs(1)), Duration::from_secs(2));
-        assert_eq!(
-            next_backoff(Duration::from_secs(8)),
-            Duration::from_secs(16)
-        );
-        assert_eq!(
-            next_backoff(Duration::from_secs(16)),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            next_backoff(Duration::from_secs(30)),
-            Duration::from_secs(30)
-        );
+    fn the_restart_backoff_doubles_and_caps_at_30s() {
+        let mut b = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
+        let steps = [1u64, 2, 4, 8, 16, 30, 30, 30];
+        for step in steps {
+            let step = Duration::from_secs(step);
+            let drawn = b.next(jitter());
+            assert!(
+                drawn >= step / 2 && drawn <= step,
+                "{drawn:?} is not inside the {step:?} step"
+            );
+        }
     }
 
     /// Spawn log for the fake tunnel spawner: `(argv, when)` per spawn.
@@ -275,12 +275,14 @@ mod tests {
         for (argv, _) in &spawns {
             assert_eq!(argv, &tunnel_argv("mefistos", 4180, 4180));
         }
-        // Lower bounds only — an upper bound would flake under CI load.
+        // Lower bounds only — an upper bound would flake under CI load — and
+        // they are the FLOOR of each jittered step (half of it), not the step
+        // itself.
         let gap1 = spawns[1].1 - spawns[0].1;
         let gap2 = spawns[2].1 - spawns[1].1;
-        assert!(gap1 >= Duration::from_millis(20), "first backoff: {gap1:?}");
+        assert!(gap1 >= Duration::from_millis(10), "first backoff: {gap1:?}");
         assert!(
-            gap2 >= Duration::from_millis(40),
+            gap2 >= Duration::from_millis(20),
             "second backoff: {gap2:?}"
         );
         // Still supervised (mid-backoff counts as up).
