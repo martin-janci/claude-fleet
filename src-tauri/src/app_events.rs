@@ -46,3 +46,26 @@ impl EventBus for AppHandleEventBus {
         }
     }
 }
+
+/// The hub event bridge's end of the same bus.
+///
+/// This is where a remote event and a local one become one thing: both arrive
+/// as a `(&'static str, serde_json::Value)` pair and go down the same channel,
+/// to the same drain thread, which makes the same `Emitter::emit` call. There
+/// is no second path to the frontend — which is what makes "the stores cannot
+/// tell the difference" a property of the code rather than a claim about it.
+///
+/// Note what is *not* here: no `RowChange` is reconstructed. Remote mode has
+/// no local `Store` and so no row to build one from, and rebuilding one by
+/// deserialising the payload would quietly drop any field this build does not
+/// know about, because every optional field carries `#[serde(default)]`. The
+/// name is still a `&'static str` from `EVENT_NAMES`, resolved by
+/// `backend::events::known_event_name`, so nothing off the wire can invent an
+/// event the frontend did not already have.
+impl crate::backend::events::RemoteEventSink for AppHandleEventBus {
+    fn emit_remote(&self, name: &'static str, payload: serde_json::Value) {
+        if let Ok(tx) = self.tx.lock() {
+            let _ = tx.send((name, payload));
+        }
+    }
+}

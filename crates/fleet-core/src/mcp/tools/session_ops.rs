@@ -248,6 +248,7 @@ impl FleetTools {
         text (not JSON), capped to the last max_lines lines (default 200).")]
     pub(super) async fn capture_session(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<CaptureSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -257,6 +258,14 @@ impl FleetTools {
                 p.session_id, p.scrollback_lines, p.max_lines
             ),
         );
+        // A pane can show secrets: a per-host token reads only its own host.
+        self.resolve_target(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            "the session to capture",
+        )?;
         let text = sessions::capture_session_output(
             p.session_id,
             &self.store,
@@ -287,6 +296,7 @@ impl FleetTools {
     )]
     pub(super) async fn peek_session(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<PeekSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -296,6 +306,11 @@ impl FleetTools {
                 p.session_id, p.claude_session_id, p.host_alias
             ),
         );
+        // Gate a fleet id up front, so even the "no Claude id yet" answer
+        // is not given for another host's session.
+        if let Some(id) = p.session_id {
+            self.resolve_target(&caller, Some(id), None, None, "the session to peek")?;
+        }
         let resolved = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::bg_sessions::resolve_peek_target(
@@ -327,6 +342,8 @@ impl FleetTools {
             }
             Err(e) => return Err(to_mcp_err(e)),
         };
+        // The claude_session_id path resolves its host here.
+        require_host(&caller, &host_alias, "the session to peek")?;
         let text = match row {
             Some(row) => self.transcript_for(&row, None, None).await?,
             // Untracked (a new_bg_session id before reconcile): the read
@@ -356,12 +373,22 @@ impl FleetTools {
         running or ghost sessions. Returns the session row as JSON.")]
     pub(super) async fn recreate_session(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<sessions::RecreateSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "recreate_session",
             &format!("session_id={}", args.session_id),
         );
+        // Gate on the stored row's host: a per-host token must not kill and
+        // rebuild a session on another host by naming its fleet id.
+        self.resolve_target(
+            &caller,
+            Some(args.session_id),
+            None,
+            None,
+            "the session to recreate",
+        )?;
         let row = sessions::recreate_session(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -426,10 +453,18 @@ impl FleetTools {
         ghost.")]
     pub(super) async fn dismiss_ghost_session(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<sessions::DismissGhostSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
         let session_id = args.session_id;
         audit("dismiss_ghost_session", &format!("session_id={session_id}"));
+        self.resolve_target(
+            &caller,
+            Some(session_id),
+            None,
+            None,
+            "the ghost to dismiss",
+        )?;
         sessions::dismiss_ghost_session(args, &self.store).map_err(to_mcp_err)?;
         ok_json(&serde_json::json!({ "dismissed": session_id }))
     }

@@ -35,6 +35,7 @@
       <h4>{report.dry_run ? 'Would create' : 'Created'} {report.created.length}</h4>
       <ul class="list">{#each report.created as [kind, name]}<li>{kind} <code>{name}</code></li>{/each}</ul>
       {#if report.problems.length}<h4>Problems {report.problems.length}</h4><ul class="list">{#each report.problems as p}<li><code>{p.path}</code> {p.message}</li>{/each}</ul>{/if}
+      {#if report.warnings?.length}<h4>Warnings</h4><ul class="list" data-testid="import-warnings">{#each report.warnings as w}<li><code>{w.path}</code> {w.message}</li>{/each}</ul>{/if}
       {#if report.flagged_secrets.length}<h4>Secrets to replace</h4><ul class="list">{#each report.flagged_secrets as s}<li>{s}</li>{/each}</ul>{/if}
     {/if}
     <div class="actions">

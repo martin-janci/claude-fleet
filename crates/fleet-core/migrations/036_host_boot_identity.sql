@@ -8,4 +8,4 @@ ALTER TABLE hosts ADD COLUMN boot_id TEXT;
 ALTER TABLE hosts ADD COLUMN tmux_server_pid INTEGER;
 ALTER TABLE sessions ADD COLUMN lost_reason TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (34);
+INSERT OR IGNORE INTO schema_version (version) VALUES (36);

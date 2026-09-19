@@ -37,19 +37,19 @@ pub struct RestoreHostSessionsArgs {
 /// batch will attempt to resume, `"skip"` (with `reason` set) for one an
 /// explicit `session_ids` request named that cannot be restored. `tmux_name`
 /// is `None` only for an id that names no session at all.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RestorePlanEntry {
     pub session_id: i64,
     pub tmux_name: Option<String>,
     pub cwd: Option<String>,
     pub claude_session_id: Option<String>,
     pub friendly_name: Option<String>,
-    pub action: &'static str,
+    pub action: String,
     pub reason: Option<String>,
 }
 
 /// The result of one restore attempt.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RestoreOutcome {
     pub session_id: i64,
     pub tmux_name: String,
@@ -57,7 +57,7 @@ pub struct RestoreOutcome {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RestoreReport {
     pub host_alias: String,
     pub dry_run: bool,
@@ -129,7 +129,7 @@ fn plan_all_lost(s: &Store, rows: &[SessionRow]) -> Vec<RestorePlanEntry> {
             cwd: plan_cwd(s, r),
             claude_session_id: r.claude_session_id.clone(),
             friendly_name: r.friendly_name.clone(),
-            action: "restore",
+            action: "restore".into(),
             reason: None,
         })
         .collect()
@@ -147,7 +147,7 @@ fn plan_one_explicit(s: &Store, host_alias: &str, id: i64) -> Result<RestorePlan
             cwd: None,
             claude_session_id: None,
             friendly_name: None,
-            action: "skip",
+            action: "skip".into(),
             reason: Some("not found on this host".to_string()),
         });
     };
@@ -157,12 +157,12 @@ fn plan_one_explicit(s: &Store, host_alias: &str, id: i64) -> Result<RestorePlan
         cwd: None,
         claude_session_id: row.claude_session_id.clone(),
         friendly_name: row.friendly_name.clone(),
-        action: "restore",
+        action: "restore".into(),
         reason: None,
     };
     if row.host_alias != host_alias {
         return Ok(RestorePlanEntry {
-            action: "skip",
+            action: "skip".into(),
             reason: Some("not found on this host".to_string()),
             ..base
         });
@@ -175,21 +175,21 @@ fn plan_one_explicit(s: &Store, host_alias: &str, id: i64) -> Result<RestorePlan
     };
     if !is_tmux_kind(&row.kind) {
         return Ok(RestorePlanEntry {
-            action: "skip",
+            action: "skip".into(),
             reason: Some("background agent: resume it with its own tooling".to_string()),
             ..base
         });
     }
     if row.lost_at.is_none() {
         return Ok(RestorePlanEntry {
-            action: "skip",
+            action: "skip".into(),
             reason: Some("not lost".to_string()),
             ..base
         });
     }
     if row.claude_session_id.is_none() {
         return Ok(RestorePlanEntry {
-            action: "skip",
+            action: "skip".into(),
             reason: Some("no claude conversation id to resume".to_string()),
             ..base
         });

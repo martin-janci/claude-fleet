@@ -331,7 +331,7 @@ impl Store {
             // appears, so `not_in`'s bare `?`s fall back to ?2.. exactly as
             // before this feature existed.
             // `COALESCE(..., 0)`: `lost_reason` is NULL on every row ghosted
-            // before migration 034 introduced the column. SQL's
+            // before migration 036 introduced the column. SQL's
             // three-valued logic would otherwise make `lost_reason IN (...)`
             // evaluate to NULL, the inner AND chain NULL, and `NOT NULL`
             // NULL again — which `WHERE` treats as "leave this row out of
@@ -614,6 +614,7 @@ mod tests {
             last_pinged_at: None,
             account_uuid: None,
             provisioned: false,
+            transport: "ssh".to_string(),
         }
     }
 
@@ -1487,7 +1488,7 @@ mod tests {
     /// given `lost_at` / `lost_reason` / `claude_session_id`, so a single
     /// `apply_host_reconcile` pass exercises Phase 2's exemption straight
     /// away. `lost_reason: None` writes SQL `NULL`, matching a row ghosted
-    /// before migration 034 introduced the column.
+    /// before migration 036 introduced the column.
     fn seed_ghost_row(
         store: &Store,
         host: &str,
@@ -1710,7 +1711,7 @@ mod tests {
 
     #[test]
     fn a_pre_migration_ghost_row_with_null_lost_reason_is_reaped() {
-        // Rows ghosted before migration 034 added `lost_reason` have it
+        // Rows ghosted before migration 036 added `lost_reason` have it
         // NULL. SQL three-valued logic must not let that NULL silently
         // exempt them: `lost_reason IN (...)` on NULL is NULL, so an
         // un-coalesced `NOT (... AND NULL AND ...)` is NULL too, and a

@@ -791,88 +791,122 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
 }
 
 #[tokio::test]
-async fn restore_host_sessions_is_host_scoped_and_dry_run_returns_the_plan() {
-    let s = Store::open_in_memory().unwrap();
-    s.upsert_host("hosta").unwrap();
-    s.upsert_host("hostb").unwrap();
-    let lost = s
-        .upsert_session("lost-1", "hostb", None, None, 1, 1, "running", None)
-        .unwrap();
-    s.set_claude_session_id(lost, "claude-1").unwrap();
-    s.mark_host_sessions_lost("hostb", "host_reboot", &[], 500, 0)
+async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
+    let (s, _pid, on_b) = two_host_store();
+    // A ghost on hostb, so dismiss would otherwise succeed.
+    let ghost_b = s
+        .upsert_session("gone-b", "hostb", None, None, 1, 1, "ghost", None)
         .unwrap();
     let t = test_tools(s);
-
-    // A token bound to another host is refused outright — dry_run never
-    // even runs, so this also proves no ssh happens for a forbidden caller.
     let a = host_caller("hosta", TokenMode::Full);
     forbidden(
-        t.restore_host_sessions(
-            Extension(a),
-            Parameters(sessions::RestoreHostSessionsArgs {
-                host_alias: "hostb".into(),
-                dry_run: true,
-                session_ids: None,
+        t.recreate_session(
+            Extension(a.clone()),
+            Parameters(sessions::RecreateSessionArgs {
+                session_id: on_b,
+                force: true,
             }),
         )
         .await
         .unwrap_err(),
     );
-
-    // The master token's dry_run gets the plan — no ssh (this store has no
-    // `SshClient` wired to anything reachable; a real call would hang or
-    // error, so a JSON plan coming back proves the dry_run early-return).
-    let r = t
-        .restore_host_sessions(
-            Extension(Caller::master()),
-            Parameters(sessions::RestoreHostSessionsArgs {
-                host_alias: "hostb".into(),
-                dry_run: true,
-                session_ids: None,
+    forbidden(
+        t.dismiss_ghost_session(
+            Extension(a),
+            Parameters(sessions::DismissGhostSessionArgs {
+                session_id: ghost_b,
             }),
         )
         .await
-        .unwrap();
-    let v: serde_json::Value = serde_json::from_str(text_of(&r.content[0])).unwrap();
-    assert_eq!(v["dry_run"], true);
-    let plan = v["plan"].as_array().expect("plan is an array");
-    assert_eq!(plan.len(), 1);
-    assert_eq!(plan[0]["session_id"], lost);
-    assert_eq!(plan[0]["action"], "restore");
-    assert_eq!(v["results"].as_array().unwrap().len(), 0);
+        .unwrap_err(),
+    );
+    // The ghost row survives the refused dismiss…
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .get_session_by_id(ghost_b)
+        .unwrap()
+        .is_some());
+    // …and the master token still reaches it.
+    t.dismiss_ghost_session(
+        Extension(Caller::master()),
+        Parameters(sessions::DismissGhostSessionArgs {
+            session_id: ghost_b,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .get_session_by_id(ghost_b)
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
-async fn discover_lost_sessions_is_readonly_and_host_scoped() {
-    assert!(guard::is_readonly_tool("discover_lost_sessions"));
-
-    let s = Store::open_in_memory().unwrap();
-    s.upsert_host("hosta").unwrap();
-    s.upsert_host("hostb").unwrap();
+async fn per_host_callers_cannot_capture_or_peek_another_hosts_session() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_claude_session_id(on_b, "0f8fad5b-d9cb-469f-a165-70867728950e")
+        .unwrap();
+    // No Claude id yet: peek must still refuse rather than say "nothing
+    // to peek" about another host's session.
+    let bare_b = s
+        .upsert_session("bare-b", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
     let t = test_tools(s);
-
-    // A token bound to another host is refused outright — no ssh happens for
-    // a forbidden caller.
-    let a = host_caller("hosta", TokenMode::Full);
-    forbidden(
-        t.discover_lost_sessions(
-            Extension(a),
-            Parameters(sessions::DiscoverLostSessionsArgs {
-                host_alias: "hostb".into(),
-                limit: None,
-            }),
-        )
-        .await
-        .unwrap_err(),
-    );
-
-    // A readonly token bound to its own host passes both gates the tool
-    // actually runs behind — the same guards every other readonly tool is
-    // proved against (`enforce_mode` in the MCP dispatch, `require_host` in
-    // the handler body).
-    let ro = host_caller("hostb", TokenMode::Readonly);
-    assert!(enforce_mode(&ro, "discover_lost_sessions").is_ok());
-    assert!(require_host(&ro, "hostb", "the lost sessions").is_ok());
+    // Readonly tokens may call both tools, but only on their own host.
+    for mode in [TokenMode::Full, TokenMode::Readonly] {
+        let a = host_caller("hosta", mode);
+        forbidden(
+            t.capture_session(
+                Extension(a.clone()),
+                Parameters(CaptureSessionParams {
+                    session_id: on_b,
+                    scrollback_lines: None,
+                    max_lines: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        for (session_id, claude_session_id) in [
+            (Some(on_b), None),
+            (Some(bare_b), None),
+            // A bare Claude id resolves to the tracked row's host.
+            (
+                None,
+                Some("0f8fad5b-d9cb-469f-a165-70867728950e".to_string()),
+            ),
+        ] {
+            forbidden(
+                t.peek_session(
+                    Extension(a.clone()),
+                    Parameters(PeekSessionParams {
+                        session_id,
+                        claude_session_id,
+                        host_alias: None,
+                    }),
+                )
+                .await
+                .unwrap_err(),
+            );
+        }
+    }
+    // The master token is unbound: its peek at the id-less session gets
+    // the friendly answer, not E_FORBIDDEN.
+    t.peek_session(
+        Extension(Caller::master()),
+        Parameters(PeekSessionParams {
+            session_id: Some(bare_b),
+            claude_session_id: None,
+            host_alias: None,
+        }),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1112,8 +1146,8 @@ fn capture_default_cap_matches_docs() {
 /// with the asset-catalog block, 63 with plan_sync/apply_sync/set_secret, 67
 /// with list_layers/resolve_preview/propose_layers/set_host_layers, 71 with
 /// session_conversation/pair_client/list_clients/revoke_client, 72 with
-/// restore_host_sessions, 73 with discover_lost_sessions; bump it when
-/// adding a tool.
+/// agent_status, 74 with restore_host_sessions/discover_lost_sessions; bump
+/// it when adding a tool.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1133,7 +1167,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 73);
+    assert_eq!(served, 74);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1596,4 +1630,89 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
         !origin.chars().any(crate::store::breaks_a_line),
         "{origin:?}"
     );
+}
+
+#[tokio::test]
+async fn restore_host_sessions_is_host_scoped_and_dry_run_returns_the_plan() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let lost = s
+        .upsert_session("lost-1", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_claude_session_id(lost, "claude-1").unwrap();
+    s.mark_host_sessions_lost("hostb", "host_reboot", &[], 500, 0)
+        .unwrap();
+    let t = test_tools(s);
+
+    // A token bound to another host is refused outright — dry_run never
+    // even runs, so this also proves no ssh happens for a forbidden caller.
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.restore_host_sessions(
+            Extension(a),
+            Parameters(sessions::RestoreHostSessionsArgs {
+                host_alias: "hostb".into(),
+                dry_run: true,
+                session_ids: None,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+
+    // The master token's dry_run gets the plan — no ssh (this store has no
+    // `SshClient` wired to anything reachable; a real call would hang or
+    // error, so a JSON plan coming back proves the dry_run early-return).
+    let r = t
+        .restore_host_sessions(
+            Extension(Caller::master()),
+            Parameters(sessions::RestoreHostSessionsArgs {
+                host_alias: "hostb".into(),
+                dry_run: true,
+                session_ids: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(text_of(&r.content[0])).unwrap();
+    assert_eq!(v["dry_run"], true);
+    let plan = v["plan"].as_array().expect("plan is an array");
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0]["session_id"], lost);
+    assert_eq!(plan[0]["action"], "restore");
+    assert_eq!(v["results"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn discover_lost_sessions_is_readonly_and_host_scoped() {
+    assert!(guard::is_readonly_tool("discover_lost_sessions"));
+
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let t = test_tools(s);
+
+    // A token bound to another host is refused outright — no ssh happens for
+    // a forbidden caller.
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.discover_lost_sessions(
+            Extension(a),
+            Parameters(sessions::DiscoverLostSessionsArgs {
+                host_alias: "hostb".into(),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+
+    // A readonly token bound to its own host passes both gates the tool
+    // actually runs behind — the same guards every other readonly tool is
+    // proved against (`enforce_mode` in the MCP dispatch, `require_host` in
+    // the handler body).
+    let ro = host_caller("hostb", TokenMode::Readonly);
+    assert!(enforce_mode(&ro, "discover_lost_sessions").is_ok());
+    assert!(require_host(&ro, "hostb", "the lost sessions").is_ok());
 }

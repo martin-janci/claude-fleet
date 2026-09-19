@@ -130,7 +130,7 @@ pub fn parse_discover_output(stdout: &str) -> (Option<i64>, Vec<TranscriptProbe>
 /// leaves `derived_tmux_name`/`project_id`/`worktree_id`/
 /// `existing_session_id` as `None` — Task 8 (which has the store and the
 /// fleet naming scheme) fills them in.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LostCandidate {
     pub cwd: String,
     pub git_branch: Option<String>,

@@ -159,7 +159,7 @@ impl Claude {
         }
         let text = format!("{}{}", frontmatter(&fields), a.body);
         plan.note_placeholders(&text);
-        let dir = format!("{SKILLS_DIR}/{}", a.header.name);
+        let dir = format!("{SKILLS_DIR}/{}", a.install_name());
         plan.files.push(FileWrite {
             path: format!("{dir}/SKILL.md"),
             bytes: text.into_bytes(),
@@ -200,7 +200,7 @@ impl Claude {
         let text = format!("{}{}", frontmatter(&fields), a.body);
         plan.note_placeholders(&text);
         plan.files.push(FileWrite {
-            path: format!("{AGENTS_DIR}/{}.md", a.header.name),
+            path: format!("{AGENTS_DIR}/{}.md", a.install_name()),
             bytes: text.into_bytes(),
         });
     }
@@ -318,7 +318,7 @@ impl Claude {
         let value = Value::Object(obj);
         plan.merges.push(ConfigMerge {
             file: CLAUDE_JSON_PATH.into(),
-            json_path: vec!["mcpServers".into(), a.header.name.clone()],
+            json_path: vec!["mcpServers".into(), a.install_name().to_string()],
             mode: MergeMode::Set,
             value,
         });
@@ -598,6 +598,22 @@ mod tests {
     }
 
     #[test]
+    fn skill_renders_under_install_as() {
+        let plan = render(
+            "kind: skill\nname: s\ndescription: d\ninstall_as: foo_bar\n",
+            "b\n",
+        );
+        assert_eq!(plan.files[0].path, "~/.claude/skills/foo_bar/SKILL.md");
+        let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
+        let map = parse_frontmatter(&text);
+        assert_eq!(
+            map.get("name").and_then(|v| v.as_str()),
+            Some("s"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn agent_renders_markdown_with_mapped_tools_and_model() {
         let plan = render(
             "kind: agent\nname: pm-qa\ndescription: QA lens.\ntools: [read, grep, bash]\nmodel: strong\n",
@@ -620,6 +636,22 @@ mod tests {
         );
         let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
         assert!(text.contains("model: claude-haiku-4-5-20251001"), "{text}");
+    }
+
+    #[test]
+    fn agent_renders_under_install_as() {
+        let plan = render(
+            "kind: agent\nname: a\ndescription: d\ninstall_as: foo_bar\n",
+            "p\n",
+        );
+        assert_eq!(plan.files[0].path, "~/.claude/agents/foo_bar.md");
+        let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
+        let map = parse_frontmatter(&text);
+        assert_eq!(
+            map.get("name").and_then(|v| v.as_str()),
+            Some("a"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -687,6 +719,18 @@ mod tests {
         assert_eq!(
             stdio.merges[0].value,
             serde_json::json!({"type": "stdio", "command": "npx", "args": ["-y", "jira-mcp"], "env": {"JIRA_TOKEN": "${JIRA_TOKEN}"}})
+        );
+    }
+
+    #[test]
+    fn mcp_server_merges_under_install_as() {
+        let plan = render(
+            "kind: mcp_server\nname: docs\ndescription: d\ntransport: http\nurl: u\ninstall_as: claude_ai_Docs\n",
+            "",
+        );
+        assert_eq!(
+            plan.merges[0].json_path,
+            vec!["mcpServers", "claude_ai_Docs"]
         );
     }
 

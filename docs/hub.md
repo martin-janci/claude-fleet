@@ -156,6 +156,201 @@ untouched. The previous file is saved as `settings.json.fleet-bak` first.
 **After provisioning, restart Claude Code on each host** to pick up the new
 MCP server entry (the skill files and hooks are picked up live).
 
+## A host that cannot be reached
+
+The hub normally reaches every host over SSH. A laptop behind a home router,
+a machine on a corporate network or anything on mobile tethering has no
+address the hub can dial. For those hosts, run **`fleet-agent`** on the host
+instead: it dials the hub (`wss://<hub>/agent`), keeps that one connection
+open, and runs what the hub sends. The host needs no listening port, no
+public address, no tunnel and no key in `authorized_keys`. It does need to
+reach the hub, so an agent host needs a hub with a public URL (`--public-url`):
+provisioning writes that URL into the host's hooks and MCP entry, and starts
+no reverse tunnel for it.
+
+> **Read this first. Installing the agent gives the hub full control of that
+> user's account on that machine.** The hub can run any command as that user
+> and write any file that user can write. Uploads are deliberately not
+> confined to any directory. That is exactly what the hub can already do to
+> an SSH host through its key; the agent does not make it less. Install it
+> only for a hub you trust as much as you trust that account.
+
+### Set it up
+
+1. **Register the host as an agent host.** From an MCP client holding the
+   master token:
+   `add_host { alias: "laptop", ssh_alias: "laptop", transport: "agent" }`.
+   `ssh_alias` is still required. Nothing dials it, but it is recorded and
+   routing matches on it, so **use the alias itself** — and in any case give
+   every host a *distinct* `ssh_alias`. Sharing one never misroutes a command:
+   an `ssh_alias` resolves only when exactly one host in the fleet claims it,
+   so two hosts claiming the same one — whatever their transports — route to
+   neither, and a command for an SSH host never runs on an agent's machine.
+   What it costs is reachability. An agent host whose `ssh_alias` another row
+   also claims is probed over SSH instead of through its agent, so the probe
+   fails and the host is stamped unreachable even while its agent is connected
+   and answering everything else. Placeholder values like `none` or `unused`
+   are what make this likely. Editing either host row fixes it. An agent host
+   is saved **without** an SSH probe and shows as unreachable until its
+   agent connects. An existing SSH host becomes an agent host when it is
+   re-added with `transport: "agent"`. Re-adding it with `transport: "ssh"`
+   moves it back, which cuts its agent off.
+2. **Get the host's token, on the hub:**
+   ```bash
+   fleet-hub agent-token laptop            # mints one on first use; prints only the token
+   docker compose run --rm fleet-hub agent-token laptop   # the same, under Docker
+   ```
+   This is the only way an agent host's token reaches the host. The hub never
+   sends a token over the agent connection (see *Rotating* below). Treat the
+   output like a password.
+3. **Install the agent, on the host.** Paste the token into stdin rather
+   than the command line. `--token` also works, but it shows up in the
+   process list and in your shell history.
+   ```bash
+   # a system unit (the default), run as the user whose sessions it drives:
+   sudo fleet-agent install --hub https://fleet.example.com --token-file -
+   # or a user unit, no root needed:
+   fleet-agent install --user --hub https://fleet.example.com --token-file -
+   ```
+   **Careful with stdin under `sudo`.** `sudo` reads its password from the
+   terminal, so a token pasted while it is still asking goes to the password
+   prompt, not to `--token-file -`. A pipe into `ssh -tt host sudo
+   fleet-agent install … --token-file -` does the same: with `-tt` the
+   remote side is a terminal, and sudo's prompt reads the token from it. A
+   paste into a terminal is also echoed on screen. When either matters, pass
+   a file instead: on the hub, `fleet-hub agent-token laptop > laptop.token`,
+   copy it to the host over a channel you trust, run
+   `--token-file laptop.token`, then
+   `shred -u laptop.token`.
+   `install` writes the config (hub URL and token, mode `0600`, created that
+   way) and a systemd unit, then runs `systemctl daemon-reload`, `enable` and
+   `restart`, printing what it wrote. It never writes the token into the
+   unit.
+   - **System unit.** The files are
+     `/etc/systemd/system/fleet-agent.service` and
+     `/etc/fleet-agent/config.json`. The config belongs to the run-as user,
+     in a directory that user can reach. The unit runs as `--run-as <user>`,
+     which defaults to the user who ran `sudo`. It never runs as root.
+   - **User unit** (`--user`). The files are under
+     `$XDG_CONFIG_HOME/systemd/user` and `$XDG_CONFIG_HOME/fleet-agent`. It
+     stops when you log out unless lingering is on:
+     `loginctl enable-linger <user>`.
+   - **Other flags.** `--config <path>` puts the config somewhere else, and
+     `--no-start` writes the files but leaves systemd alone.
+   - **A hub with a private CA.** Pass `--ca-file <bundle.pem>`. Otherwise
+     the agent trusts the host's own CA bundle (`$SSL_CERT_FILE`, or the
+     usual `/etc/ssl` / `/etc/pki` locations).
+   - **`--insecure`** accepts a plain `http://`/`ws://` hub, and **only** on
+     loopback (`localhost`, `127.0.0.0/8`, `::1`). It exists for a test on
+     one machine. Anywhere else it is refused, because the token would cross
+     the network in clear.
+4. **Check it,** on the host with `fleet-agent status [--user]`, or from any
+   client with `agent_status`. `fleet-agent status` exits `0` when the
+   service is running and connected, and `3` otherwise. It reads the
+   agent's own report through `systemctl show`; the agent keeps no state
+   file.
+5. **Provision it:** `probe_host { alias: "laptop" }` (or wait for the next
+   reconcile pass), then `provision_hosts`. Provisioning runs over the
+   agent, exactly as it would over SSH.
+
+Without systemd, `fleet-agent run --config <path>` (or
+`run --hub <url> --token-file -`) runs the same loop in the foreground.
+
+### What the agent does, and does not do
+
+- **Commands.** It runs each command as `bash -c <command>` in the user's
+  home directory, which is the same model as an ssh remote command. Its
+  environment is the service's, not a login shell's. Fleet's own commands
+  start a login shell themselves where they need one. A child's stdin is
+  `/dev/null`.
+- **Reconnecting.** It reconnects after any drop, waiting up to 60 s with
+  jitter. A connection the hub has accepted resets that wait. It answers the
+  hub's heartbeat, which the hub sends every 30 s. It gives up on a hub that
+  has been silent for three heartbeats. The hub drops an agent that misses
+  two.
+- **Stopping.** Stopping or restarting the service (SIGTERM, or Ctrl-C under
+  `run`) kills every command still running and refuses new ones, then exits
+  within 10 s. The unit uses `KillMode=process`, so systemd itself stops
+  only the agent: the tmux servers the agent started, and with them your
+  Claude sessions, survive a restart or an upgrade.
+- **No terminal.** The desktop's terminal view attaches over SSH, and an
+  agent host has none. Sessions, prompts, captures, provisioning and
+  everything else in the MCP API work. The interactive terminal does not.
+- **Offline.** A call for an agent host with no agent connected fails at
+  once with `E_AGENT_OFFLINE`; it never waits out a timeout.
+
+### Rotating, narrowing or removing an agent host's token
+
+The agent authenticates with the host's per-host token. Any of these cuts a
+**connected** agent off: rotating the token, setting its mode to `readonly`,
+removing the host, or moving it back to the SSH transport. The next call
+routed to that host drops the connection before anything is sent over it,
+and the hub drops it on its next heartbeat (within 30 s) even if nothing is
+routed to it.
+
+- **Rotating.** Run `fleet-hub agent-token laptop --rotate` on the hub, then
+  re-run `fleet-agent install … --token-file -` on the host. That rewrites
+  the agent's own config. Then run `provision_hosts` (without `rotate`) to
+  rewrite the host's hooks over the re-authenticated agent. Until then, the
+  host's hooks still carry the old token and get `401`, and the agent is
+  offline.
+- **Why not in-band.** A new token is **never** sent over the agent
+  connection, because that connection authenticated with the token being
+  replaced. A rotation is how you answer a stolen token, and the connected
+  agent may be the thief. So `provision_hosts { rotate: true }` on an agent
+  host saves the new token, sends the host nothing, and reports
+  `E_AGENT_REINSTALL` with the steps above.
+- **A `readonly` token is refused at `/agent`** (`403`). An agent receives
+  every command the hub runs on its host, which is more than "readonly"
+  promises. **Rotating does not fix this: the new token keeps the old mode.**
+  Set the host's token mode to `full` instead:
+
+  ```bash
+  fleet-hub host-token-mode laptop full     # …and `readonly` to narrow it again
+  ```
+
+  That touches only the mode, not the token, so nothing has to be
+  re-installed on the host. A refused agent is retrying with a backoff
+  capped at a minute, so it reconnects by itself; restarting it only hurries
+  that along. The desktop does the same thing through
+  `set_host_token_mode`. A token that `fleet-hub agent-token` mints for a
+  host that had none is `full`, and the command warns on stderr when a
+  token is not.
+
+### Limits, and what is still open
+
+- **Connection limits.** `/agent` accepts a connection only from a host on
+  the agent transport (`403` otherwise). Every provisioned host holds a
+  token for its hooks, SSH hosts included, and theirs are refused. It
+  accepts at most **2** connections per host and **64** across the hub,
+  counted before the upgrade (`429` beyond that). A write that takes longer
+  than 5 minutes ends the connection, and a replaced connection is torn
+  down at once.
+- **Memory is bounded, not small.** One message can be up to about 267 MiB,
+  because "Move to host…" carries a transcript of up to 200 MiB. The
+  WebSocket library reserves that much as soon as it reads a frame's
+  header, so the worst case is still 64 × ~267 MiB of reservable memory.
+  Splitting large transfers into small frames is the durable fix, and it is
+  not built.
+- **Most answers get the full budget.** The hub decodes each answer against
+  the largest output any in-flight request allows. Routine commands ask for
+  no cap (only the transcript read needs the full size, but nothing tells
+  them apart). So in practice a connected agent may send a frame up to the
+  full ceiling whenever any routine call is in flight. This is documented,
+  not fixed.
+- **Other open items.**
+  - An upload waiting in the agent's queue still completes after its
+    connection has gone.
+  - An upload rewrites the file in place, so a process that already had the
+    old file open can read the new contents. That is the same as SSH's
+    `cat >`.
+  - `install` does not check who can write to the directory holding the
+    `fleet-agent` binary. Put it somewhere only root (or the run-as user)
+    can write.
+  - A command's output is cut at 200 MiB, and the caller is not told: the
+    agent flags the cut, but the hub's command interface has nowhere to
+    carry the flag, so a cut answer looks complete.
+
 ## Pair a phone
 
 A *client* is a device that drives the fleet without being a fleet host: a
@@ -320,8 +515,9 @@ sudo -u fleet env FLEET_HUB_DATA_DIR=/var/lib/fleet-hub fleet-hub token show
 ```
 
 `init` and `serve` open `<data-dir>/state.db`, creating it when missing.
-`token show` and `token regenerate` never create one: pointed at the wrong
-data dir (or run as a user who cannot see it) they exit 1 with
+`token show`, `token regenerate`, `agent-token` and `host-token-mode` never
+create one: pointed at the wrong data dir (or run as a user who cannot see
+it) they exit 1 with
 `no hub database at <data-dir>/state.db; run fleet-hub init first (or pass
 --data-dir)` instead of minting a token nothing uses.
 
@@ -499,6 +695,143 @@ Run `provision_hosts` from only one of the two — the hub or the desktop —
 for a given host. Running it from both leaves the host's hook block pointed
 at whichever one provisioned it last.
 
+## Point a desktop at the hub
+
+Settings → **Hub**. On the hub, mint a code and paste it:
+
+```bash
+fleet-hub pair --name laptop     # prints a code; it dies on first use
+```
+
+The desktop pairs as an ordinary client — the hub cannot tell it from a phone
+and should not. It stores the client token in the OS keychain (macOS) or an
+owner-only 0600 file (elsewhere), never in `state.db` and never in a log
+line. Off macOS that file is *not* an OS secret store: anything running as
+your user can read it, so treat that machine's account as holding a fleet
+credential. Which fleet the app is a window onto is decided **once, at startup**, so
+pairing and Disconnect both take effect at the next launch; Settings says so
+rather than looking like nothing happened.
+
+Plain `http://` to anything but loopback is refused unless you say otherwise:
+the client token is a credential for the whole fleet, and it would cross the
+network in the clear on every call, forever. The pairing dialog names the risk
+and offers to do it anyway (mirroring the hub's own `--allow-plaintext`), and
+an opted-in plaintext hub keeps saying so beside its badge on every launch.
+
+**Disconnect does not revoke.** It forgets the URL and the token on that
+machine. The client stays in the hub's list and its token stays valid there
+until you revoke it (`fleet-hub client revoke <name>`) — a paired client is
+refused `revoke_client` by design, so the app could not do it even if it
+tried. For a lost laptop, revoke on the hub.
+
+### When the configured hub cannot be used
+
+If a hub is configured but a launch cannot use it, the desktop **owns
+nothing** until that is fixed. It does not fall back to standalone. The
+causes are:
+
+- no client token is stored;
+- the token cannot be read, for example because the macOS keychain was locked
+  at launch or its prompt was denied;
+- the URL is plain `http://` to a host that is not loopback, and
+  `hub.allow_plaintext` is not set;
+- `hub.remote_url` does not parse;
+- the settings cannot be read, but a client token is stored, which proves the
+  app was paired.
+
+In that state it runs no reconcile tick, no account-usage poll, no embedded
+control API and no event stream. Every fleet command is refused with
+`E_HUB_UNAVAILABLE` and the reason. A red banner at the top of the window
+names the hub and the reason, with a button to Settings → Hub. There you can
+pair again, or Disconnect to go back to standalone. Either takes effect at the
+next launch.
+
+Falling back to standalone would be the dangerous choice. You pointed the app
+at a hub, so the fleet is the hub's. An app that quietly started reconciling
+it again would be a second brain for the same hosts, and that is the failure
+this mode exists to prevent. With no `hub.remote_url` at all, the app is
+standalone exactly as before.
+
+### What is different from standalone
+
+- **Live, from the hub.** The desktop follows the hub's `GET /events` and
+  re-emits every change as the same frontend event a local change would have
+  produced, so the window updates itself. When that stream drops it reconnects
+  with backoff, re-lists sessions, hosts, tasks and accounts once, and shows a
+  banner — "what you see may be out of date", the attempt number and the
+  reason — until it is back. A stream that goes silent (not even the hub's
+  15-second keep-alive) for about 40 seconds is treated as dead, which is what
+  a laptop that slept and woke on another network looks like.
+- **The fleet is the hub's.** No reconcile tick, no account-usage poll and no
+  embedded control API in the desktop; two brains for one fleet is the failure
+  this mode exists to prevent. The footer's version, database and schema are
+  the hub's too — the badge beside them says whose.
+- **A prompt sent from the desktop reaches the agent marked *untrusted*,**
+  exactly as one typed on a phone does. `apply_marker` refuses `raw=true` to
+  any non-master caller and a paired client is never the master. Correct
+  behaviour, and the one behavioural difference in the common path.
+- **Destructive confirmations are answered on the hub.** With
+  `mcp.confirm_destructive` on, `kill_session`, `delete_worktree`,
+  `move_session` and `cancel_task` come back `E_CONFIRM_REQUIRED`. The
+  desktop's confirmation dialog answers *its own* queue, which is empty in
+  this mode. Approve it on the hub — this window will follow: the approved
+  change arrives over the hub's event stream like any other, so there is
+  nothing to refresh.
+- **Fleet administration is refused.** Adding, removing and hiding hosts,
+  provisioning, per-host tokens, asset sync and sync secrets: a client is not
+  the fleet's administrator. Those controls are disabled in the interface with
+  the reason rather than failing at the click.
+- **The terminal is local-only.** The PTY attaches a local `ssh`/`tmux`
+  process and the hub streams no pane. The terminal tab shows the
+  `ssh <host>` / `tmux attach -t <session>` line for the selected session
+  instead of a dead pane.
+- **The asset catalog and the setup checklist** are about the machine that
+  owns the fleet, so they show the reason instead of their panels. (The hub
+  does serve the catalog's asset list, `list_assets`, to any paired client;
+  what it does not serve is the configuration and git checkout the Assets
+  panel is built on.)
+- **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
+  the error says to pair again in Settings → Hub.
+
+### Parity or refusal
+
+A desktop mutation is routed to the hub **only where the desktop's arguments
+map one-to-one onto the tool's parameters**, checked field by field. Where
+they do not, the command *refuses* instead of routing.
+
+`new_session` set the rule. `NewSessionArgs` carries `kind`, `start_command`
+and `friendly_name`; the tool's `NewSessionParams` carries none of them, and a
+shell session is a different tool entirely. Routing it would have
+**succeeded** while silently dropping the label the user typed. A refusal is
+visible; a dropped field is not. `repair_session` is refused for the same
+reason: the tool always runs the *explicit* repair, and the desktop's
+automatic pre-attach check has no counterpart.
+
+Do not "fix" one of these refusals by wiring a lossy mapping. If a tool grows
+the missing parameters, route it then.
+
+### Known limitations
+
+- **The terminal works over SSH only.** A hub client has no in-app terminal;
+  attach from a shell with the command the terminal tab shows.
+- **Projects and worktrees are not re-listed on reconnect**, because their
+  list tools answer a different shape from their events. They refresh when
+  the window regains focus.
+- **Not yet run as an app.** At the time of writing this mode is verified by
+  its test suites only: the desktop has not been launched against a real hub,
+  and the macOS keychain path has not been compiled or run. Report anything
+  that does not match this page.
+
+### Going back
+
+Disconnect in Settings and restart. Disconnect is also offered while the
+configured hub cannot be used (see above), so a half-finished pairing can
+always be cleared. The desktop's own `state.db` is untouched
+throughout — pointing it at a hub is a view change, not a data move — so it
+resumes managing whatever it managed before. Nothing migrates in either
+direction; see *Migrating from the desktop* above for moving a database
+deliberately.
+
 ## Security notes
 
 - **Bearer tokens.** Same model as the desktop's Control API: a master token
@@ -545,7 +878,11 @@ at whichever one provisioned it last.
 - **Rotating tokens.** `fleet-hub token regenerate` mints a fresh master
   token — reconfigure every client afterward. For host tokens, call
   `provision_hosts { rotate: true }` (from any client), which re-provisions
-  every host with a new per-host token.
+  every SSH host with a new per-host token. An **agent** host's token is
+  rotated out of band instead (`fleet-hub agent-token <host> --rotate`, then
+  re-install the agent). See *A host that cannot be reached*. Rotating a
+  `readonly` token keeps it `readonly`; `fleet-hub host-token-mode <host>
+  full` is what widens it again.
 
 ## Troubleshooting
 
@@ -555,6 +892,17 @@ at whichever one provisioned it last.
   rewrites `Host` to something else — keep the Caddyfile's
   `header_up Host 127.0.0.1:4180` rewrite, which the loopback allowlist
   entry always accepts.
+- **An agent that will not connect.** Run `fleet-agent status` on the host,
+  or `journalctl -u fleet-agent`:
+  - `hub refused: 401` means the token is wrong, rotated or revoked
+    (re-install with `fleet-hub agent-token <host>`);
+  - `403 … readonly` means the token mode is not `full`, and rotating will
+    not fix it — run `fleet-hub host-token-mode <host> full`;
+  - `403 … not an agent host` means the host is not on the agent transport;
+  - `429` means the host already holds two connections, or the hub holds
+    64 in all;
+  - `invalid peer certificate` means pass `--ca-file`;
+  - `refusing the plain hub` means use `https://`.
 - **`401`** — wrong or missing token. Confirm the client sends
   `Authorization: Bearer <token>` with the exact current token
   (`fleet-hub token show`).

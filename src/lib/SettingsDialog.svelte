@@ -41,6 +41,14 @@
   } from './fleet_settings';
   import { refreshProjects } from './projects';
   import {
+    hubStatus,
+    hubPair,
+    hubDisconnect,
+    hubBlock,
+    hubStrandedToken,
+    ownsTheFleet,
+  } from './hub';
+  import {
     attentionIdleMinutes,
     notificationPermission,
     notifyStuckOs,
@@ -67,7 +75,75 @@
     requestHostsView();
   }
 
+  // --- Hub: which fleet this window is onto ---
+  // Pointed at a hub, four of the sections below are about a fleet this app
+  // does not own: their commands are guarded on the backend and answer
+  // E_LOCAL_ONLY. They are replaced by the reason rather than left to fail at
+  // the click — and, just as importantly, their `onMount` fetches are not made
+  // at all, or opening Settings would raise two error toasts every time.
+  const isRemote = $derived($hubStatus.remote);
+  // Not the same thing: a configured hub this launch cannot use is not a hub
+  // client, but it owns no fleet either, and the backend refuses the same
+  // panels. See `ownsTheFleet`.
+  const ownsFleet = $derived(ownsTheFleet($hubStatus));
+  let hubUrlDraft = $state('');
+  let hubCode = $state('');
+  let hubAllowPlaintext = $state(false);
+  /** Set only after the backend has refused plaintext *in words*: the opt-in
+   *  is not a checkbox anyone can tick past without having read why. */
+  let hubPlaintextRefused = $state(false);
+  let hubBusy = $state(false);
+  let hubError: string | null = $state(null);
+  let hubRestartNeeded = $state(false);
+  /** A client token left on this machine by a pairing that crashed before it
+   *  wrote its URL. No launch reads it, and nothing else offers to clear it —
+   *  see `hubStrandedToken`. Asked once, on open, and only while standalone. */
+  let hubStranded = $state(false);
+
+  const hubPairable = $derived(
+    !hubBusy && hubUrlDraft.trim() !== '' && hubCode.trim() !== '',
+  );
+
+  async function doPair() {
+    hubBusy = true;
+    hubError = null;
+    const r = await hubPair(hubUrlDraft, hubCode, hubAllowPlaintext);
+    hubBusy = false;
+    if (r.ok) {
+      hubRestartNeeded = r.value.restart_required;
+      hubPlaintextRefused = false;
+      // The code dies on first use; leaving it in the box invites a second
+      // attempt that can only fail.
+      hubCode = '';
+    } else {
+      hubError = r.error.message;
+      if (r.error.code === 'E_HUB_PLAINTEXT') hubPlaintextRefused = true;
+    }
+  }
+
+  async function doDisconnect() {
+    hubBusy = true;
+    hubError = null;
+    const r = await hubDisconnect();
+    hubBusy = false;
+    if (r.ok) {
+      hubRestartNeeded = r.value.restart_required;
+      hubUrlDraft = '';
+      // Disconnect clears the token too, so whatever was stranded is gone.
+      hubStranded = false;
+    } else {
+      hubError = r.error.message;
+    }
+  }
+
   onMount(async () => {
+    hubUrlDraft = $hubStatus.configured_url ?? '';
+    if (!ownsTheFleet($hubStatus)) {
+      // Neither of these applies to a hub client, and both are guarded on
+      // the backend. Asking anyway would put two error toasts on the screen
+      // every time Settings is opened.
+      return;
+    }
     const r = await mcpStatus();
     // Optional call: Svelte nulls a `bind:this` ref on teardown, so closing
     // Settings while mcpStatus() is in flight leaves it unset — and a throw
@@ -76,6 +152,18 @@
     const fs = await loadFleetSettings();
     if (!fs.ok) automationError = fs.error.message;
     resetProjectDrafts();
+    // Last, and only standalone: on macOS this reads the keychain, which is
+    // the one call here that can block on a locked one. Nothing else on this
+    // screen waits for it, and with a hub configured there is nothing to ask
+    // — that token belongs to that hub and Disconnect is on screen already.
+    if (!$hubStatus.configured_url) {
+      const st = await hubStrandedToken();
+      // A token store that will not open is not evidence of a leftover, and
+      // this app is working normally otherwise; an error toast on every
+      // Settings open would be noise about a state that almost certainly does
+      // not exist. The backend's error carries the reason for a log.
+      hubStranded = st.ok && st.value === true;
+    }
   });
 
   // --- Projects: per-host projects root + layout (backend settings) ---
@@ -269,6 +357,192 @@
       >
     </section>
 
+    <section class="block" data-testid="hub-section">
+      <div class="section-header">
+        <h4>Hub</h4>
+      </div>
+      {#if isRemote}
+        <p class="mcp-blurb" data-testid="hub-connected">
+          This window is a <strong>client</strong> of
+          <code>{$hubStatus.url}</code>, paired as
+          <code>{$hubStatus.client_name ?? 'desktop'}</code>. The fleet lives
+          there: its database, its reconcile tick, its SSH connections. This app
+          runs none of them.
+        </p>
+        {#if $hubStatus.warning}
+          <p class="err" data-testid="hub-status-warning">⚠ {$hubStatus.warning}</p>
+        {/if}
+        <!-- The trap: with `mcp.confirm_destructive` on, the hub refuses a
+             kill, a worktree delete, a move or a task cancel until someone
+             approves it. This desktop's confirmation dialog answers its OWN
+             queue, which in remote mode is always empty — so the click is
+             refused and there is nowhere to go unless we say where. -->
+        <p class="hook-desc" data-testid="hub-confirm-note">
+          If the hub has <code>mcp.confirm_destructive</code> on, killing a
+          session, deleting a worktree, moving a session or cancelling a task
+          comes back refused with <code>E_CONFIRM_REQUIRED</code>: this app's
+          confirmation dialog answers its own queue, which is empty here.
+          <strong>Approve it on the hub — this window will follow</strong>, as
+          the change arrives over the hub's live event stream.
+        </p>
+        <!-- Correct behaviour, and a real difference from standalone that
+             nobody would guess. `mcp::tools::support::apply_marker` refuses
+             `raw=true` to any non-master caller, and a paired client is never
+             the master. -->
+        <p class="hook-desc" data-testid="hub-untrusted-note">
+          A prompt sent from here reaches the agent marked
+          <strong>untrusted</strong>, exactly as one typed on a phone does: a
+          paired client is never the hub's master, and the hub marks every
+          non-master prompt. Standalone, the desktop is the master and does
+          not.
+        </p>
+        <div class="mcp-field">
+          <button
+            class="hook-btn"
+            onclick={doDisconnect}
+            disabled={hubBusy}
+            data-testid="hub-disconnect">Disconnect</button>
+        </div>
+        <p class="hook-desc" data-testid="hub-disconnect-note">
+          Disconnect forgets the URL and the client token <em>on this
+          machine</em>. It <strong>does not revoke</strong> anything: the
+          client stays in the hub's list and its token stays valid until an
+          operator revokes it there (<code>fleet-hub client revoke</code>). A
+          paired client is refused <code>revoke_client</code> by design, so
+          this app could not do it even if it tried.
+        </p>
+      {:else if $hubStatus.unavailable}
+        <!-- A hub is configured and this launch could not use it. Saying
+             "This app runs its own fleet" here, as this section used to, was
+             the opposite of the truth: it runs NO fleet until this is fixed. -->
+        <p class="err" data-testid="hub-unavailable-reason">
+          ⚠ This app is set to use
+          {#if $hubStatus.configured_url}<code>{$hubStatus.configured_url}</code>{:else}a hub{/if},
+          but this launch cannot: {$hubStatus.unavailable}.
+        </p>
+        <p class="hook-desc">
+          Until that is fixed it manages no fleet at all — no reconcile tick, no
+          control API, every fleet action refused — rather than quietly
+          managing the hub's hosts behind the hub's back. Pair again below, or
+          Disconnect to go back to running this app's own fleet. Either takes
+          effect at the next launch.
+        </p>
+        <div class="mcp-field">
+          <button
+            class="hook-btn"
+            onclick={doDisconnect}
+            disabled={hubBusy}
+            data-testid="hub-disconnect">Disconnect</button>
+        </div>
+        <p class="hook-desc" data-testid="hub-disconnect-note">
+          Disconnect forgets the URL and any client token <em>on this
+          machine</em>. It <strong>does not revoke</strong> anything on the hub:
+          an operator does that with <code>fleet-hub client revoke</code>.
+        </p>
+      {:else}
+        <p class="mcp-blurb" data-testid="hub-empty">
+          This app runs its own fleet: its own database, its own reconcile
+          tick, its own control API. Point it at a <code>fleet-hub</code> and
+          it becomes a window onto that fleet instead — the same sessions a
+          phone sees, live.
+        </p>
+        <p class="hook-desc">
+          On the hub, run <code>fleet-hub pair --name &lt;this machine&gt;</code>
+          and paste the code it prints. The code can be used once and expires
+          in minutes.
+        </p>
+        {#if hubStranded}
+          <!-- A pairing that crashed before it wrote its URL (the old write
+               order) left a fleet-wide client token on this machine. No launch
+               reads it — a blank URL is standalone — so this is the only place
+               it is ever mentioned, and the only place it can be cleared. -->
+          <p class="err" data-testid="hub-stranded-token">
+            ⚠ A hub <strong>client token</strong> is still stored on this
+            machine, left behind by a pairing that did not finish. Nothing uses
+            it: no hub is configured, and this app runs its own fleet. It is a
+            credential for someone else's fleet sitting in this machine's
+            secure storage, so clear it unless you are about to pair again.
+          </p>
+          <div class="mcp-field">
+            <button
+              class="hook-btn"
+              onclick={doDisconnect}
+              disabled={hubBusy}
+              data-testid="hub-disconnect">Clear leftover token</button>
+          </div>
+          <p class="hook-desc">
+            This <strong>does not revoke</strong> anything. If that token was
+            ever issued, its client row is still on the hub and the token is
+            still valid there until an operator removes it
+            (<code>fleet-hub client revoke</code>).
+          </p>
+        {/if}
+      {/if}
+
+      {#if !isRemote || hubRestartNeeded}
+        <div class="mcp-field">
+          <span class="lbl">url</span>
+          <input
+            class="port base-input"
+            type="text"
+            spellcheck="false"
+            placeholder="https://fleet.example.com"
+            bind:value={hubUrlDraft}
+            disabled={hubBusy}
+            data-testid="hub-url"
+            aria-label="Hub URL" />
+        </div>
+        <div class="mcp-field">
+          <span class="lbl">code</span>
+          <input
+            class="port base-input"
+            type="text"
+            spellcheck="false"
+            placeholder="ABCD1234"
+            bind:value={hubCode}
+            disabled={hubBusy}
+            data-testid="hub-code"
+            aria-label="Pairing code" />
+          <button onclick={doPair} disabled={!hubPairable} data-testid="hub-pair">
+            {hubBusy ? 'Pairing…' : 'Pair'}
+          </button>
+        </div>
+      {/if}
+
+      {#if hubError}
+        <p class="err" role="alert" data-testid="hub-error">{hubError}</p>
+      {/if}
+      {#if hubPlaintextRefused}
+        <!-- Only after the refusal, and only with the reason above it: the
+             opt-in is a decision someone makes having read what it costs,
+             not a box that was already there to be ticked past. -->
+        <label class="toggle">
+          <input
+            type="checkbox"
+            bind:checked={hubAllowPlaintext}
+            data-testid="hub-allow-plaintext" />
+          Send the client token in the clear anyway — this hop is already
+          private (a tunnel, a VPN, a container network)
+        </label>
+      {/if}
+      {#if hubRestartNeeded}
+        <p class="hook-desc" data-testid="hub-restart">
+          Saved. <strong>Restart claude-fleet to apply it</strong> — which
+          fleet this app is a window onto is decided once, at startup, so that
+          half the app can never be talking to a hub while the other half
+          talks to the local database.
+        </p>
+      {/if}
+    </section>
+
+    {#if !ownsFleet}
+      <section class="block" data-testid="projects-remote-section">
+        <div class="section-header"><h4>Projects</h4></div>
+        <p class="hook-desc" data-testid="projects-remote">
+          {hubBlock('get_fleet_settings', $hubStatus)}
+        </p>
+      </section>
+    {:else}
     <section class="block" data-testid="projects-section">
       <div class="section-header">
         <h4>Projects</h4>
@@ -326,6 +600,7 @@
       </div>
       {#if projectsError}<p class="err">{projectsError}</p>{/if}
     </section>
+    {/if}
 
     <section class="block" data-testid="onboarding-section">
       <div class="section-header">
@@ -448,6 +723,29 @@
       </div>
     </section>
 
+    {#if !ownsFleet}
+      <section class="block" data-testid="automation-remote-section">
+        <div class="section-header"><h4>Automation</h4></div>
+        <p class="hook-desc" data-testid="automation-remote">
+          {hubBlock('get_fleet_settings', $hubStatus)}
+        </p>
+      </section>
+      <section class="block" data-testid="limits-remote-section">
+        <div class="section-header"><h4>Limits</h4></div>
+        <p class="hook-desc" data-testid="limits-remote">
+          {hubBlock('get_fleet_settings', $hubStatus)}
+        </p>
+      </section>
+      <section class="block" data-testid="mcp-remote-section">
+        <div class="section-header"><h4>Control API (MCP)</h4></div>
+        <p class="hook-desc" data-testid="mcp-remote">
+          {hubBlock('mcp_status', $hubStatus)}
+        </p>
+        <p class="hook-desc" data-testid="provision-remote">
+          {hubBlock('provision_hosts', $hubStatus)}
+        </p>
+      </section>
+    {:else}
     <section class="block" data-testid="automation-section">
       <div class="section-header">
         <h4>Automation</h4>
@@ -652,6 +950,7 @@
          Hosts view reads (host_actions.ts). Module-level, so it is safe even
          when a slow multi-host provision outlives this dialog. -->
     <McpSettings bind:this={mcpSettings} onProvisioned={loadHostTokens} />
+    {/if}
 
     <section class="block" data-testid="diagnostics-section">
       <div class="section-header">

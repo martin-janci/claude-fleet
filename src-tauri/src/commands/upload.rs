@@ -9,6 +9,7 @@
 //! drag-drop event into [`UploadAllowList`] with a short TTL — are accepted.
 //! Anything else is `E_FORBIDDEN` (SEC-9).
 
+use crate::backend::FleetBackend;
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::shell::quote;
 use fleet_core::ssh::SshClient;
@@ -111,9 +112,17 @@ pub fn check_paths_allowed(allow: &UploadAllowList, paths: &[String]) -> Result<
 #[tauri::command]
 pub async fn upload_to_session(
     args: UploadArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     ssh: State<'_, Arc<SshClient>>,
     allow: State<'_, Arc<UploadAllowList>>,
 ) -> Result<Vec<String>, IpcError> {
+    // The bytes are on THIS machine and the destination is a host only the
+    // hub can reach; there is no tool that would carry a file across.
+    backend.local_only(
+        "upload_to_session",
+        "the file is on this machine and the session's host is the hub's to \
+         reach; copy it there yourself, or drop it on a standalone app",
+    )?;
     fleet_core::validate::host_alias(&args.host_alias)?;
     fleet_core::validate::tmux_name_addressable(&args.session_name)?;
     if args.local_paths.is_empty() {

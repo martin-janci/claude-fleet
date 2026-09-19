@@ -9,9 +9,13 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 ### `add_host`
 
-Register a new SSH host. Probes it first; only persists the host if it is reachable. Returns the host row as JSON.
+Register a new host. transport is "ssh" (the default: probed first, persisted only if reachable) or "agent" (a host the hub cannot reach, which runs fleet-agent and dials in: persisted unprobed and unreachable until its agent connects; get its token on the hub with `fleet-hub agent-token <alias>`). Returns the host row as JSON.
 
-Parameters: `alias`, `ssh_alias`
+Parameters: `alias`, `ssh_alias`, `transport`
+
+### `agent_status`
+
+Which agent hosts (transport "agent") have a fleet-agent connected, since when (unix seconds), which agent version, host name and OS. Offline agent hosts are listed with connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false on a server that accepts no agents (the desktop). Returns JSON.
 
 ### `apply_sync`
 
@@ -189,7 +193,7 @@ Parameters: `session_id`
 
 ### `plan_sync`
 
-Compute a sync plan: scan the selected hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | noop | blocked) plus a plan_id valid for 10 minutes. Inventory states now include orphan (in the host's fleet manifest, no longer in the catalog). Nothing is written. Pass the plan_id to apply_sync.
+Compute a sync plan: scan the selected hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id valid for 10 minutes. plugin_update fires once a pinned plugin's catalog version changes; a host still on the old version after that stays blocked. Inventory states now include orphan (in the host's fleet manifest, no longer in the catalog). Nothing is written. Pass the plan_id to apply_sync.
 
 Parameters: `host_alias`, `kind`, `name`
 
@@ -510,6 +514,11 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::rotate_host_token`
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
+- `commands::hub::hub_status`
+- `commands::hub::hub_pair`
+- `commands::hub::hub_disconnect`
+- `commands::hub::hub_connection`
+- `commands::hub::hub_stranded_token`
 - `commands::onboarding::check_local_prereqs`
 - `commands::onboarding::tunnel_status`
 - `commands::assets::catalog_config`

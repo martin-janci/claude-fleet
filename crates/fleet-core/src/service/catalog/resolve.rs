@@ -52,7 +52,13 @@ fn merge_yaml(base: &mut serde_yaml::Value, over: &serde_yaml::Value) {
 /// An override may change an asset's *fields*, never its identity: a
 /// `name`-changing override is rejected (it would let one override key
 /// silently rename an asset out from under its own `<kind>/<name>` key, and
-/// potentially collide with another asset of the same name). The re-parsed
+/// potentially collide with another asset of the same name). An
+/// `install_as`-changing override is rejected for the same reason: it would
+/// be a per-host install name, which is out of scope, and the inventory
+/// matrix is computed from the *full* catalog while the plan is computed
+/// from the *resolved* one — a host whose layer moved the asset elsewhere
+/// would report it `missing` and the real directory `unmanaged` forever,
+/// while `apply_sync` managed it at the other identifier. The re-parsed
 /// asset is also re-validated with the same `Asset::validate` the loader
 /// uses, so an override cannot smuggle in a value `load_one` would have
 /// rejected at load time.
@@ -66,6 +72,12 @@ fn apply_override(asset: &Asset, over: &serde_yaml::Value) -> Result<Asset, Stri
         return Err(format!(
             "an override may not change an asset's name ('{}' to '{}')",
             asset.header.name, patched.header.name
+        ));
+    }
+    if patched.header.install_as != asset.header.install_as {
+        return Err(format!(
+            "an override may not change an asset's install_as ({:?} to {:?})",
+            asset.header.install_as, patched.header.install_as
         ));
     }
     let problems = patched.validate();
@@ -409,6 +421,28 @@ mod tests {
                 .problems
                 .iter()
                 .any(|p| p.message.contains("name")),
+            "{:?}",
+            r.catalog.problems
+        );
+    }
+
+    #[test]
+    fn an_override_that_changes_install_as_is_refused_and_recorded_as_a_problem() {
+        let cat = catalog(&["a"]);
+        let role = lay("kind: layer\nname: r\naxis: role\nmembers:\n  - skill/a\n\
+             overrides:\n  skill/a:\n    install_as: a_b\n");
+        let r = resolve(&cat, &[&role], &[]);
+        // The asset survives unpatched: it still installs under its catalog
+        // name and the override never took effect.
+        assert_eq!(r.catalog.assets.len(), 1);
+        assert!(r.catalog.assets[0].header.install_as.is_none());
+        assert_eq!(r.catalog.assets[0].install_name(), "a");
+        assert!(r.provenance["skill/a"].overridden_by.is_empty());
+        assert!(
+            r.catalog
+                .problems
+                .iter()
+                .any(|p| p.message.contains("install_as")),
             "{:?}",
             r.catalog.problems
         );
