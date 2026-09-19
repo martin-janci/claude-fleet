@@ -24,6 +24,8 @@ export interface HostState { host_alias: string; harness: string; state: string 
 export interface Problem { path: string; message: string }
 export interface AssetSummary {
   kind: string; name: string; version: string; description: string; tags: string[]; hosts: HostState[];
+  /** The identifier the asset installs under, when it differs from `name`. */
+  install_as?: string;
 }
 export interface AssetListing {
   head: string; loaded_at: number; assets: AssetSummary[]; unmanaged: AssetInventoryRow[]; problems: Problem[];

@@ -144,6 +144,11 @@ pub struct AssetSummary {
     pub description: String,
     pub tags: Vec<String>,
     pub hosts: Vec<HostState>,
+    /// The identifier this asset installs under when it differs from
+    /// `name`; absent on the wire otherwise, so a listing reads the same as
+    /// before for every asset that has no `install_as`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_as: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,6 +201,7 @@ pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
                     description: a.header.description.clone(),
                     tags: a.header.tags.clone(),
                     hosts: host_states(&rows, a.kind(), &a.header.name),
+                    install_as: a.header.install_as.clone(),
                 })
                 .collect(),
             // `unmanaged` is the wire name for "installed on a host but not
@@ -609,6 +615,7 @@ mod tests {
         );
         assert_eq!(listing.unmanaged.len(), 1);
         assert_eq!(listing.unmanaged[0].name, "extra");
+        assert!(listing.assets[0].install_as.is_none());
 
         let detail = get_asset(model::Kind::Skill, "s", &store).unwrap();
         assert_eq!(detail.asset.body, "b\n");
@@ -639,6 +646,32 @@ mod tests {
             .unwrap();
         assert!(codex.plan.is_none());
         assert!(codex.unsupported.as_deref().unwrap().contains("codex"));
+    }
+
+    #[test]
+    fn asset_summary_carries_install_as_only_when_set() {
+        let base = AssetSummary {
+            kind: "skill".into(),
+            name: "foo-bar".into(),
+            version: "1".into(),
+            description: "d".into(),
+            tags: Vec::new(),
+            hosts: Vec::new(),
+            install_as: None,
+        };
+        let json = serde_json::to_value(&base).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("install_as"),
+            "{json}"
+        );
+        let with = AssetSummary {
+            install_as: Some("foo_bar".into()),
+            ..base
+        };
+        assert_eq!(
+            serde_json::to_value(&with).unwrap()["install_as"],
+            serde_json::json!("foo_bar")
+        );
     }
 
     /// `orphan` rows — the host still holds something a past sync wrote but

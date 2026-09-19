@@ -473,6 +473,28 @@ mod tests {
     }
 
     #[test]
+    fn mcp_server_install_as_with_a_dot() {
+        // `is_valid_install_name` permits `.`, so a dotted install name is
+        // reachable. The merge is applied to a JSON tree and only then
+        // converted to TOML, so the dot must become a *quoted key*, never a
+        // nested table.
+        let a = Asset::from_yaml(None, "kind: mcp_server\nname: docs\ndescription: d\ntransport: http\nurl: http://x\ninstall_as: a.b\n").unwrap();
+        let plan = Codex.render(&a).unwrap();
+        assert_eq!(plan.merges[0].json_path, vec!["mcp_servers", "a.b"]);
+
+        let out = Codex
+            .merge_config(CODEX_CONFIG_PATH, "", &plan.merges, &[])
+            .unwrap();
+        assert!(out.contains("[mcp_servers.\"a.b\"]"), "{out}");
+
+        // ... and it round-trips back as the single key "a.b".
+        let v: toml::Value = toml::from_str(&out).expect("output must be valid TOML");
+        let servers = v["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.keys().collect::<Vec<_>>(), vec!["a.b"]);
+        assert_eq!(servers["a.b"]["url"].as_str(), Some("http://x"));
+    }
+
+    #[test]
     fn hooks_and_plugins_are_unsupported_agents_unless_render_as_skill() {
         let hook = Asset::from_yaml(None, "kind: hook\nname: h\ndescription: d\nevent: stop\naction: { type: command, command: x }\n").unwrap();
         assert!(Codex.render(&hook).is_err());

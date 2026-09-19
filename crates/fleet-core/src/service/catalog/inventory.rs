@@ -473,15 +473,30 @@ pub fn compute_states(
     let install_names: std::collections::BTreeSet<(Kind, String)> = catalog
         .assets
         .iter()
-        .flat_map(|a| {
-            [
-                (a.kind(), a.install_name().to_string()),
-                (a.kind(), a.header.name.clone()),
-            ]
-        })
+        .map(|a| (a.kind(), a.install_name().to_string()))
+        .collect();
+    let catalog_names: std::collections::BTreeSet<(Kind, String)> = catalog
+        .assets
+        .iter()
+        .map(|a| (a.kind(), a.header.name.clone()))
         .collect();
     for (kind, name) in harness.installed(snap) {
-        if !install_names.contains(&(kind, name.clone()))
+        let key = (kind, name.clone());
+        if !install_names.contains(&key) && catalog_names.contains(&key) {
+            // Suppressed, and not because the host holds what the catalog
+            // renders: this identifier is some asset's *catalog* name while
+            // the asset installs under a different one, so whatever is on
+            // the host here is unrelated to fleet and can never be listed
+            // (see the primary-key note above). Say so at least once.
+            tracing::debug!(
+                host = host_alias,
+                kind = kind.as_str(),
+                identifier = %name,
+                "installed identifier collides with a catalog name; not reported as unmanaged"
+            );
+        }
+        if !install_names.contains(&key)
+            && !catalog_names.contains(&key)
             && !orphans
                 .iter()
                 .any(|o| o.kind == kind.as_str() && o.name == name)
