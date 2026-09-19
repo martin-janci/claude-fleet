@@ -32,6 +32,17 @@ run, rather than a tag push, only ever publishes a `sha-<commit>` tag, never
 locally from a checkout of the repository instead and point `image:` in
 `docker-compose.yml` at it:
 
+**Platforms.** `linux/amd64` and `linux/arm64`. **arm64 is best-effort
+until it has a track record**: `hub-image.yml` builds each platform on its
+own native runner (no QEMU) and, if the `arm64` leg fails, still publishes
+`amd64` alone under the same tags rather than blocking the image on it —
+so a given `latest`/`vX.Y.Z` may, on such a run, carry only an amd64
+manifest, and `docker pull --platform linux/arm64` (or any arm64 host
+pulling by tag) then fails outright rather than silently getting an amd64
+image. Check the `hub-image` workflow's own run history, or `docker buildx
+imagetools inspect ghcr.io/martin-janci/fleet-hub:latest`, if that matters
+to you.
+
 ```bash
 docker build -f crates/fleet-hub/Dockerfile -t fleet-hub:local .
 # docker-compose.yml:  image: fleet-hub:local
@@ -208,8 +219,11 @@ no reverse tunnel for it.
    output like a password.
 3. **Get the binary, on the host.** Each release attaches
    `fleet-agent-<version>-<target>.tar.gz` for `x86_64-unknown-linux-gnu` and
-   `aarch64-unknown-linux-gnu` (binary + `LICENSE` + a `README.txt` pointing
-   back here), plus a `SHA256SUMS` covering every asset in that release —
+   `aarch64-unknown-linux-gnu` (binary + a `README.txt` pointing back here,
+   plus the repository's own root `LICENSE` when one exists — this
+   repository does not have one yet, so today's tarballs carry no LICENSE
+   file rather than a fabricated one), plus one `SHA256SUMS` covering all
+   four tarballs in the release —
    [github.com/martin-janci/claude-fleet/releases](https://github.com/martin-janci/claude-fleet/releases):
    ```bash
    v=0.3.0   # the release you're installing; target: x86_64- or aarch64-unknown-linux-gnu

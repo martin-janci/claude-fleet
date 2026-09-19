@@ -73,26 +73,51 @@ from `build`). It builds `fleet-agent` and `fleet-hub` `--release --locked`
 for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` on native
 `ubuntu-22.04` / `ubuntu-22.04-arm` runners (22.04 rather than 24.04 so the
 binaries need only **glibc 2.35+** on the host — see `docs/hub.md`), then
-`scripts/package-linux-release.sh` packs each binary with a `LICENSE` and a
-`README.txt` into `fleet-agent-X.Y.Z-<target>.tar.gz` /
-`fleet-hub-X.Y.Z-<target>.tar.gz`, plus one `SHA256SUMS` covering all four
-tarballs, and `gh release upload` attaches them to the same draft.
+`scripts/package-linux-release.sh` packs each binary with a `README.txt` and
+this repository's root `LICENSE` file *if one exists* (as of this writing it
+does not — a tarball built today carries no LICENSE rather than a fabricated
+one; once the owner adds a root `LICENSE`/`LICENSE.md`/`LICENSE.txt`, future
+tarballs pick it up automatically, verbatim, with no workflow change needed)
+into `fleet-agent-X.Y.Z-<target>.tar.gz` / `fleet-hub-X.Y.Z-<target>.tar.gz`.
+Each leg uploads its own two tarballs straight to the release (by the
+numeric release id `create-release` produced, not by tag — see
+`scripts/upload-release-asset.sh`: a *draft* release is not resolvable by
+tag through GitHub's REST API) and its own per-target checksums as a
+workflow artifact.
 
-This job has `continue-on-error: true` and depends on nothing the desktop
-legs depend on, so a failure here never blocks, delays or marks failed the
-desktop bundles or the draft release itself — check its own job status
-separately after a release. After publishing, spot-check with
-`sha256sum -c SHA256SUMS` against a downloaded tarball.
+A separate `agent-hub-checksums` job (`needs: [create-release,
+agent-hub-binaries]`, `if: !cancelled()`, also `continue-on-error: true`)
+then combines both legs' checksums into the single `SHA256SUMS` the release
+needs (`scripts/merge-sha256sums.sh`) — this exists because two legs each
+uploading their own same-named `SHA256SUMS` would just have whichever
+finishes last silently overwrite the other's, covering 2 of the 4 tarballs
+instead of 4 with nothing to say so. It cross-checks the merged file against
+the assets actually on the release before uploading, and still produces a
+correct *partial* `SHA256SUMS` (listing only what exists) if one leg failed.
+
+Both jobs depend on nothing the desktop legs depend on and carry
+`continue-on-error: true`, so a failure here never blocks, delays or marks
+failed the desktop bundles or the draft release itself — check their own job
+status separately after a release. After publishing, spot-check with
+`sha256sum -c SHA256SUMS` against a downloaded tarball, and confirm it lists
+all four tarballs (`agent-hub-checksums`'s log says "complete" or names what
+is missing).
 
 ### Hub image
 
 `.github/workflows/hub-image.yml` also runs on push of any `v*` tag: it
 builds and publishes the `fleet-hub` container image for `linux/amd64` and
 `linux/arm64` (independently of the desktop-bundle legs above and of the
-draft-release review step) — two native per-arch jobs pushed by digest, then
-merged into one multi-arch manifest under the real tags, so the arm64 leg
-(no QEMU; see the workflow file) never slows amd64's publication. See the
-workflow file for the image name/tag scheme.
+draft-release review step) — two native per-arch jobs pushed by digest (no
+QEMU), then a `merge` job combines whichever digests exist into the real
+tags. **arm64 is best-effort**: its leg may fail without blocking the
+image — `merge` still runs (`if: !cancelled()`) and publishes an amd64-only
+manifest under the same tags, so amd64's own publication is never slowed or
+blocked by arm64. amd64 failing is different: nothing is published, and
+`merge` fails for real (no `continue-on-error` on that leg or on `merge`
+itself) so it stays visible rather than leaving a stale `latest`. See
+`scripts/merge-hub-digests.sh` and the workflow file for the exact rule and
+the image name/tag scheme.
 
 ### Signing caveat
 
