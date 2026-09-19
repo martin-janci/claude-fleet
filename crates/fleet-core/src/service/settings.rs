@@ -97,7 +97,9 @@ pub const MOVE_MAX_TRANSCRIPT_MB: &str = crate::service::move_session::SETTING_M
 /// Upper bound for [`MOVE_MAX_TRANSCRIPT_MB`]: the copy is held in memory.
 pub const MOVE_MAX_TRANSCRIPT_MB_MAX: u64 = 4096;
 
-/// Upper bound for [`MOVE_MAX_BUNDLE_MB`]: the copy is held in memory.
+/// Upper bound for [`MOVE_MAX_BUNDLE_MB`]: the bundle is relayed through the
+/// orchestrator in 8 MiB chunks via a private temp file, so this bounds relay
+/// time and temp-disk use on the orchestrator and both hosts, not memory.
 pub const MOVE_MAX_BUNDLE_MB_MAX: u64 = 4096;
 /// Upper bound for [`MOVE_IGNORED_ENTRY_KB`]: no practical I/O constraint.
 pub const MOVE_IGNORED_ENTRY_KB_MAX: u64 = 1_048_576;
