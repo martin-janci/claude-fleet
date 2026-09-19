@@ -950,12 +950,16 @@ describe('NewSessionDialog: Enter is gated the same as the Create button', () =>
   });
 });
 
-// #146 finding 4: `listHostWorktrees` refuses with E_LOCAL_ONLY for a hub
-// client (no hub tool over SSH), so the picker used to show a red error line
-// and only "+ new worktree" for every remote host — the headline "new_session
-// routes now" path landed half-working. A hub client instead reads whatever
-// the project tree already knows about that host (worktree rows an
-// EnterWorktree hook reported land there via the ordinary row-event stream).
+// #146 finding 4, fix round 2: `list_host_worktrees` refuses with
+// E_LOCAL_ONLY for a hub client (no hub tool over SSH). Fix round 1 read
+// `project.worktrees` as a substitute, on the assumption a remote host's
+// rows land there via the row-event stream — false: `list_projects_joined`
+// only ever joins `host_alias = 'local'` rows, so `project.worktrees` is
+// always the STORE's own local checkout, never a remote host's, and
+// filtering it by a remote `host_alias` always came back empty — a false
+// "this host has no worktrees" rather than "unknown" (see the `$effect`'s
+// comment in `NewSessionDialog.svelte`). A hub client now shows a neutral
+// note instead and offers only "+ new worktree", which still works.
 describe('NewSessionDialog host-scoped worktrees on a hub client', () => {
   const remote: HubStatus = {
     remote: true,
@@ -969,10 +973,6 @@ describe('NewSessionDialog host-scoped worktrees on a hub client', () => {
     restart_required: false,
     unavailable: null,
   };
-  const projectWithRemoteWt = {
-    ...project,
-    worktrees: [...project.worktrees, remoteMain],
-  };
   async function pickHost(alias: string) {
     const btn = Array.from(document.querySelectorAll('.host-pick')).find(
       (p) => (p as HTMLElement).dataset.alias === alias,
@@ -981,26 +981,47 @@ describe('NewSessionDialog host-scoped worktrees on a hub client', () => {
     await tick();
   }
 
-  it('does not call list_host_worktrees and lists the project tree’s rows for that host, with no error', async () => {
+  it('does not call list_host_worktrees, shows the neutral note naming the host, and no error line', async () => {
     mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
     hubStatus.set(remote);
-    render(NewSessionDialog, { props: { project: projectWithRemoteWt, onCreate: () => {}, onCancel: () => {} } });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
     await pickHost('mefistos');
-    expect(worktreeLabels()).toEqual(['main', '+ new worktree']);
+    expect(worktreeLabels()).toEqual(['+ new worktree']);
     const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'list_host_worktrees');
     expect(calls).toHaveLength(0);
+    const note = screen.getByTestId('wt-remote-unknown');
+    expect(note.textContent).toContain('mefistos');
+    // The neutral note is not the (red, error-only) `wt-status` line.
     expect(screen.queryByTestId('wt-status')).toBeNull();
   });
 
-  it('standalone is untouched: the ipc is still called', async () => {
+  it('"+ new worktree" is still selectable and Create still submits worktree_id: null / new_worktree', async () => {
+    hubStatus.set(remote);
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: okRow() });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('new');
+    await fireEvent.input(screen.getByTestId('new-worktree-name'), { target: { value: 'fix-login-bug' } });
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(spy).toHaveBeenCalledOnce();
+    expect(spy.mock.calls[0][0].host_alias).toBe('mefistos');
+    expect(spy.mock.calls[0][0].worktree_id).toBeNull();
+    expect(spy.mock.calls[0][0].new_worktree).toBe('fix-login-bug');
+    spy.mockRestore();
+  });
+
+  it('standalone is untouched: the ipc is still called and the neutral note never shows', async () => {
     mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
-    render(NewSessionDialog, { props: { project: projectWithRemoteWt, onCreate: () => {}, onCancel: () => {} } });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
     await pickHost('mefistos');
     await vi.waitFor(() => expect(worktreeLabels()).toEqual(['main', 'feat', '+ new worktree']));
     const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'list_host_worktrees');
     expect(calls).toHaveLength(1);
+    expect(screen.queryByTestId('wt-remote-unknown')).toBeNull();
   });
 });
 

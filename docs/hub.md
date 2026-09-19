@@ -863,6 +863,9 @@ the missing parameters, route it then.
 - **Projects and worktrees are not re-listed on reconnect**, because their
   list tools answer a different shape from their events. They refresh when
   the window regains focus.
+- **The New session dialog cannot list a remote host's existing worktrees**
+  on a hub client — `list_host_worktrees` is local-only and there is no
+  hub-side scanning tool yet. It can still create a new one on any host.
 - **Routed reads are not gated on contract skew.** `list_sessions`,
   `list_hosts`, `session_conversations`, repo reads and the focus-refresh path
   do not consult the connection state, so they still run against a hub whose
