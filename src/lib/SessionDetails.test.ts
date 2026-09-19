@@ -46,7 +46,7 @@ beforeEach(() => {
 describe('SessionDetails', () => {
   it('shows host alias from session', async () => {
     hosts.set([
-      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
     ]);
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
@@ -55,7 +55,7 @@ describe('SessionDetails', () => {
 
   it('shows account when host has one linked', async () => {
     hosts.set([
-      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: 'u1', provisioned: false },
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: 'u1', provisioned: false, transport: 'ssh' },
     ]);
     accounts.set([
       { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max', last_seen_at: 1, nickname: null, has_extra_usage: false },
@@ -69,7 +69,7 @@ describe('SessionDetails', () => {
 
   it('shows — when host has no account', async () => {
     hosts.set([
-      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
     ]);
     accounts.set([]);
     render(SessionDetails, { props: { session: sampleSession } });
@@ -81,7 +81,7 @@ describe('SessionDetails', () => {
     const source = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10, worktree_key: 'main' };
     const sibling = { ...sampleSession, id: 2, tmux_name: 'dev-sib', host_alias: 'mefistos', project_id: 1, worktree_id: 10, worktree_key: 'main' };
     hosts.set([
-      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
     ]);
     accounts.set([]);
     sessions.set([source, sibling]);
@@ -164,6 +164,7 @@ describe('SessionDetails', () => {
     const host = (alias: string, reachable: boolean, provisioned: boolean) => ({
       alias, ssh_alias: alias, reachable, claude_version: null, tmux_version: null,
       hidden: false, last_pinged_at: 1, account_uuid: null, provisioned,
+      transport: 'ssh' as const,
     });
     hosts.set([
       host('mefistos', true, true),

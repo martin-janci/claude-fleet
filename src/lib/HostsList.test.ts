@@ -64,4 +64,17 @@ describe('HostsList', () => {
     expect(offline).toHaveLength(1);
     expect(offline[0].closest('[data-testid="host-row"]')?.getAttribute('data-alias')).toBe('claude-fleet-htz');
   });
+
+  it('marks an agent-transport host and leaves ssh hosts unmarked', () => {
+    mount({ hosts: [...fleetHosts(), host('agent-box', { transport: 'agent' })] });
+    const marks = screen.getAllByTestId('host-transport-agent');
+    expect(marks).toHaveLength(1);
+    expect(marks[0].closest('[data-testid="host-row"]')?.getAttribute('data-alias')).toBe('agent-box');
+    // The default (ssh) hosts stay quiet — no marker on any of them.
+    for (const row of screen.getAllByTestId('host-row')) {
+      if (row.dataset.alias !== 'agent-box') {
+        expect(within(row).queryByTestId('host-transport-agent')).toBeNull();
+      }
+    }
+  });
 });

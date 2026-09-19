@@ -15,8 +15,8 @@ import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
   hosts.set([
-    { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
-    { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+    { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
+    { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
   ]);
   localStorage.clear();
 });
@@ -570,8 +570,8 @@ describe('NewSessionDialog — generated names', () => {
   it('remembered host is used only while it is visible and reachable, else last-host, else local', async () => {
     hosts.update((h) => [
       ...h,
-      { alias: 'hetzner', ssh_alias: 'hetzner', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
-      { alias: 'hidden-box', ssh_alias: 'hidden-box', reachable: true, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1, account_uuid: null, provisioned: false },
+      { alias: 'hetzner', ssh_alias: 'hetzner', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
+      { alias: 'hidden-box', ssh_alias: 'hidden-box', reachable: true, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
     ] as typeof h);
     const active = () => document.querySelector('.host-pick.active')?.getAttribute('data-alias');
     const open = async () => {
@@ -761,7 +761,7 @@ describe('NewSessionDialog host-scoped worktrees', () => {
   });
 
   it('a slow earlier scan cannot overwrite a later host', async () => {
-    hosts.update((h) => [...h, { alias: 'vps', ssh_alias: 'vps', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false }]);
+    hosts.update((h) => [...h, { alias: 'vps', ssh_alias: 'vps', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' }]);
     let resolveMef!: (v: unknown) => void;
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd !== 'list_host_worktrees') return null;

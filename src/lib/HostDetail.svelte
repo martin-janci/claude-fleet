@@ -148,6 +148,9 @@
       {#if host.ssh_alias}
         <dt>ssh</dt><dd data-testid="detail-ssh">{host.ssh_alias}</dd>
       {/if}
+      {#if host.transport === 'agent'}
+        <dt>transport</dt><dd class="transport-agent" data-testid="detail-transport">agent</dd>
+      {/if}
       <dt>last ping</dt>
       <dd data-testid="detail-ping">
         {host.last_pinged_at ? `${formatAge(now - host.last_pinged_at)} ago` : 'never'}
@@ -335,6 +338,7 @@
   }
   .facts dt { color: var(--fg-muted); }
   .facts dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .transport-agent { color: var(--accent); }
   .attention { margin: 0.4rem 0 0; color: var(--usage-warn); }
   .block { border-top: 1px solid var(--border); padding-top: 0.6rem; }
   .account-line { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.4rem; min-width: 0; }
