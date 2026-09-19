@@ -26,6 +26,9 @@ pub enum Command {
     /// Dial the hub and serve it, reconnecting for as long as this runs.
     Run(RunArgs),
     /// Write a systemd unit that runs the agent, then enable and start it.
+    /// Needs a Linux host with systemd already running; refuses cleanly,
+    /// before writing anything, otherwise — see `run` for how to run the
+    /// agent under your own supervisor instead.
     Install(InstallArgs),
     /// Is the service running, and is it connected to its hub?
     Status(StatusArgs),
