@@ -243,8 +243,8 @@ impl PairTransport for TcpPairTransport {
         let request = format!(
             "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
              Accept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            at.target,
-            at.authority,
+            at.target(),
+            at.authority(),
             body.len()
         );
         let raw = tokio::time::timeout(PAIR_TIMEOUT, super::remote::exchange(&at, &request))

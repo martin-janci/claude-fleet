@@ -29,6 +29,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 fleet-core = { path = "../crates/fleet-core" }
+# Directly, not through `fleet-core`: the loopback rule, the hub-URL parser
+# and the reconnect curve this app shares with `fleet-agent` and `fleet-hub`.
+# Already in the tree — `fleet-core` depends on it.
+fleet-proto = { path = "../crates/fleet-proto" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"

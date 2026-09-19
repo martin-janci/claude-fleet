@@ -832,24 +832,26 @@ fn a_real_read_error_is_not_swallowed_even_with_bytes_in_hand() {
 #[test]
 fn an_endpoint_splits_a_hub_url_into_what_a_hand_written_request_needs() {
     let at = Endpoint::parse("https://fleet.example.com/mcp").expect("a hub URL");
-    assert_eq!(at.host, "fleet.example.com");
-    assert_eq!(at.port, 443, "https defaults to 443");
-    assert!(at.tls);
+    assert_eq!(at.host(), "fleet.example.com");
+    assert_eq!(at.port(), 443, "https defaults to 443");
+    assert!(at.is_tls());
     assert_eq!(
-        at.authority, "fleet.example.com",
+        at.authority(),
+        "fleet.example.com",
         "no port in the Host header when it is the scheme's default — the \
          hub's allowlist is matched against exactly this string"
     );
-    assert_eq!(at.target, "/mcp");
+    assert_eq!(at.target(), "/mcp");
 
     let at = Endpoint::parse("http://hub.example.com:4180/fleet/events").expect("a hub URL");
-    assert_eq!(at.port, 4180);
-    assert!(!at.tls);
+    assert_eq!(at.port(), 4180);
+    assert!(!at.is_tls());
     assert_eq!(
-        at.authority, "hub.example.com:4180",
+        at.authority(),
+        "hub.example.com:4180",
         "a non-default port is"
     );
-    assert_eq!(at.target, "/fleet/events");
+    assert_eq!(at.target(), "/fleet/events");
 
     assert!(Endpoint::parse("ftp://hub.example.com").is_err());
     assert!(Endpoint::parse("not a url").is_err());
@@ -863,17 +865,19 @@ fn an_endpoint_splits_a_hub_url_into_what_a_hand_written_request_needs() {
 fn an_ipv6_literal_hub_connects_and_still_sends_a_bracketed_host_header() {
     let at = Endpoint::parse("https://[2001:db8::1]:8787/mcp").expect("an IPv6 hub URL");
     assert_eq!(
-        at.host, "2001:db8::1",
+        at.host(),
+        "2001:db8::1",
         "the connect and SNI name must be unbracketed"
     );
-    assert_eq!(at.port, 8787);
+    assert_eq!(at.port(), 8787);
     assert_eq!(
-        at.authority, "[2001:db8::1]:8787",
+        at.authority(),
+        "[2001:db8::1]:8787",
         "the Host header keeps the brackets"
     );
     // And the unbracketed form really is what rustls accepts as a name.
     assert!(
-        tokio_rustls::rustls::pki_types::ServerName::try_from(at.host.clone()).is_ok(),
+        tokio_rustls::rustls::pki_types::ServerName::try_from(at.host().to_string()).is_ok(),
         "an IP literal is matched against an IP SAN"
     );
     assert!(
@@ -882,8 +886,8 @@ fn an_ipv6_literal_hub_connects_and_still_sends_a_bracketed_host_header() {
     );
     // Loopback too, since that is the tunnelled setup docs/hub.md describes.
     let at = Endpoint::parse("http://[::1]:8787/events").expect("a loopback IPv6 hub URL");
-    assert_eq!(at.host, "::1");
-    assert_eq!(at.authority, "[::1]:8787");
+    assert_eq!(at.host(), "::1");
+    assert_eq!(at.authority(), "[::1]:8787");
 }
 
 // --- chunked framing ---------------------------------------------------------

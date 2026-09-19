@@ -679,6 +679,7 @@ dependencies = [
  "async-trait",
  "directories",
  "fleet-core",
+ "fleet-proto",
  "libc",
  "portable-pty",
  "rustls-native-certs",

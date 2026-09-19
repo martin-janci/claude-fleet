@@ -1004,61 +1004,57 @@ async fn tls_connector() -> Result<&'static tokio_rustls::TlsConnector, String> 
 /// needs. One implementation for every request this app makes — `POST /mcp`
 /// and the `GET /events` stream alike — so a fix to the parsing cannot land
 /// in one and not the other.
+///
+/// The parsing itself is [`fleet_proto::net::Endpoint`]'s, shared with
+/// `fleet-agent` and `fleet-hub`. What stays here is this transport's own
+/// policy — a WebSocket URL is not a hub address for a request this app
+/// writes by hand — and the request-line target that policy needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
-    /// The host to connect to and to check the certificate against.
-    /// **Unbracketed**, so an IPv6 literal works: `url::Url::host_str` returns
-    /// `[::1]` with the brackets, which neither resolves nor parses as a
-    /// `ServerName`, and an IPv6 hub was simply unreachable before this.
-    pub host: String,
-    pub port: u16,
-    pub tls: bool,
-    /// What the `Host` header must carry. Here the brackets are REQUIRED
-    /// (`[::1]:8787`), and the port is part of it unless it is the scheme's
-    /// default — the hub's allowlist is matched against exactly this string.
-    pub authority: String,
-    /// Path plus query, ready to go on the request line.
-    pub target: String,
+    at: fleet_proto::net::Endpoint,
 }
 
 impl Endpoint {
-    /// Parse a hub URL. `extra_path` is appended to whatever path prefix the
-    /// base URL already carries (`/mcp`, `/events`), and `query` goes on as
-    /// given, without a leading `?`.
+    /// Parse a hub URL: scheme, authority and a path prefix, with `/mcp`,
+    /// `/events` or `/pair` already appended by the caller.
     pub fn parse(url: &str) -> Result<Self, String> {
-        let parsed = url::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
-        let tls = match parsed.scheme() {
-            "https" => true,
-            "http" => false,
-            other => return Err(format!("{other}:// is not a hub address")),
-        };
-        let host = match parsed.host() {
-            // `to_string` on the address itself, NOT `host_str`, which keeps
-            // the URL's brackets.
-            Some(url::Host::Ipv6(v6)) => v6.to_string(),
-            Some(url::Host::Ipv4(v4)) => v4.to_string(),
-            Some(url::Host::Domain(d)) => d.to_string(),
-            None => return Err("no host in the hub URL".to_string()),
-        };
-        let port = parsed
-            .port_or_known_default()
-            .unwrap_or(if tls { 443 } else { 80 });
-        let bracketed = parsed.host_str().unwrap_or(&host);
-        let authority = match parsed.port() {
-            Some(p) => format!("{bracketed}:{p}"),
-            None => bracketed.to_string(),
-        };
-        let target = match parsed.query() {
-            Some(q) => format!("{}?{}", parsed.path(), q),
-            None => parsed.path().to_string(),
-        };
-        Ok(Self {
-            host,
-            port,
-            tls,
-            authority,
-            target,
-        })
+        let at = fleet_proto::net::Endpoint::parse(url).map_err(|e| format!("{url}: {e}"))?;
+        if at.scheme().is_websocket() {
+            // The agent dials a WebSocket; everything this app sends is HTTP
+            // it writes itself.
+            return Err(format!("{}:// is not a hub address", at.scheme()));
+        }
+        Ok(Self { at })
+    }
+
+    /// The host to connect to and to check the certificate against.
+    /// **Unbracketed**, so an IPv6 literal works: the bracketed `[::1]`
+    /// neither resolves nor parses as a `ServerName`, and an IPv6 hub was
+    /// simply unreachable before that was fixed.
+    pub fn host(&self) -> &str {
+        self.at.host()
+    }
+
+    pub fn port(&self) -> u16 {
+        self.at.port()
+    }
+
+    pub fn is_tls(&self) -> bool {
+        self.at.is_tls()
+    }
+
+    /// What the `Host` header must carry. Here the brackets are REQUIRED
+    /// (`[::1]:8787`), and the port is part of it unless it is the scheme's
+    /// default — the hub's allowlist is matched against exactly this string.
+    pub fn authority(&self) -> &str {
+        self.at.authority()
+    }
+
+    /// The path, ready to go on the request line. A query would have been
+    /// refused by the parser: this value is built by concatenation
+    /// (`{base_url}/mcp`), which a query silently breaks.
+    pub fn target(&self) -> String {
+        self.at.request_target()
     }
 }
 
@@ -1074,25 +1070,25 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> Duplex for 
 /// Connect to `at`, wrapping in TLS when it says so. The one place a socket
 /// to a hub is opened.
 pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
-    let tcp = tokio::net::TcpStream::connect((at.host.as_str(), at.port))
+    let tcp = tokio::net::TcpStream::connect((at.host(), at.port()))
         .await
-        .map_err(|e| format!("connect {}:{}: {e}", at.host, at.port))?;
-    if !at.tls {
+        .map_err(|e| format!("connect {}:{}: {e}", at.host(), at.port()))?;
+    if !at.is_tls() {
         return Ok(Box::new(tcp));
     }
     let connector = tls_connector().await?;
     // The name the certificate is checked against. An IP literal is accepted
     // by `ServerName` and matched as an IP SAN, which is what a hub reached
     // at `https://10.0.0.5` needs.
-    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(at.host.clone())
-        .map_err(|e| format!("{} is not a valid certificate name: {e}", at.host))?;
+    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(at.host().to_string())
+        .map_err(|e| format!("{} is not a valid certificate name: {e}", at.host()))?;
     let stream = connector
         .connect(server_name, tcp)
         .await
         // The usual causes are an expired or self-signed certificate and a
         // name that does not match; rustls says which, and the operator needs
         // to hear it verbatim.
-        .map_err(|e| format!("TLS handshake with {}:{} failed: {e}", at.host, at.port))?;
+        .map_err(|e| format!("TLS handshake with {}:{} failed: {e}", at.host(), at.port()))?;
     Ok(Box::new(stream))
 }
 
@@ -1120,8 +1116,8 @@ impl HubTransport for TcpTransport {
             "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
              Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            at.target,
-            at.authority,
+            at.target(),
+            at.authority(),
             body.len()
         );
         let raw = tokio::time::timeout(CALL_TIMEOUT, exchange(&at, &request))
@@ -1135,7 +1131,7 @@ impl HubTransport for TcpTransport {
 /// the body may be chunked and only [`split_response`] may decode it.
 pub(crate) async fn exchange(at: &Endpoint, request: &str) -> Result<Vec<u8>, String> {
     let conn = connect(at).await?;
-    speak(conn, &at.host, at.port, request).await
+    speak(conn, at.host(), at.port(), request).await
 }
 
 /// Write `request` and read until the peer closes. Generic over the stream so
