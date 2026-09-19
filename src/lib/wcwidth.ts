@@ -19,14 +19,20 @@
  * (U+1160–U+11FF) are zero width because they combine with the preceding
  * leading consonant, and U+00AD SOFT HYPHEN stays width 1.
  *
- * Deliberately per-code-point, like xterm and tmux — no grapheme clustering:
- *   - U+FE0F VS16 is width 0 and does NOT promote its base to width 2, so
- *     `❤️` (U+2764 U+FE0F) stays one cell even though it draws as an emoji.
- *   - Skin-tone modifiers (U+1F3FB–U+1F3FF) and the parts of a ZWJ sequence
- *     are each wide on their own, so `👋🏽` and `👨‍👩‍👧` occupy one pair per
- *     component rather than one pair for the cluster.
- * That matches what the remote tmux assumed when it laid the line out, which
- * is what keeps our columns aligned with its.
+ * These are widths of single code points. Joining them into clusters is the
+ * screen buffer's job (`Screen.combine` in `ansi.ts`), which follows tmux
+ * 3.6a's `screen_write_combine` so our columns stay aligned with the columns
+ * tmux addresses when it repaints or updates a pane:
+ *   - U+FE0F VS16 is width 0 here, but it widens a narrow base to two cells
+ *     (`❤️` U+2764 U+FE0F is a pair; tmux's `variation-selector-always-wide`
+ *     is on by default). At the right edge the base stays one cell.
+ *   - After a glyph ending in U+200D ZWJ any non-ASCII code point joins it
+ *     without changing its width, so `👨‍👩‍👧` is one pair.
+ *   - A skin-tone modifier (U+1F3FB–U+1F3FF) joins a base from tmux's own
+ *     table (`👋🏽` is one pair), and a regional indicator joins another one
+ *     (a flag, widened to a pair).
+ * Outside those joins each code point keeps the width below: a modifier or
+ * a lone regional indicator after anything else stands on its own.
  *
  * Ranges are stored as flat `[lo, hi, lo, hi, …]` arrays (inclusive) and
  * looked up with a binary search. Both tables are sorted and non-overlapping;

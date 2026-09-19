@@ -1064,6 +1064,11 @@ fn a_refusal_never_carries_the_token() {
 /// - `dismiss_agent_session` said "the hub exposes no tool for it" while the
 ///   routed `kill_session` dismisses an inactive agent exactly as it does.
 ///
+/// The four layer commands merged from main are held to the same standard:
+/// the hub grew a tool for each, three of them read-only, and
+/// `set_host_layers` is master-only — which is the real reason THAT one
+/// refuses, the same shape as `apply_sync` and `set_secret`.
+///
 /// Read from source, like `every_command_has_a_verdict`, because a
 /// `#[tauri::command]` cannot be called without a live `tauri::App`.
 #[test]
@@ -1095,6 +1100,10 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
         ("catalog_plan_sync", "plan_sync"),
         ("catalog_apply_sync", "apply_sync"),
         ("catalog_set_secret", "set_secret"),
+        ("catalog_list_layers", "list_layers"),
+        ("catalog_resolve_preview", "resolve_preview"),
+        ("catalog_propose_layers", "propose_layers"),
+        ("catalog_set_host_layers", "set_host_layers"),
     ] {
         let said = reason("commands/assets.rs", command);
         for d in DENIALS {
@@ -1108,8 +1117,12 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
             "{command} must name the hub's {tool}: {said}"
         );
     }
-    // The two the hub keeps for its master: THAT is why they refuse.
-    for command in ["catalog_apply_sync", "catalog_set_secret"] {
+    // The three the hub keeps for its master: THAT is why they refuse.
+    for command in [
+        "catalog_apply_sync",
+        "catalog_set_secret",
+        "catalog_set_host_layers",
+    ] {
         let said = reason("commands/assets.rs", command);
         assert!(said.contains("master"), "{command}: {said}");
     }

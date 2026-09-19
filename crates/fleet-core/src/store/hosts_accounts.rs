@@ -352,6 +352,12 @@ impl Store {
             "DELETE FROM sessions WHERE host_alias=?1",
             rusqlite::params![alias],
         )?;
+        // Its layer assignment (migration 033) is FK-enforced against
+        // hosts(alias) like sessions, so it too must go before the hosts row.
+        tx.execute(
+            "DELETE FROM host_layers WHERE host_alias=?1",
+            rusqlite::params![alias],
+        )?;
         tx.execute("DELETE FROM hosts WHERE alias=?1", rusqlite::params![alias])?;
         // A removed host's control-API token must stop authenticating.
         tx.execute(
@@ -580,6 +586,35 @@ mod tests {
         let left = s.usage_daily_since(0, None).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].1, "k");
+    }
+
+    /// `host_layers.host_alias` is FK-enforced against `hosts(alias)`
+    /// (migration 033) with no `ON DELETE` clause, so a host carrying a
+    /// layer assignment must have its `host_layers` rows cleaned up before
+    /// the `hosts` row goes, or `DELETE FROM hosts` trips the constraint.
+    #[test]
+    fn delete_host_removes_its_layer_assignment() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.set_host_layers("h", Some("workstation"), &["papayapos"])
+            .unwrap();
+        assert_eq!(s.get_host_layers("h").unwrap().len(), 2);
+
+        s.delete_host("h").unwrap();
+
+        assert_eq!(
+            s.list_hosts()
+                .unwrap()
+                .iter()
+                .filter(|x| x.alias == "h")
+                .count(),
+            0
+        );
+        assert!(s.get_host_layers("h").unwrap().is_empty());
+        assert!(
+            s.list_all_host_layers().unwrap().is_empty(),
+            "no host_layers row should survive the host it belonged to"
+        );
     }
 
     #[test]

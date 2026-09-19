@@ -14,17 +14,21 @@
  *
  * Text is handled per Unicode code point (not UTF-16 unit): astral emoji are
  * one glyph, East Asian Wide / emoji glyphs occupy two cells (head + a
- * reserved `''` trailing cell, see `wcwidth.ts`), and combining marks attach
- * to the preceding cell.
+ * reserved `''` trailing cell, see `wcwidth.ts`), and combining marks, VS16,
+ * ZWJ sequences, skin-tone modifiers and flags join the glyph before the
+ * cursor exactly as tmux 3.6a joins them (see `Screen.combine`).
  */
 
 import { wcwidth, firstCharWidth } from './wcwidth';
 
 export interface Cell {
-  /** One grapheme: a base code point plus any combining marks / variation
-   *  selectors that followed it. The empty string marks the trailing half of
-   *  a wide (2-column) glyph whose head is the cell to the left; the pair is
-   *  kept consistent by every write/erase/insert/delete operation. */
+  /** One grapheme: a base code point plus whatever tmux joined onto it
+   *  (combining marks, variation selectors, the rest of a ZWJ sequence, a
+   *  skin-tone modifier, a second regional indicator). The empty string marks
+   *  the trailing half of a wide (2-column) glyph whose head is the cell to
+   *  the left; the pair is kept consistent by every write/erase/insert/delete
+   *  operation. A head is recognised by that trailing cell, not by the width
+   *  of its first code point — VS16 can widen a narrow base. */
   ch: string;
   fg: number;
   bg: number;
@@ -37,6 +41,10 @@ export const ATTR_DIM = 1 << 1;
 export const ATTR_ITALIC = 1 << 2;
 export const ATTR_UNDERLINE = 1 << 3;
 export const ATTR_REVERSE = 1 << 4;
+/** SGR 8 (concealed): drawn transparent, still selectable. */
+export const ATTR_HIDDEN = 1 << 5;
+/** SGR 9 (crossed-out). */
+export const ATTR_STRIKE = 1 << 6;
 
 /** Sentinel "default" color. Distinct from any 256-color or RGB value. */
 export const COLOR_DEFAULT = -1;
@@ -101,10 +109,13 @@ const DEC_SPECIAL_GRAPHICS: { [k: string]: string } = {
   '_': ' ',  // NBSP in spec; plain space renders the same in our DOM
   '`': '◆',
   'a': '▒',
-  'b': '\t',
-  'c': '\f',
-  'd': '\r',
-  'e': '\n',
+  // b-e are the VT100 control *pictures* (as tmux and xterm draw them), never
+  // the raw TAB/FF/CR/LF — a cell must not hold a control char, or the
+  // `white-space: pre` row span breaks onto two lines.
+  'b': '␉',
+  'c': '␌',
+  'd': '␍',
+  'e': '␊',
   'f': '°',
   'g': '±',
   'h': '␤',
@@ -139,6 +150,7 @@ function emptyCell(): Cell {
 /** Snapshot of the primary buffer kept while the alt screen is active. */
 interface SavedScreenState {
   cells: Cell[][];
+  wrapped: boolean[];
   cursorRow: number;
   cursorCol: number;
   curFg: number;
@@ -164,19 +176,20 @@ export class Screen {
   cursorRow = 0;
   cursorCol = 0;
   /** Cursor visibility (DECSET ?25). Visible by default per the VT spec;
-   *  tmux/claude toggle it with ?25h / ?25l around redraws. */
-  cursorVisible = true;
+   *  tmux/claude toggle it with ?25h / ?25l around redraws. Mode fields
+   *  like this one get their power-on value from `resetModes()`. */
+  cursorVisible!: boolean;
   /** Bracketed-paste mode (DECSET ?2004). When on, the host app (e.g. Claude
    *  Code) wants pasted text wrapped in ESC[200~ … ESC[201~ so multi-line
    *  pastes aren't treated as typed input. The component reads this to decide
    *  whether to frame a paste. */
-  bracketedPaste = false;
+  bracketedPaste!: boolean;
   /** Application cursor keys (DECSET ?1). When on, arrows/Home/End are sent
    *  as SS3 (`ESC O A`) instead of CSI (`ESC [ A`). Read by the key mapper. */
-  appCursorKeys = false;
+  appCursorKeys!: boolean;
   /** Cursor style requested via DECSCUSR (`CSI Ps SP q`), stored only:
    *  0/1 blinking block, 2 steady block, 3/4 underline, 5/6 bar. */
-  cursorStyle = 0;
+  cursorStyle!: number;
   /** Bytes the terminal owes the host in answer to a query (DSR, DA). The
    *  parser has no back-channel of its own; the component drains this after
    *  every `write()` and forwards it to the PTY. */
@@ -200,8 +213,8 @@ export class Screen {
   /** Last printed glyph + its width, for REP (`CSI Ps b`). */
   private lastGlyph: { ch: string; width: 1 | 2 } | null = null;
   /** Saved cursor (ESC 7 / DECSC). */
-  private savedRow = 0;
-  private savedCol = 0;
+  private savedRow!: number;
+  private savedCol!: number;
   /** Whether G0 / G1 are currently designated as DEC Special Graphics.
    *  Default: both ASCII. tmux flips G0 around box drawing. */
   private g0Graphics = false;
@@ -227,6 +240,24 @@ export class Screen {
    *  rebuild into O(changed rows). */
   rowVersion: number[] = [];
   private dirtyClock = 0;
+  /** Per-row soft wrap: `wrapped[r]` is true when row r ended because the
+   *  cursor auto-wrapped off its last column (tmux leaves long lines to the
+   *  terminal's autowrap), so `selectionText` joins it to the next row with
+   *  no newline. Set when the deferred wrap fires; moved with the rows by
+   *  every scroll / IL / DL, kept with the primary buffer across the alt
+   *  screen; cleared by an erase that reaches the last column, RIS, a width
+   *  change, on a row whose continuation was moved away, and when the row is
+   *  covered from column 0 through its last column (tmux's repaint of a row
+   *  it holds unwrapped: glyphs, ECH / EL1 for never-written cells, then a
+   *  cursor move; the autowrap re-sets the flag if the repaint goes on). A
+   *  partial update — cells at either end, reached with a cursor move —
+   *  keeps it, as tmux does. See `cover`. */
+  wrapped: boolean[] = [];
+  /** The row (-1: none) whose cells [0, coverEnd) have been written since
+   *  coverage last started on it — by glyphs, ECH or EL1 / ED1 — with no gap.
+   *  Reset whenever rows move, so it never outlives the row it describes. */
+  private coverRow = -1;
+  private coverEnd = 0;
 
   // ─── Mouse mode state (DECSET/DECRST) ────────────────────────────────
   // These track which mouse-reporting modes the host app (tmux) has
@@ -243,10 +274,10 @@ export class Screen {
   //   mouseButtonMotion  — 1002 || 1003
   //   mouseAnyMotion     — 1003
   //   mouseSgr           — 1006
-  private _mouse1000 = false;
-  private _mouse1002 = false;
-  private _mouse1003 = false;
-  private _mouse1006 = false;
+  private _mouse1000!: boolean;
+  private _mouse1002!: boolean;
+  private _mouse1003!: boolean;
+  private _mouse1006!: boolean;
 
   get mouseEnabled(): boolean { return this._mouse1000 || this._mouse1002 || this._mouse1003; }
   get mouseButtonMotion(): boolean { return this._mouse1002 || this._mouse1003; }
@@ -261,10 +292,28 @@ export class Screen {
     this.rows = Math.max(1, rows);
     this.cols = Math.max(1, cols);
     this.cells = makeGrid(this.rows, this.cols);
+    this.wrapped = new Array(this.rows).fill(false);
     this.scrollTop = 0;
     this.scrollBottom = this.rows - 1;
     this.rowVersion = new Array(this.rows);
     this.markAll();
+    this.resetModes();
+  }
+
+  /** Power-on values of the terminal modes and the DECSC slot. Shared by the
+   *  constructor and RIS (`ESC c`) so a reset can never leave a mode — mouse
+   *  reporting, bracketed paste, a hidden cursor — that a fresh Screen lacks. */
+  private resetModes(): void {
+    this.cursorVisible = true;
+    this.bracketedPaste = false;
+    this.appCursorKeys = false;
+    this.cursorStyle = 0;
+    this._mouse1000 = false;
+    this._mouse1002 = false;
+    this._mouse1003 = false;
+    this._mouse1006 = false;
+    this.savedRow = 0;
+    this.savedCol = 0;
   }
 
   /** Mark a single row changed. */
@@ -291,9 +340,15 @@ export class Screen {
     cols = Math.max(1, cols);
     if (rows === this.rows && cols === this.cols) return;
     this.cells = resizeGrid(this.cells, this.rows, this.cols, rows, cols);
+    // Rows that survive a height change keep their flags; a width change
+    // moves the wrap column, so no row ends in a wrap any more.
+    const keepWraps = cols === this.cols;
+    this.wrapped = resizeWraps(this.wrapped, rows, keepWraps);
+    this.coverRow = -1;
     if (this.savedScreen !== null) {
       const saved = this.savedScreen;
       saved.cells = resizeGrid(saved.cells, this.rows, this.cols, rows, cols);
+      saved.wrapped = resizeWraps(saved.wrapped, rows, keepWraps);
       if (saved.cursorRow >= rows) saved.cursorRow = rows - 1;
       if (saved.cursorCol >= cols) saved.cursorCol = cols - 1;
     }
@@ -413,27 +468,67 @@ export class Screen {
       const ch = cp === 0xfffd ? '�' : s.substr(i, len);
       i += len;
       const width = wcwidth(cp);
-      if (width === 0) {
-        this.combine(ch);
-        continue;
-      }
+      // Joined onto the glyph before the cursor — or zero-width with nothing
+      // to join, and dropped.
+      if (this.combine(cp, ch, width) || width === 0) continue;
       // Printable: write at cursor, advance. Wrap to next row if past edge.
       this.putChar(ch, width);
     }
   }
 
-  /** Attach a zero-width code point (combining mark, ZWJ, variation
-   *  selector, …) to the glyph before the cursor. With nothing before the
-   *  cursor on this row it is dropped — there is no base to combine with. */
-  private combine(mark: string): void {
-    let c = Math.min(this.cursorCol, this.cols) - 1;
-    if (c < 0) return;
+  /** Join code point `cp` onto the glyph that ends at the cursor, following
+   *  tmux 3.6a's `screen_write_combine`: tmux addresses later columns assuming
+   *  the terminal joined exactly what it joined.
+   *    - A zero-width code point (combining mark, ZWJ, VS16, …) joins; VS16
+   *      also widens a narrow base into a pair.
+   *    - Any other non-ASCII code point joins a glyph ending in ZWJ (keeping
+   *      its width), or joins as a skin-tone modifier / regional indicator
+   *      partner (`shouldCombine`), widening a narrow base.
+   *  The glyph must end exactly at the cursor — a narrow cell just left of
+   *  it, or a pair whose trailing half is — so a join never reaches across a
+   *  cursor move. ASCII never joins, nothing joins at column 0, and a cell
+   *  stops growing at tmux's 32 UTF-8 bytes. Returns true when `ch` was
+   *  consumed: joined, or zero-width with nothing to join (dropped). */
+  private combine(cp: number, ch: string, width: 0 | 1 | 2): boolean {
+    const zeroWidth = width === 0;
+    if (cp < 0x80 || this.cursorCol === 0) return zeroWidth;
     const row = this.cells[this.cursorRow];
-    // The cell left of the cursor may be the trailing half of a wide glyph.
-    if (row[c].ch === '' && c > 0) c--;
-    if (row[c].ch === '') return;
-    row[c].ch += mark;
+    // The cell left of the cursor (a deferred-wrap cursor sits at `cols`, so
+    // that is the last column) may be the trailing half of a pair.
+    let c = this.cursorCol - 1;
+    let n = 1;
+    if (c > 0 && row[c].ch === '') {
+      c--;
+      n = 2;
+    }
+    const base = row[c];
+    if (base.ch === '' || n !== (isHead(row, c) ? 2 : 1)) return zeroWidth;
+    let widen = cp === 0xfe0f;
+    if (!zeroWidth) {
+      const first = base.ch.codePointAt(0)!;
+      if (shouldCombine(first, cp) || shouldCombine(cp, first)) widen = true;
+      else if (!base.ch.endsWith('\u200d')) return false;
+    }
+    if (utf8Length(base.ch) + utf8Length(ch) > CELL_UTF8_MAX) return zeroWidth;
+    base.ch += ch;
     this.markRow(this.cursorRow);
+    if (!widen || n === 2) return true;
+    if (c + 1 < this.cols) {
+      // The cell right of the base becomes its trailing half.
+      this.breakPairAt(row, c + 1);
+      const tail = row[c + 1];
+      tail.ch = '';
+      tail.fg = base.fg;
+      tail.bg = base.bg;
+      tail.attrs = base.attrs;
+      this.cursorCol = c + 2;
+      this.cover(this.cursorRow, c, c + 2);
+    } else {
+      // No room at the right edge: the base stays one cell and the cursor
+      // moves back onto it, so the next glyph replaces it (as in tmux).
+      this.cursorCol = c;
+    }
+    return true;
   }
 
   /** Write a glyph at the cursor with the current SGR state and advance by
@@ -451,10 +546,12 @@ export class Screen {
       width = 1;
     }
     if (this.cursorCol >= this.cols) {
+      this.wrapped[this.cursorRow] = true;
       this.cursorCol = 0;
       this.lineFeed();
     } else if (width === 2 && this.cursorCol === this.cols - 1) {
       this.blankCell(this.cursorRow, this.cursorCol);
+      this.wrapped[this.cursorRow] = true;
       this.cursorCol = 0;
       this.lineFeed();
     }
@@ -479,6 +576,29 @@ export class Screen {
     this.lastGlyph = { ch: mapped, width };
     this.markRow(this.cursorRow);
     this.cursorCol += width;
+    this.cover(this.cursorRow, c, c + width);
+  }
+
+  /** Note that cells [from, to) of row `r` were just written. Coverage starts
+   *  at column 0 and grows by any write that starts at or before its end; a
+   *  cursor move (CUF, CUP) never extends it, because tmux reaches the cells
+   *  it keeps with one. Once the row is covered through its last column it
+   *  has been repainted whole: the row ends here, unless the deferred wrap
+   *  fires on the next glyph (see `wrapped`). */
+  private endCoverage(): void {
+    // Coverage names a row INDEX. Any splice moves other content under that
+    // index, so a later write must not be read as continuing the old row.
+    this.coverRow = -1;
+    this.coverEnd = 0;
+  }
+
+  private cover(r: number, from: number, to: number): void {
+    if (r === this.coverRow && from <= this.coverEnd) this.coverEnd = Math.max(this.coverEnd, to);
+    else if (from === 0) {
+      this.coverRow = r;
+      this.coverEnd = to;
+    } else return;
+    if (this.coverEnd >= this.cols) this.wrapped[r] = false;
   }
 
   /** Before overwriting, deleting or shifting `row[c]`: if it is one half of
@@ -489,7 +609,7 @@ export class Screen {
     if (cell.ch === '') {
       if (c > 0) row[c - 1].ch = ' ';
       cell.ch = ' ';
-    } else if (firstCharWidth(cell.ch) === 2 && c + 1 < row.length && row[c + 1].ch === '') {
+    } else if (isHead(row, c)) {
       row[c + 1].ch = ' ';
       cell.ch = ' ';
     }
@@ -515,7 +635,11 @@ export class Screen {
       // shifts up by one. After the removal the array is one shorter, so
       // inserting at `scrollBottom` lands the blank on the region's last row.
       this.cells.splice(this.scrollTop, 1);
-      this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
+      this.cells.splice(this.scrollBottom, 0, this.blankRow());
+      this.wrapped.splice(this.scrollTop, 1);
+      this.wrapped.splice(this.scrollBottom, 0, false);
+      this.coverRow = -1;
+      this.unwrap(this.scrollTop - 1);
       this.markRows(this.scrollTop, this.scrollBottom);
     } else if (this.cursorRow < this.rows - 1) {
       this.cursorRow++;
@@ -530,7 +654,12 @@ export class Screen {
       // to scrollBottom shifts down. Inserting at `scrollTop` puts the blank
       // on the region's first row.
       this.cells.splice(this.scrollBottom, 1);
-      this.cells.splice(this.scrollTop, 0, makeRow(this.cols));
+      this.cells.splice(this.scrollTop, 0, this.blankRow());
+      this.wrapped.splice(this.scrollBottom, 1);
+      this.wrapped.splice(this.scrollTop, 0, false);
+      this.coverRow = -1;
+      this.unwrap(this.scrollTop - 1);
+      this.unwrap(this.scrollBottom);
       this.markRows(this.scrollTop, this.scrollBottom);
     } else if (this.cursorRow > 0) {
       this.cursorRow--;
@@ -548,8 +677,13 @@ export class Screen {
     // Batched: one splice removes the top `n` rows of the region, one more
     // inserts `n` blanks at the bottom — vs `n` individual splice pairs.
     this.cells.splice(this.scrollTop, n);
-    const blanks = Array.from({ length: n }, () => makeRow(this.cols));
+    const blanks = Array.from({ length: n }, () => this.blankRow());
     this.cells.splice(this.scrollBottom - n + 1, 0, ...blanks);
+    this.wrapped.splice(this.scrollTop, n);
+    this.wrapped.splice(this.scrollBottom - n + 1, 0, ...new Array<boolean>(n).fill(false));
+    this.endCoverage();
+    this.coverRow = -1;
+    this.unwrap(this.scrollTop - 1);
     this.markRows(this.scrollTop, this.scrollBottom);
   }
 
@@ -559,9 +693,21 @@ export class Screen {
     n = Math.min(n, this.scrollBottom - this.scrollTop + 1);
     if (n <= 0) return;
     this.cells.splice(this.scrollBottom - n + 1, n);
-    const blanks = Array.from({ length: n }, () => makeRow(this.cols));
+    const blanks = Array.from({ length: n }, () => this.blankRow());
     this.cells.splice(this.scrollTop, 0, ...blanks);
+    this.wrapped.splice(this.scrollBottom - n + 1, n);
+    this.wrapped.splice(this.scrollTop, 0, ...new Array<boolean>(n).fill(false));
+    this.endCoverage();
+    this.coverRow = -1;
+    this.unwrap(this.scrollTop - 1);
+    this.unwrap(this.scrollBottom);
     this.markRows(this.scrollTop, this.scrollBottom);
+  }
+
+  /** Clear row `r`'s soft-wrap flag (no-op outside the screen): the row
+   *  after it is no longer its continuation. */
+  private unwrap(r: number): void {
+    if (r >= 0 && r < this.rows) this.wrapped[r] = false;
   }
 
   /** Bytes of parser state carried between writes (`pending` + a buffered
@@ -714,7 +860,11 @@ export class Screen {
     const b64 = parts[1];
     if (!b64 || b64 === '?') return; // '?' is a query, not a set
     try {
-      const text = atob(b64);
+      // atob yields one char per byte; the payload is UTF-8, so decode the
+      // bytes (invalid sequences become U+FFFD) or 'čšá' / emoji arrive as
+      // mojibake.
+      const bin = atob(b64);
+      const text = UTF8.decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
       if (this.onClipboard) this.onClipboard(text);
     } catch {
       // Invalid base64 — ignore
@@ -723,6 +873,8 @@ export class Screen {
 
   private fullReset(): void {
     this.cells = makeGrid(this.rows, this.cols);
+    this.wrapped = new Array(this.rows).fill(false);
+    this.coverRow = -1;
     this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
@@ -734,8 +886,7 @@ export class Screen {
     this.useG1 = false;
     this.scrollTop = 0;
     this.scrollBottom = this.rows - 1;
-    this.appCursorKeys = false;
-    this.cursorStyle = 0;
+    this.resetModes();
     this.lastGlyph = null;
     // ESC c is a full power-on reset — drop any alt-screen snapshot so
     // we don't pop back into stale content the next time we leave alt.
@@ -743,16 +894,26 @@ export class Screen {
   }
 
   private applyCsi(body: string, final: string): void {
-    // Strip a leading '?' / '>' / '=' / '!' private marker. Remember which
-    // one: `?` selects DEC private modes and DECXCPR, `>` selects secondary
-    // DA / xterm resource requests; the rest we only need to not misparse.
+    // Strip a leading private marker: any ECMA-48 private parameter byte
+    // 0x3C-0x3F ('<' '=' '>' '?') or '!'. Remember which one: `?` selects DEC
+    // private modes and DECXCPR, `>` selects secondary DA / xterm resource
+    // requests; the rest (kitty's `<u`, an echoed `<b;x;yM` mouse report) we
+    // only need to not misparse.
     let isPrivate = false;
     let marker = '';
-    if (body.length > 0 && (body[0] === '?' || body[0] === '>' || body[0] === '!' || body[0] === '=')) {
+    const c0 = body.charCodeAt(0);
+    if ((c0 >= 0x3c && c0 <= 0x3f) || c0 === 0x21) {
       isPrivate = true;
       marker = body[0];
       body = body.slice(1);
     }
+    // A private byte anywhere else (`CSI 1 > u`) is malformed. tmux drops the
+    // whole sequence; so do we — parseInt would read `1>` as 1 and run it.
+    if (/[<=>?]/.test(body)) return;
+    // The cursor-motion and erase finals have no private meaning we model, so
+    // a private form must not move or erase — except `? J` / `? K` (DECSED /
+    // DECSEL, selective erase), which we approximate as plain ED / EL.
+    if (isPrivate && 'ABCDEFGHfdJK'.includes(final) && !(marker === '?' && (final === 'J' || final === 'K'))) return;
     // Intermediates (0x20–0x2f, e.g. the SP in DECSCUSR `CSI 2 SP q`) sit
     // between the params and the final byte; parseInt stops at them.
     const params = body.length === 0 ? [] : body.split(';').map((x) => (x === '' ? 0 : parseInt(x, 10) || 0));
@@ -822,12 +983,16 @@ export class Screen {
         // A private `?...r` is XTRESTORE (restore DEC private modes), NOT
         // DECSTBM — ignore it so we don't clobber the scroll region.
         if (isPrivate) return;
-        const top = p0 ? p0 - 1 : 0;
-        const bottom = p1 ? p1 - 1 : this.rows - 1;
-        // Valid only if both margins are in range and top is strictly above
-        // bottom; otherwise xterm ignores the request and leaves the region
-        // unchanged.
-        if (top >= 0 && bottom < this.rows && top < bottom) {
+        // Margins past the last row are clamped to it, as tmux 3.6a and xterm
+        // do: tmux sends `CSI 1;<its client rows> r` on every redraw, and a
+        // Screen briefly shorter than that must still get the full region
+        // back instead of keeping a stale partial one. The request is ignored
+        // (region unchanged) when top is negative (`-` survives the scanner,
+        // and tmux rejects it) or not strictly above bottom — a negative
+        // bottom falls into the latter.
+        const top = Math.min(p0 ? p0 - 1 : 0, this.rows - 1);
+        const bottom = Math.min(p1 ? p1 - 1 : this.rows - 1, this.rows - 1);
+        if (top >= 0 && top < bottom) {
           this.scrollTop = top;
           this.scrollBottom = bottom;
           // DECSTBM homes the cursor (origin mode off → screen home).
@@ -846,7 +1011,7 @@ export class Screen {
         this.restoreCursor();
         return;
       case 'm': // SGR - select graphic rendition
-        if (!isPrivate) this.applySgr(params);
+        if (!isPrivate) this.applySgr(parseSgrGroups(body));
         return;
       case 'h':
       case 'l':
@@ -973,6 +1138,7 @@ export class Screen {
     if (this.savedScreen !== null) return;
     this.savedScreen = {
       cells: this.cells,
+      wrapped: this.wrapped,
       cursorRow: this.cursorRow,
       cursorCol: this.cursorCol,
       curFg: this.curFg,
@@ -987,6 +1153,8 @@ export class Screen {
     // Hand the alt buffer a clean slate and reset transient state. Per
     // xterm: the alt screen starts blank with cursor at home.
     this.cells = makeGrid(this.rows, this.cols);
+    this.wrapped = new Array(this.rows).fill(false);
+    this.coverRow = -1;
     this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
@@ -1011,6 +1179,8 @@ export class Screen {
     const saved = this.savedScreen;
     if (saved === null) return;
     this.cells = saved.cells;
+    this.wrapped = saved.wrapped;
+    this.coverRow = -1;
     this.markAll();
     this.cursorRow = saved.cursorRow;
     this.cursorCol = saved.cursorCol;
@@ -1035,6 +1205,7 @@ export class Screen {
       for (let c = this.cursorCol; c < this.cols; c++) this.clearCell(this.cursorRow, c);
       for (let r = this.cursorRow + 1; r < this.rows; r++)
         for (let c = 0; c < this.cols; c++) this.clearCell(r, c);
+      for (let r = this.cursorRow; r < this.rows; r++) this.unwrap(r);
     } else if (mode === 1) {
       // From start of screen to cursor (a deferred-wrap cursor sits one past
       // the last column — clamp so the loop stays inside the row).
@@ -1042,21 +1213,30 @@ export class Screen {
         for (let c = 0; c < this.cols; c++) this.clearCell(r, c);
       const to = Math.min(this.cursorCol, this.cols - 1);
       for (let c = 0; c <= to; c++) this.clearCell(this.cursorRow, c);
+      for (let r = 0; r < this.cursorRow; r++) this.unwrap(r);
+      if (to === this.cols - 1) this.unwrap(this.cursorRow);
+      this.cover(this.cursorRow, 0, to + 1);
     } else if (mode === 2 || mode === 3) {
       // Whole screen (3 also clears scrollback in real terms; we have none).
       for (let r = 0; r < this.rows; r++)
         for (let c = 0; c < this.cols; c++) this.clearCell(r, c);
+      this.wrapped.fill(false);
     }
   }
 
   private eraseInLine(mode: number): void {
+    // An erase that reaches the last column ends the row there: not wrapped.
     if (mode === 0) {
       for (let c = this.cursorCol; c < this.cols; c++) this.clearCell(this.cursorRow, c);
+      this.unwrap(this.cursorRow);
     } else if (mode === 1) {
       const to = Math.min(this.cursorCol, this.cols - 1);
       for (let c = 0; c <= to; c++) this.clearCell(this.cursorRow, c);
+      if (to === this.cols - 1) this.unwrap(this.cursorRow);
+      this.cover(this.cursorRow, 0, to + 1);
     } else if (mode === 2) {
       for (let c = 0; c < this.cols; c++) this.clearCell(this.cursorRow, c);
+      this.unwrap(this.cursorRow);
     }
   }
 
@@ -1071,8 +1251,16 @@ export class Screen {
       // Drop the line currently at the region bottom, then insert a blank at
       // the cursor — everything between shifts down by one within the region.
       this.cells.splice(this.scrollBottom, 1);
-      this.cells.splice(this.cursorRow, 0, makeRow(this.cols));
+      this.cells.splice(this.cursorRow, 0, this.blankRow());
+      this.wrapped.splice(this.scrollBottom, 1);
+      this.wrapped.splice(this.cursorRow, 0, false);
+      this.endCoverage();
     }
+    this.coverRow = -1;
+    // The row above lost its continuation, and so did the row now at the
+    // bottom (its old next row fell off the region).
+    this.unwrap(this.cursorRow - 1);
+    this.unwrap(this.scrollBottom);
     this.markRows(this.cursorRow, this.scrollBottom);
   }
 
@@ -1086,8 +1274,13 @@ export class Screen {
       // Remove the cursor line, then insert a blank at the region bottom —
       // everything between shifts up by one within the region.
       this.cells.splice(this.cursorRow, 1);
-      this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
+      this.cells.splice(this.scrollBottom, 0, this.blankRow());
+      this.wrapped.splice(this.cursorRow, 1);
+      this.wrapped.splice(this.scrollBottom, 0, false);
+      this.endCoverage();
     }
+    this.coverRow = -1;
+    this.unwrap(this.cursorRow - 1);
     this.markRows(this.cursorRow, this.scrollBottom);
   }
 
@@ -1104,6 +1297,7 @@ export class Screen {
     while (row.length < this.cols) row.push(this.blankWithBg());
     if (row.length > this.cols) row.length = this.cols;
     if (row[c].ch === '') row[c].ch = ' ';
+    if (this.cursorRow === this.coverRow) this.coverEnd = Math.min(this.coverEnd, c);
     this.markRow(this.cursorRow);
   }
 
@@ -1116,20 +1310,22 @@ export class Screen {
     if (row[c].ch === '') this.breakPairAt(row, c);
     const blanks = Array.from({ length: n }, () => this.blankWithBg());
     row.splice(c, 0, ...blanks);
+    // A head pushed to the last column loses its trailing half off the edge.
+    if (row[this.cols].ch === '') row[this.cols - 1].ch = ' ';
     if (row.length > this.cols) row.length = this.cols;
-    // A head pushed to the last column lost its trailing half off the edge.
-    const last = row[this.cols - 1];
-    if (firstCharWidth(last.ch) === 2) last.ch = ' ';
+    if (this.cursorRow === this.coverRow) this.coverEnd = Math.min(this.coverEnd, c);
     this.markRow(this.cursorRow);
   }
 
   private eraseChars(n: number): void {
     n = Math.min(n, this.cols);
+    if (this.cursorCol < this.cols && this.cursorCol + n >= this.cols) this.unwrap(this.cursorRow);
     for (let i = 0; i < n; i++) {
       const c = this.cursorCol + i;
       if (c >= this.cols) break;
       this.clearCell(this.cursorRow, c);
     }
+    if (this.cursorCol < this.cols) this.cover(this.cursorRow, this.cursorCol, Math.min(this.cols, this.cursorCol + n));
   }
 
   /** A blank cell carrying the current background (BCE) — what EL/ED/ECH/
@@ -1139,6 +1335,16 @@ export class Screen {
     return { ch: ' ', fg: COLOR_DEFAULT, bg: this.curBg, attrs: 0 };
   }
 
+  /** A row of `blankWithBg` cells: the blank line LF / IND / RI / SU / SD /
+   *  IL / DL scroll in. xterm-256color advertises bce, so tmux relies on these
+   *  taking the current background and sends no repaint after them. (RIS,
+   *  resize and the alt screen still start from default-bg `makeRow`.) */
+  private blankRow(): Cell[] {
+    const row: Cell[] = new Array(this.cols);
+    for (let i = 0; i < this.cols; i++) row[i] = this.blankWithBg();
+    return row;
+  }
+
   /** Erase one cell to a BCE blank. Erasing either half of a wide glyph
    *  erases the other half too — a lone half is never left behind. */
   private clearCell(r: number, c: number): void {
@@ -1146,7 +1352,7 @@ export class Screen {
     const cell = row[c];
     if (cell.ch === '') {
       if (c > 0) this.resetCell(row[c - 1]);
-    } else if (firstCharWidth(cell.ch) === 2 && c + 1 < this.cols && row[c + 1].ch === '') {
+    } else if (isHead(row, c)) {
       this.resetCell(row[c + 1]);
     }
     this.resetCell(cell);
@@ -1160,13 +1366,20 @@ export class Screen {
     cell.attrs = 0;
   }
 
-  private applySgr(params: number[]): void {
-    if (params.length === 0) {
+  /** SGR over `;`-separated groups (see `parseSgrGroups`). A group with
+   *  colon sub-parameters is self-contained (`applySgrColon`); a plain group
+   *  is one code, and 38/48/58 take their arguments from the groups after. */
+  private applySgr(groups: number[][]): void {
+    if (groups.length === 0) {
       this.resetSgr();
       return;
     }
-    for (let i = 0; i < params.length; i++) {
-      const p = params[i];
+    for (let i = 0; i < groups.length; i++) {
+      if (groups[i].length > 1) {
+        this.applySgrColon(groups[i]);
+        continue;
+      }
+      const p = groups[i][0];
       if (p === 0) {
         this.resetSgr();
       } else if (p === 1) {
@@ -1175,10 +1388,15 @@ export class Screen {
         this.curAttrs |= ATTR_DIM;
       } else if (p === 3) {
         this.curAttrs |= ATTR_ITALIC;
-      } else if (p === 4) {
+      } else if (p === 4 || p === 21) {
+        // 21 is double underline; we draw every underline style the same.
         this.curAttrs |= ATTR_UNDERLINE;
       } else if (p === 7) {
         this.curAttrs |= ATTR_REVERSE;
+      } else if (p === 8) {
+        this.curAttrs |= ATTR_HIDDEN;
+      } else if (p === 9) {
+        this.curAttrs |= ATTR_STRIKE;
       } else if (p === 22) {
         this.curAttrs &= ~(ATTR_BOLD | ATTR_DIM);
       } else if (p === 23) {
@@ -1187,36 +1405,35 @@ export class Screen {
         this.curAttrs &= ~ATTR_UNDERLINE;
       } else if (p === 27) {
         this.curAttrs &= ~ATTR_REVERSE;
+      } else if (p === 28) {
+        this.curAttrs &= ~ATTR_HIDDEN;
+      } else if (p === 29) {
+        this.curAttrs &= ~ATTR_STRIKE;
       } else if (p >= 30 && p <= 37) {
         this.curFg = p - 30;
-      } else if (p === 38) {
-        // 256-color: 38;5;N. 24-bit: 38;2;R;G;B. Consume sub-params.
-        if (params[i + 1] === 5 && i + 2 < params.length) {
-          this.curFg = params[i + 2];
+      } else if (p === 38 || p === 48 || p === 58) {
+        // 256-color: 38;5;N. 24-bit: 38;2;R;G;B. Consume sub-params. 58 is
+        // the underline colour — consumed so its arguments can't run as SGR
+        // codes (`58;5;4` is not underline), but not drawn.
+        const mode = groups[i + 1]?.[0];
+        if (mode === 5 && i + 2 < groups.length) {
+          const idx = groups[i + 2][0];
+          this.setSgrColor(p, isColorByte(idx) ? idx : COLOR_DEFAULT);
           i += 2;
-        } else if (params[i + 1] === 2 && i + 4 < params.length) {
-          this.curFg = rgb(params[i + 2], params[i + 3], params[i + 4]);
+        } else if (mode === 2 && i + 4 < groups.length) {
+          const [r, g, b] = [groups[i + 2][0], groups[i + 3][0], groups[i + 4][0]];
+          const ok = isColorByte(r) && isColorByte(g) && isColorByte(b);
+          this.setSgrColor(p, ok ? rgb(r, g, b) : COLOR_DEFAULT);
           i += 4;
         } else {
-          // Truncated 38 sequence — abandon the rest of the params rather
-          // than re-reading `5`/`2`/RGB digits as standalone SGR codes.
-          i = params.length;
+          // Truncated sequence — abandon the rest of the params rather than
+          // re-reading `5`/`2`/RGB digits as standalone SGR codes.
+          i = groups.length;
         }
       } else if (p === 39) {
         this.curFg = COLOR_DEFAULT;
       } else if (p >= 40 && p <= 47) {
         this.curBg = p - 40;
-      } else if (p === 48) {
-        if (params[i + 1] === 5 && i + 2 < params.length) {
-          this.curBg = params[i + 2];
-          i += 2;
-        } else if (params[i + 1] === 2 && i + 4 < params.length) {
-          this.curBg = rgb(params[i + 2], params[i + 3], params[i + 4]);
-          i += 4;
-        } else {
-          // Truncated 48 sequence — abandon the rest of the params.
-          i = params.length;
-        }
       } else if (p === 49) {
         this.curBg = COLOR_DEFAULT;
       } else if (p >= 90 && p <= 97) {
@@ -1224,8 +1441,48 @@ export class Screen {
       } else if (p >= 100 && p <= 107) {
         this.curBg = (p - 100) + 8;
       }
-      // Anything else: silently ignore.
+      // Anything else (53/55 overline, 59 default underline colour, …):
+      // silently ignore.
     }
+  }
+
+  /** One ITU T.416 colon group: `38:5:N`, `38:2:R:G:B` / `38:2:CS:R:G:B`
+   *  (also 48 / 58), or `4:N` underline style. Follows tmux 3.6a: with six
+   *  or more values the RGB starts after the colour-space slot, with five
+   *  right after the `2`; a shorter group or any other code is ignored —
+   *  only this group, never the codes after it. */
+  private applySgrColon(g: number[]): void {
+    const p = g[0];
+    if (p === 4) {
+      if (g[1] === 0) this.curAttrs &= ~ATTR_UNDERLINE;
+      else if (g[1] >= 1 && g[1] <= 5) this.curAttrs |= ATTR_UNDERLINE;
+      return;
+    }
+    if (p !== 38 && p !== 48 && p !== 58) return;
+    // tmux ignores a group this long outright (input_csi_dispatch_sgr_colon).
+    if (g.length >= 8) return;
+    if (g[1] === 5 && g.length >= 3) {
+      // A palette index out of range is not "no colour": tmux goes to default.
+      this.setSgrColor(p, isColorByte(g[2]) ? g[2] : COLOR_DEFAULT);
+    } else if (g[1] === 2 && g.length >= 5) {
+      const k = g.length >= 6 ? 3 : 2;
+      if (isColorByte(g[k]) && isColorByte(g[k + 1]) && isColorByte(g[k + 2])) {
+        this.setSgrColor(p, rgb(g[k], g[k + 1], g[k + 2]));
+      }
+    }
+  }
+
+  /** Store a 38 / 48 colour; a 58 underline colour is accepted and dropped. */
+  // Measured against tmux 3.6a (capture-pane -e, with a colour already set):
+  //   38:2:300:0:0      pen unchanged   (out-of-range RGB: the group is ignored)
+  //   38:2::9:9:9:9:9   pen unchanged   (8+ values: ignored)
+  //   38:5:300 / 38:5:  emits 39        (bad palette index: back to default)
+  //   38;5;300          emits 39        (same for the semicolon forms)
+  //   38;2;300;0;0      emits 39
+
+  private setSgrColor(code: number, color: number): void {
+    if (code === 38) this.curFg = color;
+    else if (code === 48) this.curBg = color;
   }
 
   private resetSgr(): void {
@@ -1237,7 +1494,11 @@ export class Screen {
   /** Extract selected text from the buffer for an inclusive cell range.
    *  Anchor/focus may be in any order. First row runs from its column to EOL,
    *  middle rows are whole lines, the last row runs to its column. Trailing
-   *  whitespace is trimmed per line (cells are space-padded to full width). */
+   *  whitespace is trimmed per line (cells are space-padded to full width).
+   *  A wide glyph at either edge is copied whole: a start on its trailing
+   *  half begins at the head, and an end on its head already carries it.
+   *  A soft-wrapped row (`wrapped`) runs straight into the next one: no
+   *  newline, and its trailing spaces are part of the text. */
   selectionText(a: { row: number; col: number }, b: { row: number; col: number }): string {
     // Order the two endpoints in reading order (row, then col).
     const before = a.row < b.row || (a.row === b.row && a.col <= b.col);
@@ -1245,21 +1506,82 @@ export class Screen {
     const end = before ? b : a;
     const r0 = Math.max(0, Math.min(this.rows - 1, start.row));
     const r1 = Math.max(0, Math.min(this.rows - 1, end.row));
-    const out: string[] = [];
+    let out = '';
     for (let r = r0; r <= r1; r++) {
       const colFrom = r === r0 ? start.col : 0;
       const colTo = r === r1 ? end.col : this.cols - 1; // inclusive
-      const from = Math.max(0, colFrom);
+      let from = Math.max(0, colFrom);
+      if (from > 0 && from < this.cols && this.cells[r][from].ch === '') from--;
       const to = Math.min(this.cols - 1, colTo);
       let line = '';
       // A wide glyph's trailing `''` cell contributes nothing — the head
       // already carries the whole glyph.
       for (let c = from; c <= to; c++) line += this.cells[r][c].ch;
-      out.push(line.replace(/[ \t]+$/, ''));
+      if (r < r1 && this.wrapped[r]) {
+        // A wide glyph that did not fit wrapped early and left the last column
+        // blank (see `putChar`). That padding is not part of the copied text.
+        const straddled =
+          to === this.cols - 1 &&
+          line.endsWith(' ') &&
+          firstCharWidth(this.cells[r + 1][0].ch) === 2;
+        out += straddled ? line.slice(0, -1) : line;
+      }
+      else out += line.replace(/[ \t]+$/, '') + (r < r1 ? '\n' : '');
     }
-    return out.join('\n');
+    return out;
   }
 }
+
+/** Is `row[c]` the head of a wide pair? Recognised by its `''` trailing
+ *  cell — VS16 can widen a base whose first code point is narrow. */
+function isHead(row: readonly Cell[], c: number): boolean {
+  return row[c].ch !== '' && c + 1 < row.length && row[c + 1].ch === '';
+}
+
+/** The most UTF-8 bytes tmux 3.6a keeps in one cell (`UTF8_SIZE`); a join
+ *  that would pass it is refused. */
+const CELL_UTF8_MAX = 32;
+
+/** tmux 3.6a `utf8_should_combine`'s emoji modifier bases, verbatim. tmux's
+ *  own list, not Unicode's Emoji_Modifier_Base: ✋ U+270B or 🤘 U+1F918 do
+ *  not take a skin tone there, so they must not here either. */
+const MODIFIER_BASES: ReadonlySet<number> = new Set([
+  0x1f44b, 0x1f44c, 0x1f44d, 0x1f44e, 0x1f44f, 0x1f450, 0x1f466, 0x1f467, 0x1f468, 0x1f469,
+  0x1f46e, 0x1f470, 0x1f471, 0x1f472, 0x1f473, 0x1f474, 0x1f475, 0x1f476, 0x1f477, 0x1f478,
+  0x1f47c, 0x1f481, 0x1f482, 0x1f483, 0x1f485, 0x1f486, 0x1f487, 0x1f4aa, 0x1f575, 0x1f57a,
+  0x1f590, 0x1f595, 0x1f596, 0x1f645, 0x1f646, 0x1f647, 0x1f64b, 0x1f64c, 0x1f64d, 0x1f64e,
+  0x1f64f, 0x1f6b4, 0x1f6b5, 0x1f6b6, 0x1f926, 0x1f937, 0x1f938, 0x1f939, 0x1f93d, 0x1f93e,
+  0x1f9b5, 0x1f9b6, 0x1f9b8, 0x1f9b9, 0x1f9cd, 0x1f9ce, 0x1f9cf, 0x1f9d1, 0x1f9d2, 0x1f9d3,
+  0x1f9d4, 0x1f9d5, 0x1f9d6, 0x1f9d7, 0x1f9d8, 0x1f9d9, 0x1f9da, 0x1f9db, 0x1f9dc, 0x1f9dd,
+  0x1f9de, 0x1f9df,
+]);
+
+/** tmux 3.6a `utf8_should_combine(with, add)`, on the first code point of
+ *  each side (what its `mbtowc` decodes): two regional indicators, or a
+ *  skin-tone modifier `w` with a modifier base `a`. The caller tries both
+ *  orders, so `👋🏽` and `🏽👋` both join. */
+function shouldCombine(w: number, a: number): boolean {
+  if (a >= 0x1f1e6 && a <= 0x1f1ff && w >= 0x1f1e6 && w <= 0x1f1ff) return true;
+  return w >= 0x1f3fb && w <= 0x1f3ff && MODIFIER_BASES.has(a);
+}
+
+/** UTF-8 length of a well-formed string (cells never hold lone surrogates). */
+function utf8Length(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const u = s.charCodeAt(i);
+    if (u < 0x80) n += 1;
+    else if (u < 0x800) n += 2;
+    else if (u >= 0xd800 && u <= 0xdbff) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
+}
+
+/** Decoder for OSC 52 clipboard payloads (non-fatal: bad bytes → U+FFFD). */
+const UTF8 = new TextDecoder('utf-8');
 
 /** Longest OSC body we keep (OSC 52 clipboard payloads are base64 text;
  *  anything bigger is not something we would put on the clipboard). */
@@ -1293,6 +1615,18 @@ function stringTermEnd(s: string, end: number): number {
   return end + 1 < s.length && s.charCodeAt(end + 1) === 0x5c ? end + 2 : end;
 }
 
+/** Split an SGR parameter string into `;`-separated groups of `:`-separated
+ *  sub-parameters (`38:2::255:0:0` is one group). A group's leading value
+ *  defaults to 0 when empty, like any CSI param; an empty sub-parameter
+ *  after it is -1, so the colour-space slot in `38:2::R:G:B` is told apart
+ *  from a real 0. */
+function parseSgrGroups(body: string): number[][] {
+  if (body.length === 0) return [];
+  return body
+    .split(';')
+    .map((g) => g.split(':').map((x, j) => (x === '' ? (j === 0 ? 0 : -1) : parseInt(x, 10) || 0)));
+}
+
 function makeRow(cols: number): Cell[] {
   const row: Cell[] = new Array(cols);
   for (let i = 0; i < cols; i++) row[i] = emptyCell();
@@ -1324,9 +1658,16 @@ function resizeGrid(
     }
     // Narrowing can cut a wide glyph in half at the new right edge: blank
     // the head whose trailing cell fell off.
-    const last = next[r][newCols - 1];
-    if (firstCharWidth(last.ch) === 2) last.ch = ' ';
+    if (newCols < oldCols && src[r][newCols].ch === '') next[r][newCols - 1].ch = ' ';
   }
+  return next;
+}
+
+/** Resize the per-row wrap flags to `rows`: surviving rows keep theirs when
+ *  `keep`, every other row is unwrapped. */
+function resizeWraps(src: boolean[], rows: number, keep: boolean): boolean[] {
+  const next = new Array<boolean>(rows).fill(false);
+  if (keep) for (let r = 0; r < Math.min(rows, src.length); r++) next[r] = src[r];
   return next;
 }
 
@@ -1340,21 +1681,60 @@ export interface Run {
   fg: number;
   bg: number;
   attrs: number;
+  /** Columns the run covers. The renderer pins the run's box to exactly
+   *  `cells` × the measured cell width, so every run starts on the same
+   *  column grid the cursor, selection overlay and mouse mapping use. */
+  cells: number;
   /** A single wide (2-column) glyph. The renderer gives it exactly two
    *  cells of width so the DOM column grid matches the buffer — a fallback
    *  font's natural emoji/CJK advance is not a multiple of the cell. */
   wide?: true;
+  /** A single 1-column glyph that may be drawn from a fallback font
+   *  (see `fitsGridFont`). Pinned to one cell like `wide` is to two. */
+  glyph?: true;
+}
+
+/** Can every code point of `ch` be drawn from the grid font itself, at its
+ *  own one-cell advance? A deliberately conservative allowlist of what Menlo
+ *  (and the other stacks we fall back to) cover: printable ASCII, Latin-1,
+ *  Latin Extended-A/B, Greek, Cyrillic, box drawing and block elements.
+ *  Greek and Cyrillic matter because ordinary prose in those scripts would
+ *  otherwise become one pinned run — and one DOM node — per cell.
+ *  Everything else —
+ *  Claude Code's ⏺ ⎿ ✻, dingbats, DEC scan lines, a cell carrying a
+ *  combining mark — may come from a fallback font whose advance is not one
+ *  cell. U+00AD SOFT HYPHEN is excluded too: browsers draw it with no
+ *  advance at all, while the buffer gives it a column. */
+function fitsGridFont(ch: string): boolean {
+  for (let i = 0; i < ch.length; i++) {
+    const c = ch.charCodeAt(i);
+    if (c >= 0x20 && c <= 0x7e) continue;
+    if (c >= 0xa0 && c <= 0x24f && c !== 0xad) continue;
+    if (c >= 0x370 && c <= 0x3ff) continue; // Greek and Coptic
+    if (c >= 0x400 && c <= 0x4ff) continue; // Cyrillic
+    if (c >= 0x2500 && c <= 0x259f) continue;
+    return false;
+  }
+  return true;
+}
+
+/** A colour component or palette index tmux accepts: 0..255. Anything else
+ *  (empty, negative, above 255) means "no colour", not a clamped one. */
+function isColorByte(v: number): boolean {
+  return v >= 0 && v <= 255;
 }
 
 /** Group a row's cells into adjacent runs sharing fg/bg/attrs. Trailing
  *  default-styled blanks are kept so the column grid stays aligned in the
- *  rendered output (we depend on monospace + non-breaking spaces).
+ *  rendered output. Each run records how many cells it covers.
  *
  *  A wide glyph (head cell followed by its `''` trailing placeholder) is
  *  emitted as its own `wide` run and the placeholder is skipped, so the
- *  renderer can pin it to two cells. A placeholder with no head — never
- *  produced by `Screen`, but cheap to tolerate — renders as a blank so the
- *  columns after it don't shift. */
+ *  renderer can pin it to two cells. A narrow glyph outside the grid font
+ *  gets its own 1-cell `glyph` run for the same reason, so its fallback
+ *  advance can't shift the columns after it. A placeholder with no head —
+ *  never produced by `Screen`, but cheap to tolerate — renders as a blank so
+ *  the columns after it don't shift. */
 export function rowToRuns(row: Cell[]): Run[] {
   const runs: Run[] = [];
   let cur: Run | null = null;
@@ -1362,12 +1742,17 @@ export function rowToRuns(row: Cell[]): Run[] {
     const cell = row[i];
     const isHead = cell.ch !== '' && i + 1 < row.length && row[i + 1].ch === '';
     if (isHead) {
-      runs.push({ text: cell.ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, wide: true });
+      runs.push({ text: cell.ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, cells: 2, wide: true });
       cur = null;
       i++; // skip the trailing placeholder
       continue;
     }
     const ch = cell.ch === '' ? ' ' : cell.ch;
+    if (!fitsGridFont(ch)) {
+      runs.push({ text: ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, cells: 1, glyph: true });
+      cur = null;
+      continue;
+    }
     if (
       cur !== null &&
       cur.fg === cell.fg &&
@@ -1375,12 +1760,27 @@ export function rowToRuns(row: Cell[]): Run[] {
       cur.attrs === cell.attrs
     ) {
       cur.text += ch;
+      cur.cells++;
     } else {
-      cur = { text: ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs };
+      cur = { text: ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, cells: 1 };
       runs.push(cur);
     }
   }
   return runs;
+}
+
+/** Content key for a rendered row: the row index followed by every run's
+ *  style, cell count and text, joined with control bytes 0x01..0x05. Cells
+ *  only ever hold printable chars (code >= 0x20), so those bytes never occur
+ *  in `run.text` and the fields can't collide. The key changes whenever
+ *  anything that affects the row's DOM changes — including a run's width or
+ *  its boundaries — which is what makes the renderer recreate that row. */
+export function runsKey(row: number, runs: readonly Run[]): string {
+  let key = String(row);
+  for (const run of runs) {
+    key += `\u0001${run.fg}\u0002${run.bg}\u0003${run.attrs}\u0005${run.cells}\u0004${run.text}`;
+  }
+  return key;
 }
 
 /** Convert a palette/RGB/default color number into a CSS color string, or
@@ -1389,6 +1789,44 @@ export function colorToCss(c: number): string | null {
   if (c === COLOR_DEFAULT) return null;
   if (isRgb(c)) return rgbToCss(c);
   return paletteToCss(c);
+}
+
+/** The grid's default text / background colours (TerminalView's `.grid`
+ *  rule), substituted when reverse video swaps a default colour. */
+const GRID_FG = '#e8e8e8';
+const GRID_BG = '#0a0a0a';
+
+/** Inline CSS for a run's colours and attributes. Pure, so the renderer
+ *  can memoize it per (fg, bg, attrs). */
+export function runStyleCss(run: Pick<Run, 'fg' | 'bg' | 'attrs'>): string {
+  const parts: string[] = [];
+  let fg = colorToCss(run.fg);
+  let bg = colorToCss(run.bg);
+  // Reverse video (SGR 7): swap fg/bg, substituting the grid defaults for
+  // cells that use the default color. This is how claude/tmux draw the input
+  // CARET (a reverse-video block) and selections — without it they render as
+  // plain text and are invisible.
+  if (run.attrs & ATTR_REVERSE) {
+    const f = fg ?? GRID_FG;
+    const b = bg ?? GRID_BG;
+    fg = b;
+    bg = f;
+  }
+  // Hidden (SGR 8): transparent text over the (possibly swapped) background,
+  // so the cell keeps its colour and the text stays selectable.
+  if (run.attrs & ATTR_HIDDEN) fg = 'transparent';
+  if (fg) parts.push(`color:${fg}`);
+  if (bg) parts.push(`background:${bg}`);
+  if (run.attrs & ATTR_BOLD) parts.push('font-weight:600');
+  if (run.attrs & ATTR_DIM) parts.push('opacity:0.75');
+  if (run.attrs & ATTR_ITALIC) parts.push('font-style:italic');
+  // One text-decoration for both lines — a second declaration would
+  // override the first.
+  const lines: string[] = [];
+  if (run.attrs & ATTR_UNDERLINE) lines.push('underline');
+  if (run.attrs & ATTR_STRIKE) lines.push('line-through');
+  if (lines.length > 0) parts.push(`text-decoration:${lines.join(' ')}`);
+  return parts.join(';');
 }
 
 /**

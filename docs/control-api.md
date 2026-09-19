@@ -237,6 +237,17 @@ Index by area (names only; see the reference for details):
   Assets tab, which auto-commits every save; no MCP tools. Sessions may edit
   the catalog repo directly and commit with `catalog:` prefixed messages,
   which the app picks up on its next catalog load.
+- **Asset catalog layers** — `list_layers` (the catalog's layer definitions
+  plus every host's stored role + contexts), `resolve_preview` (compute one
+  host's effective asset set with provenance, without writing anything),
+  `propose_layers` (group the last scan's installed assets by host-set
+  signature into a starting layer split, for triage), `set_host_layers`
+  (replace a host's role + ordered contexts; validates the host and every
+  named layer against the loaded catalog on the right axis, and rejects a
+  role/context name collision; edits fleet state only, never catalog
+  files; master token only — a host's layer assignment decides what the
+  next `apply_sync` writes to its filesystem, the same reasoning as
+  `apply_sync` and `set_secret`).
 - **Orchestration** — `wait_for_session`, `session_transcript`,
   `session_conversation`, `run_prompt`, `dispatch_task`, `wait_for_task`,
   `list_tasks`, `cancel_task`, `set_session_tags`.

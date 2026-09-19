@@ -3,7 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
-  import { Screen, rowToRuns, colorToCss, type Run } from './ansi';
+  import { Screen, rowToRuns, runsKey, runStyleCss, type Run } from './ansi';
   import { pointInRect } from './geometry';
   import { selectionRects, type CellPos } from './terminal_selection';
   import { nativeWriteText } from './clipboard_native';
@@ -16,6 +16,7 @@
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
   import { createMouseController } from './terminal_mouse';
   import { hubStatus, hubBlock, ownsTheFleet } from './hub';
+  import { fitCells } from './terminal_size';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -30,7 +31,8 @@
   //     C-b [.
   //   - Keyboard input is forwarded as raw bytes via the xterm key table in
   //     `./terminal_keys.ts` (arrows/Home/End/Ins/Del/F-keys with modifiers,
-  //     Ctrl chords, Alt/Option as an ESC prefix).
+  //     Ctrl chords, Alt/Option as an ESC prefix unless the layout composed
+  //     a printable ASCII character under it).
   //   - Selection follows text-input conventions (`./terminal_mouse.ts` +
   //     `./terminal_selection.ts`): drag, double-click word, triple-click
   //     line, Shift+click extend; typing drops the highlight.
@@ -40,6 +42,11 @@
 
   let container: HTMLDivElement | undefined = $state(undefined);
   let measureCell: HTMLSpanElement | undefined = $state(undefined);
+  /** Glyphs in the metrics probe. One character's shrink-to-fit width carries
+   *  a sub-pixel rounding error, and that width now sizes every run box as
+   *  well as the overlays, so measure a run of them and divide. */
+  const MEASURE_CHARS = 20;
+  const MEASURE_SAMPLE = 'M'.repeat(MEASURE_CHARS);
   let screen: Screen | null = null;
   /** Bumped after every screen.write() so the reactive view recomputes. */
   let renderVersion = $state(0);
@@ -53,7 +60,12 @@
   let currentHost: string | null = $state(null);
 
   function isAttachedTo(sess: { tmux_name: string; host_alias: string } | null | undefined): boolean {
-    return !!sess && sess.tmux_name === currentSession && sess.host_alias === currentHost;
+    // `screen` too: a half-open pane (a PTY whose Screen was torn down under
+    // it) must never satisfy the guard, or selecting that session again would
+    // skip the reopen and leave a blank grid that still swallows keystrokes.
+    return (
+      !!sess && screen !== null && sess.tmux_name === currentSession && sess.host_alias === currentHost
+    );
   }
 
   /** Forward bytes to the PTY. A rejection (PTY gone, host dropped) used to be
@@ -67,15 +79,31 @@
    *  spinner during the upload. */
   let dragOver = $state(false);
   let uploading = $state(false);
+  /** Uploads still running for the current attach. Counted, not a flag: two
+   *  drops in a row would otherwise clear the overlay when the first finishes. */
+  let uploadsInFlight = 0;
   /** Selection endpoints in 0-based grid cells; null when nothing selected.
    *  Held in component state so the drain re-render can't wipe it (unlike the
    *  old window.getSelection() path). */
   let selAnchor: CellPos | null = $state(null);
   let selFocus: CellPos | null = $state(null);
   let openError: string | null = $state(null);
-  /** Keyboard focus is on the grid. Drives the cursor's look: a solid block
-   *  when focused, a hollow outline when not — so it is always clear where
-   *  typing will land, as with a text input's caret. */
+  /** The hidden textarea that actually owns keyboard focus. WebKit only runs
+   *  an input-method session on an editable element, so a dead key, the
+   *  press-and-hold accent popup, the emoji picker and every CJK IME need a
+   *  real editable target — the grid is a plain div and gets none of them.
+   *  It rides the cursor cell so the candidate window opens where the text
+   *  will appear. */
+  let imeInput: HTMLTextAreaElement | undefined = $state(undefined);
+  /** True between compositionstart and compositionend. */
+  let composing = false;
+  /** Set for one macrotask after compositionend: WebKit delivers the key that
+   *  COMMITTED the composition as a keydown right after it, with isComposing
+   *  already false. */
+  let compositionJustEnded = false;
+  /** Keyboard focus is on the terminal. Drives the cursor's look: a solid
+   *  block when focused, a hollow outline when not — so it is always clear
+   *  where typing will land, as with a text input's caret. */
   let focused = $state(false);
   /** Bumped on every keystroke / paste that reaches the PTY. The cursor
    *  element is keyed on it so its blink animation restarts from the visible
@@ -87,29 +115,63 @@
   let ptyOpen = false;
   let lastCols = $state(0);
   let lastRows = $state(0);
+  /** Bytes drained since this attach. The header shows this and nothing
+   *  per-tick: a counter that moved on every poll rewrote the header text
+   *  about four times a second on a terminal that was doing nothing. */
   let totalBytes = $state(0);
-  let drainTicks = $state(0);
   /** Measured advance width of a single monospace cell, in px. We compute
    *  this once after mount from a sample <span>. Without a sane fallback
-   *  the geometry calc would yield NaN and the view would never size. */
-  let cellWidth = 0;
+   *  the geometry calc would yield NaN and the view would never size.
+   *  Reactive because the grid publishes it as `--cell-w`: every run's box
+   *  is pinned to a multiple of it, so the glyphs and the overlays that sit
+   *  on the col × cellWidth grid can't disagree. */
+  let cellWidth = $state(0);
   let cellHeight = 0;
   let disconnected = $state(false);
   /** Self-healing: when the PTY dies (EOF / reader error — e.g. the ssh attach
    *  to a remote host dropped or its ControlMaster wedged), auto-reattach a
    *  bounded number of times with backoff before falling back to the manual
    *  reconnect banner. The budget resets on a fresh selection, a manual
-   *  reconnect, or sustained healthy output, so the cap only bites on a
-   *  genuinely persistent failure rather than a one-off blip. */
+   *  reconnect, or an attach that stayed up past HEALTHY_ATTACH_MS, so the cap
+   *  only bites on a genuinely persistent failure rather than a one-off blip. */
   let autoReconnecting = $state(false);
   let reconnectAttempts = 0;
   let autoReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When the current attach came up, or null while nothing is attached. */
+  let attachedAt: number | null = null;
   const MAX_AUTO_RECONNECT = 3;
   const AUTO_RECONNECT_BASE_MS = 600;
+  /** How long an attach has to stay up before it counts as healthy and the
+   *  self-heal budget is restored. Longer than a failing attach survives
+   *  (ssh connect + a login profile + a tmux error is well under a second). */
+  const HEALTHY_ATTACH_MS = 10_000;
+
+  /** What `pty_drain` returns (src-tauri/src/pty.rs `PtyDrainResult`).
+   *  `eof` and `overflowed` are out-of-band flags — the reader thread's own
+   *  state, never something inferred from `data`. */
+  interface PtyDrainResult {
+    data: string;
+    bytes: number;
+    eof: boolean;
+    overflowed: boolean;
+  }
+
+  /** One terminal-failure toast per attach: a broken chunk usually repeats on
+   *  every redraw, and the drain loop now survives it, so the user would
+   *  otherwise never learn why the pane looks wrong. Reset by openTerm. */
+  let reportedTerminalError = false;
+
+  function reportTerminalError(error: unknown) {
+    if (reportedTerminalError) return;
+    reportedTerminalError = true;
+    const detail = error instanceof Error ? error.message : String(error);
+    push({ kind: 'error', message: `Terminal output could not be rendered: ${detail}` });
+  }
 
   const drain = createDrainLoop({
     drainOnce,
     attached: () => !!screen && ptyOpen,
+    onError: reportTerminalError,
   });
   const { bumpDrain } = drain;
 
@@ -138,8 +200,18 @@
     clearSelection,
     copySelection,
     writePty,
+    focusInput,
   });
-  const { onWheel, onMousedown } = mouse;
+  const { onWheel } = mouse;
+
+  /** Mouse presses focus the proxy through the controller; note the modality
+   *  first so the focus handler knows this was not keyboard navigation. */
+  function onMousedown(e: MouseEvent) {
+    pointerFocusPending = true;
+    // Only the focus this press causes may consume the flag.
+    queueMicrotask(() => (pointerFocusPending = false));
+    mouse.onMousedown(e);
+  }
 
   function onContextMenu(e: MouseEvent) {
     if (!ptyOpen) return;
@@ -194,16 +266,37 @@
 
   async function handleDrop(paths: string[]) {
     if (!ptyOpen || !currentSession || !currentHost || paths.length === 0) return;
+    // An scp of a large file takes many seconds. Pin the upload to the attach
+    // that started it: pasting on arrival regardless typed host A's paths into
+    // whatever session was attached by then — a different Claude prompt, on a
+    // machine where those paths don't exist.
+    const target = { tmux_name: currentSession, host_alias: currentHost };
+    const gen = openGeneration;
+    uploadsInFlight += 1;
     uploading = true;
     try {
       const remote = await invoke<string[]>('upload_to_session', {
-        args: { host_alias: currentHost, session_name: currentSession, local_paths: paths },
+        args: { host_alias: target.host_alias, session_name: target.tmux_name, local_paths: paths },
       });
-      if (remote.length > 0) sendPaste(pathsToPasteText(remote));
+      if (remote.length === 0) return;
+      if (gen === openGeneration && isAttachedTo(target)) {
+        sendPaste(pathsToPasteText(remote));
+      } else {
+        push({
+          kind: 'info',
+          message: `Uploaded to ${target.host_alias}:${target.tmux_name}: ${remote.join(' ')}`,
+        });
+      }
     } catch (e) {
-      openError = `Upload failed: ${toIpcError(e).message}`;
+      // Same rule for the error: it belongs to the pane that asked for it.
+      const message = `Upload failed: ${toIpcError(e).message}`;
+      if (gen === openGeneration) openError = message;
+      else push({ kind: 'error', message });
     } finally {
-      uploading = false;
+      // closeTerm already cleared the overlay for a pane that moved on — and a
+      // newer upload may own it by now.
+      uploadsInFlight = Math.max(0, uploadsInFlight - 1);
+      if (gen === openGeneration) uploading = uploadsInFlight > 0;
     }
   }
 
@@ -262,110 +355,216 @@
    *  call would otherwise run a full second open — leaking a ResizeObserver
    *  and a drain timer and double-opening the PTY. */
   let opening = false;
+  /** Set when an open request arrives while one is already in flight.
+   *  Dropping such a request stranded the new selection whenever the running
+   *  open then failed: nothing re-triggers the $effects, so the pane sat on
+   *  the previous session's error. Coalesced here and run from openTerm's
+   *  `finally` — but only when that open cannot have attached the pane
+   *  itself, since closeTerm nulling `currentSession` re-runs the effects
+   *  during every open. */
+  let reopenPending = false;
+  /** Open generation. closeTerm() and onDestroy bump it; every open captures
+   *  it and abandons itself after any await once it no longer matches — the
+   *  selection can go away (deselect, the row killed) or the whole pane can be
+   *  unmounted while `repair_session` probes a host over SSH, and the resumed
+   *  open would otherwise attach a PTY nobody drains. */
+  let openGeneration = 0;
+  /** Set by onDestroy: after this, nothing may touch the PTY. */
+  let destroyed = false;
+  /** The post-attach resize hint, so closeTerm can cancel it. */
+  let postAttachTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Has the open that captured `gen` been superseded — by a close, a destroy,
+   *  a newer open, or the selection moving on? */
+  function openIsStale(gen: number, target: { tmux_name: string; host_alias: string }): boolean {
+    if (destroyed || gen !== openGeneration) return true;
+    const sel = $selectedSession;
+    return !sel || sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias;
+  }
 
   async function openTerm(isAutoReconnect = false) {
-    if (opening) return;
+    if (opening) {
+      reopenPending = true;
+      return;
+    }
     const sess = $selectedSession;
     if (!sess) return;
     if (!container) return;
+    const target = { tmux_name: sess.tmux_name, host_alias: sess.host_alias };
     opening = true;
-    // A fresh open (new selection, manual reconnect, detach/reattach button)
-    // starts with a clean self-heal budget; an auto-reconnect must preserve the
-    // running attempt count so the cap can actually be reached.
-    if (!isAutoReconnect) reconnectAttempts = 0;
-    await closeTerm();
-    openError = null;
-    disconnected = false;
-    await tick();
-
-    measureCellSize();
-    const dim = computeDimensions();
-    lastCols = dim.cols;
-    lastRows = dim.rows;
-    screen = new Screen(dim.rows, dim.cols);
-    clearSelection();
-    // Reset any in-progress drag state so a session switch can't leave it stale.
-    mouse.reset();
-    screen.onClipboard = (text) => {
-      void nativeWriteText(text).then((r) => {
-        if (!r.ok) openError = `Clipboard write failed: ${r.error.message}`;
-      });
-    };
-    renderVersion++;
-
-    // A pane drag fires ResizeObserver every frame; resizing the screen
-    // buffer (a full re-mark of every row) and sending pty_resize (a
-    // SIGWINCH + tmux redraw over SSH) on each one floods the PTY. Debounce
-    // on the trailing edge: only the settled size is applied, and it always
-    // is — the last frame of a drag is never dropped.
-    resizeObserver = new ResizeObserver(() => {
-      if (resizeTimer !== null) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(applyResize, RESIZE_DEBOUNCE_MS);
-    });
-    resizeObserver.observe(container);
-
-    // Automatic workspace check before attach. It only CREATES what is
-    // confirmed missing: re-adds a deleted, unregistered worktree from its
-    // existing branch, and starts a tmux session that is confirmed dead. It
-    // never respawns a live pane (that would kill a running Claude just
-    // because it was selected), never unregisters, adopts or rebranches —
-    // those are Repair workspace only; we say so instead. A healthy session
-    // costs one probe; orphans and background rows have nothing to check. An
-    // offline host is left to the attach error.
-    if (sess.project_id != null && !hasNoPane(sess)) {
-      const rep = await repairSession(sess.id);
-      if (rep.ok) {
-        const v = rep.value;
-        const actions = v?.actions ?? [];
-        if (actions.length > 0) {
-          const branch = v?.branch_source ? ` [branch: ${v.branch_source}]` : '';
-          push({ kind: 'info', message: `Repaired workspace for ${sess.tmux_name}: ${actions.join('; ')}${branch}` });
-        }
-        if (v?.needs_explicit_repair || v?.tmux_cwd_stale) {
-          push({
-            kind: 'info',
-            message: `${sess.tmux_name} needs Repair workspace: ${(v.warnings ?? []).join('; ')}`,
-          });
-        }
-      } else if (rep.error.code !== 'E_HOST_OFFLINE') {
-        pushError(rep.error, 'Workspace check failed');
-      }
-    }
-
+    // A fresh attach may render fine: let it report a parser failure again.
+    reportedTerminalError = false;
+    /** Set when this open stood down as stale instead of running to a
+     *  conclusion for `target`. The coalesced request then has to run even
+     *  when it names the same session — leaving and coming straight back to
+     *  one session is exactly the case that bails out. */
+    let bailed = false;
+    /** This open's generation, claimed below once closeTerm has bumped it. */
+    let gen = 0;
+    /** The post-await re-check, recording that we stood down so the `finally`
+     *  can tell a stale exit from an open that really reached `target`. */
+    const standDown = () => (bailed = openIsStale(gen, target));
     try {
-      await invoke('pty_open', {
-        args: {
-          session_name: sess.tmux_name,
-          host_alias: sess.host_alias,
-          cols: dim.cols,
-          rows: dim.rows,
-        },
-      });
+      // A fresh open (new selection, manual reconnect, detach/reattach button)
+      // starts with a clean self-heal budget; an auto-reconnect must preserve
+      // the running attempt count so the cap can actually be reached.
+      if (!isAutoReconnect) reconnectAttempts = 0;
+      await closeTerm();
+      // Claim the generation closeTerm() just bumped. Anything that closes or
+      // destroys from here on bumps it again and this open stands down.
+      gen = ++openGeneration;
+      if (standDown()) return;
+      openError = null;
+      disconnected = false;
+      await tick();
+      if (standDown()) return;
+
+      measureCellSize();
+      const dim = computeDimensions();
+      lastCols = dim.cols;
+      lastRows = dim.rows;
+      screen = new Screen(dim.rows, dim.cols);
+      clearSelection();
+      // Reset any in-progress drag state so a session switch can't leave it stale.
+      mouse.reset();
+      screen.onClipboard = (text) => {
+        void nativeWriteText(text).then((r) => {
+          if (!r.ok && !openIsStale(gen, target)) openError = `Clipboard write failed: ${r.error.message}`;
+        });
+      };
+      renderVersion++;
+
+      // A pane drag fires ResizeObserver every frame; resizing the screen
+      // buffer (a full re-mark of every row) and sending pty_resize (a
+      // SIGWINCH + tmux redraw over SSH) on each one floods the PTY. Debounce
+      // on the trailing edge: only the settled size is applied, and it always
+      // is — the last frame of a drag is never dropped.
+      resizeObserver = new ResizeObserver(scheduleResize);
+      resizeObserver.observe(container);
+
+      // Automatic workspace check before attach. It only CREATES what is
+      // confirmed missing: re-adds a deleted, unregistered worktree from its
+      // existing branch, and starts a tmux session that is confirmed dead. It
+      // never respawns a live pane (that would kill a running Claude just
+      // because it was selected), never unregisters, adopts or rebranches —
+      // those are Repair workspace only; we say so instead. A healthy session
+      // costs one probe; orphans and background rows have nothing to check. An
+      // offline host is left to the attach error.
+      if (sess.project_id != null && !hasNoPane(sess)) {
+        const rep = await repairSession(sess.id);
+        if (standDown()) return;
+        if (rep.ok) {
+          const v = rep.value;
+          const actions = v?.actions ?? [];
+          if (actions.length > 0) {
+            const branch = v?.branch_source ? ` [branch: ${v.branch_source}]` : '';
+            push({ kind: 'info', message: `Repaired workspace for ${sess.tmux_name}: ${actions.join('; ')}${branch}` });
+          }
+          if (v?.needs_explicit_repair || v?.tmux_cwd_stale) {
+            push({
+              kind: 'info',
+              message: `${sess.tmux_name} needs Repair workspace: ${(v.warnings ?? []).join('; ')}`,
+            });
+          }
+        } else if (rep.error.code !== 'E_HOST_OFFLINE') {
+          pushError(rep.error, 'Workspace check failed');
+        }
+      }
+
+      try {
+        await invoke('pty_open', {
+          args: {
+            session_name: sess.tmux_name,
+            host_alias: sess.host_alias,
+            cols: dim.cols,
+            rows: dim.rows,
+          },
+        });
+      } catch (e) {
+        // Only the session that caused the failure may show it; a stale open's
+        // error under another session's header is pure confusion.
+        if (standDown()) return;
+        if (isAutoReconnect) {
+          // Keep backing off instead of stopping after one try: nothing else
+          // would ever call scheduleAutoReconnect again (the drain loop never
+          // started), so the budget — and with it the manual banner — was
+          // unreachable.
+          scheduleAutoReconnect(target.tmux_name, target.host_alias);
+        } else {
+          openError = `PTY error: ${toIpcError(e).message}`;
+        }
+        return;
+      }
+      if (standDown()) {
+        // The attach landed after the pane let go of it. Nobody will drain it
+        // and the backend keeps exactly one PTY, so close it — no newer open
+        // can have taken over, they are serialized by `opening`.
+        try {
+          await invoke('pty_close');
+        } catch {
+          /* nothing to undo */
+        }
+        return;
+      }
       currentSession = sess.tmux_name;
       currentHost = sess.host_alias;
       ptyOpen = true;
-    } catch (e) {
-      openError = `PTY error: ${toIpcError(e).message}`;
+      attachedAt = Date.now();
+
+      // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
+      // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.
+      drain.start();
+
+      // Hint tmux to redraw at our exact size by re-sending the dimensions
+      // once after attach. Defends against race where pty_open runs before
+      // the slave-side process has set up SIGWINCH handling.
+      postAttachTimer = setTimeout(() => {
+        postAttachTimer = null;
+        if (!ptyOpen) return;
+        void invoke('pty_resize', { args: { cols: lastCols, rows: lastRows } }).catch(() => {});
+      }, 150);
+    } finally {
       opening = false;
-      return;
+      const pending = reopenPending;
+      reopenPending = false;
+      const sel = $selectedSession;
+      // Re-run the coalesced request when this open cannot have served it: it
+      // stood down as stale, or it was for another session. An open that ran
+      // its course for `target` and merely failed at pty_open is NOT re-run —
+      // that would retry a just-failed attach in a tight loop (the self-heal
+      // backoff owns that case). Comparing the identities alone was not
+      // enough: leaving a session and coming straight back while its workspace
+      // probe is out makes both identities equal, and the pane was then left
+      // unattached at 'measuring…' with nothing reactive left to fix it.
+      if (
+        pending &&
+        sel &&
+        !destroyed &&
+        !isAttachedTo(sel) &&
+        (bailed || sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias)
+      ) {
+        void openTerm();
+      }
     }
-
-    // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
-    // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.
-    drain.start();
-
-    // Hint tmux to redraw at our exact size by re-sending the dimensions
-    // once after attach. Defends against race where pty_open runs before
-    // the slave-side process has set up SIGWINCH handling.
-    setTimeout(() => {
-      if (!ptyOpen) return;
-      void invoke('pty_resize', { args: { cols: lastCols, rows: lastRows } }).catch(() => {});
-    }, 150);
-    opening = false;
   }
 
   const RESIZE_DEBOUNCE_MS = 50;
+  /** Floor on the gap between two applied resizes. The debounce alone only
+   *  coalesces frames closer together than its window: a slow or jerky drag
+   *  (observer callbacks 60-70 ms apart, or a busy main thread) still sent one
+   *  pty_resize — a SIGWINCH plus a full tmux redraw over SSH — per frame. */
+  const RESIZE_MIN_INTERVAL_MS = 250;
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastResizeAt = 0;
+
+  /** One ResizeObserver frame: (re)arm the trailing timer, never sooner than
+   *  RESIZE_MIN_INTERVAL_MS after the last applied resize. The settled size is
+   *  still never dropped — the last frame's timer always gets to run. */
+  function scheduleResize() {
+    if (resizeTimer !== null) clearTimeout(resizeTimer);
+    const wait = Math.max(RESIZE_DEBOUNCE_MS, lastResizeAt + RESIZE_MIN_INTERVAL_MS - Date.now());
+    resizeTimer = setTimeout(applyResize, wait);
+  }
 
   function applyResize() {
     resizeTimer = null;
@@ -376,6 +575,7 @@
     lastRows = next.rows;
     screen.resize(next.rows, next.cols);
     renderVersion++;
+    lastResizeAt = Date.now();
     if (ptyOpen) {
       void invoke('pty_resize', { args: { cols: next.cols, rows: next.rows } }).catch(() => {});
     }
@@ -388,7 +588,7 @@
     if (cellWidth > 0 && cellHeight > 0) return;
     const rect = measureCell.getBoundingClientRect();
     // Fall back to a sensible default if measurement returns zero (jsdom).
-    cellWidth = rect.width > 0 ? rect.width : 7.8;
+    cellWidth = rect.width > 0 ? rect.width / MEASURE_CHARS : 7.8;
     cellHeight = rect.height > 0 ? rect.height : 16;
   }
 
@@ -399,10 +599,8 @@
     // Subtract our own 4px padding (see CSS) from both sides.
     const w = Math.max(1, container.clientWidth - 8);
     const h = Math.max(1, container.clientHeight - 8);
-    return {
-      cols: Math.max(10, Math.floor(w / cw)),
-      rows: Math.max(2, Math.floor(h / ch)),
-    };
+    // MIN_COLS/MIN_ROWS are the same floor pty.rs clamps to — see terminal_size.ts.
+    return fitCells(w, h, cw, ch);
   }
 
   /** Drain the PTY buffer once. Returns true if any bytes were consumed. */
@@ -413,41 +611,77 @@
     // resolved bytes belong to the old PTY — discard them rather than write
     // stale output into the new screen.
     const drainingInto = screen;
-    let result: { data: string; bytes: number };
+    let result: PtyDrainResult;
     try {
-      result = await invoke<{ data: string; bytes: number }>('pty_drain');
+      result = await invoke<PtyDrainResult>('pty_drain');
     } catch {
       return false;
     }
     if (screen !== drainingInto) return false;
-    drainTicks += 1;
-    if (result.bytes === 0) return false;
-    totalBytes += result.bytes;
-    screen.write(result.data);
-    renderVersion++;
-    // Answer any terminal queries (DSR cursor position, DA) the output
-    // carried — the parser has no back-channel, so we forward its replies.
-    const reply = screen.takeReplies();
-    if (reply !== '') writePty(reply);
-    // Markers injected by the Rust reader thread when the PTY closes (e.g. the
-    // SSH child to a remote host died — now within ~10s thanks to the
-    // ServerAlive keepalive in pty.rs, instead of hanging silently forever).
-    // Try to self-heal by auto-reattaching; fall back to the manual banner
-    // only after the retry budget is exhausted.
-    if (result.data.includes('[cf] PTY EOF') || result.data.includes('[cf] reader error')) {
+    // The backend had to throw output away (the un-drained buffer hit its
+    // cap). What is left resumes mid-sequence and has lost the DECSET modes
+    // tmux sends once per attach — alt screen, mouse, bracketed paste, scroll
+    // region — so the Screen can't be repaired from the stream. Drop it and
+    // re-attach: a fresh attach re-sends all of that and redraws.
+    if (result.overflowed) {
+      // Re-attach as a self-heal, not as a fresh user-initiated open: the
+      // budget must keep counting, or a session that overflows repeatedly
+      // would reconnect for ever and never raise the banner.
+      void openTerm(true);
+      return false;
+    }
+    if (result.bytes > 0) {
+      totalBytes += result.bytes;
+      try {
+        screen.write(result.data);
+      } catch (e) {
+        // The bytes are already consumed, so a parser bug must not take the
+        // rest of the tick (query replies, the EOF handling below) with it —
+        // and the loop keeps polling, so the next tmux redraw repairs it.
+        console.error('[terminal] screen.write failed', e);
+        reportTerminalError(e);
+      }
+      renderVersion++;
+      // Answer any terminal queries (DSR cursor position, DA) the output
+      // carried — the parser has no back-channel, so we forward its replies.
+      const reply = screen.takeReplies();
+      if (reply !== '') writePty(reply);
+    }
+    // The PTY is gone (e.g. the SSH child to a remote host died — now within
+    // ~10s thanks to the ServerAlive keepalive in pty.rs, instead of hanging
+    // silently forever). `eof` is the reader thread's own flag, NOT a search
+    // for the `[cf]` line it also prints: output that merely contains that
+    // text (this repo's pty.rs on screen, say) used to tear down a healthy
+    // attach. It arrives once the last byte has been handed over, so it
+    // normally comes with bytes === 0 — hence checked outside that branch.
+    if (result.eof) {
       scheduleAutoReconnect();
-    } else if (reconnectAttempts > 0 && !result.data.includes('[cf] attached')) {
-      // Real session output after a reconnect (not our own status banner) ⇒
-      // the connection is healthy again; restore the self-heal budget.
+      return result.bytes > 0;
+    }
+    // Restore the self-heal budget on PROOF of health — an attach that has
+    // lived past HEALTHY_ATTACH_MS — never on "some output arrived". A doomed
+    // attach also prints (a login profile, `can't find session`), and taking
+    // that as healthy reset the count every cycle: the cap was never reached
+    // and the pane said "reconnecting…" forever.
+    if (
+      reconnectAttempts > 0 &&
+      attachedAt !== null &&
+      Date.now() - attachedAt >= HEALTHY_ATTACH_MS
+    ) {
       reconnectAttempts = 0;
     }
-    return true;
+    return result.bytes > 0;
   }
 
   /** Self-healing reattach. Called when the reader thread reports the PTY
    *  died. Schedules a bounded, backed-off reattach for the still-selected
-   *  session; once the budget is spent, surfaces the manual banner instead. */
-  function scheduleAutoReconnect() {
+   *  session; once the budget is spent, surfaces the manual banner instead.
+   *  The identity is a parameter because the caller may be an open whose
+   *  `pty_open` failed — `currentSession`/`currentHost` are null by then. */
+  function scheduleAutoReconnect(
+    sessionAtSchedule: string | null = currentSession,
+    hostAtSchedule: string | null = currentHost,
+  ) {
     if (autoReconnectTimer !== null) return; // one already pending
     if (reconnectAttempts >= MAX_AUTO_RECONNECT) {
       autoReconnecting = false;
@@ -456,8 +690,6 @@
     }
     reconnectAttempts += 1;
     autoReconnecting = true;
-    const sessionAtSchedule = currentSession;
-    const hostAtSchedule = currentHost;
     const delay = AUTO_RECONNECT_BASE_MS * reconnectAttempts; // 0.6s, 1.2s, 1.8s
     autoReconnectTimer = setTimeout(() => {
       autoReconnectTimer = null;
@@ -477,10 +709,18 @@
   }
 
   async function closeTerm() {
+    // Invalidate every open in flight. Done FIRST and unconditionally: an
+    // open suspended in `repair_session` or `pty_open` must stand down even
+    // when there is nothing here to tear down yet.
+    openGeneration += 1;
     // Cancel any pending self-heal first — a scheduled auto-reconnect for a
     // now-stale session must never fire after a detach or session switch.
     // (Done before the no-op guard below so a lingering timer is always
     // cleared, and kept conditional so we don't write $state needlessly.)
+    if (postAttachTimer !== null) {
+      clearTimeout(postAttachTimer);
+      postAttachTimer = null;
+    }
     if (autoReconnectTimer !== null) {
       clearTimeout(autoReconnectTimer);
       autoReconnectTimer = null;
@@ -497,6 +737,16 @@
 
     // Drop the context menu so a session switch can't leave the backdrop stuck.
     ctxMenu = null;
+    // A composition half-typed into the pane that is going away must not be
+    // flushed into the next session's PTY.
+    composing = false;
+    compositionJustEnded = false;
+    if (imeInput) imeInput.value = '';
+    // The overlay and the error belong to the pane that is going away; an
+    // upload still in flight checks the generation before it touches either.
+    uploadsInFlight = 0;
+    uploading = false;
+    openError = null;
 
     drain.stop();
     resizeObserver?.disconnect();
@@ -505,11 +755,12 @@
       clearTimeout(resizeTimer);
       resizeTimer = null;
     }
+    lastResizeAt = 0;
     screen = null;
+    attachedAt = null;
     lastCols = 0;
     lastRows = 0;
     totalBytes = 0;
-    drainTicks = 0;
     renderVersion++;
     if (ptyOpen) {
       ptyOpen = false;
@@ -530,9 +781,17 @@
 
   function onKeydown(e: KeyboardEvent) {
     if (!ptyOpen) return;
-    // While an IME / dead-key composition is in progress the keydowns are
-    // part of composing — the finished text arrives via compositionend.
-    if (e.isComposing) return;
+    // An input method owns this keystroke: the finished text arrives through
+    // the proxy's composition/input events instead. WebKit reports the keys it
+    // swallowed while composing as keyCode 229 / key `Process`.
+    if (e.isComposing || composing || e.keyCode === 229 || e.key === 'Process') return;
+    // The key that COMMITTED a composition is delivered after compositionend
+    // with isComposing already false. Forwarding it as well would submit
+    // Claude Code's prompt (Enter) or append a stray space to the word.
+    if (compositionJustEnded && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Escape' && ctxMenu) { ctxMenu = null; return; }
     const k = e.key.toLowerCase();
     const cmdChord = e.metaKey && !e.altKey && !e.ctrlKey;
@@ -563,6 +822,13 @@
       selFocus = { row: lastRows - 1, col: lastCols - 1 };
       return;
     }
+    // macOS press-and-hold: holding a letter is supposed to open the accent
+    // popup (`é`, `ē`, …) rather than repeat it, but AppKit only gets to decide
+    // that if the repeating keydown is left unprevented — a prevented one never
+    // reaches interpretKeyEvents:. So hand the repeats to the proxy: it inserts
+    // them as ordinary input events (press-and-hold off) or delivers the accent
+    // the user picked (press-and-hold on), either way through flushImeInput.
+    if (isMac && e.repeat && !e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1) return;
     const bytes = keyToBytes(e, { appCursor: screen?.appCursorKeys ?? false, isMac });
     if (bytes === null) return;
     e.preventDefault();
@@ -576,17 +842,97 @@
     bumpDrain();
   }
 
-  /** Forward IME / dead-key composed text (e.g. Slovak `á`, CJK input) — it
-   *  never reaches `onKeydown` as a single printable char. */
-  function onCompositionEnd(e: CompositionEvent) {
-    if (!ptyOpen || !e.data) return;
-    writePty(e.data);
+  /** Move keyboard focus to the IME proxy. Everything that used to focus the
+   *  grid goes through here (its own onfocus included), so an input method
+   *  always has an editable element to attach to. */
+  /** Whether the current focus arrived from the keyboard. `:focus-visible`
+   *  can't tell us: a UA always matches it on a focused text control, so the
+   *  ring would appear on every click once focus moved to the proxy. */
+  let keyboardFocus = $state(false);
+  let pointerFocusPending = false;
+
+  function onProxyFocus() {
+    focused = true;
+    keyboardFocus = !pointerFocusPending;
+    pointerFocusPending = false;
+  }
+
+  /** A composition the browser never ends (focus pulled away mid-preedit)
+   *  would otherwise leave `composing` true, and onKeydown swallows every
+   *  keystroke while it is. */
+  function onProxyBlur() {
+    focused = false;
+    keyboardFocus = false;
+    composing = false;
+    compositionJustEnded = false;
+    if (imeInput) imeInput.value = '';
+  }
+
+  function focusInput() {
+    (imeInput ?? container)?.focus({ preventScroll: true });
+  }
+
+  /** Send whatever the input method left in the proxy, and empty it.
+   *
+   *  Both compositionend and a non-composing input event call this, because
+   *  WebKit and Chromium disagree about which of the two fires first and with
+   *  what `data`. Reading the element's value rather than the event's payload
+   *  makes the proxy the single source of truth: whichever event runs second
+   *  finds it already empty and sends nothing, so the composed string can
+   *  never go out twice. */
+  function flushImeInput() {
+    const el = imeInput;
+    if (!el) return;
+    const text = el.value;
+    if (text) el.value = '';
+    if (!text || !ptyOpen) return;
+    writePty(text);
     clearSelection();
     blinkEpoch++;
     bumpDrain();
   }
 
+  function onCompositionStart() {
+    composing = true;
+  }
+
+  /** Forward IME / dead-key composed text (Slovak `á`, the press-and-hold
+   *  accent popup, a CJK commit) — it never reaches `onKeydown` as a single
+   *  printable char. */
+  function onCompositionEnd() {
+    composing = false;
+    compositionJustEnded = true;
+    // One macrotask is all the commit keydown gets; anything later is a real
+    // keystroke the user meant to send.
+    setTimeout(() => (compositionJustEnded = false), 0);
+    flushImeInput();
+  }
+
+  /** Text inserted without a composition: the emoji picker, dictation, a
+   *  paste the OS routed through the proxy. A printable keystroke never gets
+   *  here — `onKeydown` calls preventDefault() for it, and a prevented
+   *  keydown produces no input event. */
+  function onImeInput(e: Event) {
+    if (composing || (e as InputEvent).isComposing) return;
+    const type = (e as InputEvent).inputType;
+    if (type === 'insertFromPaste' || type === 'insertFromDrop') {
+      // The macOS Edit ▸ Paste menu item and a drop onto the proxy land here,
+      // not in our Cmd+V handler. Route them through the paste path so the
+      // text is sanitised and bracketed like every other paste.
+      const el = imeInput;
+      const text = el ? el.value : '';
+      if (el) el.value = '';
+      if (text && ptyOpen) sendPaste(text);
+      return;
+    }
+    flushImeInput();
+  }
+
+
   onDestroy(() => {
+    // Before closeTerm, so an open resuming from an await sees it at once.
+    destroyed = true;
+    openGeneration += 1;
     void closeTerm();
     mouse.dispose();
   });
@@ -601,8 +947,9 @@
   // content-derived `key`. Reading `renderVersion` makes Svelte recompute
   // whenever screen.write() bumps it.
   //
-  // The key encodes the row index followed by every run's style + text. When
-  // a row's content changes, its key changes, so Svelte destroys and
+  // The key (`runsKey`) encodes the row index followed by every run's style,
+  // cell count and text. When a row's content changes, its key changes — and
+  // so does the width of any run that moved — so Svelte destroys and
   // recreates that row's <div> instead of mutating its text nodes in place.
   // Recreating the DOM node is what forces WKWebView to repaint it: in-place
   // text mutation across many rows in one frame leaves some rows unpainted,
@@ -629,14 +976,7 @@
         continue;
       }
       const runs = rowToRuns(scr.cells[r]);
-      // Row index + each run's style/text, joined with control bytes
-      // 0x01..0x04. Cells only ever hold printable chars (code >= 0x20), so
-      // those bytes never occur in run.text and the fields can't collide.
-      let key = String(r);
-      for (const run of runs) {
-        key += `\u0001${run.fg}\u0002${run.bg}\u0003${run.attrs}\u0004${run.text}`;
-      }
-      const entry = { ver, key, runs };
+      const entry = { ver, key: runsKey(r, runs), runs };
       rowCache[r] = entry;
       out[r] = entry;
     }
@@ -680,38 +1020,38 @@
     };
   });
 
+  // Where the caret IS, as opposed to where it is drawn. The IME proxy rides
+  // this and not `cursor`, which is null whenever the app hid the cursor
+  // (`CSI ?25l`) — the normal state for a full-screen TUI, Ink-based Claude
+  // Code included. Anchoring the proxy to the overlay parked the candidate
+  // window, the press-and-hold accent popup and the emoji picker in the
+  // pane's top-left corner for exactly the app this terminal exists to run.
+  const caretAt = $derived.by<{ left: number; top: number; h: number } | null>(() => {
+    void renderVersion;
+    if (!screen || cellWidth <= 0 || cellHeight <= 0) return null;
+    return {
+      left: 4 + Math.min(screen.cursorCol, screen.cols - 1) * cellWidth,
+      top: 4 + screen.cursorRow * cellHeight,
+      h: cellHeight,
+    };
+  });
+
   // Selection highlight rects. Touch renderVersion so it tracks resizes/redraws.
   const selRects = $derived.by(() => {
     void renderVersion;
     if (!selAnchor || !selFocus || cellWidth <= 0 || cellHeight <= 0) return [];
-    return selectionRects(selAnchor, selFocus, lastCols, cellWidth, cellHeight, 4);
+    // Pass the live cells: snapping to whole glyphs has to use the grid as it
+    // is now, or a redraw under the selection leaves highlight and copy apart.
+    return selectionRects(selAnchor, selFocus, lastCols, cellWidth, cellHeight, 4, screen?.cells);
   });
 
   function runStyle(run: Run): string {
     const cacheKey = `${run.fg}|${run.bg}|${run.attrs}`;
-    const hit = styleCache.get(cacheKey);
-    if (hit !== undefined) return hit;
-    const parts: string[] = [];
-    let fg = colorToCss(run.fg);
-    let bg = colorToCss(run.bg);
-    // Reverse video (SGR 7 → ATTR_REVERSE): swap fg/bg, substituting the grid
-    // defaults for cells that use the default color. This is how claude/tmux
-    // draw the input CARET (a reverse-video block) and selections — without it
-    // they render as plain text and are invisible.
-    if (run.attrs & 16) {
-      const f = fg ?? '#e8e8e8'; // grid default text color (.grid color)
-      const b = bg ?? '#0a0a0a'; // grid default background (.grid background)
-      fg = b;
-      bg = f;
+    let style = styleCache.get(cacheKey);
+    if (style === undefined) {
+      style = runStyleCss(run);
+      styleCache.set(cacheKey, style);
     }
-    if (fg) parts.push(`color:${fg}`);
-    if (bg) parts.push(`background:${bg}`);
-    if (run.attrs & 1) parts.push('font-weight:600'); // ATTR_BOLD
-    if (run.attrs & 2) parts.push('opacity:0.75'); // ATTR_DIM
-    if (run.attrs & 4) parts.push('font-style:italic'); // ATTR_ITALIC
-    if (run.attrs & 8) parts.push('text-decoration:underline'); // ATTR_UNDERLINE
-    const style = parts.join(';');
-    styleCache.set(cacheKey, style);
     return style;
   }
 </script>
@@ -768,9 +1108,7 @@ tmux attach -t {$selectedSession.tmux_name}</pre>
       <span class="size" data-testid="terminal-size">
         {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}
       </span>
-      <span class="counters" data-testid="terminal-counters">
-        ticks: {drainTicks} · {totalBytes}B
-      </span>
+      <span class="counters" data-testid="terminal-counters">{totalBytes}B</span>
       <button
         class="reconnect"
         onclick={() => void openTerm()}
@@ -780,33 +1118,70 @@ tmux attach -t {$selectedSession.tmux_name}</pre>
         ↻ reconnect
       </button>
     </div>
-    <!-- The grid container. tabindex makes it focusable so keyboard
-         input lands here. We render lines as block <div>s with monospace
-         spans for each style run. -->
+    <!-- The grid container. tabindex keeps it in the tab order; the focus it
+         receives is handed straight to the IME proxy below, which is what
+         actually holds the caret. keydown stays here so it catches the
+         proxy's keystrokes as they bubble. We render lines as block <div>s
+         with monospace spans for each style run. -->
+    <!-- role=application, not textbox: a terminal passes keystrokes straight
+         through, and unlike textbox it may contain the focusable proxy.
+         tabindex=-1 keeps the grid programmatically focusable (the mouse
+         controller focuses it) while the proxy stays the single tab stop, so
+         Tab and Shift+Tab move past the terminal instead of inside it. -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions
+         The handlers belong here: the grid is the terminal surface, and the
+         rule does not know that `application` delegates keys to the widget. -->
     <div
       class="grid"
+      class:kb-focus={focused && keyboardFocus}
+      style:--cell-w={cellWidth > 0 ? `${cellWidth}px` : null}
       bind:this={container}
-      tabindex="0"
-      role="textbox"
+      tabindex="-1"
+      role="application"
       aria-label="Terminal"
-      aria-multiline="true"
+      onfocus={focusInput}
       onkeydown={onKeydown}
-      oncompositionend={onCompositionEnd}
       onwheel={onWheel}
       onmousedown={onMousedown}
       oncontextmenu={onContextMenu}
-      onfocus={() => (focused = true)}
-      onblur={() => (focused = false)}
       data-testid="terminal-host"
     >
-      <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
-           rely on naive `font-size * 0.6` — system font metrics on macOS
-           drift slightly between Menlo and SF Mono. -->
-      <span class="measure" bind:this={measureCell} aria-hidden="true">M</span>
+      <!-- Hidden probe used once to measure font metrics. We can't rely on
+           naive `font-size * 0.6` — system font metrics on macOS drift
+           slightly between Menlo and SF Mono. It holds MEASURE_CHARS glyphs,
+           not one: the width is divided back down, so per-glyph rounding is
+           amortised instead of being multiplied across every run box. -->
+      <span class="measure" bind:this={measureCell} aria-hidden="true">{MEASURE_SAMPLE}</span>
+      <!-- The real keyboard target. Invisible, one cell wide, parked on the
+           cursor so WebKit anchors the IME candidate window and the
+           press-and-hold accent popup where the text will land. Its own
+           content is never displayed: every handler empties it again. -->
+      <textarea
+        class="ime-proxy"
+        bind:this={imeInput}
+        style="left:{caretAt?.left ?? 4}px; top:{caretAt?.top ?? 4}px; height:{caretAt?.h ?? 16}px"
+        rows="1"
+        autocapitalize="off"
+        autocomplete="off"
+        {...{ autocorrect: 'off' }}
+        spellcheck="false"
+        aria-label="Terminal input"
+        oncompositionstart={onCompositionStart}
+        oncompositionend={onCompositionEnd}
+        oninput={onImeInput}
+        onfocus={onProxyFocus}
+        onblur={onProxyBlur}
+        data-ime-proxy="true"
+        data-testid="terminal-ime"
+      ></textarea>
       {#each visibleRows as row (row.key)}
         <div class="row">
           {#each row.runs as run, i (i)}
-            <span class:wide={run.wide} style={runStyle(run)}>{run.text}</span>
+            <span
+              class:wide={run.wide}
+              class:glyph={run.glyph}
+              style={runStyle(run)}
+              style:--n={run.cells}>{run.text}</span>
           {/each}
         </div>
       {/each}
@@ -961,6 +1336,10 @@ tmux attach -t {$selectedSession.tmux_name}</pre>
   .reconnect:hover { color: var(--fg); border-color: var(--accent); }
   .grid {
     position: relative;
+    /* Width of one cell, republished from the measured metrics once the font
+       is up (see `measureCellSize`). Every run's box is a multiple of it, so
+       the text grid, the cursor and the selection overlay share one unit. */
+    --cell-w: 1ch;
     flex: 1 1 auto;
     min-height: 0;
     min-width: 0;
@@ -977,8 +1356,35 @@ tmux attach -t {$selectedSession.tmux_name}</pre>
     /* Show focus ring subtly so the user knows where keyboard input lands. */
     outline: none;
   }
-  .grid:focus-visible {
+  /* Keyboard focus only: the proxy is a text control, and a UA matches
+     :focus-visible on those even for a plain mouse click. */
+  .grid.kb-focus {
     box-shadow: inset 0 0 0 1px var(--accent, #4f8fff);
+  }
+  /* Invisible, but NOT display:none / visibility:hidden and not off-screen —
+     WebKit only opens an input-method session on an element it considers
+     rendered, and positions the candidate window from its caret rect. Inherits
+     the grid font so that rect lines up with the cell it sits on. */
+  .ime-proxy {
+    position: absolute;
+    z-index: 2;
+    width: 1px;
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    outline: none;
+    resize: none;
+    overflow: hidden;
+    background: transparent;
+    color: transparent;
+    caret-color: transparent;
+    opacity: 0;
+    /* Clicks belong to the grid underneath — this only ever takes focus. */
+    pointer-events: none;
+    font: inherit;
+    line-height: inherit;
+    white-space: pre;
   }
   .row {
     white-space: pre;
@@ -988,20 +1394,25 @@ tmux attach -t {$selectedSession.tmux_name}</pre>
     line-height: 16px;
   }
   .row span {
-    /* span color comes from inline style applied per run. */
-    display: inline;
-  }
-  /* A wide (2-column) glyph. Emoji and CJK come from a fallback font whose
-     advance is not two Menlo cells, so pin the box to exactly 2ch — the
-     column grid, the selection overlay and mouse→cell mapping all assume
-     every column is one cell wide. `ch` resolves against the grid's own
-     font, not the fallback. */
-  .row span.wide {
+    /* span color comes from inline style applied per run. Each run is pinned
+       to exactly the cells it covers (`--n`), in the same unit the cursor,
+       the selection overlay and mouse→cell mapping use — so a run whose
+       glyphs are drawn a fraction wider can't push the rest of the row off
+       the column grid. */
     display: inline-block;
-    width: 2ch;
+    width: calc(var(--cell-w) * var(--n, 1));
+    height: 16px;
+    vertical-align: top;
+  }
+  /* A single glyph that may come from a fallback font: a wide (2-column)
+     emoji or CJK char, or a narrow one outside the grid font's coverage
+     (⏺ ⎿ ✻, DEC scan lines, a cell carrying a combining mark). The fallback
+     advance is not a whole number of cells, so centre the glyph in its
+     pinned box and clip whatever sticks out. */
+  .row span.wide,
+  .row span.glyph {
     overflow: hidden;
     text-align: center;
-    vertical-align: top;
   }
   .selection {
     position: absolute;

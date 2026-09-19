@@ -108,6 +108,11 @@ REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
   reintroduce them.
 - SQLite access goes through `Store` behind a `std::sync::Mutex`. Never hold the
   guard across an `.await`.
+- No blocking I/O under `Mutex<PtyState>` and none on a sync Tauri command (a
+  sync command runs on the macOS main thread). PTY input goes to the writer
+  thread through its bounded channel — `E_PTY_BUSY` when it is full,
+  `E_PTY_CLOSED` when the thread is gone; kill / reap / fd teardown runs on the
+  `PtyParts` taken out under the lock, after the guard is released.
 
 ## Status & known issues
 

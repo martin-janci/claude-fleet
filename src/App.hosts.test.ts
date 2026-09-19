@@ -104,7 +104,9 @@ async function openSession(s: SessionRow): Promise<HTMLElement> {
   selectSession(s);
   const grid = await screen.findByTestId('terminal-host');
   grid.focus();
-  expect(document.activeElement).toBe(grid);
+  // The grid hands focus straight to the terminal's hidden IME proxy, which
+  // lives inside it (F9) — so assert focus is in the terminal, not on the div.
+  expect(grid.contains(document.activeElement)).toBe(true);
   return grid;
 }
 
@@ -153,7 +155,7 @@ describe('App: the Hosts view', () => {
     await tick();
     await tick();
     expect(hostsView()).toBeNull();
-    expect(document.activeElement).toBe(grid);
+    expect(grid.contains(document.activeElement)).toBe(true);
   });
 
   it('Esc inside an input in the view does not close it', async () => {

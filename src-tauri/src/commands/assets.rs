@@ -22,7 +22,9 @@ use fleet_core::service::catalog::{
     AssetDetail, AssetListing, ConfigureArgs, ImportArgs,
 };
 use fleet_core::ssh::SshClient;
-use fleet_core::store::{AssetInventoryRow, CatalogConfigRow, SecretRow, SessionRow, Store};
+use fleet_core::store::{
+    AssetInventoryRow, CatalogConfigRow, HostLayerRow, SecretRow, SessionRow, Store,
+};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -36,6 +38,17 @@ fn check_name(name: &str) -> Result<(), IpcError> {
         Ok(())
     } else {
         Err(invalid_name(name))
+    }
+}
+
+fn check_layer_name(name: &str) -> Result<(), IpcError> {
+    if is_valid_name(name) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            format!("invalid layer name '{name}'"),
+        ))
     }
 }
 
@@ -95,6 +108,36 @@ pub struct GetAssetArgs {
 #[derive(serde::Deserialize)]
 pub struct ScanArgs {
     pub host_alias: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ResolvePreviewArgs {
+    pub host_alias: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct SetHostLayersArgs {
+    pub host_alias: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub contexts: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct LayerTemplateArgs {
+    pub name: String,
+    pub axis: catalog::layer::Axis,
+}
+
+#[derive(serde::Deserialize)]
+pub struct WriteLayerArgs {
+    pub layer: catalog::layer::Layer,
+}
+
+#[derive(serde::Deserialize)]
+pub struct LayerRef {
+    pub name: String,
 }
 
 #[tauri::command]
@@ -176,6 +219,122 @@ pub fn catalog_get_asset(
         ));
     }
     catalog::get_asset(args.kind, &args.name, &store)
+}
+
+#[tauri::command]
+pub fn catalog_list_layers(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::LayerListing, IpcError> {
+    backend.local_only(
+        "catalog_list_layers",
+        "the hub does serve this (its read-only list_layers tool), but the \
+         layer definitions live in the catalog's git checkout, which only the \
+         machine that owns the fleet has; call list_layers on the hub, or \
+         work on the catalog there",
+    )?;
+    catalog::list_layers(&store)
+}
+
+#[tauri::command]
+pub fn catalog_resolve_preview(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ResolvePreviewArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::resolve::Resolution, IpcError> {
+    backend.local_only(
+        "catalog_resolve_preview",
+        "the hub has a resolve_preview tool, but it answers a summary — kind, \
+         name and version per asset — while this command returns the full \
+         Resolution the UI renders, so routing it would silently drop every \
+         asset body; call resolve_preview on the hub for the summary, or \
+         resolve on the machine that owns the fleet",
+    )?;
+    catalog::resolve_preview(&args.host_alias, &store)
+}
+
+#[tauri::command]
+pub fn catalog_propose_layers(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::propose::LayerProposal, IpcError> {
+    backend.local_only(
+        "catalog_propose_layers",
+        "the hub does serve this (its read-only propose_layers tool), but a \
+         proposal is only useful where the layers can then be written — the \
+         catalog's git checkout, which only the machine that owns the fleet \
+         has; call propose_layers on the hub, or propose on that machine",
+    )?;
+    catalog::propose::propose_layers(&store)
+}
+
+#[tauri::command]
+pub fn catalog_set_host_layers(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: SetHostLayersArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<HostLayerRow>, IpcError> {
+    backend.local_only(
+        "catalog_set_host_layers",
+        "the hub has a set_host_layers tool, but it is master-only — a host's \
+         layer assignment decides what the next apply_sync writes to its \
+         filesystem — and a paired client is never the master; set layers on \
+         the machine that owns the fleet",
+    )?;
+    catalog::set_host_layers(
+        &args.host_alias,
+        args.role.as_deref(),
+        &args.contexts.iter().map(String::as_str).collect::<Vec<_>>(),
+        &store,
+    )
+}
+
+#[tauri::command]
+pub fn catalog_layer_template(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: LayerTemplateArgs,
+) -> Result<catalog::layer::Layer, IpcError> {
+    backend.local_only(
+        "catalog_layer_template",
+        "a template is the first step of authoring a layer into the \
+         catalog's git checkout, and catalog_write_layer refuses here for \
+         want of that checkout; the hub exposes no layer-authoring tool, so \
+         author on the machine that owns the fleet",
+    )?;
+    check_layer_name(&args.name)?;
+    Ok(author::layer_template(&args.name, args.axis))
+}
+
+#[tauri::command]
+pub fn catalog_write_layer(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: WriteLayerArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<String, IpcError> {
+    backend.local_only(
+        "catalog_write_layer",
+        "writing a layer edits a file in the catalog's git checkout, which \
+         only the machine that owns the fleet has, and the hub exposes no \
+         layer-authoring tool; author on that machine",
+    )?;
+    check_layer_name(&args.layer.name)?;
+    author::write_layer(&args.layer, &store)
+}
+
+#[tauri::command]
+pub fn catalog_delete_layer(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: LayerRef,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<String, IpcError> {
+    backend.local_only(
+        "catalog_delete_layer",
+        "deleting a layer removes a file from the catalog's git checkout, \
+         which only the machine that owns the fleet has, and the hub exposes \
+         no layer-authoring tool; author on that machine",
+    )?;
+    check_layer_name(&args.name)?;
+    author::delete_layer(&args.name, &store)
 }
 
 #[tauri::command]

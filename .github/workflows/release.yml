@@ -67,7 +67,13 @@ jobs:
               return existing.id;
             }
             const body = [
-              'Unsigned builds (no Apple Developer ID yet). On macOS, right-click the app and choose Open, or run `xattr -d com.apple.quarantine /Applications/claude-fleet.app`.',
+              'Unsigned builds (no Apple Developer ID yet). On macOS the first launch reports the app as *"damaged and can\'t be opened"* — it is not damaged. Drag it to `/Applications`, then clear the quarantine flag:',
+              '',
+              '```bash',
+              'xattr -dr com.apple.quarantine /Applications/claude-fleet.app',
+              '```',
+              '',
+              `Right-click → **Open** does not help here: that is the bypass for a signed-but-unnotarized app. Full instructions: [Installing a release build](https://github.com/${owner}/${repo}/blob/${tag}/README.md#installing-a-release-build).`,
               '',
               `Release notes: see the matching section of [CHANGELOG.md](https://github.com/${owner}/${repo}/blob/${tag}/CHANGELOG.md).`,
             ].join('\n');

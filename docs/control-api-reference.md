@@ -111,6 +111,10 @@ Parameters: `include_revoked`
 
 List all registered hosts with their reachability, claude/tmux versions, and linked account. Returns JSON.
 
+### `list_layers`
+
+List the catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app. Returns JSON.
+
 ### `list_projects`
 
 List discovered projects. Slim rows by default (id, owner, repo, worktree_count, last_session_at); pass summary=false for the full nested worktree tree.
@@ -188,6 +192,10 @@ Parameters: `host_alias`, `kind`, `name`
 Re-probe a registered host's reachability and versions. Returns the updated host row as JSON.
 
 Parameters: `alias`
+
+### `propose_layers`
+
+Propose an initial layer split from the last scan, grouping assets by the exact set of hosts they are installed on. The largest group becomes 'core'; assets on a single host are returned separately for triage. Read-only: writes nothing. Returns JSON.
 
 ### `provision_hosts`
 
@@ -283,6 +291,12 @@ List a session's worktree files (tracked + untracked, gitignore respected). Retu
 
 Parameters: `session_id`
 
+### `resolve_preview`
+
+Compute the effective asset set for one host after its role and contexts are resolved, with provenance: which layer introduced each asset, which layers overrode it, and which layer excluded anything missing. Nothing is written. Requires catalog_configure + catalog_load in the app. Returns JSON.
+
+Parameters: `host_alias`
+
 ### `restart_session`
 
 Restart a tmux session (kill and recreate it in the same place). Use when the Claude REPL is wedged but tmux and the worktree are fine — an in-place relaunch, cheaper than recreate_session. Returns the updated session row as JSON. Address the session with session_id OR host_alias + name.
@@ -354,6 +368,12 @@ Parameters: `confirm_nonce`, `content`, `host_alias`
 Set the session's friendly display name (shown when the user toggles friendly names on). Called once per task by the in-session agent — short (3–6 words). Empty string clears. Returns the updated row. Address the session with session_id OR host_alias + tmux_name.
 
 Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
+
+### `set_host_layers`
+
+Replace a host's layer assignment: one optional role plus context layers in application order. Edits fleet state only, never catalog files. Requires catalog_configure + catalog_load in the app. Master token only. Returns the host's new assignment as JSON.
+
+Parameters: `contexts`, `host_alias`, `role`
 
 ### `set_secret`
 
@@ -488,6 +508,13 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::assets::catalog_load`
 - `commands::assets::catalog_list_assets`
 - `commands::assets::catalog_get_asset`
+- `commands::assets::catalog_list_layers`
+- `commands::assets::catalog_resolve_preview`
+- `commands::assets::catalog_propose_layers`
+- `commands::assets::catalog_set_host_layers`
+- `commands::assets::catalog_layer_template`
+- `commands::assets::catalog_write_layer`
+- `commands::assets::catalog_delete_layer`
 - `commands::assets::catalog_import_host`
 - `commands::assets::assets_scan_hosts`
 - `commands::assets::assets_inventory`
