@@ -67,7 +67,7 @@ pub async fn spawn_review(
     tmux.new_session(
         &review_name,
         std::path::Path::new(&cwd),
-        &crate::tmux::pane_command_for(Some(&claude_id)),
+        &crate::tmux::pane_command_for(Some(&claude_id), &review_name),
     )
     .await?;
 

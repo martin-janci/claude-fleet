@@ -26,7 +26,15 @@ serde_json = "1"
 qrcode = { version = "0.14", default-features = false }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+# `serve`'s own SIGTERM-cancels-the-ticks token (issue #144), plus naming the
+# `CancellationToken` type `start_with_listener` returns in test helpers —
+# already in the tree as `fleet-core`'s dependency, not a new crate.
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 rcgen = "0.13"
 tempfile = "3"
+# `test-util` only: `#[tokio::test(start_paused = true)]` for the
+# `await_ticks` shutdown-ordering tests (issue #144) — same override
+# `fleet-core` already carries for the same reason.
+tokio = { version = "1", features = ["full", "test-util"] }

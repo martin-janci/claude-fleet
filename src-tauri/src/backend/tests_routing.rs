@@ -301,7 +301,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "session_conversation",
-            json!({ "session_id": 7, "turns": 5 }),
+            json!({ "session_id": 7, "turns": 5, "events_limit": 200 }),
             r#"{"turns":[],"truncated":false}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::session_conversation(
@@ -309,9 +309,45 @@ fn routed_read_cases() -> Vec<Case> {
                     commands::sessions::SessionConversationArgs {
                         session_id: 7,
                         turns: Some(5),
+                        claude_session_id: None,
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_conversation",
+            json!({ "session_id": 7, "turns": 5, "claude_session_id": "11111111-1111-1111-1111-111111111111", "events_limit": 200 }),
+            r#"{"turns":[],"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::session_conversation(
+                    b,
+                    commands::sessions::SessionConversationArgs {
+                        session_id: 7,
+                        turns: Some(5),
+                        claude_session_id: Some("11111111-1111-1111-1111-111111111111".into()),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_conversations",
+            // Clamped on this side, like session_history: 10_000 -> 500.
+            json!({ "session_id": 7, "limit": 500 }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_conversations(
+                    b,
+                    commands::sessions::SessionConversationsArgs {
+                        session_id: 7,
+                        limit: Some(10_000),
+                    },
+                    s,
                 ))
                 .map(|_| ())
             }),
@@ -943,6 +979,7 @@ fn standalone_ssh_backed_reads_take_the_local_path() {
                 commands::sessions::SessionConversationArgs {
                     session_id: 999,
                     turns: None,
+                    claude_session_id: None,
                 },
                 &st,
                 &ssh(),

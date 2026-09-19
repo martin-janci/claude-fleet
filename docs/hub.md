@@ -394,10 +394,19 @@ fleet-hub pair --name phone --ttl 120         # seconds the code stays valid (30
 
 Pairing needs a **running** hub (`fleet-hub serve`): the code only means
 something inside the process that will redeem it. `fleet-hub pair` reads the
-master token out of the data dir, resolves the port the same way `serve` does
-(`--port`, `FLEET_HUB_PORT`, the stored setting, then the default) and calls
-the hub's own `/mcp` on loopback — so run it on the hub's machine, as the user
-the daemon runs as.
+master token out of the data dir, resolves the port and the TLS mode the same
+way `serve` does (`--port`/`--tls`, `FLEET_HUB_PORT`/`FLEET_HUB_TLS`, the
+stored setting, then the default) and calls the hub's own `/mcp` on loopback —
+so run it on the hub's machine, as the user the daemon runs as. When the hub
+terminates TLS itself (`--tls cert`), `pair` and `client list|revoke` speak
+TLS too, with certificate verification off — but unlike the healthcheck
+probe, this connection carries the master token. What makes that safe is the
+address: it is hardcoded loopback (`pair.rs`:
+`SocketAddr::from(([127, 0, 0, 1], port))` — only the port is configurable),
+so the token never leaves the machine. The residual exposure — a local
+process squatting the port while the hub is down — is the same one the
+already-documented plaintext path carries. See *Single binary with its own
+certificate* below.
 
 **Changing the public URL needs a restart.** The `hub` field in the `/pair`
 response — the base URL the freshly paired device will talk to — is a snapshot
@@ -437,10 +446,11 @@ What a client may do:
   `wait_for_*`, …). Anything that sends, kills, deletes or writes answers
   `E_FORBIDDEN`.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
-  `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `pair_client`,
-  `revoke_client` and `list_clients` are master-token only, so a paired phone
-  can neither re-provision the fleet nor pair a second device nor revoke your
-  own client — nor even enumerate the other devices you have paired.
+  `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
+  `pair_client`, `revoke_client` and `list_clients` are master-token only, so
+  a paired phone can neither re-provision the fleet nor pair a second device
+  nor revoke your own client — nor even enumerate the other devices you have
+  paired.
 - A prompt typed on a phone always reaches an agent **marked** as untrusted
   input, naming the client it came from. `raw: true` is the master token's
   alone.
@@ -528,7 +538,7 @@ with its own certificate* below). Or skip the public URL
 entirely and bind loopback, reaching it over Tailscale or an SSH tunnel of
 your own: with no public URL configured, the hub behaves exactly like the
 desktop app — it binds `127.0.0.1` and opens a reverse SSH tunnel to every
-provisioned remote host. If you instead bind a non-loopback address with no
+provisioned remote SSH host. If you instead bind a non-loopback address with no
 public URL (for example the machine's Tailscale address,
 `--bind 100.64.0.1`), pass `--allow-plaintext` (or set
 `FLEET_HUB_ALLOW_PLAINTEXT=1`): the hub refuses any non-loopback bind that

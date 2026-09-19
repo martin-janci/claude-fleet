@@ -1,5 +1,6 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SessionRow, SessionEvent } from './sessions';
+import type { SessionEvent as TimelineEvent } from './timeline';
 import type { HostRow, HostEvent } from './hosts';
 import type { AccountRow } from './accounts';
 import type { ProjectRow, WorktreeRow, ProjectEvent } from './projects';
@@ -60,11 +61,17 @@ export type RowEventHandlers = {
   onTaskEvents?: (events: TaskEvent[]) => void;
   /** Task 4: one call per flush with every `account_usage:updated` row. */
   onAccountUsageEvents?: (rows: AccountUsageSnapshot[]) => void;
+  /** One call per flush with every `session:event` (timeline push). */
+  onTimelineEvents?: (events: TimelineEvent[]) => void;
+  /** One call per flush with the ids from every `session:conversations`. */
+  onConversationsChanged?: (sessionIds: number[]) => void;
 };
 
 type Queued =
   | { name: 'session:created' | 'session:updated'; payload: SessionRow }
   | { name: 'session:killed'; payload: { id: number } }
+  | { name: 'session:event'; payload: TimelineEvent }
+  | { name: 'session:conversations'; payload: { session_id: number } }
   | { name: 'host:added' | 'host:probed'; payload: HostRow }
   | { name: 'host:removed'; payload: { alias: string } }
   | { name: 'account:upserted'; payload: AccountRow }
@@ -111,6 +118,8 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const projectEvents: ProjectEvent[] = [];
     const taskEvents: TaskEvent[] = [];
     const accountUsageEvents: AccountUsageSnapshot[] = [];
+    const timelineEvents: TimelineEvent[] = [];
+    const conversationsChangedIds: number[] = [];
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
@@ -124,6 +133,12 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'session:killed':
           handlers.onSessionKilled?.(ev.payload);
           sessionEvents.push({ type: 'killed', id: ev.payload.id });
+          break;
+        case 'session:event':
+          timelineEvents.push(ev.payload);
+          break;
+        case 'session:conversations':
+          conversationsChangedIds.push(ev.payload.session_id);
           break;
         case 'host:added':
           handlers.onHostAdded?.(ev.payload);
@@ -179,6 +194,8 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (projectEvents.length > 0) handlers.onProjectEvents?.(projectEvents);
     if (taskEvents.length > 0) handlers.onTaskEvents?.(taskEvents);
     if (accountUsageEvents.length > 0) handlers.onAccountUsageEvents?.(accountUsageEvents);
+    if (timelineEvents.length > 0) handlers.onTimelineEvents?.(timelineEvents);
+    if (conversationsChangedIds.length > 0) handlers.onConversationsChanged?.(conversationsChangedIds);
   };
 
   const enqueue = (ev: Queued) => {
@@ -208,6 +225,8 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     ),
     task: !!handlers.onTaskEvents,
     accountUsage: !!handlers.onAccountUsageEvents,
+    timelineEvents: !!handlers.onTimelineEvents,
+    conversationsChanged: !!handlers.onConversationsChanged,
     assetInventoryUpdated: !!handlers.onAssetInventoryUpdated,
     assetInventoryCleared: !!handlers.onAssetInventoryCleared,
     catalogLoaded: !!handlers.onCatalogLoaded,
@@ -229,6 +248,8 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('session:created', wanted.session),
     sub('session:updated', wanted.session),
     sub('session:killed', wanted.session),
+    sub('session:event', wanted.timelineEvents),
+    sub('session:conversations', wanted.conversationsChanged),
     sub('host:added', wanted.host),
     sub('host:probed', wanted.host),
     sub('host:removed', wanted.host),

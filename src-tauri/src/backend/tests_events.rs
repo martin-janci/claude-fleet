@@ -389,7 +389,7 @@ async fn every_event_name_the_frontend_listens_for_crosses_the_bridge() {
     // Every key any store merges on, so the shape check (SF-5) passes it
     // under every name; `probe` is the unknown field that must survive.
     let payload = json!({
-        "probe": 1, "id": 1, "alias": "trn", "uuid": "u-1", "account_uuid": "u-1",
+        "probe": 1, "id": 1, "session_id": 1, "alias": "trn", "uuid": "u-1", "account_uuid": "u-1",
         "host_alias": "trn", "harness": "claude"
     });
     let body: Vec<String> = fleet_core::events::EVENT_NAMES

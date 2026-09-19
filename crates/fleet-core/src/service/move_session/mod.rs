@@ -1695,7 +1695,7 @@ async fn move_session_inner(
 
     let tmux_name = pick_target_name(&snap.row.tmux_name, &snap.target_taken)?;
     crate::validate::tmux_name(&tmux_name)?;
-    let pane_cmd = crate::service::sessions::recreate_pane_command("work", Some(&id));
+    let pane_cmd = crate::service::sessions::recreate_pane_command("work", Some(&id), &tmux_name);
     let cwd = hooks
         .ensure_target_workspace(
             store,

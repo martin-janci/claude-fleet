@@ -264,7 +264,7 @@ describe('App: the Conversation tab', () => {
     }
     expect(screen.queryByTestId('terminal-host')).toBeNull();
     expect(screen.queryByTestId('bg-panel')).toBeNull();
-    expect(inv.mock.calls).toContainEqual(['session_conversation', { args: { session_id: row.id } }]);
+    expect(inv.mock.calls).toContainEqual(['session_conversation', { args: { session_id: row.id, claude_session_id: row.claude_session_id } }]);
   });
 
   it('a bg row keeps Conversation as its view across a Hosts round trip', async () => {

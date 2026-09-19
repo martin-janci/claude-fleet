@@ -566,7 +566,7 @@ pub(super) async fn new_session_inner(
     let pane_cmd: String = if is_shell {
         crate::tmux::shell_pane_command(args.start_command.as_deref())
     } else {
-        crate::tmux::pane_command_for(claude_id.as_deref())
+        crate::tmux::pane_command_for(claude_id.as_deref(), &args.name)
     };
 
     // Automatic self-repair for an EXISTING worktree row / main checkout: the
@@ -671,6 +671,13 @@ pub(super) async fn new_session_inner(
             );
         } else {
             row.claude_session_id = Some(cid.clone());
+            // The rebind reset the context; return what the event carried.
+            if let Ok(Some(fresh)) = s.get_session_by_id(row.id) {
+                row.context = fresh.context;
+                row.context_pct = fresh.context_pct;
+                row.current_activity = fresh.current_activity;
+                row.last_prompt = fresh.last_prompt;
+            }
         }
     }
     if derived_friendly.is_some() {
@@ -812,10 +819,36 @@ pub(super) fn bg_kill_action(
     })
 }
 
+/// Record a kill: the `killed` timeline event and the end of the row's
+/// current conversation (`end_reason = killed`). Best-effort, like every
+/// timeline write; the rows go with the session row (`ON DELETE CASCADE`).
+pub(crate) fn record_kill(s: &Store, id: i64, claude_session_id: Option<&str>) {
+    if let Err(e) = s.insert_session_event(id, "killed", None) {
+        tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
+    }
+    if let Some(cid) = claude_session_id {
+        let _ = s.close_conversation(id, cid, "killed");
+    }
+}
+
 pub async fn kill_session(
     args: KillSessionArgs,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
+) -> Result<i64, IpcError> {
+    let deps = super::reconcile::ReconcileDeps::real(ssh, super::reconcile::local_host(store));
+    kill_session_with(args, store, ssh, &deps).await
+}
+
+/// [`kill_session`] with an injectable tmux executor + reconcile deps, so the
+/// kill → reconcile sequence is testable against a fake host. The tmux kill
+/// and the follow-up single-host reconcile both go through `deps`; the
+/// pane-less (`bg:`) branch still talks to the host over `ssh` directly.
+pub(super) async fn kill_session_with(
+    args: KillSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    deps: &super::reconcile::ReconcileDeps,
 ) -> Result<i64, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     // Lookup form: synthetic `bg:<uuid>` rows are killable too (via
@@ -857,9 +890,7 @@ pub async fn kill_session(
         match bg_kill_action(&kind, status, &agents, &sid)? {
             BgKillAction::Dismiss => {
                 let s = lock(store)?;
-                if let Err(e) = s.insert_session_event(id, "killed", None) {
-                    tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
-                }
+                record_kill(&s, id, Some(&sid));
                 // Records the dismissal and deletes the row, so there is
                 // nothing left for a reconcile pass to prune.
                 s.dismiss_agent(&args.host_alias, &sid, now_unix())?;
@@ -874,22 +905,29 @@ pub async fn kill_session(
             BgKillAction::Nothing => {}
         }
         if let Ok(s) = store.lock() {
-            if let Err(e) = s.insert_session_event(id, "killed", None) {
-                tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
-            }
+            record_kill(&s, id, Some(&sid));
         }
-        reconcile_one_host(store, ssh, &args.host_alias).await?;
+        super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias).await?;
         return Ok(id);
     }
-    let tmux = exec_for(&args.host_alias, ssh);
+    let tmux = (deps.exec)(&args.host_alias);
     tmux.kill_session(&args.name).await?;
     // Task G: record the kill before reconcile reaps the row. Best-effort.
+    // Then ghost the row as fleet's OWN kill (`lost_reason='killed'`)
+    // before the reconcile below probes the host: tmux exits with its last
+    // session, so killing a host's only session makes that probe see no
+    // tmux server — a `tmux_server_gone` verdict that would otherwise mark
+    // this row a resumable mass loss and keep it for the lost-session TTL.
+    // A ghost row is out of the verdict's reach and reaps on the ordinary
+    // one-cycle schedule. Best-effort: on failure the reconcile below
+    // still ghosts the row, as before.
     if let Ok(s) = store.lock() {
-        if let Err(e) = s.insert_session_event(id, "killed", None) {
-            tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
+        record_kill(&s, id, claude_sid.as_deref());
+        if let Err(e) = s.mark_session_killed(id, now_unix()) {
+            tracing::warn!(session_id = id, error = %e, "[kill] marking the killed row failed");
         }
     }
-    reconcile_one_host(store, ssh, &args.host_alias).await?;
+    super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias).await?;
     Ok(id)
 }
 
@@ -999,7 +1037,7 @@ pub async fn restart_session(
             None => ("work".to_string(), None, None),
         }
     };
-    let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref());
+    let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref(), &args.name);
     let tmux = exec_for(&args.host_alias, ssh);
     // Automatic self-repair (create-only) before the pane is respawned, then
     // respawn INTO the verified directory (a pane whose cwd was deleted keeps
@@ -1066,12 +1104,16 @@ pub(super) async fn wait_for_repl_ready(tmux: &dyn TmuxExec, name: &str) {
 /// shell; otherwise resume the session's own Claude id (or `--continue` for a
 /// legacy session with no stored id). A stored id is validated before use so a
 /// tampered DB value can't inject shell — an invalid id degrades to `None`.
-pub(crate) fn recreate_pane_command(kind: &str, claude_session_id: Option<&str>) -> String {
+pub(crate) fn recreate_pane_command(
+    kind: &str,
+    claude_session_id: Option<&str>,
+    tmux_name: &str,
+) -> String {
     if kind == "shell" {
         return crate::tmux::shell_pane_command(None);
     }
     let id = claude_session_id.filter(|id| crate::validate::claude_session_id(id).is_ok());
-    crate::tmux::pane_command_for(id)
+    crate::tmux::pane_command_for(id, tmux_name)
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
@@ -1115,7 +1157,11 @@ pub async fn recreate_session(
             ));
         }
         let cwd_src = cwd_source_for_session(&s, &sess)?;
-        let pane_cmd = recreate_pane_command(&sess.kind, sess.claude_session_id.as_deref());
+        let pane_cmd = recreate_pane_command(
+            &sess.kind,
+            sess.claude_session_id.as_deref(),
+            &sess.tmux_name,
+        );
         (sess, cwd_src, pane_cmd)
     };
     // Automatic self-repair (create-only): re-add a deleted worktree from its

@@ -87,6 +87,16 @@ pub trait TmuxExec: Send + Sync {
     async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
         None
     }
+    /// This host's boot identity (kernel boot id + tmux server pid), read
+    /// once per reconcile probe. `None` means "could not tell" (ssh failure,
+    /// transport timeout, unparseable output, or an executor that does not
+    /// implement it) — it must NEVER be read as "no tmux server", because a
+    /// later pass treats `Some(HostIdentity { tmux_server_pid: None, .. })`
+    /// as exactly that and marks every session on the host lost. The default
+    /// is `None`; `LocalTmux` and `RemoteTmux` both override it.
+    async fn host_identity(&self) -> Option<HostIdentity> {
+        None
+    }
 }
 
 /// Shell script printing `<sessionId>\t<mtime>` for the first
@@ -124,6 +134,94 @@ pub fn parse_mtimes(stdout: &str) -> std::collections::HashMap<String, i64> {
             Some((id.to_string(), mtime.trim().parse::<i64>().ok()?))
         })
         .collect()
+}
+
+/// A host's boot identity, read once per reconcile probe.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HostIdentity {
+    /// Kernel boot id — `/proc/sys/kernel/random/boot_id` (the HOST's, even
+    /// inside a container), else `sysctl -n kern.bootsessionuuid` (macOS): a
+    /// UUID stable for the whole boot. `None` when neither produced anything.
+    /// Deliberately NOT `kern.boottime` or `uptime -s`: both render their
+    /// timestamp in the local timezone, so the same boot prints a different
+    /// string under a different `TZ` (or across a DST change, or after NTP
+    /// steps the clock) — a later task reads any change in this string as a
+    /// reboot and marks every session on the host lost, so a
+    /// timezone-flavored "identity" is worse than none. Do not reintroduce
+    /// them.
+    pub boot_id: Option<String>,
+    /// Pid of the tmux server. `None` ⇒ no tmux server is running.
+    pub tmux_server_pid: Option<i64>,
+}
+
+/// Prints `boot=<id>`, then `tmuxrc=<tmux's own exit code>` and
+/// `tmuxout=<first line of tmux's combined stdout+stderr>`.
+///
+/// This deliberately does NOT decide "no server" in shell: every tmux
+/// failure looks the same to a naive `2>/dev/null` — missing binary (exit
+/// 127, e.g. a login profile edit or a `brew`/`apt upgrade tmux` mid-relink
+/// dropping tmux off `PATH`), a client/server protocol mismatch after an
+/// upgrade (the new client can't talk to the still-running old server),
+/// socket permission errors, or an actually-dead server — and only the last
+/// one means the server (and every session on it) is gone. So the script
+/// only *surfaces* tmux's raw exit code and output; `parse_host_identity`
+/// classifies it in Rust, via the same [`is_no_server_running`] the session
+/// lister already trusts, instead of guessing here.
+///
+/// `tmux list-sessions -F '#{pid}'` (not `display-message`) because it
+/// needs no attached client, matching what `list_local_sessions` /
+/// `RemoteTmux::list_sessions` already run.
+///
+/// The boot id source is deliberately just `/proc/sys/kernel/random/boot_id`
+/// (Linux) falling back to `sysctl -n kern.bootsessionuuid` (macOS) — both
+/// are per-boot identifiers with no wall-clock rendering. `kern.boottime`
+/// and `uptime -s` were rejected: both print a local-time timestamp, so the
+/// same boot yields a different "boot id" under a different `TZ`, across a
+/// DST change, or after NTP steps the clock, and a spurious change is read
+/// downstream as a reboot that marks every session on the host lost.
+pub const HOST_IDENTITY_SCRIPT: &str = "printf 'boot=%s\\n' \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.bootsessionuuid 2>/dev/null)\"; out=$(tmux list-sessions -F '#{pid}' 2>&1); rc=$?; printf 'tmuxrc=%s\\n' \"$rc\"; printf 'tmuxout=%s\\n' \"$(printf '%s' \"$out\" | head -n 1)\"";
+
+/// Parse [`HOST_IDENTITY_SCRIPT`] output. Requires BOTH a `tmuxrc=` line
+/// (tmux's exit code) and a `tmuxout=` line (the first line of its combined
+/// stdout+stderr) — missing either, or an unparseable `tmuxrc`, is output we
+/// cannot trust → outer `None`. Then:
+/// - `tmuxrc == 0`: the output must parse as the server pid. Anything else
+///   (empty — e.g. a live server holding zero sessions — or non-numeric) means
+///   we cannot tell the pid, so outer `None`, never a guess.
+/// - `tmuxrc != 0` and [`is_no_server_running`] matches the output: the ONLY
+///   path to `tmux_server_pid: None` — the server is confirmed gone.
+/// - `tmuxrc != 0` and anything else (missing binary, protocol mismatch,
+///   permission error, …): untrustworthy, so outer `None`. An untrusted
+///   "no server" would mark every session on the host lost.
+pub fn parse_host_identity(stdout: &str) -> Option<HostIdentity> {
+    let mut boot_id = None;
+    let mut rc_line: Option<&str> = None;
+    let mut out_line: Option<&str> = None;
+    for line in stdout.lines() {
+        if let Some(v) = line.strip_prefix("boot=") {
+            let v = v.trim();
+            if !v.is_empty() {
+                boot_id = Some(v.to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("tmuxrc=") {
+            rc_line = Some(v.trim());
+        } else if let Some(v) = line.strip_prefix("tmuxout=") {
+            out_line = Some(v.trim());
+        }
+    }
+    let rc: i32 = rc_line?.parse().ok()?;
+    let out = out_line?;
+    let tmux_server_pid = if rc == 0 {
+        Some(out.parse::<i64>().ok()?)
+    } else if is_no_server_running(out) {
+        None
+    } else {
+        return None;
+    };
+    Some(HostIdentity {
+        boot_id,
+        tmux_server_pid,
+    })
 }
 
 /// tmux (and `claude` / `bash`) on this machine, the `local` host. Every
@@ -240,6 +338,16 @@ impl TmuxExec for LocalTmux {
             _ => None,
         }
     }
+    async fn host_identity(&self) -> Option<HostIdentity> {
+        local_allowed().ok()?;
+        let out = tokio::process::Command::new("bash")
+            .args(["-c", HOST_IDENTITY_SCRIPT])
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        parse_host_identity(&String::from_utf8_lossy(&out.stdout))
+    }
 }
 
 /// tmux over an `SshExec`. Generic (defaulting to the production client) so
@@ -285,7 +393,7 @@ impl<C: SshExec> RemoteTmux<C> {
 #[async_trait]
 impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
-        let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}' 2>&1";
+        let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}' 2>&1";
         let output = self.remote_bash(script).await?;
         let combined = String::from_utf8_lossy(&output.stdout).into_owned();
         if output.status.success() {
@@ -468,6 +576,14 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .filter(|o| o.status.success())?;
         crate::service::hosts::parse_oauth_account(&String::from_utf8_lossy(&output.stdout))
     }
+    async fn host_identity(&self) -> Option<HostIdentity> {
+        let out = self
+            .remote_bash(HOST_IDENTITY_SCRIPT)
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        parse_host_identity(&String::from_utf8_lossy(&out.stdout))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -477,6 +593,9 @@ pub struct TmuxSession {
     pub last_activity: i64,
     pub attached: bool,
     pub path: PathBuf,
+    /// The session's active pane (`%N`), used to bind hook calls to the row.
+    /// `None` from an old format / a test fixture.
+    pub pane_id: Option<String>,
 }
 
 /// Lists tmux sessions on the local host. Returns an empty Vec (not an error)
@@ -486,7 +605,7 @@ pub async fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
         .args([
             "list-sessions",
             "-F",
-            "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}",
+            "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}",
         ])
         .output()
         .await;
@@ -531,15 +650,21 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
     input
         .lines()
         .filter_map(|line| {
-            // Destructure the fixed 5-field format off the split iterator —
-            // no per-line `Vec` allocation. A 6th field means the line is
-            // malformed (a `|` inside a session name); reject it.
+            // Destructure the fixed format off the split iterator — no
+            // per-line `Vec` allocation. The optional 6th field is the pane
+            // id (`%N`); anything else there, or a 7th field, means the line
+            // is malformed (a `|` inside a name or path); reject it.
             let mut it = line.split('|');
             let name = it.next()?;
             let created = it.next()?.parse::<i64>().ok()?;
             let last_activity = it.next()?.parse::<i64>().ok()?;
             let attached_int = it.next()?.parse::<i64>().ok()?;
             let path = it.next()?;
+            let pane_id = match it.next() {
+                None => None,
+                Some(p) if p.starts_with('%') => Some(p.to_string()),
+                Some(_) => return None,
+            };
             if it.next().is_some() {
                 return None;
             }
@@ -549,6 +674,7 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
                 last_activity,
                 attached: attached_int > 0,
                 path: PathBuf::from(path),
+                pane_id,
             })
         })
         .collect()
@@ -587,13 +713,19 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
 /// most-recent-for-cwd behavior. The id is single-quoted; externally-supplied
 /// ids should be validated with `validate::claude_session_id` before being
 /// passed in (minted ids are safe by construction).
-pub fn pane_command_for(claude_session_id: Option<&str>) -> String {
+///
+/// Every `cl` also gets `--name <tmux_name>`, so `claude agents` lists the
+/// session under its tmux name and reconcile pairs it with its agent BY NAME
+/// (authoritative) instead of inferring it from the cwd, which is ambiguous
+/// once two sessions share a directory.
+pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> String {
     let tail = "exec ${SHELL:-/bin/zsh} -l";
+    let name = format!("--name {}", crate::shell::quote(tmux_name));
     match claude_session_id {
-        Some(id) => {
-            format!("cl --resume '{id}' 2>/dev/null || cl --session-id '{id}' || cl; {tail}")
-        }
-        None => format!("cl --continue || cl; {tail}"),
+        Some(id) => format!(
+            "cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
+        ),
+        None => format!("cl --continue {name} || cl {name}; {tail}"),
     }
 }
 
@@ -791,6 +923,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_sessions_reads_an_optional_pane_id() {
+        let out = "a|1|2|0|/w|%7\nb|1|2|1|/x\n";
+        let s = parse_sessions(out);
+        assert_eq!(s[0].pane_id.as_deref(), Some("%7"));
+        assert_eq!(s[1].pane_id, None);
+        // A 7th field is still a malformed line (a `|` in the name).
+        assert!(parse_sessions("a|b|1|2|0|/w|%7").is_empty());
+        // A 6th field that is not a pane id is a `|` inside the path.
+        assert!(parse_sessions("a|1|2|0|/w|x").is_empty());
+    }
+
+    #[test]
     fn parse_empty_input() {
         assert!(parse_sessions("").is_empty());
     }
@@ -860,13 +1004,16 @@ mod tests {
 
     #[test]
     fn pane_command_for_none_falls_back_to_shell_after_claude_exits() {
-        let cmd = pane_command_for(None);
+        let cmd = pane_command_for(None, "dev-x");
         // The semicolon (NOT `||`) after the second `cl` is the whole point:
         // it makes the shell always continue to the exec regardless of `cl`'s
         // exit status. Regression test that the next person who edits this
         // doesn't accidentally use `||` and resurrect the "session dies on
         // /exit" bug.
-        assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
+        assert!(
+            cmd.contains("cl --continue --name 'dev-x' || cl --name 'dev-x';"),
+            "got: {cmd}"
+        );
         assert!(cmd.contains("exec ${SHELL:-/bin/zsh}"), "got: {cmd}");
     }
 
@@ -905,13 +1052,19 @@ mod tests {
     #[test]
     fn pane_command_for_resumes_or_creates_with_id() {
         let id = "550e8400-e29b-41d4-a716-446655440000";
-        let cmd = pane_command_for(Some(id));
-        assert!(cmd.contains(&format!("cl --resume '{id}'")), "got: {cmd}");
+        let cmd = pane_command_for(Some(id), "dev-x");
         assert!(
-            cmd.contains(&format!("cl --session-id '{id}'")),
+            cmd.contains(&format!("cl --resume '{id}' --name 'dev-x'")),
             "got: {cmd}"
         );
-        assert!(cmd.contains("|| cl;"), "bare fallback missing: {cmd}");
+        assert!(
+            cmd.contains(&format!("cl --session-id '{id}' --name 'dev-x'")),
+            "got: {cmd}"
+        );
+        assert!(
+            cmd.contains("|| cl --name 'dev-x';"),
+            "bare fallback missing: {cmd}"
+        );
         assert!(cmd.contains("exec ${SHELL"), "got: {cmd}");
     }
 
@@ -939,9 +1092,15 @@ mod tests {
 
     #[test]
     fn pane_command_for_none_uses_continue() {
-        let cmd = pane_command_for(None);
-        assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
+        let cmd = pane_command_for(None, "dev-x");
+        assert!(cmd.contains("cl --continue --name 'dev-x'"), "got: {cmd}");
         assert!(!cmd.contains("--session-id"), "got: {cmd}");
+    }
+
+    #[test]
+    fn pane_command_for_quotes_the_session_name() {
+        let cmd = pane_command_for(None, "it's$(x)");
+        assert!(cmd.contains("--name 'it'\\''s$(x)'"), "got: {cmd}");
     }
 
     #[test]
@@ -985,6 +1144,188 @@ mod tests {
             "mtime {} vs now {now}",
             m[found]
         );
+    }
+
+    #[test]
+    fn parse_host_identity_reads_both_fields() {
+        let id = parse_host_identity("boot=abc-123\ntmuxrc=0\ntmuxout=4242\n").unwrap();
+        assert_eq!(id.boot_id.as_deref(), Some("abc-123"));
+        assert_eq!(id.tmux_server_pid, Some(4242));
+    }
+
+    #[test]
+    fn a_missing_boot_id_is_just_unknown_boot() {
+        let id = parse_host_identity("boot=\ntmuxrc=0\ntmuxout=7\n").unwrap();
+        assert_eq!(id.boot_id, None);
+        assert_eq!(id.tmux_server_pid, Some(7));
+    }
+
+    #[test]
+    fn unreadable_output_is_unknown_so_it_can_never_mark_a_host_lost() {
+        // No tmuxrc=/tmuxout= lines at all: a login banner, a wrapper, a
+        // truncated run.
+        assert_eq!(parse_host_identity("Welcome to Ubuntu\n"), None);
+        assert_eq!(parse_host_identity(""), None);
+        // Only one of the two required lines present.
+        assert_eq!(parse_host_identity("boot=a\ntmuxrc=0\n"), None);
+        assert_eq!(parse_host_identity("boot=a\ntmuxout=4242\n"), None);
+        // An rc that is not a number is garbage, not a real exit code.
+        assert_eq!(
+            parse_host_identity("boot=a\ntmuxrc=not-a-number\ntmuxout=4242\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_missing_tmux_binary_is_unknown_not_no_server() {
+        // exit 127: `tmux` isn't on PATH at all (a login profile edit, a
+        // brew relink mid-upgrade). The server may well be alive and
+        // holding every session — this must never read as "no server".
+        assert_eq!(
+            parse_host_identity("boot=a\ntmuxrc=127\ntmuxout=bash: tmux: command not found\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_protocol_mismatch_is_unknown_not_no_server() {
+        // The realistic trigger: `brew`/`apt upgrade tmux` leaves a client
+        // that can't talk to the still-running old server.
+        assert_eq!(
+            parse_host_identity(
+                "boot=a\ntmuxrc=1\ntmuxout=protocol version mismatch (client 8, server 7)\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn no_server_running_is_the_only_path_to_tmux_server_pid_none() {
+        let id = parse_host_identity(
+            "boot=a\ntmuxrc=1\ntmuxout=no server running on /tmp/tmux-501/default\n",
+        )
+        .unwrap();
+        assert_eq!(id.tmux_server_pid, None);
+    }
+
+    #[test]
+    fn a_successful_but_empty_tmux_output_is_unknown_not_no_server() {
+        // rc=0 (tmux ran fine) but no pid printed — e.g. `list-sessions`
+        // formatted zero lines. We can't tell the pid, so `None`, not a
+        // guess at "no server" (the server may hold zero sessions and still
+        // be very much alive).
+        assert_eq!(parse_host_identity("boot=a\ntmuxrc=0\ntmuxout=\n"), None);
+        assert_eq!(
+            parse_host_identity("boot=a\ntmuxrc=0\ntmuxout=not-a-pid-either\n"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn the_identity_script_runs_under_local_bash() {
+        // Real bash, real `tmux` if installed — CI's `ubuntu-24.04` runner
+        // has tmux but no server, `macos-latest` has neither, and a
+        // `command -v tmux` pre-check is not a safe proxy for "the script's
+        // own tmux invocation will succeed": a stale wrapper/shim can
+        // resolve as a command yet still fail with exit 127 when run (this
+        // is not hypothetical — it's exactly how a botched `brew upgrade`
+        // can leave PATH). So the only trustworthy signal is the `tmuxrc=`
+        // the script itself observed, read straight from its own output.
+        let out = tokio::process::Command::new("bash")
+            .args(["-c", HOST_IDENTITY_SCRIPT])
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(stdout.lines().any(|l| l.starts_with("boot=")), "{stdout}");
+        assert!(stdout.lines().any(|l| l.starts_with("tmuxrc=")), "{stdout}");
+        assert!(
+            stdout.lines().any(|l| l.starts_with("tmuxout=")),
+            "{stdout}"
+        );
+        match stdout.lines().find_map(|l| l.strip_prefix("tmuxrc=")) {
+            Some("127") => {
+                // tmux did not resolve (missing binary, or a wrapper that
+                // fails exactly like one) — the parser must never invent a
+                // verdict from that.
+                assert_eq!(parse_host_identity(&stdout), None, "{stdout}");
+            }
+            Some(_) => {
+                // tmux resolved and actually ran a real client against a
+                // real socket — whether that found a live server (a
+                // numeric pid) or a confirmed-dead one ("no server
+                // running", the only other trustworthy shape reachable
+                // here), the parser must produce a verdict, not `None`.
+                // (The other untrustworthy shapes — a protocol mismatch, a
+                // permission error — need a crafted string to trigger and
+                // are covered by their own dedicated parser tests instead.)
+                assert!(
+                    parse_host_identity(&stdout).is_some(),
+                    "tmux ran (rc != 127), so its output must classify: {stdout}"
+                );
+            }
+            None => panic!("script printed no tmuxrc= line: {stdout}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_script_is_unknown_when_tmux_is_missing_from_path() {
+        // The 127 case this whole fix exists for: a login profile edit or a
+        // brew relink mid-upgrade drops tmux's directory off PATH entirely,
+        // while the server it can no longer reach is still holding every
+        // session. A system dir can't stand in for that PATH: GitHub's
+        // `ubuntu-24.04` image ships `/usr/bin/tmux`. So build a PATH of
+        // symlinks to just the script's other tools, which keeps the boot-id
+        // half resolvable and hides only tmux — the real regression shape.
+        let bin = tempfile::tempdir().unwrap();
+        for tool in ["cat", "head", "sysctl"] {
+            let found = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+                .iter()
+                .map(|d| std::path::Path::new(d).join(tool))
+                .find(|p| p.exists());
+            if let Some(target) = found {
+                std::os::unix::fs::symlink(target, bin.path().join(tool)).unwrap();
+            }
+        }
+        let out = tokio::process::Command::new("/bin/bash")
+            .args(["-c", HOST_IDENTITY_SCRIPT])
+            .env("PATH", bin.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert_eq!(parse_host_identity(&stdout), None, "{stdout}");
+    }
+
+    #[tokio::test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn the_boot_id_does_not_depend_on_the_timezone() {
+        // This is a claim about the `boot=` line alone, so read it straight
+        // off the script's stdout instead of routing through
+        // `parse_host_identity`: the parser's outer `None` legitimately
+        // depends on whether tmux is installed (CI's `ubuntu-24.04` runner
+        // has it, `macos-latest` does not; neither runs a server), which has
+        // nothing to do with the boot id and must not make this test flaky.
+        fn boot_id(stdout: &str) -> Option<String> {
+            stdout.lines().find_map(|l| {
+                let v = l.strip_prefix("boot=")?.trim();
+                (!v.is_empty()).then(|| v.to_string())
+            })
+        }
+        let run = |tz: &'static str| async move {
+            let out = tokio::process::Command::new("bash")
+                .args(["-c", HOST_IDENTITY_SCRIPT])
+                .env("TZ", tz)
+                .output()
+                .await
+                .unwrap();
+            boot_id(&String::from_utf8_lossy(&out.stdout))
+        };
+        let utc = run("UTC").await;
+        assert!(utc.is_some(), "boot id must be readable on this OS");
+        assert_eq!(utc, run("America/Los_Angeles").await);
     }
 
     #[tokio::test]
@@ -1033,6 +1374,42 @@ mod tests {
             },
         );
         assert!(tmux(&fake).read_oauth_account().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_host_identity_is_none_on_ssh_failure_and_some_through_a_login_banner() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let tmux = |fake: &FakeSsh| RemoteTmux {
+            client: fake.clone(),
+            host: "h".to_string(),
+        };
+
+        // A login banner (MOTD, a shell wrapper) ahead of the script's own
+        // lines must not stop the tagged lines from being found.
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::script_contains("tmux list-sessions"),
+            Reply::ok("Welcome to Ubuntu 24.04 LTS\nboot=abc-123\ntmuxrc=0\ntmuxout=4242\n"),
+        );
+        let id = tmux(&fake)
+            .host_identity()
+            .await
+            .expect("a login banner ahead of the tagged lines must still parse");
+        assert_eq!(id.boot_id.as_deref(), Some("abc-123"));
+        assert_eq!(id.tmux_server_pid, Some(4242));
+
+        // Unreachable host (ssh exit 255) → None: the transport failed, not
+        // "no tmux server".
+        let fake = FakeSsh::new();
+        fake.unreachable("h");
+        assert!(tmux(&fake).host_identity().await.is_none());
+
+        // A non-zero exit from the `bash -lc` invocation itself (distinct
+        // from tmux's own exit code, which the script always captures into
+        // `tmuxrc=` rather than propagating) → None.
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::fail(1, "bash: some unrelated failure"));
+        assert!(tmux(&fake).host_identity().await.is_none());
     }
 
     #[tokio::test]

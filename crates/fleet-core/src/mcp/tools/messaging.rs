@@ -106,7 +106,9 @@ impl FleetTools {
 
     #[tool(
         description = "Return the recorded event timeline for a session (status \
-        changes, prompts, stuck, kills). Newest-first; pass `limit` to cap \
+        changes, prompts, stuck, kills, and conversation events: \
+        conversation_started, conversation_ended, compact_started, \
+        compact_done, turn_done). Newest-first; pass `limit` to cap \
         (default 50). Returns the events as JSON."
     )]
     pub(super) async fn session_history(
@@ -121,6 +123,33 @@ impl FleetTools {
                 .map_err(to_mcp_err)?
         };
         ok_json(&events)
+    }
+
+    #[tool(
+        description = "List the Claude Code conversations a session has run, newest \
+        first: claude_session_id, started_at, ended_at, start_source (startup, resume, \
+        clear, compact, fork, fleet, unknown), end_reason, model, first_prompt, turns, \
+        compactions and current. Pass a claude_session_id to session_conversation to \
+        read an earlier one. limit defaults to 20 (max 500). Read-only. A per-host \
+        token may only list sessions on its own host."
+    )]
+    pub(super) async fn session_conversations(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionConversationsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_conversations",
+            &format!("session_id={} limit={:?}", p.session_id, p.limit),
+        );
+        let row =
+            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        let limit = p.limit.unwrap_or(20).clamp(1, 500);
+        let rows = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.list_conversations(row.id, limit).map_err(to_mcp_err)?
+        };
+        ok_json(&rows)
     }
 
     #[tool(

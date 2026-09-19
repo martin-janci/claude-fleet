@@ -14,6 +14,11 @@
     type EventCategory,
     type SessionEvent,
   } from './timeline';
+  import { onTimelineEvent } from './live_events';
+
+  // Matches the backend's SESSION_EVENTS_CAP (store/rows.rs): the pushed-event
+  // list is capped the same way the fetched one is.
+  const EVENTS_CAP = 500;
 
   let {
     sessionId,
@@ -39,7 +44,13 @@
     if (mine !== seq) return;
     loading = false;
     if (r.ok) {
-      events = Array.isArray(r.value) ? r.value : [];
+      const fetched = Array.isArray(r.value) ? r.value : [];
+      // A pushed event newer than anything the fetch saw arrived while it
+      // was in flight: keep it rather than overwrite it with the older read.
+      const known = new Set(fetched.map((e) => e.id));
+      const newest = fetched.reduce((m, e) => Math.max(m, e.id), -Infinity);
+      const live = events.filter((e) => !known.has(e.id) && e.id > newest);
+      events = [...live, ...fetched].slice(0, EVENTS_CAP);
       error = null;
     } else {
       error = r.error.message;
@@ -59,6 +70,20 @@
       }
       void load(id);
     });
+  });
+
+  // Live push (Q9 phase 2): prepend events the backend fans out for this
+  // session instead of waiting on the next `refreshKey` refetch. Depends only
+  // on `sessionId` — registering inside `untrack` so reading/writing `events`
+  // below doesn't retrigger this effect.
+  $effect(() => {
+    const id = sessionId;
+    return untrack(() =>
+      onTimelineEvent(id, (e) => {
+        if (events.some((x) => x.id === e.id)) return;
+        events = [e, ...events].slice(0, EVENTS_CAP);
+      }),
+    );
   });
 
   function toggle(c: EventCategory) {

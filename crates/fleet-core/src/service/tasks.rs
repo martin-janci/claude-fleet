@@ -481,10 +481,17 @@ pub fn task_max_age_secs(s: &Store) -> i64 {
 /// - its worker row is gone (killed / dismissed / GC'd);
 /// - its worker is lost (ghost);
 /// - its worker now runs a DIFFERENT Claude conversation than at dispatch
-///   (recreated onto a fresh session that never saw the prompt).
+///   (recreated onto a fresh session that never saw the prompt) — unless
+///   the worker switched conversations itself (`current_source` is `clear`,
+///   `resume` or `compact`): the task stays open. A recreate relaunches with
+///   `--resume <id>` and keeps the id, so a NEW id from `startup` is a fresh
+///   process that lost the conversation, and `unknown` (reconcile / prompt
+///   fallback) cannot tell `/clear` from that; both fail it, as do `fork`
+///   and `fleet` (move).
 pub fn liveness_verdict(
     task: &TaskRow,
     worker: Option<&SessionRow>,
+    current_source: Option<&str>,
     now: i64,
     max_age_secs: i64,
 ) -> Option<String> {
@@ -507,7 +514,8 @@ pub fn liveness_verdict(
         return Some(format!("worker session {wid} was lost (ghost)"));
     }
     if let (Some(then), Some(now_id)) = (&task.worker_claude_session_id, &w.claude_session_id) {
-        if then != now_id {
+        let in_session_switch = matches!(current_source, Some("clear" | "resume" | "compact"));
+        if then != now_id && !in_session_switch {
             return Some(format!(
                 "worker session {wid} was recreated onto a new Claude conversation"
             ));
@@ -541,9 +549,27 @@ pub fn sweep_one(
         Some(w) => s.get_session_by_id(w)?,
         None => None,
     };
-    match liveness_verdict(task, worker.as_ref(), now, max_age_secs) {
+    let source = match task.worker_session_id {
+        Some(w) => s.current_conversation_source(w).ok().flatten(),
+        None => None,
+    };
+    match liveness_verdict(task, worker.as_ref(), source.as_deref(), now, max_age_secs) {
         Some(reason) => fail_task(s, task.id, &reason),
-        None => Ok(None),
+        None => {
+            // A tolerated switch (`/clear`, `/resume`, compaction): re-stamp
+            // the task onto the worker's new id so the NEXT switch is judged
+            // on its own source (e.g. `/clear`, then a crash to a fresh
+            // `startup`). Best-effort: a failed write only means the next
+            // sweep evaluates the same switch again.
+            if let (Some(then), Some(w)) = (&task.worker_claude_session_id, &worker) {
+                if let Some(now_id) = w.claude_session_id.as_deref() {
+                    if then != now_id {
+                        let _ = s.set_task_worker_claude_id(task.id, now_id);
+                    }
+                }
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -715,6 +741,7 @@ async fn capture_worker_pane(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::StartSource;
 
     fn seed(s: &Store, host: &str, name: &str) -> i64 {
         s.upsert_host(host).unwrap();
@@ -1068,6 +1095,92 @@ mod tests {
         assert_eq!(s.get_task(t_fine.id).unwrap().unwrap().state, "queued");
         // A second sweep is a no-op.
         assert!(sweep_open_tasks(&s, now).unwrap().is_empty());
+    }
+
+    const W0: &str = "11111111-1111-1111-1111-111111111111";
+
+    /// A worker on conversation `W0` running one task dispatched on it.
+    fn worker_with_task(s: &Store) -> (i64, TaskRow) {
+        let id = seed(s, "local", "w");
+        let t = create_task(s, None, Some(id), "x").unwrap();
+        s.set_claude_session_id(id, W0).unwrap();
+        s.set_task_worker_claude_id(t.id, W0).unwrap();
+        (id, t)
+    }
+
+    fn stamped(s: &Store, task: i64) -> Option<String> {
+        s.get_task(task).unwrap().unwrap().worker_claude_session_id
+    }
+
+    #[test]
+    fn a_clear_resume_or_compact_inside_the_worker_keeps_the_task_and_restamps_it() {
+        let s = Store::open_in_memory().unwrap();
+        let (id, t) = worker_with_task(&s);
+        let now = t.created_at + 10;
+        for (uuid, src) in [
+            ("22222222-2222-2222-2222-222222222222", StartSource::Clear),
+            ("33333333-3333-3333-3333-333333333333", StartSource::Resume),
+            ("44444444-4444-4444-4444-444444444444", StartSource::Compact),
+        ] {
+            s.rebind_conversation(id, uuid, src, None, None).unwrap();
+            assert!(sweep_open_tasks(&s, now).unwrap().is_empty(), "{src:?}");
+            assert_eq!(stamped(&s, t.id).as_deref(), Some(uuid), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_id_from_startup_unknown_fork_or_fleet_fails_the_task() {
+        for src in [
+            StartSource::Startup,
+            StartSource::Unknown,
+            StartSource::Fork,
+            StartSource::Fleet,
+        ] {
+            let s = Store::open_in_memory().unwrap();
+            let (id, t) = worker_with_task(&s);
+            s.rebind_conversation(id, "22222222-2222-2222-2222-222222222222", src, None, None)
+                .unwrap();
+            let failed = sweep_open_tasks(&s, t.created_at + 10).unwrap();
+            assert_eq!(failed.len(), 1, "{src:?}");
+            assert!(
+                failed[0].error.as_deref().unwrap().contains("recreated"),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clear_then_a_fresh_startup_fails_the_task_on_the_second_switch() {
+        let s = Store::open_in_memory().unwrap();
+        let (id, t) = worker_with_task(&s);
+        let now = t.created_at + 10;
+        let cleared = "22222222-2222-2222-2222-222222222222";
+        s.rebind_conversation(id, cleared, StartSource::Clear, None, None)
+            .unwrap();
+        assert!(sweep_open_tasks(&s, now).unwrap().is_empty());
+        assert_eq!(stamped(&s, t.id).as_deref(), Some(cleared));
+        s.rebind_conversation(
+            id,
+            "33333333-3333-3333-3333-333333333333",
+            StartSource::Startup,
+            None,
+            None,
+        )
+        .unwrap();
+        let failed = sweep_open_tasks(&s, now).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].error.as_deref().unwrap().contains("recreated"));
+    }
+
+    #[test]
+    fn a_startup_on_the_same_id_is_not_a_switch() {
+        // Recreate relaunches with `--resume <id>`: the id is kept.
+        let s = Store::open_in_memory().unwrap();
+        let (id, t) = worker_with_task(&s);
+        s.rebind_conversation(id, W0, StartSource::Startup, None, None)
+            .unwrap();
+        assert!(sweep_open_tasks(&s, t.created_at + 10).unwrap().is_empty());
+        assert_eq!(stamped(&s, t.id).as_deref(), Some(W0));
     }
 
     #[test]

@@ -74,8 +74,19 @@ impl FleetTasks for RealFleetTasks {
     /// settings (`reconcile.interval_secs`, default 20; 0 disables). A
     /// `try_lock` guard skips a tick if the previous reconcile is still
     /// running so slow passes can't stack.
+    ///
+    /// The desktop's shutdown path (`lib.rs`'s window-close handler) calls
+    /// `ssh.shutdown_all()` directly without awaiting this task, so passing
+    /// `self.shutdown` here would let that path tear down SSH masters out
+    /// from under an in-flight pass — the same defect issue #144 fixed on the
+    /// hub. A token that is never cancelled keeps that (pre-existing, out of
+    /// scope here) desktop behaviour unchanged.
     fn start_reconcile_tick(&self) {
-        spawn_reconcile_tick(Arc::clone(&self.store), Arc::clone(&self.ssh));
+        let _ = spawn_reconcile_tick(
+            Arc::clone(&self.store),
+            Arc::clone(&self.ssh),
+            tokio_util::sync::CancellationToken::new(),
+        );
     }
 
     /// Task 4: independent 60s account-usage poll loop. Deliberately separate
@@ -83,13 +94,22 @@ impl FleetTasks for RealFleetTasks {
     /// disable entirely) so usage keeps polling on its own cadence;
     /// `service::account_usage`'s 5-minute floor still caps real requests to
     /// one per account.
+    ///
+    /// Never cancelled, for the same reason as `start_reconcile_tick` above.
+    ///
+    /// `std::mem::drop`, not `let _ =`: the return is a `JoinHandle`, which
+    /// is itself a `Future`, and clippy's `let_underscore_future` flags
+    /// binding one to `_` as likely-accidental. The task is already running
+    /// on its own regardless — this line only decides not to keep a handle
+    /// to it.
     fn start_account_usage_tick(&self) {
-        spawn_account_usage_tick(
+        std::mem::drop(spawn_account_usage_tick(
             Arc::clone(&self.store),
             Arc::clone(&self.ssh),
             Arc::clone(&self.usage_cache),
             Arc::clone(&self.bus),
-        );
+            tokio_util::sync::CancellationToken::new(),
+        ));
     }
 
     /// Task 4: follow the hub's `GET /events` and re-emit every frame as the

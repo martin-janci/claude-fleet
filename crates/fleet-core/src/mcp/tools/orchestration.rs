@@ -77,12 +77,21 @@ impl FleetTools {
     #[tool(
         description = "Read a session's recent conversation as structured turns: \
         each turn carries the human prompt, its timestamp, the turn's end \
-        timestamp, and items that are either assistant text or a one-line tool \
-        summary (flagged when that tool call failed). turns defaults to 10 and \
-        is capped at 100; the character budget scales with it. Prefer this over \
+        timestamp, and items tagged by kind: text (assistant text), tool (a \
+        one-line tool summary, flagged when that call failed), compact (a \
+        context compaction with its trigger, pre-compaction tokens and \
+        summary), command (a slash command with its args and output) or \
+        interrupt (the user interrupted the turn). The response also carries \
+        events (this conversation's timeline events, oldest first, at most the \
+        newest 50) and context (the conversation's context-window usage, or \
+        null). turns defaults to 10 and is capped at 100; the character budget \
+        scales with it. Prefer this over \
         session_transcript when you want the shape of the exchange rather than \
-        one flat blob. Read-only. Errors: E_INVALID_STATE (no claude_session_id \
-        yet), E_NO_TRANSCRIPT (nothing written yet)."
+        one flat blob. Pass claude_session_id (from session_conversations) to \
+        read an earlier conversation of the session instead of the current one. \
+        Read-only. Errors: E_INVALID (claude_session_id is not one of the \
+        session's conversations), E_INVALID_STATE (no claude_session_id yet), \
+        E_NO_TRANSCRIPT (nothing written yet)."
     )]
     pub(super) async fn session_conversation(
         &self,
@@ -91,16 +100,25 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit(
             "session_conversation",
-            &format!("session_id={} turns={:?}", p.session_id, p.turns),
+            &format!(
+                "session_id={} turns={:?} claude_session_id={:?} events_limit={:?}",
+                p.session_id, p.turns, p.claude_session_id, p.events_limit
+            ),
         );
         let row =
             self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
         let (turns, max_chars) = transcript::conv_limits(p.turns);
-        let args =
-            transcript::resolve_args(&self.store, &row, turns, max_chars).map_err(to_mcp_err)?;
-        let conv = transcript::fetch_conversation(args, &self.ssh)
-            .await
-            .map_err(to_mcp_err)?;
+        let conv = transcript::fetch_conversation_for_row(
+            &self.store,
+            &self.ssh,
+            &row,
+            p.claude_session_id.as_deref(),
+            turns,
+            max_chars,
+            transcript::conv_events_limit(p.events_limit),
+        )
+        .await
+        .map_err(to_mcp_err)?;
         ok_json(&conv)
     }
 

@@ -373,6 +373,24 @@ pub async fn session_history(
     routed::session_history(&backend, args, &store).await
 }
 
+#[derive(serde::Deserialize)]
+pub struct SessionConversationsArgs {
+    pub session_id: i64,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Conversations a session has run, newest first (migration 037). Default
+/// 50, max 500. Same data as the MCP `session_conversations` tool.
+#[tauri::command]
+pub async fn session_conversations(
+    args: SessionConversationsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<fleet_core::store::ConversationRow>, IpcError> {
+    routed::session_conversations(&backend, args, &store).await
+}
+
 // ── Conversation (structured transcript) ────────────────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -382,11 +400,17 @@ pub struct SessionConversationArgs {
     /// (see `transcript::conv_limits`).
     #[serde(default)]
     pub turns: Option<usize>,
+    /// Read this earlier conversation of the session instead of the current
+    /// one. `E_INVALID` when it is not one of the session's conversations.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
 }
 
 /// The session's recent conversation — prompts, assistant text and one line
 /// per tool call — read from its Claude Code transcript. Rendered by the
-/// details pane's Conversation tab. Errors: `E_NOTFOUND`, `E_INVALID_STATE`
+/// details pane's Conversation tab; `claude_session_id` reads an earlier
+/// conversation. Errors: `E_NOTFOUND`, `E_INVALID` (not one of the session's
+/// conversations), `E_INVALID_STATE`
 /// (no `claude_session_id` yet), `E_NO_TRANSCRIPT`, transport codes.
 #[tauri::command]
 pub async fn session_conversation(
@@ -396,6 +420,56 @@ pub async fn session_conversation(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<fleet_core::service::transcript::Conversation, IpcError> {
     routed::session_conversation(&backend, args, &store, &ssh).await
+}
+
+#[derive(serde::Deserialize)]
+pub struct SessionToolDetailArgs {
+    pub session_id: i64,
+    pub tool_use_id: String,
+    /// Look in this earlier conversation of the session instead of the
+    /// current one.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
+}
+
+/// The input (edit before/after, Bash command, or pretty JSON) and result
+/// of one tool call, read on demand from the session's transcript — the
+/// Conversation tab's poll never carries them. Each text is capped at 8 000
+/// chars. Errors: `E_NOTFOUND` (session, or tool call not in the
+/// transcript), `E_INVALID` (bad tool id / not one of the session's
+/// conversations), `E_INVALID_STATE`, `E_NO_TRANSCRIPT`, transport codes.
+#[tauri::command]
+pub async fn session_tool_detail(
+    args: SessionToolDetailArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::transcript::ToolDetail, IpcError> {
+    // The session id is the hub's and the transcript lives on the hub's
+    // hosts; with no hub tool to ask, a local read would look up the wrong
+    // row over this machine's SSH keys.
+    backend.local_only(
+        "session_tool_detail",
+        "the hub exposes no tool for one tool call's input and result; the \
+         Conversation tab's tool lines still come from session_conversation",
+    )?;
+    let row = {
+        let s = lock(&store)?;
+        s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+            IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {} not found", args.session_id),
+            )
+        })?
+    };
+    fleet_core::service::transcript::fetch_tool_detail(
+        &store,
+        &ssh,
+        &row,
+        args.claude_session_id.as_deref(),
+        &args.tool_use_id,
+    )
+    .await
 }
 
 // ── Activity probe (live indicator) ─────────────────────────────────────────
@@ -600,7 +674,14 @@ pub(crate) mod routed {
         if let Some(hub) = backend.hub() {
             // The hub owns the transcript file and the clamp; `turns` goes
             // over unclamped so `conv_limits` runs once, there.
-            return hub.session_conversation(args.session_id, args.turns).await;
+            return hub
+                .session_conversation(
+                    args.session_id,
+                    args.turns,
+                    args.claude_session_id.as_deref(),
+                    transcript::CONV_EVENTS_LIMIT_UI,
+                )
+                .await;
         }
         let row = {
             let s = lock(store)?;
@@ -611,11 +692,35 @@ pub(crate) mod routed {
                 )
             })?
         };
-        // `resolve_args` takes (and releases) the lock itself; nothing holds
-        // it across the fetch.
+        // The helper takes (and releases) the lock itself; nothing holds it
+        // across the fetch.
         let (turns, max_chars) = transcript::conv_limits(args.turns);
-        let targs = transcript::resolve_args(store, &row, turns, max_chars)?;
-        transcript::fetch_conversation(targs, ssh).await
+        transcript::fetch_conversation_for_row(
+            store,
+            ssh,
+            &row,
+            args.claude_session_id.as_deref(),
+            turns,
+            max_chars,
+            transcript::CONV_EVENTS_LIMIT_UI,
+        )
+        .await
+    }
+
+    /// The `limit` clamp applies to both backends, like `session_history`.
+    pub async fn session_conversations(
+        backend: &FleetBackend,
+        args: SessionConversationsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<fleet_core::store::ConversationRow>, IpcError> {
+        let limit = args.limit.unwrap_or(50).clamp(1, 500);
+        match backend.hub() {
+            Some(hub) => hub.session_conversations(args.session_id, limit).await,
+            None => {
+                let s = lock(store)?;
+                s.list_conversations(args.session_id, limit)
+            }
+        }
     }
 }
 
