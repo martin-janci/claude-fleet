@@ -803,6 +803,125 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
 }
 
 #[tokio::test]
+async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
+    let (s, _pid, on_b) = two_host_store();
+    // A ghost on hostb, so dismiss would otherwise succeed.
+    let ghost_b = s
+        .upsert_session("gone-b", "hostb", None, None, 1, 1, "ghost", None)
+        .unwrap();
+    let t = test_tools(s);
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.recreate_session(
+            Extension(a.clone()),
+            Parameters(sessions::RecreateSessionArgs {
+                session_id: on_b,
+                force: true,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+    forbidden(
+        t.dismiss_ghost_session(
+            Extension(a),
+            Parameters(sessions::DismissGhostSessionArgs {
+                session_id: ghost_b,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+    // The ghost row survives the refused dismiss…
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .get_session_by_id(ghost_b)
+        .unwrap()
+        .is_some());
+    // …and the master token still reaches it.
+    t.dismiss_ghost_session(
+        Extension(Caller::master()),
+        Parameters(sessions::DismissGhostSessionArgs {
+            session_id: ghost_b,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .get_session_by_id(ghost_b)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn per_host_callers_cannot_capture_or_peek_another_hosts_session() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_claude_session_id(on_b, "0f8fad5b-d9cb-469f-a165-70867728950e")
+        .unwrap();
+    // No Claude id yet: peek must still refuse rather than say "nothing
+    // to peek" about another host's session.
+    let bare_b = s
+        .upsert_session("bare-b", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    // Readonly tokens may call both tools, but only on their own host.
+    for mode in [TokenMode::Full, TokenMode::Readonly] {
+        let a = host_caller("hosta", mode);
+        forbidden(
+            t.capture_session(
+                Extension(a.clone()),
+                Parameters(CaptureSessionParams {
+                    session_id: on_b,
+                    scrollback_lines: None,
+                    max_lines: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        for (session_id, claude_session_id) in [
+            (Some(on_b), None),
+            (Some(bare_b), None),
+            // A bare Claude id resolves to the tracked row's host.
+            (
+                None,
+                Some("0f8fad5b-d9cb-469f-a165-70867728950e".to_string()),
+            ),
+        ] {
+            forbidden(
+                t.peek_session(
+                    Extension(a.clone()),
+                    Parameters(PeekSessionParams {
+                        session_id,
+                        claude_session_id,
+                        host_alias: None,
+                    }),
+                )
+                .await
+                .unwrap_err(),
+            );
+        }
+    }
+    // The master token is unbound: its peek at the id-less session gets
+    // the friendly answer, not E_FORBIDDEN.
+    t.peek_session(
+        Extension(Caller::master()),
+        Parameters(PeekSessionParams {
+            session_id: Some(bare_b),
+            claude_session_id: None,
+            host_alias: None,
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
@@ -1038,8 +1157,8 @@ fn capture_default_cap_matches_docs() {
 /// attributes in the router files. 57 was the count before the split, 60
 /// with the asset-catalog block, 63 with plan_sync/apply_sync/set_secret, 67
 /// with list_layers/resolve_preview/propose_layers/set_host_layers, 71 with
-/// session_conversation/pair_client/list_clients/revoke_client; bump it when
-/// adding a tool.
+/// session_conversation/pair_client/list_clients/revoke_client, 72 with
+/// agent_status; bump it when adding a tool.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1059,7 +1178,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 71);
+    assert_eq!(served, 72);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 

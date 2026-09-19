@@ -8,6 +8,20 @@ import { vi } from 'vitest';
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (cmd: string) => {
     if (cmd === 'health_check') return { version: '0.0.0', db_ready: true, schema_version: 1 };
+    // Standalone unless a test says otherwise, which is what every existing
+    // test assumes: the hub client mode must change nothing by default.
+    if (cmd === 'hub_status')
+      return {
+        remote: false,
+        url: null,
+        client_name: null,
+        client_mode: null,
+        configured_url: null,
+        configured_client_name: null,
+        allow_plaintext: false,
+        warning: null,
+        restart_required: false,
+      };
     if (cmd === 'list_projects') return [];
     if (cmd === 'refresh_projects') return [];
     if (cmd === 'list_sessions') return [];

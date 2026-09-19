@@ -1,7 +1,15 @@
 //! Tauri IPC wrappers for account usage (Task 4). Logic lives in
 //! `service::account_usage_poll`; the fetch itself is
 //! `service::account_usage` (security-reviewed, untouched here).
+//!
+//! Both refuse in remote mode. The cache they read is filled by
+//! `spawn_account_usage_tick`, which a hub client does not start (Task 1), so
+//! the local answer would be a permanently empty list presented as fact — and
+//! the refresh path SSHes to the host from here. The hub's `usage_report`
+//! tool answers per-session usage, a different shape from
+//! `AccountUsageSnapshot`, so there is nothing to route to.
 
+use crate::backend::FleetBackend;
 use fleet_core::events::EventBus;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::account_usage::{AccountUsageSnapshot, UsageCache};
@@ -20,9 +28,15 @@ pub struct RefreshAccountUsageArgs {
 /// Every known account's cached usage snapshot. Never fetches.
 #[tauri::command]
 pub fn list_account_usage(
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     cache: State<'_, Arc<Mutex<UsageCache>>>,
 ) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
+    backend.local_only(
+        "list_account_usage",
+        "this app does not poll account usage while a hub owns the fleet, so \
+         the cache is empty; read usage on the hub",
+    )?;
     account_usage_poll::list_account_usage(&store, &cache)
 }
 
@@ -31,11 +45,17 @@ pub fn list_account_usage(
 #[tauri::command]
 pub async fn refresh_account_usage(
     args: RefreshAccountUsageArgs,
+    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
     cache: State<'_, Arc<Mutex<UsageCache>>>,
     bus: State<'_, Arc<dyn EventBus>>,
 ) -> Result<AccountUsageSnapshot, IpcError> {
+    backend.local_only(
+        "refresh_account_usage",
+        "it reads the account's usage over this machine's SSH connection to \
+         the host; refresh it on the hub",
+    )?;
     account_usage_poll::refresh_account_usage(&args.account_uuid, &store, &*ssh, &cache, &**bus)
         .await
 }

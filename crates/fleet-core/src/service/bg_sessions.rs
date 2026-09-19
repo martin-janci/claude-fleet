@@ -46,20 +46,23 @@ impl NewBgSessionArgs {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NewBgSessionResult {
+    /// Absent-when-None on the wire (below), so a hub-read result needs the
+    /// default. Same for `warning` and `session`.
+    #[serde(default)]
     pub claude_session_id: Option<String>,
     /// Populated when `claude --bg` ran but no session id could be parsed from
     /// its output — the session may still be live, but the fleet can't track
     /// it by id (and thus can't `peek` it). Surfaced so the caller can warn.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub warning: Option<String>,
     /// The fleet row (MCP-7): `new_bg_session_tracked` runs a single-host
     /// reconcile right after launch so the `bg:<id>` sentinel exists before
     /// the caller's next tool call. The key is ABSENT from the JSON (not
     /// `null`) when the agent could not be matched yet (it appears on the
     /// next tick) or when the untracked path was used.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub session: Option<crate::store::SessionRow>,
 }
 

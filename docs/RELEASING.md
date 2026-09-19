@@ -106,6 +106,8 @@ https://v2.tauri.app/distribute/sign/macos/ and pass them via `env:` on the
 | `src-tauri/tauri.conf.json` | `"version"` |
 | `src-tauri/Cargo.toml` | `version =` under `[package]` |
 | `crates/fleet-hub/Cargo.toml` | `version =` under `[package]` |
+| `crates/fleet-proto/Cargo.toml` | `version =` under `[package]` |
+| `crates/fleet-agent/Cargo.toml` | `version =` under `[package]` |
 | `Cargo.lock` | via `cargo update -p claude-fleet -p fleet-hub` (no dependency changes) |
 | `CHANGELOG.md` | new `## [X.Y.Z] - YYYY-MM-DD` section under the header, bullets from `git log <last-tag>..HEAD` grouped `feat` → Added, `fix` → Fixed, `docs` → Documentation, everything else → Changed; plus a `[X.Y.Z]: …/releases/tag/vX.Y.Z` link reference at the bottom |
 
@@ -121,9 +123,9 @@ Then it commits `chore(release): vX.Y.Z` and creates the annotated tag
 After a real run, before pushing:
 
 ```bash
-git show --stat HEAD              # exactly 6 files: 4 version files, Cargo.lock, CHANGELOG.md
+git show --stat HEAD              # exactly 8 files: 6 version files, Cargo.lock, CHANGELOG.md
 grep -n '"version"' package.json src-tauri/tauri.conf.json
-grep -n '^version' src-tauri/Cargo.toml crates/fleet-hub/Cargo.toml
+grep -n '^version' src-tauri/Cargo.toml crates/fleet-hub/Cargo.toml crates/fleet-proto/Cargo.toml crates/fleet-agent/Cargo.toml
 git tag -n1 v0.3.0
 ```
 

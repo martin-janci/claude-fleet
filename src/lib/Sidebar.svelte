@@ -55,6 +55,7 @@
   import SessionRowItem from './SessionRowItem.svelte';
   import NewBgSessionDialog from './NewBgSessionDialog.svelte';
   import { isRecency, matchesRecency, type Recency } from './session_status';
+  import { hubStatus, hubBlock } from './hub';
 
   let showTasks = $state(false);
 
@@ -609,6 +610,13 @@
   function cancelPurge() {
     pendingPurge = null;
   }
+  // PARITY OR REFUSAL (see backend/routing.rs): `NewSessionArgs` carries kind,
+  // start_command and friendly_name and `NewSessionParams` carries none of
+  // them, so routing this would have SUCCEEDED while silently dropping the
+  // label the user typed. It refuses instead — and a refusal nobody can see
+  // coming is only half honest, so the button says so before the click.
+  // Background sessions (⚡) ARE routed and stay available.
+  const newSessionBlocked = $derived(hubBlock('new_session', $hubStatus));
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
@@ -751,6 +759,8 @@
       <button
         class="new-btn"
         onclick={toggleProjectPicker}
+        disabled={newSessionBlocked !== null}
+        title={newSessionBlocked ?? ''}
         data-testid="new-session-footer"
       >
         + New session

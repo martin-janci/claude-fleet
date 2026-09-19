@@ -244,6 +244,7 @@ mod tests {
             last_pinged_at: None,
             account_uuid: Some(account.to_string()),
             provisioned: true,
+            transport: "ssh".to_string(),
         }
     }
 

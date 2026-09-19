@@ -1,0 +1,54 @@
+[package]
+name = "fleet-agent"
+version = "0.1.0"
+description = "claude-fleet agent: dials its hub over one outbound WebSocket and runs what the hub asks"
+authors = ["martin-janci"]
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "fleet_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fleet-agent"
+path = "src/main.rs"
+
+# Must never grow a `fleet-core` entry: the agent installs on a host that has
+# no business compiling the hub (nor its Tauri-adjacent tree), which is why the
+# frame types live in `fleet-proto` instead. `cargo build -p fleet-agent
+# --locked` must work with no Tauri system libraries installed.
+#
+# Every crate below is already in the workspace's Cargo.lock, at the version
+# and (for the TLS stack) the feature set `fleet-hub` already uses, so the
+# agent adds no package for `cargo deny` to judge.
+[dependencies]
+fleet-proto = { path = "../fleet-proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "net", "io-util", "fs", "signal"] }
+# `handshake` only: the agent brings its own TCP and TLS (below) and hands the
+# stream over, so it needs neither tokio-tungstenite's `connect` nor its
+# rustls feature — the latter would pull a root store crate the lock does not
+# have.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# The same feature set as fleet-hub's, so nothing new is compiled. Roots come
+# from the host's own CA bundle (see conn.rs), not from a bundled root crate.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
+
+# Process groups (`killpg`), the run-as user's uid/gid for `install`, and the
+# host name for `hello`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "net", "io-util", "fs", "test-util"] }
+# A self-signed hub certificate for the wss:// dial test. Already a fleet-hub
+# dev-dependency.
+rcgen = "0.13"

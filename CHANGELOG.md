@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.22] - 2026-09-19
+
+### Fixed
+- **mcp:** a per-host token can no longer act on another host's sessions
+  through `recreate_session`, `dismiss_ghost_session`, `capture_session` or
+  `peek_session` — they now return `E_FORBIDDEN`, like the other
+  session-addressed tools.
+- **deps:** resolve devalue 5.9.2 (GHSA-9rgm-9g3h-6x36).
+- **release:** release notes give the working macOS install steps.
+
 ## [0.2.21] - 2026-09-18
 
 ### Added
@@ -543,5 +553,6 @@ Entries before 0.2.4 were plain version bumps and were not recorded individually
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.22]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.22
 [0.2.21]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.21
 [0.2.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.4

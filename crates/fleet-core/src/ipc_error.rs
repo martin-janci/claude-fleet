@@ -53,6 +53,19 @@ pub mod codes {
     pub const E_SSH: &str = "E_SSH";
     /// The host is known but currently unreachable.
     pub const E_HOST_OFFLINE: &str = "E_HOST_OFFLINE";
+    /// The host uses the `agent` transport and no `fleet-agent` is connected
+    /// for it. Returned *immediately*, never after a timeout, so an agent
+    /// host reports unreachable as fast as a down SSH host does.
+    pub const E_AGENT_OFFLINE: &str = "E_AGENT_OFFLINE";
+    /// A connected agent answered with something the protocol does not allow:
+    /// a frame that does not answer the request, or a body that will not
+    /// decode. Distinct from `E_AGENT_OFFLINE` — the connection is up.
+    pub const E_AGENT_PROTOCOL: &str = "E_AGENT_PROTOCOL";
+    /// An agent host's token was just minted or rotated. It is NOT sent to the
+    /// host over the agent connection — that connection authenticated with
+    /// the token being replaced — so the operator must hand it to the host
+    /// out of band (`fleet-hub agent-token`, then `fleet-agent install`).
+    pub const E_AGENT_REINSTALL: &str = "E_AGENT_REINSTALL";
     /// A host probe (version / reachability check) failed.
     pub const E_PROBE: &str = "E_PROBE";
     /// Host provisioning (bootstrap script) failed.
@@ -199,6 +212,79 @@ pub mod codes {
     /// with no value. The message lists the NAMES only, never a value. Set
     /// them (`catalog_set_secret`) or re-apply with `force_partial`.
     pub const E_SECRET_MISSING: &str = "E_SECRET_MISSING";
+    /// Remote (hub-client) mode: the hub answered `401`. The client token is
+    /// no longer accepted — the operator revoked it, or the hub was re-inited
+    /// with a fresh database. The desktop must send the user back to the Hub
+    /// settings to pair again; retrying cannot help.
+    pub const E_UNAUTHORIZED: &str = "E_UNAUTHORIZED";
+    /// Remote (hub-client) mode: the hub could not be reached or did not
+    /// answer usefully (connection refused, DNS, timeout, a proxy's 5xx). The
+    /// app shows the last snapshot and a banner; it never falls back to
+    /// managing the fleet itself, which would make two brains for one fleet.
+    pub const E_HUB_UNREACHABLE: &str = "E_HUB_UNREACHABLE";
+    /// Remote (hub-client) mode: a hub is configured, but this launch could
+    /// not use it — no stored client token, a keychain that would not open,
+    /// plain `http://` without the opt-in, a URL that does not parse. The app
+    /// then owns nothing and refuses every fleet command with this code and
+    /// the reason, rather than quietly managing the hub's fleet itself. The
+    /// fix is in Settings → Hub: pair again, or Disconnect.
+    pub const E_HUB_UNAVAILABLE: &str = "E_HUB_UNAVAILABLE";
+    /// Pairing: the hub URL is plain `http://` to a host that is not
+    /// loopback, so the client token this pairing is about to mint — a
+    /// credential for the whole fleet — would cross the network in the clear
+    /// on every call, forever.
+    ///
+    /// Its own code because it is the one pairing failure the user can
+    /// *decide* their way past: the message names the risk and the dialog
+    /// offers to send it anyway (the client half of the hub's own
+    /// `--allow-plaintext`). Every other pairing failure is something to fix,
+    /// not something to accept.
+    pub const E_HUB_PLAINTEXT: &str = "E_HUB_PLAINTEXT";
+    /// Remote (hub-client) mode: the command only makes sense against a fleet
+    /// this process owns, and no hub tool does it. Three families — things
+    /// about *this machine* (the PTY, SSH tunnels, the local prerequisites
+    /// check), fleet administration a paired client is refused by design
+    /// (`add_host`, `provision_hosts`, secrets, asset sync), and asset-catalog
+    /// authoring, which edits a git checkout only the owning machine has.
+    ///
+    /// The message always names what to do instead: run it on the hub, or in
+    /// a standalone app. Never returned in standalone mode.
+    pub const E_LOCAL_ONLY: &str = "E_LOCAL_ONLY";
+
+    /// Every code a *transport* raises when a command did not reach, or did
+    /// not come back from, the host — over SSH or over an agent.
+    ///
+    /// The single list the service layer branches on, so the two transports
+    /// cannot drift apart: `E_AGENT_OFFLINE` must not fall through a branch
+    /// that `E_SSH` is caught by. Codes about the *work* (`E_REPO_MISSING`,
+    /// `E_TMUX`…) are deliberately absent.
+    ///
+    /// **`E_TIMEOUT` is deliberately absent too.** Both transports report a
+    /// blown wall clock as `E_SSH_TIMEOUT` (`ssh::wall_clock_error`, and the
+    /// agent registry matches it on purpose), so the `E_TIMEOUT`s that reach
+    /// the service layer come from *local* deadlines — `HostExec::run_bash`'s
+    /// local branch, `add_project`'s local script — where "the host is
+    /// unreachable" would be a lie. Branches that mean "the command may have
+    /// been cut off" rather than "the transport failed" list it themselves;
+    /// see [`may_have_run`].
+    pub const TRANSPORT_FAILURES: [&str; 4] =
+        [E_SSH, E_SSH_TIMEOUT, E_AGENT_OFFLINE, E_AGENT_PROTOCOL];
+
+    /// Did the transport, rather than the command, fail? See
+    /// [`TRANSPORT_FAILURES`].
+    pub fn is_transport_failure(code: &str) -> bool {
+        TRANSPORT_FAILURES.contains(&code)
+    }
+
+    /// The transport failures under which the command **may already have
+    /// run**: it was sent and its outcome is unknown, rather than never
+    /// having left. `E_SSH` and `E_AGENT_OFFLINE` are the two that mean no
+    /// connection, so they are excluded — a caller doing something
+    /// non-idempotent (`gh repo create`, a billed usage request) can safely
+    /// treat those as "nothing happened" and retry elsewhere.
+    pub fn may_have_run(code: &str) -> bool {
+        matches!(code, E_SSH_TIMEOUT | E_TIMEOUT | E_AGENT_PROTOCOL)
+    }
 }
 
 #[derive(Debug, Serialize)]

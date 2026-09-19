@@ -97,3 +97,47 @@ describe('toasts store', () => {
     expect(get(toasts)).toHaveLength(0);
   });
 });
+
+// Requirement (c): the trap. With `mcp.confirm_destructive` on, a hub refuses
+// kill_session / delete_worktree / move_session / cancel_task until someone
+// approves them — and this desktop's confirmation dialog answers its OWN
+// queue, which in remote mode is always empty. Nothing in the interface said
+// where to go, so this is the one place every backend failure passes through.
+describe('pushError on a hub client', () => {
+  it('adds the next step to a confirmation the hub is waiting on', async () => {
+    const { hubStatus, STANDALONE } = await import('./hub');
+    hubStatus.set({
+      ...STANDALONE,
+      remote: true,
+      url: 'https://fleet.example.com',
+      client_name: 'laptop',
+    });
+    try {
+      pushError({ code: 'E_CONFIRM_REQUIRED', message: 'confirmation required' }, 'Kill failed');
+      const t = get(toasts)[0];
+      expect(t.code).toBe('E_CONFIRM_REQUIRED');
+      expect(t.message).toContain('Kill failed');
+      expect(t.message.toLowerCase()).toContain('on the hub');
+      expect(t.message).toContain('fleet.example.com');
+      expect(t.message.toLowerCase()).toContain('approve it on the hub — this window will follow');
+    } finally {
+      hubStatus.set({ ...STANDALONE });
+    }
+  });
+
+  it('changes nothing in standalone mode, where the dialog works', () => {
+    pushError({ code: 'E_CONFIRM_REQUIRED', message: 'confirmation required' }, 'Kill failed');
+    expect(get(toasts)[0].message).toBe('Kill failed: confirmation required');
+  });
+
+  it('leaves an error that already explains itself alone', async () => {
+    const { hubStatus, STANDALONE } = await import('./hub');
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+    try {
+      pushError({ code: 'E_LOCAL_ONLY', message: 'not from here; do it on the hub' });
+      expect(get(toasts)[0].message).toBe('not from here; do it on the hub');
+    } finally {
+      hubStatus.set({ ...STANDALONE });
+    }
+  });
+});

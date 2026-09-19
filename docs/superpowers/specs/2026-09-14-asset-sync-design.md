@@ -79,7 +79,7 @@ produces one `HostPlan` per (host, harness) with a list of actions.
 | `adopt` | present and matching, not in manifest; only the manifest changes |
 | `remove` | orphan; backup, then delete files and config entries |
 | `plugin_install` | plugin ref, not installed |
-| `plugin_update` | plugin ref installed, ref is `latest`, and a newer version may exist; or pinned and installed version differs (reported as `blocked` if the CLI cannot reach the pin) |
+| `plugin_update` | pinned plugin ref installed at another version and the catalog pin changed since fleet last applied it (`2026-09-18-catalog-install-as-and-plugin-updates-design.md`); a pin fleet already tried is `blocked`, and `latest` refs never update automatically |
 | `noop` | managed and identical |
 | `blocked` | secret name unresolvable for this host, kind unsupported on this harness, host unreachable, config file unparsable, `claude` CLI absent (plugin actions only) |
 

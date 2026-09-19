@@ -4,10 +4,29 @@
 # Nothing here provisions a host or edits ~/.claude.json / ~/.ssh.
 # Hub A: --local-host true  -> manages this machine's tmux directly.
 # Hub B: --local-host false -> must refuse host `local`.
+# Hub C: --local-host false, plus a fleet-agent dialing it over loopback. The
+#   agent is started with `run` (never `install`: no systemd, nothing written
+#   outside $ROOT), with its own HOME and its own tmux server under $ROOT.
 set -uo pipefail
 
 BIN="${BIN:?set BIN to the fleet-hub binary}"
+ABIN="${ABIN:-$(dirname "$BIN")/fleet-agent}"
 ROOT="$(mktemp -d -p /tmp/claude-1000 hub-e2e.XXXXXX)"
+# Whatever happens, leave nothing running: every hub and agent this script
+# started records a pid file under $ROOT, and the agent's tmux server lives
+# under $ROOT/tmux (a short path: a tmux socket path is capped at 108 bytes).
+cleanup() {
+  local f pid
+  for f in "$ROOT"/*.pid; do
+    [ -e "$f" ] || continue
+    pid=$(cat "$f"); kill -TERM "$pid" 2>/dev/null || continue
+    until_ok 50 '! kill -0 "$pid" 2>/dev/null' || kill -KILL "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  done
+  [ -d "$ROOT/tmux" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$ROOT/tmux" tmux kill-server 2>/dev/null
+  return 0
+}
+trap cleanup EXIT
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf 'PASS  %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf 'FAIL  %s\n      %s\n' "$1" "${2:-}"; }
@@ -35,7 +54,9 @@ start_hub() { # name port extra-args...
   done
   return 1
 }
-stop_hub() { local pid; pid=$(cat "$ROOT/$1.pid"); kill -TERM "$pid"; wait "$pid"; STOP_RC=$?; }
+stop_hub() { local pid; pid=$(cat "$ROOT/$1.pid"); kill -TERM "$pid"; wait "$pid"; STOP_RC=$?; rm -f "$ROOT/$1.pid"; }
+# until TRIES CONDITION: poll every 0.2 s, at most TRIES times.
+until_ok() { local n=$1 _; for _ in $(seq "$n"); do eval "$2" && return 0; sleep 0.2; done; return 1; }
 
 echo "== CLI basics"
 check "version flag" '"$BIN" --version | grep -q fleet-hub' "$("$BIN" --version 2>&1)"
@@ -202,6 +223,101 @@ check "new_shell_session on local is refused with E_NOTFOUND" 'echo "$r" | grep 
 check "and no tmux session was created" '! tmux has-session -t "$NAME2" 2>/dev/null' "session exists"
 stop_hub b
 check "hub B SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
+
+echo "== Agent leg (a fleet-agent dialing hub C over loopback)"
+# The whole agent side runs with this environment: its own HOME, its own tmux
+# server, and no $TMUX/$NOTIFY_SOCKET leaking in from whatever runs the script
+# (a tmux client with $TMUX set talks to THAT server, not TMUX_TMPDIR's).
+AHOME="$ROOT/agent-home"; mkdir -p "$AHOME" "$ROOT/tmux"; chmod 700 "$ROOT/tmux"
+AENV=(env -u TMUX -u TMUX_PANE -u NOTIFY_SOCKET HOME="$AHOME" XDG_CONFIG_HOME="$AHOME/.config" TMUX_TMPDIR="$ROOT/tmux")
+aenv() { "${AENV[@]}" "$@"; }
+start_agent() { # name token: `run`, never `install`; the token goes in on stdin
+  # A simple command, not a function, in the background: `env` execs the
+  # agent, so $! is the agent itself and SIGTERM reaches it (a backgrounded
+  # function would be a subshell, and killing it would orphan the agent).
+  "${AENV[@]}" "$ABIN" run --hub "http://127.0.0.1:$PC" --insecure --token-file - <<<"$2" >"$ROOT/$1.log" 2>&1 &
+  echo $! >"$ROOT/$1.pid"
+}
+# SIGTERM, then at most 15 s for it to go (the agent promises 10 s); past
+# that it is KILLed, so the wait below cannot hang and the exit code says 137.
+stop_agent() { local pid; pid=$(cat "$ROOT/$1.pid"); kill -TERM "$pid"
+  until_ok 75 '! kill -0 "$pid" 2>/dev/null' || kill -KILL "$pid" 2>/dev/null
+  wait "$pid"; STOP_RC=$?; rm -f "$ROOT/$1.pid"; }
+connected() { tool "$PC" "$PUB" "$TOKC" agent_status '{}' | grep -q '\\"connected\\": true'; }
+AH=e2eagent
+check "fleet-agent binary is there" '[ -x "$ABIN" ] && "$ABIN" --version | grep -q fleet-agent' "ABIN=$ABIN"
+out=$(aenv "$ABIN" run --hub http://fleet.example.com --insecure --token-file - <<<"$(printf 'a%.0s' $(seq 64))" 2>&1); rc=$?
+check "--insecure is refused for a hub that is not on loopback" '[ $rc -ne 0 ] && echo "$out" | grep -qi loopback' "$out"
+
+PC=$(free_port)
+TOKC=$("$BIN" init --data-dir "$ROOT/c" --public-url "https://$PUB" --port "$PC" 2>&1 | grep -E '^[0-9a-f]{64}$')
+start_hub c "$PC" --public-url "https://$PUB" || bad "hub C starts" "$(tail -5 "$ROOT/c.log")"
+out=$("$BIN" agent-token "$AH" --data-dir "$ROOT/c" 2>&1); rc=$?
+check "agent-token for a host that is not registered fails" '[ $rc -ne 0 ] && echo "$out" | grep -q "no host named"' "$out"
+ah=$(tool "$PC" "$PUB" "$TOKC" add_host "{\"alias\":\"$AH\",\"ssh_alias\":\"$AH\",\"transport\":\"agent\"}")
+check "add_host transport=agent saves it unprobed and unreachable" 'echo "$ah" | grep -q "\"isError\":false" && echo "$ah" | grep -q "\\\\\"transport\\\\\": \\\\\"agent\\\\\"" && echo "$ah" | grep -q "\\\\\"reachable\\\\\": false"' "${ah:0:400}"
+st=$(tool "$PC" "$PUB" "$TOKC" agent_status '{}')
+check "agent_status lists the host as not connected before any agent" 'echo "$st" | grep -q "\\\\\"alias\\\\\": \\\\\"$AH\\\\\"" && echo "$st" | grep -q "\\\\\"connected\\\\\": false"' "${st:0:400}"
+# The first token reaches the host out of band, the way an operator does it.
+ATOK=$("$BIN" agent-token "$AH" --data-dir "$ROOT/c" 2>"$ROOT/atok.err"); rc=$?
+check "agent-token mints the host's first token (only the token on stdout)" '[ $rc -eq 0 ] && echo "$ATOK" | grep -qxE "[0-9a-f]{64}"' "rc=$rc stdout='${ATOK:0:80}' stderr=$(cat "$ROOT/atok.err")"
+check "agent-token says on stderr that it minted one" 'grep -q "new token" "$ROOT/atok.err"' "$(cat "$ROOT/atok.err")"
+check "agent-token again prints the same token, minting nothing" '[ "$("$BIN" agent-token "$AH" --data-dir "$ROOT/c" 2>/dev/null)" = "$ATOK" ]' "a second call changed the token"
+
+start_agent agent1 "$ATOK"
+until_ok 50 connected
+check "agent_status shows the agent connected, with its version" 'tool "$PC" "$PUB" "$TOKC" agent_status "{}" | grep -q "\\\\\"agent_version\\\\\": \\\\\"0\."' "$(tool "$PC" "$PUB" "$TOKC" agent_status '{}' | head -c 400) / agent: $(tail -3 "$ROOT/agent1.log")"
+pr=$(tool "$PC" "$PUB" "$TOKC" probe_host "{\"alias\":\"$AH\"}")
+check "probe_host over the agent: reachable, tmux version read" 'echo "$pr" | grep -q "\\\\\"reachable\\\\\": true" && echo "$pr" | grep -q "\\\\\"tmux_version\\\\\": \\\\\""' "${pr:0:400}"
+# A session on the agent's own tmux server; everything after this goes through
+# the agent: the reconcile that finds it, send-keys, capture-pane, kill-session.
+aenv tmux new-session -d -s agt1 -c "$AHOME" "echo agent-e2e-marker; exec bash --noprofile --norc"
+aenv tmux new-session -d -s agt2 -c "$AHOME" "exec bash --noprofile --norc"
+ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}")
+check "list_sessions finds the host's tmux sessions over the agent" 'echo "$ls_a" | grep -q agt1 && echo "$ls_a" | grep -q agt2' "${ls_a:0:400}"
+sid_of() { echo "$ls_a" | grep -oE "\\\\\"id\\\\\":[0-9]+,[^}]*\\\\\"tmux_name\\\\\":\\\\\"$1\\\\\"" | grep -oE '^\\"id\\":[0-9]+' | grep -oE '[0-9]+'; }
+S1=$(sid_of agt1); S2=$(sid_of agt2)
+check "session ids parsed" '[ -n "$S1" ] && [ -n "$S2" ]' "${ls_a:0:400}"
+cap=$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}")
+check "capture_session reads the pane over the agent" 'echo "$cap" | grep -q agent-e2e-marker' "${cap:0:400}"
+tool "$PC" "$PUB" "$TOKC" send_prompt "{\"session_id\":${S1:-0},\"prompt\":\"echo sum-\$((40+2))\"}" >/dev/null
+until_ok 50 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | grep -q "sum-42"'
+check "send_prompt types into the pane over the agent (the shell ran it)" 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | grep -q "sum-42"' "$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | head -c 400)"
+k=$(tool "$PC" "$PUB" "$TOKC" kill_session "{\"session_id\":${S1:-0}}")
+until_ok 25 '! aenv tmux has-session -t agt1 2>/dev/null'
+check "kill_session kills the tmux session over the agent" '! aenv tmux has-session -t agt1 2>/dev/null' "${k:0:400}"
+
+# Rotation: the new token is committed and sent NOTHING over the connection it
+# replaces; the next routed call finds the old connection stale and drops it.
+NTOK=$("$BIN" agent-token "$AH" --rotate --data-dir "$ROOT/c" 2>/dev/null)
+check "agent-token --rotate prints a new token" 'echo "$NTOK" | grep -qxE "[0-9a-f]{64}" && [ "$NTOK" != "$ATOK" ]' "'${NTOK:0:80}'"
+c2=$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}")
+check "after a rotation the agent on the old token is cut off -> E_AGENT_OFFLINE" 'echo "$c2" | grep -q E_AGENT_OFFLINE' "${c2:0:400}"
+check "and agent_status shows it disconnected" '! connected' "$(tool "$PC" "$PUB" "$TOKC" agent_status '{}' | head -c 400)"
+until_ok 50 'grep -q 401 "$ROOT/agent1.log"'
+check "the stale agent was refused on redial (401)" 'grep -q 401 "$ROOT/agent1.log"' "$(tail -5 "$ROOT/agent1.log")"
+stop_agent agent1
+check "the stale agent exits on SIGTERM" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC / $(tail -3 "$ROOT/agent1.log")"
+start_agent agent2 "$NTOK"
+until_ok 50 connected
+check "the agent re-installed with the new token connects again" 'connected' "$(tail -3 "$ROOT/agent2.log")"
+c3=$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}")
+check "session commands work again over the new connection" 'echo "$c3" | grep -q "\"isError\":false"' "${c3:0:400}"
+
+# Stopping the agent: it exits cleanly, the hub fails calls at once, and the
+# tmux server the agent's commands started outlives it.
+stop_agent agent2
+check "fleet-agent exits 0 on SIGTERM" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC / $(tail -3 "$ROOT/agent2.log")"
+until_ok 50 '! connected'
+check "agent_status shows the stopped agent disconnected" '! connected' "$(tool "$PC" "$PUB" "$TOKC" agent_status '{}' | head -c 400)"
+t0=$(date +%s%N)
+c4=$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}")
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+check "a call for the host fails with E_AGENT_OFFLINE" 'echo "$c4" | grep -q E_AGENT_OFFLINE' "${c4:0:400}"
+check "and fails at once, not after a timeout (<5 s)" '[ "$ms" -lt 5000 ]' "took ${ms} ms"
+check "the tmux session survives the agent stopping" 'aenv tmux has-session -t agt2 2>/dev/null' "agt2 is gone"
+stop_hub c
+check "hub C SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
 
 echo "== ssh-key in an isolated HOME"
 FH="$ROOT/home"; mkdir -p "$FH"
