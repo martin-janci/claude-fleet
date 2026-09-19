@@ -8,6 +8,199 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.23] - 2026-09-20
+
+### Added
+- **agent:** refuse an incompatible hub and back off at the maximum on a version mismatch
+- **hub:** judge an agent's protocol version before registering it, and welcome it with the hub's own
+- **proto:** add protocol version negotiation and lenient unknown-kind decoding
+- **hub:** disable remaining routed-mutation controls while offline
+- **hub:** add wire-contract revision and skew check to the event bridge
+- **hosts:** surface host transport (ssh vs agent) in the frontend
+- **hub:** route new_session and explicit repair_session to the hub
+- **move:** strict opt-out on the MCP tool and frontend, ADR 0002
+- **move:** carry uncommitted, unpushed and small ignored work to the target
+- **move:** probe operations in progress and split the strict verdict from the carry verdict
+- **move:** list, pack and extract small git-ignored files
+- **move:** snapshot, bundle, fetch and apply scripts with a real-git round trip
+- **move:** carry report types and the ignored-file selection policy
+- **move:** carry error codes and size settings
+- **catalog:** surface install_as in listings; log suppressed host identifiers; codex dotted-key test
+- **reconcile:** log session lifecycle transitions at INFO
+- **reconcile:** a vanished tmux server or a reboot marks sessions lost, not deleted
+- **store:** keep resumable mass-loss sessions through the reap until a TTL
+- **store:** record why a session is lost; mark a host's sessions lost in one pass
+- **reconcile:** carry the host identity on each probe
+- **tmux:** read a host's boot identity alongside its sessions
+- **store:** migration 034 and host boot-identity accessors
+- **ui:** install_as in the asset editor and detail
+- **catalog:** importer keeps the host identifier as install_as
+- **sync:** update a pinned plugin when the catalog pin changes
+- **catalog:** render and inventory by install name
+- **catalog:** install_as header field
+- **conversation-ui:** find in conversation, copy buttons and turn index
+- **conversation-ui:** compact tool lines with lazy detail, subagent blocks, doing-now indicator
+- **transcript:** session_tool_detail — lazy input/result for one tool call
+- **transcript:** structured tool items with id/target/timing and subagent items
+- **desktop:** show a banner while the hub's event stream is down
+- **timeline:** live timeline via session:event push; docs for phase 2
+- **conversation-ui:** header, earlier-conversation view, /clear follow, inline events and new item kinds
+- **conversation-ui:** ConversationHeader with switcher, context meter, model, status and last event
+- **conversation-ui:** live event fan-out and header/thread helpers
+- **transcript:** compaction, slash-command and interrupt items; conversation events in session_conversation
+- **ui:** point the desktop at a hub from Settings
+- **api:** session_conversations, read earlier conversations; tasks survive /clear
+- **hooks-install:** pane header, SessionStart command hook, compaction and clear/resume events
+- **reconcile:** record tmux pane ids, pane context as fallback only, rebind conversations on id change
+- **context:** compute context size from the transcript's last usage on Stop and on read
+- **hooks:** resolve by tmux pane, rebind on SessionStart/UserPromptSubmit, track compaction and conversation end
+- **store:** conversations — rebind, close, list, context setters; push timeline events
+- **store:** migration 034 — conversations table and session context columns
+- **desktop:** the hub's event stream drives the same frontend events
+- **desktop:** every command honours the resolved backend
+- **desktop:** reach an https hub through rustls and the platform trust store
+- **desktop:** a hub-backed implementation of the read commands
+- **desktop:** resolve a local or remote backend at startup
+
+### Changed
+- **hub:** guard the fixture commit against gpgsign, balance the skip path's tally
+- **move:** a cross-host harness for the carry, run against a real target
+- **mcp:** make the never-handshakes listener test deterministic
+- **hub:** make the e2e's project discovery hermetic so it passes on a CI runner
+- **mcp:** consolidate tool-policy exhaustiveness tests, pin both admin refusal wordings
+- **mcp:** derive tool-policy predicates from one TOOL_POLICIES table
+- drop review-history narrative from comments, ignore .reticle/
+- give hub-image's meta job an empty permissions grant
+- upload the hub-e2e logs when the step fails
+- **hub:** assert the agent handshake in the e2e, and fail fast on a bad binary path
+- **hub-image:** publish the fleet-hub image for linux/arm64 too
+- **release:** ship fleet-agent and fleet-hub as Linux release artifacts
+- **hub:** kill the /events SSE subscriber on interrupt, guard $ROOT in cleanup
+- run scripts/hub-e2e.sh in the hub-headless job
+- ignore .reticle
+- **hub:** build hub_disabled.test.ts SessionRow fixtures via the shared factory
+- **hub:** cover NewSessionDialog's usage-refresh hub-client gate
+- **hub:** cover the handler-level gates and the exhaustive local/connected sweeps
+- **mcp:** make the handshake-timeout test independent of scheduler timing
+- **agent:** cover the hub-side timeout in PendingGuard's Cancel-on-drop
+- **move:** move_session.rs becomes a module directory
+- **tmux:** hide tmux with an isolated PATH, not /usr/bin:/bin
+- **sync:** rustfmt apply.rs
+- **events:** cover session:event / session:conversations batch wiring
+- **provision:** expect the headers file before settings.json
+
+### Fixed
+- **hub:** pin ConversationRow on the wire and default its optional fields
+- **proto:** neutralise a rejection's own detail before any receiver logs it
+- **release:** refuse to package when the tag and the crate versions disagree
+- **agent:** neutralise a hub-controlled close reason before it reaches the log
+- **proto:** classify an unknown kind by probing the enum, not serde's error text
+- **hub-image:** warn instead of misdescribing an amd64-only publish as making the run red
+- **release:** bare checksum filenames, explicit duplicate detection, and a loud non-atomic re-upload
+- **agent:** mention systemd in fleet-agent install --help
+- **hub-image:** let arm64 fail without blocking or breaking amd64's publish
+- **release:** merge per-target checksums, upload by release id, drop the fabricated LICENSE
+- **agent:** require a compatible welcome before acting on anything else
+- **hub:** make welcome unconditionally first, bound unknown-kind tracking, and guard frame_id
+- **proto:** drift-proof unknown-kind classification, and bound/sanitise the tracker
+- **agent:** refuse `install` cleanly on a host with no systemd
+- **store:** revive a lost session only from a newer observation
+- **release:** scope [package] field reads to the [package] table
+- **release:** sync Cargo.lock for every crate release.sh bumps
+- **hub:** make the New session dialog honest about a hub client's remote worktrees
+- **contract:** pin ConversationRow and fix unreadable-contract handling
+- **hub:** use Object.hasOwn instead of `in` when checking a refused action
+- **hub:** gate the nickname-edit shortcut and its save, not just the button
+- **hub:** gate Enter-to-submit and the remote worktree scan for hub clients
+- **reconcile:** never let a cwd-inferred agent overwrite a session's claude_session_id
+- **hub:** gate the handlers, not just the buttons, behind refused/offline actions
+- **mcp:** session_conversations is a client tool
+- **move:** the hub route forwards strict and reads the carry report back
+- **hub:** disable refused controls and stop background calls that fail there
+- **hub:** decide before writing when regenerating the contract golden
+- **hub:** drop every frame ahead of a connection's ready frame
+- **move:** harden the carry seams — status config, haves bound, upstream, rollback
+- **mcp:** distinguish an unclassified tool name from a real admin tool in enforce_admin's message
+- **hub:** cancel ticks before shutdown, widen the SIGTERM grace, refuse --tls auto in pair, flush after write
+- **move:** carry parse failures are E_MOVE_CARRY; clean the target from the first write; pin the chunked download
+- **agent:** send a best-effort Cancel when a caller drops a pending request
+- **hub:** let an in-flight reconcile/usage pass finish before SIGTERM tears down SSH masters
+- **move:** carry scripts survive login-shell banners; guard ids, chunk reads and a failed apply
+- **mcp:** make the master-only tool gate classification mandatory
+- **store:** add hosts.transport to databases from the pre-merge conversation branch
+- **hub:** let pair/client CLI reach a --tls cert hub
+- **settings:** mirror the carry setting bounds instead of hardcoding them
+- **hub:** skip reverse ssh tunnel for agent-transport hosts
+- **reconcile:** a verdict after a failed first post-loss pass still records the loss
+- **reconcile:** spare live agents from a reboot verdict, read identity before the list
+- **sessions:** fleet's own kill of a host's last session is not a resumable mass loss
+- **desktop:** a token stranded by a half-finished pairing is clearable
+- **reconcile:** correct the lifecycle_kind doc comment on duplicate lost lines
+- **reconcile:** guard the mass-loss verdict against a stale probe and side-effect failures
+- **store:** coalesce NULL lost_reason, cover keep+cutoff ordering, fix docs/copy
+- **store:** clear lost_reason on revival paths, cover idempotency
+- **tmux:** stop assuming CI has tmux installed in the identity tests
+- **tmux:** classify tmux failures in Rust instead of guessing no-server in shell
+- **tmux:** stop reading a timezone-rendered boot id on macOS
+- **sync:** re-pointed install names refresh the manifest and remove the old paths
+- **desktop:** store a new pairing's token last, beside its own hub
+- **catalog:** layer overrides cannot change install_as
+- **catalog:** refuse duplicate install names within a kind
+- **desktop:** a configured hub that cannot be used owns nothing
+- **catalog:** skip installed identifiers that collide with a catalog name
+- **conversation-ui:** stable tool lines, conversation-scoped detail, live clocks while blocked, scoped find
+- **conversation-ui:** find shortcut per platform, live pending calls while blocked, turn index a11y
+- **conversation-ui:** final review minors
+- **transcript:** only a leading command tag makes a command; MCP conversation caps events at 50
+- **conversation-ui:** guard a malformed conversation list, share the view reset, hold the switch notice for a fresh list
+- **desktop:** de-chunk a whole response before decoding it
+- **desktop:** a silent hub stream reconnects, and only a working one resets the backoff
+- **desktop:** routed commands answer what the local path would, and refusals tell the truth
+- **reconcile:** keep context_at for an unchanged pane footer value so a no-op pass emits nothing
+- **hooks:** only SessionStart(clear) rebinds a busy pane row; a nested --resume/-c is foreign
+- **provision:** write the hook headers file before settings.json; docs: rebind eligibility and source derivation in the spec
+- **hooks:** a nested claude in the pane never rebinds its parent; late SessionStart keeps the turn; safe-kill check by row
+- **tasks:** tolerate only clear/resume/compact switches and re-stamp the task; read earlier conversations by direct lookup
+- **reconcile:** never undo a hook rebind from an in-flight pass; one id guard; no stale mark on first sighting
+- **store:** hold bus events inside atomically until commit; stale context only for the current conversation
+- **desktop:** only a stream that delivered resets the reconnect backoff
+- **desktop:** make the double-brain guard observable, and close two token leaks
+- **desktop:** keep the hub token off argv and out of the logs
+
+### Documentation
+- **mcp:** session_conversation describes subagent items, tool fields and events_limit
+- fix stale pane_intel.rs path, healthcheck comment, and keychain doc comment
+- **hub:** fix set_host_token_mode, dedupe the terminal limitation, and update the keychain claim
+- **hub:** replace the protocol upgrade-order bullet with the engineer's corrected text
+- **skill:** drop stale CI-billing-block workflow, fix migration mechanism, and add two guard rules
+- **claude-md:** recount LOC, fix version-file count, and catch up Status & known issues
+- **readme:** fix stale build/test commands, migration paths, and add a hub/agent pointer
+- describe the merged SHA256SUMS, conditional LICENSE, and best-effort arm64
+- **hub:** document how to get the fleet-agent and fleet-hub binaries
+- **hub:** document the protocol version handshake and its upgrade order
+- **store:** spell out why the revive guard cannot strand a live row
+- **changelog:** backfill 0.2.22 with the #136 host-agent entries
+- **hub:** correct the contract-skew, terminal and confirm-tools sentences
+- **move:** the dialog and the docs say what a move does now, not what it refused
+- **move:** error-code docs say what strict and carry do now
+- **hub:** correct the pair/client TLS trust story, the tunnel scope, and the admin-tools list
+- **plan:** move carry engine implementation plan; spec corrections found while planning
+- **spec:** move carry engine — transfer a session with the work as it is
+- **migrations:** list 'killed' among 034's lost_reason values
+- **plan:** host-reboot safety net (PR 1 of 2)
+- **spec:** re-verify host-reboot findings on the fleet-core tree
+- **catalog:** install_as rejects only . and .., not a leading dot
+- **sync:** describe when plugin actions carry a plan and when plugin_update is planned
+- phase 3 status
+- **specs,plans:** catalog install names and plugin updates
+- phase 3 implementation plan (detail UX)
+- running the desktop against a hub
+- **plan:** inline the groupItems test in phase 2 task 1
+- phase 2 implementation plan (Conversations UI)
+- conversation tracking in control-api, CLAUDE.md status, spec correction
+- **plan:** resolve ambiguous claude_session_id by pane only; never bind one id to two rows
+- phase 1 implementation plan for conversation event tracking
+- conversation event tracking and Conversations tab UX design
 ## [0.2.22] - 2026-09-19
 
 ### Fixed
@@ -583,6 +776,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.23]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.23
 [0.2.22]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.22
 [0.2.21]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.21
 [0.2.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.4
