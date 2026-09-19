@@ -194,7 +194,8 @@ pub(super) struct HostProbe {
     /// (it is synced by `service::hosts::sync_local_account` instead).
     pub(super) account: Option<crate::service::hosts::OauthAccount>,
     /// This pass's read of the host's boot identity (`TmuxExec::host_identity`),
-    /// read under the same `tmux_result.is_ok()` guard as `account`. `None`
+    /// read BEFORE `list_sessions` (so the list can never be older than the
+    /// identity that judges it) and discarded unless the list succeeded. `None`
     /// when `list_sessions` failed, the whole probe timed out, or the
     /// executor could not tell — `reconcile_write_one_host` (`mass_loss_verdict`)
     /// consumes this to distinguish "host rebooted" from "could not tell".
@@ -575,7 +576,25 @@ pub(super) fn reconcile_write_one_host(
             let mut marked_any = false;
             let mut mark_failed = false;
             if let Some(reason) = verdict {
-                match s.mark_host_sessions_lost(&host.alias, reason, &keep, now, probe.started_at) {
+                // `keep` names tmux sessions only; the pane-less agent rows
+                // this probe saw live (`bg:<id>`, synthesised by
+                // `reconcile_agent_rows` below) must be spared too, or a
+                // `host_reboot` verdict marks an agent running NOW lost and
+                // the agent pass revives it in the same call — leaving a
+                // spurious permanent `lost` event behind.
+                let mut verdict_keep = keep.clone();
+                verdict_keep.extend(live_agent_row_names(
+                    live,
+                    agent_rows,
+                    host.alias == "local",
+                ));
+                match s.mark_host_sessions_lost(
+                    &host.alias,
+                    reason,
+                    &verdict_keep,
+                    now,
+                    probe.started_at,
+                ) {
                     Ok(rows) => {
                         marked_any = !rows.is_empty();
                         for row in &rows {
@@ -760,6 +779,27 @@ pub(super) fn unmatched_bg_agents<'a>(
         .collect()
 }
 
+/// The synthetic `sessions.tmux_name` of a pane-less agent row
+/// (`kind='bg'` / `'external'`) — `bg:<claude session id>`.
+pub(super) fn agent_row_name(session_id: &str) -> String {
+    format!("bg:{session_id}")
+}
+
+/// The row names [`reconcile_agent_rows`] keys this probe's live pane-less
+/// agents under: every [`unmatched_bg_agents`] entry with a session id.
+/// Dismissed agents are included — their row was deleted on dismissal, so
+/// naming them in a keep set is harmless.
+pub(super) fn live_agent_row_names(
+    live: &[crate::tmux::TmuxSession],
+    agents: &[crate::claude_agents::ClaudeAgentRow],
+    is_local: bool,
+) -> Vec<String> {
+    unmatched_bg_agents(live, agents, is_local)
+        .into_iter()
+        .filter_map(|a| a.session_id.as_deref().map(agent_row_name))
+        .collect()
+}
+
 /// Seconds without transcript activity after which a non-working background
 /// agent is shown as `stopped` (spec §2).
 pub(super) const AGENT_INACTIVE_SECS: i64 = 86_400;
@@ -839,7 +879,7 @@ pub(super) fn reconcile_agent_rows(
                 _ => continue,
             }
         }
-        let tmux_name = format!("bg:{session_id}");
+        let tmux_name = agent_row_name(session_id);
         // Keep the sentinel even if the upsert below fails — ghosting an
         // existing row over a transient write error would be wrong.
         keep.push(tmux_name.clone());
@@ -981,7 +1021,16 @@ pub(super) async fn probe_with_timeout(
     // the host stops being current (BE-3 ghost guard).
     let started_at = now_unix();
     let probe = async {
+        // Boot identity feeds the reboot-safety-net writer (Task 6). Read
+        // BEFORE the list: a tmux server that dies between the two reads
+        // then shows up as sessions missing from the list (the next pass's
+        // verdict catches it) rather than as a verdict whose `keep` still
+        // names the sessions it just lost. Only trustworthy when we actually
+        // reached the host this pass, so it is discarded below when the
+        // list fails.
+        let identity = tmux.host_identity().await;
         let tmux_result = tmux.list_sessions().await;
+        let identity = if tmux_result.is_ok() { identity } else { None };
         let agent_rows = tmux.list_claude_agents().await;
         // Which account the host is logged into NOW — so a `claude /login`
         // as someone else on a remote host relinks it within one pass
@@ -990,13 +1039,6 @@ pub(super) async fn probe_with_timeout(
         // would only be one more round trip into a dead ssh.
         let account = if tmux_result.is_ok() {
             tmux.read_oauth_account().await
-        } else {
-            None
-        };
-        // Boot identity feeds the reboot-safety-net writer (Task 6): only
-        // trustworthy when we actually reached the host this pass.
-        let identity = if tmux_result.is_ok() {
-            tmux.host_identity().await
         } else {
             None
         };

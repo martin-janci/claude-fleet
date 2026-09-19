@@ -4491,3 +4491,62 @@ async fn killing_a_host_s_last_session_is_not_a_resumable_mass_loss() {
         "the killed row must be reaped on the ordinary schedule, not kept as a resumable ghost"
     );
 }
+
+/// Final-review minor 3: `keep` names tmux sessions only, so a `host_reboot`
+/// verdict used to mark a bg agent that is running NOW (present in this very
+/// probe) lost — and `reconcile_agent_rows` revived it in the same writer
+/// call, leaving a spurious permanent `lost` event behind.
+#[tokio::test]
+async fn a_reboot_verdict_spares_a_bg_agent_live_in_the_same_probe() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("y")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("y", "cid-y"), unmatched_bg_agent("bg-1")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let bg_id = store
+        .lock()
+        .unwrap()
+        .get_session("bg:bg-1", "mefistos")
+        .unwrap()
+        .expect("bg row after pass 1")
+        .id;
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["y".to_string(), "bg:bg-1".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: a new boot id (reboot); the tmux session is gone but the bg
+    // agent is listed live again (e.g. relaunched by a unit on boot).
+    let deps = identity_deps(
+        "mefistos",
+        vec![],
+        Some(crate::tmux::HostIdentity {
+            boot_id: Some("b".into()),
+            tmux_server_pid: Some(2),
+        }),
+        vec![unmatched_bg_agent("bg-1")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+
+    let s = store.lock().unwrap();
+    let bg = s.get_session_by_id(bg_id).unwrap().expect("bg row kept");
+    assert_eq!(bg.status, "running");
+    assert_eq!(
+        lost_events(&s, bg_id, "host_reboot"),
+        0,
+        "a bg agent live in the verdict's own probe must get no lost event"
+    );
+    // The tmux row that really vanished is still marked.
+    let y = s
+        .get_session("y", "mefistos")
+        .unwrap()
+        .expect("tmux row kept");
+    assert_eq!(y.status, "ghost");
+    assert_eq!(lost_events(&s, y.id, "host_reboot"), 1);
+}

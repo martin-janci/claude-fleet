@@ -583,7 +583,7 @@
           aria-describedby="limit-lost-ttl-desc"
           data-testid="sessions-lost-ttl-hours"
           onchange={(e) => onLimitHoursChange(SETTING_KEYS.sessionsLostTtlSecs, 'Lost session TTL', e)} />
-        <span class="hook-desc" id="limit-lost-ttl-desc">hours a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost</span>
+        <span class="hook-desc" id="limit-lost-ttl-desc">hours a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost (0 = off: removed on the next pass like any vanished session)</span>
       </div>
       <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>

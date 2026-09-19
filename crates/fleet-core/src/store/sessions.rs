@@ -270,6 +270,7 @@ impl Store {
             if let Some(kind) = super::reconcile::lifecycle_kind(&change) {
                 tracing::info!(
                     lifecycle = kind,
+                    session_id = row.id,
                     host_alias = %row.host_alias,
                     tmux_name = %row.tmux_name,
                     claude_session_id = row.claude_session_id.as_deref().unwrap_or("-"),
