@@ -110,7 +110,8 @@
     "provisioned",
     "reachable",
     "ssh_alias",
-    "tmux_version"
+    "tmux_version",
+    "transport"
   ],
   "ProjectRow": [
     "adopted",

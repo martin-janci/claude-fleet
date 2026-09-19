@@ -131,7 +131,11 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 /// A minimal but complete `SessionRow`, null-stripped the way the hub leaves
 /// one. Nothing in the local store ever looks like this.
 const SESSION_PAYLOAD: &str = r#"{"id":42,"tmux_name":"from-the-hub","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}"#;
-const HOST_PAYLOAD: &str = r#"{"alias":"trn","reachable":true,"hidden":false,"provisioned":true}"#;
+/// `transport` is required on the wire (migration 034): it is a `String`,
+/// not an `Option`, so `ok_json_compact` never strips it and a row without
+/// it does not parse.
+const HOST_PAYLOAD: &str =
+    r#"{"alias":"trn","reachable":true,"hidden":false,"provisioned":true,"transport":"ssh"}"#;
 const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
 /// A complete `MoveReport`: all twelve fields are required on the wire, the
 /// last of them a whole `SessionRow` (the same one as [`SESSION_PAYLOAD`]).

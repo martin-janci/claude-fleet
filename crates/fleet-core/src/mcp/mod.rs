@@ -5,7 +5,9 @@
 //! server is off by default and enabled from Settings; every request must
 //! carry a bearer token. See `docs/specs/2026-05-21-control-api-mcp-design.md`.
 
-mod auth;
+// `pub(crate)` for `agent::ws`'s tests, which mint a client token the way the
+// pairing flow does; the public surface stays the `pub use`s below.
+pub(crate) mod auth;
 #[cfg(test)]
 mod doc_gen;
 pub mod events_route;
@@ -261,6 +263,7 @@ fn build_app(
     auth_state: AuthState,
     pair_state: pairing::PairState,
     events_state: EventsState,
+    agent_state: crate::agent::ws::AgentWsState,
 ) -> axum::Router {
     // The MCP streamable-HTTP service is mounted with `route_service` at the
     // exact `/mcp` path — NOT `nest_service("/", …)` under `nest("/mcp", …)`.
@@ -280,6 +283,16 @@ fn build_app(
             axum::Router::new()
                 .route("/events", axum::routing::get(events_route::handle_events))
                 .with_state(events_state),
+        )
+        // `/agent` likewise carries its own state, and likewise belongs BEHIND
+        // `authorize`: the upgrade needs a valid bearer token, and the handler
+        // then reads the `Caller` this layer inserted to learn which host is
+        // dialling in. An agent is a host, so nothing but a per-host token gets
+        // past it — see `crate::agent::ws`.
+        .merge(
+            axum::Router::new()
+                .route("/agent", axum::routing::get(crate::agent::ws::handle_agent))
+                .with_state(agent_state),
         )
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize));
     // `/healthz` and `/pair` are registered on a SEPARATE router merged after
@@ -308,6 +321,41 @@ fn build_app(
                 .with_state(pair_state),
         )
         .merge(authorized)
+}
+
+/// Test-only: the real app — the real [`authorize`] layer over the real
+/// routes — on an in-memory store.
+///
+/// It exists for `crate::agent::ws`'s tests, which dial `/agent` over a real
+/// socket and must go through the SAME auth as production rather than a
+/// hand-built router that could differ from it. `/mcp` answers a stub, since
+/// nothing here drives a tool call.
+#[cfg(test)]
+pub(crate) fn test_app(
+    store: Arc<Mutex<Store>>,
+    master: &str,
+    agent_state: crate::agent::ws::AgentWsState,
+) -> axum::Router {
+    build_app(
+        axum::routing::any(|| async { "MCP_OK" }),
+        hooks::HookState {
+            store: Arc::clone(&store),
+            ssh: Arc::new(SshClient::new()),
+        },
+        AuthState {
+            master: Arc::new(master.to_string()),
+            store: Arc::clone(&store),
+            allowed_hosts: Arc::new(vec![]),
+        },
+        pairing::PairState::new(
+            Arc::clone(&store),
+            Arc::new(pairing::PendingPairings::new()),
+            Arc::new(RateLimiter::new()),
+            "http://127.0.0.1".to_string(),
+        ),
+        EventsState::disabled(),
+        agent_state,
+    )
 }
 
 /// The stateless rmcp service behind `/mcp`.
@@ -481,6 +529,12 @@ pub async fn start_with_listener<A: TlsAcceptor>(
         // Taken before `store` is moved into `FleetTools` below: `/events`
         // re-reads it to notice a client revoked mid-stream.
         let events_store = Arc::clone(&store);
+        // Likewise taken before `ssh` is moved into `FleetTools`: `/agent`
+        // registers on the very registry this client routes agent hosts
+        // through. `None` when the embedder built an SSH-only client.
+        let agent_registry = ssh.agent_registry().cloned();
+        // Each live agent connection's token is re-checked against the store.
+        let agents_store = Arc::clone(&store);
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
@@ -506,6 +560,11 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             // The stream ends itself when the server stops, so an attached
             // client never holds the graceful drain open.
             EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token()),
+            // The SAME registry `SshClient` routes agent hosts through, so a
+            // connection registered here is the one `AgentTransport` dispatches
+            // to. `None` on an SSH-only client (the desktop): `/agent` then
+            // answers 503 rather than upgrading a socket nothing would read.
+            crate::agent::ws::AgentWsState::new(agent_registry.map(|r| (r, agents_store))),
         );
 
         let scheme = if tls.is_some() { "https" } else { "http" };
@@ -626,6 +685,7 @@ mod tests {
             auth_state,
             pair_state,
             EventsState::disabled(),
+            crate::agent::ws::AgentWsState::disabled(),
         );
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -972,6 +1032,7 @@ mod tests {
                 "https://fleet.example.com".to_string(),
             ),
             EventsState::disabled(),
+            crate::agent::ws::AgentWsState::disabled(),
         );
         let listener2 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1027,6 +1088,7 @@ mod tests {
                 "https://fleet.example.com".to_string(),
             ),
             EventsState::disabled(),
+            crate::agent::ws::AgentWsState::disabled(),
         );
         let listener3 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1130,6 +1192,7 @@ mod tests {
             auth_state,
             pair_state,
             EventsState::disabled(),
+            crate::agent::ws::AgentWsState::disabled(),
         );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1342,6 +1405,7 @@ mod tests {
             auth_state,
             pair_state,
             events_state.clone(),
+            crate::agent::ws::AgentWsState::disabled(),
         );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await

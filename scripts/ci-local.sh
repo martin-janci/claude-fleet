@@ -7,10 +7,12 @@
 #                  cargo test --workspace
 #                  cargo deny check
 #                  cargo build -p fleet-hub --locked   (mirrors the hub-headless CI job)
+#                  cargo build -p fleet-agent --locked (same job; the agent must
+#                  build with neither the Tauri libs nor fleet-core)
 #                  On a box without the Tauri system libs (no gtk+-3.0 via
 #                  pkg-config), --rust-only instead runs a headless subset:
-#                  fmt, clippy/test/build scoped to fleet-core + fleet-hub,
-#                  and cargo deny check.
+#                  fmt, clippy/test/build scoped to fleet-core, fleet-hub,
+#                  fleet-proto and fleet-agent, and cargo deny check.
 #   frontend job:  pnpm install --frozen-lockfile
 #                  pnpm run check
 #                  pnpm run test
@@ -102,10 +104,11 @@ run_rust() {
   if ! pkg-config --exists gtk+-3.0 2>/dev/null; then
     echo "ci-local: no Tauri system libs (gtk+-3.0); running the headless subset only" >&2
     step cargo fmt --all --check
-    step cargo clippy -p fleet-core -p fleet-hub --all-targets -- -D warnings
-    step cargo test -p fleet-core -p fleet-hub
+    step cargo clippy -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent --all-targets -- -D warnings
+    step cargo test -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent
     step cargo deny check
     step cargo build -p fleet-hub --locked
+    step cargo build -p fleet-agent --locked
     return
   fi
   step cargo fmt --all --check
@@ -115,6 +118,7 @@ run_rust() {
   step cargo deny check
   # Mirrors the hub-headless CI job (no Tauri libs needed).
   step cargo build -p fleet-hub --locked
+  step cargo build -p fleet-agent --locked
 }
 
 # --- frontend job ----------------------------------------------------------

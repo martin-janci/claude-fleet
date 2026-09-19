@@ -235,6 +235,7 @@ mod tests {
             last_pinged_at: None,
             account_uuid: None,
             provisioned: false,
+            transport: "ssh".to_string(),
         }
     }
 
@@ -443,7 +444,7 @@ mod tests {
         let h = health_from_store(&s);
         assert_eq!(h.version, crate::app_version::get());
         assert!(h.db_ready);
-        assert_eq!(h.schema_version, 33);
+        assert_eq!(h.schema_version, 35);
         // Empty store → empty roll-up.
         assert_eq!(h.sessions_total, 0);
         assert_eq!(h.hosts_total, 0);

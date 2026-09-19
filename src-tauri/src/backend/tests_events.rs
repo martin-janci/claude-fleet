@@ -1242,7 +1242,12 @@ fn sessions_payload(ids: &[i64]) -> String {
 fn hosts_payload(aliases: &[&str]) -> String {
     let rows: Vec<Value> = aliases
         .iter()
-        .map(|a| json!({ "alias": a, "reachable": true, "hidden": false, "provisioned": true }))
+        // `transport` is not optional on the wire; a host row without it does
+        // not parse, and `HubResync` then re-lists no host at all.
+        .map(|a| {
+            json!({ "alias": a, "reachable": true, "hidden": false,
+                    "provisioned": true, "transport": "ssh" })
+        })
         .collect();
     Value::Array(rows).to_string()
 }

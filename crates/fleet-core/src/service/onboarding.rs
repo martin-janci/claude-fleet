@@ -137,6 +137,7 @@ mod tests {
             last_pinged_at: None,
             account_uuid: None,
             provisioned: true,
+            transport: "ssh".to_string(),
         }
     }
 

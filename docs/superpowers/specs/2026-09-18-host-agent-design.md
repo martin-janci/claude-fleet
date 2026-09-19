@@ -104,8 +104,12 @@ restarted agent recovers without waiting for a timeout.
 
 ### Host rows
 
-Migration 033 adds `transport` to `hosts`: `'ssh'` (default, what every
-existing row gets) or `'agent'`. `add_host` gains a transport argument;
+Migration 034 adds `transport` to `hosts`: `'ssh'` (default, what every
+existing row gets) or `'agent'`. (It was written as 033; `main` released its
+own 033 first, so this one was renumbered when the branches merged. Migration
+035 repairs databases created by the branch before that renumber — they
+recorded 33 for *this* migration and would otherwise never be offered main's
+033. See `035_host_layers_repair.sql`.) `add_host` gains a transport argument;
 `list_hosts` returns it; the reconcile pass treats an agent host exactly like
 an SSH host except that reachability comes from the registry rather than a
 probe. Provisioning writes the same hooks and MCP entry over whichever

@@ -425,12 +425,19 @@ pub struct HostRow {
     #[serde(default)]
     pub account_uuid: Option<String>,
     pub provisioned: bool,
+    /// `"ssh"` | `"agent"` (migration 034). See `Store::set_host_transport`.
+    pub transport: String,
 }
+
+/// The only values `hosts.transport` may hold (migration 034). The single
+/// definition `Store::set_host_transport` and `service::hosts::add_host`
+/// both validate against, so the allowed set can't drift between them.
+pub const HOST_TRANSPORTS: [&str; 2] = ["ssh", "agent"];
 
 /// Columns every `HostRow` query selects, in [`map_host_row`] order.
 pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
-     last_pinged_at, account_uuid, provisioned";
+     last_pinged_at, account_uuid, provisioned, transport";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -444,6 +451,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         last_pinged_at: row.get(6)?,
         account_uuid: row.get(7)?,
         provisioned: row.get::<_, i64>(8)? != 0,
+        transport: row.get(9)?,
     })
 }
 

@@ -61,7 +61,18 @@ Pin the Gradle version in `gradle/wrapper/gradle-wrapper.properties` and check t
 
 - [ ] **Step 2: Write the build files**
 
-A version catalog holds Kotlin, AGP, Compose Multiplatform, Ktor, coroutines and serialization versions. `:shared` applies the KMP, Compose and serialization plugins with `androidTarget()`, `jvm()` (so `commonTest` runs on the JVM without a device), and the three iOS targets. `:androidApp` applies AGP with `compileSdk = 35`, `minSdk = 26`, `targetSdk = 35`.
+A version catalog holds Kotlin, AGP, Compose Multiplatform, Ktor, coroutines and serialization versions. `:shared` applies the KMP, Compose and serialization plugins with `androidTarget()`, `jvm()` (so `commonTest` runs on the JVM without a device), and the iOS targets. `:androidApp` applies AGP with `minSdk = 26`, `targetSdk = 35`.
+
+> **Amended 2026-09-18, after Task 1.** Two things in this step did not survive contact.
+> **The iOS targets are two, not three:** `iosArm64` and `iosSimulatorArm64`. Compose
+> Multiplatform 1.12 publishes no `iosX64` artifact — `runtime-uikitx64` stops at 1.10.3 —
+> so declaring it fails `./gradlew build` at the *commonMain* metadata transform, not merely
+> on an iOS task. `iosX64` is the Intel-Mac simulator alone, and `iosSimulatorArm64` covers
+> Apple Silicon, so the cost is that an Intel-Mac developer cannot run the simulator locally.
+> **`compileSdk` is 37, not 35**, forced by Compose 1.12's own androidx artifacts and by
+> `okhttp-android` 5.5 arriving through Ktor; 35 and 36 both fail AAR-metadata checks.
+> `minSdk` and `targetSdk` are unchanged. Task 8's CI image needs platform 37 and
+> build-tools 37.
 
 - [ ] **Step 3: One placeholder test, to prove the toolchain**
 
@@ -201,13 +212,23 @@ class FleetRepository(client: HubClient, events: EventStream, scope: CoroutineSc
 **Files:** `iosApp/`, `.github/workflows/ci.yml`, `README.md`, `docs/`
 
 - [ ] **Step 1:** A SwiftUI host embedding the shared UI, plus the Xcode project files, written to be correct by construction and marked explicitly as unbuilt here.
-- [ ] **Step 2:** CI on Linux: `./gradlew :shared:jvmTest :androidApp:assembleDebug` with the Android SDK action.
+- [ ] **Step 2:** CI on Linux: `./gradlew build` (the whole build, so a broken target cannot hide behind two hand-picked task names) with the Android SDK action, provisioning **platform 37 and build-tools 37**. Read raw Gradle output, never output filtered through a wrapper that strips `e:` lines.
+
+- [ ] **Step 2b (added 2026-09-18, a gap Task 3 found):** An **Android instrumentation test for `AndroidSecrets`** — write, read back, clear, and confirm the entry is gone rather than blanked. The design asks for exactly this round trip and no task scheduled it, so `EncryptedSharedPreferences` has never executed. Run it on an emulator in CI. If the emulator proves impractical, say so and leave the test in the repo marked as requiring a device, rather than deleting it.
 - [ ] **Step 3:** `README.md`: what the app is, how to pair (`fleet-hub pair --name phone` on the hub, scan), what it deliberately cannot do, how to build each platform, and that iOS needs a Mac. Copy the design doc into `docs/`.
 - [ ] **Step 4:** Verify everything once more, then commit — `docs: how to build and pair`. Do NOT create the GitHub repository or push; the controller does that.
 
 ---
 
 ## Self-review
+
+> **Amended 2026-09-18, after Task 3.** `Secrets` is a plain interface, not the
+> `expect class` this plan sketched. An `expect class` forces one constructor
+> signature on both actuals, and Android needs a `Context` while iOS needs none;
+> the workaround would be a ContentProvider-installed global context holder, which
+> is hidden global state bought for a keyword. The camera remains an expect/actual
+> pair, so the design's "secure storage and the camera are the only expect/actual
+> pairs" sentence should read "the camera is the only one".
 
 **Spec coverage.** Shared Compose UI → Tasks 5–7. Pairing by scan → Tasks 3 and 6. Fleet list → Task 5. Conversation and prompts → Task 5. Live updates → Task 4. Secure storage → Task 3. The refusal and failure paths → Task 2's error mapping, exercised in Tasks 4–6. iOS configured but unbuilt → Tasks 1 and 8, stated plainly.
 

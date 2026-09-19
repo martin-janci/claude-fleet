@@ -88,6 +88,9 @@ pub(crate) fn sample_host() -> HostRow {
         last_pinged_at: Some(1_725_000_000),
         account_uuid: Some("acct-uuid".into()),
         provisioned: true,
+        // Consistent with the `ssh_alias` above: this sample is an SSH host.
+        // `transport` is not an `Option`, so either value pins the same key.
+        transport: "ssh".into(),
     }
 }
 

@@ -56,6 +56,11 @@ struct SshClientInner {
     /// launch. Reported in the diagnostics bundle; tests use it to prove the
     /// reset is skipped when it would collateral-damage.
     master_resets: DashMap<String, usize>,
+    /// Per-host transport resolver, or `None` for a client that is SSH-only.
+    /// See [`crate::agent::router`] for why it lives here rather than in a
+    /// wrapper. `None` is the desktop; a hub builds one with
+    /// [`SshClient::with_agents`].
+    route: Option<Arc<crate::agent::HostRouter>>,
 }
 
 /// RAII decrement for `SshClientInner::in_flight`.
@@ -90,21 +95,75 @@ pub struct SshClient {
 }
 
 impl SshClient {
+    /// An SSH-only client: every host is reached over SSH, and no store is
+    /// ever consulted. This is what the desktop builds.
     pub fn new() -> Self {
+        Self::build(None)
+    }
+
+    /// A client that routes each host to its own transport: a host row whose
+    /// `transport` is `'agent'` is reached through the agent connected in
+    /// `agents` under that host's fleet alias, and every other host is
+    /// reached over SSH exactly as before.
+    ///
+    /// This is what a hub builds. The registry comes back out of
+    /// [`SshClient::agent_registry`] so the `/agent` endpoint can register
+    /// connections on the same one.
+    pub fn with_agents(
+        agents: Arc<crate::agent::AgentRegistry>,
+        store: Arc<std::sync::Mutex<crate::store::Store>>,
+    ) -> Self {
+        let transport = Arc::new(crate::agent::AgentTransport::new(agents));
+        Self::build(Some(crate::agent::HostRouter::new(transport, store)))
+    }
+
+    fn build(route: Option<Arc<crate::agent::HostRouter>>) -> Self {
         Self {
             inner: Arc::new(SshClientInner {
                 seen: DashMap::new(),
                 homes: DashMap::new(),
                 in_flight: DashMap::new(),
                 master_resets: DashMap::new(),
+                route,
             }),
         }
+    }
+
+    /// The registry this client routes agent hosts through, if it has one.
+    /// The hub's `/agent` endpoint registers live connections on it.
+    pub fn agent_registry(&self) -> Option<&Arc<crate::agent::AgentRegistry>> {
+        Some(self.inner.route.as_ref()?.agent().registry())
+    }
+
+    /// The alias to address this host's agent by, or `None` to use SSH.
+    ///
+    /// One store read per call, by value: see [`crate::agent::router`]. Every
+    /// method below starts here, so a host that moves between transports is
+    /// followed on the next call rather than for the life of a cached
+    /// decision.
+    pub(crate) fn agent_route(&self, host: &str) -> Option<String> {
+        self.inner.route.as_ref()?.agent_alias(host)
+    }
+
+    /// The agent transport. Only ever reached after [`Self::agent_route`] has
+    /// said `Some`, so the `expect` is unreachable for any caller below.
+    fn agent(&self) -> &Arc<crate::agent::AgentTransport> {
+        self.inner
+            .route
+            .as_ref()
+            .expect("agent_route answered Some, so a router is installed")
+            .agent()
     }
 
     /// Resolve `$HOME` on a remote host, cached for the lifetime of the app.
     /// The first call pays one `printenv HOME` round-trip; later calls return
     /// the cached value. Errors are not cached — a transient failure retries.
     pub async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
+        if let Some(alias) = self.agent_route(host) {
+            // The agent transport keeps its own per-host cache, so this does
+            // not pay the round trip twice either.
+            return self.agent().remote_home(&alias).await;
+        }
         if let Some(home) = self.inner.homes.get(host) {
             return Ok(home.clone());
         }
@@ -187,6 +246,8 @@ impl SshClient {
         args: &[&str],
         timeout: Duration,
     ) -> Result<Output, IpcError> {
+        // No route hook here: `run_bounded` has one, and this is a pure
+        // delegation to it.
         self.run_bounded(host, args, timeout, Self::default_wall_clock(timeout))
             .await
     }
@@ -203,6 +264,12 @@ impl SshClient {
         connect_timeout: Duration,
         wall_clock: Duration,
     ) -> Result<Output, IpcError> {
+        if let Some(alias) = self.agent_route(host) {
+            return self
+                .agent()
+                .run_bounded(&alias, args, connect_timeout, wall_clock)
+                .await;
+        }
         self.inner.seen.insert(host.to_string(), ());
         let mut cmd = tokio::process::Command::new("ssh");
         for opt in self.mux_opts(host, connect_timeout) {
@@ -227,6 +294,12 @@ impl SshClient {
         wall_clock: Duration,
         max_output: usize,
     ) -> Result<Output, IpcError> {
+        if let Some(alias) = self.agent_route(host) {
+            return self
+                .agent()
+                .run_bounded_capped(&alias, args, connect_timeout, wall_clock, max_output)
+                .await;
+        }
         self.inner.seen.insert(host.to_string(), ());
         let mut cmd = tokio::process::Command::new("ssh");
         for opt in self.mux_opts(host, connect_timeout) {
@@ -253,6 +326,12 @@ impl SshClient {
         wall_clock: Duration,
         token: CancellationToken,
     ) -> Result<Output, IpcError> {
+        if let Some(alias) = self.agent_route(host) {
+            return self
+                .agent()
+                .run_bounded_cancellable(&alias, args, connect_timeout, wall_clock, token)
+                .await;
+        }
         self.inner.seen.insert(host.to_string(), ());
         let mut cmd = tokio::process::Command::new("ssh");
         for opt in self.mux_opts(host, connect_timeout) {
@@ -280,6 +359,12 @@ impl SshClient {
         timeout: Duration,
         token: CancellationToken,
     ) -> Result<Output, IpcError> {
+        if let Some(alias) = self.agent_route(host) {
+            return self
+                .agent()
+                .run_cancellable(&alias, args, timeout, token)
+                .await;
+        }
         self.inner.seen.insert(host.to_string(), ());
         let mut cmd = tokio::process::Command::new("ssh");
         for opt in self.mux_opts(host, timeout) {
@@ -308,6 +393,12 @@ impl SshClient {
         remote_path: &str,
         timeout: Duration,
     ) -> Result<(), IpcError> {
+        if let Some(alias) = self.agent_route(host) {
+            return self
+                .agent()
+                .upload_file(&alias, local_path, remote_path, timeout)
+                .await;
+        }
         self.inner.seen.insert(host.to_string(), ());
         let file = std::fs::File::open(local_path).map_err(|e| {
             IpcError::new(

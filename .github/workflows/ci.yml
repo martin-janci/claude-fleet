@@ -49,6 +49,10 @@ jobs:
   # The regression guard for the crate split: fleet-hub must build on a box
   # with none of the Tauri system libraries. If this job fails with a
   # gtk/webkit/pkg-config error, a Tauri dependency leaked into fleet-core.
+  #
+  # fleet-agent rides along for the same reason, one step stricter: it installs
+  # on an arbitrary host, so it must build with neither the Tauri libraries nor
+  # fleet-core. If it starts pulling either, this is where you find out.
   hub-headless:
     runs-on: ubuntu-24.04
     steps:
@@ -60,6 +64,8 @@ jobs:
           key: hub-headless
       - run: cargo build -p fleet-hub --locked
       - run: cargo test -p fleet-core -p fleet-hub --locked
+      - run: cargo build -p fleet-agent --locked
+      - run: cargo test -p fleet-proto -p fleet-agent --locked
 
   frontend:
     strategy:
