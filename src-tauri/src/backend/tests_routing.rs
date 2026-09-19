@@ -1298,6 +1298,175 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
     );
 }
 
+// ── 3b. the refusal messages, byte for byte ─────────────────────────────────
+
+/// The recorded messages, relative to `src-tauri/` (`CARGO_MANIFEST_DIR`).
+const LOCAL_ONLY_GOLDEN_PATH: &str = "src/backend/local_only.golden.json";
+/// Set to rewrite the fixture. Regenerating it is never part of a refactor:
+/// the whole point of the file is that a message which changed shows up as a
+/// diff someone has to read.
+const REGEN_LOCAL_ONLY: &str = "REGEN_LOCAL_ONLY";
+
+/// Read the Rust string literal starting at `src[at]` (which must be the
+/// opening quote), returning its **value** and the index just past the close.
+///
+/// The one escape that matters here is `\` at end of line: the sentences are
+/// written as continued literals, and the continuation swallows the newline
+/// *and* the indentation of the next line. Getting that wrong would record a
+/// message with stray spaces in it, so it is spelled out rather than
+/// approximated with `split_whitespace`.
+fn rust_string_literal(src: &str, at: usize) -> (String, usize) {
+    let b = src.as_bytes();
+    assert_eq!(b[at], b'"', "not a string literal at {at}");
+    let mut out = String::new();
+    let mut i = at + 1;
+    while i < b.len() {
+        match b[i] {
+            b'"' => return (out, i + 1),
+            b'\\' => {
+                i += 1;
+                match b[i] {
+                    b'\n' => {
+                        i += 1;
+                        while b[i].is_ascii_whitespace() {
+                            i += 1;
+                        }
+                    }
+                    b'"' => {
+                        out.push('"');
+                        i += 1;
+                    }
+                    b'\\' => {
+                        out.push('\\');
+                        i += 1;
+                    }
+                    b'n' => {
+                        out.push('\n');
+                        i += 1;
+                    }
+                    other => panic!("unhandled escape \\{} in a refusal", other as char),
+                }
+            }
+            _ => {
+                let c = src[i..].chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    panic!("unterminated string literal");
+}
+
+/// Every `(what, instead)` pair pasted at a `backend.local_only(…)` call site,
+/// read out of the command sources.
+///
+/// This is how the fixture below is *generated*, and it only works while the
+/// sentences are literals at the call sites. Once they come from one table the
+/// generator is gone and the fixture is the record of what they said.
+fn pasted_local_only_pairs() -> std::collections::BTreeMap<String, String> {
+    const CALL: &str = "backend.local_only(";
+    let mut out = std::collections::BTreeMap::new();
+    for (file, src) in SOURCES {
+        let mut from = 0;
+        while let Some(rel) = src[from..].find(CALL) {
+            let mut i = from + rel + CALL.len();
+            let b = src.as_bytes();
+            while b[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            let (what, next) = rust_string_literal(src, i);
+            let mut i = next;
+            while b[i] != b'"' {
+                i += 1;
+            }
+            let (instead, next) = rust_string_literal(src, i);
+            assert!(
+                out.insert(what.clone(), instead).is_none(),
+                "{file}: {what} refuses twice with different words"
+            );
+            from = next;
+        }
+    }
+    out
+}
+
+/// `command -> the whole E_LOCAL_ONLY message`, for the fixed hub of [`cfg`].
+fn local_only_messages(pairs: &std::collections::BTreeMap<String, String>) -> String {
+    let fake = Fake::answering("[]");
+    let backend = remote_backend(&fake);
+    let rendered: std::collections::BTreeMap<&str, String> = pairs
+        .iter()
+        .map(|(what, instead)| {
+            let err = backend
+                .local_only(what, instead)
+                .expect_err("a local-only command must refuse in remote mode");
+            assert_eq!(err.code, codes::E_LOCAL_ONLY, "{what}: {err:?}");
+            (what.as_str(), err.message)
+        })
+        .collect();
+    fake.was_not_called();
+    let mut json = serde_json::to_string_pretty(&rendered).expect("serialisable");
+    json.push('\n');
+    json
+}
+
+/// **The message the user reads, pinned.**
+///
+/// A refusal's sentence is the whole of what a hub-client desktop tells
+/// someone who clicked a button that will not work here. Moving those
+/// sentences out of the call sites is only safe if "the same sentence" can be
+/// checked rather than eyeballed, so every one of them is recorded — rendered,
+/// not as a fragment — in a committed fixture, generated from the call sites
+/// before they moved. Nothing in this task may change that file.
+#[test]
+fn every_local_only_message_is_the_one_the_fixture_records() {
+    let pairs = pasted_local_only_pairs();
+    assert!(
+        pairs.len() > 70,
+        "only {} refusals found — the reader broke, not the code",
+        pairs.len()
+    );
+    let actual = local_only_messages(&pairs);
+
+    if std::env::var(REGEN_LOCAL_ONLY).is_ok() {
+        let abs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(LOCAL_ONLY_GOLDEN_PATH);
+        std::fs::write(abs, &actual).expect("write the fixture");
+        panic!(
+            "{LOCAL_ONLY_GOLDEN_PATH} was rewritten. Read `git diff -- \
+             src-tauri/{LOCAL_ONLY_GOLDEN_PATH}`: every line that changed is a \
+             sentence a user reads. Then unset {REGEN_LOCAL_ONLY} and run again."
+        );
+    }
+
+    let golden = include_str!("local_only.golden.json");
+    if golden != actual {
+        let want: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(golden).expect("the fixture must be command -> message");
+        let got: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&actual).unwrap();
+        let mut complaints = Vec::new();
+        for (name, msg) in &want {
+            match got.get(name) {
+                None => complaints.push(format!("{name} no longer refuses")),
+                Some(now) if now != msg => {
+                    complaints.push(format!("{name}:\n  was: {msg}\n  now: {now}"))
+                }
+                Some(_) => {}
+            }
+        }
+        for name in got.keys() {
+            if !want.contains_key(name) {
+                complaints.push(format!("{name} refuses and did not before"));
+            }
+        }
+        panic!(
+            "the E_LOCAL_ONLY messages are not the ones \
+             {LOCAL_ONLY_GOLDEN_PATH} records:\n\n{}",
+            complaints.join("\n")
+        );
+    }
+}
+
 // ── 4. nothing falls through unclassified ───────────────────────────────────
 
 /// Commands that are deliberately the same in both modes, each with its
