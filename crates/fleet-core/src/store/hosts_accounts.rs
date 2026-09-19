@@ -142,8 +142,14 @@ impl Store {
     /// transport: an SSH host whose alias happens to be an agent host's
     /// `ssh_alias` stays on SSH, and its commands never run on the agent's
     /// machine. Only a key that is no host's alias is matched against the
-    /// agent hosts' `ssh_alias`, and only when exactly one claims it — two
-    /// agent hosts sharing an `ssh_alias` is an ambiguity, routed to neither.
+    /// `ssh_alias` column, and only when it is unambiguous across the WHOLE
+    /// table — one claimant, on the agent transport. Two hosts claiming one
+    /// `ssh_alias` route to neither, and the count deliberately includes SSH
+    /// hosts: were it agent rows only, `mefistos` (ssh) and `laptop` (agent)
+    /// both claiming `box.example` would leave a single agent claimant, and
+    /// `probe_host(mefistos)` — which addresses a host by the `ssh_alias` on
+    /// its row — would run on the laptop and stamp the laptop's versions onto
+    /// `mefistos`.
     pub fn agent_host_alias(&self, key: &str) -> Result<Option<String>, rusqlite::Error> {
         let exact: Option<String> = self
             .conn
@@ -153,14 +159,14 @@ impl Store {
         if let Some(transport) = exact {
             return Ok((transport == "agent").then(|| key.to_string()));
         }
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT alias FROM hosts WHERE transport='agent' AND ssh_alias=?1 LIMIT 2",
-        )?;
-        let matches: Vec<String> = stmt
-            .query_map([key], |r| r.get(0))?
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT alias, transport FROM hosts WHERE ssh_alias=?1 LIMIT 2")?;
+        let matches: Vec<(String, String)> = stmt
+            .query_map([key], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?;
         Ok(match matches.as_slice() {
-            [only] => Some(only.clone()),
+            [(alias, transport)] if transport == "agent" => Some(alias.clone()),
             _ => None,
         })
     }
@@ -522,6 +528,33 @@ mod tests {
             .map(|h| h.alias)
             .collect();
         assert_eq!(names, vec!["local", "mefistos", "zebra"]);
+    }
+
+    /// The `ssh_alias` fallback answers `probe_host`, which addresses a host
+    /// by the `ssh_alias` on its row. It may only answer when the key is
+    /// unambiguous across the WHOLE table: one SSH host and one agent host
+    /// claiming the same key is exactly as ambiguous as two agent hosts, and
+    /// picking the agent would run the SSH host's probe on the agent's box.
+    #[test]
+    fn the_ssh_alias_fallback_answers_only_for_an_unshared_key() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("laptop", Some("box.example")).unwrap();
+        s.set_host_transport("laptop", "agent").unwrap();
+        assert_eq!(
+            s.agent_host_alias("box.example").unwrap().as_deref(),
+            Some("laptop"),
+            "one claimant, and it is an agent host"
+        );
+
+        // A second claimant on ANY transport takes the key away again.
+        s.insert_host("mefistos", Some("box.example")).unwrap();
+        assert_eq!(s.agent_host_alias("box.example").unwrap(), None);
+        // …while each host's own fleet alias still names it.
+        assert_eq!(
+            s.agent_host_alias("laptop").unwrap().as_deref(),
+            Some("laptop")
+        );
+        assert_eq!(s.agent_host_alias("mefistos").unwrap(), None);
     }
 
     #[test]

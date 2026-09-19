@@ -207,6 +207,29 @@ mod tests {
         assert_eq!(ssh.agent_route("laptop").as_deref(), Some("laptop"));
     }
 
+    /// An SSH host and an agent host sharing an `ssh_alias` is the mode that
+    /// used to misroute. The key names no row's fleet alias, so the fallback
+    /// decides it — and it must refuse, because the fallback's whole job is
+    /// to answer `probe_host`, which hands the transport the row's
+    /// `ssh_alias`. Resolving it to the agent would run `mefistos`'s probe on
+    /// the laptop and write the laptop's versions onto `mefistos`'s row.
+    #[test]
+    fn an_ssh_alias_an_ssh_host_also_claims_routes_to_neither() {
+        let (ssh, _reg, _store) = hub_client(&[
+            ("mefistos", Some("box.example"), "ssh"),
+            ("laptop", Some("box.example"), "agent"),
+        ]);
+        assert_eq!(
+            ssh.agent_route("box.example"),
+            None,
+            "two hosts claim box.example, so it names neither"
+        );
+        // Each host is still reachable by its own fleet alias, on its own
+        // transport: the ambiguity costs nothing but the shared key.
+        assert_eq!(ssh.agent_route("mefistos"), None);
+        assert_eq!(ssh.agent_route("laptop").as_deref(), Some("laptop"));
+    }
+
     /// Two agent hosts claiming one `ssh_alias` is ambiguous: route neither
     /// rather than pick one.
     #[test]
