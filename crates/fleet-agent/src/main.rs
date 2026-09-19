@@ -6,8 +6,8 @@
 
 use clap::Parser;
 use fleet_agent::cli::{self, Cli, Command, InstallEnv};
-use fleet_agent::install::{self, Layout, RealSystemctl};
-use std::path::PathBuf;
+use fleet_agent::install::{self, Layout, RealSystemctl, SystemdStatus};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -72,13 +72,41 @@ fn install_cmd(args: cli::InstallArgs) -> Result<(), String> {
         .map_err(|e| format!("where is this binary? {e}"))?;
     let env = InstallEnv {
         binary,
-        // SAFETY: geteuid has no preconditions.
-        root: unsafe { libc::geteuid() } == 0,
+        root: is_root(),
         sudo_user: std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()),
         config_home: config_home(),
+        systemd: systemd_status(),
     };
     let plan = cli::install_plan(&args, &env, install::lookup_user, &mut std::io::stdin())?;
     install::install(&plan, &mut RealSystemctl, &mut std::io::stdout())
+}
+
+/// Running as root.
+#[cfg(unix)]
+fn is_root() -> bool {
+    // SAFETY: geteuid has no preconditions.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// `libc` is a unix-only dependency (see Cargo.toml): this crate is not
+/// built for anything else yet, but a unconditional `libc::geteuid()` would
+/// still fail to compile there, so the one call site is guarded.
+#[cfg(not(unix))]
+fn is_root() -> bool {
+    false
+}
+
+/// The real probe behind [`install::SystemdStatus`]: is systemd this host's
+/// running init, and does `systemctl` resolve on `$PATH`? Both are read
+/// here, in `main`'s I/O, and handed to the library as data so
+/// `cli::install_plan`'s refusal stays a pure function of its inputs.
+fn systemd_status() -> SystemdStatus {
+    SystemdStatus {
+        init_running: Path::new("/run/systemd/system").exists(),
+        systemctl_on_path: std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("systemctl").is_file()))
+            .unwrap_or(false),
+    }
 }
 
 fn status(user: bool) -> ExitCode {
