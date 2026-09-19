@@ -158,6 +158,15 @@
   // otherwise look like a button that works.
   const adminBlocked = $derived(hubBlock('remove_host', $hubStatus));
 
+  // Resume is a `new_session` with `resume_claude_session_id`, which a
+  // paired desktop refuses (`E_LOCAL_ONLY`: parity or refusal, see hub.ts).
+  // Say so up front instead of offering a button that can only fail.
+  const resumeBlocked = $derived(hubBlock('new_session', $hubStatus));
+
+  // The restore plan may hold only skips (e.g. the fleet controller, which
+  // needs an explicit forced recreate): then there is nothing to confirm.
+  const restoreCount = $derived((restorePlan ?? []).filter((e) => e.action === 'restore').length);
+
   function sessionName(s: SessionRow): string {
     return s.friendly_name?.trim() || s.tmux_name;
   }
@@ -351,6 +360,9 @@
         {#if discoverList.length === 0}
           <p class="muted">No Claude conversations found on {host.alias}.</p>
         {:else}
+          {#if resumeBlocked}
+            <p class="muted" data-testid="discover-hub-note">Resume is not available from this desktop: {resumeBlocked}</p>
+          {/if}
           <ul class="discover-items">
             {#each discoverList as c (c.claude_session_id)}
               <li class="discover-item">
@@ -365,6 +377,8 @@
                   <span class="muted">already in fleet</span>
                 {:else if resumedIds.has(c.claude_session_id)}
                   <span class="muted">resumed</span>
+                {:else if c.resumable && c.project_id !== null && c.derived_tmux_name !== null && resumeBlocked}
+                  <span class="muted" title={resumeBlocked}>resume it on the hub</span>
                 {:else if c.resumable && c.project_id !== null && c.derived_tmux_name !== null}
                   <button
                     type="button"
@@ -502,6 +516,7 @@
     title="Restore lost sessions on {host.alias}?"
     confirmLabel="Restore"
     {busy}
+    confirmDisabled={restoreCount === 0}
     confirmTestId="confirm-restore"
     onconfirm={confirmRestore}
     oncancel={cancelRestore}
@@ -515,7 +530,11 @@
         </li>
       {/each}
     </ul>
-    <p class="note">Each session resumes its Claude conversation. Any first-run prompt waits for you.</p>
+    {#if restoreCount === 0}
+      <p class="note" data-testid="restore-nothing">Nothing here can be restored.</p>
+    {:else}
+      <p class="note">Each session resumes its Claude conversation. Any first-run prompt waits for you.</p>
+    {/if}
   </ConfirmDialog>
 {/if}
 
