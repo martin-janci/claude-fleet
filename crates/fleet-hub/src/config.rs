@@ -371,7 +371,9 @@ pub fn resolve(
     } else {
         settings(SETTING_ALLOW_PLAINTEXT).is_some_and(|v| v.trim() == "true")
     };
-    if !bind.is_loopback() && !tls_in_front && !allow_plaintext {
+    // The same rule the agent applies before it dials and the desktop before
+    // it sends its token, from the one place it is written down.
+    if !fleet_proto::net::is_loopback_ip(&bind) && !tls_in_front && !allow_plaintext {
         return Err(format!(
             "refusing to serve plaintext http on {bind}: use an https:// public URL, \
              terminate TLS in the hub itself with --tls cert, bind to 127.0.0.1 behind a \

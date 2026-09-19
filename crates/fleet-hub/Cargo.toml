@@ -12,6 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 fleet-core = { path = "../fleet-core" }
+# Directly, not through `fleet-core`, for one function: the loopback rule the
+# bind check applies is the same one the agent and the desktop use
+# (`fleet_proto::net`). Already in the tree — `fleet-core` depends on it.
+fleet-proto = { path = "../fleet-proto" }
 # No `env` feature: every FLEET_HUB_* value is resolved by hand in
 # `config::resolve` (flag > env > stored setting > default), which clap's own
 # env support cannot express. The env names appear in `--help` as literal text.
