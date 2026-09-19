@@ -340,8 +340,9 @@ impl AgentRegistry {
 }
 
 /// Removes a request's slot when its caller goes away, and — unlike plain
-/// SSH, where dropping the caller's future kills the child via
-/// `kill_on_drop` — tells the agent to stop it too.
+/// SSH, where a dropped caller or a wall-clock timeout kills the child via
+/// `kill_on_drop`/`kill_and_reap` (`ssh.rs`) — tells the agent to stop it
+/// too.
 struct PendingGuard {
     conn: Arc<Connection>,
     id: String,
@@ -349,26 +350,18 @@ struct PendingGuard {
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        // `remove` returning `Some` means nothing answered this id yet: the
-        // caller left early (a dropped future, or this call's own timeout),
-        // and the remote child would otherwise run on until its
-        // `timeout_ms`. A `Some` here also fires for `AgentTransport::exec`'s
-        // own token-cancellation path, which already sent a `Cancel` for the
-        // same id before dropping the request future — so this can be a
-        // *second* `Cancel` for it. That is harmless: `fleet-agent`'s
-        // `HubFrame::Cancel` handler removes the id from its in-flight table
-        // on the first one, and the second finds nothing there, exactly like
-        // a cancel for an id the agent never knew.
+        // `Some`: this id was never answered — a dropped caller future or
+        // this call's own timeout, both of which reach here the same way —
+        // so tell the agent to stop the child too, or it runs on until its
+        // `timeout_ms`. May duplicate a `Cancel` that `AgentTransport::exec`'s
+        // own token-cancellation path already sent for this id; harmless,
+        // since `fleet-agent` no-ops on an id it no longer has in flight.
+        // `None`: `deliver` or `abort_pending` already took the slot, so
+        // there is nothing to cancel.
         //
-        // If `remove` returns `None`, the slot was already taken by
-        // `AgentRegistry::deliver` (the request completed) or cleared by
-        // `Connection::abort_pending` (the connection is already gone) —
-        // either way there is nothing to cancel.
-        //
-        // Best effort, and it must not await: `outbound` is unbounded, so
-        // `send` never blocks; it only fails when the connection's writer
-        // (and so the socket) is already gone, which is silently fine — the
-        // agent's own `timeout_ms` still bounds the child.
+        // `outbound` is unbounded so `send` never blocks (`Drop` cannot
+        // await); a failure just means the connection is already gone, and
+        // the agent's own `timeout_ms` still bounds the child either way.
         if self.conn.pending.remove(&self.id).is_some() {
             let _ = self.conn.outbound.send(HubFrame::Cancel {
                 id: self.id.clone(),
@@ -792,6 +785,37 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_AGENT_OFFLINE);
+    }
+
+    /// (d) `tokio::time::timeout` giving up drops the inner future the same
+    /// way a caller walking away does, so a hub-side timeout must also send
+    /// a `Cancel` — parity with `ssh.rs`'s wall-clock arm, which kills the
+    /// child itself (`kill_and_reap`) when *its* deadline wins. The caller
+    /// must still see the same timeout error as before.
+    // `start_paused`, like `a_timed_out_request_leaves_no_pending_entry_
+    // behind`: virtual time reaches the deadline without holding a thread.
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_side_timeout_sends_the_agent_a_cancel_for_its_id() {
+        let reg = AgentRegistry::new();
+        let agent = FakeAgent::connect(&reg, "laptop", silent());
+        let err = reg
+            .request("laptop", exec("r"), Duration::from_millis(60))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            codes::E_SSH_TIMEOUT,
+            "the caller still sees the same timeout as before this fix"
+        );
+        agent.wait_until_sent(2).await;
+        let sent = agent.sent();
+        assert_eq!(sent[0], exec("r"), "the exec was dispatched first");
+        match &sent[1] {
+            HubFrame::Cancel { id } => {
+                assert_eq!(id, "r", "the cancel names the timed-out request")
+            }
+            other => panic!("expected a cancel frame, got {other:?}"),
+        }
     }
 
     #[tokio::test]
