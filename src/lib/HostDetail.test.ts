@@ -100,13 +100,20 @@ describe('HostDetail restore lost sessions', () => {
   });
 
   it('a bg/external lost session, or one without a claude_session_id, is not restorable', () => {
-    const rows = [
+    const allExcluded = [
       lost('mefistos', 'a', { kind: 'bg' }),
       lost('mefistos', 'b', { kind: 'external' }),
       lost('mefistos', 'c', { claude_session_id: null }),
     ];
-    mount('mefistos', { hostSessions: rows });
+    mount('mefistos', { hostSessions: allExcluded });
     expect(screen.queryByTestId('restore-lost')).toBeNull();
+
+    // Mixed with one genuinely restorable row: the count must exclude the
+    // three above, proving the filter actually screens them out rather than
+    // this test passing merely because the button vanishes for other reasons.
+    const mixed = [...allExcluded, lost('mefistos', 'd')];
+    mount('mefistos', { hostSessions: mixed });
+    expect(screen.getByTestId('restore-lost').textContent).toBe('Restore 1 lost session…');
   });
 
   it('clicking runs a dry run and the dialog lists the plan entries', async () => {
