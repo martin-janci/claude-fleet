@@ -511,6 +511,56 @@ export async function recreateSession(sessionId: number): Promise<Result<Session
   return r;
 }
 
+/** Mirrors `service::sessions::restore::RestorePlanEntry`: one planned restore
+ *  action. `action` is `"restore"` for a session the batch will attempt to
+ *  resume, `"skip"` (with `reason` set) for one an explicit `sessionIds`
+ *  request named that cannot be restored. */
+export interface RestorePlanEntry {
+  session_id: number;
+  tmux_name: string | null;
+  cwd: string | null;
+  claude_session_id: string | null;
+  friendly_name: string | null;
+  action: 'restore' | 'skip';
+  reason: string | null;
+}
+
+/** Mirrors `service::sessions::restore::RestoreOutcome`: the result of one
+ *  restore attempt. */
+export interface RestoreOutcome {
+  session_id: number;
+  tmux_name: string;
+  ok: boolean;
+  error: string | null;
+}
+
+/** Mirrors `service::sessions::restore::RestoreReport`. */
+export interface RestoreReport {
+  host_alias: string;
+  dry_run: boolean;
+  plan: RestorePlanEntry[];
+  results: RestoreOutcome[];
+}
+
+/** Batch-restore a host's sessions lost to a reboot or a tmux server restart,
+ *  over `recreate_session`. Pass `dryRun: true` first to get the plan (no
+ *  ssh, no writes); `sessionIds` restricts the batch to those fleet session
+ *  ids instead of every lost, resumable session on the host. The backend
+ *  emits `session:updated` row events for anything it restores, so nothing
+ *  is merged into the sessions store here. */
+export async function restoreHostSessions(
+  hostAlias: string,
+  opts: { dryRun?: boolean; sessionIds?: number[] } = {},
+): Promise<Result<RestoreReport>> {
+  return invokeCmd<RestoreReport>('restore_host_sessions', {
+    args: {
+      host_alias: hostAlias,
+      dry_run: opts.dryRun ?? false,
+      session_ids: opts.sessionIds ?? null,
+    },
+  });
+}
+
 export async function dismissGhostSession(sessionId: number): Promise<Result<void>> {
   const r = await invokeCmd<void>('dismiss_ghost_session', {
     args: { session_id: sessionId },

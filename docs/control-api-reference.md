@@ -303,6 +303,12 @@ Restart a tmux session (kill and recreate it in the same place). Use when the Cl
 
 Parameters: `force`, `host_alias`, `name`, `session_id`
 
+### `restore_host_sessions`
+
+Restore sessions a host lost to a reboot or a tmux server restart: resume each lost tmux session's Claude conversation in its original worktree, under its original name. Call with dry_run=true first to get the plan (no ssh, no writes). Concurrency and pacing come from the restore.batch_size / restore.stagger_ms settings. One failing session never fails the others; the result lists each session's outcome. First-run prompts in a resumed session are not answered: they surface as stuck_kind.
+
+Parameters: `dry_run`, `host_alias`, `session_ids`
+
 ### `revoke_client`
 
 Revoke a paired client's token by name. Its next request is refused (the auth layer only resolves live rows) and the name becomes free to pair again; the row itself is kept, revoked, for the audit trail. E_NOTFOUND when no live client holds that name. Master token only. Returns the revoked row as JSON.
@@ -448,6 +454,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`
+- `commands::sessions::restore_host_sessions`
 - `commands::move_session::move_session`
 - `commands::sessions::dismiss_ghost_session`
 - `commands::sessions::dismiss_agent_session`

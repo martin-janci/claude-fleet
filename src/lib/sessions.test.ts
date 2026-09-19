@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, restoreHostSessions, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
 import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel } from './sessions';
 
 beforeEach(() => {
@@ -130,6 +130,50 @@ describe('sessions store', () => {
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls).toEqual([
       ['repair_session', { args: { session_id: 3, explicit: true } }],
       ['repair_session', { args: { session_id: 4, explicit: false } }],
+    ]);
+  });
+
+  it('restoreHostSessions passes host_alias/dry_run/session_ids and returns the report untouched', async () => {
+    sessions.set(sample);
+    const report = {
+      host_alias: 'mefistos',
+      dry_run: true,
+      plan: [
+        {
+          session_id: 1,
+          tmux_name: 'dev-foo',
+          cwd: '/repo',
+          claude_session_id: 'uuid-1',
+          friendly_name: null,
+          action: 'restore',
+          reason: null,
+        },
+      ],
+      results: [],
+    };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(report); // restore_host_sessions
+    const r = await restoreHostSessions('mefistos', { dryRun: true, sessionIds: [1, 2] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toEqual(report);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'restore_host_sessions',
+      { args: { host_alias: 'mefistos', dry_run: true, session_ids: [1, 2] } },
+    ]);
+    // Row events carry any store change; the wrapper itself merges nothing.
+    expect(get(sessions)).toEqual(sample);
+  });
+
+  it('restoreHostSessions defaults dry_run to false and omitted session_ids to null', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host_alias: 'mefistos',
+      dry_run: false,
+      plan: [],
+      results: [],
+    });
+    await restoreHostSessions('mefistos');
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'restore_host_sessions',
+      { args: { host_alias: 'mefistos', dry_run: false, session_ids: null } },
     ]);
   });
 

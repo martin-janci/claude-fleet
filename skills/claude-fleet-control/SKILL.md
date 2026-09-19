@@ -202,9 +202,17 @@ Each rung is more destructive than the last.
 | REPL wedged, tmux fine | `restart_session` — relaunch Claude in place |
 | `stuck_kind: oom`, frozen, eating RAM | `recreate_session` — kills + rebuilds the tmux session in the same worktree, resuming the conversation |
 | Ghost (`status: "ghost"`, needs `include_lost: true`) | `recreate_session` to revive, or `dismiss_ghost_session` to drop |
+| A whole host's sessions lost together (`lost_reason: "host_reboot"` / `"tmux_server_gone"`) | after a host reboot: `restore_host_sessions {dry_run:true}` then without dry_run |
 
 `recreate_session` kills the running process but keeps the conversation via
 session-id resume; prefer `send_prompt` / `restart_session` for in-place fixes.
+
+`restore_host_sessions` is the batch form of `recreate_session` for a host
+that lost every session at once: `dry_run: true` first returns the plan (no
+ssh, no writes), then call again without it to actually restore — paced by
+`restore.batch_size` / `restore.stagger_ms`, one failing session never stops
+the rest. Pass `session_ids` to restore a subset instead of every lost,
+resumable session on the host.
 
 **Workspace gone or broken** (the worktree directory vanished, the pane runs
 in a deleted dir, git lists a stale entry): `repair_session { session_id }`

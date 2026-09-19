@@ -790,6 +790,58 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
 }
 
 #[tokio::test]
+async fn restore_host_sessions_is_host_scoped_and_dry_run_returns_the_plan() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let lost = s
+        .upsert_session("lost-1", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_claude_session_id(lost, "claude-1").unwrap();
+    s.mark_host_sessions_lost("hostb", "host_reboot", &[], 500, 0)
+        .unwrap();
+    let t = test_tools(s);
+
+    // A token bound to another host is refused outright — dry_run never
+    // even runs, so this also proves no ssh happens for a forbidden caller.
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.restore_host_sessions(
+            Extension(a),
+            Parameters(sessions::RestoreHostSessionsArgs {
+                host_alias: "hostb".into(),
+                dry_run: true,
+                session_ids: None,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+
+    // The master token's dry_run gets the plan — no ssh (this store has no
+    // `SshClient` wired to anything reachable; a real call would hang or
+    // error, so a JSON plan coming back proves the dry_run early-return).
+    let r = t
+        .restore_host_sessions(
+            Extension(Caller::master()),
+            Parameters(sessions::RestoreHostSessionsArgs {
+                host_alias: "hostb".into(),
+                dry_run: true,
+                session_ids: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(text_of(&r.content[0])).unwrap();
+    assert_eq!(v["dry_run"], true);
+    let plan = v["plan"].as_array().expect("plan is an array");
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0]["session_id"], lost);
+    assert_eq!(plan[0]["action"], "restore");
+    assert_eq!(v["results"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
@@ -1025,8 +1077,8 @@ fn capture_default_cap_matches_docs() {
 /// attributes in the router files. 57 was the count before the split, 60
 /// with the asset-catalog block, 63 with plan_sync/apply_sync/set_secret, 67
 /// with list_layers/resolve_preview/propose_layers/set_host_layers, 71 with
-/// session_conversation/pair_client/list_clients/revoke_client; bump it when
-/// adding a tool.
+/// session_conversation/pair_client/list_clients/revoke_client, 72 with
+/// restore_host_sessions; bump it when adding a tool.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1046,7 +1098,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 71);
+    assert_eq!(served, 72);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 

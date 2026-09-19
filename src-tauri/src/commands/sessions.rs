@@ -14,8 +14,8 @@ use fleet_core::service::safe_kill::{
 };
 use fleet_core::service::sessions::{
     self, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
-    RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, SendPromptArgs,
-    SetFriendlyNameArgs, SpawnReviewArgs,
+    RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
+    RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store};
@@ -151,6 +151,17 @@ pub async fn recreate_session(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     sessions::recreate_session(args, &store, &ssh).await
+}
+
+/// Batch-restore a host's sessions lost to a reboot or a tmux server
+/// restart, over `recreate_session`. Logic lives in `service::sessions::restore`.
+#[tauri::command]
+pub async fn restore_host_sessions(
+    args: RestoreHostSessionsArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<RestoreReport, IpcError> {
+    sessions::restore_host_sessions(args, &store, &ssh).await
 }
 
 #[tauri::command]

@@ -366,6 +366,30 @@ impl FleetTools {
         ok_json(&row)
     }
 
+    #[tool(
+        description = "Restore sessions a host lost to a reboot or a tmux server restart: \
+        resume each lost tmux session's Claude conversation in its original worktree, under its \
+        original name. Call with dry_run=true first to get the plan (no ssh, no writes). \
+        Concurrency and pacing come from the restore.batch_size / restore.stagger_ms settings. \
+        One failing session never fails the others; the result lists each session's outcome. \
+        First-run prompts in a resumed session are not answered: they surface as stuck_kind."
+    )]
+    pub(super) async fn restore_host_sessions(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<sessions::RestoreHostSessionsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "restore_host_sessions",
+            &format!("host={} dry_run={}", args.host_alias, args.dry_run),
+        );
+        require_host(&caller, &args.host_alias, "the lost sessions")?;
+        let report = sessions::restore_host_sessions(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&report)
+    }
+
     #[tool(description = "Dismiss a ghost session (lost from tmux): permanently \
         delete its row. Use when a ghost is not worth reviving — the row is \
         the only thing left to clean up. Errors if the session is not a \
