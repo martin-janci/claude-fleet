@@ -11,6 +11,16 @@ set -uo pipefail
 
 BIN="${BIN:?set BIN to the fleet-hub binary}"
 ABIN="${ABIN:-$(dirname "$BIN")/fleet-agent}"
+# Both binaries, checked before anything is created or started. A wrong path
+# otherwise cascades into ~79 unrelated failures (every check that needs a
+# running hub), which buries the one thing actually wrong.
+for b in "$BIN" "$ABIN"; do
+  if [ ! -f "$b" ] || [ ! -x "$b" ]; then
+    echo "hub-e2e: not an executable file: $b" >&2
+    echo "hub-e2e: set BIN and ABIN to the built fleet-hub and fleet-agent binaries" >&2
+    exit 2
+  fi
+done
 # Prefer the Claude Code sandbox scratch dir when this happens to run inside
 # one (short path, already private); otherwise plain /tmp, which is what a
 # CI runner and a bare dev box both have. Deliberately /tmp, not $TMPDIR: on
@@ -19,6 +29,13 @@ ABIN="${ABIN:-$(dirname "$BIN")/fleet-agent}"
 TMP_BASE="/tmp/claude-$(id -u)"
 [ -d "$TMP_BASE" ] || TMP_BASE=/tmp
 ROOT="$(mktemp -d -p "$TMP_BASE" hub-e2e.XXXXXX)" || { echo "hub-e2e: mktemp -p $TMP_BASE failed" >&2; exit 1; }
+# Announced up front, on its own greppable line, and exported to the workflow
+# when there is one: every hub and agent log lands under $ROOT and nothing
+# here deletes it, so CI's `if: failure()` step can collect it. The closing
+# "(logs in $ROOT)" line only prints when the script reaches its own end — a
+# run that dies early, or is killed by a step timeout, never gets there.
+echo "hub-e2e: log root: $ROOT"
+[ -n "${GITHUB_ENV:-}" ] && echo "HUBE2E_ROOT=$ROOT" >>"$GITHUB_ENV"
 # The /events subscriber (below) is a background job with no pid file of its
 # own; initialised empty here, before the trap is installed, so `set -u`
 # never trips on it and cleanup() can always test it safely.
@@ -296,7 +313,18 @@ check "agent-token again prints the same token, minting nothing" '[ "$("$BIN" ag
 
 start_agent agent1 "$ATOK"
 until_ok 50 connected
-check "agent_status shows the agent connected, with its version" 'tool "$PC" "$PUB" "$TOKC" agent_status "{}" | grep -q "\\\\\"agent_version\\\\\": \\\\\"0\."' "$(tool "$PC" "$PUB" "$TOKC" agent_status '{}' | head -c 400) / agent: $(tail -3 "$ROOT/agent1.log")"
+# A digit, not a literal 0: release.sh bumps fleet-agent with the app, so this
+# would start failing at 1.0.0.
+check "agent_status shows the agent connected, with its version" 'tool "$PC" "$PUB" "$TOKC" agent_status "{}" | grep -q "\\\\\"agent_version\\\\\": \\\\\"[0-9]\."' "$(tool "$PC" "$PUB" "$TOKC" agent_status '{}' | head -c 400) / agent: $(tail -3 "$ROOT/agent1.log")"
+# The #151 handshake, asserted from the AGENT's side: being connected only
+# says the hub registered the hello. The agent refuses to act on anything
+# until a compatible `welcome` arrives, but it waits a whole heartbeat (30 s)
+# before giving up — longer than the rest of this leg takes — so a hub that
+# stopped sending `welcome` would make the checks below flake rather than
+# fail. This is the line `conn.rs` logs at info the moment it judges the
+# hub's `welcome.proto` in range.
+until_ok 50 'grep -q "hub protocol compatible" "$ROOT/agent1.log"'
+check "the agent was welcomed and judged the hub's protocol compatible" 'grep -q "hub protocol compatible" "$ROOT/agent1.log"' "$(tail -20 "$ROOT/agent1.log")"
 pr=$(tool "$PC" "$PUB" "$TOKC" probe_host "{\"alias\":\"$AH\"}")
 check "probe_host over the agent: reachable, tmux version read" 'echo "$pr" | grep -q "\\\\\"reachable\\\\\": true" && echo "$pr" | grep -q "\\\\\"tmux_version\\\\\": \\\\\""' "${pr:0:400}"
 # A session on the agent's own tmux server; everything after this goes through
