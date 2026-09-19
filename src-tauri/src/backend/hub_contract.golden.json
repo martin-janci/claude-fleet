@@ -64,6 +64,21 @@
       "truncated",
       "turns"
     ],
+    "ConversationRow": [
+      "claude_session_id",
+      "compactions",
+      "current",
+      "end_reason",
+      "ended_at",
+      "first_prompt",
+      "id",
+      "model",
+      "session_id",
+      "start_source",
+      "started_at",
+      "transcript_path",
+      "turns"
+    ],
     "DayUsage": [
       "cache_read_tokens",
       "cache_write_tokens",

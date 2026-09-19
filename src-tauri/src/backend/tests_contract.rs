@@ -10,8 +10,8 @@ use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversat
 use fleet_core::service::usage::DayUsage;
 use fleet_core::service::worktrees::{WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
-    AccountRow, HostRow, ProjectRow, SessionContext, SessionEvent, SessionRow, SessionUsage,
-    TaskRow, UsageTotals, WorktreeRow,
+    AccountRow, ConversationRow, HostRow, ProjectRow, SessionContext, SessionEvent, SessionRow,
+    SessionUsage, TaskRow, UsageTotals, WorktreeRow,
 };
 use std::collections::BTreeMap;
 
@@ -125,6 +125,24 @@ fn sample_event() -> SessionEvent {
         kind: "prompt_sent".into(),
         detail: Some("detail".into()),
         claude_session_id: Some("claude-uuid".into()),
+    }
+}
+
+pub(crate) fn sample_conversation_row() -> ConversationRow {
+    ConversationRow {
+        id: 1,
+        session_id: 2,
+        claude_session_id: "claude-uuid".into(),
+        transcript_path: Some("/home/dev/.claude/projects/-r-cf/claude-uuid.jsonl".into()),
+        started_at: 1_725_000_000,
+        ended_at: Some(1_725_000_100),
+        start_source: "startup".into(),
+        end_reason: Some("clear".into()),
+        model: Some("claude-opus-5".into()),
+        first_prompt: Some("do the thing".into()),
+        turns: 3,
+        compactions: 1,
+        current: true,
     }
 }
 
@@ -269,6 +287,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("HostRow", wire_keys(&sample_host()));
     put("AccountRow", wire_keys(&sample_account()));
     put("SessionEvent", wire_keys(&sample_event()));
+    put("ConversationRow", wire_keys(&sample_conversation_row()));
     put("TaskRow", wire_keys(&sample_task()));
     put("ProjectTreeRow", wire_keys(&sample_project_tree()));
     put("ProjectRow", wire_keys(&sample_project_row()));
@@ -754,8 +773,28 @@ fn hub_contract_revision_defaults_to_zero_when_the_field_is_absent() {
 }
 
 #[test]
-fn hub_contract_revision_defaults_to_zero_for_unparsable_data() {
+fn hub_contract_revision_defaults_to_zero_when_the_whole_frame_is_unparsable() {
+    // The whole `ready` frame is not even JSON — a hub that HAS a contract to
+    // report always JSON-encodes it correctly, so this is read the same as a
+    // missing field, per the doc comment on `hub_contract_revision`.
     assert_eq!(hub_contract_revision("not json"), 0);
+}
+
+/// #148 finding 8: a `contract` key that is PRESENT but not a `u32` used to
+/// fold to the same `0` as a genuinely absent key, which is in range —
+/// silently trusting a hub sending nonsense as if it were an old hub sending
+/// nothing. It must instead read as a hub too new to understand (out of
+/// range on the high side), never as "everything is fine".
+#[test]
+fn hub_contract_revision_treats_a_present_but_unreadable_value_as_too_new() {
+    for data in [
+        r#"{"contract":"three","version":"1.0"}"#, // a string
+        r#"{"contract":3.5,"version":"1.0"}"#,     // a float
+        r#"{"contract":-1,"version":"1.0"}"#,      // negative
+        r#"{"contract":18446744073709551615,"version":"1.0"}"#, // > u32::MAX
+    ] {
+        assert_eq!(hub_contract_revision(data), u32::MAX, "{data}");
+    }
 }
 
 #[test]

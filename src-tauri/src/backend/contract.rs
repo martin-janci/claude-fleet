@@ -120,17 +120,32 @@ pub enum ContractFit {
     TooNew,
 }
 
-/// A hub's wire-contract revision, read out of a `ready` frame's raw JSON —
+/// A hub's wire-contract revision, read out of a `ready` frame's raw JSON.
+///
 /// `0` for a hub that sends no `contract` field (every hub released before
 /// this mechanism existed) or a frame that fails to parse at all (a hub that
 /// HAS a contract to report always JSON-encodes it correctly, so treating an
-/// unparsable frame the same as a missing field costs nothing real).
+/// unparsable frame the same as a missing field costs nothing real) — both
+/// are "nothing to distrust here" and land `0`, which is in today's range.
+///
+/// A `contract` key that IS present but is not a `u32` (a string, a float, a
+/// negative number, or a number past `u32::MAX`) is a different case: some
+/// hub sent something this build cannot read, which is exactly what this
+/// mechanism exists to catch. Folding that to the same `0` as "nothing to
+/// report" would trust it anyway. `u32::MAX` instead, so it reads as a hub
+/// too new to understand ([`classify_hub_contract`] against any real
+/// `MAX_HUB_CONTRACT`) rather than as a clean bill of health.
 pub fn hub_contract_revision(ready_frame_data: &str) -> u32 {
-    serde_json::from_str::<serde_json::Value>(ready_frame_data)
+    let Some(contract) = serde_json::from_str::<serde_json::Value>(ready_frame_data)
         .ok()
-        .and_then(|v| v.get("contract").and_then(serde_json::Value::as_u64))
+        .and_then(|v| v.get("contract").cloned())
+    else {
+        return 0;
+    };
+    contract
+        .as_u64()
         .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(0)
+        .unwrap_or(u32::MAX)
 }
 
 /// Classify `hub` against `[min, max]`. See [`ContractFit`].

@@ -573,6 +573,7 @@ pub struct SessionEvent {
     pub detail: Option<String>,
     /// The conversation this event belongs to (migration 037); `None` for
     /// events not tied to one (ops, reconcile transitions).
+    #[serde(default)]
     pub claude_session_id: Option<String>,
 }
 
