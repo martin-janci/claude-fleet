@@ -485,8 +485,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Seed a host + a mix of sessions: three lost tmux rows (with claude
-    /// ids), one live tmux row, one lost `bg` row (with a claude id), and one
-    /// lost tmux row with NO claude id. Returns `(store, ids)` where `ids` is
+    /// ids — `lost1` also carries a project/worktree and a friendly_name, so
+    /// the plan's `cwd`/`friendly_name` population is actually exercised),
+    /// one live tmux row, one lost `bg` row (with a claude id), and one lost
+    /// tmux row with NO claude id. Returns `(store, ids)` where `ids` is
     /// `(lost1, lost2, lost3, live, lost_bg, lost_no_claude_id)`.
     fn seed_mixed_host(host: &str) -> (Store, (i64, i64, i64, i64, i64, i64)) {
         let mut s = Store::open_in_memory().expect("open");
@@ -505,10 +507,22 @@ mod tests {
         })
         .unwrap();
 
+        let pid = s.upsert_project("o", "r", "/base/r").unwrap();
+        let wid = s
+            .upsert_worktree_on(
+                host,
+                pid,
+                "feat",
+                "/base/r/.claude/worktrees/feat",
+                Some("feat"),
+            )
+            .unwrap();
         let lost1 = s
-            .upsert_session("lost-1", host, None, None, 1, 1, "running", None)
+            .upsert_session("lost-1", host, Some(pid), Some(wid), 1, 1, "running", None)
             .unwrap();
         s.set_claude_session_id(lost1, "claude-1").unwrap();
+        s.set_friendly_name(host, "lost-1", Some("My Friendly Name"))
+            .unwrap();
         let lost2 = s
             .upsert_session("lost-2", host, None, None, 1, 1, "running", None)
             .unwrap();
@@ -595,6 +609,33 @@ mod tests {
             assert!(entry.claude_session_id.is_some());
             assert_eq!(entry.reason, None);
         }
+        // `lost1` carries a worktree + friendly_name (see `seed_mixed_host`):
+        // its plan entry must surface both, via the worktree-path branch of
+        // `plan_cwd`.
+        let lost1_entry = report
+            .plan
+            .iter()
+            .find(|e| e.session_id == lost1)
+            .expect("lost1 is a restore entry");
+        assert_eq!(
+            lost1_entry.cwd.as_deref(),
+            Some("/base/r/.claude/worktrees/feat"),
+            "cwd must come from the worktree row's path"
+        );
+        assert_eq!(
+            lost1_entry.friendly_name.as_deref(),
+            Some("My Friendly Name")
+        );
+        // `lost2`/`lost3` have neither a worktree nor a project, and the host
+        // isn't `local`, so neither `plan_cwd` branch applies: cwd stays
+        // `None` (and there's no friendly_name to surface).
+        let lost2_entry = report
+            .plan
+            .iter()
+            .find(|e| e.session_id == lost2)
+            .expect("lost2 is a restore entry");
+        assert_eq!(lost2_entry.cwd, None);
+        assert_eq!(lost2_entry.friendly_name, None);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             0,
@@ -610,6 +651,56 @@ mod tests {
         assert_eq!(
             before_events, after_events,
             "dry_run must not insert events"
+        );
+    }
+
+    /// The other half of `plan_cwd`'s two populated branches: a `local` lost
+    /// row with a project but NO worktree falls back to the project's
+    /// `base_path`. `plan_restore` is pure/sync, so this is tested directly
+    /// rather than through `restore_host_sessions_with`.
+    #[test]
+    fn plan_cwd_falls_back_to_the_project_base_path_on_local_without_a_worktree() {
+        let mut s = Store::open_in_memory().expect("open");
+        s.upsert_host("local").unwrap();
+        s.apply_host_reconcile(HostReconcile {
+            alias: "local",
+            reachable: true,
+            claude_version: None,
+            tmux_version: None,
+            last_pinged_at: 0,
+            probe_started_at: 0,
+            sessions: &[],
+            keep: &[],
+            lost_ttl_cutoff: None,
+            skip_prune: false,
+        })
+        .unwrap();
+        let pid = s.upsert_project("o", "r", "/base/r").unwrap();
+        let orphan = s
+            .upsert_session("orphan", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(orphan, "claude-orphan").unwrap();
+        s.mark_host_sessions_lost("local", "host_reboot", &[], 500, 0)
+            .unwrap();
+
+        let plan = plan_restore(
+            &s,
+            &RestoreHostSessionsArgs {
+                host_alias: "local".to_string(),
+                dry_run: true,
+                session_ids: None,
+            },
+        )
+        .unwrap();
+        let entry = plan
+            .iter()
+            .find(|e| e.session_id == orphan)
+            .expect("orphan is a restore entry");
+        assert_eq!(entry.action, "restore");
+        assert_eq!(
+            entry.cwd.as_deref(),
+            Some("/base/r"),
+            "cwd must fall back to the project's base_path"
         );
     }
 
