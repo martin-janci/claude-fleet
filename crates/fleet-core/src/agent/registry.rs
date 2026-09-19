@@ -399,7 +399,8 @@ fn offline(alias: &str) -> IpcError {
     )
 }
 
-/// The request id a hub frame carries. Every variant has one.
+/// The request id a hub frame carries. Every variant has one, `welcome`
+/// excepted.
 pub(crate) fn frame_id(frame: &HubFrame) -> &str {
     match frame {
         HubFrame::Exec { id, .. }
@@ -408,9 +409,19 @@ pub(crate) fn frame_id(frame: &HubFrame) -> &str {
         | HubFrame::Ping { id } => id,
         // `welcome` carries no id: it is a one-way broadcast `ws.rs` writes
         // straight onto a connection's outbound channel, never through
-        // `request`/`send` — nothing calls this with one in practice, but
-        // the match must stay exhaustive.
-        HubFrame::Welcome { .. } => "",
+        // `request`/`send`, and the match must stay exhaustive regardless.
+        // The debug assertion is the actual guard — release keeps today's
+        // graceful (if meaningless) "" rather than a hard panic in front of
+        // a real caller.
+        HubFrame::Welcome { .. } => {
+            debug_assert!(
+                false,
+                "a welcome frame must never be routed through frame_id \
+                 (request/send) — it is queued directly onto the \
+                 connection's outbound channel before registration"
+            );
+            ""
+        }
     }
 }
 

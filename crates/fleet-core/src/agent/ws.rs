@@ -78,7 +78,7 @@ use fleet_proto::{
 };
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -134,10 +134,22 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 async fn close_with_reason(sink: &mut SplitSink<WebSocket, Message>, code: u16, reason: String) {
     let frame = CloseFrame {
         code,
-        reason: reason.into(),
+        reason: clamp_close_reason(reason).into(),
     };
     let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.send(Message::Close(Some(frame)))).await;
     let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
+}
+
+/// A close reason is at most 123 bytes on the wire (RFC 6455's 125-byte
+/// control-frame payload minus the 2-byte status code). `String::pop`
+/// removes whole `char`s, never splits one, so this never produces invalid
+/// UTF-8 — the same clamp the agent's own `write_loop` (`conn.rs`) applies
+/// to what it sends back.
+fn clamp_close_reason(mut reason: String) -> String {
+    while reason.len() > 123 {
+        reason.pop();
+    }
+    reason
 }
 
 /// What a host whose token is `readonly` is told.
@@ -532,8 +544,12 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
     // IT with the same clear message `hello.proto` lets us refuse it with.
     // Queued on `tx` before `connect_bound` makes this connection reachable
     // through the registry, so nothing routed through a concurrent call can
-    // ever be enqueued ahead of it — this is unconditionally the first frame
-    // the agent reads after hello.
+    // ever be enqueued ahead of it, AND `write_loop`'s `biased` select
+    // always drains this queue ahead of a same-instant heartbeat `ping` —
+    // together, this is unconditionally the first frame the agent reads
+    // after hello, not merely first unless a ping wins a race. The agent
+    // relies on that: it refuses to act on anything else until it has seen
+    // a compatible `welcome` (see `conn.rs`'s main loop).
     let _ = tx.send(HubFrame::Welcome {
         hub_version: crate::app_version::get().to_string(),
         proto: fleet_proto::PROTO_VERSION,
@@ -677,7 +693,17 @@ async fn write_loop(
     conn_id: ConnId,
 ) {
     loop {
+        // `biased`, and `rx` listed first: the registry's own queue — which
+        // `welcome` is queued onto before this connection is even
+        // registered (`serve`) — always wins a tie over a heartbeat `ping`
+        // that happens to be ready in the same instant. Without `biased`,
+        // `select!` picks pseudo-randomly between two ready branches, so a
+        // ping racing registration could in principle reach the agent
+        // before `welcome` does. This is what makes `welcome` UNCONDITIONALLY
+        // the first frame down an accepted connection, not just first
+        // unless a ping wins a coin flip.
         let frame = tokio::select! {
+            biased;
             frame = rx.recv() => match frame {
                 Some(frame) => frame,
                 None => break,
@@ -754,10 +780,13 @@ async fn read_loop(
     // is measured from the registration.
     let mut missed = 0;
     let mut heard = false;
-    // Kinds already warned about on this connection, so a peer that sends
-    // many frames of a kind we do not know floods the log once, not once per
-    // frame. The handshake is already behind us here — see the crate doc.
-    let mut warned_kinds: HashSet<String> = HashSet::new();
+    // Bounded, sanitised tracking of unknown frame kinds on this connection
+    // — see `fleet_proto::UnknownKinds`'s doc for why an unbounded,
+    // peer-fed `HashSet<String>` of raw kind strings was itself a memory
+    // and log-injection hazard the frame-size ceiling elsewhere in this
+    // file does not cover. The handshake is already behind us here — see
+    // the crate doc.
+    let mut unknown_kinds = fleet_proto::UnknownKinds::new();
     loop {
         // A beat that has come due is taken first, before any read, however
         // many frames are waiting: see `Ticker`. Otherwise wait for either.
@@ -839,11 +868,32 @@ async fn read_loop(
                                 registry.deliver(alias, conn_id, frame);
                             }
                             Ok(Decoded::Unknown { kind }) => {
-                                if warned_kinds.insert(kind.clone()) {
-                                    tracing::warn!(
-                                        host = %alias, conn = conn_id, kind,
-                                        "[agent] unknown frame kind; skipping"
-                                    );
+                                match unknown_kinds.record(&kind) {
+                                    fleet_proto::UnknownKindAction::LogOnce(kind) => {
+                                        tracing::warn!(
+                                            host = %alias, conn = conn_id, kind,
+                                            "[agent] unknown frame kind; skipping"
+                                        );
+                                    }
+                                    fleet_proto::UnknownKindAction::Silent => {}
+                                    // The hub is exposed to any agent holding a
+                                    // valid host token, not just its operator's
+                                    // own hardware — many DISTINCT unknown
+                                    // kinds from one connection looks more
+                                    // like probing than protocol evolution, so
+                                    // here (unlike the agent's own side, which
+                                    // trusts the one hub it was configured to
+                                    // dial) the connection is closed outright
+                                    // rather than just going quiet. Reconnecting
+                                    // costs the agent nothing but a fresh
+                                    // `UnknownKinds`.
+                                    fleet_proto::UnknownKindAction::LogCapReached => {
+                                        tracing::warn!(
+                                            host = %alias, conn = conn_id,
+                                            "[agent] too many distinct unknown frame kinds; closing"
+                                        );
+                                        return;
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -2135,6 +2185,66 @@ mod tests {
         assert!(reason.contains(&too_new.to_string()), "{reason}");
         assert!(reason.contains("update the hub"), "{reason}");
         assert!(!hub.registry.connected("laptop"));
+    }
+
+    /// The literal wire case `proto`'s `#[serde(default)]` exists for: a
+    /// hello whose JSON simply has no `proto` key at all (what an agent
+    /// built before this field existed sends), not a test-constructed
+    /// `AgentFrame::Hello { proto: 0, .. }`. Decodes as `proto: 0` and is
+    /// refused exactly like an explicit 0 would be.
+    #[tokio::test]
+    async fn a_hello_whose_json_has_no_proto_key_is_refused_like_an_explicit_zero() {
+        let hub = hub().await;
+        let mut ws = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("upgrade");
+        ws.send(WsMessage::Text(
+            r#"{"kind":"hello","agent_version":"1.2.3","host_name":"laptop.local","os":"linux"}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let (code, reason) = close_reason(&mut ws).await;
+        assert_eq!(code, fleet_proto::VERSION_REFUSED_CLOSE_CODE);
+        assert!(reason.contains('0'), "{reason}");
+        assert!(reason.contains("update fleet-agent"), "{reason}");
+        assert!(!hub.registry.connected("laptop"));
+    }
+
+    /// `write_loop`'s `biased` select is what makes `welcome` unconditionally
+    /// first (see the comment where it is queued, in `serve`): a heartbeat
+    /// firing the instant registration could be visible must not preempt it.
+    #[tokio::test]
+    async fn a_ping_racing_registration_never_preempts_welcome() {
+        let hub = hub().await;
+        let mut ws = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("upgrade");
+        send(&mut ws, &hello_as("1.2.3")).await;
+        wait_until("laptop is registered", || hub.registry.connected("laptop")).await;
+        // Fire a beat the instant registration could be visible, racing the
+        // welcome this same connection is about to receive.
+        hub.beat();
+        match next_frame(&mut ws).await {
+            Some(HubFrame::Welcome { .. }) => {}
+            other => panic!("expected welcome first, got {other:?}"),
+        }
+    }
+
+    /// Past `UNKNOWN_KIND_CAP` distinct unknown kinds, the hub closes the
+    /// connection rather than tracking (and logging) an unbounded number of
+    /// them — see the decision recorded where `read_loop` matches
+    /// `UnknownKindAction::LogCapReached`.
+    #[tokio::test]
+    async fn too_many_distinct_unknown_kinds_closes_the_connection() {
+        let hub = hub().await;
+        let mut ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
+        for i in 0..=fleet_proto::UNKNOWN_KIND_CAP {
+            ws.send(WsMessage::Text(format!(r#"{{"kind":"nope{i}"}}"#).into()))
+                .await
+                .unwrap();
+        }
+        assert!(closed_by_hub(&mut ws).await);
+        wait_until("the connection to be dropped", || {
+            !hub.registry.connected("laptop")
+        })
+        .await;
     }
 
     /// Once past the handshake, a frame whose `kind` the hub does not know is
