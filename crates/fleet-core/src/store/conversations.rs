@@ -497,6 +497,33 @@ mod tests {
             .unwrap()
     }
 
+    /// #148 finding 3: the hub's list tools null-strip every `Option` key
+    /// (`ok_json_compact`) before a hub client's desktop deserialises the
+    /// reply straight into this struct (`session_conversations`) — see
+    /// `src-tauri/src/backend/contract.rs`. Without `#[serde(default)]` on
+    /// every `Option` field, a conversation whose `transcript_path` (etc.) is
+    /// genuinely null fails to parse instead of reading back as `None`.
+    #[test]
+    fn a_conversation_row_with_its_option_fields_omitted_still_parses() {
+        let json = serde_json::json!({
+            "id": 1,
+            "session_id": 2,
+            "claude_session_id": A,
+            "started_at": 100,
+            "start_source": "startup",
+            "turns": 0,
+            "compactions": 0,
+            "current": true,
+        });
+        let row: ConversationRow = serde_json::from_value(json)
+            .expect("omitted Option keys must default, not fail to parse");
+        assert_eq!(row.transcript_path, None);
+        assert_eq!(row.ended_at, None);
+        assert_eq!(row.end_reason, None);
+        assert_eq!(row.model, None);
+        assert_eq!(row.first_prompt, None);
+    }
+
     #[test]
     fn clear_opens_a_new_conversation_and_resets_context() {
         let (s, bus) = store_with_recorder();

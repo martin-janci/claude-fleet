@@ -39,8 +39,8 @@ beforeEach(() => {
   catalog.set(null); catalogConfig.set(null); inventory.set([]); lastSyncRun.set(null); repoStatusStore.set(null);
   clearAuthorSessionOpened();
   hosts.set([
-    { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true },
-    { alias: 'mefistos', ssh_alias: 'mefistos', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true },
+    { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true, transport: 'ssh' },
+    { alias: 'mefistos', ssh_alias: 'mefistos', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true, transport: 'ssh' },
   ]);
 });
 

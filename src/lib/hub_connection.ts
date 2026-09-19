@@ -13,7 +13,12 @@ import { invokeCmd } from './result';
 
 export type HubConnection =
   | { state: 'standalone' | 'connecting' | 'connected' }
-  | { state: 'reconnecting' | 'offline'; attempt: number; retry_in_secs: number; reason: string };
+  | { state: 'reconnecting' | 'offline'; attempt: number; retry_in_secs: number; reason: string }
+  // The hub's `ready` frame named a wire-contract revision this app does not
+  // accept (`src-tauri/src/backend/contract.rs`). While in either state the
+  // backend applies no row event and no re-list from that connection.
+  | { state: 'hub_too_old'; hub_contract: number; min_contract: number }
+  | { state: 'hub_too_new'; hub_contract: number; max_contract: number };
 
 export const hubConnection = writable<HubConnection>({ state: 'standalone' });
 
@@ -36,6 +41,10 @@ export function connectionBanner(c: HubConnection, url: string | null): string |
       return `Lost the live connection to ${hub}; what you see may be out of date. Reconnecting — attempt ${c.attempt}, next try in ${c.retry_in_secs} s (${c.reason}).`;
     case 'offline':
       return `Cannot reach ${hub}; what you see may be out of date. Retrying — attempt ${c.attempt}, next try in ${c.retry_in_secs} s (${c.reason}).`;
+    case 'hub_too_old':
+      return `${hub}'s wire contract is revision ${c.hub_contract}, older than the ${c.min_contract} this app requires; what you see may be out of date. Update the hub.`;
+    case 'hub_too_new':
+      return `${hub}'s wire contract is revision ${c.hub_contract}, newer than the ${c.max_contract} this app understands; what you see may be out of date. Update this app.`;
     default:
       return null;
   }

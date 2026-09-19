@@ -11,19 +11,22 @@
 //! layer can do: it would succeed, and do something other than what the user
 //! asked.
 //!
-//! Three commands are refused for that reason rather than for want of a tool:
+//! Two commands are refused for that reason rather than for want of a tool:
 //!
-//! - `new_session` — `NewSessionArgs` carries `kind`, `start_command` and
-//!   `friendly_name`; `NewSessionParams` carries none of them, and a shell
-//!   session is a different tool (`new_shell_session`) with a different shape.
-//!   Routing it would drop the user's label and mis-handle shell sessions.
-//! - `repair_session` — the tool always runs the **explicit** repair (which
-//!   may unregister a stale worktree entry, adopt a moved checkout and
-//!   recreate a branch). The desktop's automatic pre-attach check
-//!   (`explicit: false`) has no counterpart, and it exists to serve the PTY
-//!   attach, which is itself local-only in remote mode.
+//! - `repair_session` with `explicit: false` — the tool always runs the
+//!   **explicit** repair (which may unregister a stale worktree entry, adopt
+//!   a moved checkout and recreate a branch). The desktop's automatic
+//!   pre-attach check has no counterpart, and turning it into an explicit
+//!   repair would be destructive by surprise, so only `explicit: true` (the
+//!   Repair workspace button) routes.
 //! - `session_activity` — `peek_session` reads a pane, but it answers a
 //!   different shape than `ActivityProbe`.
+//!
+//! `new_session` used to be refused here too: `NewSessionArgs` carried
+//! `kind`, `start_command` and `friendly_name`, and `NewSessionParams`
+//! carried none of them. Task 1 (#146) added the three fields to the tool's
+//! params (optional — absent means today's MCP behaviour), so the desktop's
+//! arguments now map one-to-one and it routes unconditionally.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
@@ -76,14 +79,7 @@ pub async fn new_session(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<SessionRow, IpcError> {
-    // Not "no tool" — a tool exists and takes fewer arguments than this
-    // dialog sends. See the module header.
-    backend.local_only(
-        "new_session",
-        "the hub's new_session tool cannot carry this dialog's session kind, \
-         start command or label; start the session on the hub",
-    )?;
-    sessions::new_session(args, &store, &ssh, &reg).await
+    routed::new_session(&backend, args, &store, &ssh, &reg).await
 }
 
 #[tauri::command]
@@ -240,14 +236,7 @@ pub async fn repair_session(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<RepairReport, IpcError> {
-    backend.local_only(
-        "repair_session",
-        "the hub's repair_session always runs the EXPLICIT repair, which may \
-         unregister a stale worktree entry, adopt a moved checkout and \
-         recreate a branch — this app will not turn an automatic pre-attach \
-         check into that; repair from the hub",
-    )?;
-    repair::repair_session(args.session_id, args.explicit, &store, &ssh).await
+    routed::repair_session(&backend, args, &store, &ssh).await
 }
 
 #[derive(serde::Deserialize)]
@@ -529,6 +518,19 @@ pub(crate) mod routed {
         }
     }
 
+    pub async fn new_session(
+        backend: &FleetBackend,
+        args: NewSessionArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.new_session(&args).await,
+            None => sessions::new_session(args, store, ssh, reg).await,
+        }
+    }
+
     pub async fn kill_session(
         backend: &FleetBackend,
         args: KillSessionArgs,
@@ -633,6 +635,32 @@ pub(crate) mod routed {
             Some(hub) => hub.dismiss_ghost_session(args.session_id).await,
             None => sessions::dismiss_ghost_session(args, store),
         }
+    }
+
+    /// `explicit: true` (the Repair workspace button) maps one-to-one onto
+    /// the tool's own — always explicit — repair, and routes. `explicit:
+    /// false` (the automatic pre-attach check) has no counterpart; turning it
+    /// into an explicit repair would be destructive by surprise, so it stays
+    /// local-only in remote mode. See the module header.
+    pub async fn repair_session(
+        backend: &FleetBackend,
+        args: RepairSessionArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<RepairReport, IpcError> {
+        if let Some(hub) = backend.hub() {
+            if args.explicit {
+                return hub.repair_session(args.session_id).await;
+            }
+            backend.local_only(
+                "repair_session",
+                "the hub's repair_session always runs the EXPLICIT repair, which \
+                 may unregister a stale worktree entry, adopt a moved checkout and \
+                 recreate a branch — this app will not turn an automatic pre-attach \
+                 check into that; repair explicitly, or from the hub",
+            )?;
+        }
+        repair::repair_session(args.session_id, args.explicit, store, ssh).await
     }
 
     pub async fn new_bg_session(

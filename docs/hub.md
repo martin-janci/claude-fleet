@@ -592,6 +592,13 @@ dropped from the filter and logged as a warning by the hub, and it is missing
 from the `ready` frame's `kinds` — which is how you spot the typo instead of
 watching a stream that never says anything.
 
+The `ready` frame also carries `contract`, the wire-contract revision of the
+row shapes and tool results this hub sends (`fleet_core::wire_contract`,
+starting at `1`). It moves only when a client's assumptions about the wire
+would actually break — a field removed or renamed, never an addition — and a
+hub built before this field existed sends nothing, which a client reads as
+revision `0`. See *Version skew* below for what a client does with it.
+
 The stream sits behind the same bearer token as `/mcp` (a change stream names
 sessions, hosts, projects and prompts), and a caller may hold eight of them at
 once. A subscriber that falls far enough behind gets one `lagged` frame and
@@ -916,7 +923,8 @@ standalone exactly as before.
 - **The terminal is local-only.** The PTY attaches a local `ssh`/`tmux`
   process and the hub streams no pane. The terminal tab shows the
   `ssh <host>` / `tmux attach -t <session>` line for the selected session
-  instead of a dead pane.
+  instead of a dead pane — or, for a session on an agent-host (no SSH route
+  from here at all), a line saying so instead.
 - **The asset catalog and the setup checklist** are about the machine that
   owns the fleet, so they show the reason instead of their panels. (The hub
   does serve the catalog's asset list, `list_assets`, to any paired client;
@@ -925,21 +933,48 @@ standalone exactly as before.
 - **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
   the error says to pair again in Settings → Hub.
 
+### Version skew
+
+Every `/events` hello frame carries the hub's wire-contract revision (see
+*Events* above). The desktop only trusts a hub whose revision falls inside
+the range this build understands (`MIN_HUB_CONTRACT..=MAX_HUB_CONTRACT`,
+`src-tauri/src/backend/contract.rs`). Outside it, the banner says which side
+is behind and what to do — the hub is too old (update the hub) or this app
+predates the hub (update this app) — and, for as long as that connection
+lasts, the event bridge applies no row event from it and calls no resync (the
+backfill a fresh connection would otherwise do): stale-but-honest beats
+fresh-but-wrong for anything driven by the live stream. Routed reads
+(`list_sessions`, `list_hosts`, `session_conversations`, repo reads, the
+focus-refresh path) do not yet consult the connection state and still run
+against a skewed hub — see *Known limitations*. It keeps retrying on the same
+backoff rather than hammering a hub it cannot use, and re-checks the
+revision on every reconnect, so an upgrade on either side is picked up on
+its own without restarting the app.
+
 ### Parity or refusal
 
 A desktop mutation is routed to the hub **only where the desktop's arguments
 map one-to-one onto the tool's parameters**, checked field by field. Where
 they do not, the command *refuses* instead of routing.
 
-`new_session` set the rule. `NewSessionArgs` carries `kind`, `start_command`
-and `friendly_name`; the tool's `NewSessionParams` carries none of them, and a
-shell session is a different tool entirely. Routing it would have
-**succeeded** while silently dropping the label the user typed. A refusal is
-visible; a dropped field is not. `repair_session` is refused for the same
-reason: the tool always runs the *explicit* repair, and the desktop's
-automatic pre-attach check has no counterpart.
+`new_session` set the rule, and used to be its example: `NewSessionArgs`
+carried `kind`, `start_command` and `friendly_name` that the tool's
+`NewSessionParams` carried none of, and a shell session was a different tool
+entirely, so routing it would have **succeeded** while silently dropping the
+label the user typed. A refusal is visible; a dropped field is not. The gap
+is closed — the tool's params grew the three fields (optional; absent is
+today's MCP behaviour) — so a hub client can create a session, including a
+shell session with a start command and a label, the same way a standalone
+desktop does.
 
-Do not "fix" one of these refusals by wiring a lossy mapping. If a tool grows
+`repair_session` is still partly refused, for the same shape of reason: the
+tool always runs the *explicit* repair (which may unregister a stale worktree
+entry, adopt a moved checkout and recreate a branch), and the desktop's
+automatic pre-attach check has no counterpart. Only `explicit: true` — the
+Repair workspace button — routes; the automatic check stays local-only rather
+than silently becoming a destructive explicit repair.
+
+Do not "fix" a refusal like this by wiring a lossy mapping. If a tool grows
 the missing parameters, route it then.
 
 ### Known limitations
@@ -949,6 +984,14 @@ the missing parameters, route it then.
 - **Projects and worktrees are not re-listed on reconnect**, because their
   list tools answer a different shape from their events. They refresh when
   the window regains focus.
+- **The New session dialog cannot list a remote host's existing worktrees**
+  on a hub client — `list_host_worktrees` is local-only and there is no
+  hub-side scanning tool yet. It can still create a new one on any host.
+- **Routed reads are not gated on contract skew.** `list_sessions`,
+  `list_hosts`, `session_conversations`, repo reads and the focus-refresh path
+  do not consult the connection state, so they still run against a hub whose
+  wire contract is outside this build's range — only the event bridge (row
+  events, resync) is gated; see *Version skew*.
 - **Not yet run as an app.** At the time of writing this mode is verified by
   its test suites only: the desktop has not been launched against a real hub.
   The macOS keychain path (`token_store.rs`) compiles on every macOS CI run,

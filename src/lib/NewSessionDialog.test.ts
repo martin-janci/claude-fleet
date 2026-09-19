@@ -11,12 +11,16 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import NewSessionDialog from './NewSessionDialog.svelte';
 import { hosts } from './hosts';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
+  hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
   hosts.set([
-    { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
-    { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+    { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
+    { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
   ]);
   localStorage.clear();
 });
@@ -570,8 +574,8 @@ describe('NewSessionDialog — generated names', () => {
   it('remembered host is used only while it is visible and reachable, else last-host, else local', async () => {
     hosts.update((h) => [
       ...h,
-      { alias: 'hetzner', ssh_alias: 'hetzner', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
-      { alias: 'hidden-box', ssh_alias: 'hidden-box', reachable: true, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1, account_uuid: null, provisioned: false },
+      { alias: 'hetzner', ssh_alias: 'hetzner', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
+      { alias: 'hidden-box', ssh_alias: 'hidden-box', reachable: true, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
     ] as typeof h);
     const active = () => document.querySelector('.host-pick.active')?.getAttribute('data-alias');
     const open = async () => {
@@ -761,7 +765,7 @@ describe('NewSessionDialog host-scoped worktrees', () => {
   });
 
   it('a slow earlier scan cannot overwrite a later host', async () => {
-    hosts.update((h) => [...h, { alias: 'vps', ssh_alias: 'vps', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false }]);
+    hosts.update((h) => [...h, { alias: 'vps', ssh_alias: 'vps', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' }]);
     let resolveMef!: (v: unknown) => void;
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd !== 'list_host_worktrees') return null;
@@ -901,6 +905,126 @@ describe('NewSessionDialog host-scoped worktrees', () => {
   });
 });
 
+// #147 finding 1: `newSessionBlocked` (the same derived the Create button's
+// `disabled` reads) was checked only by the button — Enter in the Name field
+// went straight to `submit()` and still routed `new_session` while the hub
+// connection was down. The handler itself must refuse, not just the button.
+describe('NewSessionDialog: Enter is gated the same as the Create button', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  it('Enter in the Name field calls no ipc while a hub client is reconnecting', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable');
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const input = screen.getByTestId('friendly-name');
+    await fireEvent.input(input, { target: { value: 'red comet' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('standalone is untouched: Enter still creates', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: okRow() });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const input = screen.getByTestId('friendly-name');
+    await fireEvent.input(input, { target: { value: 'red comet' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(spy).toHaveBeenCalledOnce();
+    spy.mockRestore();
+  });
+});
+
+// #146 finding 4, fix round 2: `list_host_worktrees` refuses with
+// E_LOCAL_ONLY for a hub client (no hub tool over SSH). Fix round 1 read
+// `project.worktrees` as a substitute, on the assumption a remote host's
+// rows land there via the row-event stream — false: `list_projects_joined`
+// only ever joins `host_alias = 'local'` rows, so `project.worktrees` is
+// always the STORE's own local checkout, never a remote host's, and
+// filtering it by a remote `host_alias` always came back empty — a false
+// "this host has no worktrees" rather than "unknown" (see the `$effect`'s
+// comment in `NewSessionDialog.svelte`). A hub client now shows a neutral
+// note instead and offers only "+ new worktree", which still works.
+describe('NewSessionDialog host-scoped worktrees on a hub client', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+  async function pickHost(alias: string) {
+    const btn = Array.from(document.querySelectorAll('.host-pick')).find(
+      (p) => (p as HTMLElement).dataset.alias === alias,
+    ) as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await tick();
+  }
+
+  it('does not call list_host_worktrees, shows the neutral note naming the host, and no error line', async () => {
+    mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
+    hubStatus.set(remote);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    expect(worktreeLabels()).toEqual(['+ new worktree']);
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'list_host_worktrees');
+    expect(calls).toHaveLength(0);
+    const note = screen.getByTestId('wt-remote-unknown');
+    expect(note.textContent).toContain('mefistos');
+    // The neutral note is not the (red, error-only) `wt-status` line.
+    expect(screen.queryByTestId('wt-status')).toBeNull();
+  });
+
+  it('"+ new worktree" is still selectable and Create still submits worktree_id: null / new_worktree', async () => {
+    hubStatus.set(remote);
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: okRow() });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('new');
+    await fireEvent.input(screen.getByTestId('new-worktree-name'), { target: { value: 'fix-login-bug' } });
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(spy).toHaveBeenCalledOnce();
+    expect(spy.mock.calls[0][0].host_alias).toBe('mefistos');
+    expect(spy.mock.calls[0][0].worktree_id).toBeNull();
+    expect(spy.mock.calls[0][0].new_worktree).toBe('fix-login-bug');
+    spy.mockRestore();
+  });
+
+  it('standalone is untouched: the ipc is still called and the neutral note never shows', async () => {
+    mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() => expect(worktreeLabels()).toEqual(['main', 'feat', '+ new worktree']));
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'list_host_worktrees');
+    expect(calls).toHaveLength(1);
+    expect(screen.queryByTestId('wt-remote-unknown')).toBeNull();
+  });
+});
+
 describe('NewSessionDialog: account headroom on the host chips', () => {
   const USAGE = { locale: 'en-GB', timeZone: 'UTC' };
   const M = 60;
@@ -1025,6 +1149,44 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
     expect(refreshed).toEqual([ADMIN.uuid, GMAIL.uuid, WORK.uuid].sort());
     expect(get(toasts)).toHaveLength(0);
     expect(document.body.textContent).not.toContain('floor');
+  });
+
+  // #147 fix round 1, finding 5: `refresh_account_usage` is local-only in
+  // remote mode, and this onMount fetch-trigger is the same shape as
+  // HostsView's (Task 4, Part B) — gated on `ownsTheFleet(...)`.
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  it('does not fire refresh_account_usage on open on a hub client', async () => {
+    const { NOW, inv } = await setup();
+    hubStatus.set(remote);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    await tick();
+    expect(inv.mock.calls.some((c) => c[0] === 'refresh_account_usage')).toBe(false);
+    hubStatus.set({ ...STANDALONE });
+  });
+
+  it('standalone is untouched: opening still refreshes linked accounts', async () => {
+    const { NOW, inv, ADMIN, WORK, GMAIL } = await setup();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    await tick();
+    const refreshed = inv.mock.calls
+      .filter((c) => c[0] === 'refresh_account_usage')
+      .map((c) => (c[1] as { args: { account_uuid: string } }).args.account_uuid)
+      .sort();
+    expect(refreshed).toEqual([ADMIN.uuid, GMAIL.uuid, WORK.uuid].sort());
   });
 
   it('is about 520px wide', async () => {

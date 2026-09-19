@@ -18,6 +18,7 @@ const sampleLocal = {
   last_pinged_at: 1,
   account_uuid: null,
   provisioned: false,
+  transport: 'ssh' as const,
 };
 
 beforeEach(() => {

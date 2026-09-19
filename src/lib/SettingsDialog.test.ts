@@ -9,12 +9,12 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
-import { hosts } from './hosts';
+import { hosts, type HostRow } from './hosts';
 import { composerPresets, resetComposerPresets, DEFAULT_PRESETS } from './composer_presets';
 
-const sample = [
-  { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
-  { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+const sample: HostRow[] = [
+  { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
+  { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
 ];
 
 const mcpStatusObj = {
@@ -65,7 +65,7 @@ describe('SettingsDialog', () => {
   it('no longer renders the hosts table; one line summarises the hosts instead', async () => {
     hosts.set([
       ...sample,
-      { alias: 'nas', ssh_alias: 'nas', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+      { alias: 'nas', ssh_alias: 'nas', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
     ]);
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();

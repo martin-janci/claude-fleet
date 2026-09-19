@@ -65,6 +65,7 @@
     onStageToggle,
     onCommit,
     enableStaging = false,
+    writeBlocked = null,
   }: {
     mode: 'changes' | 'tree' | 'history' | 'branches';
     changes: ChangedFile[];
@@ -76,6 +77,9 @@
     onStageToggle?: (path: string, staged: boolean) => void;
     onCommit?: (message: string) => void;
     enableStaging?: boolean;
+    /** Set when staging/committing has no hub tool (`hubBlock('repo_write', …)`
+     *  from `FilesPanel`) — the reason, shown as the checkbox's/button's title. */
+    writeBlocked?: string | null;
   } = $props();
 
   let filter = $state('');
@@ -135,7 +139,8 @@
                 type="checkbox"
                 class="stage"
                 checked={c.staged}
-                title={c.staged ? 'Unstage' : 'Stage'}
+                disabled={writeBlocked !== null}
+                title={writeBlocked ?? (c.staged ? 'Unstage' : 'Stage')}
                 onclick={(e) => { e.stopPropagation(); onStageToggle?.(c.path, !c.staged); }}
               />
             {/if}
@@ -184,9 +189,16 @@
   </div>
   {#if enableStaging && mode === 'changes'}
     <div class="commit-footer">
-      <textarea bind:value={commitMsg} placeholder="Commit message…" rows={2}></textarea>
+      <textarea
+        bind:value={commitMsg}
+        placeholder="Commit message…"
+        rows={2}
+        disabled={writeBlocked !== null}
+        title={writeBlocked ?? ''}
+      ></textarea>
       <button
-        disabled={stagedCount === 0 || commitMsg.trim() === ''}
+        disabled={writeBlocked !== null || stagedCount === 0 || commitMsg.trim() === ''}
+        title={writeBlocked ?? ''}
         onclick={() => { onCommit?.(commitMsg.trim()); commitMsg = ''; }}
       >Commit {stagedCount} file{stagedCount === 1 ? '' : 's'}</button>
     </div>

@@ -735,6 +735,9 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 name: "x".into(),
                 new_worktree: None,
                 base_branch: None,
+                kind: None,
+                start_command: None,
+                friendly_name: None,
             }),
         )
         .await
@@ -816,6 +819,43 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     // Nothing was recorded.
     let s = t.store.lock().unwrap();
     assert!(s.list_tasks(None, None, None, 10).unwrap().is_empty());
+}
+
+/// `new_session`'s `kind`, `start_command` and `friendly_name` now thread
+/// through to `NewSessionArgs` instead of being hardcoded to `None` — Task 1
+/// (#146), so the hub tool can carry what the desktop's dialog sends. Proven
+/// with an over-long `friendly_name`: `sessions::new_session` validates it
+/// (`E_INVALID`) before it ever looks up the project, so a wired-through
+/// label surfaces that error; a still-hardcoded `None` would instead reach
+/// the (unrelated) project lookup and fail differently.
+#[tokio::test]
+async fn new_session_threads_kind_start_command_and_friendly_name_through() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    let t = test_tools(s);
+    let a = host_caller("hosta", TokenMode::Full);
+    let err = t
+        .new_session(
+            Extension(a),
+            Parameters(NewSessionParams {
+                host_alias: "hosta".into(),
+                project_id: 4242, // unknown — would be E_NOTFOUND if reached
+                worktree_id: None,
+                name: "x".into(),
+                new_worktree: None,
+                base_branch: None,
+                kind: Some("shell".into()),
+                start_command: Some("echo hi".into()),
+                friendly_name: Some("a".repeat(81)), // over the 80-char cap
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.starts_with("E_INVALID"),
+        "friendly_name must have reached validation, not a hardcoded None: {}",
+        err.message
+    );
 }
 
 #[tokio::test]

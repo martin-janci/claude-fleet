@@ -1,7 +1,12 @@
 <script lang="ts">
   import { newBgSession } from './sessions';
   import { hosts } from './hosts';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
   import Modal from './Modal.svelte';
+
+  // new_bg_session routes, so it only needs the live connection to be up.
+  const bgSessionBlocked = $derived(hubActionBlocked('new_bg_session', $hubStatus, $hubConnection));
 
   // The draft lives in the Sidebar and is bound here, so it survives closing
   // and reopening the dialog as before.
@@ -77,7 +82,8 @@
       <button
         class="btn-primary"
         onclick={doNewBgSession}
-        disabled={bgModalLoading || !bgModalName.trim() || !bgModalPrompt.trim()}
+        disabled={bgModalLoading || !bgModalName.trim() || !bgModalPrompt.trim() || bgSessionBlocked !== null}
+        title={bgSessionBlocked ?? ''}
         data-testid="bg-session-submit"
       >
         {bgModalLoading ? 'Launching…' : 'Launch'}

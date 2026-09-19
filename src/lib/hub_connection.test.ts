@@ -33,6 +33,8 @@ const offline: HubConnection = {
   retry_in_secs: 2,
   reason: 'connect fleet.example.com:443: connection refused',
 };
+const hubTooOld: HubConnection = { state: 'hub_too_old', hub_contract: 0, min_contract: 2 };
+const hubTooNew: HubConnection = { state: 'hub_too_new', hub_contract: 5, max_contract: 1 };
 
 beforeEach(() => {
   inv().mockReset();
@@ -94,6 +96,24 @@ describe('what the banner says', () => {
     expect(text).toContain('connection refused');
     expect(text).toContain('attempt 2');
   });
+
+  it('a too-old hub names both revisions and says to update the hub', () => {
+    const text = connectionBanner(hubTooOld, 'https://fleet.example.com')!;
+    expect(text).toContain('fleet.example.com');
+    expect(text).toContain('0');
+    expect(text).toContain('2');
+    expect(text.toLowerCase()).toContain('out of date');
+    expect(text.toLowerCase()).toContain('update the hub');
+  });
+
+  it('a too-new hub names both revisions and says to update this app', () => {
+    const text = connectionBanner(hubTooNew, 'https://fleet.example.com')!;
+    expect(text).toContain('fleet.example.com');
+    expect(text).toContain('5');
+    expect(text).toContain('1');
+    expect(text.toLowerCase()).toContain('out of date');
+    expect(text.toLowerCase()).toContain('update this app');
+  });
 });
 
 describe('the banner', () => {
@@ -109,5 +129,21 @@ describe('the banner', () => {
     const b = screen.getByTestId('hub-connection-banner');
     expect(b.getAttribute('role')).toBe('alert');
     expect(b.textContent).toContain('attempt 3');
+  });
+
+  it('shows the too-old sentence for a hub behind this app', () => {
+    hubConnection.set(hubTooOld);
+    render(HubConnectionBanner, { props: { hubUrl: 'https://fleet.example.com' } });
+    expect(screen.getByTestId('hub-connection-banner').textContent?.toLowerCase()).toContain(
+      'update the hub'
+    );
+  });
+
+  it('shows the too-new sentence for a hub ahead of this app', () => {
+    hubConnection.set(hubTooNew);
+    render(HubConnectionBanner, { props: { hubUrl: 'https://fleet.example.com' } });
+    expect(screen.getByTestId('hub-connection-banner').textContent?.toLowerCase()).toContain(
+      'update this app'
+    );
   });
 });

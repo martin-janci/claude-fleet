@@ -31,6 +31,8 @@
   import { attentionIdleMinutes } from './notify';
   import { pushError } from './toasts';
   import { rowElapsed, rowPrompt, timeAgo } from './session_status';
+  import { hubStatus, hubBlock, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -134,6 +136,21 @@
   function hostIsReachable(alias: string): boolean {
     return $hostByAlias.get(alias)?.reachable ?? false;
   }
+
+  // kill_session (routed) does the same thing to an inactive agent that
+  // dismiss_agent_session does, but this row's Kill button is hidden for an
+  // inactive one (`!isInactiveAgent(sess)` below) — so a paired client sees
+  // the reason instead of a control that fails at the click.
+  const dismissAgentBlocked = $derived(hubBlock('dismiss_agent_session', $hubStatus));
+  // These route, so they only need the live connection to be up.
+  const killBlocked = $derived(hubActionBlocked('kill_session', $hubStatus, $hubConnection));
+  const restartBlocked = $derived(hubActionBlocked('restart_session', $hubStatus, $hubConnection));
+  const recreateBlocked = $derived(hubActionBlocked('recreate_session', $hubStatus, $hubConnection));
+  const labelBlocked = $derived(hubActionBlocked('set_friendly_name', $hubStatus, $hubConnection));
+  const tmuxRenameBlocked = $derived(hubActionBlocked('rename_session', $hubStatus, $hubConnection));
+  const ghostDismissBlocked = $derived(
+    hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection),
+  );
 </script>
 
 <div
@@ -220,15 +237,16 @@
           class="icon-btn small"
           data-testid="ghost-recreate"
           onclick={(e) => doRecreate(sess, e)}
-          disabled={!hostIsReachable(sess.host_alias)}
-          title={hostIsReachable(sess.host_alias) ? 'Recreate tmux session' : 'Host is offline'}
+          disabled={!hostIsReachable(sess.host_alias) || recreateBlocked !== null}
+          title={recreateBlocked ?? (hostIsReachable(sess.host_alias) ? 'Recreate tmux session' : 'Host is offline')}
           aria-label="Recreate"
         >↺</button>
         <button
           class="icon-btn small danger"
           data-testid="ghost-dismiss"
           onclick={(e) => doDismissGhost(sess, e)}
-          title="Dismiss ghost session"
+          disabled={ghostDismissBlocked !== null}
+          title={ghostDismissBlocked ?? 'Dismiss ghost session'}
           aria-label="Dismiss"
         >×</button>
       </div>
@@ -282,40 +300,55 @@
               <button
                 class="icon-btn small danger"
                 data-testid="remove-from-list"
+                disabled={dismissAgentBlocked !== null}
                 onclick={(e) => doDismissAgent(sess, e)}
-                title="Remove from list"
+                title={dismissAgentBlocked ?? 'Remove from list'}
                 aria-label="Remove from list"
               >×</button>
             {/if}
-            <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
+            <button
+              class="icon-btn small"
+              onclick={(e) => doRestart(sess, e)}
+              disabled={restartBlocked !== null}
+              title={restartBlocked ?? 'Restart claude in this session'}
+              aria-label="Restart"
+            >↻</button>
             <button
               class="icon-btn small"
               data-testid="edit-label"
               onclick={(e) => beginLabelEdit(sess, e)}
-              title="Edit label (double-click the row)"
+              disabled={labelBlocked !== null}
+              title={labelBlocked ?? 'Edit label (double-click the row)'}
               aria-label="Edit label"
             >🏷</button>
             <button
               class="icon-btn small"
               data-testid="rename-tmux"
               onclick={(e) => beginRename(sess, e)}
-              title="Rename tmux session"
+              disabled={tmuxRenameBlocked !== null}
+              title={tmuxRenameBlocked ?? 'Rename tmux session'}
               aria-label="Rename tmux session"
             >✎</button>
             <button
               class="icon-btn small"
               data-testid="recreate-live"
               onclick={(e) => askRecreate(sess, e)}
-              disabled={!hostIsReachable(sess.host_alias)}
-              title={hostIsReachable(sess.host_alias)
+              disabled={!hostIsReachable(sess.host_alias) || recreateBlocked !== null}
+              title={recreateBlocked ?? (hostIsReachable(sess.host_alias)
                 ? 'Recreate: kill the tmux session and start it fresh in the same worktree'
-                : 'Host is offline'}
+                : 'Host is offline')}
               aria-label="Recreate"
             >♻</button>
             {#if !isInactiveAgent(sess)}
               <!-- An inactive agent's daemon is gone: Remove from list is its
                    only removal action. -->
-              <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
+              <button
+                class="icon-btn small danger"
+                onclick={(e) => askKill(sess, e)}
+                disabled={killBlocked !== null}
+                title={killBlocked ?? 'Kill session'}
+                aria-label="Kill"
+              >×</button>
             {/if}
           </div>
         </div>

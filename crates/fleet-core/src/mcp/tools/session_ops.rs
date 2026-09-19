@@ -168,7 +168,10 @@ impl FleetTools {
     #[tool(description = "Create a Claude Code tmux session on a host, in a \
         project (and optional worktree). Pass new_worktree to fork a fresh \
         worktree+branch (optional base_branch). Auto-clones the repo on \
-        remote hosts.")]
+        remote hosts. Optional kind=\"shell\" runs a plain interactive shell \
+        instead (see new_shell_session for the same thing with start_command); \
+        optional friendly_name sets the sidebar label (omit / empty to derive \
+        one from the branch).")]
     pub(super) async fn new_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -188,13 +191,11 @@ impl FleetTools {
             call_id: None,
             new_worktree: p.new_worktree,
             base_branch: p.base_branch,
-            // Shell-kind sessions and per-start commands are not exposed on the
-            // MCP surface yet; the GUI is the only path for those.
-            kind: None,
-            start_command: None,
-            // MCP callers don't pick a label; let the service derive one from
-            // the branch via `humanize::humanize_branch`.
-            friendly_name: None,
+            kind: p.kind,
+            start_command: p.start_command,
+            // Omit / empty -> the service derives one from the branch via
+            // `humanize::humanize_branch`.
+            friendly_name: p.friendly_name,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await

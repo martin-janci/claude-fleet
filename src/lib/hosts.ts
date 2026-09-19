@@ -13,6 +13,8 @@ export interface HostRow {
   last_pinged_at: number | null;
   account_uuid: string | null;
   provisioned: boolean;
+  /** `"ssh"` | `"agent"` — see `HostRow::transport` in `crates/fleet-core/src/store/rows.rs`. */
+  transport: 'ssh' | 'agent';
 }
 
 export interface SshHost {

@@ -48,6 +48,7 @@ export function host(alias: string, over: Partial<HostRow> = {}): HostRow {
     last_pinged_at: NOW - 2 * MIN,
     account_uuid: null,
     provisioned: true,
+    transport: 'ssh',
     ...over,
   };
 }

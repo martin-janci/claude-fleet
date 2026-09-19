@@ -140,6 +140,10 @@ const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
 /// A complete `MoveReport`: all twelve fields are required on the wire, the
 /// last of them a whole `SessionRow` (the same one as [`SESSION_PAYLOAD`]).
 const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","tmux_name":"demo","claude_session_id":"abc","branch":"main","target_cwd":"/w/demo","transcript_bytes":1024,"source_killed":true,"warnings":[],"carried":{"commits":2,"bundle_bytes":1234,"dirty_entries":[{"status":" M","path":"src/lib.rs"}],"ignored_carried":[{"path":".env","bytes":4096}],"ignored_left_behind":[{"path":"node_modules/","bytes":null,"reason":"denylisted"}],"target_seeded":"existing"},"target":{"id":43,"tmux_name":"demo","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}}"#;
+/// A complete `RepairReport` (`repair_session` uses `ok_json`, not the
+/// null-stripping `ok_json_compact`, so every `Option` is present as a real
+/// key — `null` included — and every non-`Option` field is required).
+const REPAIR_PAYLOAD: &str = r#"{"session_id":7,"host_alias":"trn","tmux_name":"demo","project_root":"/p","cwd":"/p","cwd_physical":null,"healthy":true,"actions":[],"warnings":[],"needs_explicit_repair":false,"deferred":[],"branch_source":null,"tmux":null,"tmux_alive":true,"tmux_dead":false,"tmux_cwd_stale":false,"worktree_row_updated":false,"sibling_session_ids":[],"vanished_guard":null}"#;
 
 /// One row of the tables below: what to run, the tool it must name, and the
 /// arguments it must send.
@@ -496,13 +500,15 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
 /// The table [`every_routed_mutation_names_its_tool_and_arguments`] runs; also run against a configured hub this
 /// launch cannot use, which must refuse every row.
 fn routed_mutation_cases() -> Vec<Case> {
+    use commands::sessions::RepairSessionArgs;
     use fleet_core::service::bg_sessions::NewBgSessionArgs;
     use fleet_core::service::hosts::HostAliasArgs;
     use fleet_core::service::move_session::MoveSessionArgs;
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
-        DismissGhostSessionArgs, KillSessionArgs, RecreateSessionArgs, RenameSessionArgs,
-        RestartSessionArgs, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
+        DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
+        RenameSessionArgs, RestartSessionArgs, SendPromptArgs, SetFriendlyNameArgs,
+        SpawnReviewArgs,
     };
     use fleet_core::service::worktrees::DeleteWorktreeArgs;
 
@@ -736,6 +742,65 @@ fn routed_mutation_cases() -> Vec<Case> {
                         target_host_alias: "hetzner".into(),
                         keep_source: false,
                         strict: true,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Task 1 (#146): `kind`, `start_command` and `friendly_name` now map
+        // one-to-one onto the tool's `NewSessionParams`, so `new_session`
+        // routes unconditionally (`call_id` is this process's own
+        // cancellation-registry key and has no counterpart — never sent).
+        (
+            "new_session",
+            json!({
+                "host_alias": "trn",
+                "project_id": 4,
+                "worktree_id": 9,
+                "name": "demo",
+                "new_worktree": "feat",
+                "base_branch": "main",
+                "kind": "shell",
+                "start_command": "pnpm dev",
+                "friendly_name": "the demo",
+            }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::new_session(
+                    b,
+                    NewSessionArgs {
+                        host_alias: "trn".into(),
+                        project_id: 4,
+                        worktree_id: Some(9),
+                        name: "demo".into(),
+                        call_id: Some(123),
+                        new_worktree: Some("feat".into()),
+                        base_branch: Some("main".into()),
+                        kind: Some("shell".into()),
+                        start_command: Some("pnpm dev".into()),
+                        friendly_name: Some("the demo".into()),
+                    },
+                    s,
+                    h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // `explicit: true` — the Repair workspace button — routes to the
+        // tool's own (always-explicit) repair.
+        (
+            "repair_session",
+            json!({ "session_id": 7 }),
+            REPAIR_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::repair_session(
+                    b,
+                    RepairSessionArgs {
+                        session_id: 7,
+                        explicit: true,
                     },
                     s,
                     h,
@@ -1081,6 +1146,59 @@ fn a_local_only_command_refuses_in_remote_mode_and_says_where_to_go() {
         err.message
     );
     fake.was_not_called();
+}
+
+/// Task 1 (#146), the controller ruling: `repair_session` routes only
+/// `explicit: true` (the Repair workspace button, which maps one-to-one onto
+/// the tool's always-explicit repair). `explicit: false` — the automatic
+/// pre-attach check — has no hub counterpart, and must never be silently
+/// upgraded into a destructive explicit repair; it stays local-only in remote
+/// mode. Standalone, both still reach the local service call unchanged
+/// (proven by `E_NOTFOUND` for an unknown session, which only that path can
+/// answer).
+#[test]
+fn repair_session_explicit_false_stays_local_only_in_remote_mode() {
+    use commands::sessions::RepairSessionArgs;
+
+    let fake = Fake::answering("[]");
+    let (_dir, st) = store();
+    let err = block_on(commands::sessions::routed::repair_session(
+        &remote_backend(&fake),
+        RepairSessionArgs {
+            session_id: 7,
+            explicit: false,
+        },
+        &st,
+        &ssh(),
+    ))
+    .expect_err("an automatic check must never become a destructive explicit repair");
+    assert_eq!(err.code, codes::E_LOCAL_ONLY, "{err:?}");
+    assert!(err.message.contains("repair_session"), "{}", err.message);
+    assert!(
+        err.message.contains("EXPLICIT"),
+        "must say why explicit and automatic are not the same operation: {}",
+        err.message
+    );
+    fake.was_not_called();
+
+    for explicit in [false, true] {
+        let (_dir, st) = store();
+        let err = block_on(commands::sessions::routed::repair_session(
+            &FleetBackend::local(),
+            RepairSessionArgs {
+                session_id: 999,
+                explicit,
+            },
+            &st,
+            &ssh(),
+        ))
+        .expect_err("standalone must still reach the local service call");
+        assert_eq!(
+            err.code,
+            codes::E_NOTFOUND,
+            "explicit={explicit}: only the local path answers this: {err:?}"
+        );
+    }
 }
 
 /// The refusal message carries the hub's URL, so it is an outward string and

@@ -48,7 +48,7 @@ use crate::ssh::{SshClient, SshExec};
 use crate::store::{SessionRow, Store};
 use crate::tmux::TmuxExec;
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -650,7 +650,7 @@ pub struct AutoContext {
 /// (`git worktree remove --force -- <path>`, never a prune) and re-add it:
 /// the directory vanished, and nothing suggests an unmounted volume or
 /// someone else's checkout. Recorded in the `workspace_repaired` detail.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VanishedGuard {
     /// Non-empty canonical path, and `test -e` / `test -L` false for it.
     pub dir_absent: bool,
@@ -676,7 +676,16 @@ pub struct VanishedGuard {
     /// worktree was healthy. The primary unmounted / remounted discriminator.
     pub fingerprint_matches: bool,
     /// `match` / `mismatch` / `missing` (never recorded) / `stat_failed`.
-    pub fingerprint_check: &'static str,
+    ///
+    /// `String`, not `&'static str`: a struct containing a `&'static`-lifetime
+    /// field can only derive `Deserialize` for `'de: 'static` (the blanket
+    /// impl for `&'a str` borrows from the input), and `deserialize_with`
+    /// does not exempt it — serde's derive ties the whole impl's `'de` to a
+    /// field's own lifetime structurally. `RepairReport` nests this
+    /// (`Option<VanishedGuard>`) and derives `Deserialize` for a generic
+    /// `'de` (`backend::remote::HubBackend::repair_session`), so the field
+    /// has to own its string.
+    pub fingerprint_check: String,
 }
 
 impl VanishedGuard {
@@ -686,7 +695,7 @@ impl VanishedGuard {
 
     /// The conditions that failed, human-readable.
     pub fn failed(&self) -> Vec<&'static str> {
-        let fingerprint = match self.fingerprint_check {
+        let fingerprint = match self.fingerprint_check.as_str() {
             "missing" => "no parent fingerprint was recorded while the worktree was healthy",
             "stat_failed" => "could not read the parent's dev:inode",
             _ => "the parent's dev:inode differs from the one recorded while healthy (remounted or replaced?)",
@@ -768,7 +777,7 @@ fn vanished_guard(p: &Probe, r: &RegisteredWorktree, ctx: AutoContext) -> Vanish
     VanishedGuard {
         siblings_present: missing_siblings(p).is_empty(),
         fingerprint_matches: fingerprint_check == "match",
-        fingerprint_check,
+        fingerprint_check: fingerprint_check.to_string(),
         dir_absent: wt.is_some() && p.wt_entry_exists == Some(false) && !p.wt_exists,
         parent_exists: p.wt_parent_exists,
         same_filesystem: matches!(
@@ -1443,8 +1452,10 @@ impl RepairExec for HostExec<'_> {
 // Report
 // ---------------------------------------------------------------------------
 
-/// What [`ensure_workspace`] found and did. Serialized to the UI / MCP.
-#[derive(Debug, Clone, Serialize)]
+/// What [`ensure_workspace`] found and did. Serialized to the UI / MCP, and
+/// deserialised back on the hub-client desktop (`backend::remote::HubBackend
+/// ::repair_session`), so it round-trips.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepairReport {
     pub session_id: Option<i64>,
     pub host_alias: String,
@@ -1748,7 +1759,7 @@ pub async fn ensure_workspace_with(
         tmux_cwd_stale: probe.tmux_alive && probe.tmux_cwd.is_some() && !probe.tmux_cwd_exists,
         worktree_row_updated: false,
         sibling_session_ids: siblings,
-        vanished_guard: fix.vanished_guard,
+        vanished_guard: fix.vanished_guard.clone(),
     };
     if fix.needs_explicit_repair {
         // Nothing git-side runs automatically; the caller decides.

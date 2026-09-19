@@ -4,6 +4,13 @@
   import { selectSession } from './selection';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { pushError } from './toasts';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
+
+  // cancel_task routes to the hub, so it stays enabled on a hub client — but
+  // only once the live connection to it is up; while it is not, sending it
+  // would just wait on a socket that is not there.
+  const cancelBlocked = $derived(hubActionBlocked('cancel_task', $hubStatus, $hubConnection));
 
   // `sessionId` narrows the list to tasks where that session is the
   // requester or the worker (the SessionDetails mount); omit it for the
@@ -90,8 +97,9 @@
               <button
                 class="cancel"
                 data-testid="task-cancel"
+                disabled={cancelBlocked !== null}
                 onclick={() => (pendingCancel = t)}
-                title="Cancel this task (the worker keeps running)"
+                title={cancelBlocked ?? 'Cancel this task (the worker keeps running)'}
               >Cancel</button>
             {/if}
           </div>

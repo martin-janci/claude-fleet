@@ -157,9 +157,9 @@ Parameters: `host_alias`, `name`, `prompt`
 
 ### `new_session`
 
-Create a Claude Code tmux session on a host, in a project (and optional worktree). Pass new_worktree to fork a fresh worktree+branch (optional base_branch). Auto-clones the repo on remote hosts.
+Create a Claude Code tmux session on a host, in a project (and optional worktree). Pass new_worktree to fork a fresh worktree+branch (optional base_branch). Auto-clones the repo on remote hosts. Optional kind="shell" runs a plain interactive shell instead (see new_shell_session for the same thing with start_command); optional friendly_name sets the sidebar label (omit / empty to derive one from the branch).
 
-Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `worktree_id`
+Parameters: `base_branch`, `friendly_name`, `host_alias`, `kind`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
 
 ### `new_shell_session`
 

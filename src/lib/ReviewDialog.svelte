@@ -1,6 +1,8 @@
 <script lang="ts">
   import { spawnReview, DEFAULT_REVIEW_PROMPT, type SessionRow } from './sessions';
   import { selectSession } from './selection';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
   import Modal from './Modal.svelte';
 
   let { source, onClose }: { source: SessionRow; onClose: () => void } = $props();
@@ -10,7 +12,9 @@
   let error = $state<string | null>(null);
   let controller: AbortController | null = null;
 
-  const canStart = $derived(prompt.trim().length > 0 && !spawning);
+  // spawn_review routes, so it only needs the live connection to be up.
+  const spawnBlocked = $derived(hubActionBlocked('spawn_review', $hubStatus, $hubConnection));
+  const canStart = $derived(prompt.trim().length > 0 && !spawning && spawnBlocked === null);
 
   async function start() {
     spawning = true;
@@ -51,7 +55,13 @@
 
     <div class="actions">
       <button onclick={onClose}>Cancel</button>
-      <button class="primary" disabled={!canStart} onclick={start} data-testid="review-start">
+      <button
+        class="primary"
+        disabled={!canStart}
+        title={spawnBlocked ?? ''}
+        onclick={start}
+        data-testid="review-start"
+      >
         {spawning ? 'Starting…' : 'Start review'}
       </button>
     </div>

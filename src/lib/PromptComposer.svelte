@@ -3,6 +3,8 @@
   import { get } from 'svelte/store';
   import { sessions, sendPrompt, type SessionRow } from './sessions';
   import { accounts, accountEmailTier, type AccountRow } from './accounts';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
   import Modal from './Modal.svelte';
 
   let {
@@ -12,6 +14,9 @@
     source: SessionRow;
     onClose: () => void;
   } = $props();
+
+  // send_prompt routes, so it only needs the live connection to be up.
+  const sendBlocked = $derived(hubActionBlocked('send_prompt', $hubStatus, $hubConnection));
 
   let prompt = $state('');
   let showAllFleet = $state(false);
@@ -81,7 +86,7 @@
   // from a prior "Show all fleet" toggle can't keep Send enabled when none of
   // the currently-displayed rows are checked.
   const hasChecked = $derived(displayTargets.some((t) => checked[t.id]));
-  const canSend = $derived(prompt.trim().length > 0 && hasChecked && !sending);
+  const canSend = $derived(prompt.trim().length > 0 && hasChecked && !sending && sendBlocked === null);
 
   async function send() {
     sending = true;
@@ -170,6 +175,7 @@
       <button
         class="primary"
         disabled={!canSend}
+        title={sendBlocked ?? ''}
         onclick={send}
         data-testid="composer-send"
       >{sending ? 'Sending…' : 'Send →'}</button>
