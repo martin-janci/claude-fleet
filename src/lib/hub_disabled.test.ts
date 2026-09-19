@@ -25,7 +25,16 @@ import RemoteToolbar from './RemoteToolbar.svelte';
 import BranchList from './BranchList.svelte';
 import CommitGraph from './CommitGraph.svelte';
 import { sharedWith } from './hosts_view';
-import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host } from './hosts_fixture';
+import {
+  ADMIN,
+  GMAIL,
+  NOW,
+  fleetHosts,
+  fleetSessions,
+  fleetUsage,
+  host,
+  session as sessionFixture,
+} from './hosts_fixture';
 import { hosts } from './hosts';
 import { projects, type ProjectTreeRow } from './projects';
 import { sessions as sessionsStore, type SessionRow } from './sessions';
@@ -362,17 +371,9 @@ describe('the git-write panel on a hub client', () => {
 // safe-kill inspection and the one-step discard-and-kill, neither of which
 // has a hub tool (`commands/sessions.rs`).
 describe('safe remove and discard-kill on a hub client', () => {
-  const session: SessionRow = {
-    id: 1, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: 3, worktree_id: null,
-    created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
-    kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null,
-    claude_session_id: null, claude_status: null, effort_level: null, pr_url: null,
-    current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
-    safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null,
-    idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null,
-    started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null,
-    parent_session_id: null, tags: [],
-  } as SessionRow;
+  const session: SessionRow = sessionFixture('mefistos', 'dev-foo', {
+    project_id: 3, claude_status: null, turn_seq: 0, last_stop_at: null,
+  });
 
   it('Safe remove is disabled, with the reason', async () => {
     hubStatus.set(remote);
@@ -417,17 +418,10 @@ describe('add and purge project on a hub client', () => {
     project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 1, adopted: false },
     worktrees: [{ id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' }],
   };
-  const projectSession: SessionRow = {
-    id: 5, tmux_name: 'dev-cf', host_alias: 'local', project_id: 1, worktree_id: 11,
-    created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
-    kind: 'work', reviews_session_id: null, worktree_key: 'main', lost_at: null,
-    claude_session_id: null, claude_status: null, effort_level: null, pr_url: null,
-    current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
-    safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null,
-    idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null,
-    started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null,
-    parent_session_id: null, tags: [],
-  } as SessionRow;
+  const projectSession: SessionRow = sessionFixture('local', 'dev-cf', {
+    project_id: 1, worktree_id: 11, worktree_key: 'main',
+    claude_status: null, turn_seq: 0, last_stop_at: null,
+  });
 
   it('+ Add project… is disabled with the reason', async () => {
     hubStatus.set(remote);
@@ -471,17 +465,9 @@ describe('add and purge project on a hub client', () => {
 // new_session, repair, task cancel, …), all driven by the one derived helper
 // (`hubActionBlocked`).
 describe('a routed mutation control while the hub connection is not up', () => {
-  const session: SessionRow = {
-    id: 1, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: 3, worktree_id: null,
-    created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
-    kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null,
-    claude_session_id: null, claude_status: null, effort_level: null, pr_url: null,
-    current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
-    safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null,
-    idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null,
-    started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null,
-    parent_session_id: null, tags: [],
-  } as SessionRow;
+  const session: SessionRow = sessionFixture('mefistos', 'dev-foo', {
+    project_id: 3, claude_status: null, turn_seq: 0, last_stop_at: null,
+  });
 
   it('Kill session is disabled while reconnecting, naming the hub as unreachable', async () => {
     hubStatus.set(remote);
