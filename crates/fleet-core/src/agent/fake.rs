@@ -139,6 +139,7 @@ pub fn hello() -> AgentHello {
         agent_version: "9.9.9".into(),
         host_name: "fake-host".into(),
         os: "linux".into(),
+        proto: fleet_proto::PROTO_VERSION,
     }
 }
 

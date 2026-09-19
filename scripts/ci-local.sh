@@ -18,11 +18,19 @@
 #                  pnpm run test
 #                  pnpm run build
 #                  pnpm audit --audit-level=high
+#   hub-e2e:       scripts/hub-e2e.sh, opt-in via --hub-e2e (mirrors the
+#                  hub-headless CI job's e2e step; see that script's own
+#                  header). Skipped with a message if tmux is missing.
+#                  NOT part of the default run: it drives real fleet-hub /
+#                  fleet-agent processes and, for one of its three hubs,
+#                  manages this machine's own tmux server directly, which a
+#                  developer may already have a real hub or session on.
 #
 # Usage:
 #   scripts/ci-local.sh                 # everything (rust first, then frontend)
 #   scripts/ci-local.sh --rust-only
 #   scripts/ci-local.sh --frontend-only
+#   scripts/ci-local.sh --hub-e2e       # also run scripts/hub-e2e.sh (opt-in; see above)
 #
 # Opt in to a fast subset of this before each commit (fmt + clippy for rust
 # changes, the full frontend job for frontend changes; see .githooks/pre-commit):
@@ -43,16 +51,18 @@ cd "$ROOT"
 
 RUN_RUST=1
 RUN_FRONTEND=1
+RUN_HUB_E2E=0
 for arg in "$@"; do
   case "$arg" in
     --rust-only) RUN_FRONTEND=0 ;;
     --frontend-only) RUN_RUST=0 ;;
+    --hub-e2e) RUN_HUB_E2E=1 ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
-      echo "ci-local: unknown argument '$arg' (expected --rust-only or --frontend-only)" >&2
+      echo "ci-local: unknown argument '$arg' (expected --rust-only, --frontend-only or --hub-e2e)" >&2
       exit 2
       ;;
   esac
@@ -121,6 +131,21 @@ run_rust() {
   step cargo build -p fleet-agent --locked
 }
 
+# --- hub end-to-end script (opt-in: --hub-e2e) ------------------------------
+run_hub_e2e() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "ci-local: tmux not found; skipping --hub-e2e (the macOS runners/dev machines don't have it)" >&2
+    return
+  fi
+  local target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
+  local bin="$target_dir/debug/fleet-hub" abin="$target_dir/debug/fleet-agent"
+  if [[ ! -x "$bin" || ! -x "$abin" ]]; then
+    echo "ci-local: fleet-hub/fleet-agent not built at $target_dir/debug; run without --frontend-only, or build them first: cargo build -p fleet-hub -p fleet-agent --locked" >&2
+    exit 1
+  fi
+  BIN="$bin" ABIN="$abin" step bash scripts/hub-e2e.sh
+}
+
 # --- frontend job ----------------------------------------------------------
 run_frontend() {
   need node "Install Node >= 20 (see .node-version)"
@@ -135,5 +160,6 @@ run_frontend() {
 
 [[ "$RUN_RUST" == 1 ]] && run_rust
 [[ "$RUN_FRONTEND" == 1 ]] && run_frontend
+[[ "$RUN_HUB_E2E" == 1 ]] && run_hub_e2e
 
 printf '\n\033[1;32mci-local: all selected checks passed\033[0m\n'

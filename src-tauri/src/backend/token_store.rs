@@ -30,9 +30,11 @@ pub trait TokenStore: Send + Sync {
 const SERVICE: &str = "claude-fleet";
 const ACCOUNT: &str = "hub-client-token";
 
-/// The real store: the macOS keychain via `/usr/bin/security`, and an
-/// owner-only file in the app data dir on the platforms that have no system
-/// keychain we can reach without a new dependency.
+/// The real store: the macOS keychain through the Security framework
+/// directly (see the `TokenStore` impl below — no more shelling out to
+/// `/usr/bin/security`), and an owner-only file in the app data dir on the
+/// platforms that have no system keychain we can reach without a new
+/// dependency.
 pub struct OsTokenStore {
     /// Only the non-macOS fallback reads this, but it is held unconditionally
     /// so the struct has one shape — and one constructor — on every platform.

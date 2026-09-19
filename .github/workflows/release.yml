@@ -142,3 +142,151 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+
+  # fleet-agent and a bare fleet-hub, packaged for a Linux host with no
+  # Tauri toolchain and no `cargo` of its own. Independent of `build` above —
+  # both legs only `needs: create-release`, never each other — so a failure
+  # here can never block or delay the desktop bundles, and `continue-on-error`
+  # keeps a failed leg from turning the whole workflow run red (the desktop
+  # legs' own status stays the signal to watch). It also cannot touch the
+  # release itself beyond uploading its own assets: it never deletes or
+  # un-drafts anything.
+  #
+  # Runner/target choice: native `ubuntu-22.04` / `ubuntu-22.04-arm` GitHub-
+  # hosted runners for both legs (arm64 hosted runners are GA and free for
+  # public repos as of 2025; this repo is public) — no `cross`, no QEMU,
+  # nothing to emulate. `-22.04` rather than `-24.04` on purpose: these
+  # binaries carry no Tauri/GTK dependency (see ci.yml's `hub-headless` job),
+  # so nothing needs 24.04's newer packages, and building on 22.04's older
+  # glibc (2.35) means the binaries also run on Debian 12 and Ubuntu 22.04
+  # hosts, not only 24.04+ — a 24.04 build would refuse to start there
+  # (glibc >= 2.39 required). gnu targets, not musl: neither crate has been
+  # verified to build against musl libc, and glibc's compatibility floor
+  # above already covers the hosts this ships to (see docs/hub.md).
+  agent-hub-binaries:
+    if: github.ref_type == 'tag'
+    needs: create-release
+    continue-on-error: true
+    name: agent/hub binaries (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: agent-hub-binaries-${{ matrix.target }}
+      # Both crates build with no Tauri system libraries and no fleet-core
+      # (see ci.yml's hub-headless job) — nothing to install first.
+      - run: cargo build -p fleet-agent -p fleet-hub --release --locked --target ${{ matrix.target }}
+      # A checked-in script rather than an inline heredoc: no ${{ }}
+      # expression carrying tag/ref text is interpolated inside a `run:`
+      # body — tag, target and repository all arrive through `env:` instead,
+      # so a tag name can never be interpreted as shell — and it is
+      # independently dry-runnable (see the task report). This leg writes
+      # only its OWN checksums, to `dist/SHA256SUMS.<target>` — never a
+      # plain `dist/SHA256SUMS` two legs would both produce and race to
+      # upload (whichever finishes last would silently overwrite the
+      # other's, covering 2 of 4 tarballs). `agent-hub-checksums` below
+      # combines both legs' files into the one SHA256SUMS the release gets.
+      - name: Package the tarballs and this leg's checksums
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: scripts/package-linux-release.sh
+      # Uploaded BY NUMERIC RELEASE ID, not by tag: see
+      # scripts/upload-release-asset.sh for why (a draft is not resolvable
+      # by tag through the REST "get release by tag" endpoint — the same
+      # reason `build` above hands tauri-action `releaseId:` instead of a
+      # tag). contents:write is already granted at the workflow level.
+      - name: Upload the tarballs to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          for f in dist/*.tar.gz; do
+            scripts/upload-release-asset.sh "$f"
+          done
+      # This leg's own checksums travel to `agent-hub-checksums` as a
+      # workflow artifact, distinctly named per target so two legs' files
+      # never collide.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums-${{ matrix.target }}
+          path: dist/SHA256SUMS.${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combines the two agent-hub-binaries legs' per-target checksums into the
+  # one SHA256SUMS the release actually needs (see scripts/merge-sha256sums.sh
+  # for why each leg can't just upload its own file directly). Runs even if
+  # a leg failed (`if: !cancelled()`, plus `continue-on-error: true` like
+  # the matrix it depends on) so it still publishes a correct PARTIAL
+  # SHA256SUMS for whichever assets a leg failure left on the release —
+  # never blocking or being blocked by the desktop bundles either.
+  agent-hub-checksums:
+    if: github.ref_type == 'tag' && !cancelled()
+    needs: [create-release, agent-hub-binaries]
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: sums
+          pattern: sha256sums-*
+          merge-multiple: true
+        continue-on-error: true
+      # Exit 0 with an empty SHA256SUMS.tmp means "no per-target sums files
+      # at all" (both legs failed before packaging) — nothing to publish,
+      # not a failure of this job. A non-empty result but the wrong names
+      # (scripts/merge-sha256sums.sh's own check) exits 1 and fails this
+      # step for real, via `set -e`.
+      - name: Merge the per-target checksums
+        id: merge
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          scripts/merge-sha256sums.sh sums >SHA256SUMS.tmp
+          if [ -s SHA256SUMS.tmp ]; then
+            mv SHA256SUMS.tmp SHA256SUMS
+            echo "wrote=1" >>"$GITHUB_OUTPUT"
+          else
+            rm -f SHA256SUMS.tmp
+            echo "wrote=0" >>"$GITHUB_OUTPUT"
+          fi
+      # Cross-checked against the assets ACTUALLY on the release (by
+      # numeric id, same reasoning as upload-release-asset.sh) rather than
+      # trusted from the merge alone: this is the belt to that script's
+      # suspenders — a SHA256SUMS entry for a tarball that never actually
+      # made it onto the release must never be published.
+      - name: Cross-check against the release's actual assets, then upload
+        if: steps.merge.outputs.wrote == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          actual="$(gh api "repos/$REPO/releases/$RELEASE_ID" --jq '.assets[].name' | sort)"
+          listed="$(awk '{print $2}' SHA256SUMS | sed 's#^\./##' | sort)"
+          only_in_sums="$(comm -23 <(echo "$listed") <(echo "$actual") || true)"
+          if [ -n "$only_in_sums" ]; then
+            echo "SHA256SUMS names an asset that was never uploaded to the release:" >&2
+            echo "$only_in_sums" >&2
+            exit 1
+          fi
+          scripts/upload-release-asset.sh SHA256SUMS

@@ -23,6 +23,48 @@ pub enum Scope {
     User,
 }
 
+/// Whether this host can run a systemd unit at all — checked by
+/// [`crate::cli::install_plan`] before it builds a [`Plan`], so a refusal
+/// happens before a single byte is written. Two independent signals, because
+/// either one missing means the `systemctl` calls in [`install`] would fail
+/// after the config and unit were already written to disk: `install` used to
+/// write the token config first and find that out from `systemctl` itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemdStatus {
+    /// `/run/systemd/system` exists: systemd is the host's running init, not
+    /// merely installed.
+    pub init_running: bool,
+    /// `systemctl` resolves on `$PATH`.
+    pub systemctl_on_path: bool,
+}
+
+impl SystemdStatus {
+    pub fn available(&self) -> bool {
+        self.init_running && self.systemctl_on_path
+    }
+
+    /// Why `install` refuses: what was checked, that nothing was written,
+    /// and how to run the agent without systemd instead.
+    pub fn refusal(&self) -> String {
+        format!(
+            "no systemd to install a unit on (checked: /run/systemd/system {}, systemctl {} \
+             on $PATH); nothing was written. Run the agent without systemd instead, under \
+             your own supervisor: `fleet-agent run --hub <url> --token-file -` (or \
+             `--config <path>` once you have one).",
+            if self.init_running {
+                "exists"
+            } else {
+                "does not exist"
+            },
+            if self.systemctl_on_path {
+                "is"
+            } else {
+                "is not"
+            },
+        )
+    }
+}
+
 /// Where the two files go.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
@@ -548,6 +590,55 @@ mod tests {
         assert!(!plan.layout.config_path.exists());
         assert!(!plan.layout.unit_path.exists());
         assert!(systemctl.calls.is_empty());
+    }
+
+    #[test]
+    fn systemd_is_available_only_when_both_signals_are_present() {
+        assert!(SystemdStatus {
+            init_running: true,
+            systemctl_on_path: true,
+        }
+        .available());
+        for status in [
+            SystemdStatus {
+                init_running: false,
+                systemctl_on_path: true,
+            },
+            SystemdStatus {
+                init_running: true,
+                systemctl_on_path: false,
+            },
+            SystemdStatus {
+                init_running: false,
+                systemctl_on_path: false,
+            },
+        ] {
+            assert!(!status.available(), "{status:?}");
+        }
+    }
+
+    /// The refusal names exactly what was checked, says nothing was written,
+    /// and gives the non-systemd fallback command.
+    #[test]
+    fn the_refusal_says_what_was_checked_and_how_to_run_without_systemd() {
+        let err = SystemdStatus {
+            init_running: false,
+            systemctl_on_path: false,
+        }
+        .refusal();
+        assert!(err.contains("/run/systemd/system does not exist"), "{err}");
+        assert!(err.contains("systemctl is not"), "{err}");
+        assert!(err.contains("on $PATH"), "{err}");
+        assert!(err.contains("nothing was written"), "{err}");
+        assert!(err.contains("fleet-agent run"), "{err}");
+
+        let err = SystemdStatus {
+            init_running: true,
+            systemctl_on_path: false,
+        }
+        .refusal();
+        assert!(err.contains("/run/systemd/system exists"), "{err}");
+        assert!(err.contains("systemctl is not"), "{err}");
     }
 
     #[test]

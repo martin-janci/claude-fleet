@@ -64,6 +64,14 @@ impl AgentTransport {
         token: Option<CancellationToken>,
     ) -> Result<Output, IpcError> {
         let id = uuid::Uuid::new_v4().to_string();
+        // Every frame this transport builds — here and in `upload_file` below
+        // — is one an agent at `proto` 1 already understands, so nothing is
+        // gated on `self.registry.negotiated_proto(host)`. The FIRST time
+        // that stops being true — a new frame kind, or a changed field
+        // meaning, that an agent below some version could not act on — is
+        // where a caller here has to check it before sending, refusing (or
+        // falling back) rather than handing an old agent something it will
+        // only be able to ignore.
         let frame = HubFrame::Exec {
             id: id.clone(),
             argv: shell_argv(args),
@@ -351,6 +359,8 @@ impl SshExec for AgentTransport {
                 format!("open {}: {e}", local_path.display()),
             )
         })?;
+        // Same note as `exec`'s `HubFrame::Exec`: nothing here needs gating
+        // on `self.registry.negotiated_proto(host)` yet either.
         let frame = HubFrame::Upload {
             id: uuid::Uuid::new_v4().to_string(),
             path: remote_path.to_string(),

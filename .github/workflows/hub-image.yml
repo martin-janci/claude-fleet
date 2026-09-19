@@ -7,16 +7,17 @@ permissions:
   contents: read
   packages: write
 jobs:
-  image:
+  meta:
     runs-on: ubuntu-24.04
+    # This job only renders tag/label strings — it does not check out the
+    # repository and it does not touch the registry, so it needs none of the
+    # workflow-level `contents: read` / `packages: write` above.
+    permissions: {}
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/metadata-action@v5
         id: meta
         with:
@@ -25,12 +26,160 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha
-      - uses: docker/build-push-action@v6
+
+  # One native leg per platform — no QEMU. A Rust release build the size of
+  # fleet-hub's under QEMU emulation commonly takes 30-60+ minutes; a native
+  # arm64 GitHub-hosted runner (GA and free for public repos since 2025 —
+  # this repo is public, confirmed with `gh repo view`) instead builds arm64
+  # at roughly the amd64 leg's own wall-clock cost, and the two legs run in
+  # parallel, so adding arm64 does not slow amd64's publication at all — the
+  # amd64 leg's own steps are unchanged from before this file added arm64.
+  # `timeout-minutes` below is ordinary CI hygiene for a new job, not a sign
+  # either leg is expected to need it.
+  #
+  # Each leg pushes its own image BY DIGEST (push-by-digest, no tag) instead
+  # of a tag directly: two legs finishing at different times must never race
+  # to push the SAME tag with two different single-arch manifests, each
+  # overwriting the other. `merge` below waits for both digests and combines
+  # them into one multi-arch manifest under the real tags — the standard
+  # docker/build-push-action pattern for a multi-platform image built across
+  # more than one runner.
+  #
+  # `allow_failure`/`continue-on-error` differ by arch ON PURPOSE: arm64's
+  # native GitHub-hosted runner has no track record here yet, so its leg is
+  # allowed to fail without blocking the image amd64 alone can still
+  # publish (see `merge` below); amd64 is not allowed to fail; if it does,
+  # `merge` publishes nothing at all and fails visibly rather than leaving
+  # a stale `latest`.
+  build:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            os: ubuntu-24.04
+            arch: amd64
+            allow_failure: false
+          - platform: linux/arm64
+            os: ubuntu-24.04-arm
+            arch: arm64
+            allow_failure: true
+    continue-on-error: ${{ matrix.allow_failure }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: crates/fleet-hub/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          labels: ${{ needs.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/fleet-hub,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+      # No ${{ }} expression carrying ref/tag text is interpolated inside a
+      # `run:` body anywhere in this job: the digest is the build step's own
+      # output, passed through `env:` like everything else that varies.
+      - name: Export the digest for the merge job
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      # Named by `arch`, not `os`: `merge` below needs to tell the two
+      # platforms' artifacts apart (their digest files are each just an
+      # opaque hex name, indistinguishable from each other on their own),
+      # and `arch` stays stable even if the runner label changes.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Publishes whatever `build` produced — never skipped by a failed leg
+  # (`if: !cancelled()`), because a plain `needs: [meta, build]` would skip
+  # this job entirely the moment amd64 (the one leg NOT allowed to fail)
+  # actually fails, silently leaving `latest`/`vX.Y.Z` stale with no visible
+  # error. Rule (enforced by scripts/merge-hub-digests.sh): amd64 digest
+  # present -> publish (multi-arch if arm64 is present too, amd64-only
+  # otherwise — arm64 failing never blocks amd64's own publication); amd64
+  # digest missing -> this job fails for real (no continue-on-error here),
+  # visibly, and nothing is published.
+  #
+  # An amd64-only publish is a SUCCESSFUL run, not a red one: a job-level
+  # `continue-on-error: true` failure (arm64's, above) gives that job a
+  # success conclusion with a distinct icon, and the overall run stays
+  # green — it does NOT turn the run red or non-green, and publishing
+  # amd64 must keep succeeding regardless of arm64. The degradation is
+  # instead made VISIBLE without failing anything: a `::warning::`
+  # annotation on the run, and a line in the job summary, both emitted only
+  # on the amd64-only path (`steps.digests.outputs.status`, set from
+  # merge-hub-digests.sh's own `STATUS=` line).
+  merge:
+    if: ${{ !cancelled() }} # bare `!cancelled()` is invalid YAML here (leading `!`), so this one keeps the wrapper
+    needs: [meta, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+        continue-on-error: true
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      # The script's first stdout line is `STATUS=both` or
+      # `STATUS=amd64-only`; everything after it is the imagetools argv.
+      # Split them here so "Create the manifest" only ever sees argv lines,
+      # and the status survives as a step output for the warning step below.
+      - name: Select which platforms actually have a digest
+        id: digests
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/fleet-hub
+          TAGS: ${{ needs.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          scripts/merge-hub-digests.sh /tmp/digests >/tmp/merge-output.txt
+          status_line="$(head -n1 /tmp/merge-output.txt)"
+          tail -n +2 /tmp/merge-output.txt >/tmp/imagetools-args.txt
+          echo "status=${status_line#STATUS=}" >>"$GITHUB_OUTPUT"
+      - name: Create the manifest and push it under the real tags
+        run: |
+          set -euo pipefail
+          mapfile -t args </tmp/imagetools-args.txt
+          docker buildx imagetools create "${args[@]}"
+      # Visible, not red: this never fails the job — amd64 already
+      # published successfully by this point — it only makes the
+      # degradation impossible to miss.
+      - name: Flag an amd64-only publish
+        if: steps.digests.outputs.status == 'amd64-only'
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/fleet-hub
+        run: |
+          set -euo pipefail
+          echo "::warning title=fleet-hub image is amd64-only this run::$IMAGE was published for linux/amd64 only this run — the arm64 build leg failed. An arm64 host pulling this tag will fail until a later run publishes both platforms."
+          {
+            echo "### fleet-hub image: amd64-only this run"
+            echo
+            echo "The arm64 build leg failed. The manifest just published for this tag covers **linux/amd64 only** for \`$IMAGE\`. An arm64 host pulling it will fail until a later run publishes both platforms."
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Inspect the pushed manifest
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/fleet-hub
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: docker buildx imagetools inspect "$IMAGE:$VERSION"
