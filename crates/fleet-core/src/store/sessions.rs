@@ -1560,6 +1560,8 @@ mod tests {
         assert_eq!(lost_reason_of(&s, id), Some("missing".to_string()));
 
         // Upserting it live again (the tmux session reappears) ⇒ lost_reason NULL.
+        // The probe must be newer than the loss for the resurrect to apply
+        // (#170), and Phase 1 stamped `lost_at` with the real `now_unix()`.
         s.apply_host_reconcile(HostReconcile {
             sessions: &[ReconcileSession {
                 tmux_name: "a",
@@ -1568,6 +1570,7 @@ mod tests {
                 ..Default::default()
             }],
             keep: &["a".to_string()],
+            probe_started_at: now_unix() + 1,
             ..empty_probe("h", 200)
         })
         .unwrap();
