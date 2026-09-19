@@ -38,7 +38,8 @@ The principle stays; the refusal goes.
   deny-list; what stays behind is reported.
 - What the move writes on the source: unreferenced git objects, the private
   ref namespace and a temp directory. The refs and the directory are removed
-  when the move ends, on success and on failure.
+  when the move returns — on success and on every failure path once the
+  carry began.
 - `strict: true` restores the ADR 0001 refusals for callers that want the
   guarantee that origin holds everything.
 
@@ -47,6 +48,22 @@ The principle stays; the refusal goes.
 - A successful move leaves a copy of the uncommitted work in the source
   worktree. It is reported, not cleaned up: deleting user work is a separate,
   explicit action.
+- That copy blocks the return trip. Moving the session BACK to the host it
+  came from is refused with `E_MOVE_TARGET_DIRTY` until the copy there is
+  committed or discarded by hand. The planned Transfer UI (slice 3) owns
+  this; until then the message names the case and the user resolves it on
+  that host.
+- A failure AFTER the apply — a verify mismatch, the transcript upload, the
+  tmux start — leaves the carried changes in the target worktree and blocks
+  a retry exactly the same way. Nothing is rolled back there.
+- A cancelled or crashed move skips the cleanup: the private refs and the
+  transfer directory stay until the same session is moved again (the id is
+  the Claude session id, and each run removes the directory before writing
+  it). The directory can hold `ignored.tgz` — `.env` content — at mode 0600
+  inside a 0700 directory, so it is private, but it is not transient.
+- Each payload upload runs under a fixed 300 s wall clock. A bundle near the
+  500 MiB cap therefore needs roughly a 14 Mbit/s uplink to finish; on a
+  slower link the move fails at the upload with the source untouched.
 - An operation in progress (merge, rebase, cherry-pick, revert, bisect) is
   refused (`E_MOVE_MIDOP`); its state is not carried.
 - Submodule contents, LFS objects, stashes, hooks and per-repo config do not

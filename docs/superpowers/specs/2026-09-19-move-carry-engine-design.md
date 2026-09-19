@@ -128,9 +128,17 @@ stdin; only the boundary — a handful of commits — reaches `bundle create` as
 argv, because `bundle create --stdin` regressed in some git releases.)
 
 `$dir` is `~/.cache/claude-fleet/transfer/<claude_id>/`, created `0700`.
-The haves reach the script as a quoted heredoc read line by line (validated
-as 40/64-hex on the orchestrator first), never as argv, so a target with
-thousands of refs cannot overflow the command line. `CarryReport.commits` is
+The haves reach `git` through a quoted heredoc read line by line (validated
+as 40/64-hex on the orchestrator first), never as that command's argv. The
+heredoc is still part of the SCRIPT, though, and `run_shell` hands the whole
+script to the host as ONE `bash -lc` argument — which Linux caps at 128 KiB,
+about 3,000 object names. So the list is bounded at `MAX_HAVES` (1000) on
+both sides: `haves_script` offers `refs/heads/<branch>` and
+`refs/remotes/origin/<branch>` first, then every other ref
+newest-commit-first, de-duplicated and cut; `snapshot_script` takes at most
+that many valid shas. Haves are only an optimisation — a short list makes a
+fatter bundle, never a wrong one — where "Argument list too long" would make
+every attempt and every retry fail. `CarryReport.commits` is
 `git rev-list --count refs/fleet/transfer/$id/head --not <kept haves>`.
 
 **The bundle is never skipped.** Even when the target already has the source
@@ -185,6 +193,18 @@ The orchestrator compares the target's post-apply porcelain with the source's
 inspection porcelain, as sorted line sets. Any difference → `E_MOVE_CARRY`
 step `verify`, with both sides in `details`. A successful carry is a checked
 claim.
+
+The source side of that comparison is the porcelain taken in step 2, not one
+the snapshot takes of itself: a file written on the source between the
+inspection and the snapshot therefore fails the move CLOSED, before the
+target session starts, rather than travelling unnoticed.
+
+Both sides are produced by the same pinned invocation (`STATUS_PORCELAIN`:
+`-c core.quotePath=true -c status.renames=true status --porcelain=v1
+--untracked-files=normal`). Two hosts configured differently would otherwise
+spell the same state two ways — and a target with
+`status.showUntrackedFiles=no` would hide its own untracked work from the
+apply's dirty check.
 
 ## Ignored files (step 8)
 

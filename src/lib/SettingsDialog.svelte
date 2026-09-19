@@ -599,14 +599,14 @@
         <span class="hook-desc" id="limit-move-bundle-desc">largest git bundle (MiB, 1–{MOVE_MAX_BUNDLE_MB_MAX}) Move to host… relays; a bigger one is refused (E_MOVE_TOO_LARGE)</span>
       </div>
       <div class="mcp-field">
-        <label class="lbl" for="limit-move-ignored-entry-kb">carry file</label>
+        <label class="lbl" for="limit-move-ignored-entry-kb">carry entry</label>
         <input class="port" id="limit-move-ignored-entry-kb" type="number" min="1" max={MOVE_IGNORED_ENTRY_KB_MAX} step="1"
           value={settingInt($fleetSettings, SETTING_KEYS.moveIgnoredEntryKb)}
           disabled={limitsBusy}
           aria-describedby="limit-move-ignored-entry-desc"
           data-testid="move-ignored-entry-kb"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.moveIgnoredEntryKb, 'Move ignored entry', e)} />
-        <span class="hook-desc" id="limit-move-ignored-entry-desc">largest git-ignored file (KiB, 1–{MOVE_IGNORED_ENTRY_KB_MAX}) Move to host… carries; bigger ones are left behind</span>
+        <span class="hook-desc" id="limit-move-ignored-entry-desc">largest single git-ignored entry (KiB, 1–{MOVE_IGNORED_ENTRY_KB_MAX}) Move to host… carries — a file, or a whole ignored directory measured together; bigger ones are left behind</span>
       </div>
       <div class="mcp-field">
         <label class="lbl" for="limit-move-ignored-total-mb">carry ignored</label>

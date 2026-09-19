@@ -305,7 +305,8 @@
 
   // Move to host…: continue this conversation on another host (same branch,
   // same Claude session id). Only a worktree-backed work session with a
-  // Claude id can move; the backend refuses dirty or unpushed worktrees.
+  // Claude id can move; the backend carries uncommitted and unpushed work
+  // along instead of refusing it (ADR 0002).
   const canMove = $derived(
     session.kind === 'work' && session.worktree_id !== null && session.claude_session_id !== null,
   );
@@ -779,7 +780,8 @@
     <p class="move-note">
       Copies this conversation to the chosen host, creates the worktree there from the same
       branch and resumes it with <code>--resume</code>. This session is killed only once the
-      new one is running. The worktree must be clean and pushed; nothing is pushed for you.
+      new one is running. Uncommitted and unpushed work travels with the session, plus small
+      git-ignored files such as <code>.env</code>. Nothing is pushed or committed for you.
     </p>
     {#if moveTargets.length === 0}
       <p class="move-note" data-testid="move-no-targets">No other reachable, provisioned host.</p>
