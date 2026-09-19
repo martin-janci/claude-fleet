@@ -106,6 +106,18 @@ fn asset_inventory_has_managed(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 036: `sessions` already has its
+/// `lost_reason` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn sessions_has_lost_reason(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'lost_reason'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 034: `hosts` already has its
 /// `transport` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
@@ -244,6 +256,14 @@ const MIGRATIONS: &[Migration] = &[
         35,
         include_str!("../../migrations/035_host_layers_repair.sql"),
     ),
+    // Adds the reboot safety net's columns (`sessions.lost_reason`, the host
+    // boot identity). Guarded like 034: `ALTER TABLE ... ADD COLUMN` fails if
+    // the column is already there.
+    Migration {
+        version: 36,
+        sql: include_str!("../../migrations/036_host_boot_identity.sql"),
+        already_applied: Some(sessions_has_lost_reason),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

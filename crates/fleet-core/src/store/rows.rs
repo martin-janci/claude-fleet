@@ -455,6 +455,37 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
     })
 }
 
+/// A host's recorded boot identity (migration 036): the kernel boot id and
+/// tmux server pid from the last probe that could read them. Not part of
+/// [`HostRow`] — reached only through [`Store::get_host_identity`] and
+/// [`Store::set_host_identity`], since [`HostRow`] is serialised to the
+/// frontend and this identity is backend-only bookkeeping for the reboot
+/// safety net.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StoredIdentity {
+    pub boot_id: Option<String>,
+    pub tmux_server_pid: Option<i64>,
+}
+
+/// What one [`Store::mark_host_sessions_lost`] call touched, split by how:
+/// `marked` rows were live and are now ghost (they changed on the wire and
+/// were announced with `SessionUpdated`); `reclassified` rows were ALREADY a
+/// `missing` ghost (a failed first post-loss pass pruned them routinely) and
+/// only had their `lost_reason` upgraded to the verdict's reason — nothing
+/// the frontend sees changed, so no event was emitted for them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MarkedLost {
+    pub marked: Vec<SessionRow>,
+    pub reclassified: Vec<SessionRow>,
+}
+
+impl MarkedLost {
+    /// `true` when the call recorded no loss at all (neither list has a row).
+    pub fn is_empty(&self) -> bool {
+        self.marked.is_empty() && self.reclassified.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AccountRow {
@@ -724,6 +755,20 @@ pub struct HostReconcile<'a> {
     /// tmux_names to keep; rows on this host not in the set are deleted
     /// (only used when `reachable`).
     pub keep: &'a [String],
+    /// Unix-epoch cutoff (see [`Store::ghost_and_clean`]'s `lost_ttl_cutoff`
+    /// doc) at or above which a resumable mass-loss row (`claude_session_id
+    /// IS NOT NULL`, `lost_reason IN ('host_reboot','tmux_server_gone')`,
+    /// `lost_at >= cutoff`) is spared Phase 2's hard-delete. `None` (the
+    /// default) disables the exemption entirely — today's behaviour.
+    pub lost_ttl_cutoff: Option<i64>,
+    /// Skip the tmux-keyed ghost/reap pass entirely this write (Task 6): set
+    /// when this pass already mass-marked the host's sessions lost via
+    /// `Store::mark_host_sessions_lost` (a reboot or a vanished tmux
+    /// server), so the routine `keep`-set ghosting must not immediately
+    /// re-ghost (and start the reap clock on) rows the mass-loss path just
+    /// stamped with their specific `lost_reason`. `false` (the default) is
+    /// today's behaviour — every reachable pass prunes.
+    pub skip_prune: bool,
 }
 
 /// Max `session_events` rows kept per session. Enforced on every

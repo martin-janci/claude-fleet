@@ -235,7 +235,9 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
         assert!(row.lost_at.is_none());
     }
 
-    // What actually crossed the wire for alpha: list → agents → the
+    // What actually crossed the wire for alpha: the boot-identity read
+    // (FIRST, so a tmux server dying mid-probe cannot yield a verdict whose
+    // keep set still names its sessions) → list → agents → the
     // `~/.claude.json` account read → one pane capture per live session,
     // each as a single quoted `bash -lc` word.
     let scripts: Vec<String> = fake
@@ -250,15 +252,17 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
     assert_eq!(
         scripts,
         vec![
+            crate::tmux::HOST_IDENTITY_SCRIPT.to_string(),
             LIST_SCRIPT.to_string(),
             "claude agents --json 2>/dev/null || echo '[]'".to_string(),
             crate::service::hosts::OAUTH_ACCOUNT_SCRIPT.to_string(),
             "tmux capture-pane -t '=alpha-live:' -S '-8' -p".to_string(),
         ]
     );
-    // beta and gamma: the list and the (unconditional) agents probe, and
-    // nothing more — a failed list skips the account read and the
-    // per-session pane captures.
+    // beta and gamma: the identity read (attempted before the list, its
+    // result discarded once the list fails), the list and the
+    // (unconditional) agents probe, and nothing more — a failed list skips
+    // the account read and the per-session pane captures.
     for host in ["beta", "gamma"] {
         let scripts: Vec<String> = fake
             .calls_for(host)
@@ -268,6 +272,7 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
         assert_eq!(
             scripts,
             vec![
+                crate::tmux::HOST_IDENTITY_SCRIPT.to_string(),
                 LIST_SCRIPT.to_string(),
                 "claude agents --json 2>/dev/null || echo '[]'".to_string(),
             ],
