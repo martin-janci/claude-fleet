@@ -60,12 +60,23 @@ pub struct ConversationRow {
     pub id: i64,
     pub session_id: i64,
     pub claude_session_id: String,
+    // The `Option` fields carry `serde(default)` because a desktop in remote
+    // mode deserialises this row straight out of a hub's tool result, and a
+    // hub that answers with `ok_json_compact` strips every null key (see
+    // `src-tauri/src/backend/contract.rs`). Without them a conversation that
+    // has, say, no `end_reason` would fail to parse instead of arriving as
+    // `None`.
+    #[serde(default)]
     pub transcript_path: Option<String>,
     pub started_at: i64,
+    #[serde(default)]
     pub ended_at: Option<i64>,
     pub start_source: String,
+    #[serde(default)]
     pub end_reason: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
     pub first_prompt: Option<String>,
     pub turns: i64,
     pub compactions: i64,

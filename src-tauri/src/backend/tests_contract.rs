@@ -10,8 +10,8 @@ use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversat
 use fleet_core::service::usage::DayUsage;
 use fleet_core::service::worktrees::{WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
-    AccountRow, HostRow, ProjectRow, SessionContext, SessionEvent, SessionRow, SessionUsage,
-    TaskRow, UsageTotals, WorktreeRow,
+    AccountRow, ConversationRow, HostRow, ProjectRow, SessionContext, SessionEvent, SessionRow,
+    SessionUsage, TaskRow, UsageTotals, WorktreeRow,
 };
 use std::collections::BTreeMap;
 
@@ -214,6 +214,27 @@ fn sample_health() -> Health {
     }
 }
 
+/// One row of `session_conversations` — the switcher in the Conversations
+/// tab reads every field, and `current` decides which conversation the panel
+/// treats as live.
+fn sample_conversation_row() -> ConversationRow {
+    ConversationRow {
+        id: 1,
+        session_id: 2,
+        claude_session_id: "claude-uuid".into(),
+        transcript_path: Some("/h/.claude/projects/p/claude-uuid.jsonl".into()),
+        started_at: 1_725_000_000,
+        ended_at: Some(1_725_000_900),
+        start_source: "clear".into(),
+        end_reason: Some("replaced".into()),
+        model: Some("claude-opus-5".into()),
+        first_prompt: Some("fix the bug".into()),
+        turns: 3,
+        compactions: 1,
+        current: false,
+    }
+}
+
 fn sample_conversation() -> Conversation {
     Conversation {
         turns: vec![ConvTurn {
@@ -313,6 +334,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         }),
     );
     put("Conversation", wire_keys(&sample_conversation()));
+    put("ConversationRow", wire_keys(&sample_conversation_row()));
     put(
         "ConvTurn",
         wire_keys(&sample_conversation().turns.into_iter().next().unwrap()),

@@ -289,6 +289,40 @@ fn a_null_stripped_session_row_survives_the_round_trip() {
     assert_eq!(rows, vec![original]);
 }
 
+/// The same guard for `session_conversations`: its rows carry five optional
+/// columns (an unfinished conversation has neither `ended_at` nor
+/// `end_reason`), so a hub answering with `ok_json_compact` sends them absent.
+#[test]
+fn a_null_stripped_conversation_row_survives_the_round_trip() {
+    let original = fleet_core::store::ConversationRow {
+        id: 3,
+        session_id: 12,
+        claude_session_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
+        transcript_path: None,
+        started_at: 1_725_000_000,
+        ended_at: None,
+        start_source: "clear".into(),
+        end_reason: None,
+        model: None,
+        first_prompt: None,
+        turns: 0,
+        compactions: 0,
+        current: true,
+    };
+    let mut v = serde_json::to_value(&original).expect("serialise");
+    strip_nulls(&mut v);
+    assert_eq!(
+        v.get("end_reason"),
+        None,
+        "the fixture must really be stripped"
+    );
+
+    let payload = serde_json::to_string(&json!([v])).unwrap();
+    let fake = Fake::answering(Ok(ok(&payload)));
+    let rows = block_on(backend(&fake).session_conversations(12, 50)).expect("rows");
+    assert_eq!(rows, vec![original]);
+}
+
 /// Mirrors `fleet_core::mcp::tools::support::strip_nulls`, which is private
 /// to that module. If the two ever disagree, the round-trip above stops
 /// testing the real encoding — which is why this is spelled out rather than
