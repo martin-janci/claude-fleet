@@ -78,6 +78,38 @@ jobs:
           ABIN: target/debug/fleet-agent
         timeout-minutes: 5
         run: bash scripts/hub-e2e.sh
+      # The script's own failure output names which check failed, but the hub
+      # and agent logs that say WHY live under its temp root, which dies with
+      # the runner. It puts that root in $GITHUB_ENV as HUBE2E_ROOT the moment
+      # it creates it, so this collects them however the step ended — a failed
+      # check, an early exit, or the 5-minute timeout above.
+      - name: Collect hub-e2e logs
+        if: failure()
+        run: |
+          set -u
+          root="${HUBE2E_ROOT:-}"
+          if [ -z "$root" ] || [ ! -d "$root" ]; then
+            echo "no hub-e2e log root to collect (HUBE2E_ROOT='$root')"
+            exit 0
+          fi
+          # Named files only, never the whole root: the data dirs beside them
+          # hold each hub's SQLite database, its master token and a generated
+          # ssh key, none of which belong in a downloadable artifact.
+          mapfile -t files < <(cd "$root" && ls -1 | grep -E '\.(log|sse|err)$')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no logs under $root"
+            exit 0
+          fi
+          tar -czf hub-e2e-logs.tar.gz -C "$root" "${files[@]}"
+          ls -la hub-e2e-logs.tar.gz
+      - name: Upload hub-e2e logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-e2e-logs
+          path: hub-e2e-logs.tar.gz
+          if-no-files-found: ignore
+          retention-days: 7
 
   frontend:
     strategy:
