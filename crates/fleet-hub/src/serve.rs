@@ -14,6 +14,7 @@ use fleet_core::store::Store;
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 /// Open (creating when missing) `<data-dir>/state.db`. The data dir is the
 /// only option resolved without the store: everything else reads its stored
@@ -386,8 +387,79 @@ async fn probe_exchange(addr: std::net::SocketAddr, tls: bool) -> Result<String,
     let tcp = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| format!("connect {addr}: {e}"))?;
+    let conn = maybe_tls(tcp, addr, tls).await?;
+    exchange(conn, addr).await
+}
+
+/// Either a plain TCP connection or the client half of a TLS handshake over
+/// one, behind one `AsyncRead + AsyncWrite` front — so a caller that already
+/// has its own `TcpStream` (this probe's [`exchange`], and `pair::exchange`)
+/// can read and write it without knowing which transport [`maybe_tls`]
+/// picked.
+pub(crate) enum Conn {
+    Plain(tokio::net::TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>),
+}
+
+impl tokio::io::AsyncRead for Conn {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Conn::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Conn::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for Conn {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Conn::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            Conn::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Conn::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Conn::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Conn::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Conn::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Wrap an already-connected `tcp` in a TLS client handshake when `tls`,
+/// using the probe's no-verification trust story (see
+/// [`crate::tls::insecure_probe_client`]): every caller of this dials
+/// `127.0.0.1` only, and the hub's certificate is issued for its public
+/// domain, which `127.0.0.1` can never match. `pair::exchange` reuses this
+/// rather than carrying a second TLS client.
+pub(crate) async fn maybe_tls(
+    tcp: tokio::net::TcpStream,
+    addr: std::net::SocketAddr,
+    tls: bool,
+) -> Result<Conn, String> {
     if !tls {
-        return exchange(tcp, addr).await;
+        return Ok(Conn::Plain(tcp));
     }
     // The server's certificate is issued for its public domain, so it can
     // never match `127.0.0.1`; `insecure_probe_client` is why that is fine
@@ -397,7 +469,7 @@ async fn probe_exchange(addr: std::net::SocketAddr, tls: bool) -> Result<String,
         .connect(name, tcp)
         .await
         .map_err(|e| format!("TLS handshake with {addr}: {e}"))?;
-    exchange(conn, addr).await
+    Ok(Conn::Tls(Box::new(conn)))
 }
 
 /// The write-read half, over whatever transport [`probe_exchange`] opened.
@@ -408,6 +480,9 @@ async fn exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let req = format!("GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     conn.write_all(req.as_bytes())
+        .await
+        .map_err(|e| format!("send to {addr}: {e}"))?;
+    conn.flush()
         .await
         .map_err(|e| format!("send to {addr}: {e}"))?;
     // Status line plus the short body is all we need; bound what a stray peer
@@ -660,11 +735,20 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         "fleet-hub serving"
     );
 
-    fleet_core::service::tick::spawn_reconcile_tick(Arc::clone(&store), Arc::clone(&ssh));
+    // Cancelled on shutdown, below, so both ticks stop between passes rather
+    // than being torn down along with the SSH masters they may still be
+    // using mid-pass (issue #144). One token for both: SIGTERM has no reason
+    // to stop them at different times.
+    let ticks_cancel = CancellationToken::new();
+    let reconcile_handle = fleet_core::service::tick::spawn_reconcile_tick(
+        Arc::clone(&store),
+        Arc::clone(&ssh),
+        ticks_cancel.clone(),
+    );
     let usage_cache = Arc::new(Mutex::new(
         fleet_core::service::account_usage::UsageCache::new(),
     ));
-    fleet_core::service::tick::spawn_account_usage_tick(
+    let usage_handle = fleet_core::service::tick::spawn_account_usage_tick(
         Arc::clone(&store),
         Arc::clone(&ssh),
         usage_cache,
@@ -672,10 +756,21 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         // tick-borne event, not a store write, and a client following
         // `/events` wants it like any other.
         Arc::clone(&bus) as Arc<dyn EventBus>,
+        ticks_cancel.clone(),
     );
 
     wait_for_signal().await?;
     tracing::info!("fleet-hub stopping");
+    // Cancel the ticks BEFORE tearing down the MCP server below: cancellation
+    // is only observed between passes, so cancelling here is strictly safe
+    // (it does not abort a pass already in flight) and it stops a new pass
+    // from starting during the drain. That matters because `/agent`
+    // websockets are served by the same axum app `shutdown` tears down — an
+    // in-flight pass otherwise keeps its SSH masters but loses every
+    // fleet-agent connection mid-drain. This way the in-flight pass gets the
+    // drain window plus TICK_SHUTDOWN_TIMEOUT below, with agent connections
+    // still up.
+    ticks_cancel.cancel();
     shutdown.cancel();
     // Let in-flight requests drain before tearing down what they use.
     match tokio::time::timeout(DRAIN_TIMEOUT, serve_task).await {
@@ -686,6 +781,16 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             "in-flight requests did not drain in time; exiting anyway"
         ),
     }
+    // The hub-daemon spec's SIGTERM promise (docs/superpowers/specs/2026-09-17-hub-daemon-design.md):
+    // the current reconcile pass finishes, then the loop exits. Await the
+    // (already-cancelled, above) ticks' handles, bounded, BEFORE tearing down
+    // the SSH masters a pass in flight might still be using.
+    let mut tick_handles = Vec::new();
+    if let Some(h) = reconcile_handle {
+        tick_handles.push(h);
+    }
+    tick_handles.push(usage_handle);
+    await_ticks(tick_handles, TICK_SHUTDOWN_TIMEOUT).await;
     tunnels.stop_all();
     ssh.shutdown_all();
     Ok(ExitCode::SUCCESS)
@@ -693,6 +798,33 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
 
 /// How long `serve` waits for in-flight requests after a stop signal.
 const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long `serve` waits, after cancelling the reconcile/usage ticks, for
+/// their in-flight passes to finish before tearing down the SSH masters they
+/// might still be using anyway. Same order of magnitude as [`DRAIN_TIMEOUT`]
+/// — a pass this slow is already unusual, and `ssh.shutdown_all()` cannot
+/// wait forever on process shutdown.
+const TICK_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Await every tick's `JoinHandle`, bounded by `timeout`: a single stuck
+/// pass cannot block shutdown forever. Logs at warn (and proceeds) when the
+/// bound is hit, and when a tick task itself panicked.
+async fn await_ticks(handles: Vec<tokio::task::JoinHandle<()>>, timeout: std::time::Duration) {
+    let join_all = async {
+        for h in handles {
+            if let Err(e) = h.await {
+                tracing::warn!(error = %e, "a background tick task panicked");
+            }
+        }
+    };
+    if tokio::time::timeout(timeout, join_all).await.is_err() {
+        tracing::warn!(
+            timeout_secs = timeout.as_secs(),
+            "reconcile/usage ticks did not finish their in-flight pass within the timeout; \
+             tearing down SSH masters anyway"
+        );
+    }
+}
 
 /// A state.db copied from a desktop can carry `mcp.confirm_destructive=true`;
 /// a hub has no approver, so every destructive tool would be refused. Say so
@@ -1276,5 +1408,53 @@ mod tests {
         };
         let back = resolve(&opts, &HashMap::new(), &settings).unwrap();
         assert_eq!(back, r);
+    }
+
+    // --- shutdown ordering (issue #144) --------------------------------
+    //
+    // `spawn_reconcile_tick`/`spawn_account_usage_tick` in fleet-core cover
+    // the tick loop's own cancellation behaviour (a pass in flight finishes;
+    // a pre-cancelled token starts none). What is specific to `serve` is the
+    // ORDER: `ticks_cancel.cancel()` fires before `shutdown.cancel()` (so a
+    // new pass cannot start during the drain, while an in-flight one keeps
+    // its `/agent` websockets through the drain window), and ticks are
+    // awaited, bounded, before `ssh.shutdown_all()`. Driving that through a
+    // real `serve()` would need a live listener, a real SIGTERM and a real
+    // reconcile pass against a fake host — much heavier scaffolding than the
+    // ordering itself warrants. `await_ticks` is the piece that gives the
+    // ordering its bound, so it is tested directly, with tokio's paused
+    // clock so nothing here touches a real socket or a real sleep. The
+    // relative order of the two `.cancel()` calls is pinned by this comment
+    // and by review; see `serve`'s body.
+
+    #[tokio::test(start_paused = true)]
+    async fn await_ticks_returns_once_every_handle_finishes() {
+        let h1 = tokio::spawn(async {});
+        let h2 = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        });
+        let started = tokio::time::Instant::now();
+        await_ticks(vec![h1, h2], std::time::Duration::from_secs(5)).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "must not wait for the full timeout when both handles finish well within it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_ticks_gives_up_after_the_bound_on_a_stuck_handle() {
+        // A handle that never completes — the stand-in for a tick loop stuck
+        // mid-pass — must not block shutdown past `timeout`.
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let n2 = Arc::clone(&notify);
+        let stuck = tokio::spawn(async move {
+            n2.notified().await; // never notified: this task never finishes
+        });
+        let started = tokio::time::Instant::now();
+        await_ticks(vec![stuck], std::time::Duration::from_millis(200)).await;
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(200),
+            "must wait out the full bound before giving up on a stuck handle"
+        );
     }
 }
