@@ -108,7 +108,7 @@ https://v2.tauri.app/distribute/sign/macos/ and pass them via `env:` on the
 | `crates/fleet-hub/Cargo.toml` | `version =` under `[package]` |
 | `crates/fleet-proto/Cargo.toml` | `version =` under `[package]` |
 | `crates/fleet-agent/Cargo.toml` | `version =` under `[package]` |
-| `Cargo.lock` | via `cargo update -p claude-fleet -p fleet-hub` (no dependency changes) |
+| `Cargo.lock` | via `cargo update` scoped to every crate bumped above (`claude-fleet`, `fleet-hub`, `fleet-proto`, `fleet-agent` — derived from `VERSION_FILES`, not hard-coded); no dependency changes |
 | `CHANGELOG.md` | new `## [X.Y.Z] - YYYY-MM-DD` section under the header, bullets from `git log <last-tag>..HEAD` grouped `feat` → Added, `fix` → Fixed, `docs` → Documentation, everything else → Changed; plus a `[X.Y.Z]: …/releases/tag/vX.Y.Z` link reference at the bottom |
 
 Then it commits `chore(release): vX.Y.Z` and creates the annotated tag

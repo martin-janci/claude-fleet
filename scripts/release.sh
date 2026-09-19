@@ -6,7 +6,10 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/martin-janci/claude-fleet"
-CRATE="claude-fleet"
+# crates/fleet-core stays at 0.1.0 and is deliberately NOT in this list: it is
+# an internal library crate consumed only by path within this workspace, not
+# versioned in step with the app. (Its Cargo.toml has no `publish = false`
+# marker, so this is a convention, not an enforced one — see issue #152.)
 VERSION_FILES=(package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml crates/fleet-hub/Cargo.toml crates/fleet-proto/Cargo.toml crates/fleet-agent/Cargo.toml)
 
 die() { echo "release.sh: $*" >&2; exit 1; }
@@ -41,9 +44,29 @@ JS
 
 # --- 2. Cargo.lock follows Cargo.toml ----------------------------------------
 if [[ -z "${RELEASE_DRY_RUN:-}" ]]; then
-  cargo update -p "$CRATE" --offline >/dev/null 2>&1 || cargo update -p "$CRATE"
-  cargo update -p fleet-hub --offline >/dev/null 2>&1 || cargo update -p fleet-hub
-  echo "  Cargo.lock"
+  # Every crate this script just bumped needs Cargo.lock synced, or a
+  # `--locked` build of it fails after the release (#152). Derive the package
+  # list from VERSION_FILES' .toml entries instead of hard-coding a second
+  # list that can drift from the first.
+  CARGO_PKGS=()
+  for f in "${VERSION_FILES[@]}"; do
+    [[ "$f" == *.toml ]] || continue
+    name="$(node -e '
+      const fs = require("fs");
+      const src = fs.readFileSync(process.argv[1], "utf8");
+      const m = src.match(/^name = "([^"]+)"/m);
+      if (!m) { console.error("no [package] name in " + process.argv[1]); process.exit(1); }
+      process.stdout.write(m[1]);
+    ' "$f")" || die "could not read [package] name from $f"
+    CARGO_PKGS+=("$name")
+  done
+  UPDATE_ARGS=()
+  for p in "${CARGO_PKGS[@]}"; do UPDATE_ARGS+=(-p "$p"); done
+  if ! cargo update "${UPDATE_ARGS[@]}" --offline >/dev/null 2>&1; then
+    cargo update "${UPDATE_ARGS[@]}" \
+      || die "cargo update failed for: ${CARGO_PKGS[*]} (both --offline and online) — Cargo.lock was NOT updated; fix and re-run"
+  fi
+  echo "  Cargo.lock (${CARGO_PKGS[*]})"
 fi
 
 # --- 3. CHANGELOG.md section, grouped by Conventional Commit type -------------
