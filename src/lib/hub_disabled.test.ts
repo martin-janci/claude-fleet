@@ -195,10 +195,11 @@ describe('adding a host on a hub client', () => {
   });
 });
 
-// PARITY OR REFUSAL: these two REFUSE rather than route, because routing them
-// would have succeeded while meaning something else. A refusal nobody can see
-// coming is only half honest.
-describe('the two commands that refuse rather than route', () => {
+// Task 1 (#146): `new_session` and `repair_session` (explicit, the only mode
+// the desktop's buttons ever send) now map one-to-one onto their hub tools
+// and route, so — unlike the fleet-administration and this-machine-only
+// controls above — these two stay enabled on a hub client.
+describe('new_session and repair_session route now, so their buttons stay enabled', () => {
   const session = {
     id: 1, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: 3, worktree_id: null,
     created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
@@ -211,26 +212,14 @@ describe('the two commands that refuse rather than route', () => {
     parent_session_id: null, tags: [],
   };
 
-  it('New session says the label it would drop is why', async () => {
+  it('+ New session is enabled on a hub client', async () => {
     hubStatus.set(remote);
-    render(Sidebar, { props: {} as never });
-    const btn = (await screen.findByTestId('new-session-footer')) as HTMLButtonElement;
-    expect(btn).toBeDisabled();
-    expect(btn.title).toMatch(/label|name/i);
-    expect(btn.title).toContain('fleet.example.com');
-  });
-
-  it('Repair workspace says why it is not the same operation here', async () => {
-    hubStatus.set(remote);
-    render(SessionDetails, { props: { session } });
-    const btn = (await screen.findByTestId('repair-from-details')) as HTMLButtonElement;
-    expect(btn).toBeDisabled();
-    expect(btn.title).toContain('fleet.example.com');
-  });
-
-  it('standalone is untouched: both still work', async () => {
     render(Sidebar, { props: {} as never });
     expect(await screen.findByTestId('new-session-footer')).not.toBeDisabled();
+  });
+
+  it('Repair workspace is enabled on a hub client', async () => {
+    hubStatus.set(remote);
     render(SessionDetails, { props: { session } });
     expect(await screen.findByTestId('repair-from-details')).not.toBeDisabled();
   });

@@ -26,7 +26,9 @@
 use super::{RemoteConfig, UnavailableHub};
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::transcript::Conversation;
-use fleet_core::service::{bg_sessions, move_session, repo_read, safe_kill, sessions, worktrees};
+use fleet_core::service::{
+    bg_sessions, move_session, repair, repo_read, safe_kill, sessions, worktrees,
+};
 use fleet_core::store::{AccountRow, HostRow, SessionEvent, SessionRow, TaskRow};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -625,11 +627,12 @@ impl HubBackend {
 //
 // Only the ones whose desktop arguments map **one to one** onto the tool's
 // parameters. Where they do not, the command refuses with `E_LOCAL_ONLY`
-// rather than calling a tool that would drop a field: `new_session` is the
-// case that matters (`kind`, `start_command` and `friendly_name` have no
-// counterpart in `NewSessionParams`, and a shell session is a different tool
-// entirely). A silent argument mismatch on a *mutation* is the worst failure
-// this module can have, so the rule is parity or refusal.
+// rather than calling a tool that would drop a field or mean something else:
+// `repair_session` with `explicit: false` is the case that matters (the tool
+// always runs the EXPLICIT repair; the desktop's automatic pre-attach check
+// has no counterpart, so only `explicit: true` gets a method here). A silent
+// argument mismatch on a *mutation* is the worst failure this module can
+// have, so the rule is parity or refusal.
 //
 // Every one of these tools answers with `ok_json` of the same type the local
 // service call returns, so the mapping stays a deserialisation.
@@ -656,6 +659,30 @@ impl HubBackend {
             )
             .await?;
         Ok(())
+    }
+
+    /// `commands::sessions::new_session`. `call_id` is this process's own
+    /// cancellation-registry key (`cancel_command`) and has no hub
+    /// counterpart, so it is never sent.
+    pub async fn new_session(
+        &self,
+        args: &sessions::NewSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        self.call(
+            "new_session",
+            json!({
+                "host_alias": args.host_alias,
+                "project_id": args.project_id,
+                "worktree_id": args.worktree_id,
+                "name": args.name,
+                "new_worktree": args.new_worktree,
+                "base_branch": args.base_branch,
+                "kind": args.kind,
+                "start_command": args.start_command,
+                "friendly_name": args.friendly_name,
+            }),
+        )
+        .await
     }
 
     /// `commands::sessions::kill_session`. Answers the killed session's id.
@@ -767,6 +794,15 @@ impl HubBackend {
             .call("dismiss_ghost_session", json!({ "session_id": session_id }))
             .await?;
         Ok(())
+    }
+
+    /// `commands::sessions::repair_session` with `explicit: true` only — the
+    /// tool's own repair is always explicit, so `explicit` itself is not a
+    /// parameter (`routed::repair_session` guards `explicit: false` before
+    /// this is ever called).
+    pub async fn repair_session(&self, session_id: i64) -> Result<repair::RepairReport, IpcError> {
+        self.call("repair_session", json!({ "session_id": session_id }))
+            .await
     }
 
     /// `commands::sessions::new_bg_session`.

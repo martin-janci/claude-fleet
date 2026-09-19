@@ -12,16 +12,17 @@
 //      prerequisites check, SSH tunnels, the asset-catalog git checkout.
 //   3. **PARITY OR REFUSAL.** A mutation routes to the hub only where the
 //      desktop's arguments map one-to-one onto the tool's parameters. Where
-//      they do not — `new_session` and `repair_session` — the command refuses
-//      rather than routing, because routing would have SUCCEEDED while
-//      silently dropping what the user typed. A refusal is visible; a dropped
-//      field is not. Nobody should later "fix" one of these refusals by
-//      wiring a lossy mapping.
+//      they do not — `repair_session` with `explicit: false`, the automatic
+//      pre-attach check — the command refuses rather than routing, because
+//      routing would have quietly turned it into the tool's own (always
+//      explicit) repair. A refusal is visible; a dropped field is not.
+//      Nobody should later "fix" a refusal like this by wiring a lossy
+//      mapping.
 //
-// The backend returns `E_LOCAL_ONLY` for all three, with a message naming
-// where the operation does work. This module is the *other* half: the reason
-// in front of the control, before the click, so that a paired desktop looks
-// like a paired desktop rather than like a broken one.
+// The backend returns `E_LOCAL_ONLY` for these, with a message naming where
+// the operation does work. This module is the *other* half: the reason in
+// front of the control, before the click, so that a paired desktop looks like
+// a paired desktop rather than like a broken one.
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 
@@ -176,12 +177,6 @@ const REASONS = {
     'these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not',
   list_account_usage:
     'this app does not poll account usage while a hub owns the fleet, so its cache stays empty',
-
-  // --- parity or refusal ---------------------------------------------------
-  new_session:
-    'the hub’s new_session tool takes no kind, start command or friendly name, so routing this would have quietly dropped the label you typed — a refusal is visible, a dropped field is not',
-  repair_session:
-    'the hub’s repair tool always runs the explicit repair, and the desktop’s automatic pre-attach check has no counterpart, so routing this would not mean the same thing',
 } as const;
 
 export type HubAction = keyof typeof REASONS;

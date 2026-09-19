@@ -799,15 +799,24 @@ A desktop mutation is routed to the hub **only where the desktop's arguments
 map one-to-one onto the tool's parameters**, checked field by field. Where
 they do not, the command *refuses* instead of routing.
 
-`new_session` set the rule. `NewSessionArgs` carries `kind`, `start_command`
-and `friendly_name`; the tool's `NewSessionParams` carries none of them, and a
-shell session is a different tool entirely. Routing it would have
-**succeeded** while silently dropping the label the user typed. A refusal is
-visible; a dropped field is not. `repair_session` is refused for the same
-reason: the tool always runs the *explicit* repair, and the desktop's
-automatic pre-attach check has no counterpart.
+`new_session` set the rule, and used to be its example: `NewSessionArgs`
+carried `kind`, `start_command` and `friendly_name` that the tool's
+`NewSessionParams` carried none of, and a shell session was a different tool
+entirely, so routing it would have **succeeded** while silently dropping the
+label the user typed. A refusal is visible; a dropped field is not. The gap
+is closed — the tool's params grew the three fields (optional; absent is
+today's MCP behaviour) — so a hub client can create a session, including a
+shell session with a start command and a label, the same way a standalone
+desktop does.
 
-Do not "fix" one of these refusals by wiring a lossy mapping. If a tool grows
+`repair_session` is still partly refused, for the same shape of reason: the
+tool always runs the *explicit* repair (which may unregister a stale worktree
+entry, adopt a moved checkout and recreate a branch), and the desktop's
+automatic pre-attach check has no counterpart. Only `explicit: true` — the
+Repair workspace button — routes; the automatic check stays local-only rather
+than silently becoming a destructive explicit repair.
+
+Do not "fix" a refusal like this by wiring a lossy mapping. If a tool grows
 the missing parameters, route it then.
 
 ### Known limitations

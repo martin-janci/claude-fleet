@@ -97,14 +97,6 @@ describe('hubBlock', () => {
     }
   });
 
-  // PARITY OR REFUSAL, the rule Task 3 made and the ledger asks to write down:
-  // new_session and repair_session REFUSE rather than route, because routing
-  // would have succeeded while silently dropping the user's label.
-  it('new_session and repair_session say why they refuse rather than routing', () => {
-    expect(hubBlock('new_session', remote)).toMatch(/label|name/i);
-    expect(hubBlock('repair_session', remote)).toBeTruthy();
-  });
-
   // The terminal is the spec's named non-goal, and the hint has to be more
   // than "no".
   it('the terminal reason offers the shell command instead', () => {

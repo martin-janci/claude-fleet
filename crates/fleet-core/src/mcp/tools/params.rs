@@ -81,6 +81,18 @@ pub struct NewSessionParams {
     /// branch if the named branch isn't found on the host.
     #[serde(default)]
     pub base_branch: Option<String>,
+    /// Session kind: `"work"` (default) runs Claude Code in the pane;
+    /// `"shell"` runs a plain interactive login shell (see
+    /// `new_shell_session` for a dedicated tool with the same effect).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Optional command run once on start for a `"shell"` session, before
+    /// the pane drops to an interactive shell. Ignored for `"work"`.
+    #[serde(default)]
+    pub start_command: Option<String>,
+    /// Optional sidebar label. Omit / empty to derive one from the branch.
+    #[serde(default)]
+    pub friendly_name: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
