@@ -6,9 +6,11 @@
 //! `lib.rs` without renaming it here is a wire break, and that is the point.
 
 use fleet_proto::{
-    base64_len, decode_agent_frame, decode_b64, decode_hub_frame, decode_hub_frame_within,
-    encode_agent_frame, encode_agent_frame_within, encode_b64, encode_hub_frame,
-    encode_hub_frame_within, AgentFrame, HubFrame, ProtoError, MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES,
+    base64_len, decode_agent_frame, decode_agent_frame_lenient_within, decode_b64,
+    decode_hub_frame, decode_hub_frame_lenient, decode_hub_frame_within, encode_agent_frame,
+    encode_agent_frame_within, encode_b64, encode_hub_frame, encode_hub_frame_within, judge_proto,
+    AgentFrame, Decoded, HubFrame, ProtoError, ProtoVerdict, MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES,
+    MIN_SUPPORTED_PROTO, PROTO_VERSION, VERSION_REFUSED_CLOSE_CODE,
 };
 use serde_json::{json, Value};
 
@@ -40,6 +42,10 @@ fn hub_frames() -> Vec<HubFrame> {
         },
         HubFrame::Cancel { id: "01J3".into() },
         HubFrame::Ping { id: "01J4".into() },
+        HubFrame::Welcome {
+            hub_version: "0.9.0".into(),
+            proto: PROTO_VERSION,
+        },
     ]
 }
 
@@ -49,6 +55,7 @@ fn agent_frames() -> Vec<AgentFrame> {
             agent_version: "0.1.0".into(),
             host_name: "laptop".into(),
             os: "linux".into(),
+            proto: PROTO_VERSION,
         },
         AgentFrame::Result {
             id: "01J0".into(),
@@ -116,6 +123,7 @@ fn hub_frames_use_the_spec_s_tag_and_field_names() {
         }),
         json!({ "kind": "cancel", "id": "01J3" }),
         json!({ "kind": "ping", "id": "01J4" }),
+        json!({ "kind": "welcome", "hub_version": "0.9.0", "proto": PROTO_VERSION }),
     ];
     for (frame, want) in hub_frames().into_iter().zip(expected) {
         let text = encode_hub_frame(&frame).expect("encodes");
@@ -131,7 +139,8 @@ fn agent_frames_use_the_spec_s_tag_and_field_names() {
             "kind": "hello",
             "agent_version": "0.1.0",
             "host_name": "laptop",
-            "os": "linux"
+            "os": "linux",
+            "proto": PROTO_VERSION
         }),
         json!({
             "kind": "result",
@@ -453,4 +462,178 @@ fn the_budget_follows_the_cap_and_a_hostile_cap_cannot_overflow_it() {
 #[test]
 fn both_ends_agree_on_the_heartbeat() {
     assert_eq!(HEARTBEAT, std::time::Duration::from_secs(30));
+}
+
+// ── protocol versioning ──────────────────────────────────────────────────
+
+/// A `hello` with no `proto` field — what every pre-versioning agent sends —
+/// deserialises with `proto: 0`, serde's default for `u32`.
+#[test]
+fn a_hello_without_proto_decodes_as_zero() {
+    let decoded = decode_agent_frame(
+        r#"{"kind":"hello","agent_version":"0.1.0","host_name":"laptop","os":"linux"}"#,
+    )
+    .expect("decodes without the new field");
+    assert_eq!(
+        decoded,
+        AgentFrame::Hello {
+            agent_version: "0.1.0".into(),
+            host_name: "laptop".into(),
+            os: "linux".into(),
+            proto: 0,
+        }
+    );
+}
+
+/// A `hello` that does carry `proto` round-trips it exactly — the ordinary
+/// case, now that every current build sends one.
+#[test]
+fn a_hello_with_proto_round_trips_it() {
+    let frame = AgentFrame::Hello {
+        agent_version: "1.2.3".into(),
+        host_name: "laptop".into(),
+        os: "linux".into(),
+        proto: 7,
+    };
+    let text = encode_agent_frame(&frame).expect("encodes");
+    assert!(text.contains(r#""proto":7"#), "{text}");
+    assert_eq!(decode_agent_frame(&text).expect("decodes"), frame);
+}
+
+#[test]
+fn min_supported_proto_is_the_current_version() {
+    // Task 3's own choice: see `MIN_SUPPORTED_PROTO`'s doc for why 1, not 0
+    // — the same change that introduces the version field also introduces
+    // `HubFrame::Welcome`, which a proto-0 (pre-versioning) agent cannot
+    // parse, so admitting proto 0 would not avoid the reconnect loop this
+    // task exists to end.
+    assert_eq!(MIN_SUPPORTED_PROTO, PROTO_VERSION);
+}
+
+#[test]
+fn judge_proto_accepts_exactly_the_supported_window() {
+    assert_eq!(judge_proto(PROTO_VERSION), ProtoVerdict::Compatible);
+    assert_eq!(judge_proto(MIN_SUPPORTED_PROTO), ProtoVerdict::Compatible);
+}
+
+#[test]
+fn judge_proto_flags_a_peer_below_the_window() {
+    let verdict = judge_proto(0);
+    assert_eq!(
+        verdict,
+        ProtoVerdict::PeerBehind {
+            their: 0,
+            min_supported: MIN_SUPPORTED_PROTO,
+        }
+    );
+    let reason = verdict
+        .refusal_reason("the hub", "fleet-agent")
+        .expect("out of range");
+    assert!(reason.contains('0'), "{reason}");
+    assert!(
+        reason.contains(&MIN_SUPPORTED_PROTO.to_string()),
+        "{reason}"
+    );
+    assert!(reason.contains("update fleet-agent"), "{reason}");
+}
+
+#[test]
+fn judge_proto_flags_a_peer_above_the_window() {
+    let too_new = PROTO_VERSION + 1;
+    let verdict = judge_proto(too_new);
+    assert_eq!(
+        verdict,
+        ProtoVerdict::PeerAhead {
+            their: too_new,
+            max_supported: PROTO_VERSION,
+        }
+    );
+    let reason = verdict
+        .refusal_reason("fleet-agent", "the hub")
+        .expect("out of range");
+    assert!(reason.contains(&too_new.to_string()), "{reason}");
+    assert!(reason.contains(&PROTO_VERSION.to_string()), "{reason}");
+    assert!(reason.contains("update fleet-agent"), "{reason}");
+}
+
+#[test]
+fn a_compatible_verdict_has_no_refusal_reason() {
+    assert_eq!(
+        ProtoVerdict::Compatible.refusal_reason("the hub", "fleet-agent"),
+        None
+    );
+}
+
+#[test]
+fn the_version_refused_close_code_is_in_the_private_use_range() {
+    assert!((4000..=4999).contains(&VERSION_REFUSED_CLOSE_CODE));
+}
+
+// ── lenient decoding, past the handshake ─────────────────────────────────
+
+#[test]
+fn a_known_kind_lenient_decodes_the_same_as_the_strict_decoder() {
+    let frame = HubFrame::Ping { id: "01J4".into() };
+    let text = encode_hub_frame(&frame).expect("encodes");
+    assert_eq!(
+        decode_hub_frame_lenient(&text).expect("decodes"),
+        Decoded::Frame(frame)
+    );
+}
+
+#[test]
+fn an_unknown_kind_is_skippable_once_past_the_handshake() {
+    let text = r#"{"kind":"selfdestruct","id":"01J0"}"#;
+    assert_eq!(
+        decode_hub_frame_lenient(text).expect("not an error"),
+        Decoded::Unknown {
+            kind: "selfdestruct".into()
+        }
+    );
+    assert_eq!(
+        decode_agent_frame_lenient_within(text, MAX_FRAME_BYTES).expect("not an error"),
+        Decoded::Unknown {
+            kind: "selfdestruct".into()
+        }
+    );
+}
+
+/// A `kind` the receiver DOES know, but whose body will not parse, is
+/// corruption, not evolution — it stays a hard error even leniently.
+#[test]
+fn a_known_kind_that_will_not_parse_is_still_an_error_leniently() {
+    let text = r#"{"kind":"exec","id":"1","argv":"not a list","timeout_ms":1}"#;
+    let err = decode_hub_frame_lenient(text).expect_err("rejected");
+    assert!(matches!(err, ProtoError::Malformed(_)), "{err:?}");
+}
+
+/// Junk with no recognisable `kind` at all is still a hard error leniently,
+/// not `Unknown` — there is nothing here to skip.
+#[test]
+fn junk_with_no_kind_is_still_an_error_leniently() {
+    for text in [
+        "",
+        "null",
+        "[]",
+        "{}",
+        "not json at all",
+        r#"{"kind":null}"#,
+    ] {
+        assert!(decode_hub_frame_lenient(text).is_err(), "accepted {text:?}");
+        assert!(
+            decode_agent_frame_lenient_within(text, MAX_FRAME_BYTES).is_err(),
+            "accepted {text:?}"
+        );
+    }
+}
+
+#[test]
+fn the_lenient_decoder_still_enforces_the_size_cap() {
+    let body = "a".repeat(SMALL_CAP);
+    let text =
+        format!(r#"{{"kind":"upload","id":"1","path":"/tmp/x","mode":384,"bytes_b64":"{body}"}}"#);
+    match decode_agent_frame_lenient_within(&text, SMALL_CAP) {
+        Err(ProtoError::TooLarge { cap, .. }) => assert_eq!(cap, SMALL_CAP),
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
 }
