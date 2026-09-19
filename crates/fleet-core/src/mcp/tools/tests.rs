@@ -846,6 +846,69 @@ async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
 }
 
 #[tokio::test]
+async fn per_host_callers_cannot_capture_or_peek_another_hosts_session() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_claude_session_id(on_b, "0f8fad5b-d9cb-469f-a165-70867728950e")
+        .unwrap();
+    // No Claude id yet: peek must still refuse rather than say "nothing
+    // to peek" about another host's session.
+    let bare_b = s
+        .upsert_session("bare-b", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    // Readonly tokens may call both tools, but only on their own host.
+    for mode in [TokenMode::Full, TokenMode::Readonly] {
+        let a = host_caller("hosta", mode);
+        forbidden(
+            t.capture_session(
+                Extension(a.clone()),
+                Parameters(CaptureSessionParams {
+                    session_id: on_b,
+                    scrollback_lines: None,
+                    max_lines: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        for (session_id, claude_session_id) in [
+            (Some(on_b), None),
+            (Some(bare_b), None),
+            // A bare Claude id resolves to the tracked row's host.
+            (
+                None,
+                Some("0f8fad5b-d9cb-469f-a165-70867728950e".to_string()),
+            ),
+        ] {
+            forbidden(
+                t.peek_session(
+                    Extension(a.clone()),
+                    Parameters(PeekSessionParams {
+                        session_id,
+                        claude_session_id,
+                        host_alias: None,
+                    }),
+                )
+                .await
+                .unwrap_err(),
+            );
+        }
+    }
+    // The master token is unbound: its peek at the id-less session gets
+    // the friendly answer, not E_FORBIDDEN.
+    t.peek_session(
+        Extension(Caller::master()),
+        Parameters(PeekSessionParams {
+            session_id: Some(bare_b),
+            claude_session_id: None,
+            host_alias: None,
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
