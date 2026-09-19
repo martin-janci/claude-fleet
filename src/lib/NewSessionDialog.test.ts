@@ -12,10 +12,12 @@ import NewSessionDialog from './NewSessionDialog.svelte';
 import { hosts } from './hosts';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
   hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
   hosts.set([
     { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
     { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
@@ -900,6 +902,105 @@ describe('NewSessionDialog host-scoped worktrees', () => {
     expect(mem.host).toBe('local');
     expect(mem.worktrees).toEqual({ local: 11 });
     spy.mockRestore();
+  });
+});
+
+// #147 finding 1: `newSessionBlocked` (the same derived the Create button's
+// `disabled` reads) was checked only by the button — Enter in the Name field
+// went straight to `submit()` and still routed `new_session` while the hub
+// connection was down. The handler itself must refuse, not just the button.
+describe('NewSessionDialog: Enter is gated the same as the Create button', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  it('Enter in the Name field calls no ipc while a hub client is reconnecting', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable');
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const input = screen.getByTestId('friendly-name');
+    await fireEvent.input(input, { target: { value: 'red comet' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('standalone is untouched: Enter still creates', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: okRow() });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const input = screen.getByTestId('friendly-name');
+    await fireEvent.input(input, { target: { value: 'red comet' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(spy).toHaveBeenCalledOnce();
+    spy.mockRestore();
+  });
+});
+
+// #146 finding 4: `listHostWorktrees` refuses with E_LOCAL_ONLY for a hub
+// client (no hub tool over SSH), so the picker used to show a red error line
+// and only "+ new worktree" for every remote host — the headline "new_session
+// routes now" path landed half-working. A hub client instead reads whatever
+// the project tree already knows about that host (worktree rows an
+// EnterWorktree hook reported land there via the ordinary row-event stream).
+describe('NewSessionDialog host-scoped worktrees on a hub client', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+  const projectWithRemoteWt = {
+    ...project,
+    worktrees: [...project.worktrees, remoteMain],
+  };
+  async function pickHost(alias: string) {
+    const btn = Array.from(document.querySelectorAll('.host-pick')).find(
+      (p) => (p as HTMLElement).dataset.alias === alias,
+    ) as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await tick();
+  }
+
+  it('does not call list_host_worktrees and lists the project tree’s rows for that host, with no error', async () => {
+    mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
+    hubStatus.set(remote);
+    render(NewSessionDialog, { props: { project: projectWithRemoteWt, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    expect(worktreeLabels()).toEqual(['main', '+ new worktree']);
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'list_host_worktrees');
+    expect(calls).toHaveLength(0);
+    expect(screen.queryByTestId('wt-status')).toBeNull();
+  });
+
+  it('standalone is untouched: the ipc is still called', async () => {
+    mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
+    render(NewSessionDialog, { props: { project: projectWithRemoteWt, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() => expect(worktreeLabels()).toEqual(['main', 'feat', '+ new worktree']));
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'list_host_worktrees');
+    expect(calls).toHaveLength(1);
   });
 });
 

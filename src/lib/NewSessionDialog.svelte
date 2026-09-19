@@ -191,6 +191,23 @@
         scanSeq++;
       };
     }
+    if (!ownsTheFleet($hubStatus)) {
+      // `list_host_worktrees` scans over this machine's SSH and refuses with
+      // E_LOCAL_ONLY for a hub client (no hub tool for it) — read whatever
+      // the project tree already knows about this host instead of showing
+      // an error line. No async round-trip, so (unlike the scan below)
+      // nothing needs to force new-worktree mode first: the repair effect
+      // below re-validates `chosenWorktreeId` against these rows right away.
+      scanSeq++;
+      hostWorktrees = {
+        status: 'ready',
+        rows: project.worktrees.filter((w) => w.host_alias === host),
+        cloned: true,
+      };
+      return () => {
+        scanSeq++;
+      };
+    }
     const seq = ++scanSeq;
     hostWorktrees = { status: 'loading', rows: [], cloned: true };
     // Never leave the previous host's row selected (and submittable) while
@@ -506,6 +523,11 @@
 
   async function submit() {
     if (busy) return;
+    // The Create button's `disabled` reads the same derived, but Enter in
+    // any field (`onKeydown` below) calls `submit()` directly — the handler
+    // must refuse too, or a blocked hub client could still route
+    // `new_session` from the keyboard.
+    if (newSessionBlocked) return;
     if (inNewMode) {
       // Strip any trailing dash the live slugifier left in place so the
       // backend sees a fully-finalized branch name.
