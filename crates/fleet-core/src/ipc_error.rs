@@ -133,11 +133,13 @@ pub mod codes {
     /// The caller exceeded a per-caller rate limit (`broadcast_prompt`);
     /// `details.retry_after_secs` says when to retry.
     pub const E_RATE_LIMITED: &str = "E_RATE_LIMITED";
-    /// `move_session`: the source worktree has uncommitted changes
-    /// (`details.dirty_files`). A move never carries uncommitted work.
+    /// `move_session` with `strict: true` only: the source worktree has
+    /// uncommitted changes (`details.dirty_files`). Without `strict` a move
+    /// carries them instead of refusing.
     pub const E_MOVE_DIRTY: &str = "E_MOVE_DIRTY";
-    /// `move_session`: the branch is not on origin, or has commits origin
-    /// lacks. Push first; a move never pushes.
+    /// `move_session` with `strict: true` only: the branch is not on origin,
+    /// or has commits origin lacks. Without `strict` a move carries them
+    /// instead of refusing; a move never pushes either way.
     pub const E_MOVE_UNPUSHED: &str = "E_MOVE_UNPUSHED";
     /// `move_session`: the transcript is over `move.max_transcript_mb`, or
     /// the git bundle of the carried work is over `move.max_bundle_mb`
@@ -150,8 +152,9 @@ pub mod codes {
     /// `move_session`: the source worktree is mid merge / rebase /
     /// cherry-pick / revert / bisect (`details.operation`); finish or abort it.
     pub const E_MOVE_MIDOP: &str = "E_MOVE_MIDOP";
-    /// `move_session`: a pre-existing target worktree has uncommitted
-    /// changes; the move never overwrites them.
+    /// `move_session`: the target worktree has uncommitted changes — its
+    /// own, or work carried by an earlier move that did not finish; the
+    /// move never overwrites them.
     pub const E_MOVE_TARGET_DIRTY: &str = "E_MOVE_TARGET_DIRTY";
     /// `move_session`: carrying the work failed before the target started
     /// (`details.step`, `details.stderr`); the source is untouched.
