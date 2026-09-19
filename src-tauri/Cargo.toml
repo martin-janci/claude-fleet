@@ -1,6 +1,6 @@
 [package]
 name = "claude-fleet"
-version = "0.2.20"
+version = "0.2.22"
 description = "Desktop app for managing Claude Code sessions across hosts"
 authors = ["martin-janci"]
 edition = "2021"
@@ -42,6 +42,30 @@ libc = "0.2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
+# Already in the lockfile via tauri; used to validate `hub.remote_url`.
+url = "2"
+# Talking to a real hub, which `docs/hub.md` says is https. `ring` only, and
+# the same tokio-rustls version fleet-hub's server side already pins, so no
+# second TLS stack enters the tree. `rustls-native-certs` reads the PLATFORM
+# trust store rather than bundling roots, so a corporate CA or an operator's
+# own root works; `webpki-roots` would not, and its CDLA-Permissive-2.0
+# licence is not on deny.toml's allow list.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+# Object-safe async trait for the hub transport seam (already in the tree
+# via fleet-core).
+async-trait = "0.1"
+
+# The macOS keychain, so the client token never touches a child process's
+# argv (which EDR/EndpointSecurity capture and retain). macOS-only: Linux's
+# and Windows' dependency sets are untouched, which is what separates this
+# from the cross-platform `keyring` crate that was rejected at Task 1.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` only: `#[tokio::test(start_paused = true)]`, so the event
+# bridge's idle-timeout tests run on a clock that jumps rather than waiting
+# out a real 37-second silence. fleet-core enables it the same way.
+tokio = { version = "1", features = ["full", "test-util"] }

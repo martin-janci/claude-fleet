@@ -81,7 +81,7 @@ impl Store {
     }
 
     /// This conversation's timeline events, oldest first (at most `limit`,
-    /// the newest ones). Events recorded before migration 034 carry no
+    /// the newest ones). Events recorded before migration 037 carry no
     /// conversation id and are not returned.
     pub fn list_conversation_events(
         &self,

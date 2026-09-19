@@ -25,9 +25,23 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 // ─── wire types ───────────────────────────────────────────────────────────
+//
+// These eight also come back *into* a hub-client desktop, which reads the
+// same JSON out of the matching MCP tool (`mcp::tools::repo`) instead of
+// running git itself, so each derives `Deserialize` as well.
+//
+// Deliberately **without** `#[serde(default)]` on the `Option` fields, unlike
+// the list rows in `store::rows`. Those go out through `ok_json_compact`,
+// which strips nulls recursively, so absent is the normal encoding of `None`
+// and the default is forced. Every tool in `mcp::tools::repo` uses plain
+// `ok_json`, which keeps `"orig_path": null` on the wire — so `Option` parses
+// from an explicit null, and a *renamed or dropped* field still fails loudly
+// rather than becoming a silent `None`. That is the stronger contract. Keep
+// it unless one of those tools switches to the compact encoder; if one does,
+// these must change together.
 
 /// One entry in `git status` for a session's worktree.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChangedFile {
     pub path: String,
     /// Friendly status: modified / added / deleted / renamed / copied /
@@ -40,14 +54,14 @@ pub struct ChangedFile {
 }
 
 /// Flat worktree listing — tracked files plus untracked, gitignore respected.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoTree {
     pub entries: Vec<String>,
     pub truncated: bool,
 }
 
 /// The content of one worktree file.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileContent {
     pub path: String,
     /// Empty when `binary` is true.
@@ -62,7 +76,7 @@ pub struct FileContent {
 }
 
 /// A unified diff for one worktree file.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileDiff {
     pub path: String,
     /// Empty when `binary` is true.
@@ -71,7 +85,7 @@ pub struct FileDiff {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Branch {
     pub name: String,
@@ -83,7 +97,7 @@ pub struct Branch {
     pub tip_hash: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GitRef {
     pub name: String,
@@ -91,7 +105,7 @@ pub struct GitRef {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Commit {
     pub hash: String,
@@ -103,7 +117,7 @@ pub struct Commit {
     pub subject: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitDetail {
     pub hash: String,

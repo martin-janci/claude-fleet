@@ -39,6 +39,35 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
+    /// Print an agent host's token, for `fleet-agent install` on that host (minted on first use).
+    ///
+    /// The only way an agent host's token reaches the host: the hub never
+    /// sends a new token over the agent connection it replaces. `--rotate`
+    /// mints a new one and saves it, which cuts off any agent still connected
+    /// on the old one within a heartbeat.
+    AgentToken {
+        /// The host's fleet alias.
+        host: String,
+        /// Mint a fresh token, revoking the current one.
+        #[arg(long)]
+        rotate: bool,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Set a host's control-API token mode, without a desktop.
+    ///
+    /// The way back from a `readonly` token, which `/agent` refuses: a
+    /// rotation keeps the existing mode, so `agent-token --rotate` cannot
+    /// undo it. Leaves the token itself alone, so nothing has to be
+    /// re-installed on the host.
+    HostTokenMode {
+        /// The host's fleet alias.
+        host: String,
+        /// full (drive the host) or readonly (observe it).
+        mode: String,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
     /// Mint a pairing code for a new client device and show it as a QR. Needs a running hub.
     Pair {
         /// Name for the client, as it will appear in `client list` (1-64 characters).
@@ -103,6 +132,10 @@ async fn main() -> ExitCode {
         } => serve::init(&opts, &env, regenerate_token),
         Cmd::Serve { opts } => serve::serve(&opts, &env).await,
         Cmd::Token { cmd, opts } => serve::token(&opts, &env, matches!(cmd, TokenCmd::Regenerate)),
+        Cmd::AgentToken { host, rotate, opts } => serve::agent_token(&opts, &env, &host, rotate),
+        Cmd::HostTokenMode { host, mode, opts } => {
+            serve::host_token_mode(&opts, &env, &host, &mode)
+        }
         Cmd::Pair {
             name,
             mode,
@@ -166,6 +199,16 @@ mod tests {
         Cli::try_parse_from(["fleet-hub", "init", "--tls", "auto"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "show"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "regenerate"]).unwrap();
+        Cli::try_parse_from(["fleet-hub", "agent-token", "laptop"]).unwrap();
+        Cli::try_parse_from([
+            "fleet-hub",
+            "agent-token",
+            "laptop",
+            "--rotate",
+            "--data-dir",
+            "/tmp/x",
+        ])
+        .unwrap();
         for argv in [
             ["fleet-hub", "token", "show", "--data-dir", "/tmp/x"],
             ["fleet-hub", "token", "--data-dir", "/tmp/x", "show"],
@@ -176,6 +219,49 @@ mod tests {
             assert!(matches!(cmd, TokenCmd::Show), "{argv:?}");
             assert_eq!(opts.data_dir, Some("/tmp/x".into()), "{argv:?}");
         }
+        // `host-token-mode`, the headless way back to a `full` token — with
+        // HubOptions accepted in either position, `--port` included, exactly
+        // as `token` and `client` take them.
+        for argv in [
+            [
+                "fleet-hub",
+                "host-token-mode",
+                "laptop",
+                "full",
+                "--data-dir",
+                "/tmp/x",
+                "--port",
+                "4190",
+            ],
+            [
+                "fleet-hub",
+                "host-token-mode",
+                "--data-dir",
+                "/tmp/x",
+                "--port",
+                "4190",
+                "laptop",
+                "full",
+            ],
+        ] {
+            let Cmd::HostTokenMode { host, mode, opts } = Cli::try_parse_from(argv).unwrap().cmd
+            else {
+                panic!("{argv:?} did not parse as host-token-mode");
+            };
+            assert_eq!(
+                (host.as_str(), mode.as_str()),
+                ("laptop", "full"),
+                "{argv:?}"
+            );
+            assert_eq!(opts.data_dir, Some("/tmp/x".into()), "{argv:?}");
+            assert_eq!(opts.port, Some(4190), "{argv:?}");
+        }
+        Cli::try_parse_from(["fleet-hub", "host-token-mode", "laptop", "readonly"]).unwrap();
+        // Both arguments are required; clap refuses a missing one rather than
+        // guessing a mode.
+        assert!(Cli::try_parse_from(["fleet-hub", "host-token-mode", "laptop"]).is_err());
+        assert!(Cli::try_parse_from(["fleet-hub", "host-token-mode"]).is_err());
+
         // `pair` and `client …`, including HubOptions before or after the
         // subcommand (they are `global = true`).
         let Cmd::Pair {

@@ -16,7 +16,7 @@ Each host has a **projects base**, the directory that holds its repositories, se
 
 ## Control API & tunnels
 
-An embedded MCP server (disabled by default, bound to `localhost`, protected by a bearer token, default port 4180) exposes the full fleet API so an AI assistant can drive sessions programmatically — creating sessions, sending prompts, reading output. When the control API is enabled, **reverse SSH tunnels** (`ssh -R`) forward that localhost port to each remote host's localhost, allowing remote agents to call back to the central server. Each tunnel is supervised: if the `ssh` process exits it restarts with capped exponential backoff. The same fleet can instead be run headless as the `fleet-hub` daemon, with the control API always on and bound to a configurable address; a hub given a public URL is reached directly by every host, and reverse tunnels exist only for a hub left on loopback. See [control-api.md](control-api.md) for the full tool reference and [hub.md](hub.md) for the daemon.
+An embedded MCP server (disabled by default, bound to `localhost`, protected by a bearer token, default port 4180) exposes the full fleet API so an AI assistant can drive sessions programmatically — creating sessions, sending prompts, reading output. When the control API is enabled, **reverse SSH tunnels** (`ssh -R`) forward that localhost port to each remote host's localhost, allowing remote agents to call back to the central server. Each tunnel is supervised: if the `ssh` process exits it restarts with capped exponential backoff. The same fleet can instead be run headless as the `fleet-hub` daemon, with the control API always on and bound to a configurable address; a hub given a public URL is reached directly by every host, and reverse tunnels exist only for a hub left on loopback. The desktop can also be paired with a hub as an ordinary client (Settings → Hub), and it then becomes a live window onto the hub's fleet rather than a second owner of it, decided once at startup. See [control-api.md](control-api.md) for the full tool reference and [hub.md](hub.md) for the daemon and for pointing a desktop at it.
 
 ## Asset catalog
 
@@ -28,6 +28,21 @@ scans hosts read-only for what is actually installed, and shows each asset
 as in sync, drifted, missing or unsupported per host. Assets found on a host
 but not in the catalog are listed as unmanaged and can be imported.
 
+Skills, agents and MCP servers have an optional `install_as` field naming the
+identifier a harness installs them under, when it differs from the catalog
+name (the Claude Code skill/agent directory or `mcpServers.<key>`; the Codex
+skill directory or `mcp_servers.<key>`) — hooks and plugin references derive
+their host key from other fields and cannot set it. Importing a host sets
+`install_as` whenever slugifying its identifier into a kebab-case catalog
+name changes it (`~/.claude/skills/foo_bar` becomes catalog `skill/foo-bar`
+with `install_as: foo_bar`), so the rendered asset keeps installing under the
+original identifier and that host copy reads as in sync rather than
+unmanaged; when the original identifier is not itself a valid install name
+(a space, a slash, or exactly `.` or `..`), the import proceeds under the slug without
+`install_as` and the report lists it as a warning instead. The asset editor
+exposes an "Installs as" field for the kinds that support it, and the detail
+view shows "installs as `<name>`" when one is set.
+
 **Sync** is plan-first: `plan_sync` scans the selected hosts and computes
 which assets to create, update, overwrite, adopt, or remove, returning a plan
 valid for 10 minutes. `apply_sync` applies the plan using compare-and-swap on
@@ -36,7 +51,9 @@ backups before overwriting or removing files and keeps the three newest
 backups of each file. Config merges (JSON for Claude
 Code, TOML for Codex) are applied on the controller and written through the
 secure 0600 path; plugins are installed via `claude plugin install` on the
-host. A per-harness managed manifest (`~/.claude/.fleet-assets.json` and
+host. A pinned plugin is updated through the harness CLI only when the
+catalog's pin changes; `latest` refs are never updated automatically. A
+per-harness managed manifest (`~/.claude/.fleet-assets.json` and
 `~/.codex/.fleet-assets.json`) records what fleet installed, so only managed
 assets are ever removed. Secrets referenced as `${NAME}` in assets are resolved
 at apply time from the fleet database (global with per-host override) and never

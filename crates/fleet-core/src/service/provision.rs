@@ -170,6 +170,75 @@ pub fn commit_host_token(
     s.upsert_host_token(host, token)
 }
 
+/// An agent host's token, for the operator to hand to the host out of band.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentHostToken {
+    pub token: String,
+    /// `full` or `readonly`. A readonly token is refused at `/agent`.
+    pub mode: String,
+    /// Freshly minted by this call (the host had none, or `rotate`).
+    pub minted: bool,
+}
+
+/// The token an agent host's `fleet-agent` must be installed with — what
+/// `fleet-hub agent-token` prints. The existing one unless `rotate` or there
+/// is none, in which case a fresh one is minted and COMMITTED before this
+/// returns: committing is what revokes the old token, and with it any agent
+/// still connected on it. It is the only way an agent host's token reaches
+/// the host — never over the agent connection (see
+/// [`provision_host_with_token`]).
+///
+/// Refused for a host that is not an agent host: an SSH host's token is
+/// written by provisioning, over SSH.
+pub fn agent_host_token(
+    store: &Mutex<Store>,
+    host: &str,
+    rotate: bool,
+) -> Result<AgentHostToken, IpcError> {
+    let s = lock(store)?;
+    let row = s
+        .list_hosts()?
+        .into_iter()
+        .find(|h| h.alias == host)
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no host named {host}")))?;
+    if row.transport != "agent" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{host} is not an agent host (transport {}): its token is written by \
+                 provisioning, over SSH",
+                row.transport
+            ),
+        ));
+    }
+    match s.get_host_token(host)? {
+        Some(existing) if !rotate => Ok(AgentHostToken {
+            token: existing.token,
+            mode: existing.mode,
+            minted: false,
+        }),
+        _ => {
+            let token = crate::mcp::generate_token();
+            s.upsert_host_token(host, &token)?;
+            let mode = s
+                .get_host_token(host)?
+                .map(|r| r.mode)
+                .unwrap_or_else(|| "full".into());
+            Ok(AgentHostToken {
+                token,
+                mode,
+                minted: true,
+            })
+        }
+    }
+}
+
+/// Is `host` reached through a `fleet-agent`?
+fn routes_to_agent(store: &Mutex<Store>, host: &str) -> Result<bool, IpcError> {
+    let s = lock(store)?;
+    Ok(s.agent_host_alias(host)?.as_deref() == Some(host))
+}
+
 /// Provision ONE host end to end with its own token: resolve/mint → write
 /// files → persist the token → ensure the tunnel (remote host, loopback hub) → mark
 /// provisioned. Shared by [`provision_hosts`] and the per-host Rotate action.
@@ -182,11 +251,38 @@ pub async fn provision_host_with_token(
     rotate: bool,
 ) -> Result<(), IpcError> {
     let (token, minted) = resolve_host_token(store, host, rotate)?;
+    if minted && routes_to_agent(store, host)? {
+        // An agent host's new token cannot go the usual way. The usual way
+        // writes it to the host FIRST and commits after, so a failed write
+        // never strands a host on a token it never received — but for an
+        // agent host "writing it to the host" means sending it over the agent
+        // connection, which authenticated with the token being replaced. A
+        // rotation is how an operator answers a stolen token, so that
+        // connection may be the thief's.
+        //
+        // So: commit first, which revokes the old token and with it the live
+        // connection (`HostRouter::agent_alias` drops it before anything else
+        // is sent; the endpoint drops it on its next beat), and send nothing.
+        // The operator hands the new token to the host out of band.
+        commit_host_token(store, host, &token, true)?;
+        return Err(IpcError::new(
+            codes::E_AGENT_REINSTALL,
+            format!(
+                "{host} is an agent host: its new token was saved but NOT sent over the agent \
+                 connection, which authenticated with the old one and has been cut off. Print it \
+                 on the hub with `fleet-hub agent-token {host}`, install it on the host with \
+                 `fleet-agent install --token-file -`, then provision {host} again to rewrite \
+                 its hooks"
+            ),
+        ));
+    }
     provision_one(ssh, host, base, &token).await?;
     commit_host_token(store, host, &token, minted)?;
     // A public hub is reached directly; only a loopback hub needs the
     // reverse tunnel so the host's 127.0.0.1:<port> lands on this machine.
-    if host != "local" && !base.public {
+    // An agent host is never dialed over SSH at all, so it has no use for
+    // one either — it reaches the hub over its own outbound connection.
+    if host != "local" && !base.public && !routes_to_agent(store, host)? {
         tunnels.ensure(host, base.port, base.port);
     }
     if let Ok(s) = store.lock() {
@@ -343,7 +439,7 @@ pub fn reestablish_tunnels(
     }
     let hosts = { lock(store)?.list_hosts()? };
     for h in hosts {
-        if h.provisioned && h.alias != "local" && !h.hidden {
+        if h.provisioned && h.alias != "local" && !h.hidden && h.transport != "agent" {
             tunnels.ensure(&h.alias, base.port, base.port);
         }
     }
@@ -1580,6 +1676,136 @@ mod tests {
         tunnels.stop_all();
     }
 
+    /// An AGENT host's rotation is the answer to a stolen token, and the
+    /// thief may be the agent that is connected. So the new token must never
+    /// travel over that connection: it is committed FIRST, which revokes the
+    /// old one, and nothing is sent to the host at all. The operator hands
+    /// the new token to the host out of band, as the error says.
+    #[tokio::test]
+    async fn rotating_an_agent_host_never_sends_the_new_token_over_its_live_connection() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("laptop", Some("laptop")).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            s.upsert_host_token("laptop", "old-token").unwrap();
+        }
+        let reg = crate::agent::AgentRegistry::new();
+        let ssh = crate::ssh::SshClient::with_agents(Arc::clone(&reg), Arc::clone(&store));
+        // Connected with the OLD token, answering everything as a host would.
+        let agent = crate::agent::fake::FakeAgent::connect_with_token(
+            &reg,
+            "laptop",
+            "old-token",
+            crate::agent::fake::answer_with(0, b"", b""),
+        );
+
+        let err =
+            provision_host_with_token(&store, &ssh, &quiet_tunnels(), "laptop", &base(), true)
+                .await
+                .unwrap_err();
+
+        let new = store
+            .lock()
+            .unwrap()
+            .get_host_token("laptop")
+            .unwrap()
+            .unwrap();
+        assert_ne!(new.token, "old-token", "the rotation is committed");
+        assert_eq!(new.mode, "full");
+        assert!(
+            agent.sent().is_empty(),
+            "nothing may be sent over the connection being revoked: {:?}",
+            agent.sent()
+        );
+        assert_eq!(err.code, codes::E_AGENT_REINSTALL, "{err:?}");
+        assert!(
+            err.message.contains("fleet-hub agent-token laptop")
+                && err.message.contains("fleet-agent install"),
+            "it tells the operator how to deliver the token: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains(&new.token),
+            "the error is not a place to print a secret"
+        );
+        // And the old connection is refused from here on.
+        let refused = crate::ssh::SshExec::run(&ssh, "laptop", &["true"], Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, codes::E_AGENT_OFFLINE);
+        assert!(agent.sent().is_empty());
+    }
+
+    fn agent_host_store() -> Mutex<Store> {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("laptop", Some("laptop")).unwrap();
+        s.set_host_transport("laptop", "agent").unwrap();
+        s.insert_host("mefistos", Some("mefistos")).unwrap();
+        Mutex::new(s)
+    }
+
+    #[test]
+    fn an_agent_host_token_is_minted_once_then_reused_until_rotated() {
+        let store = agent_host_store();
+        let first = agent_host_token(&store, "laptop", false).unwrap();
+        assert!(first.minted);
+        assert_eq!(first.mode, "full");
+        let stored = store
+            .lock()
+            .unwrap()
+            .get_host_token("laptop")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.token, first.token, "committed before it is shown");
+
+        let again = agent_host_token(&store, "laptop", false).unwrap();
+        assert_eq!(again.token, first.token);
+        assert!(!again.minted);
+
+        let rotated = agent_host_token(&store, "laptop", true).unwrap();
+        assert!(rotated.minted);
+        assert_ne!(rotated.token, first.token);
+        let stored = store
+            .lock()
+            .unwrap()
+            .get_host_token("laptop")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.token, rotated.token, "the rotation is committed");
+    }
+
+    #[test]
+    fn an_agent_host_token_reports_a_readonly_mode() {
+        let store = agent_host_store();
+        agent_host_token(&store, "laptop", false).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .set_host_token_mode("laptop", "readonly")
+            .unwrap();
+        assert_eq!(
+            agent_host_token(&store, "laptop", false).unwrap().mode,
+            "readonly"
+        );
+    }
+
+    #[test]
+    fn only_an_agent_host_is_given_a_token_this_way() {
+        let store = agent_host_store();
+        let err = agent_host_token(&store, "mefistos", false).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID, "{err:?}");
+        assert!(err.message.contains("not an agent host"), "{}", err.message);
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_host_token("mefistos")
+            .unwrap()
+            .is_none());
+        let err = agent_host_token(&store, "nobody", false).unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND, "{err:?}");
+    }
+
     #[tokio::test]
     async fn rotate_mints_a_new_token_only_after_the_host_received_it() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -1646,6 +1872,35 @@ mod tests {
         tunnels.stop_all();
     }
 
+    /// An agent host is by definition not dialable over SSH, so a reverse
+    /// tunnel to it would just be `ssh -R` restarting forever against an
+    /// address that never accepts a connection. `provision_host_with_token`
+    /// must skip the tunnel for it even on a loopback hub.
+    #[tokio::test]
+    async fn provisioning_an_agent_host_starts_no_reverse_tunnel() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("laptop", Some("laptop")).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            // An existing token, so this re-provision does not mint a new
+            // one — minting one would instead hit E_AGENT_REINSTALL (an
+            // agent host's new token can never travel over the connection
+            // it is replacing), which is a different, already-tested path.
+            s.upsert_host_token("laptop", "existing-token").unwrap();
+        }
+        let tunnels = quiet_tunnels();
+        let fake = fresh_host();
+        provision_host_with_token(&store, &fake, &tunnels, "laptop", &base(), false)
+            .await
+            .unwrap();
+        assert!(
+            tunnels.snapshot().is_empty(),
+            "an agent host has no way to reach an ssh -R tunnel: {:?}",
+            tunnels.snapshot()
+        );
+    }
+
     #[tokio::test]
     async fn reestablish_tunnels_is_a_no_op_for_a_public_base() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -1687,6 +1942,36 @@ mod tests {
         let argv = spawned.lock().unwrap().clone();
         assert_eq!(argv.len(), 1, "{argv:?}");
         assert!(argv[0].contains("mefistos"), "{argv:?}");
+        tunnels.stop_all();
+    }
+
+    /// A provisioned agent host is skipped on the app-start reconcile pass
+    /// too, the same as on first provisioning: it has no address for the hub
+    /// to dial, so `ssh -R` against it would just restart forever.
+    #[tokio::test]
+    async fn reestablish_tunnels_skips_agent_transport_hosts() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("laptop", Some("laptop")).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            s.set_host_provisioned("laptop", true).unwrap();
+            s.upsert_host("mefistos").unwrap();
+            s.set_host_provisioned("mefistos", true).unwrap();
+        }
+        let tunnels = quiet_tunnels();
+        reestablish_tunnels(&store, &tunnels, &HubBase::loopback(4180)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !tunnels.snapshot().contains_key("laptop"),
+            "an agent host has no way to reach an ssh -R tunnel: {:?}",
+            tunnels.snapshot()
+        );
+        assert_eq!(
+            tunnels.snapshot().get("mefistos"),
+            Some(&true),
+            "an ssh-transport host is still tunneled"
+        );
         tunnels.stop_all();
     }
 

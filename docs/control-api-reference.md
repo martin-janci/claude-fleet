@@ -9,9 +9,13 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 ### `add_host`
 
-Register a new SSH host. Probes it first; only persists the host if it is reachable. Returns the host row as JSON.
+Register a new host. transport is "ssh" (the default: probed first, persisted only if reachable) or "agent" (a host the hub cannot reach, which runs fleet-agent and dials in: persisted unprobed and unreachable until its agent connects; get its token on the hub with `fleet-hub agent-token <alias>`). Returns the host row as JSON.
 
-Parameters: `alias`, `ssh_alias`
+Parameters: `alias`, `ssh_alias`, `transport`
+
+### `agent_status`
+
+Which agent hosts (transport "agent") have a fleet-agent connected, since when (unix seconds), which agent version, host name and OS. Offline agent hosts are listed with connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false on a server that accepts no agents (the desktop). Returns JSON.
 
 ### `apply_sync`
 
@@ -183,7 +187,7 @@ Parameters: `session_id`
 
 ### `plan_sync`
 
-Compute a sync plan: scan the selected hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | noop | blocked) plus a plan_id valid for 10 minutes. Inventory states now include orphan (in the host's fleet manifest, no longer in the catalog). Nothing is written. Pass the plan_id to apply_sync.
+Compute a sync plan: scan the selected hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id valid for 10 minutes. plugin_update fires once a pinned plugin's catalog version changes; a host still on the old version after that stays blocked. Inventory states now include orphan (in the host's fleet manifest, no longer in the catalog). Nothing is written. Pass the plan_id to apply_sync.
 
 Parameters: `host_alias`, `kind`, `name`
 
@@ -343,7 +347,7 @@ Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
 Read a session's recent conversation as structured turns: each turn carries the human prompt, its timestamp, the turn's end timestamp, and items tagged by kind: text (assistant text), tool (a one-line tool summary, flagged when that call failed), compact (a context compaction with its trigger, pre-compaction tokens and summary), command (a slash command with its args and output) or interrupt (the user interrupted the turn). The response also carries events (this conversation's timeline events, oldest first, at most the newest 50) and context (the conversation's context-window usage, or null). turns defaults to 10 and is capped at 100; the character budget scales with it. Prefer this over session_transcript when you want the shape of the exchange rather than one flat blob. Pass claude_session_id (from session_conversations) to read an earlier conversation of the session instead of the current one. Read-only. Errors: E_INVALID (claude_session_id is not one of the session's conversations), E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet).
 
-Parameters: `claude_session_id`, `session_id`, `turns`
+Parameters: `claude_session_id`, `events_limit`, `session_id`, `turns`
 
 ### `session_conversations`
 
@@ -503,6 +507,11 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::rotate_host_token`
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
+- `commands::hub::hub_status`
+- `commands::hub::hub_pair`
+- `commands::hub::hub_disconnect`
+- `commands::hub::hub_connection`
+- `commands::hub::hub_stranded_token`
 - `commands::onboarding::check_local_prereqs`
 - `commands::onboarding::tunnel_status`
 - `commands::assets::catalog_config`

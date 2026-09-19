@@ -1,4 +1,4 @@
-//! Per-session conversation tracking (migration 034). `rebind_conversation`
+//! Per-session conversation tracking (migration 037). `rebind_conversation`
 //! is the ONLY writer of `sessions.claude_session_id` outside the reconcile
 //! upsert, which then opens the conversation through it (the fallback rebind,
 //! spec §1.4); see the spec's §1.3.
@@ -55,7 +55,7 @@ impl StartSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConversationRow {
     pub id: i64,
     pub session_id: i64,

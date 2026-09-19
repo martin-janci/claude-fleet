@@ -18,6 +18,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 dashmap = "6"
 async-trait = "0.1"
 
+# The hub/agent wire types, shared with the `fleet-agent` binary (which never
+# depends on this crate). See crates/fleet-proto/src/lib.rs.
+fleet-proto = { path = "../fleet-proto" }
+
 # Control API: the app embeds an MCP server (streamable-HTTP transport) on
 # localhost so an AI assistant can drive it. See docs/specs/2026-05-21-control-api-mcp-design.md.
 rmcp = { version = "1", features = [
@@ -26,11 +30,19 @@ rmcp = { version = "1", features = [
     "transport-streamable-http-server",
     "schemars",
 ] }
-axum = "0.8"
+# `ws` is for `GET /agent` (crates/fleet-core/src/agent/ws.rs): the WebSocket a
+# `fleet-agent` dials in on. It is NOT on by default in axum 0.8. It brings in
+# axum's own `tokio-tungstenite`/`tungstenite` rather than a second WebSocket
+# stack, plus their `sha1` and `data-encoding` — four packages, all MIT or
+# MIT/Apache-2.0.
+axum = { version = "0.8", features = ["ws"] }
 # `GET /events` builds its SSE body with `stream::unfold`, which is what lets
 # one state machine hold the caller's stream permit for the life of the
-# connection. Default features off: only the `Stream` combinators are used.
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# connection. `sink` is what `/agent` needs: `StreamExt::split`, so the socket's
+# reader and its writer can be separate tasks (a single read-then-write loop
+# deadlocks against an agent doing the same when both sides send a large frame
+# at once).
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 rand = "0.10"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
@@ -57,3 +69,12 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # Property tests for shell::quote (see shell.rs). `std` only: no fork/timeout
 # runners, which keeps the transitive dev tree small.
 proptest = { version = "1", default-features = false, features = ["std"] }
+# The CLIENT half of `GET /agent`'s tests: they dial the real endpoint over a
+# real loopback socket. It resolves to the SAME tokio-tungstenite 0.29 axum's
+# `ws` feature already pulls in for the server half, so it adds no package to
+# `Cargo.lock` — keep the two in step when axum moves.
+tokio-tungstenite = "0.29"
+# The REAL agent, for agent::e2e: the hub and a fleet-agent talking over a
+# loopback socket in one process. A dev-dependency only, and in this
+# direction only — fleet-agent never depends on fleet-core.
+fleet-agent = { path = "../fleet-agent" }

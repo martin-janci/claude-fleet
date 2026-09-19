@@ -20,7 +20,7 @@ use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{SessionEvent, SessionRow, Store};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 /// Default / hard cap on the characters returned by `session_transcript`.
@@ -203,19 +203,23 @@ pub const CONV_READ_BYTES: usize = 1_048_576;
 
 /// One turn of a conversation: the human prompt that opened it and what the
 /// assistant said / did in reply.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ConvTurn {
     /// `None` for assistant output whose prompt lies before the read tail.
+    #[serde(default)]
     pub prompt: Option<String>,
     /// ISO timestamp of the prompt entry (else of the first assistant entry).
+    #[serde(default)]
     pub at: Option<String>,
     /// ISO timestamp of the turn's latest assistant entry: with `at`, how
     /// long the reply took so far. `None` for a turn with no assistant entry.
+    #[serde(default)]
     pub ended_at: Option<String>,
+    #[serde(default)]
     pub items: Vec<ConvItem>,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConvItem {
     Text {
@@ -232,19 +236,25 @@ pub enum ConvItem {
     /// the following `isCompactSummary` user entry when the read tail has
     /// it.
     Compact {
+        #[serde(default)]
         trigger: Option<String>,
+        #[serde(default)]
         pre_tokens: Option<i64>,
+        #[serde(default)]
         summary: Option<String>,
     },
     /// A slash command the user ran (`<command-name>` user entry); `output`
     /// is the following `<local-command-stdout>` / `<local-command-stderr>`.
     Command {
         name: String,
+        #[serde(default)]
         args: Option<String>,
+        #[serde(default)]
         output: Option<String>,
     },
     /// `[Request interrupted by user]` (`during_tool`: "… for tool use").
     Interrupt {
+        #[serde(default)]
         during_tool: bool,
     },
 }
@@ -296,7 +306,7 @@ fn cap_chars(s: &str, max: usize) -> String {
     out
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Conversation {
     pub turns: Vec<ConvTurn>,
     /// Older turns or items were dropped to fit the turn / char budget.
@@ -307,14 +317,16 @@ pub struct Conversation {
     pub context: Option<ContextView>,
     /// This conversation's timeline events, oldest first. Empty wherever a
     /// `Conversation` is built without a store (e.g. `trim_conversation`
-    /// alone); [`fetch_conversation_for_row`] fills it in.
+    /// alone); [`fetch_conversation_for_row`] fills it in. Defaulted so a
+    /// hub that predates events still deserializes.
+    #[serde(default)]
     pub events: Vec<SessionEvent>,
 }
 
 /// The context size shown in the Conversation payload (spec §1.5), derived
 /// from a [`crate::service::context::ContextUsage`] read at the same time as
 /// the transcript tail.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ContextView {
     pub tokens: i64,
     pub window: i64,
@@ -846,6 +858,15 @@ pub const CONV_EVENTS_LIMIT_UI: i64 = 200;
 /// Most timeline events the `session_conversation` MCP tool returns — kept
 /// small so an assistant's context is not flooded.
 pub const CONV_EVENTS_LIMIT_MCP: i64 = 50;
+
+/// The `session_conversation` tool's `events_limit`: default
+/// [`CONV_EVENTS_LIMIT_MCP`], clamped to `1..=CONV_EVENTS_LIMIT_UI` (the
+/// desktop asks for the UI window when it reads through a hub).
+pub fn conv_events_limit(requested: Option<i64>) -> i64 {
+    requested
+        .unwrap_or(CONV_EVENTS_LIMIT_MCP)
+        .clamp(1, CONV_EVENTS_LIMIT_UI)
+}
 
 /// Validate `args` and build the script that prints the last `max_bytes` of
 /// its transcript. Errors: `E_INVALID` (bad id / host / pane name).
