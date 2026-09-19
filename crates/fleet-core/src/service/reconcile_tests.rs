@@ -724,7 +724,11 @@ async fn ghost_lifecycle_ghosts_unghosts_and_dismissed_rows_stay_gone() {
         vec![format!("session:updated:{id}")]
     );
 
-    // Back in tmux → un-ghosted in place (same id, lost_at cleared).
+    // Back in tmux → un-ghosted in place (same id, lost_at cleared). The
+    // reviving pass must start in a later second than the loss: a ghost is
+    // revived only by an observation strictly newer than its `lost_at`
+    // (#170), and whole seconds are the resolution of both stamps.
+    next_unix_second().await;
     f.list("alpha", "s1|1|3|0|/tmp/s1\n");
     f.pass().await;
     let u = f.row("s1", "alpha");

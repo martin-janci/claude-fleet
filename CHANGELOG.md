@@ -18,6 +18,36 @@ Entries before 0.2.4 were plain version bumps and were not recorded individually
 - **deps:** resolve devalue 5.9.2 (GHSA-9rgm-9g3h-6x36).
 - **release:** release notes give the working macOS install steps.
 
+### Also in this release
+
+_The `v0.2.22` tag is a merge of the release commit below and PR #136 (the
+`fleet-agent` host agent), so the tag contains #136 even though the release
+commit that generated this section predates its merge. These entries are
+added by hand for that reason — see #152._
+
+#### Added
+- **agent:** the fleet-agent binary — a lightweight process for hosts the hub
+  cannot reach over SSH.
+- **core:** an agent transport behind the existing SshExec seam, so a host can
+  run over the agent connection just like SSH.
+- **core:** route each host to its own transport.
+- **hub:** the /agent WebSocket endpoint.
+- **hub:** hand an agent host its enrollment token out of band.
+- **hub:** set a host token's mode without a desktop.
+
+#### Fixed
+- **agent:** a system install leaves its config reachable only by the user it
+  runs as.
+- **agent:** the config directory's mode no longer depends on the umask.
+- **agent:** `--insecure` is confined to loopback.
+- **agent:** stopping the agent kills the children it is running.
+- **agent:** size the frame cap to the transcript, and stop `E_TIMEOUT`
+  re-firing a billed request.
+- **hub:** bound agent connections per host, refuse SSH hosts, and never hold
+  a stuck socket.
+- **hub:** cut a live agent off when its host token is rotated, narrowed or
+  removed.
+
 ## [0.2.21] - 2026-09-18
 
 ### Added

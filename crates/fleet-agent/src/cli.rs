@@ -6,7 +6,7 @@
 
 use crate::config::{self, Config};
 use crate::conn::Endpoint;
-use crate::install::{Layout, Plan, Scope};
+use crate::install::{Layout, Plan, Scope, SystemdStatus};
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -26,6 +26,9 @@ pub enum Command {
     /// Dial the hub and serve it, reconnecting for as long as this runs.
     Run(RunArgs),
     /// Write a systemd unit that runs the agent, then enable and start it.
+    /// Needs a Linux host with systemd already running; refuses cleanly,
+    /// before writing anything, otherwise — see `run` for how to run the
+    /// agent under your own supervisor instead.
     Install(InstallArgs),
     /// Is the service running, and is it connected to its hub?
     Status(StatusArgs),
@@ -110,6 +113,10 @@ pub struct InstallEnv {
     pub sudo_user: Option<String>,
     /// `$XDG_CONFIG_HOME`, else `~/.config`.
     pub config_home: Option<PathBuf>,
+    /// Whether this host can run a systemd unit — checked first, before any
+    /// other input, so a host with no systemd is refused before anything
+    /// else about the plan is even considered.
+    pub systemd: SystemdStatus,
 }
 
 /// The token from `--token`, or read from `--token-file` (`-` for `stdin`),
@@ -173,12 +180,20 @@ pub fn run_config(
 
 /// Turn `install`'s flags into a [`Plan`], refusing anything wrong BEFORE a
 /// file is written. `owner_of` resolves the system scope's user to a uid/gid.
+///
+/// The systemd check comes first, ahead of every other check: a host with no
+/// systemd to install a unit on is refused before a bad hub URL or an empty
+/// token even gets a chance to complain about itself, and — the point that
+/// matters — before anything is written.
 pub fn install_plan(
     args: &InstallArgs,
     env: &InstallEnv,
     owner_of: impl Fn(&str) -> Result<(u32, u32), String>,
     stdin: &mut dyn std::io::Read,
 ) -> Result<Plan, String> {
+    if !env.systemd.available() {
+        return Err(env.systemd.refusal());
+    }
     Endpoint::parse(&args.hub, args.insecure)?;
     let token = read_token(args.token.as_deref(), args.token_file.as_deref(), stdin)?;
     config::check_token(&token).map_err(|e| e.to_string())?;
@@ -251,6 +266,10 @@ mod tests {
             root,
             sudo_user: sudo_user.map(str::to_string),
             config_home: Some(PathBuf::from("/home/alice/.config")),
+            systemd: SystemdStatus {
+                init_running: true,
+                systemctl_on_path: true,
+            },
         }
     }
 
@@ -317,6 +336,54 @@ mod tests {
         assert_eq!(plan.binary, PathBuf::from("/usr/local/bin/fleet-agent"));
         assert_eq!(plan.config.token, "t");
         assert!(plan.start);
+    }
+
+    /// The guard fires before anything else: no Plan is built, so nothing
+    /// `install` could write ever gets a chance to.
+    #[test]
+    fn install_refuses_before_anything_else_when_there_is_no_systemd() {
+        let a = install_args(&["install", "--hub", "https://hub.example", "--token", "t"]);
+        let mut e = env(true, Some("alice"));
+        e.systemd = SystemdStatus {
+            init_running: false,
+            systemctl_on_path: true,
+        };
+        let err = install_plan(&a, &e, uid_1000, &mut std::io::empty()).unwrap_err();
+        assert!(err.contains("/run/systemd/system does not exist"), "{err}");
+        assert!(err.contains("nothing was written"), "{err}");
+        assert!(err.contains("fleet-agent run"), "{err}");
+
+        let mut e = env(true, Some("alice"));
+        e.systemd = SystemdStatus {
+            init_running: true,
+            systemctl_on_path: false,
+        };
+        let err = install_plan(&a, &e, uid_1000, &mut std::io::empty()).unwrap_err();
+        assert!(err.contains("systemctl is not"), "{err}");
+    }
+
+    /// The literal requirement: after a no-systemd refusal, the path
+    /// `install` would have written the config to does not exist.
+    #[test]
+    fn no_systemd_means_the_config_path_never_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = install_args(&[
+            "install",
+            "--hub",
+            "https://hub.example",
+            "--token",
+            "t",
+            "--user",
+        ]);
+        let mut e = env(false, None);
+        e.config_home = Some(dir.path().to_path_buf());
+        e.systemd = SystemdStatus {
+            init_running: false,
+            systemctl_on_path: false,
+        };
+        let expected_config = Layout::user(dir.path()).config_path;
+        assert!(install_plan(&a, &e, uid_1000, &mut std::io::empty()).is_err());
+        assert!(!expected_config.exists());
     }
 
     #[test]

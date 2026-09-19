@@ -23,11 +23,29 @@ cp fleet-hub.env.example fleet-hub.env
 ```
 
 **The image.** The compose file pulls `ghcr.io/martin-janci/fleet-hub:latest`.
-A new ghcr package starts out private, and no `latest` tag exists until the
-first `v*` release tag is pushed (a manual run of the `hub-image.yml`
-workflow publishes only a `sha-<commit>` tag). Until then — or if you cannot
-pull the package — build the image locally from a checkout of the repository
-and point `image:` in `docker-compose.yml` at it:
+`hub-image.yml` has now run successfully on a pushed `v*` tag (v0.2.21 and
+later), so a `latest` tag should exist —
+[check the package page](https://github.com/martin-janci/claude-fleet/pkgs/container/fleet-hub)
+if you are unsure, or if it still shows private (a manual `workflow_dispatch`
+run, rather than a tag push, only ever publishes a `sha-<commit>` tag, never
+`latest`). If you cannot pull the package for any reason, build the image
+locally from a checkout of the repository instead and point `image:` in
+`docker-compose.yml` at it:
+
+**Platforms.** `linux/amd64` and `linux/arm64`. **arm64 is best-effort
+until it has a track record**: `hub-image.yml` builds each platform on its
+own native runner (no QEMU) and, if the `arm64` leg fails, still publishes
+`amd64` alone under the same tags rather than blocking the image on it —
+so a given `latest`/`vX.Y.Z` may, on such a run, carry only an amd64
+manifest, and `docker pull --platform linux/arm64` (or any arm64 host
+pulling by tag) then fails outright rather than silently getting an amd64
+image. **The run itself still shows green** when this happens — an
+amd64-only publish is a successful run, not a failed one, since amd64
+publishing must keep working regardless of arm64 — but it is not silent:
+the run carries a `::warning::` annotation and a job-summary note saying
+arm64 failed and the manifest is amd64-only. Check the `hub-image`
+workflow's own run history and summaries, or `docker buildx imagetools
+inspect ghcr.io/martin-janci/fleet-hub:latest`, if that matters to you.
 
 ```bash
 docker build -f crates/fleet-hub/Dockerfile -t fleet-hub:local .
@@ -203,7 +221,29 @@ no reverse tunnel for it.
    This is the only way an agent host's token reaches the host. The hub never
    sends a token over the agent connection (see *Rotating* below). Treat the
    output like a password.
-3. **Install the agent, on the host.** Paste the token into stdin rather
+3. **Get the binary, on the host.** Each release attaches
+   `fleet-agent-<version>-<target>.tar.gz` for `x86_64-unknown-linux-gnu` and
+   `aarch64-unknown-linux-gnu` (binary + a `README.txt` pointing back here,
+   plus the repository's own root `LICENSE` when one exists — this
+   repository does not have one yet, so today's tarballs carry no LICENSE
+   file rather than a fabricated one), plus one `SHA256SUMS` covering all
+   four tarballs in the release —
+   [github.com/martin-janci/claude-fleet/releases](https://github.com/martin-janci/claude-fleet/releases):
+   ```bash
+   v=0.3.0   # the release you're installing; target: x86_64- or aarch64-unknown-linux-gnu
+   curl -LO https://github.com/martin-janci/claude-fleet/releases/download/v$v/fleet-agent-$v-x86_64-unknown-linux-gnu.tar.gz
+   curl -LO https://github.com/martin-janci/claude-fleet/releases/download/v$v/SHA256SUMS
+   sha256sum -c SHA256SUMS --ignore-missing
+   tar xzf fleet-agent-$v-x86_64-unknown-linux-gnu.tar.gz
+   sudo install -m 0755 fleet-agent-$v-x86_64-unknown-linux-gnu/fleet-agent /usr/local/bin/fleet-agent
+   ```
+   These are built on `ubuntu-22.04` runners and need **glibc 2.35 or
+   newer** on the host — Ubuntu 22.04+, Debian 12+ and equivalents; not
+   Debian 11. No matching release yet, or an older host? Build from a
+   checkout instead: `cargo build -p fleet-agent --release --locked` needs
+   neither the Tauri system libraries nor `fleet-core` (see
+   `crates/fleet-agent/Cargo.toml`).
+4. **Install the agent, on the host.** Paste the token into stdin rather
    than the command line. `--token` also works, but it shows up in the
    process list and in your shell history.
    ```bash
@@ -212,6 +252,12 @@ no reverse tunnel for it.
    # or a user unit, no root needed:
    fleet-agent install --user --hub https://fleet.example.com --token-file -
    ```
+   **No systemd on this host (or not Linux at all)?** `install` checks for
+   it first — `/run/systemd/system` and `systemctl` on `$PATH` — and refuses
+   cleanly, before writing anything, naming what it checked. Run the agent
+   under your own supervisor instead: `fleet-agent run --hub <url>
+   --token-file -` (or `--config <path>` once `install` has written one
+   somewhere systemd could).
    **Careful with stdin under `sudo`.** `sudo` reads its password from the
    terminal, so a token pasted while it is still asking goes to the password
    prompt, not to `--token-file -`. A pipe into `ssh -tt host sudo
@@ -244,17 +290,17 @@ no reverse tunnel for it.
      loopback (`localhost`, `127.0.0.0/8`, `::1`). It exists for a test on
      one machine. Anywhere else it is refused, because the token would cross
      the network in clear.
-4. **Check it,** on the host with `fleet-agent status [--user]`, or from any
+5. **Check it,** on the host with `fleet-agent status [--user]`, or from any
    client with `agent_status`. `fleet-agent status` exits `0` when the
    service is running and connected, and `3` otherwise. It reads the
    agent's own report through `systemctl show`; the agent keeps no state
    file.
-5. **Provision it:** `probe_host { alias: "laptop" }` (or wait for the next
+6. **Provision it:** `probe_host { alias: "laptop" }` (or wait for the next
    reconcile pass), then `provision_hosts`. Provisioning runs over the
    agent, exactly as it would over SSH.
 
-Without systemd, `fleet-agent run --config <path>` (or
-`run --hub <url> --token-file -`) runs the same loop in the foreground.
+(No systemd? See the no-systemd note under step 4 — `fleet-agent run` is
+the same loop, just in the foreground, under whatever supervises it instead.)
 
 ### What the agent does, and does not do
 
@@ -278,6 +324,64 @@ Without systemd, `fleet-agent run --config <path>` (or
   everything else in the MCP API work. The interactive terminal does not.
 - **Offline.** A call for an agent host with no agent connected fails at
   once with `E_AGENT_OFFLINE`; it never waits out a timeout.
+
+### Protocol version negotiation
+
+The hub and `fleet-agent` are separately-released binaries, so a frame kind
+one side adds can reach a peer that predates it. The wire carries a small,
+explicit version to keep that safe:
+
+- The agent's `hello` carries `proto`, its build's protocol version. The
+  hub's `welcome` — the first frame it sends back, right after accepting the
+  `hello` — carries the hub's own, so each side learns the other's.
+- Each side accepts a range, `MIN_SUPPORTED_PROTO..=PROTO_VERSION`, compiled
+  into that binary. A number outside the other side's range is refused with
+  a WebSocket close naming both versions and which one to update — never a
+  bare disconnect. The hub logs `refused a hello: protocol version` at warn
+  and never registers the connection; the agent logs `protocol version
+  refused` at **error** (louder than an ordinary reconnect, which logs at
+  warn) and does not tight-loop over it: it keeps trying, at the slowest
+  backoff interval, quietly, until whichever side is behind is upgraded —
+  no restart needed on the host once that happens.
+- Past that handshake, a frame whose `kind` neither side recognises is
+  **not** fatal: it is logged once per kind, at warn, and skipped, so a
+  hub ahead of an agent (or the reverse) can add a frame kind the older side
+  simply never acts on. A `kind` a side DOES recognise, but cannot parse the
+  rest of, is still corruption and still ends the connection — evolution is
+  forgiven, damage is not.
+- **Which order to upgrade in, today.** At `PROTO_VERSION` 1 there is nothing
+  older to be compatible with, so this is moot right now — but it will not
+  stay moot. The rule for whoever bumps `PROTO_VERSION` next (enforced by a
+  doc comment on `MIN_SUPPORTED_PROTO` in `fleet-proto`, not by this doc):
+  hold `MIN_SUPPORTED_PROTO` at the version BEFORE the bump for at least one
+  release. Only under that rule is either order actually safe — the hub
+  first (an agent within the still-wide window keeps working unchanged), or
+  an agent first (it waits, quietly, at the slowest backoff interval — it
+  retries every 30-60 s — until the hub catches up, then reconnects with no
+  further action). If a hub is ever bumped WITHOUT holding the floor down, it
+  refuses every older agent the moment it restarts; that is a mistake in the
+  release, not something an operator can route around by choosing an order.
+- **What a pre-versioning agent looks like, if one is ever run against this
+  hub.** An agent built before `proto` existed sends a `hello` with no
+  `proto` field, which this hub reads as `proto: 0` — below
+  `MIN_SUPPORTED_PROTO` (1) today, always. The hub refuses it at the
+  WebSocket layer with a close naming both versions and closes with
+  `refused a hello: protocol version` in its own log; the agent, being a
+  pre-versioning build, has no special handling for this — from the agent's
+  side it looks like an ordinary rejected connection, so it just reconnects
+  at ITS ordinary (pre-versioning) backoff, indefinitely, `refused a hello:
+  protocol version` repeating in the HUB's log every time it tries. The
+  operator's fix is the same either way: install a proto-1 (or later)
+  `fleet-agent`.
+- **What a version-refused CURRENT agent looks like.** Unlike a
+  pre-versioning agent, a proto-1-or-later `fleet-agent` that gets refused —
+  by the hub (its hello was out of range) or because it decided the hub's own
+  `welcome` was out of ITS range, or because the hub never sent one at all
+  within one heartbeat (30 s) of connecting — logs the reason at **error**,
+  once per attempt, and backs off at the slowest interval (it retries every
+  30-60 s, not the normal 1-2-4-8...-60 s growth) instead of hammering a hub
+  that has already said no. It keeps trying — a hub upgrade heals it without
+  touching the host — just quietly.
 
 ### Rotating, narrowing or removing an agent host's token
 
@@ -312,10 +416,13 @@ routed to it.
   That touches only the mode, not the token, so nothing has to be
   re-installed on the host. A refused agent is retrying with a backoff
   capped at a minute, so it reconnects by itself; restarting it only hurries
-  that along. The desktop does the same thing through
-  `set_host_token_mode`. A token that `fleet-hub agent-token` mints for a
-  host that had none is `full`, and the command warns on stderr when a
-  token is not.
+  that along. The desktop's `set_host_token_mode` command is `local_only`: it
+  changes the mode in the desktop's *own* store, not the hub's, so it only
+  does something when the desktop is running its own embedded control API
+  (standalone, or as its own agent-accepting server) — never against a hub it
+  is paired to as a client. On a hub, always use `fleet-hub host-token-mode`
+  above. A token that `fleet-hub agent-token` mints for a host that had none
+  is `full`, and the command warns on stderr when a token is not.
 
 ### Limits, and what is still open
 
@@ -500,6 +607,19 @@ the stream closes — reconnect and re-list rather than assume continuity.
 ## Bare binary
 
 Prefer running without Docker, or need it as a system service:
+
+```bash
+v=0.3.0   # the release you're installing; target: x86_64- or aarch64-unknown-linux-gnu
+curl -LO https://github.com/martin-janci/claude-fleet/releases/download/v$v/fleet-hub-$v-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/martin-janci/claude-fleet/releases/download/v$v/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+tar xzf fleet-hub-$v-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m 0755 fleet-hub-$v-x86_64-unknown-linux-gnu/fleet-hub /usr/local/bin/fleet-hub
+```
+
+Like `fleet-agent`'s binaries (see *Get the binary* above), these are built
+on `ubuntu-22.04` runners and need **glibc 2.35 or newer** on the host. No
+matching release, or an older host? Build from a checkout instead:
 
 ```bash
 cargo build -p fleet-hub --release
@@ -706,7 +826,9 @@ only (the hook block is rewritten, not duplicated). A desktop app can still
 see that host's sessions through its own reconcile pass, but it loses the
 hook-driven signals for that host: real-time `idle`/`working` status,
 `turn_seq` updates, task completion, and `safe_kill_session` finalization —
-until the host becomes a client of the hub itself (a future sub-project).
+unless the desktop itself is paired to the hub as a client (see *Point a
+desktop at the hub* below), where it follows the hub's own event stream
+instead of reconciling independently.
 
 Run `provision_hosts` from only one of the two — the hub or the desktop —
 for a given host. Running it from both leaves the host's hook block pointed
@@ -857,9 +979,8 @@ the missing parameters, route it then.
 
 ### Known limitations
 
-- **The terminal works over SSH only.** A hub client has no in-app terminal;
-  attach from a shell with the command the terminal tab shows — except for a
-  session on an agent-host, which has no such command (see above).
+- **The terminal.** See *The terminal is local-only* under *What is different
+  from standalone* above.
 - **Projects and worktrees are not re-listed on reconnect**, because their
   list tools answer a different shape from their events. They refresh when
   the window regains focus.
@@ -872,9 +993,11 @@ the missing parameters, route it then.
   wire contract is outside this build's range — only the event bridge (row
   events, resync) is gated; see *Version skew*.
 - **Not yet run as an app.** At the time of writing this mode is verified by
-  its test suites only: the desktop has not been launched against a real hub,
-  and the macOS keychain path has not been compiled or run. Report anything
-  that does not match this page.
+  its test suites only: the desktop has not been launched against a real hub.
+  The macOS keychain path (`token_store.rs`) compiles on every macOS CI run,
+  but no test exercises it against a real keychain — only the file-backed
+  fallback used on other platforms has test coverage. Report anything that
+  does not match this page.
 
 ### Going back
 
