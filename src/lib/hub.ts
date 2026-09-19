@@ -327,11 +327,12 @@ export function hubActionBlocked(
  *
  * `E_CONFIRM_REQUIRED` is the trap this exists for. With
  * `mcp.confirm_destructive` on, the hub refuses `kill_session`,
- * `delete_worktree`, `move_session` and `cancel_task` until someone approves
- * them — and the desktop's own confirmation dialog answers **this process's**
- * queue, which in remote mode is always empty. So the click is refused, the
- * dialog never appears, and without this sentence there is nothing anywhere
- * saying that the approval has to happen on the hub.
+ * `delete_worktree`, `move_session`, `cancel_task` and `repair_session` until
+ * someone approves them — and the desktop's own confirmation dialog answers
+ * **this process's** queue, which in remote mode is always empty. So the
+ * click is refused, the dialog never appears, and without this sentence
+ * there is nothing anywhere saying that the approval has to happen on the
+ * hub.
  *
  * "This window will follow" is a consequence of the event bridge, not a hope:
  * once the operator approves, the hub emits `session:killed` /

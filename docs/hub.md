@@ -801,7 +801,8 @@ standalone exactly as before.
 - **The terminal is local-only.** The PTY attaches a local `ssh`/`tmux`
   process and the hub streams no pane. The terminal tab shows the
   `ssh <host>` / `tmux attach -t <session>` line for the selected session
-  instead of a dead pane.
+  instead of a dead pane — or, for a session on an agent-host (no SSH route
+  from here at all), a line saying so instead.
 - **The asset catalog and the setup checklist** are about the machine that
   owns the fleet, so they show the reason instead of their panels. (The hub
   does serve the catalog's asset list, `list_assets`, to any paired client;
@@ -818,8 +819,12 @@ the range this build understands (`MIN_HUB_CONTRACT..=MAX_HUB_CONTRACT`,
 `src-tauri/src/backend/contract.rs`). Outside it, the banner says which side
 is behind and what to do — the hub is too old (update the hub) or this app
 predates the hub (update this app) — and, for as long as that connection
-lasts, the desktop applies no row event and re-lists nothing from it:
-stale-but-honest beats fresh-but-wrong. It keeps retrying on the same
+lasts, the event bridge applies no row event from it and calls no resync (the
+backfill a fresh connection would otherwise do): stale-but-honest beats
+fresh-but-wrong for anything driven by the live stream. Routed reads
+(`list_sessions`, `list_hosts`, `session_conversations`, repo reads, the
+focus-refresh path) do not yet consult the connection state and still run
+against a skewed hub — see *Known limitations*. It keeps retrying on the same
 backoff rather than hammering a hub it cannot use, and re-checks the
 revision on every reconnect, so an upgrade on either side is picked up on
 its own without restarting the app.
@@ -853,10 +858,16 @@ the missing parameters, route it then.
 ### Known limitations
 
 - **The terminal works over SSH only.** A hub client has no in-app terminal;
-  attach from a shell with the command the terminal tab shows.
+  attach from a shell with the command the terminal tab shows — except for a
+  session on an agent-host, which has no such command (see above).
 - **Projects and worktrees are not re-listed on reconnect**, because their
   list tools answer a different shape from their events. They refresh when
   the window regains focus.
+- **Routed reads are not gated on contract skew.** `list_sessions`,
+  `list_hosts`, `session_conversations`, repo reads and the focus-refresh path
+  do not consult the connection state, so they still run against a hub whose
+  wire contract is outside this build's range — only the event bridge (row
+  events, resync) is gated; see *Version skew*.
 - **Not yet run as an app.** At the time of writing this mode is verified by
   its test suites only: the desktop has not been launched against a real hub,
   and the macOS keychain path has not been compiled or run. Report anything
