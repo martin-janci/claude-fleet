@@ -85,6 +85,10 @@ pub struct MoveSessionArgs {
     /// Leave the source session running after the target is confirmed.
     #[serde(default)]
     pub keep_source: bool,
+    /// Refuse a dirty worktree (`E_MOVE_DIRTY`) or an unpushed branch
+    /// (`E_MOVE_UNPUSHED`) instead of carrying them. Default false.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// What a completed move did.
@@ -316,12 +320,15 @@ pub struct SourceState {
     pub remote_sha: Option<String>,
     /// Commits in HEAD not on the origin branch; -1 when unknown.
     pub ahead: i64,
+    /// An operation in progress (`merge`, `rebase`, `cherry-pick`, `revert`,
+    /// `bisect`); its state is not carried, so the move is refused.
+    pub midop: Option<String>,
 }
 
 /// Parse the inspect script's `\x1e`-separated output.
 pub fn parse_inspection(stdout: &str) -> Result<SourceState, IpcError> {
     let parts: Vec<&str> = stdout.split('\x1e').collect();
-    if parts.len() != 6 {
+    if parts.len() != 7 {
         return Err(IpcError::new(
             codes::E_PARSE,
             format!(
@@ -338,11 +345,48 @@ pub fn parse_inspection(stdout: &str) -> Result<SourceState, IpcError> {
         current_branch: parts[3].trim().to_string(),
         remote_sha: (!remote.is_empty()).then(|| remote.to_string()),
         ahead: parts[5].trim().parse().unwrap_or(-1),
+        midop: Some(parts[6].trim())
+            .filter(|m| !m.is_empty())
+            .map(str::to_string),
     })
 }
 
-/// Refuse a source that would lose work or land on the wrong code.
+/// The refusals that hold in every mode: an operation in progress, an
+/// unreadable HEAD, a worktree on another branch. Dirty and unpushed work is
+/// not refused here — the carry engine takes it along.
+pub fn carry_verdict(state: &SourceState, branch: &str) -> Result<(), IpcError> {
+    if let Some(op) = state.midop.as_deref() {
+        return Err(IpcError::new(
+            codes::E_MOVE_MIDOP,
+            format!(
+                "the source worktree {} is in the middle of a {op}; finish or abort it first — move_session does not carry an operation in progress",
+                state.worktree
+            ),
+        )
+        .with_details(serde_json::json!({ "operation": op })));
+    }
+    if state.head.is_empty() {
+        return Err(IpcError::new(
+            codes::E_GIT,
+            format!("could not read HEAD in {}", state.worktree),
+        ));
+    }
+    if state.current_branch != branch {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "the source worktree is on {:?} but the session's branch is {branch:?}; check out {branch} first",
+                state.current_branch
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The strict-mode verdict: [`carry_verdict`] plus today's refusals of
+/// uncommitted and unpushed work.
 pub fn preflight_verdict(state: &SourceState, branch: &str) -> Result<(), IpcError> {
+    carry_verdict(state, branch)?;
     if !state.dirty.is_empty() {
         let shown: Vec<String> = state
             .dirty
@@ -361,21 +405,6 @@ pub fn preflight_verdict(state: &SourceState, branch: &str) -> Result<(), IpcErr
             ),
         )
         .with_details(serde_json::json!({ "dirty_files": state.dirty })));
-    }
-    if state.head.is_empty() {
-        return Err(IpcError::new(
-            codes::E_GIT,
-            format!("could not read HEAD in {}", state.worktree),
-        ));
-    }
-    if state.current_branch != branch {
-        return Err(IpcError::new(
-            codes::E_INVALID_STATE,
-            format!(
-                "the source worktree is on {:?} but the session's branch is {branch:?}; check out {branch} first",
-                state.current_branch
-            ),
-        ));
     }
     if state.remote_sha.is_none() {
         return Err(IpcError::new(
@@ -454,8 +483,8 @@ pub fn parse_target_prep(stdout: &str, claude_id: &str) -> Result<TargetPrep, Ip
 // ── scripts (every interpolated value goes through `shell::quote`) ─────────
 
 /// Source git state, `\x1e`-separated: worktree, porcelain, HEAD, current
-/// branch, origin sha of `branch`, ahead count. Tries the pane's cwd first,
-/// then `hint`.
+/// branch, origin sha of `branch`, ahead count, mid-op name (or empty). Tries
+/// the pane's cwd first, then `hint`.
 pub fn inspect_script(tmux_name: &str, hint: Option<&str>, branch: &str) -> String {
     format!(
         r#"# cf-move:inspect
@@ -482,7 +511,17 @@ if [ -n "$rsha" ]; then
   ahead=$(git -C "$wt" rev-list --count "$rsha..HEAD" 2>/dev/null)
   if [ -z "$ahead" ]; then ahead=-1; fi
 fi
-printf '%s\036%s\036%s\036%s\036%s\036%s' "$wt" "$porcelain" "$head" "$cur" "$rsha" "$ahead"
+gd=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)
+midop=''
+if [ -n "$gd" ]; then
+  if [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ]; then midop=rebase
+  elif [ -f "$gd/MERGE_HEAD" ]; then midop=merge
+  elif [ -f "$gd/CHERRY_PICK_HEAD" ]; then midop=cherry-pick
+  elif [ -f "$gd/REVERT_HEAD" ]; then midop=revert
+  elif [ -f "$gd/BISECT_LOG" ]; then midop=bisect
+  fi
+fi
+printf '%s\036%s\036%s\036%s\036%s\036%s\036%s' "$wt" "$porcelain" "$head" "$cur" "$rsha" "$ahead" "$midop"
 "#,
         name = quote(tmux_name),
         hint = quote(hint.unwrap_or("")),
@@ -1684,8 +1723,12 @@ mod tests {
     }
 
     fn inspection(porcelain: &str, rsha: &str, ahead: &str) -> String {
+        inspection_midop(porcelain, rsha, ahead, "")
+    }
+
+    fn inspection_midop(porcelain: &str, rsha: &str, ahead: &str, midop: &str) -> String {
         format!(
-            "/home/a/p/o/r/.claude/worktrees/feat\x1e{porcelain}\x1e{HEAD}\x1efeat\x1e{rsha}\x1e{ahead}"
+            "/home/a/p/o/r/.claude/worktrees/feat\x1e{porcelain}\x1e{HEAD}\x1efeat\x1e{rsha}\x1e{ahead}\x1e{midop}"
         )
     }
 
@@ -1773,6 +1816,7 @@ mod tests {
             session_id: f.source_id,
             target_host_alias: "beta".into(),
             keep_source,
+            strict: false,
         }
     }
 
@@ -2276,6 +2320,7 @@ mod tests {
             session_id: f.source_id,
             target_host_alias: "alpha".into(),
             keep_source: false,
+            strict: false,
         };
         assert_eq!(
             move_session_with(same, &f.store, &f.fake, &hooks, fast())
@@ -2387,6 +2432,137 @@ mod tests {
             codes::E_INVALID_STATE
         );
         assert!(parse_inspection("garbage").is_err());
+    }
+
+    #[test]
+    fn carry_verdict_accepts_dirty_and_unpushed_but_refuses_midop_and_wrong_branch() {
+        let dirty_unpushed = parse_inspection(&inspection(" M a.rs\n?? n.txt", "", "-1")).unwrap();
+        assert!(carry_verdict(&dirty_unpushed, "feat").is_ok());
+        assert_eq!(
+            preflight_verdict(&dirty_unpushed, "feat").unwrap_err().code,
+            codes::E_MOVE_DIRTY,
+            "strict still refuses"
+        );
+
+        let mid = parse_inspection(&inspection_midop("", HEAD, "0", "rebase")).unwrap();
+        assert_eq!(mid.midop.as_deref(), Some("rebase"));
+        for verdict in [carry_verdict(&mid, "feat"), preflight_verdict(&mid, "feat")] {
+            let e = verdict.unwrap_err();
+            assert_eq!(e.code, codes::E_MOVE_MIDOP);
+            assert!(e.message.contains("rebase"), "{}", e.message);
+            assert_eq!(e.details.unwrap()["operation"], "rebase");
+        }
+
+        let clean = parse_inspection(&inspection("", HEAD, "0")).unwrap();
+        assert_eq!(clean.midop, None);
+        assert_eq!(
+            carry_verdict(&clean, "other").unwrap_err().code,
+            codes::E_INVALID_STATE
+        );
+    }
+
+    #[test]
+    fn inspect_script_probes_every_in_progress_operation() {
+        let s = inspect_script("n", None, "feat");
+        for marker in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "BISECT_LOG",
+            "rebase-merge",
+            "rebase-apply",
+        ] {
+            assert!(s.contains(marker), "{marker}: {s}");
+        }
+    }
+
+    /// Runs the generated `inspect_script` through real `git`/`bash` against a
+    /// temp repo that is genuinely mid-merge (two branches editing the same
+    /// line, `git merge` left conflicted), then again after `git merge
+    /// --abort`. Nobody had run the probe against real git before this test.
+    #[test]
+    fn inspect_script_probe_detects_a_real_mid_merge() {
+        let git_ok = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok();
+        let bash_ok = std::process::Command::new("bash")
+            .arg("--version")
+            .output()
+            .is_ok();
+        if !git_ok || !bash_ok {
+            eprintln!("skipping: git or bash is not available in this environment");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let git = |args: &[&str]| -> std::process::Output {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", &home)
+                .output()
+                .unwrap()
+        };
+
+        assert!(git(&["init", "-q", "-b", "main"]).status.success());
+        assert!(git(&["config", "user.email", "a@example.com"])
+            .status
+            .success());
+        assert!(git(&["config", "user.name", "A"]).status.success());
+        std::fs::write(repo.join("f.txt"), "one\n").unwrap();
+        assert!(git(&["add", "f.txt"]).status.success());
+        assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+        assert!(git(&["checkout", "-q", "-b", "other"]).status.success());
+        std::fs::write(repo.join("f.txt"), "other\n").unwrap();
+        assert!(git(&["commit", "-q", "-am", "other change"])
+            .status
+            .success());
+        assert!(git(&["checkout", "-q", "main"]).status.success());
+        std::fs::write(repo.join("f.txt"), "main\n").unwrap();
+        assert!(git(&["commit", "-q", "-am", "main change"])
+            .status
+            .success());
+        // Both branches touched the same line, so this merge conflicts and
+        // leaves MERGE_HEAD in place instead of completing.
+        let merge = git(&["merge", "other"]);
+        assert!(
+            !merge.status.success(),
+            "merge must conflict to leave MERGE_HEAD: {}",
+            String::from_utf8_lossy(&merge.stderr)
+        );
+
+        let probe = || -> SourceState {
+            // Empty tmux name: the script skips the tmux lookup and locates
+            // the worktree from `hint` alone.
+            let script = inspect_script("", Some(repo.to_str().unwrap()), "main");
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&script)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", &home)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            parse_inspection(&String::from_utf8_lossy(&out.stdout)).unwrap()
+        };
+
+        assert_eq!(probe().midop.as_deref(), Some("merge"));
+
+        assert!(git(&["merge", "--abort"]).status.success());
+        assert_eq!(probe().midop, None);
     }
 
     #[test]

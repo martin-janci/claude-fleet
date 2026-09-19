@@ -387,6 +387,7 @@ impl FleetTools {
                 session_id: row.id,
                 target_host_alias: p.target_host_alias,
                 keep_source: p.keep_source,
+                strict: false,
             },
             &self.store,
             &self.ssh,
