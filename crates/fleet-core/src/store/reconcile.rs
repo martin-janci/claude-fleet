@@ -207,11 +207,26 @@ impl Store {
         // session after it died. `?20 <= 0` is "probe time unknown" (see
         // [`ghost_cutoff`]) — undatable evidence never revives a lost row;
         // no production caller passes it (reconcile always passes
-        // `probe.started_at`), only store-level tests do. The guard covers
-        // the WHOLE `DO UPDATE`, not just the three resurrect columns: a
-        // stale sighting of a dead session must not repaint its
-        // `claude_status`, activity stamp or context either. A live row
-        // (`lost_at IS NULL`) takes the branch exactly as before.
+        // `probe.started_at`), only store-level tests do.
+        //
+        // Why this cannot strand a live session as lost: `lost_at` is FROZEN
+        // for as long as a row stays ghost. Every writer of it
+        // (`mark_session_killed`, `Store::mark_host_sessions_lost`,
+        // `ghost_and_clean` Phase 1) is gated on `status != 'ghost'`, and the
+        // reclassify path rewrites only `lost_reason`, deliberately leaving
+        // `lost_at` alone — so the threshold never ratchets forward while the
+        // row waits. `probe.started_at` only grows (same `now_unix()` clock,
+        // same process), so the very next pass that observes the name live
+        // clears the bar and revives the row; a backwards clock step costs a
+        // bounded delay, never a permanent ghost.
+        //
+        // The guard covers the WHOLE `DO UPDATE`, not just the three
+        // resurrect columns: a stale sighting of a dead session must not
+        // repaint its `claude_status`, activity stamp or context either. A
+        // live row (`lost_at IS NULL`) takes the branch exactly as before,
+        // and the plain INSERT path above is NOT guarded — a killed row that
+        // has already been reaped is re-inserted by a stale pass as a fresh
+        // session, which needs a tombstone to close (#171).
         const NOT_STALE: &str = "lost_at IS NULL OR (?20 > 0 AND ?20 > lost_at)";
         // A hook/transcript context value younger than 120 s outranks the
         // pane footer (spec §1.5) — unless it belongs to the conversation
