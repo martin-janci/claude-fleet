@@ -11,9 +11,11 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import NewSessionDialog from './NewSessionDialog.svelte';
 import { hosts } from './hosts';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
+  hubStatus.set({ ...STANDALONE });
   hosts.set([
     { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
     { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
@@ -1025,6 +1027,44 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
     expect(refreshed).toEqual([ADMIN.uuid, GMAIL.uuid, WORK.uuid].sort());
     expect(get(toasts)).toHaveLength(0);
     expect(document.body.textContent).not.toContain('floor');
+  });
+
+  // #147 fix round 1, finding 5: `refresh_account_usage` is local-only in
+  // remote mode, and this onMount fetch-trigger is the same shape as
+  // HostsView's (Task 4, Part B) — gated on `ownsTheFleet(...)`.
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  it('does not fire refresh_account_usage on open on a hub client', async () => {
+    const { NOW, inv } = await setup();
+    hubStatus.set(remote);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    await tick();
+    expect(inv.mock.calls.some((c) => c[0] === 'refresh_account_usage')).toBe(false);
+    hubStatus.set({ ...STANDALONE });
+  });
+
+  it('standalone is untouched: opening still refreshes linked accounts', async () => {
+    const { NOW, inv, ADMIN, WORK, GMAIL } = await setup();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    await tick();
+    const refreshed = inv.mock.calls
+      .filter((c) => c[0] === 'refresh_account_usage')
+      .map((c) => (c[1] as { args: { account_uuid: string } }).args.account_uuid)
+      .sort();
+    expect(refreshed).toEqual([ADMIN.uuid, GMAIL.uuid, WORK.uuid].sort());
   });
 
   it('is about 520px wide', async () => {
