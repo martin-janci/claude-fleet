@@ -53,19 +53,20 @@ use std::net::{IpAddr, Ipv6Addr};
 /// Only the question "is this the local machine" is answered here.
 pub fn is_loopback(host: &str) -> bool {
     let host = host.trim();
-    // `[::1]` / `[::1`-with-no-close: an authority's brackets, if the caller
-    // did not strip them.
-    let bare = match host.strip_prefix('[') {
-        Some(rest) => match rest.strip_suffix(']') {
-            Some(inner) => inner,
-            None => return false,
-        },
-        None => host,
-    };
-    if bare.eq_ignore_ascii_case("localhost") {
+    // `[::1]`: an authority's brackets, if the caller did not strip them.
+    // Brackets mean IPv6 and nothing else — `[127.0.0.1]` is not a legal
+    // authority, and accepting it here would widen a `Host`-header check
+    // beyond the three forms this function promises.
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest
+            .strip_suffix(']')
+            .and_then(|inner| inner.parse::<Ipv6Addr>().ok())
+            .is_some_and(|v6| is_loopback_ip(&IpAddr::V6(v6)));
+    }
+    if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    bare.parse::<IpAddr>().is_ok_and(|ip| is_loopback_ip(&ip))
+    host.parse::<IpAddr>().is_ok_and(|ip| is_loopback_ip(&ip))
 }
 
 /// [`is_loopback`] for an address that is already parsed — what a bind check
@@ -144,6 +145,7 @@ pub struct Endpoint {
     host: String,
     port: u16,
     authority: String,
+    authority_as_written: String,
     path: String,
 }
 
@@ -194,6 +196,7 @@ impl Endpoint {
         if authority.contains('@') {
             return Err("a hub URL carries no userinfo".to_string());
         }
+        let authority_as_written = authority.to_string();
         let (host, port, bracketed) = split_authority(authority, scheme.default_port())?;
         let host = normalise_host(&host, bracketed)?;
         let path = normalise_path(path)?;
@@ -208,6 +211,7 @@ impl Endpoint {
             host,
             port,
             authority,
+            authority_as_written,
             path,
         })
     }
@@ -231,11 +235,38 @@ impl Endpoint {
         self.scheme.is_tls()
     }
 
-    /// What a `Host` header must carry. Here the brackets are REQUIRED
-    /// (`[::1]:8787`) and the port is present unless it is the scheme's
-    /// default — a hub's allowlist is matched against exactly this string.
+    /// The **canonical** authority: brackets REQUIRED around an IPv6 literal
+    /// (`[::1]:8787`), host lower-cased, and the port present only when it is
+    /// not the scheme's default.
+    ///
+    /// This is what the desktop puts in its `Host` header, and it is the form
+    /// it has always sent — the `url` crate it used before this parser
+    /// existed drops a scheme-default port the same way. A hub matches its
+    /// `allowed_hosts` against exactly this string, so the form is not a
+    /// cosmetic choice: see [`Endpoint::authority_as_written`] for the other
+    /// half of that.
     pub fn authority(&self) -> &str {
         &self.authority
+    }
+
+    /// The authority **exactly as the URL spelled it** — original case,
+    /// original IPv6 spelling, and a scheme-default port still present if it
+    /// was typed.
+    ///
+    /// `fleet-agent` builds its WebSocket URL from this, and therefore sends
+    /// it as its `Host` header. It must, for compatibility: a hub's
+    /// `allowed_hosts` is an exact string match that only relaxes one way
+    /// (an entry spelled `hub` accepts `Host: hub` and `Host: hub:443`, but
+    /// an entry spelled `hub:443` accepts only `hub:443`), and an operator
+    /// who wrote `--public-url https://hub:443` has `hub:443` in that list.
+    /// An agent that started eliding the port would be refused by a hub it
+    /// reached the day before.
+    ///
+    /// It is as safe as [`Endpoint::authority`] to put in a request line:
+    /// the same host and port validation ran over it, so it carries no
+    /// control character, no space and no userinfo.
+    pub fn authority_as_written(&self) -> &str {
+        &self.authority_as_written
     }
 
     /// The path prefix the hub is mounted under, with no trailing slash:
@@ -264,20 +295,32 @@ impl Endpoint {
 /// `host[:port]`, or `[v6][:port]`, into its halves — plus whether the host
 /// arrived in brackets, which is what tells an IPv6 literal from a name.
 fn split_authority(authority: &str, default_port: u16) -> Result<(String, u16, bool), String> {
+    // `str::parse::<u16>` accepts a leading sign, which the `url` crate — and
+    // therefore every URL this fleet stores — does not. Digits only. Leading
+    // zeros are deliberately left alone: `url` accepts those, so refusing
+    // them would be a new divergence rather than the end of one.
+    let parse_port = |p: &str| match p.bytes().all(|b| b.is_ascii_digit()) {
+        true => p.parse::<u16>().ok(),
+        false => None,
+    };
     let bad_port = |p: &str| format!("{p:?} is not a port");
     if let Some(v6) = authority.strip_prefix('[') {
         let (host, after) = v6
             .split_once(']')
             .ok_or_else(|| "an IPv6 literal is missing its closing bracket".to_string())?;
         let port = match after.strip_prefix(':') {
-            Some(p) => p.parse().map_err(|_| bad_port(p))?,
+            Some(p) => parse_port(p).ok_or_else(|| bad_port(p))?,
             None if after.is_empty() => default_port,
             None => return Err(format!("{after:?} after an IPv6 literal")),
         };
         return Ok((host.to_string(), port, true));
     }
     match authority.rsplit_once(':') {
-        Some((host, p)) => Ok((host.to_string(), p.parse().map_err(|_| bad_port(p))?, false)),
+        Some((host, p)) => Ok((
+            host.to_string(),
+            parse_port(p).ok_or_else(|| bad_port(p))?,
+            false,
+        )),
         None => Ok((authority.to_string(), default_port, false)),
     }
 }
@@ -285,6 +328,12 @@ fn split_authority(authority: &str, default_port: u16) -> Result<(String, u16, b
 /// Lower-cased, and an IPv6 literal put in its canonical form, so that two
 /// spellings of one address compare equal and [`is_loopback`] sees the
 /// address rather than the spelling.
+///
+/// The character set is the ONLY shape check on a name — no label lengths, no
+/// empty-label rule, nothing that would have to decide whether a trailing dot
+/// is an absolute name or a typo. Whether `hub..example` exists is the
+/// resolver's answer to give; what matters here is that nothing which cannot
+/// safely reach a request line gets through.
 ///
 /// `bracketed` says the authority wrote the host as `[…]`, and it is the
 /// whole of what distinguishes `http://[::1]` from `http://::1` — the latter
@@ -306,8 +355,8 @@ fn normalise_host(host: &str, bracketed: bool) -> Result<String, String> {
     }
     if !host.bytes().all(ok_in_host) {
         return Err(format!(
-            "{host:?} is not a hostname (ASCII letters, digits, '-', '.' and '_' only; \
-             write an international name in punycode)"
+            "{host:?} has a character a host name cannot (ASCII letters, digits, '-', '.' \
+             and '_' only; write an international name in punycode)"
         ));
     }
     Ok(host.to_ascii_lowercase())
@@ -372,6 +421,11 @@ mod tests {
             // The unspecified address is a bind, not a destination.
             "0.0.0.0",
             "::",
+            // Brackets mean IPv6. A bracketed v4 is not a legal authority,
+            // and accepting it would widen the `Host` check in `mcp::auth`
+            // past the three forms this function promises.
+            "[127.0.0.1]",
+            "[localhost]",
             "10.0.0.5",
             "fe80::1",
             "",
@@ -493,6 +547,26 @@ mod tests {
             ),
             // An IPv6 hub on its scheme's default port: brackets, no port.
             ("https://[::1]", "::1", 443, true, "[::1]", ""),
+            // A default port written out: the CANONICAL authority elides it,
+            // which is the form the desktop has always sent. The agent needs
+            // the other form — see the `authority_as_written` test below.
+            (
+                "https://hub.example:443",
+                "hub.example",
+                443,
+                true,
+                "hub.example",
+                "",
+            ),
+            (
+                "http://hub.example:80",
+                "hub.example",
+                80,
+                false,
+                "hub.example",
+                "",
+            ),
+            ("https://[::1]:443", "::1", 443, true, "[::1]", ""),
             // Case and an already-canonical address both normalise.
             (
                 "HTTPS://Hub.EXAMPLE/Fleet",
@@ -544,6 +618,13 @@ mod tests {
             "http://[::1",
             "https://hub.example:notaport",
             "https://hub.example:65536",
+            // `str::parse::<u16>` would take a sign or surrounding space; the
+            // `url` crate does not, and neither does the form every stored
+            // URL is normalised into. (Leading zeros are left alone — `url`
+            // takes those, so refusing them would be a divergence of its own.)
+            "https://hub.example:+443",
+            "https://hub.example:-443",
+            "https://hub.example: 443",
             // Header injection into a hand-written request line.
             "https://hub.example\r\nX-Evil: 1",
             "https://hub .example",
@@ -588,6 +669,54 @@ mod tests {
             ("http://hub.localhost", false),
         ] {
             assert_eq!(Endpoint::parse(url).unwrap().is_loopback(), want, "{url}");
+        }
+    }
+
+    /// **The compatibility rule this parser exists to keep.** A hub matches
+    /// `allowed_hosts` as an exact string that relaxes only one way, so the
+    /// two callers must each keep sending the authority they always sent:
+    /// the desktop the canonical one (the `url` crate elided a default
+    /// port), `fleet-agent` the one the operator typed (its hand-rolled
+    /// parser passed the authority through verbatim). Picking either for
+    /// both would 403 somebody's working setup.
+    #[test]
+    fn the_authority_comes_in_two_forms_so_neither_caller_changes_what_it_sends() {
+        // url, canonical (desktop), as written (agent)
+        let cases = [
+            ("https://hub.example:443", "hub.example", "hub.example:443"),
+            ("http://hub.example:80", "hub.example", "hub.example:80"),
+            (
+                "wss://hub.example:443/agent",
+                "hub.example",
+                "hub.example:443",
+            ),
+            // No port written: the two agree.
+            ("https://hub.example", "hub.example", "hub.example"),
+            // A non-default port survives into both.
+            (
+                "https://hub.example:8443",
+                "hub.example:8443",
+                "hub.example:8443",
+            ),
+            // Case and IPv6 spelling: canonicalised in one, verbatim in the
+            // other.
+            ("https://HUB.Example", "hub.example", "HUB.Example"),
+            (
+                "https://[0:0:0:0:0:0:0:1]:8443",
+                "[::1]:8443",
+                "[0:0:0:0:0:0:0:1]:8443",
+            ),
+            ("https://[::1]:443", "[::1]", "[::1]:443"),
+            ("https://[::1]", "[::1]", "[::1]"),
+        ];
+        for (url, canonical, as_written) in cases {
+            let at = Endpoint::parse(url).unwrap_or_else(|e| panic!("{url}: {e}"));
+            assert_eq!(at.authority(), canonical, "canonical authority of {url}");
+            assert_eq!(
+                at.authority_as_written(),
+                as_written,
+                "as-written authority of {url}"
+            );
         }
     }
 }

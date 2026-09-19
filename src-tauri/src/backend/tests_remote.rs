@@ -857,6 +857,28 @@ fn an_endpoint_splits_a_hub_url_into_what_a_hand_written_request_needs() {
     assert!(Endpoint::parse("not a url").is_err());
 }
 
+/// The other half of `fleet_proto::net::Endpoint`'s two authority forms.
+/// This app has never put a scheme-default port in its `Host` header — the
+/// `url` crate it parsed with dropped one — and a hub's `allowed_hosts` may
+/// be spelled without it, so it must keep not doing so. (`fleet-agent` keeps
+/// the port it was given; see `authority_as_written` there.)
+#[test]
+fn a_scheme_default_port_stays_out_of_the_host_header() {
+    for (url, authority) in [
+        ("https://fleet.example.com:443/mcp", "fleet.example.com"),
+        ("http://fleet.example.com:80/mcp", "fleet.example.com"),
+        ("https://[::1]:443/mcp", "[::1]"),
+        // A non-default port is part of the header, as before.
+        (
+            "https://fleet.example.com:8443/mcp",
+            "fleet.example.com:8443",
+        ),
+    ] {
+        let at = Endpoint::parse(url).unwrap_or_else(|e| panic!("{url}: {e}"));
+        assert_eq!(at.authority(), authority, "{url}");
+    }
+}
+
 /// An IPv6-literal hub was simply unreachable: `host_str()` keeps the URL's
 /// brackets, and `[::1]` neither resolves nor parses as a certificate name,
 /// so `https://[::1]:8787` failed before a single byte went out. The `Host`

@@ -107,7 +107,17 @@ impl Endpoint {
             path.push_str("/agent");
         }
         Ok(Self {
-            url: format!("{}://{}{path}", at.scheme().websocket(), at.authority()),
+            // `authority_as_written`, NOT the canonical one: this string
+            // becomes the `Host` header, a hub matches `allowed_hosts`
+            // against it exactly, and an operator who wrote
+            // `--public-url https://hub:443` has `hub:443` in that list. The
+            // desktop sends the canonical form and always has; these two
+            // callers must each keep the form they shipped with.
+            url: format!(
+                "{}://{}{path}",
+                at.scheme().websocket(),
+                at.authority_as_written()
+            ),
             at,
         })
     }
@@ -1352,6 +1362,43 @@ mod tests {
             assert_eq!(ep.url(), want, "{hub}");
             assert_eq!(ep.port(), port, "{hub}");
             assert!(ep.is_tls());
+        }
+    }
+
+    /// **A default port the operator wrote stays written.** A hub matches
+    /// `allowed_hosts` as an exact string that relaxes only one way: an entry
+    /// spelled `hub.example` accepts `Host: hub.example` and
+    /// `Host: hub.example:443`, but an entry spelled `hub.example:443` — what
+    /// `--public-url https://hub.example:443` puts there — accepts only the
+    /// second. `into_client_request` derives `Host` from this URL, so an
+    /// agent that started eliding the port would be 403'd by a hub it reached
+    /// the day before.
+    #[test]
+    fn an_explicit_default_port_survives_into_the_websocket_url() {
+        let cases = [
+            (
+                "https://hub.example:443",
+                "wss://hub.example:443/agent",
+                false,
+            ),
+            (
+                "wss://hub.example:443/agent",
+                "wss://hub.example:443/agent",
+                false,
+            ),
+            ("http://127.0.0.1:80", "ws://127.0.0.1:80/agent", true),
+            ("ws://localhost:80", "ws://localhost:80/agent", true),
+            // …and one that is not written stays unwritten.
+            ("https://hub.example", "wss://hub.example/agent", false),
+            (
+                "https://hub.example:8443",
+                "wss://hub.example:8443/agent",
+                false,
+            ),
+        ];
+        for (hub, want, insecure) in cases {
+            let ep = Endpoint::parse(hub, insecure).unwrap_or_else(|e| panic!("{hub}: {e}"));
+            assert_eq!(ep.url(), want, "{hub}");
         }
     }
 
