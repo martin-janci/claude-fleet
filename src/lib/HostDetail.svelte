@@ -349,7 +349,7 @@
                 <div class="d-main">
                   <span class="d-cwd">{c.cwd}</span>
                   {#if c.git_branch}<span class="muted">{c.git_branch}</span>{/if}
-                  <span class="muted">{timeAgo(c.transcript_mtime, now)}</span>
+                  <span class="muted">{timeAgo(c.transcript_mtime, now * 1000)}</span>
                   {#if rankLabel(c.rank_hint)}<span class="badge">{rankLabel(c.rank_hint)}</span>{/if}
                   {#if c.derived_tmux_name}<span class="muted">{c.derived_tmux_name}</span>{/if}
                 </div>

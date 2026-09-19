@@ -14,6 +14,7 @@ vi.mock('./sessions', async () => {
 
 import HostDetail from './HostDetail.svelte';
 import { sharedWith } from './hosts_view';
+import { timeAgo } from './session_status';
 import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host, session } from './hosts_fixture';
 import {
   restoreHostSessions,
@@ -364,6 +365,24 @@ describe('HostDetail find lost conversations', () => {
 
     expect(screen.getByTestId('discover-item-error').textContent).toContain('already resumed on this host');
     expect(screen.getByTestId('discover-resume')).toBeInTheDocument();
+  });
+
+  it('renders the transcript age from the seconds-based now prop, not a raw ms mismatch', async () => {
+    const threeHoursAgo = candidate({ claude_session_id: 'cs-age', transcript_mtime: NOW - 3 * 3600 });
+    mockedDiscover.mockResolvedValueOnce({ ok: true, value: [threeHoursAgo] });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+
+    // `now` (the mounted prop) is epoch SECONDS; timeAgo's second param is
+    // epoch MILLISECONDS — the expected string is derived from timeAgo
+    // itself rather than hardcoded, so this stays correct if its buckets
+    // change.
+    const expected = timeAgo(threeHoursAgo.transcript_mtime, NOW * 1000);
+    expect(screen.getByTestId('discover-list').textContent).toContain(expected);
+    // Guard against a vacuous pass: "just now" (what the seconds/ms mixup
+    // produces) must not be what we just asserted for a 3h-old transcript.
+    expect(expected).not.toBe('just now');
   });
 
   it('an empty result says so', async () => {
