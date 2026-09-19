@@ -9,8 +9,9 @@ use fleet_proto::{
     base64_len, decode_agent_frame, decode_agent_frame_lenient_within, decode_b64,
     decode_hub_frame, decode_hub_frame_lenient, decode_hub_frame_within, encode_agent_frame,
     encode_agent_frame_within, encode_b64, encode_hub_frame, encode_hub_frame_within, judge_proto,
-    AgentFrame, Decoded, HubFrame, ProtoError, ProtoVerdict, MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES,
-    MIN_SUPPORTED_PROTO, PROTO_VERSION, VERSION_REFUSED_CLOSE_CODE,
+    AgentFrame, Decoded, HubFrame, ProtoError, ProtoVerdict, UnknownKindAction, UnknownKinds,
+    MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES, MIN_SUPPORTED_PROTO, PROTO_VERSION,
+    VERSION_REFUSED_CLOSE_CODE,
 };
 use serde_json::{json, Value};
 
@@ -636,4 +637,42 @@ fn the_lenient_decoder_still_enforces_the_size_cap() {
         Err(ProtoError::TooLarge { cap, .. }) => assert_eq!(cap, SMALL_CAP),
         other => panic!("expected TooLarge, got {other:?}"),
     }
+}
+
+// ── the close reason fits a WebSocket close frame ───────────────────────────
+//
+// RFC 6455 caps a close frame's control payload at 125 bytes, 2 of which are
+// the status code — 123 left for the reason. `refusal_reason` is what both
+// `ws.rs` and `conn.rs` put straight into one; this is the evidence it never
+// needs the clamp both of them apply defensively anyway.
+
+#[test]
+fn refusal_reason_fits_a_close_frame_even_at_u32_max() {
+    for verdict in [
+        ProtoVerdict::PeerBehind {
+            their: 0,
+            min_supported: u32::MAX,
+        },
+        ProtoVerdict::PeerAhead {
+            their: u32::MAX,
+            max_supported: 0,
+        },
+    ] {
+        let reason = verdict
+            .refusal_reason("the hub", "fleet-agent")
+            .expect("out of range");
+        assert!(reason.len() <= 123, "{} bytes: {reason:?}", reason.len());
+    }
+}
+
+// ── UnknownKinds: the public API another crate consumes ────────────────────
+
+#[test]
+fn unknown_kinds_is_usable_from_outside_the_crate() {
+    let mut u = UnknownKinds::new();
+    assert_eq!(
+        u.record("nope"),
+        UnknownKindAction::LogOnce("nope".to_string())
+    );
+    assert_eq!(u.record("nope"), UnknownKindAction::Silent);
 }

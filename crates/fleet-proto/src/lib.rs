@@ -22,7 +22,9 @@
 //!   rather than an error, so a newer peer can add a frame kind an older one
 //!   may skip without dropping the connection. A `kind` the receiver DOES
 //!   know, but whose body will not parse, is corruption either way and stays
-//!   a hard error — see [`decode_lenient`]'s doc.
+//!   a hard error — see [`decode_lenient`]'s doc. A receiver logging an
+//!   unknown kind bounds and sanitises it first with [`UnknownKinds`], since
+//!   the kind string is peer-controlled.
 //! - An unknown *field* is **ignored**, so a newer hub can add one without
 //!   taking an older agent's connection down.
 //! - Bytes that are not text (`stdin` excepted) travel base64 in `*_b64`
@@ -90,6 +92,21 @@ pub const PROTO_VERSION: u32 = 1;
 /// [`PROTO_VERSION`] itself. Once a proto-1 `fleet-agent` has actually
 /// shipped, lowering this is a live compatibility decision for whoever ships
 /// the next bump, not a default to carry forward blindly.
+///
+/// **The rolling-upgrade rule, for whoever bumps [`PROTO_VERSION`] next.**
+/// Today's window is a single version (`MIN_SUPPORTED_PROTO ==
+/// PROTO_VERSION`): a hub built from this crate refuses every agent that
+/// isn't ALSO at proto 1, and vice versa. That is fine at proto 1, where
+/// there is nothing older to be compatible with, but bumping `PROTO_VERSION`
+/// to 2 while leaving `MIN_SUPPORTED_PROTO` at 2 as well would refuse every
+/// already-deployed proto-1 agent the instant one hub upgrades — the
+/// opposite of what this whole mechanism exists for. So: when a change
+/// bumps `PROTO_VERSION`, hold `MIN_SUPPORTED_PROTO` at the PREVIOUS
+/// version for at least one release, so a hub and its agents can be
+/// upgraded in either order — an old agent against a new hub, or a new
+/// agent waiting (at the maximum backoff) for an old hub — without either
+/// one being refused outright. Narrow the window again only once nothing in
+/// the field still needs the old floor.
 pub const MIN_SUPPORTED_PROTO: u32 = 1;
 
 // Enforced at compile time, not just in a test: `judge_proto` assumes this
@@ -461,7 +478,7 @@ pub enum Decoded<T> {
 /// AFTER the handshake — see the crate doc; the handshake itself keeps using
 /// the strict decoders.
 pub fn decode_hub_frame_lenient(text: &str) -> Result<Decoded<HubFrame>, ProtoError> {
-    decode_lenient(text, MAX_FRAME_BYTES, known_hub_kind)
+    decode_lenient(text, MAX_FRAME_BYTES)
 }
 
 /// [`decode_agent_frame_within`], except a `kind` this build does not
@@ -471,51 +488,146 @@ pub fn decode_agent_frame_lenient_within(
     text: &str,
     cap: usize,
 ) -> Result<Decoded<AgentFrame>, ProtoError> {
-    decode_lenient(text, cap, known_agent_kind)
-}
-
-/// The `kind` field alone, for [`decode_lenient`]'s second pass. Never used
-/// to build a real frame — only to explain why the first pass failed.
-#[derive(Deserialize)]
-struct KindOnly {
-    kind: String,
-}
-
-/// `kind` strings [`HubFrame`] actually has a variant for. Kept in sync with
-/// the enum by `fleet-proto`'s own `known_kind_lists_match_every_real_variant`
-/// test, which fails to COMPILE — not just to pass — the moment a variant is
-/// added here without a matching arm there.
-fn known_hub_kind(kind: &str) -> bool {
-    matches!(kind, "exec" | "upload" | "cancel" | "ping" | "welcome")
-}
-
-/// [`known_hub_kind`], for [`AgentFrame`].
-fn known_agent_kind(kind: &str) -> bool {
-    matches!(kind, "hello" | "result" | "pong")
+    decode_lenient(text, cap)
 }
 
 /// Decode leniently: a `kind` this build does not know is [`Decoded::Unknown`],
 /// never an error. A `kind` it DOES know, but whose body will not parse — or
 /// no `kind` at all, or invalid JSON — is corruption either way, and stays a
 /// hard [`ProtoError::Malformed`]: the unknown-kind rule forgives evolution,
-/// not damage.
-///
-/// The two-pass shape (real decode first, `KindOnly` only to explain a
-/// failure) means the common case — a frame this build understands — costs
-/// nothing extra; the second parse only runs once the first has already
-/// failed.
-fn decode_lenient<T: DeserializeOwned>(
-    text: &str,
-    cap: usize,
-    known_kind: fn(&str) -> bool,
-) -> Result<Decoded<T>, ProtoError> {
+/// not damage. See [`unknown_variant_kind`] for how the two are told apart.
+fn decode_lenient<T: DeserializeOwned>(text: &str, cap: usize) -> Result<Decoded<T>, ProtoError> {
     check_size(text.len(), cap)?;
     match serde_json::from_str::<T>(text) {
         Ok(frame) => Ok(Decoded::Frame(frame)),
-        Err(e) => match serde_json::from_str::<KindOnly>(text) {
-            Ok(KindOnly { kind }) if !known_kind(&kind) => Ok(Decoded::Unknown { kind }),
-            _ => Err(ProtoError::Malformed(e.to_string())),
+        Err(e) => match unknown_variant_kind(&e) {
+            Some(kind) => Ok(Decoded::Unknown { kind }),
+            None => Err(ProtoError::Malformed(e.to_string())),
         },
+    }
+}
+
+/// If `e` is serde's "unknown variant" error for an internally-tagged enum
+/// (`#[serde(tag = "kind")]`, what [`HubFrame`] and [`AgentFrame`] both are),
+/// the offending value — otherwise `None`.
+///
+/// This is how [`decode_lenient`] tells "the kind is not one this build
+/// knows" apart from "the kind IS known, but the rest would not parse" —
+/// deliberately WITHOUT a hand-maintained list of kinds. An earlier version
+/// of this function compared the tag against `known_hub_kind`/
+/// `known_agent_kind` `matches!` lists that had to be kept in sync with the
+/// enums BY HAND; a variant added to the enum but not to the matching list
+/// would make a MALFORMED frame of that real kind decode as `Unknown`
+/// instead of `Malformed` — corruption silently swallowed as evolution,
+/// exactly backwards from the rule this module exists to enforce. Reading
+/// the tag back out of serde's own error removes the list: serde's derive
+/// generates this exact message, and the names in it, from the enum's own
+/// variants, at compile time — it can never claim a real variant is
+/// unknown.
+///
+/// The message format (`unknown variant \`X\`, expected ...`) is pinned
+/// against serde_json's actual wording by
+/// `unknown_variant_kind_extracts_the_offending_tag` below, so a serde
+/// upgrade that changes it fails a test here instead of silently
+/// reclassifying "unknown" as "malformed" — and that failure mode is the
+/// SAFE direction: every previously-unknown kind just becomes a hard error
+/// again (today's pre-lenient behaviour), never the other way around.
+fn unknown_variant_kind(e: &serde_json::Error) -> Option<String> {
+    let msg = e.to_string();
+    let after = msg.strip_prefix("unknown variant `")?;
+    let (kind, _) = after.split_once('`')?;
+    Some(kind.to_string())
+}
+
+/// The longest a `kind` [`UnknownKinds`] stores or hands back for logging,
+/// in bytes, truncated on a `char` boundary so it is never split
+/// mid-codepoint.
+pub const UNKNOWN_KIND_MAX_LEN: usize = 32;
+
+/// How many distinct unknown kinds one connection's [`UnknownKinds`] tracks
+/// before it stops logging new ones and reports [`UnknownKindAction::LogCapReached`]
+/// exactly once instead.
+pub const UNKNOWN_KIND_CAP: usize = 32;
+
+/// What a caller should do about one [`Decoded::Unknown`] kind, having told
+/// [`UnknownKinds`] about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnknownKindAction {
+    /// First time this (sanitised, truncated) kind has been seen on this
+    /// connection: log it.
+    LogOnce(String),
+    /// Already logged, or the cap was already reported: say nothing.
+    Silent,
+    /// This call is the one that pushed the tracker past
+    /// [`UNKNOWN_KIND_CAP`] distinct kinds. Log ONE "too many" notice —
+    /// never a per-kind one again on this connection.
+    LogCapReached,
+}
+
+/// Bounds what a peer's stream of unknown frame `kind`s can cost the
+/// receiver: memory (an unbounded set, grown by an arbitrary number of
+/// distinct peer-chosen strings, is itself the thing [`MAX_FRAME_BYTES`]
+/// and the rest of this crate otherwise take care to bound) and the log (a
+/// `kind` is peer-controlled text; stored and printed verbatim, at
+/// unbounded length, it is both a memory amplifier and a log-injection
+/// vector — a `kind` containing a newline or an ANSI escape could forge log
+/// lines).
+///
+/// Scoped to ONE connection (a fresh `UnknownKinds` per connect), not the
+/// process: a reconnect is a clean slate, which is deliberate — see each
+/// caller's own decision on what a peer hitting the cap means for it (a hub
+/// closes the connection; an agent does not — both explained where they
+/// call [`UnknownKinds::record`]).
+#[derive(Debug, Default)]
+pub struct UnknownKinds {
+    seen: std::collections::HashSet<String>,
+    cap_notice_sent: bool,
+}
+
+impl UnknownKinds {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one occurrence of `kind` and say what, if anything, the
+    /// caller should log. Sanitises `kind` first — see
+    /// [`UnknownKinds::sanitize`] — so what comes back in
+    /// [`UnknownKindAction::LogOnce`] is always safe to put straight into a
+    /// log line.
+    pub fn record(&mut self, kind: &str) -> UnknownKindAction {
+        let kind = Self::sanitize(kind);
+        if self.seen.contains(&kind) {
+            return UnknownKindAction::Silent;
+        }
+        if self.seen.len() < UNKNOWN_KIND_CAP {
+            self.seen.insert(kind.clone());
+            return UnknownKindAction::LogOnce(kind);
+        }
+        // At the cap: this NEW kind is not added — the set stays bounded at
+        // `UNKNOWN_KIND_CAP` forever, whether or not a hostile peer keeps
+        // sending fresh strings — but crossing it is worth exactly one
+        // notice.
+        if self.cap_notice_sent {
+            UnknownKindAction::Silent
+        } else {
+            self.cap_notice_sent = true;
+            UnknownKindAction::LogCapReached
+        }
+    }
+
+    /// Truncate to [`UNKNOWN_KIND_MAX_LEN`] bytes on a `char` boundary, and
+    /// replace every control character (a newline, a carriage return, an
+    /// ANSI escape, …) with `U+FFFD`, so the result is always safe to log
+    /// verbatim on one line.
+    fn sanitize(kind: &str) -> String {
+        let mut end = kind.len().min(UNKNOWN_KIND_MAX_LEN);
+        while end > 0 && !kind.is_char_boundary(end) {
+            end -= 1;
+        }
+        kind[..end]
+            .chars()
+            .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+            .collect()
     }
 }
 
@@ -554,72 +666,104 @@ pub fn decode_b64(text: &str) -> Result<Vec<u8>, ProtoError> {
 mod tests {
     use super::*;
 
-    fn hub_kind(frame: &HubFrame) -> &'static str {
-        // Exhaustive on purpose: adding a `HubFrame` variant without adding
-        // an arm here fails to COMPILE, which is what actually keeps
-        // `known_hub_kind` from calling a real variant "unknown".
-        match frame {
-            HubFrame::Exec { .. } => "exec",
-            HubFrame::Upload { .. } => "upload",
-            HubFrame::Cancel { .. } => "cancel",
-            HubFrame::Ping { .. } => "ping",
-            HubFrame::Welcome { .. } => "welcome",
+    // ── unknown_variant_kind: the drift-proof classifier ────────────────
+
+    #[test]
+    fn unknown_variant_kind_extracts_the_offending_tag() {
+        let e =
+            serde_json::from_str::<HubFrame>(r#"{"kind":"selfdestruct","id":"1"}"#).unwrap_err();
+        assert_eq!(unknown_variant_kind(&e).as_deref(), Some("selfdestruct"));
+
+        let e =
+            serde_json::from_str::<AgentFrame>(r#"{"kind":"selfdestruct","id":"1"}"#).unwrap_err();
+        assert_eq!(unknown_variant_kind(&e).as_deref(), Some("selfdestruct"));
+    }
+
+    /// The property the whole design rests on: a REAL variant's tag, with a
+    /// body that will not parse, is never mistaken for an unknown one —
+    /// serde's error for it is a different shape entirely ("missing field
+    /// ...", not "unknown variant ..."), so there is no hand-maintained
+    /// list here that could drift and misclassify it.
+    #[test]
+    fn unknown_variant_kind_is_none_for_a_known_kind_that_will_not_parse() {
+        let e = serde_json::from_str::<HubFrame>(r#"{"kind":"exec"}"#).unwrap_err();
+        assert_eq!(unknown_variant_kind(&e), None, "{e}");
+
+        let e = serde_json::from_str::<AgentFrame>(r#"{"kind":"result"}"#).unwrap_err();
+        assert_eq!(unknown_variant_kind(&e), None, "{e}");
+    }
+
+    #[test]
+    fn unknown_variant_kind_is_none_for_junk_with_no_kind_at_all() {
+        for text in ["", "{}", "null", r#"{"kind":null}"#, r#"{"kind":42}"#] {
+            let e = serde_json::from_str::<HubFrame>(text).unwrap_err();
+            assert_eq!(unknown_variant_kind(&e), None, "{text:?}: {e}");
         }
     }
 
-    fn agent_kind(frame: &AgentFrame) -> &'static str {
-        match frame {
-            AgentFrame::Hello { .. } => "hello",
-            AgentFrame::Result { .. } => "result",
-            AgentFrame::Pong { .. } => "pong",
+    // ── UnknownKinds: bounded, sanitised tracking ───────────────────────
+
+    #[test]
+    fn the_first_sighting_of_a_kind_logs_once_then_stays_silent() {
+        let mut u = UnknownKinds::new();
+        assert_eq!(
+            u.record("selfdestruct"),
+            UnknownKindAction::LogOnce("selfdestruct".into())
+        );
+        assert_eq!(u.record("selfdestruct"), UnknownKindAction::Silent);
+        // A different kind logs its own once.
+        assert_eq!(
+            u.record("launch_missiles"),
+            UnknownKindAction::LogOnce("launch_missiles".into())
+        );
+    }
+
+    #[test]
+    fn a_long_kind_is_truncated_on_a_char_boundary() {
+        let mut u = UnknownKinds::new();
+        // A multi-byte character sitting right at the truncation boundary:
+        // truncating by raw byte count would panic or split it.
+        let hostile = "a".repeat(UNKNOWN_KIND_MAX_LEN - 1) + "€€€€";
+        match u.record(&hostile) {
+            UnknownKindAction::LogOnce(logged) => {
+                assert!(logged.len() <= UNKNOWN_KIND_MAX_LEN, "{logged:?}");
+                assert!(hostile.starts_with(&logged), "{logged:?}");
+            }
+            other => panic!("expected LogOnce, got {other:?}"),
         }
     }
 
     #[test]
-    fn known_kind_lists_match_every_real_variant() {
-        let hub_frames = [
-            HubFrame::Ping { id: "x".into() },
-            HubFrame::Cancel { id: "x".into() },
-            HubFrame::Exec {
-                id: "x".into(),
-                argv: vec![],
-                stdin: None,
-                timeout_ms: 1,
-                cap_bytes: None,
-            },
-            HubFrame::Upload {
-                id: "x".into(),
-                path: "x".into(),
-                mode: 0,
-                bytes_b64: String::new(),
-            },
-            HubFrame::Welcome {
-                hub_version: "x".into(),
-                proto: 1,
-            },
-        ];
-        for frame in &hub_frames {
-            assert!(known_hub_kind(hub_kind(frame)), "{frame:?}");
+    fn control_characters_are_replaced_so_a_kind_cannot_forge_a_log_line() {
+        let mut u = UnknownKinds::new();
+        let hostile = "ok\nfleet-hub: fake line\x1b[31mred\x1b[0m";
+        match u.record(hostile) {
+            UnknownKindAction::LogOnce(logged) => {
+                assert!(!logged.contains('\n'), "{logged:?}");
+                assert!(!logged.contains('\x1b'), "{logged:?}");
+            }
+            other => panic!("expected LogOnce, got {other:?}"),
         }
+    }
 
-        let agent_frames = [
-            AgentFrame::Hello {
-                agent_version: "x".into(),
-                host_name: "x".into(),
-                os: "x".into(),
-                proto: 1,
-            },
-            AgentFrame::Result {
-                id: "x".into(),
-                exit_code: 0,
-                stdout_b64: String::new(),
-                stderr_b64: String::new(),
-                truncated: false,
-            },
-            AgentFrame::Pong { id: "x".into() },
-        ];
-        for frame in &agent_frames {
-            assert!(known_agent_kind(agent_kind(frame)), "{frame:?}");
+    #[test]
+    fn the_cap_is_reported_exactly_once_and_the_set_never_grows_past_it() {
+        let mut u = UnknownKinds::new();
+        for i in 0..UNKNOWN_KIND_CAP {
+            assert!(
+                matches!(u.record(&format!("kind{i}")), UnknownKindAction::LogOnce(_)),
+                "kind{i}"
+            );
         }
+        // The kind that pushes it over the cap: exactly one notice.
+        assert_eq!(u.record("one-too-many"), UnknownKindAction::LogCapReached);
+        // Every subsequent NEW kind, silent — no more notices, ever.
+        for i in 0..5 {
+            assert_eq!(
+                u.record(&format!("also-over-{i}")),
+                UnknownKindAction::Silent
+            );
+        }
+        assert_eq!(u.seen.len(), UNKNOWN_KIND_CAP, "the set stays bounded");
     }
 }
