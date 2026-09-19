@@ -78,13 +78,17 @@ impl FleetTools {
         description = "Read a session's recent conversation as structured turns: \
         each turn carries the human prompt, its timestamp, the turn's end \
         timestamp, and items tagged by kind: text (assistant text), tool (a \
-        one-line tool summary, flagged when that call failed), compact (a \
-        context compaction with its trigger, pre-compaction tokens and \
-        summary), command (a slash command with its args and output) or \
-        interrupt (the user interrupted the turn). The response also carries \
-        events (this conversation's timeline events, oldest first, at most the \
-        newest 50) and context (the conversation's context-window usage, or \
-        null). turns defaults to 10 and is capped at 100; the character budget \
+        one-line summary plus the tool_use id, name, target, start/end \
+        timestamps and done; flagged when the call failed), subagent (a \
+        Task/Agent call: its agent type, description, the start of its final \
+        report, timestamps, done and error), compact (a context compaction \
+        with its trigger, pre-compaction tokens and summary), command (a slash \
+        command with its args and output) or interrupt (the user interrupted \
+        the turn). Tool inputs and results are not included. The response \
+        also carries events (this conversation's timeline events, oldest \
+        first, the newest events_limit of them: default 50, at most 200) and \
+        context (the conversation's context-window usage, or null). turns \
+        defaults to 10 and is capped at 100; the character budget \
         scales with it. Prefer this over \
         session_transcript when you want the shape of the exchange rather than \
         one flat blob. Pass claude_session_id (from session_conversations) to \
