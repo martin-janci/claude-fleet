@@ -108,7 +108,7 @@ describe('REASONS against the generated local_only commands', () => {
 
 // Coverage the other way: a `local_only` command the UI can reach with no
 // `REASONS` entry at all would fail open (or, worse, open a dialog whose
-// click then dies with a raw `E_LOCAL_ONLY`). Every one of the 54 commands
+// click then dies with a raw `E_LOCAL_ONLY`). Every one of the 51 commands
 // below is `local_only` today, is not a `REASONS` key (checked below), and
 // falls into one of these groups. Seeded from today's truth
 // (generated `local_only` minus the `REASONS` keys that are command names);
@@ -127,13 +127,6 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
     'catalog_write_layer',
     'catalog_delete_layer',
   ],
-  // pick_attachments (the OS file picker that authorises its own result,
-  // SEC-9), attachment_preview (the inline thumbnail data URL), and
-  // upload_attachments (stages attachments inside the worktree so Claude
-  // Code can read them without a permission prompt) have no caller yet
-  // either — the composer's attach button, preview strip and send wiring are
-  // later tasks of the same plan (`.superpowers/sdd/2026-09-20-conversation-attachments/`).
-  noUiControlYet: ['pick_attachments', 'attachment_preview', 'upload_attachments'],
   // Gated by AssetsPanel.svelte's own `catalog_config` gate: `{#if
   // catalogBlocked}` swaps the ENTIRE panel body (Sync, Secrets, asset
   // list/detail, import, lint, layers-adjacent…) for the remote note, so

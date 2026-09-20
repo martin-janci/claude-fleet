@@ -76,7 +76,10 @@
     type ActivityProbe,
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
-  import { hubStatus, ownsTheFleet } from './hub';
+  import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { invokeCmd } from './result';
+  import { addFiles, pastedName, fmtBytes, type Attachment, type PickedFile } from './attachments';
   import Markdown from './MarkdownView.svelte';
 
   let {
@@ -926,6 +929,144 @@
     });
   }
 
+  // ---- attachments -------------------------------------------------------
+  //
+  // The composer holds the list; the limits, the naming and every rejection
+  // sentence live in `attachments.ts`. Only two origins can ever produce a
+  // path the Rust side will read or upload: the OS picker
+  // (`pick_attachments` authorises its own result) and an OS drop (the Tauri
+  // window event puts the paths on the allow-list before the webview sees
+  // anything). A pasted file has neither, and `addFiles` says so.
+
+  let attachments = $state<Attachment[]>([]);
+  let attachErrors = $state<string[]>([]);
+  /** dragleave fires on every child, so nesting is counted, not flagged. */
+  let dragDepth = $state(0);
+
+  /** Attaching exists to upload: gate the control on the command that does
+   *  the work, not on the picker that only feeds it. */
+  const attachBlocked = $derived(
+    hubActionBlocked('upload_attachments', $hubStatus, $hubConnection),
+  );
+
+  /**
+   * Every sentence the composer owes the user about attaching: the
+   * rejections `addFiles` returned, plus the per-tile errors — a pasted
+   * file's above all, which would otherwise live only in a tooltip and read
+   * as a bare red square. Deduped: the same sentence twice says nothing
+   * twice (and `{#each}` needs the key to be unique).
+   */
+  const attachNotes = $derived([
+    ...new Set([
+      ...attachErrors,
+      ...attachments.flatMap((a) => (a.state === 'error' && a.error ? [a.error] : [])),
+    ]),
+  ]);
+
+  function hasFiles(dt: DataTransfer | null): boolean {
+    return !!dt && Array.from(dt.types).includes('Files');
+  }
+
+  async function attach(picked: PickedFile[]) {
+    const { next, rejected } = addFiles(attachments, picked);
+    attachErrors = rejected;
+    preserveThread(() => (attachments = next));
+    // `pasted` is belt and braces: addFiles already lands a pasted entry as
+    // `error`, never `reading`. Previewing one would come back E_FORBIDDEN
+    // (no path was ever authorised) and replace an honest sentence with a
+    // permission error.
+    for (const a of next.filter((x) => !x.pasted && x.state === 'reading')) {
+      const r = await invokeCmd<string | null>('attachment_preview', { path: a.path });
+      attachments = attachments.map((x) =>
+        x.id !== a.id
+          ? x
+          : r.ok
+            ? // null is an ordinary answer: not an inlineable image, or over
+              // 2 MiB. The tile falls back to its extension, not to an error.
+              { ...x, thumb: r.value, state: 'ready' as const }
+            : { ...x, state: 'error' as const, error: r.error.message },
+      );
+    }
+  }
+
+  function removeAttachment(id: string) {
+    preserveThread(() => (attachments = attachments.filter((a) => a.id !== id)));
+  }
+
+  async function pickFiles() {
+    if (attachBlocked !== null) return;
+    const r = await invokeCmd<PickedFile[]>('pick_attachments', {});
+    if (r.ok) await attach(r.value ?? []);
+    else attachErrors = [r.error.message];
+  }
+
+  function onShellDragEnter(e: DragEvent) {
+    if (!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth++;
+  }
+  function onShellDragOver(e: DragEvent) {
+    if (!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  }
+  function onShellDragLeave() {
+    dragDepth = Math.max(0, dragDepth - 1);
+  }
+  function onShellDrop(e: DragEvent) {
+    e.preventDefault();
+    // App.svelte's window-level guard must not also see this one: a drop that
+    // reaches the window navigates the WKWebView to file:// and takes the
+    // whole app state with it.
+    e.stopPropagation();
+    dragDepth = 0;
+    // The OS drop already put these paths on the Rust allow-list via the
+    // Tauri window event; the webview only echoes them back.
+    const dropped = Array.from(e.dataTransfer?.files ?? []);
+    const picked = pickedFromDrop(dropped);
+    // A webview that hands back files but no path for any of them has nothing
+    // the allow-list can match. Say so rather than falling through to
+    // `addFiles`' pasted-file sentence, which would name the wrong gesture.
+    attachErrors = dropped.length > 0 && picked.length === 0 ? [DROP_WITHOUT_PATH] : [];
+    if (picked.length) void attach(picked);
+  }
+
+  const DROP_WITHOUT_PATH =
+    'That drop reached the app without a file path, so it cannot be attached — use Attach files instead.';
+
+  /** Only files the webview gave a real path for: an empty path is the
+   *  clipboard's shape, and nothing else may borrow it. */
+  function pickedFromDrop(files: File[]): PickedFile[] {
+    return files
+      .map((f) => ({
+        path: (f as File & { path?: string }).path ?? '',
+        name: f.name,
+        size: f.size,
+        kind: f.type.startsWith('image/') ? ('image' as const) : ('binary' as const),
+      }))
+      .filter((f) => f.path !== '');
+  }
+
+  function onComposerPaste(e: ClipboardEvent) {
+    const dt = e.clipboardData;
+    if (!dt || dt.files.length === 0) return;
+    // A rich-text paste carries both; the text half wins.
+    if (dt.getData('text/plain').trim().length > 0) return;
+    e.preventDefault();
+    void attach(
+      Array.from(dt.files).map((f) => ({
+        // Deliberately empty: clipboard bytes have no filesystem path, and
+        // `addFiles` keys the "not supported yet" tile off exactly that.
+        path: '',
+        name: f.name === 'image.png' ? pastedName(new Date()) : f.name,
+        size: f.size,
+        kind: f.type.startsWith('image/') ? ('image' as const) : ('binary' as const),
+      })),
+    );
+  }
+
   /** Open a tool group when it becomes the running turn's last group; never
    *  close one, and never re-open one the user closed while it stays the
    *  running group, so manual toggles survive transcript refreshes. */
@@ -1278,7 +1419,36 @@
           aria-expanded={chipsExpanded}
           onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : 'More'} ▾</button>
       {/if}
-      <div class="composer-shell">
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="composer-shell"
+        class:is-dragging={dragDepth > 0}
+        ondragenter={onShellDragEnter}
+        ondragover={onShellDragOver}
+        ondragleave={onShellDragLeave}
+        ondrop={onShellDrop}
+      >
+        {#if attachments.length}
+          <ul class="attach-strip" data-testid="conv-attachments" aria-label="Attachments">
+            {#each attachments as a (a.id)}
+              <li class="attach" data-testid="conv-attachment" data-state={a.state} title="{a.name} · {fmtBytes(a.size)}{a.error ? ` · ${a.error}` : ''}">
+                {#if a.thumb}
+                  <!-- A preview can be an SVG data URL (classify maps .svg to
+                       an image). Inside <img> it cannot run script; inlined as
+                       markup it would, in this app's origin. Never an html tag. -->
+                  <img class="attach-img" src={a.thumb} alt="" />
+                {:else}
+                  <span class="attach-ext">{a.name.split('.').pop() ?? 'file'}</span>
+                {/if}
+                <button type="button" class="btn btn--icon btn--quiet attach-x" data-testid="conv-attachment-remove"
+                  aria-label="Remove {a.name}" title="Remove {a.name}" onclick={() => removeAttachment(a.id)}>×</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#each attachNotes as msg (msg)}
+          <p class="attach-error" role="status" data-testid="conv-attach-error">{msg}</p>
+        {/each}
         <textarea
           class="composer-input"
           data-testid="conv-composer-input"
@@ -1292,10 +1462,19 @@
           onkeydown={onComposerKey}
           rows="2"
           use:autoGrow={draft}
+          onpaste={onComposerPaste}
           placeholder="Send a prompt…"
           disabled={sending || viewing !== null}
         ></textarea>
         <div class="composer-actions">
+          <button
+            type="button"
+            class="btn btn--icon btn--quiet"
+            data-testid="conv-attach-button"
+            aria-label="Attach files"
+            title={attachBlocked ?? 'Attach files'}
+            aria-disabled={attachBlocked !== null}
+            onclick={pickFiles}>⌾</button>
           <span class="composer-hint" id={COMPOSER_HINT_ID}>↵ send · ⇧↵ newline · ↑ history</span>
           <button
             type="submit"
@@ -1306,6 +1485,9 @@
             aria-keyshortcuts="Enter"
             disabled={!canSend}>{sending ? '…' : '↑'}</button>
         </div>
+        {#if dragDepth > 0}
+          <div class="drop-veil" aria-hidden="true">Drop to attach</div>
+        {/if}
       </div>
       {#if statusNote}
         <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
@@ -1416,6 +1598,86 @@
   }
   .composer-shell:focus-within {
     border-color: var(--accent);
+  }
+  .attach-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--control-gap);
+    margin: 0 0 2px;
+    padding: 0 2px;
+    list-style: none;
+    /* Exactly two rows, then scroll: growth is quantised to 50px so
+       preserveThread corrects by a clean integer. */
+    max-height: 94px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .attach {
+    position: relative;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-pane);
+    overflow: hidden;
+  }
+  .attach-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .attach-ext {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--control-fg-quiet);
+  }
+  /* 18px is the one deliberate exception to the 24px floor: the 44px tile is
+     the primary target and Backspace on a focused tile removes it too, which
+     is WCAG 2.5.8's equivalent-control path. It is bounded to this case. */
+  .attach-x {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    background: color-mix(in srgb, var(--bg) 78%, transparent);
+    color: var(--fg);
+    font-size: 13px;
+    opacity: 0;
+  }
+  .attach:hover .attach-x,
+  .attach:focus-within .attach-x,
+  .attach-x:focus-visible { opacity: 1; }
+  @media (hover: none) { .attach-x { opacity: 1; } }
+  .attach[data-state='reading'] { opacity: 0.6; }
+  .attach[data-state='error'] {
+    border-color: var(--usage-crit);
+    box-shadow: inset 0 0 0 1px var(--usage-crit);
+  }
+  .attach-error {
+    margin: 0 0 2px;
+    padding: 0 2px;
+    color: var(--usage-crit);
+    font-size: var(--control-font-sm);
+  }
+  .composer-shell.is-dragging {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .drop-veil {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    color: var(--accent);
+    font-size: var(--control-font);
+    font-weight: 600;
+    /* Must not eat the drop event. */
+    pointer-events: none;
   }
   .composer-input {
     min-height: 40px;

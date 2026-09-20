@@ -25,6 +25,8 @@ import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_eve
 import type { SessionEvent } from './timeline';
 import { copyText } from './clipboard';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { invoke } from '@tauri-apps/api/core';
+import type { PickedFile } from './attachments';
 
 const REMOTE: HubStatus = {
   remote: true,
@@ -912,6 +914,33 @@ describe('ConversationPanel quick actions', () => {
     await fireEvent.click(more);
     await new Promise((r) => requestAnimationFrame(() => r(null)));
     expect(scroller.scrollTop).toBe(550);
+  });
+
+  it('preserveThread re-pins the transcript when the reader was already at the bottom', async () => {
+    await mount();
+    const row = screen.getByTestId('conv-chips');
+    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
+    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'clientHeight', {
+      configurable: true,
+      get: () => (row.getAttribute('data-expanded') === 'true' ? 350 : 400),
+    });
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    // Pinned: composing at the bottom, which is where an attachment strip
+    // appears from. The offset correction is wrong here — it would leave a
+    // gap below the last turn — so this branch re-pins instead.
+    scroller.scrollTop = 1600;
+    await fireEvent.scroll(scroller);
+
+    const more = screen.getByTestId('conv-chips-more');
+    await fireEvent.click(more);
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    // The new bottom, not 1650 (1600 + the 50px the scroller gave up).
+    expect(scroller.scrollTop).toBe(2000);
   });
 
   it('re-measures when the preset list changes, not just on resize', async () => {
@@ -2683,5 +2712,138 @@ describe('ConversationPanel detail UX fixes', () => {
     // user types, so the field must carry its own label.
     expect(box.getAttribute('aria-label')).toBe('Prompt');
     expect(screen.getByTestId('conv-composer-send').getAttribute('aria-keyshortcuts')).toBe('Enter');
+  });
+});
+
+describe('ConversationPanel attachments', () => {
+  const mockedInvoke = invoke as unknown as ReturnType<typeof vi.fn>;
+  // The global Tauri stub from vitest.setup.ts. Captured once so a test can
+  // answer two attachment commands without losing hub_status, list_hosts and
+  // the rest of it.
+  type InvokeImpl = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  const baseInvoke = mockedInvoke.getMockImplementation() as unknown as InvokeImpl;
+
+  afterEach(() => {
+    mockedInvoke.mockImplementation(baseInvoke);
+  });
+
+  async function renderPanel(over: Partial<SessionRow> = {}) {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(over), visible: true });
+    await settle();
+  }
+
+  async function renderPanelInHubMode() {
+    hubStatus.set(REMOTE);
+    await renderPanel();
+  }
+
+  /**
+   * Go through the real attach path rather than poking state: the OS picker
+   * is the only origin the button has, so stub what Rust would have returned
+   * and click. `attachment_preview` answers null — the ordinary outcome for a
+   * file that is not an inlineable image or is over 2 MiB.
+   */
+  async function addAttachments(picked: PickedFile[]) {
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments') return picked;
+      if (cmd === 'attachment_preview') return null;
+      return baseInvoke(cmd, args);
+    });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    // One round trip for the pick, then one per file for the preview.
+    for (let i = 0; i < picked.length + 3; i++) await settle();
+  }
+
+  it('shows a tile per attachment and removes one without losing the rest', async () => {
+    await renderPanel();
+    await addAttachments([
+      { path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' },
+      { path: '/tmp/b.log', name: 'b.log', size: 2048, kind: 'text' },
+    ]);
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(2);
+    await fireEvent.click(screen.getAllByTestId('conv-attachment-remove')[0]);
+    const left = screen.getAllByTestId('conv-attachment');
+    expect(left).toHaveLength(1);
+    expect(left[0].getAttribute('title')).toContain('b.log');
+  });
+
+  it('a drop on the shell attaches; a drop on the transcript does not', async () => {
+    await renderPanel();
+    const shell = document.querySelector('.composer-shell')!;
+    await fireEvent.drop(shell, { dataTransfer: { types: ['Files'], files: [] } });
+    expect(shell.className).not.toContain('is-dragging');
+
+    const scroller = screen.getByTestId('conv-scroller');
+    const ev = new Event('drop', { bubbles: true, cancelable: true });
+    await fireEvent(scroller, ev);
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+  });
+
+  it('a rejected file stays visible with its reason', async () => {
+    await renderPanel();
+    await addAttachments([{ path: '/tmp/big.png', name: 'big.png', size: 11 * 1024 * 1024, kind: 'image' }]);
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('big.png');
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('10 MB');
+  });
+
+  it('the attach button states why it is unavailable in hub mode', async () => {
+    await renderPanelInHubMode();
+    const btn = screen.getByTestId('conv-attach-button');
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(btn.getAttribute('title')).toContain('standalone');
+  });
+
+  // SEC-9: a pasted file has no filesystem path, so nothing authorised it for
+  // the Rust allow-list. Previewing it would come back E_FORBIDDEN and
+  // overwrite the honest sentence with a permission error.
+  it('a pasted file is never previewed and reads as unsupported, not as a failure', async () => {
+    await renderPanel();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'attachment_preview') throw { code: 'E_FORBIDDEN', message: 'not attached by the user' };
+      return baseInvoke(cmd, args);
+    });
+    const box = screen.getByTestId('conv-composer-input');
+    const file = new File([new Uint8Array([1, 2, 3])], 'image.png', { type: 'image/png' });
+    // The Tauri stub is a module-level vi.fn shared by the whole file; only
+    // the calls this paste makes are under test.
+    mockedInvoke.mockClear();
+    await fireEvent.paste(box, {
+      clipboardData: { files: [file], types: ['Files'], getData: () => '' },
+    });
+    await settle();
+    await settle();
+
+    const tile = screen.getByTestId('conv-attachment');
+    expect(tile.getAttribute('data-state')).toBe('error');
+    expect(tile.getAttribute('title')).toMatch(/pasted-\d\d\.\d\d\.\d\d\.png/);
+    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_preview', expect.anything());
+    // Visible, not just a tooltip: a bare red square reads as a failure.
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it from disk');
+    expect(screen.getByTestId('conv-attach-error').textContent).not.toContain('E_FORBIDDEN');
+  });
+
+  // An SVG is an image to `classify`, and `mime_for` returns image/svg+xml —
+  // so a preview can be an SVG data URL. Inlined as markup it would run
+  // script in the app's own origin; inside an <img> it cannot.
+  it('renders a preview only through an <img>, never as inlined markup', async () => {
+    await renderPanel();
+    const svg = 'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIi8+';
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/x.svg', name: 'x.svg', size: 64, kind: 'image' }];
+      if (cmd === 'attachment_preview') return svg;
+      return baseInvoke(cmd, args);
+    });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    const tile = screen.getByTestId('conv-attachment');
+    const img = tile.querySelector('img');
+    expect(img).toBeTruthy();
+    expect(img!.getAttribute('src')).toBe(svg);
+    expect(tile.querySelector('svg')).toBeNull();
+    expect(tile.innerHTML).not.toContain('onload');
   });
 });
