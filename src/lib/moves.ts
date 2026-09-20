@@ -44,6 +44,21 @@ export interface MoveRun {
   cleanTarget: boolean;
   /** 1 for the original attempt; `retryMove` bumps it, on the same run. */
   attempt: number;
+  /**
+   * True from the moment `retryMove` resets this run until its own first
+   * `move:progress` event (`check`/`started`) arrives; every other event is
+   * dropped while it is true.
+   *
+   * `move:progress` carries only the session id, not a per-move id, so a
+   * straggler from the attempt this run replaced looks exactly like this
+   * attempt's own next step: `applyMoveProgress` would otherwise apply it
+   * straight onto the fresh (blank) step list, since `retryMove` already put
+   * `status: 'running'` and `settledAt: null` — the very shape that lets
+   * ordinary events through. A per-move id on the wire would make this flag
+   * unnecessary; that is backend work tracked separately, not part of this
+   * task.
+   */
+  awaitingStart: boolean;
 }
 
 const DETAIL_MAX = 80;
@@ -171,6 +186,7 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     settledAt: null,
     cleanTarget: false,
     attempt: 1,
+    awaitingStart: false,
   });
   void moveSession(session.id, toHost, { keepSource: opts.keepSource }).then((r) =>
     settle(session.id, r),
@@ -274,6 +290,9 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     attempt: run.attempt + 1,
     startedAt: Date.now(),
     settledAt: null,
+    // See the field comment on `MoveRun.awaitingStart`: a straggler from the
+    // attempt this run replaces must not land on the fresh step list.
+    awaitingStart: true,
   });
   void moveSession(sessionId, run.toHost, {
     keepSource: run.keepSource ?? false,
@@ -324,7 +343,10 @@ function settleResolve(sessionId: number, action: ResolveAction, r: Result<Resol
  */
 export function resolveMoveRun(sessionId: number, action: ResolveAction): void {
   const run = get(store).get(sessionId);
-  if (!run) return;
+  // Finish/undo only mean something for a partial: on any other status the
+  // backend would answer E_INVALID_STATE, so refuse the round-trip here,
+  // mirroring retryMove's own status guard.
+  if (!run || run.status !== 'partial') return;
   const targetId = targetIdOf(run);
   if (targetId === null) {
     push({ kind: 'error', message: `${run.sessionName}: no target session to resolve.` });
@@ -366,6 +388,7 @@ export function adoptPartial(p: UnresolvedPartial, sessionName: string): void {
     },
     cleanTarget: false,
     attempt: 1,
+    awaitingStart: false,
     startedAt: Date.now(),
     settledAt: Date.now(),
   });
@@ -388,6 +411,7 @@ function observed(p: MoveProgress): MoveRun {
     settledAt: null,
     cleanTarget: false,
     attempt: 1,
+    awaitingStart: false,
   };
 }
 
@@ -409,6 +433,18 @@ export function applyMoveProgress(p: MoveProgress): void {
   const detail = typeof p.detail === 'string' ? p.detail.slice(0, DETAIL_MAX) : null;
 
   let run = get(store).get(p.session_id);
+  const isFreshStart = i === 0 && p.state === 'started';
+
+  // See the field comment on `MoveRun.awaitingStart`: `retryMove` reset this
+  // run's steps and put it back to `running` before the retry's own events
+  // exist, so nothing here can tell a straggler from the replaced attempt
+  // apart from the retry's real first step except waiting for that step by
+  // name. Everything else is dropped until it arrives.
+  if (run?.awaitingStart) {
+    if (!isFreshStart) return;
+    run = { ...run, awaitingStart: false };
+  }
+
   let settledLocal = false;
   if (run && run.status !== 'running') {
     if (
@@ -419,7 +455,7 @@ export function applyMoveProgress(p: MoveProgress): void {
       // Its own events, still arriving. They may name the step that failed;
       // they may not touch the outcome the user is already reading.
       settledLocal = true;
-    } else if (i === 0 && p.state === 'started') {
+    } else if (isFreshStart) {
       run = undefined; // a NEW move of this session
     } else {
       return;

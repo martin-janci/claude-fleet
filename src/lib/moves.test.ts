@@ -653,6 +653,32 @@ describe('retryMove', () => {
     retryMove(7);
     expect(invoked.mock.calls.length).toBe(calls); // unchanged
   });
+
+  // Fix round 1, Finding 1: `move:progress` carries only the session id, so
+  // once `retryMove` puts the run back to `running` with blank steps, a
+  // straggler from the FIRST attempt (still in flight when the retry began)
+  // looks exactly like the retry's own next step to `applyMoveProgress`.
+  it("drops a late event from the attempt it replaced, and applies its own from the first step", async () => {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(err('E_MOVE_CARRY', 'x', { step: 'fetch' }));
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('failed');
+
+    invoked.mockReturnValueOnce(new Promise(() => {})); // the retry's own call never settles here
+    retryMove(7);
+    // A straggler from the FIRST attempt, naming the LAST step failed.
+    applyMoveProgress(ev('handoff', 'failed', { session_id: 7, to_host: 'beta' }));
+    let run = get(moves).get(7)!;
+    expect(run.status).toBe('running');
+    expect(run.steps.map((s) => s.state)).toEqual(Array(9).fill('pending'));
+
+    // The retry's own first event is accepted, from its own first step.
+    applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: 'beta' }));
+    run = get(moves).get(7)!;
+    expect(run.steps[0].state).toBe('started');
+    expect(run.steps.slice(1).every((s) => s.state === 'pending')).toBe(true);
+  });
 });
 
 describe('resolveMoveRun and adoptPartial', () => {
@@ -717,5 +743,38 @@ describe('resolveMoveRun and adoptPartial', () => {
     const run = get(moves).get(7)!;
     expect(run.status).toBe('failed');
     expect(run.error?.code).toBe('E_MOVE_UNDONE');
+  });
+
+  // Fix round 1, Finding 2: the backend really can answer E_MOVE_PARTIAL
+  // with `target_session_id: null` (crates/fleet-core/.../move_session/mod.rs
+  // :2609, :2693). This is the guard that stops the SOURCE id ever reaching
+  // `resolve_move`, so it gets its own test.
+  it('refuses to resolve when the partial names no target, and toasts instead', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    p.reject({ code: 'E_MOVE_PARTIAL', message: 'partial', details: { step: 'x', target_session_id: null } });
+    await flush();
+    expect(get(moves).get(5)!.status).toBe('partial');
+    const calls = invoked.mock.calls.length;
+    resolveMoveRun(5, 'finish');
+    await flush();
+    expect(invoked.mock.calls.length).toBe(calls);
+    expect(get(toasts).some((t) => t.kind === 'error')).toBe(true);
+  });
+
+  // Fix round 1, Finding 3: called on anything but a partial, `resolveMoveRun`
+  // would fire `resolve_move` at a move that is not partial (e.g. `report`'s
+  // target on a DONE run) and the backend would answer E_INVALID_STATE — a
+  // wasted round-trip and a confusing toast. Mirrors `retryMove`'s own guard.
+  it('refuses to resolve a run that is not partial', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    p.resolve(report());
+    await flush();
+    expect(get(moves).get(5)!.status).toBe('done');
+    const calls = invoked.mock.calls.length;
+    resolveMoveRun(5, 'finish');
+    await flush();
+    expect(invoked.mock.calls.length).toBe(calls);
   });
 });
