@@ -281,6 +281,19 @@ describe('App: the Conversation tab', () => {
     expect(subtab('subtab-terminal').disabled).toBe(false);
   });
 
+  it('clicking the already-forced Conversation pill on a pane-less row does not overwrite the stored preference', async () => {
+    const { sessionView } = await import('./lib/prefs');
+    const { get } = await import('svelte/store');
+    sessionView.set('terminal');
+    await mountAndSelect(bg);
+    // Forced to Conversation (no pane) and already checked; clicking it must
+    // be a no-op on the stored preference, not a silent flip back to it.
+    expect(checked('subtab-conversation')).toBe('true');
+    await fireEvent.click(subtab('subtab-conversation'));
+    await tick();
+    expect(get(sessionView)).toBe('terminal');
+  });
+
   it('Esc leaves Files even with focus parked on the terminal input proxy (F9)', async () => {
     await mountAndSelect(work);
     const grid = await screen.findByTestId('terminal-host');

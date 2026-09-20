@@ -388,10 +388,17 @@
     filesMode = false;
     assetsMode = true;
   }
-  /** Pick a sub-view. A row that cannot show it is left alone. */
+  /**
+   * Pick a sub-view. A row that cannot show it is left alone. The pref is
+   * written only when the row can genuinely offer both views: on a row that
+   * forces one of them, that view is already showing and already checked, so
+   * a click is a no-op that must not silently overwrite the preference a
+   * different row is relying on. showSession() still runs unconditionally —
+   * the click should always leave whatever overlay was open.
+   */
   function setSessionView(v: SessionView) {
     if (resolveSessionView(v, selNoPane, selHasClaudeId) !== v) return;
-    sessionView.set(v);
+    if (!selNoPane && selHasClaudeId) sessionView.set(v);
     showSession();
   }
   /**
