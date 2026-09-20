@@ -160,6 +160,12 @@ its effect, which exist only to approximate that behaviour today.
 Returning from Files, Assets or Hosts always lands on the remembered
 sub-view.
 
+`ConversationPanel`'s own "Open terminal" affordance routes through the same
+`setSessionView('terminal')`, so it persists the preference exactly as the
+segment does. It is a view switch like any other; making it a one-shot
+exception would mean the same visible action sometimes sticks and sometimes
+does not.
+
 ### 3. The keyboard chord
 
 `appChord()` in `src/lib/app_views.ts` gains a third result,
