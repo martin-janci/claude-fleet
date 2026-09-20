@@ -265,6 +265,10 @@ ls_c=$(tool "$PA" "$PUB" "$CTOK" list_sessions '{}')
 check "a client token may list sessions" 'echo "$ls_c" | grep -q "\"isError\":false"' "${ls_c:0:400}"
 ls_r=$(tool "$PA" "$PUB" "$RTOK" list_sessions '{}')
 check "a readonly client may list sessions" 'echo "$ls_r" | grep -q "\"isError\":false"' "${ls_r:0:400}"
+# The desktop's New-session dialog asks the hub for this when it has no SSH
+# route of its own, so a paired client must be able to call it.
+lhw_c=$(tool "$PA" "$PUB" "$CTOK" list_host_worktrees "{\"host_alias\":\"local\",\"project_id\":${PID_:-0}}")
+check "a client token may list a host's worktrees" 'echo "$lhw_c" | grep -q "\"isError\":false" && echo "$lhw_c" | grep -q cloned' "${lhw_c:0:400}"
 sp_r=$(tool "$PA" "$PUB" "$RTOK" send_prompt '{"session_id":1,"prompt":"hello"}')
 check "a readonly client is refused send_prompt" 'echo "$sp_r" | grep -q E_FORBIDDEN' "${sp_r:0:400}"
 pv_c=$(tool "$PA" "$PUB" "$CTOK" provision_hosts '{}')
