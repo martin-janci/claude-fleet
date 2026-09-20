@@ -37,7 +37,7 @@ describe('HostDetail', () => {
   it('shares the account with the other host in the usage block', () => {
     mount('claude-fleet-oci');
     expect(screen.getByTestId('usage-shared').textContent).toBe('· shared with mefistos');
-    expect(screen.getByTestId('detail-account').textContent).toContain('admin@32bit.sk');
+    expect(screen.getByTestId('detail-account').textContent).toContain('admin-janci@users.noreply.github.com');
   });
 
   it('a host with no account says so and has no refresh', () => {

@@ -239,7 +239,7 @@ Add host: mefistos
   Hostname:    192.168.1.50
   tmux:        3.6a ✓
   claude:      2.1.144 ✓
-  account:     m.janci@32bit.sk (Max) · "32bit s.r.o."
+  account:     m-janci@users.noreply.github.com (Max) · "32bit s.r.o."
               (or)
   account:     —  (claude not logged in)
 
@@ -252,8 +252,8 @@ Implementation note: probe is currently inside `add_host`. To enable the preview
 
 ```
 Alias       tmux    claude    Account                       Status     ...
-local       3.5a    2.1.145   m.janci@32bit.sk (Max)        online     [↻] [🚫]
-mefistos    3.6a    2.1.144   m.janci@32bit.sk (Max)        online     [↻] [👁] [×]
+local       3.5a    2.1.145   m-janci@users.noreply.github.com (Max)        online     [↻] [🚫]
+mefistos    3.6a    2.1.144   m-janci@users.noreply.github.com (Max)        online     [↻] [👁] [×]
 mac         3.5b    2.1.130   martin@personal.com (Pro)     offline    ...
 papayapos   3.6a    2.1.144   —                             online     ...
 ```
@@ -272,7 +272,7 @@ where `account` is `\n${email} (${seatTier})` if known, `\n(no account)` dimmed 
 
 ```
 Host:        mefistos
-Account:     m.janci@32bit.sk (Max)
+Account:     m-janci@users.noreply.github.com (Max)
 Project:     martin-janci/claude-fleet
 Created:     1h ago
 Last activity: just now
@@ -320,7 +320,7 @@ Component / integration:
 
 Live verification (manual):
 
-1. Probe local — should detect own `m.janci@32bit.sk` and show in Settings ✓
+1. Probe local — should detect own `m-janci@users.noreply.github.com` and show in Settings ✓
 2. (When mefistos online) Probe mefistos — same account picked up; Mode B confirmed
 3. Login to claude on remote as different account (if user has alt) — Re-probe → new account row; old row stays
 4. Logout of claude on remote — Re-probe → host.account_uuid set to NULL; UI shows `—`

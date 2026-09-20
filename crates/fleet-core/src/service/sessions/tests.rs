@@ -1634,7 +1634,7 @@ async fn reconcile_links_the_local_account_when_it_becomes_known() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join(".claude.json"),
-        r#"{"oauthAccount":{"accountUuid":"796436ed-fd1f-436d-bc15-ad1a81f78a71","emailAddress":"mj.janci@gmail.com","seatTier":null}}"#,
+        r#"{"oauthAccount":{"accountUuid":"796436ed-fd1f-436d-bc15-ad1a81f78a71","emailAddress":"mj-janci@users.noreply.github.com","seatTier":null}}"#,
     )
     .unwrap();
     let deps = ReconcileDeps::fake_with_local_home(
@@ -1671,7 +1671,10 @@ async fn reconcile_links_the_local_account_when_it_becomes_known() {
     );
     let accounts = s.list_accounts().unwrap();
     assert_eq!(accounts.len(), 1);
-    assert_eq!(accounts[0].email.as_deref(), Some("mj.janci@gmail.com"));
+    assert_eq!(
+        accounts[0].email.as_deref(),
+        Some("mj-janci@users.noreply.github.com")
+    );
 }
 
 /// `ScriptedTmux` plus a scripted `read_oauth_account` answer, standing in

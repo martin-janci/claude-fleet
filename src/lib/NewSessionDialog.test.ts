@@ -1095,13 +1095,13 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
     await tick();
     expect(active()).toBe('local');
     expect(screen.getByTestId('host-usage-line').textContent).toBe(
-      'mj.janci@gmail.com · 5h 91% left, resets 15:10 · weekly 98% left · 2 min ago',
+      'mj-janci@users.noreply.github.com · 5h 91% left, resets 15:10 · weekly 98% left · 2 min ago',
     );
     expect(screen.queryByTestId('host-usage-warning')).toBeNull();
     await fireEvent.click(chip('claude-fleet-htz'));
     await tick();
     expect(screen.getByTestId('host-usage-line').textContent).toBe(
-      'm.janci@32bit.sk · 5h ~62% left, resets 15:10 · weekly ~98% left · 14 min ago',
+      'm-janci@users.noreply.github.com · 5h ~62% left, resets 15:10 · weekly ~98% left · 14 min ago',
     );
   });
 
@@ -1113,7 +1113,7 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
     await tick();
     expect(active()).toBe('mefistos');
     expect(screen.getByTestId('host-usage-warning').textContent).toBe(
-      '▲ admin@32bit.sk has 8% of its 5-hour window left (resets 15:10). Also used by claude-fleet-oci.',
+      '▲ admin-janci@users.noreply.github.com has 8% of its 5-hour window left (resets 15:10). Also used by claude-fleet-oci.',
     );
     // Choosing the other low host on the same account: still no auto-switch.
     await fireEvent.click(chip('claude-fleet-oci'));
@@ -1131,7 +1131,7 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
     accountUsage.update((m) => ({ ...m, [GMAIL.uuid]: five(GMAIL.uuid, 3) }));
     await tick();
     expect(active()).toBe('local');
-    expect(screen.getByTestId('host-usage-warning').textContent).toContain('mj.janci@gmail.com has 3%');
+    expect(screen.getByTestId('host-usage-warning').textContent).toContain('mj-janci@users.noreply.github.com has 3%');
   });
 
   it('opening refreshes usage for the visible hosts’ accounts, once each, and shows no error when refused', async () => {
