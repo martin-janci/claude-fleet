@@ -15,7 +15,7 @@ vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
 });
-import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
+import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, type SessionRow } from './sessions';
 import { composerPresets, resetComposerPresets } from './composer_presets';
@@ -1739,6 +1739,37 @@ describe('ConversationPanel conversations', () => {
     expect(compact.querySelector('summary')!.textContent!.trim()).toBe('Compacted (unknown)');
     expect(compact.textContent).toContain('Summary not in the loaded tail.');
     expect(screen.getByTestId('conv-interrupt').textContent!.trim()).toBe('Interrupted');
+  });
+
+  it('clamps prompts and command output to the line counts the module defines', async () => {
+    const longPrompt = Array.from({ length: PROMPT_CLAMP_LINES + 3 }, (_, i) => `p ${i}`).join('\n');
+    const longOut = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: longPrompt,
+              at: TURN1_AT,
+              ended_at: null,
+              items: [{ kind: 'command', name: '/cost', args: null, output: longOut }],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    // The CSS must read its clamp from the module, not carry its own copy:
+    // a changed constant that the stylesheet did not follow shows "Show
+    // more" over text nothing actually clipped.
+    const text = screen.getByTestId('conv-prompt').querySelector('.prompt-text') as HTMLElement;
+    expect(text.classList.contains('clamped')).toBe(true);
+    expect(text.style.getPropertyValue('--clamp-lines')).toBe(String(PROMPT_CLAMP_LINES));
+
+    const out = screen.getByTestId('conv-command').querySelector('pre') as HTMLElement;
+    expect(out.classList.contains('clamped')).toBe(true);
+    expect(Number(out.style.getPropertyValue('--clamp-lines'))).toBeGreaterThan(0);
   });
 
   it('interleaves timeline events and appends pushed ones', async () => {

@@ -45,6 +45,7 @@
     groupItems,
     toolGroupLabel,
     isLongPrompt,
+    PROMPT_CLAMP_LINES,
     turnDuration,
     composerStatus,
     transcriptCarries,
@@ -1131,7 +1132,11 @@
                       {/if}
                     </span>
                   </div>
-                  <div class="prompt-text" class:clamped={long && !expanded.has(turnKey(turn, i))}>{turn.prompt}</div>
+                  <div
+                    class="prompt-text"
+                    class:clamped={long && !expanded.has(turnKey(turn, i))}
+                    style:--clamp-lines={PROMPT_CLAMP_LINES}
+                  >{turn.prompt}</div>
                   {#if long}
                     <button type="button" class="linkish" data-testid="conv-prompt-toggle" onclick={() => togglePrompt(turnKey(turn, i))}
                       >{expanded.has(turnKey(turn, i)) ? 'Show less' : 'Show more'}</button
@@ -1177,7 +1182,10 @@
                     <div class="command" data-testid="conv-command">
                       <code>{g.name}{g.args ? ` ${g.args}` : ''}</code>
                       {#if g.output}
-                        <pre class="command-out" class:clamped={longOut && !expanded.has(cmdKey)}>{g.output}</pre>
+                        <pre
+                          class="command-out"
+                          class:clamped={longOut && !expanded.has(cmdKey)}
+                          style:--clamp-lines={CMD_CLAMP_LINES}>{g.output}</pre>
                         {#if longOut}
                           <button type="button" class="linkish" data-testid="conv-command-toggle" onclick={() => togglePrompt(cmdKey)}
                             >{expanded.has(cmdKey) ? 'Show less' : 'Show more'}</button
@@ -1782,8 +1790,11 @@
   .prompt-text.clamped {
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 6;
-    line-clamp: 6;
+    /* --clamp-lines comes from PROMPT_CLAMP_LINES, the same constant
+       isLongPrompt decides on: a copy here drifts into a "Show more" over
+       text nothing clipped. */
+    -webkit-line-clamp: var(--clamp-lines);
+    line-clamp: var(--clamp-lines);
     overflow: hidden;
   }
   .linkish {
@@ -1938,7 +1949,9 @@
     overflow-wrap: anywhere;
   }
   .command-out.clamped {
-    max-height: calc(8 * 1.45em + 0.7rem);
+    /* --clamp-lines comes from CMD_CLAMP_LINES; 1.45em is this block's own
+       line-height and 0.7rem its vertical padding. */
+    max-height: calc(var(--clamp-lines) * 1.45em + 0.7rem);
     overflow: hidden;
   }
   .interrupt {
