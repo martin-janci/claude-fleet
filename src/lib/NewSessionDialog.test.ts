@@ -1327,3 +1327,102 @@ describe('NewSessionDialog: Cancel creation while a hub-routed create is in flig
     spy.mockRestore();
   });
 });
+
+// Closing the dialog (Escape / backdrop) during a creation never aborts the
+// request in either mode — a late success already merges into the session
+// store on its own. A late FAILURE used to have nowhere to go: the
+// paragraph that would show `error` is gone with the dialog. That gap
+// predates #191, but #191's new copy ("…will appear when it's ready")
+// makes it worth closing: the promise should hold for failure too, not just
+// success.
+describe('NewSessionDialog: a creation that fails after the dialog is closed', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  it('hub mode: a late failure after closing toasts once', async () => {
+    hubStatus.set(remote);
+    const { toasts, clearToasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    clearToasts();
+    let resolveCreate!: (v: unknown) => void;
+    const spy = vi
+      .spyOn(sessionsModule, 'newSessionAbortable')
+      .mockImplementation(() => new Promise((r) => (resolveCreate = r as (v: unknown) => void)) as any);
+    const { unmount } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    unmount();
+    resolveCreate({ ok: false, error: { code: 'E_HUB_UNREACHABLE', message: 'connection reset' } });
+    await tick();
+    expect(get(toasts)).toHaveLength(1);
+    expect(get(toasts)[0].code).toBe('E_HUB_UNREACHABLE');
+    spy.mockRestore();
+  });
+
+  it('local mode: a late failure after closing toasts once (the same gap, not hub-specific)', async () => {
+    const { toasts, clearToasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    clearToasts();
+    let resolveCreate!: (v: unknown) => void;
+    const spy = vi
+      .spyOn(sessionsModule, 'newSessionAbortable')
+      .mockImplementation(() => new Promise((r) => (resolveCreate = r as (v: unknown) => void)) as any);
+    const { unmount } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    unmount();
+    resolveCreate({ ok: false, error: { code: 'E_SSH', message: 'connection reset' } });
+    await tick();
+    expect(get(toasts)).toHaveLength(1);
+    expect(get(toasts)[0].code).toBe('E_SSH');
+    spy.mockRestore();
+  });
+
+  it('a failure while the dialog is still open stays inline, no toast', async () => {
+    const { toasts, clearToasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    clearToasts();
+    const spy = vi
+      .spyOn(sessionsModule, 'newSessionAbortable')
+      .mockResolvedValue({ ok: false, error: { code: 'E_SSH', message: 'connection reset' } });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(document.body.textContent).toContain('connection reset');
+    expect(get(toasts)).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('local mode: clicking Cancel creation never toasts, closed or not', async () => {
+    const { toasts, clearToasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    clearToasts();
+    let resolveCreate!: (v: unknown) => void;
+    const spy = vi
+      .spyOn(sessionsModule, 'newSessionAbortable')
+      .mockImplementation(() => new Promise((r) => (resolveCreate = r as (v: unknown) => void)) as any);
+    const { unmount } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('cancel-create'));
+    unmount();
+    resolveCreate({ ok: false, error: { code: 'E_CANCELLED', message: 'aborted' } });
+    await tick();
+    expect(get(toasts)).toHaveLength(0);
+    spy.mockRestore();
+  });
+});

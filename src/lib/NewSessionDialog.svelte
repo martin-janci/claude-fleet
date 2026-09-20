@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { listHostWorktrees, type ProjectTreeRow, type WorktreeRow } from './projects';
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { hosts } from './hosts';
@@ -10,6 +10,7 @@
   import PickerList from './PickerList.svelte';
   import HostChips from './HostChips.svelte';
   import { refreshAccountUsage } from './account_usage_store';
+  import { pushError } from './toasts';
   import type { PickerItem } from './PickerList.svelte';
   import {
     fleetSettings,
@@ -469,6 +470,17 @@
   let error: string | null = $state(null);
   let createController: AbortController | null = null;
 
+  // Escape / backdrop close this dialog during a creation in both modes
+  // (`Modal.svelte` never gates that on `busy`) without aborting the
+  // request — a late SUCCESS still merges into the session store on its own
+  // (`newSessionAbortable` → `acceptCommandRow`), but a late FAILURE has
+  // nowhere left to show `error`: the paragraph that would render it is
+  // gone with the dialog. Track that so `submit()` can fall back to a toast.
+  let destroyed = false;
+  onDestroy(() => {
+    destroyed = true;
+  });
+
   // A hub-routed `new_session` sends no `call_id` (`HubBackend::new_session`,
   // deliberately — it has no hub-side counterpart to cancel by), so
   // aborting the wait here does not stop the hub from finishing the create:
@@ -621,8 +633,19 @@
     createController = null;
     busy = false;
     if (!r.ok) {
+      // `E_CANCELLED` is the user's own "Cancel creation" (local mode only
+      // — a hub-routed create offers none, see `hubCreateNote`); never a
+      // failure worth reporting.
       if (r.error.code !== 'E_CANCELLED') {
-        error = r.error.message;
+        // While the dialog is still open, its own paragraph shows this. Once
+        // it's gone (Escape / backdrop closed it mid-create), that paragraph
+        // closed with it — a toast is the only way this failure still
+        // reaches anyone, in both modes.
+        if (destroyed) {
+          pushError(r.error, 'New session failed');
+        } else {
+          error = r.error.message;
+        }
       }
       return;
     }
