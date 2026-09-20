@@ -32,6 +32,22 @@ const TIMEOUTS = new Set(['E_SSH_TIMEOUT', 'E_TIMEOUT']);
  */
 const NOTHING_COPIED_YET: ReadonlySet<MoveStep> = new Set<MoveStep>(['check', 'transcript']);
 
+/**
+ * Codes the backend cannot produce before the target has been touched: the
+ * carry starts at `workspace` (seeding the clone) and a dirty target is only
+ * discovered by preparing its worktree.
+ *
+ * They override `reached`, because `reached` is how far the EVENTS got, and
+ * they may never have arrived — an old hub, a dropped stream, or a result
+ * that simply won the race leaves every step pending, which reads as `check`.
+ * Promising "nothing was copied" on that is the one mistake here that sends
+ * somebody looking for a clean host that is not clean.
+ */
+const ALWAYS_TOUCHED_THE_TARGET: ReadonlySet<string> = new Set([
+  'E_MOVE_CARRY',
+  'E_MOVE_TARGET_DIRTY',
+]);
+
 function field(details: unknown, key: string): string | null {
   if (typeof details !== 'object' || details === null) return null;
   const v = (details as Record<string, unknown>)[key];
@@ -109,10 +125,13 @@ export function describeMoveError(
   toHost: string,
   reached: MoveStep | null,
 ): MoveFailure {
+  const nothingCopied =
+    (reached === null || NOTHING_COPIED_YET.has(reached)) &&
+    !(error !== null && ALWAYS_TOUCHED_THE_TARGET.has(error.code));
   const standing =
     status === 'partial'
       ? `A new session exists on ${toHost} and the source is still there. Nothing was killed.`
-      : reached === null || NOTHING_COPIED_YET.has(reached)
+      : nothingCopied
         ? `Nothing was copied to ${toHost}. The source session was not touched.`
         : 'The source session was not touched. Temporary transfer files were removed; what was ' +
           `already set up on ${toHost} — the clone, the worktree, copied files — was left there.`;

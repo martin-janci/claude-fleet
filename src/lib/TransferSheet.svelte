@@ -161,6 +161,9 @@
     {:else if run && run.status === 'running'}
       {#if run.error}
         <p class="note">Lost contact with the hub — the move may still be running there.</p>
+        <!-- The same code covers a refused connection and a 404, which are
+             not "may still be running" at all: show what was actually said. -->
+        <p class="note" data-testid="transfer-lost-contact-detail">{run.error.message}</p>
       {:else if run.origin === 'observed'}
         <p class="note">Started elsewhere — this window is following along.</p>
       {/if}
@@ -235,6 +238,10 @@
               {/if}
             </div>
           {/if}
+        {:else if run.error}
+          <p class="note">
+            The connection to the hub was lost during the move, so this window has no report for it.
+          </p>
         {:else}
           <p class="note">Started elsewhere — this window has no report for it.</p>
         {/if}

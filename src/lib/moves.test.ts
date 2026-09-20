@@ -374,10 +374,12 @@ describe('displaySteps and the settle grace', () => {
 // there, so calling it failed is a lie — and the user must still be able to
 // stop following it (F3).
 describe('a lost hub connection', () => {
+  const lost = { code: 'E_HUB_UNREACHABLE', message: 'hub did not answer', details: null };
+
   it('keeps the run running as an observed one, with no error toast', async () => {
     const p = pending();
     startMove(source, 'turanga', { keepSource: false });
-    p.reject({ code: 'E_HUB_UNREACHABLE', message: 'hub did not answer', details: null });
+    p.reject(lost);
     await flush();
     const run = get(moves).get(5)!;
     expect(run.status).toBe('running');
@@ -387,6 +389,88 @@ describe('a lost hub connection', () => {
     // From here events settle it like any other observed run.
     applyMoveProgress(ev('handoff', 'done'));
     expect(get(moves).get(5)!.status).toBe('done');
+  });
+
+  // m4: the outcome is only unknown while the events have not said it. If
+  // they already did, following a move that is over is the wrong thing.
+  it('is not "unknown" when the events already reported a failed step', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    applyMoveProgress(ev('git', 'started'));
+    applyMoveProgress(ev('git', 'failed'));
+    p.reject(lost);
+    await flush();
+    const run = get(moves).get(5)!;
+    expect(run.status).toBe('failed');
+    expect(run.error?.code).toBe('E_HUB_UNREACHABLE');
+    expect(activeMoveFor(5)).toBeUndefined();
+  });
+
+  it('is not "unknown" when the events already reported the last step done', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    applyMoveProgress(ev('handoff', 'warned', { detail: '1 file' }));
+    p.reject(lost);
+    await flush();
+    const run = get(moves).get(5)!;
+    expect(run.status).toBe('done');
+    expect(run.report).toBeNull();
+    expect(activeMoveFor(5)).toBeUndefined();
+  });
+
+  it('is still "unknown" in the middle of the move', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    applyMoveProgress(ev('git', 'started'));
+    p.reject(lost);
+    await flush();
+    expect(get(moves).get(5)!.status).toBe('running');
+  });
+});
+
+// R2: this window's Transfer was refused because ANOTHER move of the same
+// session is already running (reachable after Stop following, or after a
+// lost-hub run was dismissed, then Transfer again). The refusal is about the
+// click, not about the move — settling a failed run would show a step failing
+// that never did, and would then be patched by the REAL move's events.
+describe('a Transfer refused because a move is already running', () => {
+  const busy = {
+    code: 'E_INVALID_STATE',
+    message: 'a move of session 5 is already in progress',
+    details: null,
+  };
+
+  it('follows the real move instead of inventing a failure, and says why', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    p.reject(busy);
+    await flush();
+    const run = get(moves).get(5)!;
+    expect(run).toMatchObject({
+      status: 'running',
+      origin: 'observed',
+      error: null,
+      keepSource: null,
+      settledAt: null,
+    });
+    expect(get(toasts).some((t) => t.kind === 'error' && t.message.includes('already in progress')))
+      .toBe(true);
+    // The real move's events now patch it like any other observed run, and
+    // nothing is shown as failed.
+    applyMoveProgress(ev('replay', 'started'));
+    const patched = get(moves).get(5)!;
+    expect(displaySteps(patched).some((s) => s.state === 'failed')).toBe(false);
+    expect(displaySteps(patched).map((s) => s.state).slice(0, 5))
+      .toEqual(['done', 'done', 'done', 'done', 'started']);
+  });
+
+  it('tells the user even when the sheet is open on the run', async () => {
+    const p = pending();
+    transferSheetFor.set(5);
+    startMove(source, 'turanga', { keepSource: false });
+    p.reject(busy);
+    await flush();
+    expect(get(toasts).some((t) => t.kind === 'error')).toBe(true);
   });
 });
 
@@ -465,5 +549,26 @@ describe('runForSession', () => {
     await flush();
     // The session the move produced finds the source's run.
     expect(runForSession(get(moves), target)?.sessionId).toBe(5);
+  });
+
+  // m2a: the target id is reused too — the report has to name this row.
+  it('holds the target branch to the same guard as the source branch', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    p.resolve(report);
+    await flush();
+    expect(runForSession(get(moves), row({ id: 6, tmux_name: 'someone-else', host_alias: 'turanga' })))
+      .toBeUndefined();
+    expect(runForSession(get(moves), row({ id: 6, tmux_name: 'dev-foo', host_alias: 'elsewhere' })))
+      .toBeUndefined();
+  });
+
+  // m2b: an observed run created before its row was known has no name or
+  // host to compare — the id is all it ever had, so the guard cannot apply.
+  it('still finds a placeholder observed run once its row turns up', () => {
+    applyMoveProgress(ev('check', 'started', { session_id: 77 }));
+    expect(get(moves).get(77)).toMatchObject({ sessionName: 'session 77', fromHost: '' });
+    expect(runForSession(get(moves), row({ id: 77, tmux_name: 'late-row', host_alias: 'alpha' }))?.sessionId)
+      .toBe(77);
   });
 });

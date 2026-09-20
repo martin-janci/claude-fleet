@@ -120,18 +120,28 @@ export function displaySteps(run: MoveRun): MoveRunStep[] {
  * Keyed by the SOURCE session's id — but a row id is reused when a session is
  * re-discovered, so the run must still name the same session; otherwise an
  * unrelated session that inherited the id would wear someone else's move.
- * A session that a move PRODUCED finds the run through the report.
+ * A session that a move PRODUCED finds the run through the report, under the
+ * same guard: a target id is reused exactly as readily as a source one.
  */
 export function runForSession(
   map: Map<number, MoveRun>,
   session: SessionRow,
 ): MoveRun | undefined {
   const own = map.get(session.id);
-  if (own && own.sessionName === session.tmux_name && own.fromHost === session.host_alias) {
+  // A run built from an event before this window had the row (`observed`)
+  // knows no name or host — the id is all it ever had, so there is nothing
+  // to hold it to. Every other run is held to both.
+  if (own && (own.fromHost === '' || (own.sessionName === session.tmux_name && own.fromHost === session.host_alias))) {
     return own;
   }
   for (const run of map.values()) {
-    if (run.report?.target_session_id === session.id) return run;
+    if (
+      run.report?.target_session_id === session.id &&
+      run.report.tmux_name === session.tmux_name &&
+      run.toHost === session.host_alias
+    ) {
+      return run;
+    }
   }
   return undefined;
 }
@@ -163,6 +173,17 @@ function warningCount(n: number): string {
   return `${n} warning${n === 1 ? '' : 's'}`;
 }
 
+/**
+ * What the events already said about how the move ended, or null while they
+ * have not said it. Only the answer can be lost; the events are a separate
+ * stream and a terminal one that arrived is as good as a result.
+ */
+function endedInTheSteps(steps: MoveRunStep[]): MoveStatus | null {
+  if (steps.some((s) => s.state === 'failed')) return 'failed';
+  const last = steps[steps.length - 1].state;
+  return last === 'done' || last === 'warned' ? 'done' : null;
+}
+
 function settle(sessionId: number, r: Result<MoveReport>): void {
   const run = get(store).get(sessionId);
   if (!run || run.origin !== 'local' || run.status !== 'running') return;
@@ -191,10 +212,28 @@ function settle(sessionId: number, r: Result<MoveReport>): void {
     }
     return;
   }
+  if (r.error.code === 'E_INVALID_STATE' && r.error.message.includes('already in progress')) {
+    // The CLICK was refused, not the move: another move of this session is
+    // already running (this window let go of one, or another window owns
+    // it). Settling a failure here would show a step failing that never did
+    // — and the real move's events would then patch that failed run. Follow
+    // the real move instead, and say why the Transfer did nothing. The
+    // toast goes up even with the sheet open: the sheet shows a move
+    // running, which is not an answer to "why was my click ignored".
+    put({ ...run, origin: 'observed', keepSource: null, error: null, settledAt: null });
+    pushError(r.error, `Transfer of ${run.sessionName}`);
+    return;
+  }
   if (r.error.code === NO_ANSWER) {
-    // The hub never answered. The move is most likely still running there,
-    // and its events still reach this window — so keep following it as if it
-    // had been started elsewhere, and let the user stop following (F3).
+    // The hub never answered. Unless its events already said how the move
+    // ended, the move is most likely still running there and its events
+    // still reach this window — so keep following it as if it had been
+    // started elsewhere, and let the user stop following (F3).
+    const ended = endedInTheSteps(run.steps);
+    if (ended !== null) {
+      put({ ...run, status: ended, error: r.error, settledAt: Date.now() });
+      return;
+    }
     put({ ...run, origin: 'observed', error: r.error });
     return;
   }

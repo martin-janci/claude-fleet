@@ -216,13 +216,38 @@ describe('TransferSheet', () => {
     startMove(source, 'turanga', { keepSource: false });
     transferSheetFor.set(5);
     render(TransferSheet);
-    p.reject({ code: 'E_HUB_UNREACHABLE', message: 'no answer', details: null });
+    p.reject({
+      code: 'E_HUB_UNREACHABLE',
+      message: 'https://hub.example/mcp did not answer: connect: connection refused',
+      details: null,
+    });
     await flush();
     await tick();
     const dialog = screen.getByTestId('move-dialog');
     expect(dialog.textContent).toContain('Lost contact with the hub — the move may still be running there.');
     expect(dialog.textContent).not.toContain('Started elsewhere');
     expect(screen.getByTestId('transfer-stop-following')).toBeTruthy();
+    // R3: a connection refused and a 404 come back under the same code, and
+    // those are definite failures. The note must not hide what was said.
+    expect(screen.getByTestId('transfer-lost-contact-detail').textContent)
+      .toContain('https://hub.example/mcp did not answer: connect: connection refused');
+  });
+
+  // m3: the same run, once its events finish it. "Started elsewhere" is
+  // wrong — this window started it and then lost the answer.
+  it('result: a run that lost its hub says so instead of blaming another window', async () => {
+    const p = pendingMove();
+    startMove(source, 'turanga', { keepSource: false });
+    transferSheetFor.set(5);
+    render(TransferSheet);
+    p.reject({ code: 'E_HUB_UNREACHABLE', message: 'no answer', details: null });
+    await flush();
+    applyMoveProgress(ev('handoff', 'done'));
+    await tick();
+    const result = await screen.findByTestId('transfer-result');
+    expect(result.textContent)
+      .toContain('The connection to the hub was lost during the move, so this window has no report for it.');
+    expect(result.textContent).not.toContain('Started elsewhere');
   });
 
   // P-T5: the result view of a move this window only watched.
