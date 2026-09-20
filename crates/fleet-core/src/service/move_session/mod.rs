@@ -1587,18 +1587,113 @@ fn bundle_too_large(bytes: u64, cap: u64) -> IpcError {
     .with_details(serde_json::json!({ "bytes": bytes, "cap_bytes": cap, "payload": "bundle" }))
 }
 
-/// The target worktree holds uncommitted changes. Raised from two places —
-/// the prep step (behind the source HEAD and dirty) and the apply — with
-/// one message, because from the user's side it is one situation. The third
-/// case is the common one after this branch: a move leaves its work in the
-/// source worktree, so moving the session BACK finds that copy waiting.
-fn target_dirty(cwd: &str, target: &str) -> IpcError {
-    IpcError::new(
-        codes::E_MOVE_TARGET_DIRTY,
-        format!(
-            "move_session: the target worktree {cwd} on {target} has uncommitted changes — its own, work carried by an earlier move attempt that did not finish, or the copy left behind when this session was moved away from this host; the move never overwrites them, so inspect them there and commit or discard them before retrying (the source session was not touched)"
-        ),
+/// What a dirty target worktree turned out to be.
+#[derive(Debug)]
+enum Adopted {
+    /// Already exactly the snapshot: the porcelain the verify script printed.
+    Yes(String),
+    /// Differs, but only in paths the snapshot itself writes: a cleanup could
+    /// replace them (`clean_target`).
+    Ours(carry::Leftovers),
+    /// Holds at least one path this move would never write: nothing may touch
+    /// it, flag or not.
+    Theirs(carry::Leftovers),
+    /// The check could not answer. Never widen what the move will overwrite
+    /// on the strength of a broken check.
+    Unknown,
+}
+
+/// Ask the target whether its dirty worktree is already the snapshot
+/// (`carry::verify_replayed_script`). Called only after a `TARGET_DIRTY`
+/// refusal, so its own failure simply means "still dirty, reason unknown".
+async fn classify_target(
+    ssh: &dyn SshExec,
+    target: &str,
+    cwd: &str,
+    claude_id: &str,
+    want_head: &str,
+) -> Adopted {
+    let Ok(out) = sh(
+        ssh,
+        target,
+        &carry::verify_replayed_script(cwd, claude_id, want_head),
+        GIT_TIMEOUT,
     )
+    .await
+    else {
+        return Adopted::Unknown;
+    };
+    if out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        return match carry::parse_apply(&stdout) {
+            Ok(p) => Adopted::Yes(p.to_string()),
+            Err(_) => Adopted::Unknown,
+        };
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.contains(carry::LEFTOVERS_DIFFER) {
+        return Adopted::Unknown;
+    }
+    let l = carry::parse_leftovers(&err);
+    if l.theirs.is_empty() && l.more_theirs == 0 {
+        Adopted::Ours(l)
+    } else {
+        Adopted::Theirs(l)
+    }
+}
+
+/// `a, b and 7 more` — the path lists in a refusal's message.
+fn name_paths(paths: &[String], more: u64) -> String {
+    let mut s = paths.join(", ");
+    if more > 0 {
+        if !s.is_empty() {
+            s.push_str(" and ");
+        }
+        s.push_str(&format!("{more} more"));
+    }
+    s
+}
+
+/// The target worktree is dirty. Three refusals, because they ask three
+/// different things of the user: replace the stale leftovers of an attempt
+/// that did not finish (`Ours` — `clean_target` can do it), deal with the
+/// target's own work (`Theirs` — only they can), or look for themselves
+/// (`Unknown`, which is also what this said before slice 3d).
+fn target_dirty(cwd: &str, target: &str, verdict: &Adopted) -> IpcError {
+    let (kind, message) = match verdict {
+        Adopted::Ours(l) => (
+            "ours",
+            format!(
+                "move_session: {cwd} on {target} still holds work an earlier transfer attempt left behind, and it differs from what is being carried now ({}); transfer again with clean_target to replace it, or inspect it there first (the source session was not touched)",
+                name_paths(&l.ours, l.more_ours)
+            ),
+        ),
+        Adopted::Theirs(l) => (
+            "theirs",
+            format!(
+                "move_session: the target worktree {cwd} on {target} has uncommitted work of its own ({}); the move never overwrites it and no cleanup can be safe here, so commit or discard it there before transferring (the source session was not touched)",
+                name_paths(&l.theirs, l.more_theirs)
+            ),
+        ),
+        // Unchanged from before 3d, including for `Yes` — which never reaches
+        // here, but must not silently become a permissive message if it ever
+        // does.
+        _ => (
+            "unknown",
+            format!(
+                "move_session: the target worktree {cwd} on {target} has uncommitted changes — its own, work carried by an earlier move attempt that did not finish, or the copy left behind when this session was moved away from this host; the move never overwrites them, so inspect them there and commit or discard them before retrying (the source session was not touched)"
+            ),
+        ),
+    };
+    let (ours, theirs) = match verdict {
+        Adopted::Ours(l) | Adopted::Theirs(l) => (l.ours.clone(), l.theirs.clone()),
+        _ => (Vec::new(), Vec::new()),
+    };
+    IpcError::new(codes::E_MOVE_TARGET_DIRTY, message).with_details(serde_json::json!({
+        "leftovers": kind,
+        "ours": ours,
+        "theirs": theirs,
+    }))
 }
 
 /// A carry step failed before the target started.
@@ -2076,6 +2171,7 @@ async fn move_session_inner(
         .await
         .map_err(|e| before_target("preparing the target worktree", e))?;
 
+    let mut adopted: Option<String> = None;
     let out = sh(
         ssh,
         &target,
@@ -2089,22 +2185,26 @@ async fn move_session_inner(
         // Behind the source HEAD and dirty: the target's own uncommitted
         // work, not a divergence.
         if err.contains(carry::TARGET_DIRTY) {
-            return Err(target_dirty(&cwd, &target));
-        }
-        let msg = if err.contains(DIVERGED) {
-            format!(
-                "the target worktree {cwd} on {target} has diverged from the source HEAD {}; reconcile the branch there first",
-                state.head
-            )
-        } else if err.contains(NO_CWD) {
-            format!("the target worktree {cwd} does not exist on {target}")
+            match classify_target(ssh, &target, &cwd, &id, &state.head).await {
+                Adopted::Yes(porcelain) => adopted = Some(porcelain),
+                other => return Err(target_dirty(&cwd, &target, &other)),
+            }
         } else {
-            format!("target preparation failed on {target}: {err}")
-        };
-        return Err(before_target(
-            "verifying the target worktree",
-            IpcError::new(codes::E_GIT, msg),
-        ));
+            let msg = if err.contains(DIVERGED) {
+                format!(
+                    "the target worktree {cwd} on {target} has diverged from the source HEAD {}; reconcile the branch there first",
+                    state.head
+                )
+            } else if err.contains(NO_CWD) {
+                format!("the target worktree {cwd} does not exist on {target}")
+            } else {
+                format!("target preparation failed on {target}: {err}")
+            };
+            return Err(before_target(
+                "verifying the target worktree",
+                IpcError::new(codes::E_GIT, msg),
+            ));
+        }
     }
     let prep = parse_target_prep(&String::from_utf8_lossy(&out.stdout), &id)
         .map_err(|e| before_target("verifying the target worktree", e))?;
@@ -2148,36 +2248,59 @@ async fn move_session_inner(
             ));
         }
     } else {
-        let out = sh(
-            ssh,
-            &target,
-            &carry::apply_script(&cwd, &id, &state.head),
-            GIT_TIMEOUT,
-        )
-        .await
-        .map_err(|e| carry_transport("apply", e))?;
-        if !out.status.success() {
-            let err = stderr_of(&out);
-            if err.contains(carry::TARGET_DIRTY) {
-                return Err(target_dirty(&cwd, &target));
+        let porcelain_owned = match adopted.take() {
+            Some(p) => {
+                progress.done(Some("already in place".to_string()));
+                warnings.push(format!(
+                    "{cwd} on {target} already held exactly this work; nothing was replayed"
+                ));
+                p
             }
-            return Err(carry_err(
-                "apply",
-                &format!("replaying the work in {cwd} on {target}"),
-                &err,
-            ));
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let porcelain = carry::parse_apply(&stdout).map_err(|e| {
-            carry_err(
-                "apply",
-                &format!(
-                    "reading the replayed state of {cwd} on {target}: {}",
-                    e.message
-                ),
-                "",
-            )
-        })?;
+            None => {
+                let out = sh(
+                    ssh,
+                    &target,
+                    &carry::apply_script(&cwd, &id, &state.head),
+                    GIT_TIMEOUT,
+                )
+                .await
+                .map_err(|e| carry_transport("apply", e))?;
+                if !out.status.success() {
+                    let err = stderr_of(&out);
+                    if !err.contains(carry::TARGET_DIRTY) {
+                        return Err(carry_err(
+                            "apply",
+                            &format!("replaying the work in {cwd} on {target}"),
+                            &err,
+                        ));
+                    }
+                    match classify_target(ssh, &target, &cwd, &id, &state.head).await {
+                        Adopted::Yes(porcelain) => {
+                            progress.done(Some("already in place".to_string()));
+                            warnings.push(format!(
+                                "{cwd} on {target} already held exactly this work; nothing was replayed"
+                            ));
+                            porcelain
+                        }
+                        other => return Err(target_dirty(&cwd, &target, &other)),
+                    }
+                } else {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    carry::parse_apply(&stdout)
+                        .map_err(|e| {
+                            carry_err(
+                                "apply",
+                                &format!(
+                                    "reading the replayed state of {cwd} on {target}: {}",
+                                    e.message
+                                ),
+                                "",
+                            )
+                        })?
+                        .to_string()
+                }
+            }
+        };
         // `" M"` (unstaged) and `"M "` (staged) differ only in the two status
         // columns, so they are compared verbatim.
         let line_set = |files: &[DirtyFile]| -> std::collections::BTreeSet<String> {
@@ -2188,7 +2311,7 @@ async fn move_session_inner(
         };
         let (want, got) = (
             line_set(&state.dirty),
-            line_set(&parse_porcelain(porcelain)),
+            line_set(&parse_porcelain(&porcelain_owned)),
         );
         if want != got {
             return Err(IpcError::new(
@@ -3130,6 +3253,146 @@ mod tests {
             "{seen:?}"
         );
         assert!(seen.contains(&"git:done".to_string()), "{seen:?}");
+    }
+
+    /// The state a move leaves when it fails after the replay: the target
+    /// worktree already holds exactly what this move is carrying.
+    fn target_already_replayed(f: &Fixture, porcelain: &str) {
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::ok(&out(&format!("{porcelain}\n"))),
+            );
+    }
+
+    #[tokio::test]
+    async fn a_target_that_already_holds_this_work_is_adopted_and_the_move_completes() {
+        let (f, bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        target_already_replayed(&f, " M src/lib.rs\n?? notes.txt");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("the move completes");
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("already held exactly this work")),
+            "{:?}",
+            rep.warnings
+        );
+        let seen = progress_of(&f, &bus);
+        assert!(seen.contains(&"replay:done".to_string()), "{seen:?}");
+        assert!(!seen.iter().any(|e| e == "replay:failed"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn stale_leftovers_are_ours_and_name_their_paths() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\nours\tsrc/lib.rs\0", carry::LEFTOVERS_DIFFER),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        let d = err.details.clone().unwrap();
+        assert_eq!(d["leftovers"], "ours");
+        assert_eq!(d["ours"][0], "src/lib.rs");
+        assert!(err.message.contains("src/lib.rs"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn the_targets_own_work_is_theirs_and_is_refused_outright() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!(
+                        "{}\nours\tsrc/lib.rs\0theirs\ttheir_notes.md\0more\ttheirs\t7\0",
+                        carry::LEFTOVERS_DIFFER
+                    ),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        let d = err.details.clone().unwrap();
+        assert_eq!(d["leftovers"], "theirs");
+        assert_eq!(d["theirs"][0], "their_notes.md");
+        assert!(err.message.contains("their_notes.md"), "{}", err.message);
+        assert!(err.message.contains("7 more"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn a_verify_that_cannot_answer_keeps_todays_refusal() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(5, &format!("{} no-snapshot", carry::FAILED)),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        assert_eq!(err.details.clone().unwrap()["leftovers"], "unknown");
+        assert!(
+            err.message.contains("inspect them there"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_head_mismatch_from_verify_is_never_an_adopt() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(10, &format!("{} deadbeef", carry::HEAD_MISMATCH)),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        assert_eq!(err.details.clone().unwrap()["leftovers"], "unknown");
     }
 
     /// F8: the confirm wait is inside the `start` step, so a target that
