@@ -61,18 +61,24 @@ fn safe_session_path(p: &str) -> bool {
 }
 
 /// A tar exclude pattern for `path` that cannot carry shell or glob syntax of
-/// the caller's making: every char outside the safe set becomes `?` (one-char
-/// wildcard on GNU and BSD tar alike).
+/// the caller's making: every char outside the safe set becomes `[!/]` — a
+/// bracket expression matching exactly one NON-slash character, on GNU and
+/// BSD tar alike. A plain `?` wildcard is not safe here: both tars' fnmatch
+/// let `?` match `/` too, so a pattern built for one odd file (say
+/// `a[?]b.txt` for `a b.txt`) can also match an unrelated `a/b.txt` one
+/// directory over — an odd name would silently reach across a directory
+/// boundary and exclude a file the caller never named. The explicit `[!/]`
+/// negation excludes `/` regardless of that.
 pub fn exclude_pattern(path: &str) -> String {
-    path.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || "._/-".contains(c) {
-                c
-            } else {
-                '?'
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() || "._/-".contains(c) {
+            out.push(c);
+        } else {
+            out.push_str("[!/]");
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -310,9 +316,15 @@ pub fn merge_index(
 
 /// Every regular file under `<project dir>/<id>/` as `<bytes>\t<path>\0`,
 /// the path relative to `<id>/`. Symlinks and special files are not listed —
-/// and the merge moves regular files only, so they never travel. No such
-/// directory is not an error. Streaming: a `find` failure is detected after
-/// the marker; callers check the exit status first.
+/// and the merge moves regular files only, so they never travel. A leftover
+/// `*.cf-part` from an interrupted merge (see `session_merge_script`) is
+/// never listed either. The directory is checked and entered BEFORE the
+/// marker is printed, so a caller never sees a marker it cannot trust — "no
+/// such directory" still prints the marker (with an empty list) since that
+/// is a legitimate, successful outcome. Only a `find` failure remains an
+/// after-the-marker exception, documented at the call site: streaming a
+/// listing means its own failure can only be discovered once records are
+/// already flowing.
 pub fn session_list_script(project_dir: &str, claude_id: &str) -> String {
     format!(
         r#"# cf-carry:state-list
@@ -321,11 +333,15 @@ d={d}
 id={id}
 {id_guard}
 cd -- "$d" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
-printf '\n{OUT_MARKER}\n'
-[ -d "./$id" ] || exit 0
-cd -- "./$id" || {{ printf '{FAILED} cd-id\n' >&2; exit 5; }}
-find . -type f -exec sh -c 'for f; do n=$(wc -c < "$f" | tr -d " "); printf "%s\t%s\0" "${{n:-0}}" "${{f#./}}"; done' _ {{}} +
-[ "$?" -eq 0 ] || {{ printf '{FAILED} find\n' >&2; exit 5; }}
+if [ -d "./$id" ]; then
+  cd -- "./$id" || {{ printf '{FAILED} cd-id\n' >&2; exit 5; }}
+  printf '\n{OUT_MARKER}\n'
+  find . -type f ! -name '*.cf-part' -exec sh -c 'for f; do n=$(wc -c < "$f" | tr -d " "); printf "%s\t%s\0" "${{n:-0}}" "${{f#./}}"; done' _ {{}} +
+  [ "$?" -eq 0 ] || {{ printf '{FAILED} find\n' >&2; exit 5; }}
+else
+  printf '\n{OUT_MARKER}\n'
+fi
+exit 0
 "#,
         d = quote(project_dir),
         id = quote(claude_id),
@@ -334,9 +350,13 @@ find . -type f -exec sh -c 'for f; do n=$(wc -c < "$f" | tr -d " "); printf "%s\
 }
 
 /// One tar of `./<id>` minus `excludes` (patterns relative to `<id>/`, each
-/// given in both member-name spellings so GNU and BSD tar agree).
+/// given in both member-name spellings so GNU and BSD tar agree). A
+/// `*.cf-part` is always excluded too, regardless of the caller's list: it
+/// is the merge script's own same-directory temp name (see
+/// `session_merge_script`), and a leftover one from an earlier interrupted
+/// merge must never travel as if it were real session content.
 pub fn session_pack_script(project_dir: &str, claude_id: &str, excludes: &[String]) -> String {
-    let ex: Vec<String> = excludes
+    let mut ex: Vec<String> = excludes
         .iter()
         .flat_map(|p| {
             [
@@ -346,6 +366,7 @@ pub fn session_pack_script(project_dir: &str, claude_id: &str, excludes: &[Strin
         })
         .map(|a| quote(&a))
         .collect();
+    ex.push(quote("--exclude=*.cf-part"));
     format!(
         r#"# cf-carry:state-pack
 set +e
@@ -374,7 +395,24 @@ printf '%s\t%s\n' "$n" "$dir/state.tgz"
 /// Extract into a staging dir inside the transfer dir — never in place —
 /// then move each staged REGULAR file into `<target project dir>/<id>/` iff
 /// the target has no such file or a strictly smaller one (these files are
-/// append-only: the larger copy is the newer one).
+/// append-only: the larger copy is the newer one). Every doubt falls toward
+/// KEEP: a destination that is not a plain regular file, OR one whose size
+/// cannot even be read (permissions, an ACL, an fs quirk), is treated as
+/// larger and kept rather than risk replacing something the merge could not
+/// verify; a STAGED file whose own size cannot be read is reported `failed`
+/// and never moved. A replacement is staged through a same-directory
+/// `<dst>.cf-part` name first, so the final step onto `<dst>` is a rename
+/// (atomic) rather than a possibly cross-filesystem copy+unlink that ENOSPC
+/// could interrupt mid-write; on any failure the `.cf-part` is removed and
+/// the entry reported `failed`. `*.cf-part` itself is never treated as real
+/// staged content (a leftover from an earlier interrupted merge). The
+/// `find | while` pipeline's own exit status is read immediately after it
+/// (`PIPESTATUS`, not `$?`, since the pipeline's last stage is the `while`)
+/// so a `find` failure partway through (e.g. an unreadable staged
+/// subdirectory) still surfaces as one `failed` line instead of a silently
+/// truncated report — the files already moved by then stay moved and
+/// reported. `fail()` always cleans up the staging dir first: it is only
+/// ever called after `stage=` has run, so `$stage` is already set.
 pub fn session_merge_script(target_project_dir: &str, claude_id: &str, archive: &str) -> String {
     format!(
         r#"# cf-carry:state-merge
@@ -385,8 +423,8 @@ a={a}
 {id_guard}
 {home_guard}
 umask 077
-fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
 stage="$HOME/.cache/claude-fleet/transfer/$id/state-staging"
+fail() {{ rm -rf -- "$stage" 2>/dev/null; printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
 rm -rf -- "$stage"
 mkdir -p -- "$stage" || fail mkdir
 tar -tzf "$a" >/dev/null 2>&1 || fail corrupt
@@ -394,18 +432,36 @@ tar -xzf "$a" -C "$stage" >/dev/null 2>&1 || fail extract
 mkdir -p -- "$d/$id" || fail mkdir-target
 printf '\n{OUT_MARKER}\n'
 if cd -- "$stage/$id" 2>/dev/null; then
-  find . -type f -print0 | while IFS= read -r -d '' f; do
+  find . -type f ! -name '*.cf-part' -print0 | while IFS= read -r -d '' f; do
     rel=${{f#./}}
     dst="$d/$id/$rel"
-    s=$(wc -c < "$f" | tr -d ' ')
-    t=-1
-    if [ -f "$dst" ] && [ ! -L "$dst" ]; then t=$(wc -c < "$dst" | tr -d ' '); elif [ -e "$dst" ] || [ -L "$dst" ]; then t=999999999999; fi
-    if [ "${{t:--1}}" -lt "${{s:-0}}" ]; then
-      if mkdir -p -- "$(dirname -- "$dst")" && mv -f -- "$f" "$dst"; then printf 'carried\t%s\t%s\n' "$s" "$rel"; else printf 'failed\t%s\n' "$rel"; fi
+    s=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+    if [ -z "$s" ]; then
+      printf 'failed\t%s\n' "$rel"
+      continue
+    fi
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
+      if [ -f "$dst" ] && [ ! -L "$dst" ]; then
+        t=$(wc -c < "$dst" 2>/dev/null | tr -d ' ')
+        [ -n "$t" ] || t=999999999999
+      else
+        t=999999999999
+      fi
+    else
+      t=-1
+    fi
+    if [ "$t" -lt "$s" ]; then
+      if mkdir -p -- "$(dirname -- "$dst")" && mv -f -- "$f" "$dst.cf-part" && mv -f -- "$dst.cf-part" "$dst"; then
+        printf 'carried\t%s\t%s\n' "$s" "$rel"
+      else
+        rm -f -- "$dst.cf-part"
+        printf 'failed\t%s\n' "$rel"
+      fi
     else
       printf 'kept\t%s\n' "$rel"
     fi
   done
+  [ "${{PIPESTATUS[0]}}" -eq 0 ] || printf 'failed\t(listing the staged files)\n'
 fi
 cd / 2>/dev/null
 rm -rf -- "$stage"
@@ -427,14 +483,16 @@ pub struct MergeResult {
 }
 
 /// Lines after the marker: `carried\t<bytes>\t<path>`, `kept\t<path>`,
-/// `failed\t<path>`. `None` without the marker.
+/// `failed\t<path>`. `None` only when the marker itself is missing — a
+/// malformed `carried` size does not sink the rest of an otherwise-good
+/// report; it is kept with `bytes: 0`.
 pub fn parse_merge(stdout: &str) -> Option<MergeResult> {
     let mut r = MergeResult::default();
     for line in payload_str(stdout)?.lines() {
         match line.split('\t').collect::<Vec<_>>().as_slice() {
             ["carried", n, path] => r.carried.push(IgnoredEntry {
                 path: path.to_string(),
-                bytes: n.trim().parse().ok()?,
+                bytes: n.trim().parse().unwrap_or(0),
             }),
             ["kept", path] => r.kept.push(path.to_string()),
             ["failed", path] => r.failed.push(path.to_string()),
@@ -498,6 +556,20 @@ mod tests {
 
     fn mode(p: &std::path::Path) -> u32 {
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    /// `true` when this test process is root — permission-denial tests are
+    /// meaningless there (uid 0 reads/writes anything regardless of mode
+    /// bits), so those assertions are skipped, loudly, rather than silently
+    /// passing for the wrong reason.
+    fn is_root() -> bool {
+        std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim() == "0")
+            .unwrap_or(false)
     }
 
     #[test]
@@ -681,6 +753,378 @@ mod tests {
             .any(|e| e.path == "subagents/agent-own.jsonl"));
     }
 
+    /// Every doubt must fall toward KEEP: `wc -c < "$dst"` has no failure
+    /// handling of its own, so an existing destination that cannot be READ
+    /// (mode 000, an ACL, an fs quirk) must never be treated as if it were
+    /// absent — that would let a smaller staged file silently replace
+    /// something the merge could not even measure.
+    #[test]
+    fn an_unreadable_destination_is_kept_not_replaced() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        if is_root() {
+            eprintln!("skipping: uid 0 can read anything regardless of mode 000");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = source_project(tmp.path());
+        let out = bash(&session_pack_script(src.to_str().unwrap(), ID, &[]), &home);
+        assert!(out.status.success());
+        let (_, archive) =
+            crate::service::move_session::carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+                .unwrap();
+
+        let tgt = tmp.path().join("-Users-other--claude-worktrees-feat");
+        // Larger than the source's 4000 B copy, then made unreadable.
+        let bb_bigger = tgt.join(ID).join("subagents/agent-bb.jsonl");
+        std::fs::create_dir_all(bb_bigger.parent().unwrap()).unwrap();
+        std::fs::write(&bb_bigger, "b\n".repeat(2500)).unwrap();
+        std::fs::set_permissions(&bb_bigger, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let before = {
+            // Can't read the bytes without restoring the mode first — just
+            // pin the mtime/size via metadata as a before/after sentinel.
+            std::fs::metadata(&bb_bigger).unwrap().len()
+        };
+
+        let out = bash(
+            &session_merge_script(tgt.to_str().unwrap(), ID, &archive),
+            &home,
+        );
+        // restore before any assertion can fail and leave it unreadable
+        std::fs::set_permissions(&bb_bigger, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let merged = parse_merge(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert!(
+            merged
+                .kept
+                .contains(&"subagents/agent-bb.jsonl".to_string()),
+            "{merged:?}"
+        );
+        assert!(
+            !merged
+                .carried
+                .iter()
+                .any(|e| e.path == "subagents/agent-bb.jsonl"),
+            "{merged:?}"
+        );
+        assert_eq!(
+            std::fs::metadata(&bb_bigger).unwrap().len(),
+            before,
+            "byte-identical to before the merge"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&bb_bigger).unwrap(),
+            "b\n".repeat(2500)
+        );
+    }
+
+    /// `fail()` used to exit immediately, leaving the staging dir (a partial
+    /// copy of the user's conversation history) behind on every failure
+    /// path. It must clean up first.
+    #[test]
+    fn the_staging_dir_does_not_survive_a_corrupt_archive() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let corrupt = tmp.path().join("corrupt.tgz");
+        std::fs::write(&corrupt, b"not a tarball").unwrap();
+        let tgt = tmp.path().join("-Users-other--claude-worktrees-feat");
+
+        let out = bash(
+            &session_merge_script(tgt.to_str().unwrap(), ID, corrupt.to_str().unwrap()),
+            &home,
+        );
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        assert!(
+            !home
+                .join(".cache/claude-fleet/transfer")
+                .join(ID)
+                .join("state-staging")
+                .exists(),
+            "the staging dir must not survive a failed merge"
+        );
+    }
+
+    /// Replacing a smaller target file is not atomic today: `mv -f` across
+    /// filesystems is copy+unlink, so ENOSPC (or any interrupted copy) could
+    /// leave a truncated destination where a good smaller file used to be.
+    /// Moving through a same-directory `.cf-part` name first makes the final
+    /// step a rename. A leftover `*.cf-part` (from an earlier crash, or one
+    /// already sitting in the source) must never be listed, packed, or
+    /// merged as if it were real content.
+    #[test]
+    fn a_replacement_goes_through_a_same_directory_temp_name_and_leaves_none_behind() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = source_project(tmp.path());
+        // A leftover .cf-part sitting in the SOURCE session dir, as if this
+        // host had once been a merge target itself.
+        std::fs::write(src.join(ID).join("subagents/x.cf-part"), "stale").unwrap();
+
+        // --- list must never report it ---
+        let out = bash(&session_list_script(src.to_str().unwrap(), ID), &home);
+        assert!(out.status.success());
+        assert!(parse_file_list(&out.stdout)
+            .iter()
+            .all(|f| !f.path.ends_with(".cf-part")));
+
+        // --- pack must never archive it, even with no caller-supplied excludes ---
+        let out = bash(&session_pack_script(src.to_str().unwrap(), ID, &[]), &home);
+        assert!(out.status.success());
+        let (_, archive) =
+            crate::service::move_session::carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+                .unwrap();
+        let listing = std::process::Command::new("tar")
+            .args(["-tzf", &archive])
+            .output()
+            .unwrap();
+        let names = String::from_utf8_lossy(&listing.stdout);
+        assert!(!names.contains("x.cf-part"), "{names}");
+
+        // --- merge: a normal run leaves no *.cf-part anywhere on the target ---
+        let tgt = tmp.path().join("-Users-other--claude-worktrees-feat");
+        let out = bash(
+            &session_merge_script(tgt.to_str().unwrap(), ID, &archive),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let merged = parse_merge(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert!(
+            !merged.carried.iter().any(|e| e.path.ends_with(".cf-part")),
+            "{merged:?}"
+        );
+        fn has_cf_part(dir: &std::path::Path) -> bool {
+            std::fs::read_dir(dir).unwrap().any(|e| {
+                let e = e.unwrap();
+                let p = e.path();
+                if p.is_dir() {
+                    has_cf_part(&p)
+                } else {
+                    p.extension().is_some_and(|x| x == "cf-part")
+                }
+            })
+        }
+        assert!(
+            !has_cf_part(&tgt.join(ID)),
+            "no .cf-part temp file survives a successful merge"
+        );
+    }
+
+    /// The rule "a destination that is not a regular file is kept" had no
+    /// coverage: a pre-existing DIRECTORY and a pre-existing SYMLINK on the
+    /// target must both be reported `kept`, left exactly as they were, and
+    /// nothing may be written inside/through them.
+    #[test]
+    fn a_non_regular_destination_is_kept_and_left_untouched() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = source_project(tmp.path());
+        let out = bash(&session_pack_script(src.to_str().unwrap(), ID, &[]), &home);
+        assert!(out.status.success());
+        let (_, archive) =
+            crate::service::move_session::carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+                .unwrap();
+
+        let tgt = tmp.path().join("-Users-other--claude-worktrees-feat");
+        // custom-title.json as a DIRECTORY.
+        std::fs::create_dir_all(tgt.join(ID).join("custom-title.json")).unwrap();
+        // tool-results/out1.txt as a SYMLINK to some other file.
+        let referent = tmp.path().join("referent.txt");
+        std::fs::write(&referent, "referent content\n").unwrap();
+        std::fs::create_dir_all(tgt.join(ID).join("tool-results")).unwrap();
+        std::os::unix::fs::symlink(&referent, tgt.join(ID).join("tool-results/out1.txt")).unwrap();
+
+        let out = bash(
+            &session_merge_script(tgt.to_str().unwrap(), ID, &archive),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let merged = parse_merge(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert!(
+            merged.kept.contains(&"custom-title.json".to_string()),
+            "{merged:?}"
+        );
+        assert!(
+            merged.kept.contains(&"tool-results/out1.txt".to_string()),
+            "{merged:?}"
+        );
+        assert!(!merged
+            .carried
+            .iter()
+            .any(|e| e.path == "custom-title.json" || e.path == "tool-results/out1.txt"));
+
+        let dir_meta = std::fs::symlink_metadata(tgt.join(ID).join("custom-title.json")).unwrap();
+        assert!(dir_meta.file_type().is_dir(), "still a directory");
+        assert_eq!(
+            std::fs::read_dir(tgt.join(ID).join("custom-title.json"))
+                .unwrap()
+                .count(),
+            0,
+            "nothing was written inside it"
+        );
+
+        let link_meta =
+            std::fs::symlink_metadata(tgt.join(ID).join("tool-results/out1.txt")).unwrap();
+        assert!(link_meta.file_type().is_symlink(), "still a symlink");
+        assert_eq!(
+            std::fs::read_link(tgt.join(ID).join("tool-results/out1.txt")).unwrap(),
+            referent
+        );
+        assert_eq!(
+            std::fs::read_to_string(&referent).unwrap(),
+            "referent content\n",
+            "the referent is unchanged"
+        );
+    }
+
+    /// Builds a `.tgz` containing `<id>/custom-title.json` and
+    /// `<id>/subagents/locked/inner.jsonl`, with the `locked` directory's
+    /// STORED mode forced to `0o000` — independent of the mode of the real
+    /// files on disk while archiving (a plain `tar` can't do this: you can't
+    /// archive the *contents* of a directory that is already unreadable).
+    /// `tar` defers restoring a directory's final permissions until after
+    /// its children are written, so extracting this archive lands the file
+    /// inside `locked` and THEN locks the directory down — exactly the
+    /// shape of a directory that becomes unreadable only once staged.
+    fn build_archive_with_a_locked_directory(
+        dir: &std::path::Path,
+        id: &str,
+    ) -> std::path::PathBuf {
+        let src = dir.join("archive_src");
+        std::fs::create_dir_all(src.join(id).join("subagents/locked")).unwrap();
+        std::fs::write(src.join(id).join("custom-title.json"), "{\"title\":\"t\"}").unwrap();
+        std::fs::write(
+            src.join(id).join("subagents/locked/inner.jsonl"),
+            "secret\n",
+        )
+        .unwrap();
+        let builder = dir.join("build_archive.py");
+        std::fs::write(
+            &builder,
+            r#"
+import tarfile, os, sys
+root, id_, out = sys.argv[1], sys.argv[2], sys.argv[3]
+locked_rel = os.path.join(id_, "subagents", "locked")
+with tarfile.open(out, "w:gz") as tar:
+    for dirpath, dirnames, filenames in os.walk(os.path.join(root, id_)):
+        rel_dir = os.path.relpath(dirpath, root)
+        ti = tar.gettarinfo(dirpath, arcname="./" + rel_dir)
+        if rel_dir == locked_rel:
+            ti.mode = 0o000
+        tar.addfile(ti)
+        for fn in filenames:
+            fp = os.path.join(dirpath, fn)
+            rel_fp = os.path.relpath(fp, root)
+            ti2 = tar.gettarinfo(fp, arcname="./" + rel_fp)
+            with open(fp, "rb") as fh:
+                tar.addfile(ti2, fh)
+"#,
+        )
+        .unwrap();
+        let archive = dir.join("locked.tgz");
+        let out = std::process::Command::new("python3")
+            .args([
+                builder.to_str().unwrap(),
+                src.to_str().unwrap(),
+                id,
+                archive.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        archive
+    }
+
+    /// A `find` failure partway through the merge loop (e.g. an unreadable
+    /// staged subdirectory) must not silently truncate the report: the
+    /// pipeline's exit status is checked immediately after it, and a single
+    /// `failed\t(listing the staged files)` line warns the flow — without
+    /// losing the report lines for files already moved.
+    #[test]
+    fn a_find_failure_mid_merge_is_reported_without_losing_files_already_moved() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        if is_root() {
+            eprintln!("skipping: uid 0 can traverse a mode-000 directory anyway");
+            return;
+        }
+        let py = std::process::Command::new("python3")
+            .arg("--version")
+            .output();
+        if py.is_err() {
+            eprintln!("skipping: python3 is not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let archive = build_archive_with_a_locked_directory(tmp.path(), ID);
+
+        let tgt = tmp.path().join("-Users-other--claude-worktrees-feat");
+        let out = bash(
+            &session_merge_script(tgt.to_str().unwrap(), ID, archive.to_str().unwrap()),
+            &home,
+        );
+        // Whatever permissions tar left on the target's copy, restore them
+        // before the tempdir tries to clean itself up.
+        let target_locked = tgt.join(ID).join("subagents/locked");
+        if target_locked.exists() {
+            let _ =
+                std::fs::set_permissions(&target_locked, std::fs::Permissions::from_mode(0o700));
+        }
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let merged = parse_merge(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        // The file outside the locked directory must still have made it.
+        assert!(
+            merged.carried.iter().any(|e| e.path == "custom-title.json"),
+            "{merged:?}"
+        );
+        assert!(
+            merged
+                .failed
+                .iter()
+                .any(|p| p.contains("listing the staged files")),
+            "a find failure must be reported: {merged:?}"
+        );
+    }
+
     #[test]
     fn excluded_files_do_not_travel_on_either_tar() {
         if !require(&["bash", "tar"]) {
@@ -732,6 +1176,53 @@ mod tests {
         ] {
             assert!(names.contains(present), "missing {present}: {names}");
         }
+    }
+
+    /// A single-char wildcard (`?`) in a tar `--exclude` pattern can match
+    /// `/` on both GNU and BSD tar's fnmatch, so a pattern built for one odd
+    /// file can silently reach into an unrelated file across a directory
+    /// boundary. `exclude_pattern` must use a token that matches exactly one
+    /// NON-slash character.
+    #[test]
+    fn exclude_pattern_never_reaches_across_a_directory_boundary() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = source_project(tmp.path());
+        // "a b.txt" (one odd top-level file) and "a/b.txt" (an unrelated file
+        // nested under a directory literally named "a") — a pattern for the
+        // first must never also match the second.
+        std::fs::write(src.join(ID).join("a b.txt"), "space").unwrap();
+        std::fs::create_dir_all(src.join(ID).join("a")).unwrap();
+        std::fs::write(src.join(ID).join("a/b.txt"), "nested").unwrap();
+
+        let excludes = vec![exclude_pattern("a b.txt")];
+        let out = bash(
+            &session_pack_script(src.to_str().unwrap(), ID, &excludes),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (_, archive) =
+            crate::service::move_session::carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+                .unwrap();
+        let listing = std::process::Command::new("tar")
+            .args(["-tzf", &archive])
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        let names = String::from_utf8_lossy(&listing.stdout);
+        assert!(!names.contains("a b.txt"), "the odd file itself: {names}");
+        assert!(
+            names.contains("a/b.txt"),
+            "an unrelated file one directory over must survive: {names}"
+        );
     }
 
     #[test]
@@ -871,6 +1362,42 @@ mod tests {
         assert_eq!(merged.carried.len(), 6);
     }
 
+    /// The list script must confirm the session directory is actually
+    /// reachable BEFORE printing the marker — printing it first and only
+    /// then discovering `cd` fails leaves a caller staring at a marker with
+    /// no trustworthy payload. `chmod 000` on `<id>/` makes `cd` fail
+    /// deterministically (no race required) while `[ -d ]` still reports it
+    /// as a directory.
+    #[test]
+    fn session_list_script_confirms_the_directory_before_printing_the_marker() {
+        if !require(&["bash"]) {
+            return;
+        }
+        if is_root() {
+            eprintln!("skipping: chmod 000 has no effect on root");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = tmp.path().join("-Users-me-r--claude-worktrees-locked");
+        std::fs::create_dir_all(&src).unwrap();
+        let idp = src.join(ID);
+        std::fs::create_dir_all(&idp).unwrap();
+        std::fs::set_permissions(&idp, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let out = bash(&session_list_script(src.to_str().unwrap(), ID), &home);
+        // restore so the tempdir can be cleaned up regardless of the assertions below
+        std::fs::set_permissions(&idp, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(!out.status.success(), "cd into an unreadable dir must fail");
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        assert!(
+            crate::service::move_session::carry::payload(&out.stdout).is_none(),
+            "no marker until the directory is confirmed reachable"
+        );
+    }
+
     fn marked(body: &[u8]) -> Vec<u8> {
         let mut v = format!("banner\n\n{OUT_MARKER}\n").into_bytes();
         v.extend_from_slice(body);
@@ -960,14 +1487,15 @@ mod tests {
             3
         );
         assert!(
-            sel.exclude.contains(&"we?ird??x?.txt".to_string()),
+            sel.exclude
+                .contains(&"we[!/]ird[!/][!/]x[!/].txt".to_string()),
             "{:?}",
             sel.exclude
         );
         assert!(sel.exclude.iter().all(|p| p
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._/-?".contains(c))));
-        assert_eq!(exclude_pattern("a b"), "a?b");
+            .all(|c| c.is_ascii_alphanumeric() || "._/-[]!".contains(c))));
+        assert_eq!(exclude_pattern("a b"), "a[!/]b");
     }
 
     #[test]
@@ -1173,5 +1701,36 @@ mod tests {
         let sel = select_session_files(vec![f("a", big), f("b", big), f("c", big)], 1);
         assert!(sel.carry.is_empty(), "{:?}", sel.carry);
         assert_eq!(sel.exclude.len(), 3);
+    }
+
+    // --- Fix round 1 (session-directory scripts) ---
+
+    #[test]
+    fn parse_merge_keeps_the_report_when_one_size_is_malformed() {
+        let stdout = format!(
+            "banner\n\n{OUT_MARKER}\ncarried\t10\tgood.jsonl\ncarried\tNaN\tbad.jsonl\nkept\tsame.md\n"
+        );
+        let got = parse_merge(&stdout).unwrap();
+        assert_eq!(got.carried.len(), 2, "{got:?}");
+        assert_eq!(
+            got.carried[0],
+            IgnoredEntry {
+                path: "good.jsonl".into(),
+                bytes: 10
+            }
+        );
+        assert_eq!(
+            got.carried[1],
+            IgnoredEntry {
+                path: "bad.jsonl".into(),
+                bytes: 0
+            },
+            "a malformed size becomes 0; the line is not dropped and the rest of the report survives"
+        );
+        assert_eq!(got.kept, vec!["same.md"]);
+        assert!(
+            parse_merge("carried\t10\tgood.jsonl\n").is_none(),
+            "only a missing marker is None"
+        );
     }
 }
