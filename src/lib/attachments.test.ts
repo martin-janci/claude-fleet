@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { addFiles, pastedName, fmtBytes, MAX_FILES, MAX_BYTES } from './attachments';
+import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, NEEDS_REATTACH, MAX_FILES, MAX_BYTES } from './attachments';
 
 const file = (o: Partial<{ path: string; name: string; size: number; kind: 'image' | 'text' | 'binary' }> = {}) => ({
   path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' as const, ...o,
@@ -93,3 +93,50 @@ describe('fmtBytes', () => {
 // left to unit-test here; the integration is covered in
 // ConversationPanel.test.ts, where an oversized *dropped* file is shown to
 // be rejected by the same `addFiles` limit a picked one hits.
+
+// `upload_attachments` consumes each path's allow-list entry the moment it
+// passes the byte budget, before a single byte transfers (`UploadAllowList
+// ::consume` in `src-tauri/src/commands/upload.rs`). A failure anywhere
+// downstream of that — the upload call itself, or a later refusal on this
+// side of the wire — leaves the tiles' local paths unusable for a second
+// attempt even though nothing in the UI says so. `markNeedsReattach` is how
+// the composer stops claiming a plain retry will work.
+describe('markNeedsReattach', () => {
+  const two = () => [
+    { id: 'a', path: '/tmp/a.png', name: 'a.png', size: 1, kind: 'image' as const, thumb: null, state: 'ready' as const, error: null, pasted: false },
+    { id: 'b', path: '/tmp/b.png', name: 'b.png', size: 1, kind: 'image' as const, thumb: null, state: 'ready' as const, error: null, pasted: false },
+  ];
+
+  it('marks only the given ids as needing reattachment', () => {
+    const out = markNeedsReattach(two(), new Set(['a']));
+    expect(out[0]).toMatchObject({ id: 'a', state: 'error', error: NEEDS_REATTACH });
+    expect(out[1]).toMatchObject({ id: 'b', state: 'ready', error: null });
+  });
+
+  it('is a no-op — same array reference — for an empty id set', () => {
+    const list = two();
+    expect(markNeedsReattach(list, new Set())).toBe(list);
+  });
+});
+
+// The other half of the same fix: only the attachments this send actually
+// uploaded are spent. Anything it could not upload (a pasted entry) was
+// never part of the attempt, so it is not this function's to remove — the
+// evidence that it did not go must not disappear with the ones that did.
+describe('clearSent', () => {
+  const mixed = () => [
+    { id: 'a', path: '/tmp/a.png', name: 'a.png', size: 1, kind: 'image' as const, thumb: null, state: 'ready' as const, error: null, pasted: false },
+    { id: 'p', path: '', name: 'pasted-14.05.09.png', size: 0, kind: 'image' as const, thumb: null, state: 'error' as const, error: "Pasted files aren't supported yet.", pasted: true },
+  ];
+
+  it('removes only the ids that were uploaded, keeping everything else', () => {
+    const out = clearSent(mixed(), new Set(['a']));
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe('p');
+  });
+
+  it('is a no-op — same array reference — for an empty id set', () => {
+    const list = mixed();
+    expect(clearSent(list, new Set())).toBe(list);
+  });
+});

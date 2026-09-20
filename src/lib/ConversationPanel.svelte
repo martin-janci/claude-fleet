@@ -79,7 +79,7 @@
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { invokeCmd } from './result';
-  import { addFiles, pastedName, fmtBytes, type Attachment, type PickedFile } from './attachments';
+  import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, type Attachment, type PickedFile } from './attachments';
   import { withAttachments, tooLong } from './attach_prompt';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pointInRect } from './geometry';
@@ -803,8 +803,24 @@
     // rather than sent to `upload_attachments` at all. With nothing
     // uploadable, nothing can fail: the draft (if any) still goes out on its
     // own rather than being refused over a tile that was already showing its
-    // own honest error.
+    // own honest error, and the tile itself is never touched below — it was
+    // never attempted, so it is not this send's to clear or flag.
     const toUpload = attachments.filter((a) => a.path !== '');
+    const toUploadIds = new Set(toUpload.map((a) => a.id));
+
+    // `upload_attachments` consumes each path's allow-list entry the moment
+    // it clears the byte budget — before a byte moves, and not undone by a
+    // later failure (`UploadAllowList::consume` in
+    // `src-tauri/src/commands/upload.rs`). So a failure anywhere downstream
+    // of that point — the upload call itself, this side's own `tooLong`
+    // refusal, or a failed `sendPrompt` — can leave a tile in `toUpload`
+    // looking untouched while its local path is already unusable for a
+    // second attempt: pressing Send again would call `upload_attachments`
+    // with the same path and get back an authorisation error instead of a
+    // real retry. Rather than guess which specific failure actually
+    // consumed it, every failure below marks the attempted tiles as spent —
+    // occasionally more cautious than strictly necessary (a size-budget
+    // refusal happens before `consume`), never wrong.
     let paths: string[] = [];
     if (toUpload.length > 0) {
       const up = await invokeCmd<string[]>('upload_attachments', {
@@ -822,6 +838,7 @@
         // The draft stays: a prompt without its attachment is a worse
         // outcome than no prompt at all.
         sendError = up.error.message;
+        attachments = markNeedsReattach(attachments, toUploadIds);
         sending = false;
         return;
       }
@@ -830,7 +847,11 @@
 
     const body = withAttachments(text, paths);
     if (tooLong(body)) {
+      // The file(s), if any, already uploaded successfully — only the
+      // prompt text is refused — so a retry needs a shorter prompt AND,
+      // since the upload above already spent the tile, a fresh attach.
       sendError = 'That prompt is too long to send through tmux. Shorten it.';
+      attachments = markNeedsReattach(attachments, toUploadIds);
       sending = false;
       return;
     }
@@ -842,11 +863,13 @@
     if (session.id !== id) return;
     if (!r.ok) {
       sendError = r.error.message;
+      attachments = markNeedsReattach(attachments, toUploadIds);
       return;
     }
-    // Attachments (and their remote allow-list entries) are spent the
-    // moment the upload succeeds, regardless of what triggered the send.
-    if (attachments.length > 0) attachments = [];
+    // Only the attachments this send actually uploaded are spent; anything
+    // it could not upload (a pasted entry) was never attempted and stays,
+    // so the evidence that it did not go is not lost.
+    attachments = clearSent(attachments, toUploadIds);
     // The notes were about the tray that just went; they do not carry over.
     attachErrors = [];
     if (text === '') return;

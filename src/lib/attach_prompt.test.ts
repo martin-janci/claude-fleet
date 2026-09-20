@@ -24,4 +24,15 @@ describe('tooLong', () => {
   it('measures bytes, not characters', () => {
     expect(tooLong('é'.repeat(PROMPT_MAX_BYTES - 10))).toBe(true);
   });
+
+  // `crate::shell::quote` (crates/fleet-core/src/shell.rs) wraps the body in
+  // `'...'` and replaces every embedded `'` with the 4-byte sequence `'\''`
+  // before it reaches the argv this bound protects. A quote-heavy body can
+  // be well under PROMPT_MAX_BYTES in its own bytes and still cross the real
+  // ceiling once quoted — a byte-only check misses exactly this case.
+  it('accounts for shell-quote expansion, not just the raw byte count', () => {
+    const quoteHeavy = "'".repeat(40000);
+    expect(new TextEncoder().encode(quoteHeavy).length).toBeLessThan(PROMPT_MAX_BYTES);
+    expect(tooLong(quoteHeavy)).toBe(true);
+  });
 });

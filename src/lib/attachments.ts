@@ -131,3 +131,44 @@ export function addFiles(
   }
   return { next, rejected };
 }
+
+// ---- after a send ----------------------------------------------------
+//
+// `upload_attachments` consumes each path's allow-list entry the moment it
+// passes the byte budget — before a single byte transfers
+// (`UploadAllowList::consume` in `src-tauri/src/commands/upload.rs`, which
+// runs unconditionally and is not undone by a later failure). So a failure
+// anywhere downstream of a successful upload call — this side's own
+// too-long refusal, a failed `send_prompt` — or the upload call itself
+// failing, leaves an attempted tile's local path unusable for a second try,
+// even though nothing about the tile says so. Pressing Send again would
+// call `upload_attachments` with the same path and get back "not attached
+// by the user, or its authorisation has expired" — a confusing failure for
+// something that looks untouched.
+
+export const NEEDS_REATTACH = 'Not sent — attach it again to retry.';
+
+/**
+ * Mark every attachment whose id is in `ids` as spent, so the tile stops
+ * looking retry-safe. Anything not in `ids` — including an attachment that
+ * was never part of the attempt, like a pasted entry — is returned
+ * unchanged. A no-op call (`ids` empty) returns the same array reference,
+ * so the caller does not have to guard it separately.
+ */
+export function markNeedsReattach(list: Attachment[], ids: Set<string>): Attachment[] {
+  if (ids.size === 0) return list;
+  return list.map((a) => (ids.has(a.id) ? { ...a, state: 'error' as const, error: NEEDS_REATTACH } : a));
+}
+
+/**
+ * Remove every attachment whose id is in `ids` — the ones a send actually
+ * uploaded. Everything else stays: an attachment that could not be
+ * uploaded (a pasted entry) was never attempted, so it is not this send's
+ * to clear, and the tile that explains why it did not go must not
+ * disappear along with the ones that did. A no-op call (`ids` empty)
+ * returns the same array reference.
+ */
+export function clearSent(list: Attachment[], ids: Set<string>): Attachment[] {
+  if (ids.size === 0) return list;
+  return list.filter((a) => !ids.has(a.id));
+}

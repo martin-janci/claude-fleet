@@ -3084,7 +3084,7 @@ describe('ConversationPanel attachments', () => {
     expect(screen.queryAllByTestId('conv-attachment')).toHaveLength(0);
   });
 
-  it('a failed upload cancels the send and keeps the draft', async () => {
+  it('a failed upload cancels the send, keeps the draft, and marks the tile as needing reattachment', async () => {
     await renderPanel();
     mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'pick_attachments')
@@ -3104,8 +3104,139 @@ describe('ConversationPanel attachments', () => {
     expect(box.value).toBe('look');
     expect(screen.getByTestId('conv-composer-error').textContent).toContain('host unreachable');
     expect(mockedSend).not.toHaveBeenCalled();
-    // The draft is worthless without its attachment: the tile stays exactly
-    // as it was so the user can retry.
+    // The tile stays so the user can retry — but `upload_attachments`
+    // consumes a path's authorisation before a failure like this one can be
+    // told apart from a genuine mid-transfer failure (`UploadAllowList::
+    // consume` in `upload.rs` runs unconditionally, ahead of the transfer),
+    // so a plain retry is not actually safe. The tile must say so rather
+    // than looking untouched.
+    const tile = screen.getByTestId('conv-attachment');
+    expect(tile.getAttribute('data-state')).toBe('error');
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
+  });
+
+  // Coordinator review Finding 1: `attachments = []` used to fire on ANY
+  // successful send, keyed on the unfiltered array — so a pasted tile that
+  // was never uploadable got wiped along with the ones that sent, and its
+  // "pasting isn't supported" message (the only record it never went) went
+  // with it. `clearSent` now only removes the ids a send actually uploaded.
+  it('a mixed tray sends only the uploadable file and keeps the pasted tile as evidence', async () => {
+    await renderPanel();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') return ['/w/p/.claude-fleet-attachments/a.png'];
+      return baseInvoke(cmd, args);
+    });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    const box = screen.getByTestId('conv-composer-input');
+    const file = new File([new Uint8Array([1, 2, 3])], 'image.png', { type: 'image/png' });
+    await fireEvent.paste(box, {
+      clipboardData: { files: [file], types: ['Files'], getData: () => '' },
+    });
+    await settle();
+    await settle();
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(2);
+
+    await fireEvent.input(box, { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    expect(mockedSend).toHaveBeenCalledWith(
+      'local',
+      'ctl',
+      'look\n\nAttached files:\n/w/p/.claude-fleet-attachments/a.png',
+    );
+    // The pasted tile was never part of the upload: it must still be there,
+    // not silently cleared along with the one that sent.
+    const left = screen.getAllByTestId('conv-attachment');
+    expect(left).toHaveLength(1);
+    expect(left[0].getAttribute('title')).toMatch(/pasted-\d\d\.\d\d\.\d\d\.png/);
+  });
+
+  it('a pasted-only tray sends the text alone, uploading nothing, and keeps the tile', async () => {
+    await renderPanel();
+    // The Tauri stub is a module-level vi.fn shared by the whole file and
+    // nothing resets its call history between tests; only the calls this
+    // test itself makes are under test.
+    mockedInvoke.mockClear();
+    const box = screen.getByTestId('conv-composer-input');
+    const file = new File([new Uint8Array([1, 2, 3])], 'image.png', { type: 'image/png' });
+    await fireEvent.paste(box, {
+      clipboardData: { files: [file], types: ['Files'], getData: () => '' },
+    });
+    await settle();
+    await settle();
     expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+
+    await fireEvent.input(box, { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    // Nothing uploadable was ever in the tray, so nothing was attempted and
+    // nothing can have failed: the text goes out on its own.
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'look');
+    expect(mockedInvoke).not.toHaveBeenCalledWith('upload_attachments', expect.anything());
+    // Never sent, never cleared: the pasted tile is the only record it was
+    // excluded, and it must still be there afterwards.
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+  });
+
+  // Coordinator review Finding 2: a body that only becomes too long once the
+  // attachment paths are appended is refused AFTER the upload already
+  // succeeded — the file is already on the host and its local path already
+  // consumed, so the tile must not look retry-safe either.
+  it('a prompt too long only once the attachment paths are appended marks the tile as needing reattachment', async () => {
+    await renderPanel();
+    const hugePath = `/w/${'p'.repeat(200 * 1024)}`;
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') return [hugePath];
+      return baseInvoke(cmd, args);
+    });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(box.value).toBe('look');
+    expect(screen.getByTestId('conv-composer-error').textContent).toContain('too long');
+    const tile = screen.getByTestId('conv-attachment');
+    expect(tile.getAttribute('data-state')).toBe('error');
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
+  });
+
+  it('a failed send after a successful upload marks the tile as needing reattachment', async () => {
+    await renderPanel();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') return ['/w/p/.claude-fleet-attachments/a.png'];
+      return baseInvoke(cmd, args);
+    });
+    mockedSend.mockResolvedValue({ ok: false, error: { code: 'E_TMUX', message: "can't find session" } });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    expect(box.value).toBe('look');
+    expect(screen.getByTestId('conv-composer-error').textContent).toContain("can't find session");
+    const tile = screen.getByTestId('conv-attachment');
+    expect(tile.getAttribute('data-state')).toBe('error');
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
   });
 });
