@@ -856,6 +856,20 @@ describe('ConversationPanel quick actions', () => {
     expect(screen.queryByTestId('conv-chip')).toBeNull();
   });
 
+  it('the stuck prompt gets its own row, not a seat among the presets', async () => {
+    await mount({ claude_status: 'blocked', stuck_kind: 'press_enter' });
+    const enter = screen.getByTestId('conv-chip-enter');
+    expect(enter.closest('[data-testid="conv-chips"]')).toBeNull();
+    expect(enter.className).toContain('btn--warn');
+  });
+
+  it('a suggested chip is toned, not ringed', async () => {
+    await mount({ context_pct: 88 });
+    const chip = screen.getAllByTestId('conv-chip').find((c) => c.dataset.suggested === 'true');
+    expect(chip).toBeTruthy();
+    expect(chip!.className).toContain('btn--warn');
+  });
+
   it('collapses overflowing chips behind More and expands them', async () => {
     await mount();
     const row = screen.getByTestId('conv-chips');

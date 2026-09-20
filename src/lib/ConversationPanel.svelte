@@ -1215,24 +1215,25 @@
       {#if sendError}
         <div class="composer-error" data-testid="conv-composer-error">{sendError}</div>
       {/if}
-      <div class="chips" data-testid="conv-chips" data-expanded={chipsExpanded} bind:this={chipsRow}>
-        {#if liveStuck === 'press_enter'}
+      {#if liveStuck === 'press_enter'}
+        <div class="stuck-row">
           <button
             type="button"
             class="btn btn--toggle btn--warn"
             data-testid="conv-chip-enter"
             title="The session is waiting on a key press. Sends a bare Enter."
             disabled={sending || viewing !== null}
-            onclick={() => void sendText('')}>⏎ Press Enter</button
-          >
-        {/if}
+            onclick={() => void sendText('')}>⏎ Press Enter</button>
+        </div>
+      {/if}
+      <div class="chips" data-testid="conv-chips" data-expanded={chipsExpanded} bind:this={chipsRow}>
         {#each $composerPresets as p, i (i)}
           {#if p.label.trim() && p.text.trim()}
             {@const suggested = suggestCompact && isCompactPreset(p)}
             <button
               type="button"
               class="btn btn--toggle"
-              class:suggest={suggested}
+              class:btn--warn={suggested}
               data-testid="conv-chip"
               data-suggested={suggested || undefined}
               title={suggested
@@ -1368,6 +1369,14 @@
     background: var(--bg-pane);
     padding: 0.55rem var(--chat-inset) 0.6rem;
   }
+  .stuck-row {
+    display: flex;
+    margin: 0 0 6px;
+  }
+  .stuck-row .btn {
+    width: 100%;
+    justify-content: flex-start;
+  }
   .chips {
     display: flex;
     gap: var(--control-gap);
@@ -1478,11 +1487,6 @@
     margin: 0.35rem 0 0;
     color: var(--fg-muted);
     font-size: 0.75rem;
-  }
-  .btn--toggle.suggest {
-    border-color: var(--usage-warn);
-    color: var(--fg);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--usage-warn) 25%, transparent);
   }
   .indicator {
     display: flex;
