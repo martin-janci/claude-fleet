@@ -288,6 +288,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "resolve_move",
+        Verdict::Routed {
+            tool: "resolve_move",
+        },
+    ),
+    (
         "dismiss_ghost_session",
         Verdict::Routed {
             tool: "dismiss_ghost_session",

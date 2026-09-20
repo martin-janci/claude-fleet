@@ -638,6 +638,17 @@ pub struct MoveSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ResolveMoveParams {
+    /// The TARGET session of a partial move.
+    pub session_id: i64,
+    /// "finish" or "undo".
+    pub action: String,
+    /// Nonce from a prior E_CONFIRM_REQUIRED, once approved.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RepairSessionParams {
     /// Fleet session id (from list_sessions / whoami). Alternative to
     /// host_alias + name.

@@ -1211,7 +1211,7 @@ fn capture_default_cap_matches_docs() {
 /// session_conversation/pair_client/list_clients/revoke_client, 72 with
 /// agent_status, 73 with session_conversations; bump it when adding a tool.
 /// (`peek_session` came out again with the token-efficiency work, so the
-/// count is 73 with `list_host_worktrees`.)
+/// count is 73 with `list_host_worktrees`, 74 with `resolve_move`.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1231,7 +1231,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 73);
+    assert_eq!(served, 74);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2123,8 +2123,17 @@ fn the_served_definition_budget_stays_bounded() {
     /// counted the way a model pays for them: name + description + schema,
     /// summed over the tools. ~3.7 chars per token, so this caps the surface
     /// at roughly 15k tokens. It was 64,265 bytes before scoping, slimming
-    /// and the description diet.
-    const BUDGET_BYTES: usize = 56_000;
+    /// and the description diet. Raised by 400 for `resolve_move` (a
+    /// three-field tool: `session_id`, `action`, `confirm_nonce`, each
+    /// needing a real per-field description under
+    /// `every_tool_parameter_is_documented`): a worktree checkout of the
+    /// pre-`resolve_move` commit measured the surface at exactly 55,755
+    /// bytes, so only 245 bytes of headroom existed; even a degenerate
+    /// `resolve_move` (empty tool description, single-character field
+    /// descriptions) still measured 56,026, 26 over the old cap, before
+    /// `move_session`'s required `clean_target` clause was added on top —
+    /// trimming text could not have closed that gap.
+    const BUDGET_BYTES: usize = 56_400;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

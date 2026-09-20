@@ -151,7 +151,7 @@ Parameters: `host_alias`, `limit`, `project_id`, `summary`
 
 ### `move_session`
 
-Move a work session to another host, carrying its work as it is: the Claude transcript, unpushed commits, staged/modified/untracked files and small git-ignored files (.env); also the session's Claude directory (subagent transcripts, tool results) and the project's Claude memory, added to the target without replacing anything there (these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the same conversation and the source is killed only once the target runs (keep_source=true leaves it). strict=true refuses instead of carrying: E_MOVE_DIRTY, E_MOVE_UNPUSHED. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts (in practice the master). Returns a MoveReport with the new row as target.
+Move a work session to another host, carrying its work as it is: the Claude transcript, unpushed commits, staged/modified/untracked files and small git-ignored files (.env); also the session's Claude directory (subagent transcripts, tool results) and the project's Claude memory, added to the target without replacing anything there (these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the same conversation and the source is killed only once the target runs (keep_source=true leaves it). strict=true refuses instead of carrying: E_MOVE_DIRTY, E_MOVE_UNPUSHED. clean_target=true replaces earlier leftovers in the target worktree (never its own work). Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts (in practice the master). Returns a MoveReport with the new row as target.
 
 Parameters: `confirm_nonce`, `keep_source`, `session_id`, `strict`, `target_host_alias`
 
@@ -294,6 +294,12 @@ Parameters: `all`, `limit`, `session_id`, `skip`
 List a session's worktree files (tracked + untracked, gitignore respected). Returns JSON {entries, truncated}.
 
 Parameters: `session_id`
+
+### `resolve_move`
+
+Finish or undo a partial move (E_MOVE_PARTIAL). finish kills the source; undo kills the target and is refused if it took a turn or isn't idle.
+
+Parameters: `action`, `confirm_nonce`, `session_id`
 
 ### `resolve_preview`
 
@@ -461,6 +467,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`
 - `commands::move_session::move_session`
+- `commands::resolve_move::resolve_move`
 - `commands::sessions::dismiss_ghost_session`
 - `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`

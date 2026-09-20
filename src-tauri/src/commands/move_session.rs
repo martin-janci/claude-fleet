@@ -2,8 +2,8 @@
 //! Logic lives in `service::move_session`.
 //!
 //! Routes in remote mode: `MoveSessionArgs` is exactly the tool's parameter
-//! set (`session_id`, `target_host_alias`, `keep_source`, `strict`), and the tool
-//! answers the same `MoveReport`.
+//! set (`session_id`, `target_host_alias`, `keep_source`, `strict`,
+//! `clean_target`), and the tool answers the same `MoveReport`.
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;

@@ -288,6 +288,7 @@ pub fn run() {
             commands::sessions::spawn_review,
             commands::sessions::recreate_session,
             commands::move_session::move_session,
+            commands::resolve_move::resolve_move,
             commands::sessions::dismiss_ghost_session,
             commands::sessions::dismiss_agent_session,
             commands::sessions::new_bg_session,
