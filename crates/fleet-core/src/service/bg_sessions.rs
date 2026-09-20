@@ -311,56 +311,6 @@ pub fn dismiss_agent_session(args: DismissAgentArgs, store: &Mutex<Store>) -> Re
     Ok(())
 }
 
-/// Resolve a transcript-read target from any of: a fleet `session_id`, or a
-/// `claude_session_id` plus its `host_alias` (the id a `new_bg_session`
-/// caller already holds, before reconcile has surfaced the row). Returns the
-/// `(host_alias, claude_session_id)` pair to read.
-///
-/// A fleet row without a Claude id yields `E_INVALID_STATE` so the caller can
-/// tell "not tracked yet" apart from "no such session" (`E_NOTFOUND`).
-pub fn resolve_peek_target(
-    s: &Store,
-    session_id: Option<i64>,
-    host_alias: Option<&str>,
-    claude_session_id: Option<&str>,
-) -> Result<(String, String), IpcError> {
-    if let Some(id) = session_id {
-        let row = s
-            .get_session_by_id(id)?
-            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {id} not found")))?;
-        return match row.claude_session_id {
-            Some(cid) => Ok((row.host_alias, cid)),
-            None => Err(IpcError::new(
-                codes::E_INVALID_STATE,
-                "this session has no Claude session id yet — nothing to peek",
-            )),
-        };
-    }
-    match (host_alias, claude_session_id) {
-        (Some(host), Some(cid)) => {
-            validate::host_alias(host)?;
-            validate::claude_session_id(cid)?;
-            Ok((host.to_string(), cid.to_string()))
-        }
-        // A bare Claude id: use the fleet row's host when the agent is
-        // already tracked; otherwise the host is genuinely unknown.
-        (None, Some(cid)) => {
-            validate::claude_session_id(cid)?;
-            match s.get_session_by_claude_id(cid)? {
-                Some(row) => Ok((row.host_alias, cid.to_string())),
-                None => Err(IpcError::new(
-                    codes::E_INVALID,
-                    "pass host_alias with claude_session_id (the agent is not tracked yet)",
-                )),
-            }
-        }
-        _ => Err(IpcError::new(
-            codes::E_INVALID,
-            "pass session_id, or claude_session_id (+ host_alias)",
-        )),
-    }
-}
-
 /// Purge Claude Code state for a project on every host in `host_aliases`,
 /// then delete the fleet row. The row (and its session rows) is deleted only
 /// when every host succeeded — purged, or held no state. On any failure it is
@@ -467,76 +417,6 @@ mod tests {
         assert!(row.started_at.is_some());
         // Unknown id ⇒ None, no panic.
         assert!(stamp_bg_row(&store, "nope", "x").is_none());
-    }
-
-    #[test]
-    fn resolve_peek_target_accepts_fleet_id_or_claude_id() {
-        let store = make_store();
-        let (tracked_id, untracked_id) = {
-            let s = store.lock().unwrap();
-            s.upsert_host("local").unwrap();
-            let bg = s
-                .upsert_bg_session(
-                    "local",
-                    &format!("bg:{UUID}"),
-                    None,
-                    UUID,
-                    Some("working"),
-                    5,
-                    "bg",
-                    5,
-                )
-                .unwrap();
-            let plain = s
-                .upsert_session("dev-plain", "local", None, None, 1, 1, "running", None)
-                .unwrap();
-            (bg, plain)
-        };
-        let s = store.lock().unwrap();
-        assert_eq!(
-            resolve_peek_target(&s, Some(tracked_id), None, None).unwrap(),
-            ("local".to_string(), UUID.to_string())
-        );
-        assert_eq!(
-            resolve_peek_target(&s, Some(untracked_id), None, None)
-                .unwrap_err()
-                .code,
-            "E_INVALID_STATE"
-        );
-        assert_eq!(
-            resolve_peek_target(&s, Some(999), None, None)
-                .unwrap_err()
-                .code,
-            "E_NOTFOUND"
-        );
-        // Claude id alone resolves through the tracked row …
-        assert_eq!(
-            resolve_peek_target(&s, None, None, Some(UUID)).unwrap().0,
-            "local"
-        );
-        // … an untracked id needs its host …
-        let other = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
-        assert_eq!(
-            resolve_peek_target(&s, None, None, Some(other))
-                .unwrap_err()
-                .code,
-            "E_INVALID"
-        );
-        assert_eq!(
-            resolve_peek_target(&s, None, Some("mefistos"), Some(other)).unwrap(),
-            ("mefistos".to_string(), other.to_string())
-        );
-        // … and garbage is rejected before any lookup.
-        assert_eq!(
-            resolve_peek_target(&s, None, Some("local"), Some("--foo"))
-                .unwrap_err()
-                .code,
-            "E_INVALID"
-        );
-        assert_eq!(
-            resolve_peek_target(&s, None, None, None).unwrap_err().code,
-            "E_INVALID"
-        );
     }
 
     /// A listed background agent launched at `started_at` (unix seconds).
@@ -687,8 +567,6 @@ mod tests {
         assert_eq!(res.claude_session_id.as_deref(), Some("abc-123"));
         assert!(res.warning.is_none());
     }
-
-    const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     #[test]
     fn new_bg_session_args_rejects_option_like_values_and_bad_host() {
