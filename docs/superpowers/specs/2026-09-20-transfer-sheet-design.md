@@ -1,7 +1,7 @@
 # Transfer sheet: one button, live progress, a readable result
 
 **Date:** 2026-09-20
-**Status:** Draft
+**Status:** Implemented
 **Builds on:** `docs/superpowers/specs/2026-09-19-move-carry-engine-design.md`
 (slice 1, PR #163), `docs/superpowers/specs/2026-09-20-move-carry-claude-state-design.md`
 (slice 2, PR #194) and `docs/adr/0002-move-carries-work-as-is.md`
@@ -284,8 +284,9 @@ Then the warnings, **one per line** — never joined. **Details** expands the
 lists behind the counts: each left-behind file with its reason, the kept and
 identical memory names, the index lines added. Buttons: **Open on {toHost}**
 (selects `report.target_session_id`) and **Done** (dismisses the run). An observed
-run that finished has no report: the view says "Moved to {toHost}" and offers
-Open when the new row can be found by name, otherwise only Done.
+run that finished has no report: the view says "Moved to {toHost}" and
+offers Open when the new session can be found — the row on {toHost} whose
+parent is the moved session — otherwise only Done.
 
 **Failure** (`failed`, `partial`). Title "The move did not finish". Three
 parts:
