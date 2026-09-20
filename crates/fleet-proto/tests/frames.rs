@@ -391,6 +391,7 @@ fn assert_no_control_chars(err: &ProtoError, what: &str) {
     let ProtoError::Malformed(why) = err else {
         panic!("{what}: expected Malformed, got {err:?}");
     };
+    let why = why.as_str();
     assert!(
         !why.chars().any(char::is_control),
         "{what}: control character in {why:?}"

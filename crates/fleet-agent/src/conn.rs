@@ -532,6 +532,7 @@ where
                                 break SessionEnd::VersionRefused(reason);
                             }
                             welcomed = true;
+                            let hub_version = sanitized_hub_version(&hub_version);
                             tracing::info!(
                                 hub_version, proto, "[agent] hub protocol compatible"
                             );
@@ -644,6 +645,22 @@ fn close_end(frame: Option<CloseFrame>) -> SessionEnd {
 
 /// The most a WebSocket close frame's reason may carry, per RFC 6455.
 const CLOSE_REASON_MAX: usize = 123;
+
+/// The most of the hub's `hub_version` [`sanitize_for_log`] keeps for the
+/// "hub protocol compatible" log line. Generous next to a real build string
+/// (e.g. `"0.2.24"`), bounded all the same because it is the hub's own text.
+///
+/// [`sanitize_for_log`]: fleet_proto::sanitize_for_log
+const HUB_VERSION_LOG_MAX: usize = 64;
+
+/// `hub_version` is the hub's own free-form build string, unverified past
+/// being valid UTF-8 — neutralised before it reaches the "hub protocol
+/// compatible" log line, the same treatment the close reason and an unknown
+/// `kind` already get. Split out, like [`close_end`], so it is testable
+/// without driving the async `serve` loop.
+fn sanitized_hub_version(hub_version: &str) -> String {
+    fleet_proto::sanitize_for_log(hub_version, HUB_VERSION_LOG_MAX)
+}
 
 /// Why the connection ends when the hub sends something other than
 /// `welcome` before ever sending one.
@@ -838,9 +855,17 @@ fn handle(
     }
 }
 
+/// The most of a request `id` [`sanitize_for_log`] keeps when it is logged.
+/// Generous next to a real id (a uuid, 36 bytes), bounded because it is
+/// peer-controlled text.
+///
+/// [`sanitize_for_log`]: fleet_proto::sanitize_for_log
+const DUPLICATE_ID_LOG_MAX: usize = 64;
+
 /// A replayed id runs nothing and answers nothing. An answer would carry the
 /// same id, and the hub would hand it to whichever caller holds that id now.
 fn refuse_duplicate(id: &str) {
+    let id = fleet_proto::sanitize_for_log(id, DUPLICATE_ID_LOG_MAX);
     tracing::warn!(id, "[agent] refusing a request id already seen");
 }
 
@@ -2051,6 +2076,78 @@ mod tests {
         // Still says something: the peer's forgery is neutralised, not the
         // reason for the refusal.
         assert!(rendered.contains("malformed frame"), "{rendered:?}");
+    }
+
+    /// An in-memory `tracing` writer, so a test can inspect the actual line
+    /// a log macro produced instead of only the value handed to it — the
+    /// two `refuse_duplicate`/`hub_version` cases below have no return value
+    /// to assert on the way `close_end` and `SessionEnd` above do.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'w> tracing_subscriber::fmt::MakeWriter<'w> for CapturedLog {
+        type Writer = CapturedLog;
+        fn make_writer(&'w self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl CapturedLog {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                .expect("log output is UTF-8")
+        }
+    }
+
+    /// A duplicate request id is peer-controlled text, logged at warn — the
+    /// same class of hazard as the close reason and the malformed detail,
+    /// which are already neutralised. Goes through the real function, not
+    /// just the shared sanitiser, so a future refactor that drops the call
+    /// fails here.
+    #[test]
+    fn refuse_duplicate_cannot_forge_a_log_line() {
+        let captured = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        refuse_duplicate("legit\nfleet-hub: forged line\x1b[31mred\x1b[0m");
+        let text = captured.text();
+        // `tracing_subscriber`'s own formatter already Debug-quotes a
+        // structured field's value, which happens to escape an embedded
+        // control character too — so the real, narrower signal that
+        // sanitisation ran (rather than the formatter's own quoting) is the
+        // `U+FFFD` substitution itself: one per replaced control character.
+        assert_eq!(text.matches('\u{fffd}').count(), 3, "{text:?}");
+        assert_eq!(text.lines().count(), 1, "{text:?}");
+        assert!(!text.contains('\x1b'), "{text:?}");
+    }
+
+    /// `hub_version` is the hub's own free-form build string, carried
+    /// straight from its `welcome` into the "hub protocol compatible" log
+    /// line — the same hazard, on the other free-form field this connection
+    /// logs before anything else is trusted.
+    #[test]
+    fn a_hostile_hub_version_cannot_forge_a_log_line() {
+        let got = sanitized_hub_version("0.9\nfleet-hub: forged line\x1b[31mred\x1b[0m");
+        assert!(!got.chars().any(char::is_control), "{got:?}");
+        assert_eq!(got.matches('\u{fffd}').count(), 3, "{got:?}");
+        // Still readable: neutralised, not dropped.
+        assert!(got.contains("forged line"), "{got:?}");
     }
 
     /// The hub side of a version refusal: a close carrying

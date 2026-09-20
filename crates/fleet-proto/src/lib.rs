@@ -451,23 +451,48 @@ pub enum ProtoError {
     /// message and renders it VERBATIM — a `kind` of `"\nfleet-hub: …"`
     /// comes back with a real newline in it — and every receiver logs this
     /// (`ws.rs` at warn; the agent through `SessionEnd::Protocol`, which
-    /// reaches both a log line and systemd's `STATUS=`). Build it with
-    /// [`ProtoError::malformed`], never by hand: that neutralises control
-    /// characters and bounds the length, so no call site has to remember
-    /// to.
-    Malformed(String),
+    /// reaches both a log line and systemd's `STATUS=`). The field is
+    /// private — [`MalformedDetail`] — so the only way to build one is
+    /// [`ProtoError::malformed`], which neutralises control characters and
+    /// bounds the length; there is no by-hand path that skips it.
+    Malformed(MalformedDetail),
+}
+
+/// The detail behind [`ProtoError::Malformed`], already made safe to log.
+///
+/// The inner `String` is private: nothing outside this crate can construct
+/// one except through [`ProtoError::malformed`], which is what sanitises it.
+/// [`MalformedDetail::as_str`] reads it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedDetail(String);
+
+impl MalformedDetail {
+    /// The sanitised, length-bounded detail text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for MalformedDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 impl ProtoError {
     /// [`ProtoError::Malformed`] with the detail made safe to log: every
     /// control character replaced with `U+FFFD`, truncated to
-    /// [`MALFORMED_DETAIL_MAX_LEN`] bytes on a `char` boundary.
+    /// [`MALFORMED_DETAIL_MAX_LEN`] bytes on a `char` boundary — see
+    /// [`sanitize_for_log`] for exactly what counts and how the cap is kept.
     ///
     /// Takes a `Display` so a `serde_json::Error`, a `base64` error or a
     /// plain `&str` all go the same way — there is deliberately no path
     /// that skips this.
     pub fn malformed(why: impl fmt::Display) -> Self {
-        Self::Malformed(sanitize_for_log(&why.to_string(), MALFORMED_DETAIL_MAX_LEN))
+        Self::Malformed(MalformedDetail(sanitize_for_log(
+            &why.to_string(),
+            MALFORMED_DETAIL_MAX_LEN,
+        )))
     }
 }
 
@@ -750,23 +775,55 @@ impl UnknownKinds {
     }
 }
 
-/// Truncate `text` to `max_bytes` on a `char` boundary, and replace every
-/// control character (a newline, a carriage return, an ANSI escape, …) with
-/// `U+FFFD`, so the result is always safe to log verbatim on one line.
+/// Replace every character a log viewer could mistake for structure with
+/// `U+FFFD`, then cut the result to `max_bytes` on a `char` boundary — in
+/// that order, so the result NEVER exceeds `max_bytes`, whatever `text` is.
+///
+/// **Substituted:** every `char::is_control()` character (a newline, a
+/// carriage return, an ANSI escape, NEL/`U+0085`, …); the Unicode line and
+/// paragraph separators `U+2028`/`U+2029`, which several log viewers break a
+/// line on even though `char::is_control()` is false for them; and the bidi
+/// override/isolate controls `U+202A`–`U+202E` and `U+2066`–`U+2069`, which a
+/// terminal can use to render text in an order that hides what it actually
+/// says. Nothing else — this is not a general non-printable sweep.
+///
+/// **The cap.** Substitution happens BEFORE truncation and the byte budget is
+/// spent one whole (possibly substituted) `char` at a time: a `char` that
+/// would push the running total past `max_bytes` is left out, along with
+/// everything after it, rather than truncating an already-built string
+/// (substituting first, then truncating naively, can overshoot: `U+FFFD` is
+/// 3 bytes, so a control-dense input truncated to `max_bytes` first and
+/// substituted after can come back up to 3x over). A `max_bytes` smaller than
+/// one replacement character (3 bytes) never panics and never exceeds the
+/// cap — the substituted character, and the rest of `text`, are simply
+/// dropped; an empty string is a legitimate result.
 ///
 /// Shared because more than one thing on this wire is peer-controlled text a
 /// receiver logs: a frame `kind` (bounded by [`UnknownKinds`], which calls
-/// this) and a WebSocket close reason (bounded by RFC 6455's own 123-byte
-/// limit, and neutralised by `fleet-agent` with this).
+/// this), a WebSocket close reason (bounded by RFC 6455's own 123-byte
+/// limit, and neutralised by `fleet-agent` with this), and a
+/// [`ProtoError::Malformed`] detail (see [`ProtoError::malformed`]).
 pub fn sanitize_for_log(text: &str, max_bytes: usize) -> String {
-    let mut end = text.len().min(max_bytes);
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in text.chars() {
+        let c = if is_log_hostile(c) { '\u{fffd}' } else { c };
+        let len = c.len_utf8();
+        if used + len > max_bytes {
+            break;
+        }
+        out.push(c);
+        used += len;
     }
-    text[..end]
-        .chars()
-        .map(|c| if c.is_control() { '\u{fffd}' } else { c })
-        .collect()
+    out
+}
+
+/// The characters [`sanitize_for_log`] replaces with `U+FFFD` — see its doc
+/// for why each group is in scope.
+fn is_log_hostile(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{2028}' | '\u{2029}')
+        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
 fn encode<T: Serialize>(frame: &T, cap: usize) -> Result<String, ProtoError> {
@@ -1058,5 +1115,135 @@ mod tests {
             );
         }
         assert_eq!(u.seen.len(), UNKNOWN_KIND_CAP, "the set stays bounded");
+    }
+
+    // ── sanitize_for_log: the cap can no longer be exceeded ─────────────
+
+    /// The scenario the issue names, through the real entry point: a hub
+    /// frame whose top-level shape is a JSON array (not an object), so
+    /// there is no `kind` to classify and this is damage, not evolution —
+    /// serde's "invalid type" message quotes the offending string VERBATIM,
+    /// all 300 control bytes of it. Before the fix, substituting after
+    /// truncating let each of those bytes grow to a 3-byte `U+FFFD`, so the
+    /// detail came back up to 3x over `MALFORMED_DETAIL_MAX_LEN`.
+    #[test]
+    fn an_all_control_frame_never_exceeds_the_malformed_detail_cap() {
+        let hostile = "\u{1}".repeat(300);
+        let text = format!("[{},1]", serde_json::to_string(&hostile).expect("encodes"));
+        let err = decode_hub_frame_lenient(&text).expect_err("not a valid frame");
+        let ProtoError::Malformed(detail) = err else {
+            panic!("expected Malformed, got {err:?}");
+        };
+        assert!(
+            detail.as_str().len() <= MALFORMED_DETAIL_MAX_LEN,
+            "{} bytes, cap is {MALFORMED_DETAIL_MAX_LEN}",
+            detail.as_str().len()
+        );
+        assert!(!detail.as_str().chars().any(char::is_control), "{detail:?}");
+    }
+
+    /// The same scenario through the unknown-kind path, whose cap
+    /// ([`UNKNOWN_KIND_MAX_LEN`], 32 bytes) is smaller still — the fix must
+    /// hold for both caps in use, not just the 256-byte one.
+    #[test]
+    fn an_all_control_kind_never_exceeds_the_unknown_kind_cap() {
+        let hostile = "\u{1}".repeat(300);
+        let text = format!(
+            r#"{{"kind":{}}}"#,
+            serde_json::to_string(&hostile).expect("encodes")
+        );
+        let decoded =
+            lenient::<HubFrame>(&text).expect("an object with one string kind classifies");
+        let Decoded::Unknown { kind } = decoded else {
+            panic!("expected Unknown, got {decoded:?}");
+        };
+        assert_eq!(kind, hostile, "the raw kind is carried through undecoded");
+
+        let mut tracker = UnknownKinds::new();
+        match tracker.record(&kind) {
+            UnknownKindAction::LogOnce(logged) => {
+                assert!(
+                    logged.len() <= UNKNOWN_KIND_MAX_LEN,
+                    "{} bytes, cap is {UNKNOWN_KIND_MAX_LEN}",
+                    logged.len()
+                );
+                assert!(!logged.chars().any(char::is_control), "{logged:?}");
+            }
+            other => panic!("expected LogOnce, got {other:?}"),
+        }
+    }
+
+    /// A cap smaller than one replacement character (3 bytes: `U+FFFD`) must
+    /// not panic and must not exceed the cap. Dropping the character (and
+    /// anything after it) is the documented behaviour; an empty string is a
+    /// legitimate result.
+    #[test]
+    fn a_cap_smaller_than_one_replacement_char_never_panics_or_overflows() {
+        for max_bytes in 0..3 {
+            let got = sanitize_for_log("\x01ok", max_bytes);
+            assert!(got.len() <= max_bytes, "{max_bytes}: {got:?}");
+            assert_eq!(got, "", "{max_bytes}: {got:?}");
+        }
+        // Just enough room for one replacement char, nothing after it.
+        assert_eq!(sanitize_for_log("\x01ok", 3), "\u{fffd}");
+    }
+
+    /// Plain ASCII with no hostile characters is untouched and, in
+    /// particular, a small cap still keeps as much of it as fits — the fix
+    /// must not make ordinary short strings disappear.
+    #[test]
+    fn ordinary_text_under_the_cap_is_untouched() {
+        assert_eq!(sanitize_for_log("laptop.local", 256), "laptop.local");
+        assert_eq!(sanitize_for_log("hello", 3), "hel");
+    }
+
+    /// U+2028/U+2029 (line/paragraph separator) are `Zl`/`Zp`, not `Cc`, so
+    /// `char::is_control()` alone misses them — several log viewers still
+    /// break a line on them.
+    #[test]
+    fn line_and_paragraph_separators_are_substituted() {
+        assert_eq!(
+            sanitize_for_log("a\u{2028}b", 64),
+            "a\u{fffd}b",
+            "U+2028 (LINE SEPARATOR)"
+        );
+        assert_eq!(
+            sanitize_for_log("a\u{2029}b", 64),
+            "a\u{fffd}b",
+            "U+2029 (PARAGRAPH SEPARATOR)"
+        );
+    }
+
+    /// NEL (`U+0085`) is already `Cc`, so `char::is_control()` alone already
+    /// catches it — pinned here so a future change to the hostile set cannot
+    /// silently stop covering it.
+    #[test]
+    fn nel_is_already_a_control_character_and_is_substituted() {
+        assert!('\u{0085}'.is_control(), "NEL must stay Cc for this test");
+        assert_eq!(sanitize_for_log("a\u{0085}b", 64), "a\u{fffd}b");
+    }
+
+    /// The bidi override/isolate controls: a classic log-spoofing vector,
+    /// since they can make a terminal render text in an order that hides
+    /// what it actually says. Each is tested individually, not swept in as
+    /// part of a broader "non-printable" rule.
+    #[test]
+    fn each_bidi_control_is_substituted() {
+        for c in ['\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}'] {
+            assert_eq!(
+                sanitize_for_log(&format!("a{c}b"), 64),
+                "a\u{fffd}b",
+                "U+{:04X}",
+                c as u32
+            );
+        }
+        for c in ['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'] {
+            assert_eq!(
+                sanitize_for_log(&format!("a{c}b"), 64),
+                "a\u{fffd}b",
+                "U+{:04X}",
+                c as u32
+            );
+        }
     }
 }
