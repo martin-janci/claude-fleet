@@ -6,8 +6,11 @@
 //! transcript, the conversation view, restart, reboot survival and the
 //! sidebar for free, and removing the feature means deleting this file.
 
-use crate::ipc_error::{codes, IpcError};
-use crate::store::Store;
+use crate::cancel::CancellationRegistry;
+use crate::ipc_error::{codes, lock, IpcError};
+use crate::ssh::SshClient;
+use crate::store::{SessionRow, Store};
+use std::sync::{Arc, Mutex};
 
 /// `settings` key holding `"<host_alias>/<tmux_name>"` for the live operator
 /// session. Absent until `ensure_operator` has run once.
@@ -82,10 +85,269 @@ pub fn refuse_if_operator(
     }
 }
 
+/// Owner/repo of the operator's own project row. Not a real repository —
+/// `upsert_system_project` flags it so the picker hides it and the sweep
+/// leaves it be.
+pub const OPERATOR_OWNER: &str = "fleet";
+pub const OPERATOR_REPO: &str = "operator";
+/// The operator's working directory. Deliberately NOT one of the user's
+/// checkouts: the agent runs sessions, it does not write code.
+pub const OPERATOR_DIR: &str = "~/.claude-fleet/operator";
+/// Fixed tmux name, so the session is recognisable in the sidebar and in
+/// `tmux ls` without consulting the database.
+pub const OPERATOR_TMUX_NAME: &str = "fleet-operator";
+/// The operator always runs on the machine that serves the control API —
+/// `local` for the desktop, the hub's own host for a hub. That is why the
+/// endpoint below can be loopback and no public URL is ever baked into the
+/// file.
+pub const OPERATOR_HOST: &str = "local";
+/// Name of the operator's client-token row. A client token in mode `full`,
+/// never the master token: the agent is a paired client like any other, and
+/// revoking it by name is how the operator is disarmed.
+pub const OPERATOR_CLIENT_NAME: &str = "ux-agent";
+/// `settings` key holding the SHA-256 of the operator's client token, so
+/// `operator_status` can tell a revoked token from a healthy one without
+/// reading the secret back off the host.
+pub const SETTING_OPERATOR_TOKEN_SHA: &str = "operator.token_sha";
+
+/// PURE: the operator's standing instructions.
+pub fn claude_md() -> &'static str {
+    "# You are the fleet operator\n\
+     \n\
+     You drive claude-fleet through its MCP control API on behalf of the\n\
+     person at the keyboard. `list_sessions`, `fleet_health` and\n\
+     `session_conversation` tell you what is happening; `send_prompt`,\n\
+     `new_session` and the rest change it.\n\
+     \n\
+     Two rules.\n\
+     \n\
+     1. **Destructive work is proposed, never assumed.** Killing, deleting,\n\
+     moving, broadcasting and committing stop for a confirmation you do not\n\
+     control. Say plainly what you are about to do and let the dialog do its\n\
+     job; do not try to route around a refusal.\n\
+     \n\
+     2. **This directory is not a repository and you do not write code in\n\
+     it.** When work needs doing in a project, start a session on the right\n\
+     host and brief it. You are the operator, not the worker.\n\
+     \n\
+     Answer in the language the person uses. Prefer one short paragraph over\n\
+     a report: the sidebar already shows what changed.\n"
+}
+
+/// PURE: the operator's `.claude/settings.json`, pointing its MCP client at
+/// this fleet with its own bearer token.
+pub fn settings_json(endpoint: &str, token: &str) -> String {
+    serde_json::json!({
+        "mcpServers": {
+            "claude-fleet": {
+                "type": "http",
+                "url": endpoint,
+                "headers": { "Authorization": format!("Bearer {token}") }
+            }
+        }
+    })
+    .to_string()
+}
+
+/// The part of `ensure_operator` that reaches outside the database: where
+/// the operator's directory actually is on the host, the two files that go
+/// into it, and starting the session.
+///
+/// It is a trait because `new_session` has no exec seam of its own — the
+/// live path writes a bearer token into `$HOME` and runs `tmux new-session`,
+/// neither of which a unit test may do (and macOS CI has no tmux at all).
+/// Everything the idempotence test cares about is store state, so the double
+/// in the test module produces that and nothing else.
+#[async_trait::async_trait]
+pub(crate) trait OperatorHost: Send + Sync {
+    /// The operator's working directory as an ABSOLUTE path on the host.
+    ///
+    /// This is not a formality. `new_session` hands the project's
+    /// `base_path` straight to `tmux new-session -c <path>`, which is an
+    /// argv element with no shell behind it, so a literal `~` would be taken
+    /// as a directory of that name rather than the home directory. The
+    /// provisioning helpers expand `~` themselves (`remote_path` /
+    /// `expand_home_local`); the session lifecycle does not, so the path
+    /// stored on the project row has to be resolved here first.
+    async fn resolve_dir(&self) -> Result<String, IpcError>;
+
+    /// Write `CLAUDE.md` and `.claude/settings.json` under `dir`.
+    async fn write_files(&self, dir: &str, claude_md: &str, settings: &str)
+        -> Result<(), IpcError>;
+
+    /// Start the operator's session and return its row.
+    async fn start_session(&self, project_id: i64) -> Result<SessionRow, IpcError>;
+}
+
+/// The live host side: the provisioning helpers and the ordinary session
+/// lifecycle, on the machine that serves the control API.
+struct LiveHost {
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<SshClient>,
+    reg: Arc<CancellationRegistry>,
+}
+
+#[async_trait::async_trait]
+impl OperatorHost for LiveHost {
+    async fn resolve_dir(&self) -> Result<String, IpcError> {
+        crate::service::provision::expand_home_local(OPERATOR_DIR)
+    }
+
+    async fn write_files(
+        &self,
+        dir: &str,
+        claude_md: &str,
+        settings: &str,
+    ) -> Result<(), IpcError> {
+        let claude_dir = format!("{dir}/.claude");
+        crate::service::provision::write_host_file(
+            self.ssh.as_ref(),
+            OPERATOR_HOST,
+            dir,
+            &format!("{dir}/CLAUDE.md"),
+            claude_md,
+        )
+        .await?;
+        // `settings.json` carries the bearer token, so it goes through the
+        // secret path: never in an argv, never a truncated file on a failed
+        // write, and 0600 on disk.
+        crate::service::provision::write_host_file_secret(
+            self.ssh.as_ref(),
+            OPERATOR_HOST,
+            &claude_dir,
+            &format!("{claude_dir}/settings.json"),
+            settings,
+        )
+        .await
+    }
+
+    async fn start_session(&self, project_id: i64) -> Result<SessionRow, IpcError> {
+        // An ordinary work session, which is the whole point: transcript,
+        // conversation view, restart and reboot survival all come for free.
+        crate::service::sessions::new_session(
+            crate::service::sessions::NewSessionArgs {
+                host_alias: OPERATOR_HOST.to_string(),
+                project_id,
+                worktree_id: None,
+                name: OPERATOR_TMUX_NAME.to_string(),
+                call_id: None,
+                new_worktree: None,
+                base_branch: None,
+                kind: Some("work".to_string()),
+                start_command: None,
+                friendly_name: Some("fleet operator".to_string()),
+            },
+            &self.store,
+            &self.ssh,
+            &self.reg,
+        )
+        .await
+    }
+}
+
+/// Make sure the operator session exists, and return its row.
+///
+/// Idempotent by design — this runs on every press of the FAB. When a live
+/// session is already recorded it is a pair of store reads and nothing else.
+/// Birth is lazy for exactly this reason: an agent you never open costs
+/// nothing.
+pub async fn ensure_operator(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    reg: &Arc<CancellationRegistry>,
+) -> Result<SessionRow, IpcError> {
+    let host = LiveHost {
+        store: Arc::clone(store),
+        ssh: Arc::clone(ssh),
+        reg: Arc::clone(reg),
+    };
+    ensure_operator_on(store, &host).await
+}
+
+/// [`ensure_operator`] with the host side injected. The store guard is taken
+/// in three short scoped blocks below and dropped before every `.await`:
+/// this function interleaves database work with SSH and tmux work, and
+/// holding the mutex across either would block every other command in the
+/// app for the length of a network round trip.
+pub(crate) async fn ensure_operator_on(
+    store: &Arc<Mutex<Store>>,
+    host: &dyn OperatorHost,
+) -> Result<SessionRow, IpcError> {
+    // 1. Already alive? Then there is nothing to do. (guard #1)
+    {
+        let s = lock(store)?;
+        if let Some(r) = operator_ref(&s) {
+            if let Some(row) = s
+                .get_session(&r.tmux_name, &r.host_alias)
+                .map_err(|e| IpcError::new(codes::E_SQLITE, format!("find operator: {e}")))?
+            {
+                if row.lost_at.is_none() {
+                    return Ok(row);
+                }
+            }
+        }
+    }
+
+    // The absolute directory has to be known before the project row is
+    // written, because `base_path` is what the session's pane starts in —
+    // see [`OperatorHost::resolve_dir`].
+    let dir = host.resolve_dir().await?;
+
+    // 2. The project row, the token and the endpoint, under one guard. (#2)
+    let (project_id, token, endpoint) = {
+        let s = lock(store)?;
+        let project_id = s
+            .upsert_system_project(OPERATOR_OWNER, OPERATOR_REPO, &dir)
+            .map_err(|e| IpcError::new(codes::E_SQLITE, format!("operator project row: {e}")))?;
+        // Only the hash is ever stored; the plaintext lives in the operator's
+        // settings.json on the host and nowhere else.
+        let token = crate::mcp::generate_token();
+        let sha = crate::mcp::auth::sha256_hex(&token);
+        // A previous token by this name may still be live (a half-finished
+        // birth, or a session that was lost). Revoke it rather than colliding
+        // on the partial unique index over live `client_tokens(name)`.
+        // `E_NOTFOUND` here just means there was none.
+        let _ = s.revoke_client_token(OPERATOR_CLIENT_NAME);
+        s.insert_client_token(OPERATOR_CLIENT_NAME, &sha, "full")?;
+        s.set_setting(SETTING_OPERATOR_TOKEN_SHA, &sha)
+            .map_err(|e| {
+                IpcError::new(codes::E_SQLITE, format!("record the operator token: {e}"))
+            })?;
+        // Loopback in both modes: the operator runs on the machine that
+        // serves the control API, so no public URL is ever baked into the
+        // file it is about to be handed.
+        let endpoint = format!(
+            "http://127.0.0.1:{}/mcp",
+            crate::mcp::settings::configured_port(&s)?
+        );
+        (project_id, token, endpoint)
+    };
+
+    // 3. The files on the host, then the session itself.
+    host.write_files(&dir, claude_md(), &settings_json(&endpoint, &token))
+        .await?;
+    let row = host.start_session(project_id).await?;
+
+    // 4. Record where it lives, so the self-guard and the next press can
+    //    find it. (guard #3)
+    {
+        let s = lock(store)?;
+        set_operator_ref(
+            &s,
+            &OperatorRef {
+                host_alias: row.host_alias.clone(),
+                tmux_name: row.tmux_name.clone(),
+            },
+        )?;
+    }
+    Ok(row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::Store;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn a_reference_round_trips_and_a_malformed_one_is_no_reference() {
@@ -135,5 +397,149 @@ mod tests {
         // ordinary sessions.
         refuse_if_operator(&s, "mefistos", "fleet-operator", "kill_session").unwrap();
         refuse_if_operator(&s, "local", "blue-sirius", "kill_session").unwrap();
+    }
+
+    #[test]
+    fn the_settings_file_points_at_the_endpoint_and_carries_the_token() {
+        let j = settings_json("http://127.0.0.1:4180/mcp", "deadbeef");
+        let v: serde_json::Value = serde_json::from_str(&j).expect("valid JSON");
+        let srv = &v["mcpServers"]["claude-fleet"];
+        assert_eq!(srv["type"], "http");
+        assert_eq!(srv["url"], "http://127.0.0.1:4180/mcp");
+        assert_eq!(srv["headers"]["Authorization"], "Bearer deadbeef");
+    }
+
+    #[test]
+    fn the_operating_instructions_state_the_two_rules_that_matter() {
+        let md = claude_md();
+        assert!(
+            md.contains("propose") || md.contains("confirm"),
+            "the operator must be told destructive work is confirmed, not assumed"
+        );
+        assert!(
+            md.contains("not a repository") || md.contains("do not write code"),
+            "the operator must be told its directory is not a place to write code"
+        );
+    }
+
+    // ------------------------------------------------------- ensure_operator
+
+    /// The triple every `ensure_operator` test needs: a store with the
+    /// `local` host row and a master token (without one `configured_port`
+    /// refuses), plus the ssh client and cancellation registry the real
+    /// entry point takes.
+    fn fixture() -> (
+        Arc<Mutex<Store>>,
+        Arc<crate::ssh::SshClient>,
+        Arc<crate::cancel::CancellationRegistry>,
+    ) {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host(OPERATOR_HOST).unwrap();
+        s.set_setting(crate::mcp::SETTING_TOKEN, "master-token")
+            .unwrap();
+        (
+            Arc::new(Mutex::new(s)),
+            Arc::new(crate::ssh::SshClient::new()),
+            crate::cancel::CancellationRegistry::new(),
+        )
+    }
+
+    /// The host side, faked. The real one writes a bearer token into `$HOME`
+    /// and starts a tmux session; neither belongs in a unit test, and macOS
+    /// CI has no tmux at all. Everything the test asserts on — the project
+    /// row, the token row, the recorded reference, the returned session — is
+    /// store state, which this double produces exactly as the live one does.
+    struct FakeHost {
+        store: Arc<Mutex<Store>>,
+        dir: String,
+        files: std::sync::Mutex<Vec<(String, String)>>,
+        starts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeHost {
+        fn new(store: &Arc<Mutex<Store>>) -> Self {
+            Self {
+                store: Arc::clone(store),
+                dir: "/tmp/fleet-operator-test".to_string(),
+                files: std::sync::Mutex::new(Vec::new()),
+                starts: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OperatorHost for FakeHost {
+        async fn resolve_dir(&self) -> Result<String, IpcError> {
+            Ok(self.dir.clone())
+        }
+        async fn write_files(
+            &self,
+            dir: &str,
+            claude_md: &str,
+            settings: &str,
+        ) -> Result<(), IpcError> {
+            let mut f = self.files.lock().unwrap();
+            f.push((format!("{dir}/CLAUDE.md"), claude_md.to_string()));
+            f.push((format!("{dir}/.claude/settings.json"), settings.to_string()));
+            Ok(())
+        }
+        async fn start_session(&self, project_id: i64) -> Result<SessionRow, IpcError> {
+            self.starts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let s = lock(&self.store)?;
+            s.upsert_session(
+                OPERATOR_TMUX_NAME,
+                OPERATOR_HOST,
+                Some(project_id),
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .map_err(|e| IpcError::new(codes::E_SQLITE, e.to_string()))?;
+            Ok(s.get_session(OPERATOR_TMUX_NAME, OPERATOR_HOST)
+                .unwrap()
+                .expect("the fake host just wrote this row"))
+        }
+    }
+
+    /// `ensure_operator` runs on every press of the button. Twice over it
+    /// must leave one project, one session and one token — not three.
+    #[tokio::test]
+    async fn ensure_operator_is_idempotent() {
+        let (store, _ssh, _reg) = fixture();
+        let host = FakeHost::new(&store);
+        let first = ensure_operator_on(&store, &host).await.expect("first");
+        let second = ensure_operator_on(&store, &host).await.expect("second");
+        assert_eq!(first.id, second.id, "the same session comes back");
+        assert_eq!(
+            host.starts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the second call must not start a second session"
+        );
+
+        let s = store.lock().unwrap();
+        let projects: Vec<_> = s
+            .list_projects()
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.system)
+            .collect();
+        assert_eq!(projects.len(), 1, "one operator project, not two");
+        let tokens: Vec<_> = s
+            .list_client_tokens(false)
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name == "ux-agent")
+            .collect();
+        assert_eq!(tokens.len(), 1, "one operator token, not two");
+        assert_eq!(
+            operator_ref(&s),
+            Some(OperatorRef {
+                host_alias: "local".into(),
+                tmux_name: OPERATOR_TMUX_NAME.into(),
+            })
+        );
     }
 }
