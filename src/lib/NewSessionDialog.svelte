@@ -163,13 +163,24 @@
 
   // ── Worktree choice ──────────────────────────────────────────────────
   // The rows on offer are the CHOSEN HOST's: local answers from the project
-  // tree synchronously; a remote host is scanned over SSH (`hostWorktrees`).
+  // tree synchronously; a remote host is scanned over SSH (`hostWorktrees`)
+  // — by this app when it owns the fleet, by the hub when it does not.
   type HostWorktreesState = {
-    status: 'loading' | 'ready' | 'error';
+    // `unlistable`: nobody could run the scan (see `HUB_CANNOT_SCAN`), which
+    // is a different thing from the scan failing — no rows, and no error to
+    // report about the host itself.
+    status: 'loading' | 'ready' | 'error' | 'unlistable';
     rows: WorktreeRow[];
     cloned: boolean;
     error?: string;
   };
+  // Error codes that mean the HUB could not answer the scan at all: it is
+  // older than this app and serves no such tool, its wire contract is out of
+  // range, or it is unreachable / unusable this launch. None of them says
+  // anything about the host, so the dialog degrades to what it did before
+  // the hub had the tool (#146) instead of showing a failure. Matched by
+  // code, never by message text.
+  const HUB_CANNOT_SCAN = ['E_HUB_PROTOCOL', 'E_HUB_CONTRACT', 'E_HUB_UNREACHABLE', 'E_HUB_UNAVAILABLE'];
   let hostWorktrees = $state<HostWorktreesState>(
     untrack(() => ({ status: 'ready', rows: project.worktrees, cloned: true })),
   );
@@ -191,34 +202,18 @@
         scanSeq++;
       };
     }
-    if (!ownsTheFleet($hubStatus)) {
-      // `list_host_worktrees` scans THIS host over its own SSH and refuses
-      // with E_LOCAL_ONLY for a hub client (no hub tool for it). An earlier
-      // version here read `project.worktrees` as a substitute, on the
-      // assumption a remote host's rows land there via the row-event
-      // stream — false:
-      // `list_projects_joined` LEFT JOINs worktrees on `host_alias = 'local'`
-      // only, `upsert_worktree_on` fires `worktree:updated` for local rows
-      // only, and the `list_worktrees` tool goes through
-      // `list_worktrees_for_project`, also local-only (all in
-      // `crates/fleet-core/src/store/projects.rs`). So `project.worktrees`
-      // is always the STORE's own local checkout (the hub's own `local`
-      // host when this is a hub client) and never a remote one — filtering
-      // it by `host_alias === host` for a non-local `host` always came back
-      // empty, which silently read as "this host has no worktrees" rather
-      // than "unknown". There is no way to list a remote host's worktrees
-      // from a hub client today (a hub-side scanning tool is filed as a
-      // follow-up); offer only "+ new worktree" and say so
-      // (`remoteWorktreesUnknownOnHubClient` below) instead of a false
-      // empty list. No async round-trip, so nothing needs to force
-      // new-worktree mode first: the repair effect below already lands on
-      // "+ new worktree" once it sees these rows are empty.
-      scanSeq++;
-      hostWorktrees = { status: 'ready', rows: [], cloned: true };
-      return () => {
-        scanSeq++;
-      };
-    }
+    // A hub client gets here too: `list_host_worktrees` routes to the hub,
+    // which has the SSH route this app does not (#168). What must never
+    // happen — and did, before #146 — is reading `project.worktrees` as a
+    // substitute: `list_projects_joined` LEFT JOINs worktrees on
+    // `host_alias = 'local'` only, `upsert_worktree_on` fires
+    // `worktree:updated` for local rows only, and the `list_worktrees` tool
+    // goes through `list_worktrees_for_project`, also local-only (all in
+    // `crates/fleet-core/src/store/projects.rs`). So `project.worktrees` is
+    // always the STORE's own local checkout and never a remote host's —
+    // filtering it by `host_alias === host` for a non-local `host` always
+    // came back empty, which silently read as "this host has no worktrees"
+    // rather than "unknown".
     const seq = ++scanSeq;
     hostWorktrees = { status: 'loading', rows: [], cloned: true };
     // Never leave the previous host's row selected (and submittable) while
@@ -236,7 +231,9 @@
     void listHostWorktrees(host, projectId).then((r) => {
       if (seq !== scanSeq) return;
       if (!r.ok) {
-        hostWorktrees = { status: 'error', rows: [], cloned: true, error: r.error.message };
+        hostWorktrees = HUB_CANNOT_SCAN.includes(r.error.code)
+          ? { status: 'unlistable', rows: [], cloned: true }
+          : { status: 'error', rows: [], cloned: true, error: r.error.message };
         return;
       }
       if (!r.value || r.value.host_alias !== host) {
@@ -433,18 +430,18 @@
   const worktreeStatus = $derived.by((): string | null => {
     if (hostWorktrees.status === 'loading') return `Scanning ${chosenHost}…`;
     if (hostWorktrees.status === 'error') return `Couldn't list worktrees on ${chosenHost}: ${hostWorktrees.error}`;
+    if (hostWorktrees.status === 'unlistable') return null;
     if (!hostWorktrees.cloned) return `Not cloned on ${chosenHost} yet — it is cloned on the first session.`;
     return null;
   });
-  // Non-null while a hub client has a non-local host chosen: this dialog has
-  // no way to list that host's existing worktrees (see the `$effect` above),
-  // so the picker only ever offers "+ new worktree" for it. A neutral note,
-  // not an error — deliberately separate from `worktreeStatus`'s scanning /
-  // error / not-cloned states, which never fire for this case (`hostWorktrees`
-  // is always `{status: 'ready', cloned: true}` here).
-  const remoteWorktreesUnknownOnHubClient = $derived(
-    chosenHost !== 'local' && !ownsTheFleet($hubStatus)
-      ? `Existing worktrees on ${chosenHost} can't be listed from a hub client yet — create a new one, or start from the project root.`
+  // Non-null when the hub could not answer the scan at all (`HUB_CANNOT_SCAN`
+  // above), so the picker only offers "+ new worktree" for that host. A
+  // neutral note, not an error — deliberately separate from
+  // `worktreeStatus`'s scanning / error / not-cloned states, which are about
+  // the host rather than about the hub.
+  const remoteWorktreesUnlistable = $derived(
+    hostWorktrees.status === 'unlistable'
+      ? `Existing worktrees on ${chosenHost} can't be listed through this hub — create a new one, or start from the project root.`
       : null,
   );
 
@@ -704,8 +701,8 @@
     {#if worktreeStatus}
       <p class="wt-status" data-testid="wt-status" class:err={hostWorktrees.status === 'error'}>{worktreeStatus}</p>
     {/if}
-    {#if remoteWorktreesUnknownOnHubClient}
-      <p class="wt-status" data-testid="wt-remote-unknown">{remoteWorktreesUnknownOnHubClient}</p>
+    {#if remoteWorktreesUnlistable}
+      <p class="wt-status" data-testid="wt-remote-unknown">{remoteWorktreesUnlistable}</p>
     {/if}
     <PickerList
       items={worktreeItems}

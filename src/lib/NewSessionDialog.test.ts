@@ -950,16 +950,15 @@ describe('NewSessionDialog: Enter is gated the same as the Create button', () =>
   });
 });
 
-// #146: `list_host_worktrees` refuses with
-// E_LOCAL_ONLY for a hub client (no hub tool over SSH). An earlier version
-// read `project.worktrees` as a substitute, on the assumption a remote host's
-// rows land there via the row-event stream — false: `list_projects_joined`
-// only ever joins `host_alias = 'local'` rows, so `project.worktrees` is
-// always the STORE's own local checkout, never a remote host's, and
-// filtering it by a remote `host_alias` always came back empty — a false
-// "this host has no worktrees" rather than "unknown" (see the `$effect`'s
-// comment in `NewSessionDialog.svelte`). A hub client now shows a neutral
-// note instead and offers only "+ new worktree", which still works.
+// #168: `list_host_worktrees` now routes to a hub tool, so a hub client
+// scans a remote host through the hub and gets real rows. What it must NOT
+// do is invent them: never read `project.worktrees` as a substitute (those
+// are only ever the store's own local rows — `list_projects_joined` joins
+// `host_alias = 'local'` only, so filtering them by a remote alias always
+// came back empty, which read as "no worktrees" rather than "unknown"), and
+// never show an empty list when the hub could not answer. A hub that cannot
+// answer — too old for the tool, wire-contract skew, or simply not reachable
+// — keeps #146's neutral note and "+ new worktree", which still works.
 describe('NewSessionDialog host-scoped worktrees on a hub client', () => {
   const remote: HubStatus = {
     remote: true,
@@ -981,27 +980,65 @@ describe('NewSessionDialog host-scoped worktrees on a hub client', () => {
     await tick();
   }
 
-  it('does not call list_host_worktrees, shows the neutral note naming the host, and no error line', async () => {
+  /** Answer `list_host_worktrees` with one `IpcError` code. */
+  function refuseWith(code: string) {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_host_worktrees') throw { code, message: `refused: ${code}` };
+      return null;
+    });
+  }
+
+  it('lists the remote hosts worktrees through the hub, with no note', async () => {
     mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
     hubStatus.set(remote);
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
     await pickHost('mefistos');
-    expect(worktreeLabels()).toEqual(['+ new worktree']);
+    await vi.waitFor(() => expect(worktreeLabels()).toEqual(['main', 'feat', '+ new worktree']));
     const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'list_host_worktrees');
-    expect(calls).toHaveLength(0);
-    const note = screen.getByTestId('wt-remote-unknown');
-    expect(note.textContent).toContain('mefistos');
-    // The neutral note is not the (red, error-only) `wt-status` line.
+    expect(calls).toHaveLength(1);
+    expect((calls[0][1] as { args: unknown }).args).toEqual({ host_alias: 'mefistos', project_id: 1 });
+    expect(screen.queryByTestId('wt-remote-unknown')).toBeNull();
     expect(screen.queryByTestId('wt-status')).toBeNull();
   });
 
+  // The old-hub fallback and its two siblings: a hub that cannot answer the
+  // call at all is #146's state again, by code and not by message text.
+  for (const code of ['E_HUB_PROTOCOL', 'E_HUB_CONTRACT', 'E_HUB_UNREACHABLE', 'E_HUB_UNAVAILABLE']) {
+    it(`falls back to the neutral note when the hub answers ${code}`, async () => {
+      refuseWith(code);
+      hubStatus.set(remote);
+      render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+      await tick();
+      await pickHost('mefistos');
+      await vi.waitFor(() => expect(screen.getByTestId('wt-remote-unknown')).toBeTruthy());
+      expect(worktreeLabels()).toEqual(['+ new worktree']);
+      expect(screen.getByTestId('wt-remote-unknown').textContent).toContain('mefistos');
+      // The neutral note is not the (red, error-only) `wt-status` line.
+      expect(screen.queryByTestId('wt-status')).toBeNull();
+    });
+  }
+
+  // The scan itself failing on the host is a real error and still reads as
+  // one: it says what went wrong instead of blaming the hub.
+  it('a scan that fails on the host still shows the error line, not the note', async () => {
+    refuseWith('E_GIT_SETUP');
+    hubStatus.set(remote);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() => expect(screen.getByTestId('wt-status')).toHaveTextContent('E_GIT_SETUP'));
+    expect(screen.queryByTestId('wt-remote-unknown')).toBeNull();
+  });
+
   it('"+ new worktree" is still selectable and Create still submits worktree_id: null / new_worktree', async () => {
+    refuseWith('E_HUB_PROTOCOL');
     hubStatus.set(remote);
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: okRow() });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
     await pickHost('mefistos');
+    await vi.waitFor(() => expect(screen.getByTestId('wt-remote-unknown')).toBeTruthy());
     expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('new');
     await fireEvent.input(screen.getByTestId('new-worktree-name'), { target: { value: 'fix-login-bug' } });
     await fireEvent.click(screen.getByText('Create'));
