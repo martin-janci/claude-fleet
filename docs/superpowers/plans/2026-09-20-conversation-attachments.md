@@ -1115,6 +1115,61 @@ git commit -m "feat(composer): attach files, with thumbnails in the box"
 
 ---
 
+### Task 6b: A dropped file has a size
+
+Added during execution. Task 6's drop path works, but Tauri's drag-drop event
+carries **paths only** — nothing stats them — so a dropped attachment arrives
+with `size: 0`. `MAX_BYTES` and `MAX_TOTAL` are therefore enforced for picked
+files and silently skipped for dropped ones, which is the primary entry point.
+`upload_attachments` enforces no byte budget either, so a dropped 2 GB file
+would be attempted: `SshClient::upload_file` streams it under a 60 s per-file
+timeout, on a link the user may not control.
+
+The limits the spec states must apply to both origins, or they are not limits.
+
+**Files:**
+- Modify: `src-tauri/src/commands/upload.rs`, `src-tauri/src/lib.rs`
+- Modify: `src-tauri/src/backend/verdicts.rs`, `src/lib/hub.ts`
+- Modify: `src/lib/ConversationPanel.svelte`, `src/lib/attachments.ts`
+- Test: the Rust test module, `src/lib/attachments.test.ts`, `src/lib/ConversationPanel.test.ts`
+
+**Interfaces:**
+- Consumes: `UploadAllowList`, `classify`, `PickedFile` — all existing.
+- Produces: `#[tauri::command] attachment_describe(paths: Vec<String>, allow) -> Result<Vec<PickedFile>, IpcError>`.
+  It is the measuring sibling of `attachment_preview`: allow-list gate first, then
+  stat, then classify. It authorises nothing — a dropped path is already
+  authorised by the Tauri drag-drop handler in `lib.rs`, which is what makes this
+  safe to add without widening the threat model.
+
+**Steps**
+
+- [ ] Write the failing Rust tests: an allow-listed path is described with its
+  real size and kind; a path that is not allow-listed is `E_FORBIDDEN` and is
+  never stat'd; a batch with one unreadable file returns the rest.
+- [ ] Run them, confirm they fail, record the output.
+- [ ] Implement `attachment_describe`, reusing `classify`. Gate first, no
+  filesystem access before the gate — the same ordering `preview_for` already
+  follows and that its review verified.
+- [ ] Register it in `generate_handler!` after `attachment_preview`; add its
+  `LocalOnly` verdict row in that same position; `refuse_local_only` by name;
+  `REGEN_HUB_VERDICTS=1`, `REGEN_DOCS=1`, and `REGEN_LOCAL_ONLY=1` if asked.
+  Add its `REASONS` entry in `src/lib/hub.ts` — the composer reaches it, so it
+  does not belong on the no-UI-caller allowlist.
+- [ ] In the composer's drop path, call `attachment_describe` with the event's
+  paths and feed the described files into `addFiles`, so a dropped file goes
+  through exactly the same limits as a picked one.
+- [ ] Remove `droppedFile`'s `size: 0` placeholder from `attachments.ts`, or
+  keep it only for the case where describing fails and say so in a comment.
+- [ ] Add a frontend test proving an oversized DROPPED file is rejected with the
+  same message an oversized picked file gets.
+- [ ] Full suite, clippy, fmt, then commit.
+
+```bash
+git commit -m "fix(upload): dropped attachments obey the same size limits as picked ones"
+```
+
+---
+
 ### Task 7: Sending, with the paths in the prompt
 
 The files upload first; their absolute remote paths go into the prompt text. An upload failure **cancels the send and leaves the draft intact** — sending the prompt without its attachment would hand Claude an incomplete brief and look like it worked.
