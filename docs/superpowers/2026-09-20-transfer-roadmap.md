@@ -18,6 +18,7 @@ work, the small ignored files, Claude's own state — between any two hosts.
 |---|---|---|
 | 1 carry engine | `move_session` carries uncommitted, unpushed and small git-ignored work as it is; `strict: true` restores the old refusals | PR #163 · spec `specs/2026-09-19-move-carry-engine-design.md` · ADR 0002 |
 | 2 Claude-side state | the per-session directory (subagents, tool results, title) and the project's Claude memory travel too; they only ever add on the target | PR #194 · spec `specs/2026-09-20-move-carry-claude-state-design.md` |
+| 3d retry + return trip | adopt a target that already holds the work; `clean_target`; `resolve_move` Finish/Undo; a preflight refusal when the target already runs this conversation; the sheet's and panel's actions | spec `specs/2026-09-20-transfer-retry-design.md` · plan `plans/2026-09-20-transfer-retry.md` |
 | 3a Transfer sheet | a button on the terminal header's host name (and in the details panel); nine live steps from the `move:progress` event; closable while the move runs; a readable result and honest failure text | merge `8356217` · spec `specs/2026-09-20-transfer-sheet-design.md` (read its section 7, "Revisions") · plan `plans/2026-09-20-transfer-sheet.md` |
 
 Slice 3a's code map: `crates/fleet-core/src/events.rs` (`MoveStep`,
@@ -30,7 +31,18 @@ Slice 3a's code map: `crates/fleet-core/src/events.rs` (`MoveStep`,
 Each part gets its own brainstorm → spec → plan → subagent-driven execution →
 whole-branch review → PR, exactly like the slices above.
 
-### 3d — Retry and the return trip (next)
+### 3d — Retry and the return trip (LANDED)
+
+Spec `specs/2026-09-20-transfer-retry-design.md`, plan
+`plans/2026-09-20-transfer-retry.md`. What shipped: content-exact adopt of a
+target that already holds the work (`carry::verify_replayed_script` over a
+throwaway index), `clean_target` to replace an unfinished attempt's leftovers
+(never the target's own work), `resolve_move { Finish | Undo }` for a partial,
+a preflight refusal when the target host already runs this conversation, and the
+sheet plus details-panel actions. The sections below are kept for the record of
+what the question was.
+
+### 3d — the original sketch
 
 **Why first:** it is the part that makes a failed move recoverable, and 3a's
 failure sheet currently ends in a single "Done". It is also where the engine
@@ -58,7 +70,7 @@ Scope sketch: `Retry` on the failure view (same target, same options);
 text that names the leftovers precisely. Non-goals: cancelling a running move
 (needs cancel-safe cleanup — see debts), bulk moves.
 
-### 3b — Preflight
+### 3b — Preflight (next)
 
 Before the move starts, the setup view shows what WOULD travel and what would
 be refused: commits and dirty entries, ignored files with sizes and the ones
@@ -100,6 +112,42 @@ From slice 3a's reviews — decided, not forgotten:
   app has none for danger/warning.
 - Nobody has clicked through the sheet in the real app: a dev build was
   deliberately never run (see the rules below). Do it once on a released build.
+
+From slice 3d's reviews — decided, not forgotten:
+- A per-move id in `MoveProgress` would retire BOTH the `SETTLE_GRACE_MS`
+  window and the `awaitingStart` flag the retry path now needs. Until then one
+  hole stays open: `Done` on a failed sheet calls `dismissMove`, so the next
+  `startMove` of that session does not count as "replacing" and a straggler can
+  still settle an `E_HUB_UNREACHABLE` run as failed. Self-healing, but real.
+- `clean_target` is documented on the MCP **parameter**, not in
+  `move_session`'s description, because the served-surface budget had 68 bytes
+  and the clause cost 113. `docs/control-api-reference.md` lists parameter names
+  only, so a reader of that file sees the flag with no explanation, and the
+  "never the target's own work" guarantee survives only on the non-served args
+  struct. ~31 bytes of budget remain — folding three words into the parameter
+  doc would restore it.
+- `Ours` cannot separate an unfinished attempt's leftover from the target's own
+  edit to a file the snapshot also writes; `clean_target`'s reset to `HEAD`
+  discards the latter. Fenced by the flagless refusal and by the sheet naming
+  every path, but inherent to path-based classification.
+- Sparse-checkout: a `read-tree`-seeded throwaway index can carry
+  `skip-worktree` bits, which `update-index --refresh` does not check, so a path
+  outside the cone could read clean while differing on disk. `apply_script`'s
+  existing `read-tree -u` has the identical exposure.
+- `parse_leftovers` drops a path containing a TAB from the advisory list (the
+  adopt is still aborted); `verify` leaves an empty
+  `~/.cache/claude-fleet/transfer/<id>` when `cleanup_script` never runs;
+  `home_guard` rejects an empty `$HOME` but not a relative one.
+- `putRunForTest` in `moves.ts` forges arbitrary run state past every status
+  guard, protected only by its name.
+- Tests worth adding: the `session_moved` detail's `from_session_id` and
+  `source_killed` are asserted by nothing, so transposing the two row ids would
+  go undetected; the `finalise_source` seam test drives the transcript
+  comparison in the inverted direction (a shrinking transcript, which no real
+  write causes).
+- `finalise.rs`'s `extra_detail` merge skips a colliding key with a
+  `debug_assert!`; in release a collision is silently skipped rather than
+  reported.
 
 From slices 1–2:
 - A real move through the app followed by `cl --resume` on the target — needs
