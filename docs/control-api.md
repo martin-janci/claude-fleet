@@ -247,7 +247,9 @@ Index by area (names only; see the reference for details):
   worktrees fleet's own rows do not cover), `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
   `new_shell_session`, `new_bg_session`, `spawn_review`, `rename_session`,
-  `set_friendly_name`, `register_self`, `whoami`.
+  `set_friendly_name`, `register_self`, `whoami`, `ensure_operator` (the UX
+  agent's own session, idempotent), `operator_status` (why it cannot work,
+  if it cannot).
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),

@@ -1609,6 +1609,7 @@ mod tests {
                 base_path: "/home/u/proj".into(),
                 last_session_at: None,
                 adopted: false,
+                system: false,
             },
             ProjectRow {
                 id: 2,
@@ -1617,6 +1618,7 @@ mod tests {
                 base_path: "/home/u/proj/sub".into(),
                 last_session_at: None,
                 adopted: false,
+                system: false,
             },
         ];
         assert_eq!(
@@ -1639,6 +1641,7 @@ mod tests {
             base_path: "/home/u/proj".into(),
             last_session_at: None,
             adopted: false,
+            system: false,
         }];
         // "/home/u/project/..." must NOT match "/home/u/proj"
         assert_eq!(

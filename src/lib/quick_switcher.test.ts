@@ -54,17 +54,37 @@ function sess(over: Partial<SessionRow> & { id: number }): SessionRow {
 
 const projects: ProjectTreeRow[] = [
   {
-    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 10, adopted: false },
+    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 10, adopted: false, system: false },
     worktrees: [
       { id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' },
       { id: 12, project_id: 1, host_alias: 'local', name: 'blue-sirius', path: '/r/cf/.worktrees/blue-sirius', branch: 'blue-sirius' },
     ],
   },
   {
-    project: { id: 2, owner: 'acme', repo: 'widgets', base_path: '/r/w', last_session_at: 20, adopted: false },
+    project: { id: 2, owner: 'acme', repo: 'widgets', base_path: '/r/w', last_session_at: 20, adopted: false, system: false },
     worktrees: [],
   },
 ];
+
+/** The UX agent's own project row: flagged `system`, with its session. */
+const operatorProject: ProjectTreeRow = {
+  project: {
+    id: 9,
+    owner: 'fleet',
+    repo: 'operator',
+    base_path: '/home/u/.claude-fleet/operator',
+    last_session_at: 99,
+    adopted: false,
+    system: true,
+  },
+  worktrees: [],
+};
+const operatorSess = sess({
+  id: 9,
+  project_id: 9,
+  tmux_name: 'fleet-operator',
+  friendly_name: 'fleet operator',
+});
 
 const sessions: SessionRow[] = [
   sess({ id: 1, friendly_name: 'Blue sirius', worktree_id: 12, host_alias: 'mefistos', claude_status: 'working' }),
@@ -239,5 +259,33 @@ describe('isSwitcherChord', () => {
   it('chordLabel names the platform chord', () => {
     expect(chordLabel(true)).toBe('⌘K');
     expect(chordLabel(false)).toBe('Ctrl+Shift+K');
+  });
+});
+
+describe('the operator\'s system project', () => {
+  // The design says the operator's project row is "flagged `system` and
+  // hidden from the project picker". The sweep half was built and tested;
+  // nothing in src/ read the flag, so `fleet / operator` showed up as a
+  // place to start an ordinary session.
+  it('offers no "New session in fleet/operator" entry', () => {
+    const entries = buildEntries([operatorSess], [...projects, operatorProject]);
+    const projectEntries = entries.filter((e) => e.kind === 'project');
+    expect(projectEntries.map((e) => e.label)).not.toContain('New session in fleet/operator');
+    expect(projectEntries).toHaveLength(2);
+  });
+
+  it('still LABELS the operator session with its project, which is not a picker', () => {
+    const entries = buildEntries([operatorSess], [...projects, operatorProject]);
+    const row = entries.find((e) => e.kind === 'session' && e.session?.id === 9);
+    expect(row?.description).toContain('fleet/operator');
+  });
+
+  it('contextProject never answers with it, not even from the agent\'s own session', () => {
+    const all = [...projects, operatorProject];
+    const ranked = rankEntries(buildEntries([operatorSess], all), '', []);
+    expect(contextProject(ranked, operatorSess, all)?.project.system).toBe(false);
+    // And with nothing else to pick from, it answers "no project" rather
+    // than offering the agent's directory.
+    expect(contextProject([], operatorSess, [operatorProject])).toBeNull();
   });
 });

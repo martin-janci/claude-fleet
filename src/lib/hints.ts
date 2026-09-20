@@ -10,7 +10,8 @@ export type HintId =
   | 'session-actions'
   | 'terminal-header'
   | 'recency-filter'
-  | 'conversation-composer';
+  | 'conversation-composer'
+  | 'agent-fab';
 
 export type Placement = 'top' | 'bottom' | 'left' | 'right';
 
@@ -51,6 +52,11 @@ export const HINTS: HintDef[] = [
     id: 'conversation-composer',
     text: 'Prompt the session from here. Type / for Claude Code commands; Enter sends, Shift+Enter breaks a line.',
     placement: 'top',
+  },
+  {
+    id: 'agent-fab',
+    text: 'Ask the agent to drive the fleet — it can do anything this app can.',
+    placement: 'left',
   },
 ];
 

@@ -81,6 +81,18 @@ fn projects_has_adopted(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 038: `projects` already has its
+/// `system` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 028: `accounts` already has BOTH its
 /// `nickname` and `has_extra_usage` columns, and `ALTER TABLE ... ADD COLUMN`
 /// would fail again. See [`Migration`].
@@ -281,6 +293,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 37,
         sql: include_str!("../../migrations/037_conversations.sql"),
         already_applied: Some(sessions_has_tmux_pane_id),
+    },
+    // `ALTER TABLE ... ADD COLUMN` fails if the column is already there.
+    Migration {
+        version: 38,
+        sql: include_str!("../../migrations/038_project_system.sql"),
+        already_applied: Some(projects_has_system),
     },
 ];
 
@@ -1241,6 +1259,43 @@ mod tests {
                 .unwrap()
                 .adopted,
             "the adopted flag survives a re-run"
+        );
+    }
+
+    /// 038 on a database with project rows (stopped at 037): the column is
+    /// added, defaults to 0 (not a system row) for existing rows, and a
+    /// re-run (tests roll the recorded version back and migrate again) is a
+    /// no-op that keeps a row's `system` flag.
+    #[test]
+    fn migration_038_adds_system_column_defaulting_to_unset_and_reruns_safely() {
+        let old = store_at_version(37);
+        old.conn
+            .execute_batch(
+                "INSERT INTO projects (id, owner, repo, base_path) VALUES (1, 'o', 'r', '/p/r');",
+            )
+            .unwrap();
+        old.migrate().expect("038 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(
+            !old.list_projects().unwrap()[0].system,
+            "a pre-038 row is not a system row"
+        );
+        let pid = old
+            .upsert_system_project("fleet", "operator", "~/.claude-fleet/operator")
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 38;")
+            .unwrap();
+        old.migrate().expect("re-running 038 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(
+            old.list_projects()
+                .unwrap()
+                .into_iter()
+                .find(|p| p.id == pid)
+                .unwrap()
+                .system,
+            "the system flag survives a re-run"
         );
     }
 

@@ -767,6 +767,22 @@ impl HubBackend {
         self.route("cancel_task", &json!({ "task_id": task_id }))
             .await
     }
+
+    /// `commands::operator::operator_status`. No arguments: the tool reads
+    /// the hub's own `mcp` settings and its own operator session.
+    pub async fn operator_status(
+        &self,
+    ) -> Result<fleet_core::service::operator::OperatorStatus, IpcError> {
+        self.route("operator_status", &json!({})).await
+    }
+
+    /// `commands::operator::ensure_operator`. No arguments: the hub births
+    /// or finds ITS OWN operator session — the one whose `local` is the
+    /// machine that actually serves the control API, which this desktop is
+    /// not in hub-client mode.
+    pub async fn ensure_operator(&self) -> Result<SessionRow, IpcError> {
+        self.route("ensure_operator", &json!({})).await
+    }
 }
 
 // --- the mutations that are more than their arguments ------------------------

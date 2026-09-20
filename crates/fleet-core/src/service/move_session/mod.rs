@@ -1966,7 +1966,14 @@ async fn move_session_inner(
     let _claim = MoveClaim::acquire(store, args.session_id)?;
     let snap = {
         let s = lock(store)?;
-        snapshot(&s, &args)?
+        let snap = snapshot(&s, &args)?;
+        crate::service::operator::refuse_if_operator(
+            &s,
+            &snap.row.host_alias,
+            &snap.row.tmux_name,
+            "move_session",
+        )?;
+        snap
     };
     let src = snap.row.host_alias.clone();
     // The source row is looked up by id, not validated as an alias: a `local`

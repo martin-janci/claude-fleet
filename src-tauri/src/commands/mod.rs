@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod move_session;
 pub mod mutate;
 pub mod onboarding;
+pub mod operator;
 pub mod projects;
 pub mod resolve_move;
 pub mod sessions;

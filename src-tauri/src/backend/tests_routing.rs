@@ -152,6 +152,10 @@ const REPAIR_PAYLOAD: &str = r#"{"session_id":7,"host_alias":"trn","tmux_name":"
 /// A complete `ResolveMoveReport`: every field is required (no `Option`), so
 /// this is the whole shape, not a null-stripped subset.
 const RESOLVE_MOVE_PAYLOAD: &str = r#"{"action":"finish","source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","source_killed":true,"target_killed":false,"warnings":[]}"#;
+/// A complete `OperatorStatus`: both `Option` fields are required on the
+/// wire (no `#[serde(default)]`), so `session` and `blocked` are spelled out
+/// as `null` rather than omitted.
+const OPERATOR_STATUS_PAYLOAD: &str = r#"{"ready":true,"session":null,"blocked":null}"#;
 
 /// One row of the tables below: the command it drives, the tool that command
 /// must name, and the arguments it must send.
@@ -661,6 +665,17 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // The simple `(b, s, _)` shape: `operator_status` needs neither ssh
+        // nor a cancellation registry, unlike `ensure_operator` below.
+        (
+            "operator_status",
+            "operator_status",
+            json!({}),
+            OPERATOR_STATUS_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::operator_status(b, s)).map(|_| ())
+            }),
+        ),
     ]
 }
 
@@ -881,7 +896,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "new_bg_session",
             "new_bg_session",
-            json!({ "host_alias": "trn", "name": "worker", "prompt": "go" }),
+            json!({ "host_alias": "trn", "name": "worker", "prompt": "go", "requester_session_id": 41 }),
             r#"{"claude_session_id":"abc"}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::new_bg_session(
@@ -890,6 +905,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         host_alias: "trn".into(),
                         name: "worker".into(),
                         prompt: "go".into(),
+                        requester_session_id: Some(41),
                     },
                     s,
                     h,
@@ -1065,6 +1081,36 @@ fn routed_mutation_cases() -> Vec<Case> {
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // `ensure_operator` needs `ssh` and `reg` the way `move_session` and
+        // `new_session` do, so it copies their entry shape rather than the
+        // simpler `(b, s, _)` one `operator_status` below uses. Its service
+        // call additionally needs the store as an `Arc` (to clone into the
+        // `LiveHost` it hands to `new_session`'s own lifecycle, which
+        // outlives a single lock), which the table's shared `Mutex<Store>`
+        // is not — so the closure builds its own throwaway one. That is
+        // sound only because remote mode never touches it:
+        // `routed::ensure_operator` takes the hub branch before the local
+        // store or ssh client is ever read.
+        (
+            "ensure_operator",
+            "ensure_operator",
+            json!({}),
+            SESSION_PAYLOAD,
+            Box::new(|b, _s, h| {
+                let dir = tempfile::tempdir().unwrap();
+                let throwaway_store = Arc::new(Mutex::new(
+                    Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus))
+                        .unwrap(),
+                ));
+                block_on(commands::operator::routed::ensure_operator(
+                    b,
+                    &throwaway_store,
+                    h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
                 ))
                 .map(|_| ())
             }),
@@ -2295,6 +2341,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/onboarding.rs",
         include_str!("../commands/onboarding.rs"),
+    ),
+    (
+        "commands/operator.rs",
+        include_str!("../commands/operator.rs"),
     ),
     (
         "commands/projects.rs",

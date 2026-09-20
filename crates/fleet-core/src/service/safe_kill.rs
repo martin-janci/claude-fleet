@@ -139,6 +139,15 @@ pub async fn safe_kill_session(
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name_addressable(&args.tmux_name)?;
+    {
+        let s = lock(store)?;
+        crate::service::operator::refuse_if_operator(
+            &s,
+            &args.host_alias,
+            &args.tmux_name,
+            "safe_kill_session",
+        )?;
+    }
 
     // Read + state-update happens under one lock; the SSH send afterwards is
     // off-lock.

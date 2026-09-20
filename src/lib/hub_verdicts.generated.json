@@ -50,7 +50,6 @@
     "mcp_status",
     "probe_ssh_alias",
     "provision_hosts",
-    "pty_open",
     "purge_project",
     "refresh_account_usage",
     "remove_host",
@@ -70,13 +69,13 @@
     "set_account_nickname",
     "set_fleet_setting",
     "set_host_token_mode",
-    "tunnel_status",
-    "upload_to_session"
+    "tunnel_status"
   ],
   "routed": [
     "cancel_task",
     "delete_worktree",
     "dismiss_ghost_session",
+    "ensure_operator",
     "health_check",
     "kill_session",
     "list_accounts",
@@ -89,6 +88,7 @@
     "move_session",
     "new_bg_session",
     "new_session",
+    "operator_status",
     "probe_host",
     "recreate_session",
     "refresh_projects",
@@ -131,7 +131,9 @@
     "open_log_folder",
     "pty_close",
     "pty_drain",
+    "pty_open",
     "pty_resize",
-    "pty_write"
+    "pty_write",
+    "upload_to_session"
   ]
 }

@@ -280,6 +280,20 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    ToolPolicy {
+        name: "ensure_operator",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "operator_status",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // lifecycle.rs
     ToolPolicy {
         name: "kill_session",

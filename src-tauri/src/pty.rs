@@ -475,20 +475,23 @@ pub struct PtyOpenArgs {
 
 /// Attach the single global PTY to a session's tmux pane.
 ///
-/// The only PTY command with a remote-mode guard, and deliberately so: it is
-/// the one that opens an `ssh … tmux attach` from THIS machine, which a
-/// hub-client desktop has no route for. `pty_write`, `pty_resize`,
-/// `pty_drain` and `pty_close` act on whatever is attached, and with the open
-/// refused nothing ever is — they answer `E_PTY_CLOSED`, which is the true
-/// statement. Guarding them too would make `pty_close` fail, which is worse.
+/// Opens an `ssh … tmux attach` from THIS machine. It carries no remote-mode
+/// guard, and that is deliberate: the hub is not in this path at all. The
+/// argv is built from the alias and the tmux name the caller passes, the ssh
+/// options come from [`SshClient::mux_opts`] (pure string construction), and
+/// nothing here reads `state.db` — so a hub-client desktop attaches exactly
+/// as a standalone one does, using its own `~/.ssh/config`.
+///
+/// What it cannot reach is an **agent** host, which has no SSH route from
+/// anywhere; `TerminalView` does not offer an attach for one. A host this
+/// machine simply lacks a `Host` block for fails in `ssh` with ssh's own
+/// message, in the pane, which is more use than a refusal would be.
 #[tauri::command(async)]
 pub fn pty_open(
     args: PtyOpenArgs,
-    backend: State<'_, std::sync::Arc<crate::backend::FleetBackend>>,
     state: State<'_, Mutex<PtyState>>,
     ssh: State<'_, std::sync::Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.refuse_local_only("pty_open")?;
     // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
     fleet_core::validate::host_alias(&args.host_alias)?;
     fleet_core::validate::tmux_name(&args.session_name)?;
