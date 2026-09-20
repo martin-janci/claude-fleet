@@ -33,8 +33,14 @@
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
 
   let draft = $state('');
-  let chipDropped = $state(false);
   let sending = $state(false);
+  let sendError = $state<string | null>(null);
+  // Which context's chip the person dismissed, by label rather than a bare
+  // boolean: "not this context" outlives the click, but only for as long as
+  // it stays the SAME context. The moment `agentContext(...)` describes
+  // something else, the labels no longer match and the chip is back — pure
+  // derived state, no effect required to bring it back.
+  let droppedLabel = $state<string | null>(null);
 
   const session = $derived($operatorSession);
   // Same "is the agent busy" signal ConversationPanel's own composer reads
@@ -44,7 +50,8 @@
     session ? composerStatus({ claude_status: session.claude_status, stuck_kind: session.stuck_kind }) : null,
   );
   const busy = $derived(statusNote !== null);
-  const ctx = $derived(contextInput && !chipDropped ? agentContext(contextInput) : null);
+  const rawCtx = $derived(contextInput ? agentContext(contextInput) : null);
+  const ctx = $derived(rawCtx && rawCtx.chipLabel !== droppedLabel ? rawCtx : null);
 
   const blocked = $derived(
     $operatorState !== 'ready' && $operatorState !== 'waking' && $operatorState !== 'unknown'
@@ -64,11 +71,22 @@
 
   async function send() {
     if (!session || busy || sending || !draft.trim()) return;
+    const s = session;
+    const id = s.id;
     sending = true;
+    sendError = null;
     const body = ctx ? `${ctx.prefix}\n\n${draft}` : draft;
-    await sendPrompt(session.host_alias, session.tmux_name, body);
-    draft = '';
+    const r = await sendPrompt(s.host_alias, s.tmux_name, body);
     sending = false;
+    // The operator session moved on while the send was on the wire (or the
+    // panel was reopened onto a different one) — the prompt landed wherever
+    // it landed, but none of this component's state belongs to it any more.
+    if (session?.id !== id) return;
+    if (!r.ok) {
+      sendError = r.error.message;
+      return;
+    }
+    draft = '';
   }
 </script>
 
@@ -87,7 +105,7 @@
         <button
           class="chip"
           data-testid="agent-context-chip"
-          onclick={() => (chipDropped = true)}
+          onclick={() => (droppedLabel = ctx.chipLabel)}
           title="Send without this context"
         >
           {ctx.chipLabel} ✕
@@ -97,6 +115,9 @@
         <textarea bind:value={draft} placeholder="Ask the agent…" rows="2"></textarea>
         <button onclick={() => void send()} disabled={busy || sending || !session}>Send</button>
       </div>
+      {#if sendError}
+        <p class="error" data-testid="agent-composer-error">{sendError}</p>
+      {/if}
       {#if statusNote}
         <p class="busy" class:stuck={!!session?.stuck_kind}>{statusNote}</p>
       {/if}
@@ -133,6 +154,11 @@
   }
   .busy.stuck {
     color: var(--usage-crit);
+  }
+  .error {
+    margin: 0;
+    color: var(--usage-crit);
+    font-size: 0.8rem;
   }
   .chip {
     align-self: flex-start;

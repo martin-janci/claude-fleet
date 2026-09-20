@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
@@ -51,5 +51,68 @@ describe('AgentPanel', () => {
     render(AgentPanel);
     // With no session selected elsewhere in the app there is no chip at all.
     expect(screen.queryByTestId('agent-context-chip')).toBeNull();
+  });
+
+  it('keeps the draft and shows an error when the send fails, instead of losing what was typed', async () => {
+    invoke.mockImplementation((cmd: unknown) => {
+      if (cmd === 'send_prompt') return Promise.reject(new Error('ssh: connection refused'));
+      return Promise.resolve({ ready: true, session: null, blocked: null });
+    });
+    render(AgentPanel);
+    const box = screen.getByPlaceholderText(/ask the agent/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'do the thing' } });
+    await fireEvent.click(screen.getByRole('button', { name: /^send$/i }));
+    await waitFor(() => expect(screen.getByTestId('agent-composer-error')).toBeTruthy());
+    expect(box.value).toBe('do the thing');
+  });
+
+  it('clears a stale error the moment the next send starts', async () => {
+    let fail = true;
+    invoke.mockImplementation((cmd: unknown) => {
+      if (cmd === 'send_prompt') return fail ? Promise.reject(new Error('boom')) : Promise.resolve(undefined);
+      return Promise.resolve({ ready: true, session: null, blocked: null });
+    });
+    render(AgentPanel);
+    const box = screen.getByPlaceholderText(/ask the agent/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'first try' } });
+    await fireEvent.click(screen.getByRole('button', { name: /^send$/i }));
+    await waitFor(() => expect(screen.getByTestId('agent-composer-error')).toBeTruthy());
+
+    fail = false;
+    await fireEvent.click(screen.getByRole('button', { name: /^send$/i }));
+    await waitFor(() => expect(screen.queryByTestId('agent-composer-error')).toBeNull());
+  });
+
+  it('a dropped chip comes back when the context changes, and its prefix is sent again', async () => {
+    const { rerender } = render(AgentPanel, {
+      contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null },
+    });
+    expect(screen.getByTestId('agent-context-chip').textContent).toContain('alpha');
+
+    await fireEvent.click(screen.getByTestId('agent-context-chip'));
+    expect(screen.queryByTestId('agent-context-chip')).toBeNull();
+
+    // Same context re-rendered — the drop persists, this is not a one-shot toggle.
+    await rerender({ contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null } });
+    expect(screen.queryByTestId('agent-context-chip')).toBeNull();
+
+    // A different context — the chip returns on its own, no re-click needed.
+    await rerender({ contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null } });
+    expect(screen.getByTestId('agent-context-chip').textContent).toContain('beta');
+
+    invoke.mockImplementation((cmd: unknown) =>
+      cmd === 'send_prompt'
+        ? Promise.resolve(undefined)
+        : Promise.resolve({ ready: true, session: null, blocked: null }),
+    );
+    const box = screen.getByPlaceholderText(/ask the agent/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    await fireEvent.click(screen.getByRole('button', { name: /^send$/i }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        'send_prompt',
+        expect.objectContaining({ args: expect.objectContaining({ prompt: expect.stringContaining('beta') }) }),
+      ),
+    );
   });
 });
