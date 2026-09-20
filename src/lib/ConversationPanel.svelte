@@ -1219,8 +1219,9 @@
           {/if}
         {/each}
       </div>
-      <div class="composer-row">
+      <div class="composer-shell">
         <textarea
+          class="composer-input"
           data-testid="conv-composer-input"
           aria-label="Prompt"
           aria-controls={slashOpen ? SLASH_LIST_ID : undefined}
@@ -1231,10 +1232,20 @@
           onkeydown={onComposerKey}
           rows="2"
           use:autoGrow={draft}
-          placeholder="Send a prompt to this session (Enter to send, Shift+Enter for a new line, ↑ recalls earlier prompts)"
+          placeholder="Send a prompt…"
           disabled={sending || viewing !== null}
         ></textarea>
-        <button type="submit" data-testid="conv-composer-send" aria-keyshortcuts="Enter" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>
+        <div class="composer-actions">
+          <span class="composer-hint" aria-hidden="true">↵ send · ⇧↵ newline · ↑ history</span>
+          <button
+            type="submit"
+            class="btn btn--icon btn--primary"
+            data-testid="conv-composer-send"
+            aria-label="Send prompt"
+            title="Send (Enter)"
+            aria-keyshortcuts="Enter"
+            disabled={!canSend}>{sending ? '…' : '↑'}</button>
+        </div>
       </div>
       {#if statusNote}
         <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
@@ -1350,45 +1361,53 @@
     border-color: var(--usage-warn);
     color: var(--usage-warn);
   }
-  .composer-row {
+  .composer-shell {
+    position: relative;
     display: flex;
-    align-items: flex-end;
-    gap: 0.5rem;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 6px 4px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-md);
+    background: var(--control-bg);
   }
-  .composer textarea {
-    flex: 1 1 auto;
-    min-height: 2.6rem;
-    max-height: 12rem;
+  .composer-shell:focus-within {
+    border-color: var(--accent);
+  }
+  .composer-input {
+    min-height: 40px;
+    max-height: 168px;
     /* The box sizes itself to the draft (see autoGrow); a manual drag would
        only be overwritten on the next keystroke. */
     resize: none;
-    padding: 0.45rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
+    padding: 2px 4px;
+    border: 0;
+    background: none;
     color: var(--fg);
     font: inherit;
-    font-size: 0.85rem;
+    font-size: 13px;
     line-height: 1.45;
   }
-  .composer textarea:focus {
+  .composer-input:focus {
     outline: none;
-    border-color: var(--accent);
   }
-  .composer button {
-    flex: 0 0 auto;
-    padding: 0.45rem 0.9rem;
-    border: 1px solid var(--accent);
-    border-radius: 6px;
-    background: var(--accent);
-    color: var(--bg);
-    font-size: 0.8rem;
-    font-weight: 600;
-    cursor: pointer;
+  .composer-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--control-gap);
+    min-height: var(--control-h-lg);
   }
-  .composer button:disabled {
-    opacity: 0.45;
-    cursor: default;
+  .composer-hint {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--control-fg-quiet);
+    font-size: var(--control-font-sm);
+  }
+  @container chat (max-width: 26rem) {
+    .composer-hint { display: none; }
   }
   .slash-menu {
     list-style: none;

@@ -635,6 +635,16 @@ describe('ConversationPanel composer', () => {
     expect(screen.getByTestId('conv-empty').textContent).toBe('No conversation yet');
     expect(screen.getByTestId('conv-composer-input')).toBeTruthy();
   });
+
+  it('send is an icon button inside the shell and still submits', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const send = screen.getByTestId('conv-composer-send');
+    expect(send.getAttribute('aria-label')).toBe('Send prompt');
+    expect(send.closest('.composer-shell')).not.toBeNull();
+    expect(screen.getByTestId('conv-composer-input').getAttribute('placeholder')).toBe('Send a prompt…');
+  });
 });
 
 describe('ConversationPanel composer auto-grow', () => {
