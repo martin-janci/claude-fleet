@@ -34,6 +34,10 @@ pub use rows::*;
 pub struct Store {
     conn: Connection,
     bus: StoreBus,
+    /// In-memory record of the sessions fleet itself killed, so a reconcile
+    /// pass that probed before a kill cannot re-insert its row once the kill
+    /// has reaped it. Process-local on purpose — see [`reconcile::KillMemory`].
+    kills: reconcile::KillMemory,
 }
 
 /// The store's handle on its [`EventBus`]. Normally a pass-through; inside
@@ -89,6 +93,7 @@ impl Store {
         let store = Self {
             conn,
             bus: StoreBus::new(bus),
+            kills: Default::default(),
         };
         store.migrate()?;
         Ok(store)
@@ -123,6 +128,7 @@ impl Store {
         Ok(Self {
             conn,
             bus: StoreBus::new(Arc::new(crate::events::NoopEventBus)),
+            kills: Default::default(),
         })
     }
 
@@ -132,6 +138,7 @@ impl Store {
         let store = Self {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
+            kills: Default::default(),
         };
         store.migrate()?;
         Ok(store)
@@ -143,6 +150,7 @@ impl Store {
         let store = Self {
             conn,
             bus: StoreBus::new(bus),
+            kills: Default::default(),
         };
         store.migrate()?;
         Ok(store)

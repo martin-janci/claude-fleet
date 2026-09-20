@@ -373,6 +373,12 @@ impl Store {
         }
         let row = fetch_session_by_id(&self.conn, id)?;
         if let Some(row) = &row {
+            // Remember the kill by name: the reconcile the caller runs next
+            // hard-deletes this (already ghost) row in its own pass, after
+            // which a fleet-wide pass still carrying the name from a probe
+            // that ran BEFORE the kill would find nothing to conflict with
+            // and insert the dead session again.
+            self.note_kill(&row.host_alias, &row.tmux_name, now);
             tracing::info!(
                 lifecycle = "lost",
                 session_id = row.id,
