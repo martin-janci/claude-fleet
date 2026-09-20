@@ -133,7 +133,7 @@ fn a_known_command_lands_where_its_row_says() {
 // ── render_json shape ───────────────────────────────────────────────────
 
 #[test]
-fn render_json_key_order_matches_the_controllers_shape() {
+fn render_json_key_order_is_local_only_routed_routed_unless_same_in_both() {
     let json = render_json(&verdict_lists());
     let local_only_at = json.find("\"local_only\"").expect("local_only key");
     let routed_at = json.find("\"routed\"").expect("routed key");
@@ -259,10 +259,10 @@ fn doc_table_names_the_argument_shape_and_the_refusal_for_the_routed_unless_row(
 // ── summary_sentence ─────────────────────────────────────────────────────
 
 #[test]
-fn summary_sentence_matches_the_controllers_example_counts() {
-    // The controller's own example: "Of the 123 commands, 35 route to a hub
-    // tool, 1 routes except for one argument shape, 73 refuse, and 14 are
-    // the same in both modes; the full table is
+fn summary_sentence_reports_todays_bucket_counts() {
+    // The shape this file is pinned to: "Of the 123 commands, 35 route to a
+    // hub tool, 1 routes except for one argument shape, 73 refuse, and 14
+    // are the same in both modes; the full table is
     // `src-tauri/src/backend/verdicts.rs`." Pinned literally so a
     // regression in the verb-pluralisation logic is caught even if the real
     // counts drift.

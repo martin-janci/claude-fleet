@@ -70,9 +70,9 @@ pub struct RoutedUnlessEntry {
 }
 
 /// Every command name in [`VERDICTS`], bucketed by verdict kind. Field order
-/// is the JSON's key order (`serde_json` preserves struct declaration order),
-/// and matches the shape the controller specified: `local_only`, `routed`,
-/// `routed_unless`, `same_in_both`.
+/// is the JSON's key order (`serde_json` preserves struct declaration order):
+/// `local_only`, `routed`, `routed_unless`, `same_in_both` — the key order
+/// the frontend test and `docs/hub.md` both read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct VerdictLists {
     pub local_only: Vec<String>,

@@ -70,11 +70,11 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
 //                  RemoteToolbar, BranchList, CommitGraph)
 //   host_tokens -> list_host_tokens / set_host_token_mode / rotate_host_token
 //                  (HostDetail.svelte's per-host token controls)
-//   apply_sync  -> catalog_apply_sync — see the report: no component calls
+//   apply_sync  -> catalog_apply_sync — no component calls
 //                  hubBlock('apply_sync', …) today; AssetsPanel hides the
 //                  whole Sync section instead (transitively gated via
 //                  catalog_config, group B below)
-//   set_secret  -> catalog_set_secret — same finding as apply_sync
+//   set_secret  -> catalog_set_secret — same as apply_sync
 const REASONS_KEYS_THAT_ARE_NOT_COMMANDS: ReadonlySet<string> = new Set([
   'terminal',
   'repo_write',
@@ -111,9 +111,9 @@ describe('REASONS against the generated local_only commands', () => {
 // click then dies with a raw `E_LOCAL_ONLY`). Every one of the 53 commands
 // below is `local_only` today, is not a `REASONS` key (checked below), and
 // falls into one of these groups. Seeded from today's truth
-// (generated `local_only` minus the `REASONS` keys that are command names)
-// — see the task report for how each group was verified against the actual
-// component code.
+// (generated `local_only` minus the `REASONS` keys that are command names);
+// each group below names the component whose own gate covers it, which is
+// how to re-verify a group.
 const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // No frontend UI calls these at all — the Layers feature
   // (list/resolve/propose/set-host-layers/template/write/delete) has no
@@ -201,8 +201,7 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // non-retryable `E_LOCAL_ONLY` message (`loadRetryable = r.error.code !==
   // 'E_LOCAL_ONLY'`) rather than a pre-emptive disable. Already a
   // deliberate, documented choice (see the comment above `loadRetryable` in
-  // ToolLine.svelte); noted in the task report as a finding, not changed
-  // here.
+  // ToolLine.svelte), so left as is here.
   handledInlinePerClickNotPreGated: ['session_tool_detail'],
 } as const;
 
