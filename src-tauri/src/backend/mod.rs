@@ -28,7 +28,13 @@ pub mod remote;
 pub mod routing;
 pub mod startup;
 pub mod token_store;
-pub mod verdict_gen;
+// Generator for `src/lib/hub_verdicts.generated.json` and the refusal table
+// in `docs/hub.md`. Test-only, like `fleet_core::mcp::doc_gen` (the
+// identical pattern for `REGEN_DOCS`): nothing outside
+// `tests_verdict_gen.rs` calls it, so it must not compile into the release
+// binary.
+#[cfg(test)]
+mod verdict_gen;
 pub mod verdicts;
 
 use fleet_core::store::Store;

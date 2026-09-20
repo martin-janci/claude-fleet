@@ -3,6 +3,12 @@
 //! routed actions and the refusal reasons it gates on, and `docs/hub.md`'s
 //! prose list of what a hub client cannot do.
 //!
+//! Test-only — like `fleet_core::mcp::doc_gen`, the identical pattern for
+//! `REGEN_DOCS`. Nothing outside this module's own tests calls any of it;
+//! shipping it in the release binary would be dead weight with no runtime
+//! consumer (unlike [`super::contract`], which `events.rs` calls at
+//! connection time — that one is NOT `cfg(test)`-gated, and for that reason).
+//!
 //! Two generated artifacts, same REGEN pattern as [`super::contract`]'s
 //! `hub_contract.golden.json` (see that module's header):
 //!
@@ -12,12 +18,18 @@
 //!   keeps its own literal `ROUTED_ACTIONS`/`REASONS` (a generated-file-driven
 //!   type would have to be exactly as precise as the hand-written ones to be
 //!   worth it, and it is not), and `hub_verdicts.test.ts` reads this file to
-//!   hold them to it instead.
-//! - `docs/hub.md`, between `BEGIN_MARKER`/`END_MARKER` — one row per
-//!   command: its verdict, and the hub tool it calls or the sentence it
-//!   refuses with. [`render_doc_table`] renders it; [`splice_doc`] replaces
-//!   the marked block in the file without touching the hand-written prose
-//!   around it.
+//!   hold them to it instead. All four lists, not just the two below —
+//!   `hub_verdicts.test.ts` needs `routed`/`routed_unless` too.
+//! - `docs/hub.md`, between `BEGIN_MARKER`/`END_MARKER` — the REFUSAL table:
+//!   one row per command that is `LocalOnly` or `RoutedUnless` (74 of 123
+//!   today), with what to do instead. `Routed`/`SameInBoth` rows are left
+//!   out on purpose — `| list_sessions | \`list_sessions\` |` tells an
+//!   operator nothing they came to docs to learn; the full verdict, for
+//!   every command, is what `verdicts.rs` is *for*, and the generated
+//!   summary sentence ([`summary_sentence`]) points there. [`render_doc_table`]
+//!   renders the whole block (summary + table); [`splice_doc`] replaces the
+//!   marked span in the file without touching the hand-written prose around
+//!   it.
 //!
 //! Regenerate both with:
 //! ```text
@@ -114,37 +126,80 @@ fn md_escape(s: &str) -> String {
     s.replace('|', "\\|")
 }
 
-/// The verdict-kind cell for one row.
-fn verdict_cell(verdict: &Verdict) -> String {
+/// The "what to do instead" cell for one row, for the two verdict kinds the
+/// refusal table shows. `None` for `Routed`/`SameInBoth` — those rows are
+/// left out of the table entirely (see this module's header).
+fn refusal_detail(verdict: &Verdict) -> Option<String> {
     match verdict {
-        Verdict::Routed { .. } => "Routed".to_string(),
-        Verdict::RoutedUnless { unless, .. } => {
-            format!("Routed, unless {}", md_escape(unless))
-        }
-        Verdict::LocalOnly { .. } => "Local-only (`E_LOCAL_ONLY`)".to_string(),
-        Verdict::SameInBoth { .. } => "Same in both modes".to_string(),
+        Verdict::Routed { .. } | Verdict::SameInBoth { .. } => None,
+        Verdict::LocalOnly { instead } => Some(md_escape(instead)),
+        Verdict::RoutedUnless {
+            tool,
+            unless,
+            instead,
+        } => Some(format!(
+            "Refuses when {} (otherwise routes to `{tool}`): {}",
+            md_escape(unless),
+            md_escape(instead)
+        )),
     }
 }
 
-/// The "hub tool or what to do instead" cell for one row.
-fn detail_cell(verdict: &Verdict) -> String {
-    match verdict {
-        Verdict::Routed { tool } => format!("`{tool}`"),
-        Verdict::RoutedUnless { tool, instead, .. } => {
-            format!("`{tool}`; otherwise: {}", md_escape(instead))
-        }
-        Verdict::LocalOnly { instead } => md_escape(instead),
-        Verdict::SameInBoth { why } => md_escape(why),
+/// A singular/plural verb for `n`, so the summary sentence reads correctly
+/// whether a bucket holds one command or many — `repair_session` is the only
+/// `RoutedUnless` row today ("1 routes"), but nothing here assumes that
+/// stays true.
+fn verb(n: usize, singular: &'static str, plural: &'static str) -> &'static str {
+    if n == 1 {
+        singular
+    } else {
+        plural
     }
 }
 
-/// Render the whole table, one row per command in [`VERDICTS`], sorted
-/// alphabetically by command name — `VERDICTS`' own order is
+/// The generated sentence above the refusal table, with real counts. Kept
+/// pure and separate from [`render_doc_table`] for the same reason
+/// `contract.rs`'s `regen_verdict` is pure: the pluralisation edge (one row
+/// vs many) is what is worth testing directly, independent of how many rows
+/// `VERDICTS` happens to have today.
+pub fn summary_sentence(
+    total: usize,
+    routed: usize,
+    routed_unless: usize,
+    local_only: usize,
+    same_in_both: usize,
+) -> String {
+    format!(
+        "Of the {total} commands, {routed} {} to a hub tool, {routed_unless} {} except for one \
+         argument shape, {local_only} {}, and {same_in_both} {} the same in both modes; the \
+         full table is `src-tauri/src/backend/verdicts.rs`.",
+        verb(routed, "routes", "route"),
+        verb(routed_unless, "routes", "route"),
+        verb(local_only, "refuses", "refuse"),
+        verb(same_in_both, "is", "are"),
+    )
+}
+
+/// Render the whole generated block: the summary sentence, then the refusal
+/// table — one row per `LocalOnly`/`RoutedUnless` command (74 of 123 today),
+/// sorted alphabetically by command name. `VERDICTS`' own order is
 /// `generate_handler!`'s, which groups by feature area and is a worse read
 /// as a lookup table than a straight alphabetical list.
 pub fn render_doc_table() -> String {
-    let mut rows: Vec<(&str, &Verdict)> = VERDICTS.iter().map(|(n, v)| (*n, v)).collect();
-    rows.sort_by_key(|(name, _)| *name);
+    let lists = verdict_lists();
+    let summary = summary_sentence(
+        VERDICTS.len(),
+        lists.routed.len(),
+        lists.routed_unless.len(),
+        lists.local_only.len(),
+        lists.same_in_both.len(),
+    );
+
+    let mut rows: Vec<(&str, String)> = VERDICTS
+        .iter()
+        .filter_map(|(name, verdict)| refusal_detail(verdict).map(|detail| (*name, detail)))
+        .collect();
+    rows.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     let mut out = String::new();
     out.push_str(BEGIN_MARKER);
@@ -153,15 +208,13 @@ pub fn render_doc_table() -> String {
         "<!-- Regenerate with: {REGEN_ENV}=1 cargo test -p claude-fleet --lib verdict_gen -->\n"
     ));
     out.push('\n');
-    out.push_str("| Command | Verdict | Hub tool / what to do instead |\n");
-    out.push_str("| --- | --- | --- |\n");
-    for (name, verdict) in rows {
-        out.push_str(&format!(
-            "| `{}` | {} | {} |\n",
-            name,
-            verdict_cell(verdict),
-            detail_cell(verdict)
-        ));
+    out.push_str(&summary);
+    out.push('\n');
+    out.push('\n');
+    out.push_str("| Command | What to do instead |\n");
+    out.push_str("| --- | --- |\n");
+    for (name, detail) in rows {
+        out.push_str(&format!("| `{name}` | {detail} |\n"));
     }
     out.push_str(END_MARKER);
     out

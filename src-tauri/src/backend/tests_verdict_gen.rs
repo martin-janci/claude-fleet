@@ -165,7 +165,25 @@ fn routed_unless_entry_serialises_command_and_unless() {
     );
 }
 
-// ── doc table rendering ─────────────────────────────────────────────────
+// ── doc table rendering: the REFUSAL table only (local_only + routed_unless) ─
+
+#[test]
+fn doc_table_has_exactly_the_local_only_and_routed_unless_rows() {
+    let lists = verdict_lists();
+    let table = render_doc_table();
+    let names: Vec<&str> = table
+        .lines()
+        .filter(|l| l.starts_with("| `"))
+        .map(|l| l.trim_start_matches("| `").split('`').next().unwrap())
+        .collect();
+    assert_eq!(
+        names.len(),
+        lists.local_only.len() + lists.routed_unless.len(),
+        "row count must be local_only + routed_unless, not every command"
+    );
+    // Not VERDICTS.len(): Routed/SameInBoth commands must not appear at all.
+    assert!(names.len() < VERDICTS.len());
+}
 
 #[test]
 fn doc_table_is_sorted_alphabetically_by_command() {
@@ -178,24 +196,42 @@ fn doc_table_is_sorted_alphabetically_by_command() {
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(names, sorted);
-    assert_eq!(names.len(), VERDICTS.len());
 }
 
 #[test]
-fn doc_table_pipe_escapes_a_sentence_that_contains_one() {
-    let verdict = Verdict::LocalOnly { instead: "a | b" };
-    assert_eq!(detail_cell(&verdict), "a \\| b");
-}
-
-#[test]
-fn doc_table_names_the_tool_for_a_routed_command() {
+fn doc_table_omits_a_routed_command() {
     let table = render_doc_table();
-    let row = table
-        .lines()
-        .find(|l| l.starts_with("| `list_sessions`"))
-        .expect("list_sessions row");
-    assert!(row.contains("Routed"));
-    assert!(row.contains("`list_sessions`"));
+    assert!(
+        !table.lines().any(|l| l.starts_with("| `list_sessions`")),
+        "a Routed row (\"| `list_sessions` | `list_sessions` |\") tells an operator nothing \
+         they came to docs for — it must not appear in the refusal table"
+    );
+}
+
+#[test]
+fn doc_table_omits_a_same_in_both_command() {
+    let table = render_doc_table();
+    assert!(
+        !table
+            .lines()
+            .any(|l| l.starts_with("| `collect_diagnostics`")),
+        "a SameInBoth row is not a refusal and must not appear"
+    );
+}
+
+#[test]
+fn refusal_detail_is_none_for_routed_and_same_in_both() {
+    assert!(refusal_detail(&Verdict::Routed {
+        tool: "list_sessions"
+    })
+    .is_none());
+    assert!(refusal_detail(&Verdict::SameInBoth { why: "why" }).is_none());
+}
+
+#[test]
+fn refusal_detail_pipe_escapes_a_sentence_that_contains_one() {
+    let verdict = Verdict::LocalOnly { instead: "a | b" };
+    assert_eq!(refusal_detail(&verdict), Some("a \\| b".to_string()));
 }
 
 #[test]
@@ -205,19 +241,73 @@ fn doc_table_names_the_refusal_for_a_local_only_command() {
         .lines()
         .find(|l| l.starts_with("| `add_host`"))
         .expect("add_host row");
-    assert!(row.contains("Local-only"));
     assert!(row.contains("fleet administration"));
 }
 
 #[test]
-fn doc_table_marks_the_routed_unless_row_distinctly() {
+fn doc_table_names_the_argument_shape_and_the_refusal_for_the_routed_unless_row() {
     let table = render_doc_table();
     let row = table
         .lines()
         .find(|l| l.starts_with("| `repair_session`"))
         .expect("repair_session row");
-    assert!(row.contains("Routed, unless"));
-    assert!(row.contains("`repair_session`; otherwise:"));
+    assert!(row.contains("Refuses when"));
+    assert!(row.contains("explicit: false, the automatic pre-attach check"));
+    assert!(row.contains("otherwise routes to `repair_session`"));
+}
+
+// ── summary_sentence ─────────────────────────────────────────────────────
+
+#[test]
+fn summary_sentence_matches_the_controllers_example_counts() {
+    // The controller's own example: "Of the 123 commands, 35 route to a hub
+    // tool, 1 routes except for one argument shape, 73 refuse, and 14 are
+    // the same in both modes; the full table is
+    // `src-tauri/src/backend/verdicts.rs`." Pinned literally so a
+    // regression in the verb-pluralisation logic is caught even if the real
+    // counts drift.
+    assert_eq!(
+        summary_sentence(123, 35, 1, 73, 14),
+        "Of the 123 commands, 35 route to a hub tool, 1 routes except for one argument shape, \
+         73 refuse, and 14 are the same in both modes; the full table is \
+         `src-tauri/src/backend/verdicts.rs`."
+    );
+}
+
+#[test]
+fn summary_sentence_pluralises_every_bucket_independently() {
+    // Every bucket at exactly 1: every verb goes singular.
+    assert_eq!(
+        summary_sentence(4, 1, 1, 1, 1),
+        "Of the 4 commands, 1 routes to a hub tool, 1 routes except for one argument shape, \
+         1 refuses, and 1 is the same in both modes; the full table is \
+         `src-tauri/src/backend/verdicts.rs`."
+    );
+    // Every bucket at 0 or 2+: every verb goes plural (0 reads as plural,
+    // same as English "0 commands").
+    assert_eq!(
+        summary_sentence(0, 0, 0, 0, 0),
+        "Of the 0 commands, 0 route to a hub tool, 0 route except for one argument shape, \
+         0 refuse, and 0 are the same in both modes; the full table is \
+         `src-tauri/src/backend/verdicts.rs`."
+    );
+}
+
+#[test]
+fn render_doc_table_includes_the_summary_sentence_with_real_counts() {
+    let lists = verdict_lists();
+    let table = render_doc_table();
+    let expected = summary_sentence(
+        VERDICTS.len(),
+        lists.routed.len(),
+        lists.routed_unless.len(),
+        lists.local_only.len(),
+        lists.same_in_both.len(),
+    );
+    assert!(
+        table.contains(&expected),
+        "generated table is missing the summary sentence:\n{expected}"
+    );
 }
 
 // ── splice_doc ───────────────────────────────────────────────────────────
