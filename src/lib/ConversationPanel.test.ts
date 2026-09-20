@@ -11,6 +11,18 @@ vi.mock('./clipboard', async () => {
   const actual = await vi.importActual<typeof import('./clipboard')>('./clipboard');
   return { ...actual, copyText: vi.fn() };
 });
+// Same shape as TerminalView.test.ts: the setup file's stub returns a fresh
+// no-op each call, so a test cannot reach the callback. Capture it instead.
+type DragDropPayload = { type: string; position: { x: number; y: number }; paths?: string[] };
+let dragDrop: ((e: { payload: DragDropPayload }) => void) | null = null;
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: async (cb: (e: { payload: DragDropPayload }) => void) => {
+      dragDrop = cb;
+      return () => {};
+    },
+  }),
+}));
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
@@ -2769,7 +2781,9 @@ describe('ConversationPanel attachments', () => {
     expect(left[0].getAttribute('title')).toContain('b.log');
   });
 
-  it('a drop on the shell attaches; a drop on the transcript does not', async () => {
+  // The DOM half drives the veil and stops App.svelte's window-level file://
+  // guard from swallowing the drop; the paths come from Tauri's event below.
+  it('the DOM drop clears the veil and attaches nothing; a drop on the transcript does nothing either', async () => {
     await renderPanel();
     const shell = document.querySelector('.composer-shell')!;
     await fireEvent.drop(shell, { dataTransfer: { types: ['Files'], files: [] } });
@@ -2793,6 +2807,87 @@ describe('ConversationPanel attachments', () => {
     const btn = screen.getByTestId('conv-attach-button');
     expect(btn.getAttribute('aria-disabled')).toBe('true');
     expect(btn.getAttribute('title')).toContain('standalone');
+  });
+
+  /** Stand the shell somewhere measurable: jsdom lays nothing out, so state
+   *  the rect the way real layout would. */
+  function placeShell(rect: Partial<DOMRect> = {}): HTMLElement {
+    const shell = document.querySelector('.composer-shell') as HTMLElement;
+    const r = { left: 100, top: 400, right: 500, bottom: 500, width: 400, height: 100, x: 100, y: 400, ...rect };
+    shell.getBoundingClientRect = () => ({ ...r, toJSON: () => r }) as DOMRect;
+    return shell;
+  }
+
+  // The DOM event cannot carry a filesystem path in a WKWebView; Tauri's
+  // drag-drop event can, and it is the same event lib.rs listens to in order
+  // to authorise those paths. So this is the one that must attach.
+  it('a drop inside the shell attaches the event’s paths; a drop outside it does nothing', async () => {
+    await renderPanel();
+    placeShell();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'attachment_preview') return null;
+      return baseInvoke(cmd, args);
+    });
+
+    dragDrop?.({ payload: { type: 'drop', position: { x: 10, y: 10 }, paths: ['/tmp/outside.png'] } });
+    for (let i = 0; i < 3; i++) await settle();
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+
+    dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/inside.png'] } });
+    for (let i = 0; i < 4; i++) await settle();
+    const tiles = screen.getAllByTestId('conv-attachment');
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0].getAttribute('title')).toContain('inside.png');
+    expect(mockedInvoke).toHaveBeenCalledWith('attachment_preview', { path: '/tmp/inside.png' });
+  });
+
+  // A known past bug in this codebase (see the contract on `pointInRect` in
+  // geometry.ts): Tauri's position is already in logical points, so dividing
+  // it by devicePixelRatio halves it and the hit-test misses everywhere.
+  it('hit-tests the drop point unscaled, so a 2× display still hits the shell', async () => {
+    const dpr = window.devicePixelRatio;
+    Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });
+    try {
+      await renderPanel();
+      placeShell();
+      mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'attachment_preview') return null;
+        return baseInvoke(cmd, args);
+      });
+      dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/retina.png'] } });
+      for (let i = 0; i < 4; i++) await settle();
+      expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+    } finally {
+      Object.defineProperty(window, 'devicePixelRatio', { value: dpr, configurable: true });
+    }
+  });
+
+  it('the drag veil follows the Tauri event, and only over the shell', async () => {
+    await renderPanel();
+    const shell = placeShell();
+
+    dragDrop?.({ payload: { type: 'over', position: { x: 10, y: 10 } } });
+    await settle();
+    expect(shell.className).not.toContain('is-dragging');
+
+    dragDrop?.({ payload: { type: 'over', position: { x: 300, y: 450 } } });
+    await settle();
+    expect(shell.className).toContain('is-dragging');
+    expect(screen.getByText('Drop to attach')).toBeTruthy();
+
+    dragDrop?.({ payload: { type: 'leave', position: { x: 0, y: 0 } } });
+    await settle();
+    expect(shell.className).not.toContain('is-dragging');
+  });
+
+  it('a drop is refused in hub mode, where nothing could upload it', async () => {
+    await renderPanelInHubMode();
+    placeShell();
+    mockedInvoke.mockClear();
+    dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/a.png'] } });
+    for (let i = 0; i < 3; i++) await settle();
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_preview', expect.anything());
   });
 
   // SEC-9: a pasted file has no filesystem path, so nothing authorised it for

@@ -79,7 +79,9 @@
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { invokeCmd } from './result';
-  import { addFiles, pastedName, fmtBytes, type Attachment, type PickedFile } from './attachments';
+  import { addFiles, droppedFile, pastedName, fmtBytes, type Attachment, type PickedFile } from './attachments';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { pointInRect } from './geometry';
   import Markdown from './MarkdownView.svelte';
 
   let {
@@ -940,8 +942,14 @@
 
   let attachments = $state<Attachment[]>([]);
   let attachErrors = $state<string[]>([]);
-  /** dragleave fires on every child, so nesting is counted, not flagged. */
+  /** dragleave fires for every child, so DOM nesting is counted, not flagged. */
   let dragDepth = $state(0);
+  /** The veil's other source: Tauri's drag-drop event, hit-tested against the
+   *  shell. Kept apart from `dragDepth` because the two arrive independently
+   *  and neither can clear the other's state. */
+  let dragOverShell = $state(false);
+  let shellEl = $state<HTMLDivElement | null>(null);
+  const dragging = $derived(dragDepth > 0 || dragOverShell);
 
   /** Attaching exists to upload: gate the control on the command that does
    *  the work, not on the picker that only feeds it. */
@@ -1015,39 +1023,67 @@
   function onShellDragLeave() {
     dragDepth = Math.max(0, dragDepth - 1);
   }
+  /**
+   * The DOM drop carries NO usable file: in a WKWebView a dropped `File` has
+   * no filesystem path, and a path is the only thing the Rust allow-list
+   * matches on. So this handler exists for one reason — to stop the event
+   * reaching App.svelte's window-level guard, which would otherwise let the
+   * webview navigate to `file://` and take the whole app state with it. The
+   * paths arrive on Tauri's own drag-drop event instead (see below).
+   */
   function onShellDrop(e: DragEvent) {
     e.preventDefault();
-    // App.svelte's window-level guard must not also see this one: a drop that
-    // reaches the window navigates the WKWebView to file:// and takes the
-    // whole app state with it.
     e.stopPropagation();
     dragDepth = 0;
-    // The OS drop already put these paths on the Rust allow-list via the
-    // Tauri window event; the webview only echoes them back.
-    const dropped = Array.from(e.dataTransfer?.files ?? []);
-    const picked = pickedFromDrop(dropped);
-    // A webview that hands back files but no path for any of them has nothing
-    // the allow-list can match. Say so rather than falling through to
-    // `addFiles`' pasted-file sentence, which would name the wrong gesture.
-    attachErrors = dropped.length > 0 && picked.length === 0 ? [DROP_WITHOUT_PATH] : [];
-    if (picked.length) void attach(picked);
   }
 
-  const DROP_WITHOUT_PATH =
-    'That drop reached the app without a file path, so it cannot be attached — use Attach files instead.';
-
-  /** Only files the webview gave a real path for: an empty path is the
-   *  clipboard's shape, and nothing else may borrow it. */
-  function pickedFromDrop(files: File[]): PickedFile[] {
-    return files
-      .map((f) => ({
-        path: (f as File & { path?: string }).path ?? '',
-        name: f.name,
-        size: f.size,
-        kind: f.type.startsWith('image/') ? ('image' as const) : ('binary' as const),
-      }))
-      .filter((f) => f.path !== '');
+  function pointInShell(px: number, py: number): boolean {
+    if (!shellEl) return false;
+    // NOT divided by devicePixelRatio: the event's position is already in
+    // logical points (see the contract on `pointInRect` in geometry.ts).
+    return pointInRect(px, py, shellEl.getBoundingClientRect());
   }
+
+  function onDroppedPaths(paths: string[]) {
+    // The same refusal the attach button carries: nothing here could upload.
+    if (attachBlocked !== null || paths.length === 0) return;
+    // These paths are already on the Rust allow-list — `lib.rs` recorded them
+    // from this very event before the webview heard about it.
+    void attach(paths.filter((p) => p !== '').map(droppedFile));
+  }
+
+  /**
+   * Tauri's drag-drop event: the only place the webview learns a dropped
+   * file's path, and the same event the backend authorises those paths from.
+   * Hit-tested against the shell, the way TerminalView hit-tests its grid, so
+   * a drop anywhere else in the window does nothing at all.
+   */
+  $effect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === 'enter' || p.type === 'over') {
+          dragOverShell = pointInShell(p.position.x, p.position.y);
+        } else if (p.type === 'leave') {
+          dragOverShell = false;
+        } else if (p.type === 'drop') {
+          const over = pointInShell(p.position.x, p.position.y);
+          dragOverShell = false;
+          dragDepth = 0;
+          if (over) onDroppedPaths(p.paths ?? []);
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
 
   function onComposerPaste(e: ClipboardEvent) {
     const dt = e.clipboardData;
@@ -1422,7 +1458,8 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="composer-shell"
-        class:is-dragging={dragDepth > 0}
+        bind:this={shellEl}
+        class:is-dragging={dragging}
         ondragenter={onShellDragEnter}
         ondragover={onShellDragOver}
         ondragleave={onShellDragLeave}
@@ -1431,7 +1468,7 @@
         {#if attachments.length}
           <ul class="attach-strip" data-testid="conv-attachments" aria-label="Attachments">
             {#each attachments as a (a.id)}
-              <li class="attach" data-testid="conv-attachment" data-state={a.state} title="{a.name} · {fmtBytes(a.size)}{a.error ? ` · ${a.error}` : ''}">
+              <li class="attach" data-testid="conv-attachment" data-state={a.state} title="{a.name}{a.size > 0 ? ` · ${fmtBytes(a.size)}` : ''}{a.error ? ` · ${a.error}` : ''}">
                 {#if a.thumb}
                   <!-- A preview can be an SVG data URL (classify maps .svg to
                        an image). Inside <img> it cannot run script; inlined as
@@ -1485,7 +1522,7 @@
             aria-keyshortcuts="Enter"
             disabled={!canSend}>{sending ? '…' : '↑'}</button>
         </div>
-        {#if dragDepth > 0}
+        {#if dragging}
           <div class="drop-veil" aria-hidden="true">Drop to attach</div>
         {/if}
       </div>
