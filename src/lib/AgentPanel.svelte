@@ -20,8 +20,9 @@
   import {
     agentPanelOpen,
     operatorState,
-    operatorSession,
+    operatorRow,
     blockedCopy,
+    closeAgent,
     openAgent,
     restartOperator,
     type OperatorBlocked,
@@ -42,7 +43,11 @@
   // derived state, no effect required to bring it back.
   let droppedLabel = $state<string | null>(null);
 
-  const session = $derived($operatorSession);
+  // The LIVE row, not the snapshot `ensure_operator` returned: `busy`, the
+  // `stuck_kind` line and ConversationPanel's own `$effect` on rowStatus all
+  // hang off this, and all three are worthless if it cannot change. See
+  // `operatorRow` in operator.ts.
+  const session = $derived($operatorRow);
   // Same "is the agent busy" signal ConversationPanel's own composer reads
   // (stuck_kind first, then claude_status === 'working') — one shared
   // definition so the two composers can never disagree about it.
@@ -88,10 +93,47 @@
     }
     draft = '';
   }
+
+  // Escape closes the sheet, INCLUDING from inside the composer. This is a
+  // non-modal overlay, so it is not a <dialog> and gets no `cancel` event
+  // from the browser (Modal.svelte's route); and App.svelte's window-level
+  // Escape deliberately leaves an editable element alone, which would leave
+  // the one field you are most likely to be in with no way out. Handled
+  // here, where the panel owns the key, and marked handled so the same
+  // press does not also leave Files or Hosts behind it.
+  function onPanelKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeAgent();
+  }
 </script>
 
 {#if $agentPanelOpen}
-  <section class="agent-panel" aria-label="Agent">
+  <!-- A non-modal dialog: `role="dialog"` on a div (a <section> is a
+       landmark and may not take the role), `tabindex="-1"` so the sheet
+       itself can hold focus and Escape reaches this handler even when no
+       control inside it is focused. Not <dialog>/Modal.svelte: showModal()
+       would dim and focus-trap the whole app, and the point of this sheet
+       is that the app stays usable underneath it. -->
+  <div
+    class="agent-panel"
+    role="dialog"
+    tabindex="-1"
+    aria-label="Agent"
+    data-testid="agent-panel"
+    onkeydown={onPanelKeydown}
+  >
+    <header class="head">
+      <span class="who">Agent</span>
+      <button
+        class="close"
+        data-testid="agent-panel-close"
+        aria-label="Close the agent"
+        title="Close the agent (Esc)"
+        onclick={closeAgent}>✕</button
+      >
+    </header>
     {#if blocked}
       <p class="blocked">{blocked.title}</p>
       {#if blocked.action && blockedAction}
@@ -122,7 +164,7 @@
         <p class="busy" class:stuck={!!session?.stuck_kind}>{statusNote}</p>
       {/if}
     {/if}
-  </section>
+  </div>
 {/if}
 
 <style>
@@ -142,6 +184,32 @@
     color: var(--fg);
     box-shadow: 0 4px 20px rgb(0 0 0 / 35%);
     z-index: 39;
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .who {
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .close {
+    border: none;
+    background: none;
+    color: var(--fg-muted);
+    font-size: 0.9rem;
+    line-height: 1;
+    padding: 0.15rem 0.3rem;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .close:hover {
+    color: var(--fg);
+    background: var(--bg);
   }
   .blocked {
     margin: 0;

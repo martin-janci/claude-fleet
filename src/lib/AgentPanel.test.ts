@@ -5,8 +5,10 @@ const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 vi.mock('./ConversationPanel.svelte', () => ({ default: () => ({}) }));
 
+import { get } from 'svelte/store';
 import AgentPanel from './AgentPanel.svelte';
 import { agentPanelOpen, operatorState, operatorSession } from './operator';
+import { sessions, applySessionEvents } from './sessions';
 
 const row = (over = {}) =>
   ({
@@ -16,6 +18,7 @@ const row = (over = {}) =>
     kind: 'work',
     claude_status: 'idle',
     stuck_kind: null,
+    last_activity_at: 100,
     ...over,
   }) as never;
 
@@ -24,6 +27,7 @@ beforeEach(() => {
   agentPanelOpen.set(true);
   operatorState.set('ready');
   operatorSession.set(row());
+  sessions.set([]);
 });
 
 describe('AgentPanel', () => {
@@ -115,4 +119,66 @@ describe('AgentPanel', () => {
       ),
     );
   });
+
+  it('closes on its close button — the agent keeps running behind it', async () => {
+    render(AgentPanel);
+    await fireEvent.click(screen.getByTestId('agent-panel-close'));
+    expect(get(agentPanelOpen)).toBe(false);
+    expect(screen.queryByTestId('agent-panel')).toBeNull();
+    expect(get(operatorState)).toBe('ready');
+  });
+
+  it('closes on Escape from inside the composer, where a window-level handler would not', async () => {
+    render(AgentPanel);
+    const box = screen.getByPlaceholderText(/ask the agent/i);
+    await fireEvent.keyDown(box, { key: 'Escape' });
+    expect(get(agentPanelOpen)).toBe(false);
+  });
+
+  it('closes on Escape anywhere in the sheet', async () => {
+    render(AgentPanel);
+    await fireEvent.keyDown(screen.getByTestId('agent-panel'), { key: 'Escape' });
+    expect(get(agentPanelOpen)).toBe(false);
+  });
+
+  it('the busy gate MOVES on a row event, not only when the panel was opened', async () => {
+    // The spec's mitigation for "two clients at once". Read off the snapshot
+    // `operator_status` returned, it could neither fire after you sent nor
+    // ever clear; this drives it through the same bus the sidebar repaints
+    // from.
+    operatorSession.set(row({ claude_status: 'idle' }));
+    sessions.set([row({ claude_status: 'idle' })]);
+    render(AgentPanel);
+    expect(screen.getByRole('button', { name: /^send$/i })).not.toBeDisabled();
+
+    applySessionEvents([
+      { type: 'updated', row: row({ claude_status: 'working', last_activity_at: 200 }) },
+    ]);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^send$/i })).toBeDisabled(),
+    );
+    expect(screen.getByText(/working/i)).toBeTruthy();
+
+    // And it clears again when the agent goes idle.
+    applySessionEvents([
+      { type: 'updated', row: row({ claude_status: 'idle', last_activity_at: 300 }) },
+    ]);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^send$/i })).not.toBeDisabled(),
+    );
+  });
+
+  it('surfaces a stuck_kind that arrives after the panel opened', async () => {
+    operatorSession.set(row({ claude_status: 'working' }));
+    sessions.set([row({ claude_status: 'working' })]);
+    render(AgentPanel);
+    applySessionEvents([
+      {
+        type: 'updated',
+        row: row({ claude_status: 'working', stuck_kind: 'trust_prompt', last_activity_at: 200 }),
+      },
+    ]);
+    await waitFor(() => expect(screen.getByText(/trust/i)).toBeTruthy());
+  });
 });
+

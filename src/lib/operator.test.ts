@@ -8,16 +8,33 @@ import {
   agentPanelOpen,
   operatorState,
   operatorSession,
+  operatorRow,
   openAgent,
+  closeAgent,
+  toggleAgent,
   restartOperator,
   blockedCopy,
 } from './operator';
+import { sessions, applySessionEvents, type SessionRow } from './sessions';
+
+const row = (over = {}) =>
+  ({
+    id: 7,
+    tmux_name: 'fleet-operator',
+    host_alias: 'local',
+    kind: 'work',
+    claude_status: 'idle',
+    stuck_kind: null,
+    last_activity_at: 100,
+    ...over,
+  }) as unknown as SessionRow;
 
 beforeEach(() => {
   invoke.mockReset();
   agentPanelOpen.set(false);
   operatorState.set('unknown');
   operatorSession.set(null);
+  sessions.set([]);
 });
 
 describe('openAgent', () => {
@@ -93,5 +110,101 @@ describe('restartOperator', () => {
     expect(invoke.mock.calls[0][0]).toBe('restart_session');
     expect(invoke.mock.calls[1][0]).toBe('operator_status');
     expect(get(operatorState)).toBe('ready');
+  });
+});
+
+describe('closing the panel', () => {
+  // The panel is `position: fixed` over the bottom-right corner of every
+  // view. Before this, `agentPanelOpen` was written `true` in one place and
+  // `false` nowhere in production code — the first press pinned the sheet
+  // for the life of the process.
+  it('toggleAgent closes an open panel without touching the backend', async () => {
+    agentPanelOpen.set(true);
+    await toggleAgent();
+    expect(get(agentPanelOpen)).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('toggleAgent opens a closed panel', async () => {
+    invoke.mockResolvedValueOnce({ ready: true, session: row(), blocked: null });
+    await toggleAgent();
+    expect(get(agentPanelOpen)).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('operator_status', undefined);
+  });
+
+  it('closeAgent leaves the agent itself alone — the panel is a window, not the session', () => {
+    agentPanelOpen.set(true);
+    operatorState.set('ready');
+    closeAgent();
+    expect(get(agentPanelOpen)).toBe(false);
+    expect(get(operatorState)).toBe('ready');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe('openAgent re-entrancy', () => {
+  // Two overlapping presses each minted a token and revoked the other's, and
+  // because the DB write and the `.mcp.json` write are separately ordered the
+  // host could end up on a token the database had revoked — every call 401s
+  // while `operator_status` still says `ready`.
+  it('two overlapping presses issue ONE ensure_operator', async () => {
+    let releaseStatus: (v: unknown) => void = () => {};
+    invoke.mockImplementationOnce(
+      () => new Promise((res) => { releaseStatus = res; }),
+    );
+    invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
+    invoke.mockResolvedValueOnce(row());
+
+    const first = openAgent();
+    const second = openAgent();
+    expect(second).toBe(first);
+    releaseStatus({ ready: false, session: null, blocked: 'absent' });
+    await Promise.all([first, second]);
+
+    const ensures = invoke.mock.calls.filter((c) => c[0] === 'ensure_operator');
+    expect(ensures).toHaveLength(1);
+    expect(get(operatorState)).toBe('ready');
+  });
+
+  it('a later press is a fresh call, not the stale promise', async () => {
+    invoke.mockResolvedValue({ ready: true, session: row(), blocked: null });
+    await openAgent();
+    agentPanelOpen.set(false);
+    await openAgent();
+    expect(invoke.mock.calls.filter((c) => c[0] === 'operator_status')).toHaveLength(2);
+  });
+});
+
+describe('operatorRow', () => {
+  // The spec's "refuse to send while working" gate and the stuck_kind line
+  // both read this. As a snapshot taken when the panel opened, neither could
+  // ever fire or clear.
+  it('follows the row-event bus, not the snapshot the panel opened with', () => {
+    operatorSession.set(row({ claude_status: 'idle' }));
+    sessions.set([row({ claude_status: 'idle' })]);
+    expect(get(operatorRow)?.claude_status).toBe('idle');
+
+    applySessionEvents([
+      { type: 'updated', row: row({ claude_status: 'working', last_activity_at: 200 }) },
+    ]);
+    expect(get(operatorRow)?.claude_status).toBe('working');
+  });
+
+  it('falls back to the anchor in the window before the row event arrives', () => {
+    operatorSession.set(row({ claude_status: 'idle' }));
+    sessions.set([]);
+    expect(get(operatorRow)?.id).toBe(7);
+  });
+
+  it('matches on (host, tmux) — another host\'s same-named session is not the operator', () => {
+    operatorSession.set(row({ claude_status: 'idle' }));
+    sessions.set([row({ id: 99, host_alias: 'mefistos', claude_status: 'working' })]);
+    expect(get(operatorRow)?.claude_status).toBe('idle');
+  });
+
+  it('is null with no operator at all', () => {
+    operatorSession.set(null);
+    sessions.set([row()]);
+    expect(get(operatorRow)).toBeNull();
   });
 });
