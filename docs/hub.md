@@ -1038,7 +1038,7 @@ Of the 123 commands, 35 route to a hub tool, 1 routes except for one argument sh
 | `repo_stage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_unstage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
-| `session_activity` | it captures the session's pane over this machine's SSH connection; the hub's peek_session answers a different shape, so the live indicator is off in remote mode |
+| `session_activity` | it captures the session's pane over this machine's SSH connection; the hub's pane reads answer a different shape, so the live indicator is off in remote mode |
 | `session_tool_detail` | the hub exposes no tool for one tool call's input and result; the Conversation tab's tool lines still come from session_conversation |
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
 | `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub |

@@ -311,10 +311,10 @@ pub fn dismiss_agent_session(args: DismissAgentArgs, store: &Mutex<Store>) -> Re
     Ok(())
 }
 
-/// Resolve a `peek_session` target (MCP-7) from any of: a fleet `session_id`,
-/// or a `claude_session_id` plus its `host_alias` (the id a `new_bg_session`
+/// Resolve a transcript-read target from any of: a fleet `session_id`, or a
+/// `claude_session_id` plus its `host_alias` (the id a `new_bg_session`
 /// caller already holds, before reconcile has surfaced the row). Returns the
-/// `(host_alias, claude_session_id)` pair to peek.
+/// `(host_alias, claude_session_id)` pair to read.
 ///
 /// A fleet row without a Claude id yields `E_INVALID_STATE` so the caller can
 /// tell "not tracked yet" apart from "no such session" (`E_NOTFOUND`).

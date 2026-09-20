@@ -57,7 +57,7 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
     ) -> Result<Vec<WorktreeOccupancy>, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.route("list_worktrees", &args).await,
+            Some(hub) => hub.list_worktrees(args.project_id).await,
             None => worktrees::list_worktrees(args, store),
         }
     }

@@ -10,6 +10,70 @@ MCP server exposes tools to **observe** and **act on** those sessions. The tool
 descriptions say what each tool does and which parameters it takes; this skill
 is the workflow that ties them together — the parts that aren't obvious.
 
+## Token discipline — the cheapest call that answers the question
+
+Every result lands in your context verbatim, and a fleet grows. Measured on a
+5-host fleet with 55 sessions and 249 worktrees (2026-09):
+
+| Call | ~Tokens |
+| --- | ---: |
+| `whoami`, `peer_status`, `related_sessions`, `capture_session` (idle pane) | < 50 |
+| `session_history`, `fleet_health`, `list_hosts` | 100–450 |
+| `list_worktrees` (default: slim, 100 of 249 rows) | ~3.2k |
+| `list_sessions` (summary default, 55 rows) | ~2.6k |
+| `usage_report`, `list_projects` (summary) | ~1.6k / ~1.8k |
+| `list_sessions { summary: false }` | ~11k |
+| `list_projects { summary: false }` (pair it with `limit`) | ~18k |
+
+- **Filter before you widen.** `list_sessions` AND-combines `host_alias`,
+  `project_id`, `status`, `claude_status`, `tag`, and `limit` caps the rows.
+  Reach for `summary: false` for the *one* session you are about to act on —
+  or better, `peer_status`, which carries `current_activity` / `context_pct`
+  for a single row at a fraction of the cost.
+- **Read the `total`.** `list_worktrees` answers `{total, worktrees}` with at
+  most 100 slim rows; when `total` is larger you are holding a page — narrow
+  with `project_id` / `host_alias` rather than raising `limit`.
+- **One round trip beats three.** `run_prompt` = send + wait + read in one
+  call. Use it unless you need control between the steps.
+- **Long-poll, never poll.** `wait_for_session` / `wait_for_task` block
+  server-side. Re-listing sessions in a loop to see whether a turn finished is
+  the most expensive anti-pattern on this API: it pays a full fleet dump per
+  iteration and still misses the transition.
+- **Read the reply, not the screen.** `session_transcript { since_turn,
+  max_chars }` (default 8000 chars) returns just the new turn.
+  `capture_session` / `scrollback_lines` re-reads text you already have —
+  use it only for the *screen state* (menu, permission prompt, spinner).
+- **Re-sync narrowly.** After an error, run the smallest list that proves the
+  state (`whoami`, `list_sessions { host_alias, limit }`), not a full dump.
+
+## Finding the tools
+
+The server lists only the tools your token may call — the master token sees
+72, a per-host token 62, a `readonly` token 36 — so a tool you cannot find is
+usually one your token is not allowed to call, not a missing feature. Clients
+also defer the surface (~13k tokens of definitions): Claude Code, and any MCP
+connector with `defer_loading`, loads a definition only when it is searched
+for, so load **every tool you expect to need in one search call**, not one per
+call. The names, by job:
+
+```text
+orient    fleet_health list_hosts list_projects list_sessions whoami
+          peer_status related_sessions usage_report agent_status
+spawn     new_session new_shell_session new_bg_session spawn_review
+steer     send_prompt run_prompt wait_for_session capture_session
+          session_transcript session_conversation(s) broadcast_prompt
+coordinate send_message inbox dispatch_task wait_for_task list_tasks
+          cancel_task set_session_tags session_history register_self
+recover   restart_session recreate_session repair_session move_session
+          dismiss_ghost_session safe_kill_session kill_session
+review    repo_changes repo_diff repo_file repo_tree repo_log
+          repo_branches repo_commit repo_commit_diff
+admin     add_host remove_host probe_host hide_host provision_hosts
+          pair_client list_clients revoke_client set_secret refresh_projects
+          delete_worktree get_clipboard set_clipboard rename_session
+          set_friendly_name list_accounts
+```
+
 ## Status vocabulary
 
 Every session row carries two derived fields. These are the only values that
@@ -43,8 +107,9 @@ claude_status, stuck_kind, lost_at, is_controller). Filters AND-combine:
 after filtering; `include_lost: true` surfaces ghosts (required before
 `recreate_session` can revive one). For `current_activity` / `context_pct` on
 one session call `peer_status`; for every session pass `summary: false`
-(expensive — use sparingly). Orient with `fleet_health` / `list_hosts` /
-`list_projects` / `list_worktrees` when you don't yet know what exists.
+(expensive — see *Token discipline*). Orient with `fleet_health` /
+`list_hosts` / `list_projects` when you don't yet know what exists, and
+`list_worktrees { project_id }` once you do.
 
 ## Identifying yourself — `register_self`
 
@@ -80,9 +145,7 @@ included: on a `readonly` host you cannot set your session's label. Treat
 `kill_session`, `safe_kill_session`, `restart_session`, `rename_session`,
 `set_friendly_name`, `register_self` — accepts **either** `session_id` **or**
 the `host_alias` + `tmux_name` pair. `session_id` (from `list_sessions` /
-`whoami`) is the stable form and wins when both are given. `peek_session` is
-deprecated (use `session_transcript`); it still takes `session_id` or
-`claude_session_id` (+ `host_alias` until the row exists).
+`whoami`) is the stable form and wins when both are given.
 
 ## Spawning — `new_session` / `new_shell_session` / `new_bg_session`
 
@@ -98,8 +161,7 @@ deprecated (use `session_transcript`); it still takes `session_id` or
   named `bg:<uuid>`. Returns the Claude id **and** the fleet row (`session`),
   so the very next call can be `session_transcript { session_id }`; the launch
   prompt becomes the row's default friendly name and `last_prompt`. Track
-  it with `session_transcript` (`peek_session` is deprecated);
-  `capture_session` does not apply (no pane). `kill_session` stops it via
+  it with `session_transcript`; `capture_session` does not apply (no pane). `kill_session` stops it via
   `claude stop`; an inactive agent (`claude_status: stopped`) is removed from
   the list instead.
 - Rows with `kind: external` are interactive Claude sessions running outside
@@ -294,3 +356,7 @@ errors. Three classes, three responses:
 - Jumping to `recreate_session` for a session that needed a nudge.
 - Guessing `host_alias` from `hostname` — always look it up via `list_sessions`.
 - Auto-retrying a destructive op after a timeout.
+- Polling `list_sessions` in a loop to watch a turn — long-poll with
+  `wait_for_session` instead.
+- Asking for `summary: false`, or raising `limit`, when a filter would have
+  answered it.
