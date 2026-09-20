@@ -61,12 +61,21 @@ fn tag_step(step: &str, e: IpcError) -> IpcError {
 /// The final source step (see the module docs). Returns plain errors — the
 /// caller decides how to wrap them (`E_MOVE_PARTIAL` for a fresh move,
 /// `E_INVALID_STATE` for a recovery finishing a partial one).
+///
+/// `carried` is `None` for a caller that did not do the carrying — a
+/// recovery finishing a partial move runs from the recorded event alone,
+/// hours later, and has no carry report at all. The `session_moved` detail
+/// then omits the `carried` key rather than writing a default one, which
+/// would read as fact (zero commits, zero dirty entries, nothing carried)
+/// and contradict the `session_move_partial` above it on the same timeline.
+/// The timeline is the durable record recovery leans on; a gap in it is
+/// honest, a fabricated zero is not.
 pub(super) async fn finalise_source(
     a: FinaliseArgs<'_>,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     hooks: &dyn MoveHooks,
-    carried: &carry::CarryReport,
+    carried: Option<&carry::CarryReport>,
 ) -> Result<FinaliseOutcome, IpcError> {
     let mut warnings = Vec::new();
     let mut source_killed = false;
@@ -168,8 +177,10 @@ pub(super) async fn finalise_source(
         "bytes": a.transcript_bytes,
         "kept_source": a.keep_source,
         "source_killed": source_killed,
-        "carried": carried,
     });
+    if let (Some(base), Some(c)) = (detail.as_object_mut(), carried) {
+        base.insert("carried".into(), serde_json::json!(c));
+    }
     if let (Some(base), serde_json::Value::Object(extra)) = (detail.as_object_mut(), a.extra_detail)
     {
         // `Map::extend` would silently overwrite a canonical key

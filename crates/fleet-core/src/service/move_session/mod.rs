@@ -1498,6 +1498,28 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
             ));
         }
     }
+    // The target must not already be running THIS conversation. After a
+    // `keep_source` move both rows carry the same `claude_session_id` and the
+    // same branch and worktree, so a move "back" to the host the session came
+    // from would aim at that live session's own worktree: the tmux name clash
+    // is stepped around by `pick_target_name`, the dirty target is adopted
+    // when the content matches (or reset by `clean_target`), and the
+    // transcript copy replaces the one it is writing. Two live sessions, one
+    // conversation, one worktree. Refused here rather than in the UI so the
+    // Tauri command, the MCP tool and the hub are all covered.
+    let target_rows = s.list_sessions_for_host(target)?;
+    if let Some(twin) = target_rows
+        .iter()
+        .find(|r| r.status == "running" && r.claude_session_id.as_deref() == Some(&*claude_id))
+    {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "{target} already runs this conversation ({claude_id}) as session {} ({}); moving there would point the transfer at that session's own worktree — kill or resolve it there first",
+                twin.tmux_name, twin.id
+            ),
+        ));
+    }
     if !args.keep_source {
         crate::service::sessions::guard_not_controller(
             s.get_controller()?.as_ref(),
@@ -1546,11 +1568,7 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         claude_state::DEFAULT_MAX_SESSION_STATE_MB,
     )
     .saturating_mul(1024 * 1024);
-    let target_taken = s
-        .list_sessions_for_host(target)?
-        .into_iter()
-        .map(|r| r.tmux_name)
-        .collect();
+    let target_taken = target_rows.into_iter().map(|r| r.tmux_name).collect();
     Ok(Snapshot {
         claude_id,
         branch,
@@ -1763,6 +1781,10 @@ pub(super) struct PartialCtx {
     pub to_tmux_name: String,
     pub claude_session_id: String,
     pub branch: String,
+    /// What this move was asked to do with the source (`keep_source`). A
+    /// recovery rebuilt from the event cannot re-derive it, and guessing
+    /// `false` there means killing a source the transfer was told to keep.
+    pub kept_source: bool,
     /// The source transcript as the copy was taken. `None` before the copy.
     pub source_transcript: Option<Located>,
     /// The target row's counters as the move last saw them.
@@ -1793,6 +1815,7 @@ fn partial(step: &str, ctx: &PartialCtx, target_id: Option<i64>, e: &IpcError) -
         "to_tmux_name": ctx.to_tmux_name,
         "claude_session_id": ctx.claude_session_id,
         "branch": ctx.branch,
+        "kept_source": ctx.kept_source,
         "source_transcript_size": ctx.source_transcript.as_ref().map(|l| l.size),
         "source_transcript_mtime": ctx.source_transcript.as_ref().map(|l| l.mtime),
         "source_transcript_path": ctx.source_transcript.as_ref().map(|l| l.path.clone()),
@@ -1865,6 +1888,7 @@ fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcEr
         "to_tmux_name": d["to_tmux_name"],
         "claude_session_id": d["claude_session_id"],
         "branch": d["branch"],
+        "kept_source": d["kept_source"],
         "source_transcript_size": d["source_transcript_size"],
         "source_transcript_mtime": d["source_transcript_mtime"],
         "source_transcript_path": d["source_transcript_path"],
@@ -2328,9 +2352,11 @@ async fn move_session_inner(
         let mut adopted_detail: Option<String> = None;
         // Set only when `clean_target` replaced an unfinished earlier
         // attempt's leftovers before the retried apply below; drives the
-        // `replaced ... path(s)` warning and the `Warned` (not `Done`) close
-        // of the `Replay` step.
-        let mut cleaned: Option<u64> = None;
+        // `replaced ...` warning and the `Warned` (not `Done`) close of the
+        // `Replay` step. The inner `Option` is the count: `None` there means
+        // the cleanup ran but its reply could not be read, and the warning
+        // then names no number rather than one it does not have.
+        let mut cleaned: Option<Option<u64>> = None;
         let porcelain_owned = {
             let out = sh(
                 ssh,
@@ -2383,10 +2409,12 @@ async fn move_session_inner(
                                 &stderr_of(&rec_out),
                             ));
                         }
-                        let removed =
-                            carry::parse_recover(&String::from_utf8_lossy(&rec_out.stdout))
-                                .unwrap_or(l.ours.len() as u64);
-                        cleaned = Some(removed);
+                        // Never `l.ours.len()` as a fallback: that list is
+                        // capped at `carry::LEFTOVER_CAP`, so 200 leftovers
+                        // with an unreadable count would report 50.
+                        cleaned = Some(
+                            carry::parse_recover(&String::from_utf8_lossy(&rec_out.stdout)).ok(),
+                        );
                         // The leftovers are gone, so the retried apply lands
                         // on a clean worktree; classify_target is not called
                         // again on its failure — a second failure here is
@@ -2467,8 +2495,12 @@ async fn move_session_inner(
             // path `read-tree -u --reset HEAD` already removed still exits
             // 0), not a count of files this step actually deleted — so this
             // must never read as "N files deleted".
+            let count = match removed {
+                Some(n) => format!(" ({n} path(s))"),
+                None => String::new(),
+            };
             warnings.push(format!(
-                "replaced the work an unfinished earlier transfer had left in {cwd} on {target} ({removed} path(s))"
+                "replaced the work an unfinished earlier transfer had left in {cwd} on {target}{count}"
             ));
         }
         progress.end_soft(cleaned.is_some(), adopted_detail);
@@ -2607,6 +2639,7 @@ async fn move_session_inner(
         to_tmux_name: tmux_name.clone(),
         claude_session_id: id.clone(),
         branch: snap.branch.clone(),
+        kept_source: args.keep_source,
         source_transcript: Some(located.clone()),
         to_turn_seq: None,
         to_last_turn_at: None,
@@ -2743,7 +2776,7 @@ async fn move_session_inner(
         store,
         ssh,
         hooks,
-        &carried,
+        Some(&carried),
     )
     .await
     .map_err(|e| {
@@ -3612,6 +3645,51 @@ mod tests {
         assert_eq!(scripts_with(&f, "beta", "# cf-carry:recover").len(), 1);
     }
 
+    /// A cleanup whose count could not be read must not borrow one from the
+    /// `ours` list: that list is capped at `carry::LEFTOVER_CAP`, so 200
+    /// leftovers with an unreadable count would report 50. No number is the
+    /// honest answer.
+    #[tokio::test]
+    async fn a_cleanup_with_an_unreadable_count_claims_no_count() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\nours\tsrc/lib.rs\0", carry::LEFTOVERS_DIFFER),
+                ),
+            )
+            // The recover ran, but its payload is not a number.
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:recover"),
+                Reply::ok(&out("who knows\n")),
+            )
+            .on_host_once(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run_with(&f, &hooks, |a| a.clean_target = true)
+            .await
+            .expect("the move completes");
+        let replaced: Vec<&String> = rep
+            .warnings
+            .iter()
+            .filter(|w| w.contains("unfinished earlier transfer had left"))
+            .collect();
+        assert_eq!(replaced.len(), 1, "{:?}", rep.warnings);
+        assert!(
+            !replaced[0].contains("path(s)"),
+            "a count nobody could read must not be invented: {:?}",
+            replaced[0]
+        );
+    }
+
     #[tokio::test]
     async fn clean_target_never_touches_the_targets_own_work() {
         let (f, _bus) = recorded_fixture();
@@ -4125,6 +4203,35 @@ mod tests {
             "{d}"
         );
         assert!(d["step"].is_string(), "{d}");
+    }
+
+    /// Whether the move was told to KEEP the source is one of the facts a
+    /// later recovery cannot re-derive: the run store is gone, and a retry
+    /// rebuilt from this event would otherwise default to killing a source
+    /// the original transfer was asked to leave running.
+    #[tokio::test]
+    async fn a_partial_records_whether_the_move_was_told_to_keep_the_source() {
+        for keep in [true, false] {
+            let f = fixture();
+            let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            // Never confirmed: the target row exists, both sessions are alive.
+            hooks.target_status = "ghost";
+            let err = run(&f, &hooks, keep).await.unwrap_err();
+            assert_eq!(err.code, codes::E_MOVE_PARTIAL, "{keep}: {}", err.message);
+            let tid = err.details.clone().expect("details")["target_session_id"]
+                .as_i64()
+                .expect("target id");
+            for id in [f.source_id, tid] {
+                let ev = events(&f, id);
+                let (_, detail) = ev
+                    .iter()
+                    .find(|(k, _)| k == EVENT_MOVE_PARTIAL)
+                    .unwrap_or_else(|| panic!("{keep}: session_move_partial on {id}: {ev:?}"));
+                let d: serde_json::Value =
+                    serde_json::from_str(detail.as_deref().unwrap()).unwrap();
+                assert_eq!(d["kept_source"], keep, "on {id}: {d}");
+            }
+        }
     }
 
     /// A partial that fails at the earliest possible call site (reconciling
@@ -5908,6 +6015,56 @@ mod tests {
             codes::E_INVALID_STATE
         );
         assert!(f.fake.calls().iter().all(|c| c.host != "beta"));
+    }
+
+    /// A `keep_source` move leaves the origin running the SAME conversation in
+    /// the SAME worktree, so a move "back" to that host would point the
+    /// transfer at the live session's own worktree: `pick_target_name` steps
+    /// around the tmux name clash, the dirty target is ADOPTED when the
+    /// content matches (or `clean_target` resets it), and the transcript copy
+    /// replaces the one that session is writing — two live sessions, one
+    /// conversation, one worktree. The refusal lives in the preflight, where
+    /// it covers the Tauri command, the MCP tool and the hub alike, not just
+    /// the button that made it easy to click.
+    #[tokio::test]
+    async fn a_target_already_running_this_conversation_is_refused() {
+        let f = fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let twin = {
+            let s = f.store.lock().unwrap();
+            let twin = s
+                .upsert_session(
+                    "dev-o-r--feat-moved",
+                    "beta",
+                    Some(f.project_id),
+                    Some(f.worktree_id),
+                    1,
+                    1,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            s.set_claude_session_id(twin, SID).unwrap();
+            twin
+        };
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE, "{}", err.message);
+        for want in ["beta", "dev-o-r--feat-moved", SID] {
+            assert!(err.message.contains(want), "{want:?}: {}", err.message);
+        }
+        // Refused before a single command reached either host.
+        assert!(f.fake.calls().is_empty(), "{:?}", f.fake.calls());
+        assert_source_untouched(&f, &hooks);
+        // A row that is no longer alive is not this conversation running
+        // there: a retry after the target session was killed must still work.
+        f.store
+            .lock()
+            .unwrap()
+            .mark_session_killed(twin, 1)
+            .unwrap();
+        run(&f, &hooks, false)
+            .await
+            .expect("move after the twin died");
     }
 
     #[tokio::test]

@@ -51,9 +51,7 @@ use crate::ssh::{SshClient, SshExec};
 use crate::store::{SessionRow, Store};
 
 use super::finalise::{finalise_source, FinaliseArgs};
-use super::{
-    carry, Located, MoveHooks, RealHooks, EVENT_MOVED, EVENT_MOVE_PARTIAL, EVENT_MOVE_UNDONE,
-};
+use super::{Located, MoveHooks, RealHooks, EVENT_MOVED, EVENT_MOVE_PARTIAL, EVENT_MOVE_UNDONE};
 
 /// How many of the target's newest timeline events `resolve_move` scans for
 /// the handle. Generous: a partial's own record-keeping (reconcile
@@ -394,7 +392,9 @@ async fn finish(
         store,
         ssh,
         hooks,
-        &carry::CarryReport::default(),
+        // No carry report: this Finish did not carry anything — see
+        // `finalise_source`'s doc for why a default one is not written.
+        None,
     )
     .await
     .map_err(wrap_finalise_error)?;
@@ -819,6 +819,51 @@ mod tests {
                 .expect("session_moved");
             let d: serde_json::Value = serde_json::from_str(e.detail.as_deref().unwrap()).unwrap();
             assert_eq!(d["finished_from_partial"], true);
+        }
+    }
+
+    /// A Finish never saw the carry: it runs from the recorded event alone,
+    /// long after the move that did the carrying. Writing a default
+    /// `CarryReport` into its `session_moved` detail would read as fact —
+    /// zero commits, zero dirty entries, nothing carried — and flatly
+    /// contradict the `session_move_partial` sitting right above it on the
+    /// same timeline. The key is left out instead, and
+    /// `finished_from_partial` says where the carry facts actually live.
+    #[tokio::test]
+    async fn a_finished_partial_claims_no_carry_it_did_not_see() {
+        let (store, source_id, target_id) = partial_fixture(true);
+        let fake = FakeSsh::new();
+        fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:locate"),
+            Reply::ok(&format!(
+                "{TRANSCRIPT_LEN}\t{MTIME}\t{SRC_TRANSCRIPT_PATH}\n"
+            )),
+        );
+        let hooks = FakeHooks::new(&fake);
+        resolve_move_with(
+            ResolveMoveArgs {
+                session_id: target_id,
+                action: ResolveMoveAction::Finish,
+            },
+            &store,
+            &fake,
+            &hooks,
+        )
+        .await
+        .expect("finish");
+        for id in [source_id, target_id] {
+            let ev = store.lock().unwrap().list_session_events(id, 50).unwrap();
+            let e = ev
+                .iter()
+                .find(|e| e.kind == EVENT_MOVED)
+                .expect("session_moved");
+            let d: serde_json::Value = serde_json::from_str(e.detail.as_deref().unwrap()).unwrap();
+            assert!(
+                d.get("carried").is_none(),
+                "a Finish must not record a carry it never saw: {d}"
+            );
+            assert_eq!(d["finished_from_partial"], true, "{d}");
         }
     }
 

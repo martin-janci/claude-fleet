@@ -643,8 +643,13 @@ const LEFTOVER_CAP: usize = 50;
 /// worktree and index to `HEAD` via `git read-tree -u --reset HEAD`, then
 /// remove EXACTLY the paths the snapshot tree adds relative to `HEAD` — never
 /// `git clean`, which would also take the target's own untracked files and
-/// empty directories. Sets `n` to the number of files removed. Requires `$id`
-/// to be set and guarded.
+/// empty directories. Requires `$id` to be set and guarded.
+///
+/// `n` counts the paths it WENT THROUGH, not files it deleted: `rm -f` exits
+/// 0 on a path the preceding `read-tree -u --reset HEAD` already removed (or
+/// that was never written), so `n` ends up equal to the number of paths the
+/// snapshot tree adds relative to `HEAD`. Callers must word it that way —
+/// never as "N files deleted".
 ///
 /// `read-tree -u --reset HEAD` is a hard reset of every TRACKED path: it
 /// discards any uncommitted modification to a tracked file, whoever made it
@@ -667,7 +672,9 @@ recover() {
 }
 
 /// Undo what an unfinished earlier attempt replayed into `cwd`: [`recover_body`],
-/// then [`OUT_MARKER`] and the number of files removed. Parse with
+/// then [`OUT_MARKER`] and its `n` — the number of paths the snapshot adds
+/// relative to `HEAD`, which is what was reset and removed, not a count of
+/// files that were actually there (see [`recover_body`]). Parse with
 /// [`parse_recover`]. It never touches a git-ignored file, an untracked path
 /// the snapshot does not add, or any path outside the snapshot's additions —
 /// but [`recover_body`]'s `read-tree -u --reset HEAD` DOES discard any
