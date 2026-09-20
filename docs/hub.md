@@ -937,11 +937,18 @@ standalone exactly as before.
   administrator, so those controls are disabled in the interface with the
   reason rather than failing at the click. *What a hub client refuses* below
   lists exactly which ones.
-- **The terminal is local-only.** The PTY attaches a local `ssh`/`tmux`
-  process and the hub streams no pane. The terminal tab shows the
-  `ssh <host>` / `tmux attach -t <session>` line for the selected session
-  instead of a dead pane — or, for a session on an agent-host (no SSH route
-  from here at all), a line saying so instead.
+- **The terminal attaches, the same as standalone.** The PTY is a local
+  `ssh <host>` / `tmux attach` from this machine, built from the alias and
+  tmux name of the selected session; it reads no `state.db` and the hub is
+  not in that path, so being a paired client changes nothing about it. The
+  hub still streams no pane — it does not need to. Two things follow. A host
+  this machine has no `Host` block for fails in `ssh`, with ssh's own message,
+  in the pane: the fleet's aliases come from the *hub's* `ssh/config`, and
+  where the two disagree that is what you see. And a session on an
+  **agent host** is not offered an attach at all — nothing anywhere can dial
+  such a host, which is the whole reason it dials the hub instead — so the tab
+  says that rather than showing a command that cannot work. Dropping files on
+  the pane (`upload_to_session`) follows the same rule, for the same reason.
 - **The asset catalog and the setup checklist** are about the machine that
   owns the fleet, so they show the reason instead of their panels. (The hub
   does serve the catalog's asset list, `list_assets`, to any paired client;
@@ -967,7 +974,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 123 commands, 36 route to a hub tool, 1 routes except for one argument shape, 72 refuse, and 14 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 123 commands, 36 route to a hub tool, 1 routes except for one argument shape, 70 refuse, and 16 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1021,7 +1028,6 @@ Of the 123 commands, 36 route to a hub tool, 1 routes except for one argument sh
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
 | `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub` |
-| `pty_open` | the terminal attaches over this machine's SSH connection to the session's host; attach from that host, or from a standalone app |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
 | `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |
@@ -1043,7 +1049,6 @@ Of the 123 commands, 36 route to a hub tool, 1 routes except for one argument sh
 | `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
-| `upload_to_session` | the file is on this machine and the session's host is the hub's to reach; copy it there yourself, or drop it on a standalone app |
 <!-- END GENERATED: hub-client verdicts -->
 
 ### Version skew
@@ -1107,8 +1112,9 @@ the missing parameters, route it then.
 
 ### Known limitations
 
-- **The terminal.** See *The terminal is local-only* under *What is different
-  from standalone* above.
+- **The terminal, for an agent host only.** A session on an agent host cannot
+  be attached from anywhere; see *The terminal attaches, the same as
+  standalone* under *What is different from standalone* above.
 - **Projects and worktrees are not re-listed on reconnect**, because their
   list tools answer a different shape from their events. They refresh when
   the window regains focus.
