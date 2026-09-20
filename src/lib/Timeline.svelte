@@ -23,11 +23,18 @@
   let {
     sessionId,
     refreshKey = '',
+    onEvents,
   }: {
     sessionId: number;
     /** Any change re-fetches (the parent passes turn/status fields so a new
      *  event shows up without a manual refresh). */
     refreshKey?: string;
+    /** Handed the current event list every time it changes (initial load,
+     *  refetch, and live push) — so a parent like SessionDetails can derive
+     *  "Move back" / "Finish"/"Undo" from the same read, instead of a second
+     *  `session_history` round trip. Optional: Timeline's other uses are
+     *  unaffected when it is omitted. */
+    onEvents?: (events: SessionEvent[]) => void;
   } = $props();
 
   let events = $state<SessionEvent[]>([]);
@@ -52,6 +59,7 @@
       const live = events.filter((e) => !known.has(e.id) && e.id > newest);
       events = [...live, ...fetched].slice(0, EVENTS_CAP);
       error = null;
+      onEvents?.(events);
     } else {
       error = r.error.message;
     }
@@ -82,6 +90,7 @@
       onTimelineEvent(id, (e) => {
         if (events.some((x) => x.id === e.id)) return;
         events = [e, ...events].slice(0, EVENTS_CAP);
+        onEvents?.(events);
       }),
     );
   });

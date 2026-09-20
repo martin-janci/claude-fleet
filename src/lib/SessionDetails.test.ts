@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
@@ -6,12 +6,27 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+// Only startMove/resolveMoveRun are replaced with spies: the panel must
+// trigger recovery through them (never resolve a move itself), and the
+// details-move-back / details-finish-move / details-undo-move tests assert
+// on how they were called. transferSheetFor and adoptPartial keep their real
+// behaviour — the sheet-opening tests only look at the store's value.
+vi.mock('./moves', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./moves')>();
+  return {
+    ...actual,
+    startMove: vi.fn(),
+    resolveMoveRun: vi.fn(),
+  };
+});
+
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SessionDetails from './SessionDetails.svelte';
 import { hosts } from './hosts';
 import { accounts } from './accounts';
 import { projects } from './projects';
-import { sessions } from './sessions';
+import { sessions, type SessionRow } from './sessions';
+import { startMove, resolveMoveRun, transferSheetFor } from './moves';
 
 const sampleSession = {
   id: 1,
@@ -524,5 +539,70 @@ describe('SessionDetails actions for pane-less rows (external read-only, inactiv
     await tick();
     expect(screen.getByTestId('attach-command').textContent).toBe('tmux attach -t dev-foo');
     expect(screen.getByTestId('kill-from-details')).toBeTruthy();
+  });
+});
+
+describe('SessionDetails recovery actions from the timeline', () => {
+  const inv = () => mockedInvoke as ReturnType<typeof vi.fn>;
+  function row(over: Partial<SessionRow> = {}): SessionRow {
+    return { ...sampleSession, ...over } as SessionRow;
+  }
+
+  beforeEach(() => {
+    inv().mockReset();
+    (startMove as ReturnType<typeof vi.fn>).mockReset();
+    (resolveMoveRun as ReturnType<typeof vi.fn>).mockReset();
+    transferSheetFor.set(null);
+  });
+
+  it('offers Move back when the session was moved here', async () => {
+    const events = [
+      {
+        id: 1,
+        session_id: 8,
+        at: 1700000000,
+        kind: 'session_moved',
+        detail: JSON.stringify({ from_host: 'alpha', to_host: 'beta', claude_session_id: 'c1' }),
+        claude_session_id: null,
+      },
+    ];
+    inv().mockImplementation(async (cmd: string) => (cmd === 'session_history' ? events : undefined));
+    const { getByTestId } = render(SessionDetails, { props: { session: row({ id: 8, host_alias: 'beta' }) } });
+    await waitFor(() => expect(getByTestId('details-move-back')).toBeTruthy());
+    expect(getByTestId('details-move-back').textContent).toContain('alpha');
+    await fireEvent.click(getByTestId('details-move-back'));
+    expect(startMove).toHaveBeenCalledWith(expect.objectContaining({ id: 8 }), 'alpha', {
+      keepSource: false,
+    });
+  });
+
+  it('offers Finish and Undo for an unresolved partial', async () => {
+    const events = [
+      {
+        id: 1,
+        session_id: 8,
+        at: 1700000000,
+        kind: 'session_move_partial',
+        detail: JSON.stringify({
+          step: 'killing the source s on alpha',
+          from_host: 'alpha',
+          to_host: 'beta',
+          from_session_id: 7,
+          to_session_id: 8,
+        }),
+        claude_session_id: null,
+      },
+    ];
+    inv().mockImplementation(async (cmd: string) => (cmd === 'session_history' ? events : undefined));
+    const { getByTestId } = render(SessionDetails, { props: { session: row({ id: 8, host_alias: 'beta' }) } });
+    await waitFor(() => expect(getByTestId('details-finish-move')).toBeTruthy());
+    expect(getByTestId('details-undo-move')).toBeTruthy();
+  });
+
+  it('offers neither when the timeline has no move in it', async () => {
+    inv().mockImplementation(async (cmd: string) => (cmd === 'session_history' ? [] : undefined));
+    const { queryByTestId } = render(SessionDetails, { props: { session: row({ id: 8 }) } });
+    await waitFor(() => expect(queryByTestId('details-move-back')).toBeNull());
+    expect(queryByTestId('details-finish-move')).toBeNull();
   });
 });
