@@ -406,6 +406,11 @@ export function transcriptBackground(turns: ConvTurn[]): BackgroundEntry[] {
       list.push({ at: item.at ?? t.at, status: item.status, summary: item.summary, result: item.result });
       reports.set(item.tool_use_id, list);
       if (item.task_id !== null) taskIds.set(item.tool_use_id, item.task_id);
+      // Last non-null wins, same as `result` and (via reports' own `at`)
+      // the entry's finish time: a resumed call's newest report describes
+      // its current run, so a later notification's output file supersedes
+      // an earlier one; a later notification with no file at all leaves the
+      // earlier one standing rather than clearing it.
       if (item.output_file !== null) outputFiles.set(item.tool_use_id, item.output_file);
     }
   }

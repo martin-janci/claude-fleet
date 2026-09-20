@@ -807,6 +807,36 @@ describe('transcriptBackground', () => {
     expect(got[0].result).toBe('second pass');
   });
 
+  it("takes the newest report's output file when a task is resumed", () => {
+    const got = transcriptBackground([
+      bgTurn([bgAgentItem('toolu_1')]),
+      bgTurn(
+        [bgNoteItem('toolu_1', 'completed', '2026-09-18T10:05:00Z', { output_file: '/tmp/tasks/first.output' })],
+        '2026-09-18T10:05:00Z',
+      ),
+      bgTurn(
+        [bgNoteItem('toolu_1', 'completed', '2026-09-18T10:20:00Z', { output_file: '/tmp/tasks/second.output' })],
+        '2026-09-18T10:20:00Z',
+      ),
+    ]);
+    expect(got[0].outputFile).toBe('/tmp/tasks/second.output');
+  });
+
+  it('keeps an earlier output file when a later report carries none', () => {
+    const got = transcriptBackground([
+      bgTurn([bgAgentItem('toolu_1')]),
+      bgTurn(
+        [bgNoteItem('toolu_1', 'completed', '2026-09-18T10:05:00Z', { output_file: '/tmp/tasks/first.output' })],
+        '2026-09-18T10:05:00Z',
+      ),
+      bgTurn(
+        [bgNoteItem('toolu_1', 'completed', '2026-09-18T10:20:00Z', { output_file: null })],
+        '2026-09-18T10:20:00Z',
+      ),
+    ]);
+    expect(got[0].outputFile).toBe('/tmp/tasks/first.output');
+  });
+
   it('lists a Bash call only once a notification proves it was backgrounded', () => {
     const bash = (id: string) => ({
       kind: 'tool' as const,
