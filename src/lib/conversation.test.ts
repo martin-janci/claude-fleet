@@ -48,12 +48,16 @@ import {
   doingNow,
   hasPendingCall,
   editDiffLines,
+  transcriptBackground,
+  fleetBackground,
   type Conversation,
   type ConversationSummary,
   type ConvTurn,
   type ConvItem,
 } from './conversation';
+import { notificationTone, notificationMark, notificationLabel } from './conversation';
 import type { SessionRow } from './sessions';
+import type { TaskRow } from './tasks';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -624,5 +628,363 @@ describe('hasPendingCall', () => {
     expect(hasPendingCall(c([toolItem(true)]))).toBe(false);
     expect(hasPendingCall(c([toolItem(false), { kind: 'text', text: 'x' }]))).toBe(true);
     expect(hasPendingCall(c([{ kind: 'subagent', id: 's', name: 'Task', agent_type: null, description: null, result: null, error: false, at: null, ended_at: null, done: false }]))).toBe(true);
+  });
+});
+
+describe('notification presentation', () => {
+  it('reads completion as info, failure as error, a stop as a warning', () => {
+    expect(notificationTone('completed')).toBe('info');
+    expect(notificationTone('failed')).toBe('error');
+    expect(notificationTone('killed')).toBe('error');
+    expect(notificationTone('stopped')).toBe('warn');
+  });
+
+  it('treats a mid-stream event, which has no status, as plain progress', () => {
+    expect(notificationTone(null)).toBe('info');
+    expect(notificationMark(null)).toBe('•');
+  });
+
+  it('marks each terminal status distinctly', () => {
+    expect(notificationMark('completed')).toBe('✓');
+    expect(notificationMark('failed')).toBe('✕');
+    expect(notificationMark('killed')).toBe('✕');
+    expect(notificationMark('stopped')).toBe('⏸');
+  });
+
+  it('uses the harness sentence as the label', () => {
+    expect(notificationLabel({ summary: 'Agent "Posúdiť" finished', event: null })).toBe(
+      'Agent "Posúdiť" finished',
+    );
+  });
+
+  it('appends a streamed event as one line', () => {
+    expect(
+      notificationLabel({ summary: 'Monitor event', event: 'frontend: pass\nALL DONE' }),
+    ).toBe('Monitor event: frontend: pass');
+  });
+
+  it('never renders an empty row', () => {
+    expect(notificationLabel({ summary: null, event: null })).toBe('Background task reported');
+    expect(notificationLabel({ summary: '   ', event: null })).toBe('Background task reported');
+  });
+});
+
+// ─── transcriptBackground / fleetBackground (task 4) ────────────────────────
+
+/** A complete SessionRow literal (copied from src/App.test.ts:58), overridden
+ *  per test. */
+const baseSessionRow: SessionRow = {
+  id: 5, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: null, worktree_id: null,
+  created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
+  kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null,
+  claude_session_id: null, claude_status: null, effort_level: null, pr_url: null,
+  current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
+  safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null,
+  idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null,
+  last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null,
+  tags: [], model: null, context_tokens: null, context_window: null, context_source: null,
+  context_at: null, context_stale: false, tmux_pane_id: null,
+};
+
+/** A complete TaskRow literal (copied from src/lib/tasks.test.ts:19). */
+const baseTaskRow: TaskRow = {
+  id: 1,
+  requester_session_id: 10,
+  worker_session_id: 20,
+  prompt: 'fix the flaky test\n\nWhen finished, print exactly …',
+  state: 'running',
+  result: null,
+  error: null,
+  created_at: 100,
+  started_at: 101,
+  finished_at: null,
+};
+
+/** A turn carrying exactly the items given. */
+const bgTurn = (items: ConvTurn['items'], at = '2026-09-18T10:00:00Z'): ConvTurn => ({
+  prompt: null,
+  at,
+  ended_at: null,
+  items,
+});
+
+const bgAgentItem = (id: string, done = false) => ({
+  kind: 'subagent' as const,
+  id,
+  name: 'Agent',
+  agent_type: 'general-purpose',
+  description: 'Posúdiť stratégiu testov',
+  result: null,
+  error: false,
+  at: '2026-09-18T10:00:01Z',
+  ended_at: null,
+  done,
+});
+
+/** A notification item — all eight wire fields, `at` included (its own
+ *  transcript timestamp, distinct from the turn's when notifications
+ *  coalesce). */
+const bgNoteItem = (toolUseId: string | null, status: string | null, at: string | null, extra = {}) => ({
+  kind: 'notification' as const,
+  task_id: 'a6',
+  tool_use_id: toolUseId,
+  status,
+  summary: 'Agent finished',
+  result: 'the report',
+  output_file: '/private/tmp/x/tasks/a6.output',
+  event: null,
+  at,
+  ...extra,
+});
+
+describe('transcriptBackground', () => {
+  it('lists an agent that has not reported back as running', () => {
+    const got = transcriptBackground([bgTurn([bgAgentItem('toolu_1')])]);
+    expect(got).toHaveLength(1);
+    expect(got[0].status).toBe('running');
+    expect(got[0].kind).toBe('Agent');
+    expect(got[0].label).toBe('Posúdiť stratégiu testov');
+    expect(got[0].key).toBe('tool:toolu_1');
+  });
+
+  it("keeps an entry's key unchanged when its first notification arrives", () => {
+    // The key names the LAUNCHING call, so an open detail keyed by it does
+    // not fall out from under the reader the moment the report lands.
+    const before = transcriptBackground([bgTurn([bgAgentItem('toolu_1')])]);
+    const got = transcriptBackground([
+      bgTurn([bgAgentItem('toolu_1')]),
+      bgTurn([bgNoteItem('toolu_1', 'completed', '2026-09-18T10:12:00Z')], '2026-09-18T10:12:00Z'),
+    ]);
+    expect(got[0].key).toBe(before[0].key);
+    expect(got[0].key).toBe('tool:toolu_1');
+    expect(got[0].status).toBe('done');
+    expect(got[0].result).toBe('the report');
+    expect(got[0].outputFile).toBe('/private/tmp/x/tasks/a6.output');
+  });
+
+  it('keeps two calls that report the SAME task id apart', () => {
+    // The resume workflow: `Agent` launches T, `SendMessage` resumes it, and
+    // both notifications carry task-id a6. Keying by task id collided and
+    // crashed the `{#each … (e.key)}` that lists them.
+    const send = (id: string) => ({
+      kind: 'tool' as const,
+      summary: 'SendMessage(agent=a6)',
+      error: false,
+      id,
+      name: 'SendMessage',
+      target: null,
+      at: '2026-09-18T10:30:00Z',
+      ended_at: null,
+      done: true,
+    });
+    const got = transcriptBackground([
+      bgTurn([bgAgentItem('toolu_A')]),
+      bgTurn([bgNoteItem('toolu_A', 'completed', '2026-09-18T10:12:00Z')], '2026-09-18T10:12:00Z'),
+      bgTurn([send('toolu_S')]),
+      bgTurn([bgNoteItem('toolu_S', 'completed', '2026-09-18T10:40:00Z')], '2026-09-18T10:40:00Z'),
+    ]);
+    expect(got).toHaveLength(2);
+    expect(new Set(got.map((e) => e.key)).size).toBe(2);
+  });
+
+  it('keys two id-less subagent items apart', () => {
+    const got = transcriptBackground([
+      bgTurn([
+        { ...bgAgentItem('ignored'), id: null, description: 'first' },
+        { ...bgAgentItem('ignored'), id: null, description: 'second' },
+      ]),
+    ]);
+    expect(got).toHaveLength(2);
+    expect(new Set(got.map((e) => e.key)).size).toBe(2);
+  });
+
+  it('maps each terminal status onto the entry', () => {
+    const of = (status: string) =>
+      transcriptBackground([
+        bgTurn([bgAgentItem('toolu_1')]),
+        bgTurn([bgNoteItem('toolu_1', status, '2026-09-18T10:12:00Z')], '2026-09-18T10:12:00Z'),
+      ])[0].status;
+    expect(of('completed')).toBe('done');
+    expect(of('failed')).toBe('failed');
+    expect(of('killed')).toBe('failed');
+    expect(of('stopped')).toBe('stopped');
+  });
+
+  it('keeps every report of a resumed agent, newest state last', () => {
+    const got = transcriptBackground([
+      bgTurn([bgAgentItem('toolu_1')]),
+      bgTurn(
+        [bgNoteItem('toolu_1', 'completed', '2026-09-18T10:05:00Z', { result: 'first pass' })],
+        '2026-09-18T10:05:00Z',
+      ),
+      bgTurn(
+        [bgNoteItem('toolu_1', 'completed', '2026-09-18T10:20:00Z', { result: 'second pass' })],
+        '2026-09-18T10:20:00Z',
+      ),
+    ]);
+    expect(got[0].history).toHaveLength(2);
+    expect(got[0].history[1].at).toBe('2026-09-18T10:20:00Z');
+    expect(got[0].result).toBe('second pass');
+  });
+
+  it("gives a coalesced notification its own finish time, not the turn's", () => {
+    // Two notifications for the same agent arrive back to back and land in
+    // ONE turn; the turn's `at` is the first one's. Correction 2026-09-20 #1:
+    // history and the per-item output file must read the item's own `at`,
+    // not the shared turn `at` — otherwise the second report's finish time
+    // is silently backdated to the first.
+    const got = transcriptBackground([
+      bgTurn([bgAgentItem('toolu_1')]),
+      bgTurn(
+        [
+          bgNoteItem('toolu_1', 'completed', '2026-09-18T10:05:00Z', { result: 'first pass' }),
+          bgNoteItem('toolu_1', 'completed', '2026-09-18T10:05:03Z', { result: 'second pass' }),
+        ],
+        '2026-09-18T10:05:00Z',
+      ),
+    ]);
+    expect(got[0].history.map((h) => h.at)).toEqual(['2026-09-18T10:05:00Z', '2026-09-18T10:05:03Z']);
+    expect(got[0].result).toBe('second pass');
+  });
+
+  it("takes the newest report's output file when a task is resumed", () => {
+    const got = transcriptBackground([
+      bgTurn([bgAgentItem('toolu_1')]),
+      bgTurn(
+        [bgNoteItem('toolu_1', 'completed', '2026-09-18T10:05:00Z', { output_file: '/tmp/tasks/first.output' })],
+        '2026-09-18T10:05:00Z',
+      ),
+      bgTurn(
+        [bgNoteItem('toolu_1', 'completed', '2026-09-18T10:20:00Z', { output_file: '/tmp/tasks/second.output' })],
+        '2026-09-18T10:20:00Z',
+      ),
+    ]);
+    expect(got[0].outputFile).toBe('/tmp/tasks/second.output');
+  });
+
+  it('keeps an earlier output file when a later report carries none', () => {
+    const got = transcriptBackground([
+      bgTurn([bgAgentItem('toolu_1')]),
+      bgTurn(
+        [bgNoteItem('toolu_1', 'completed', '2026-09-18T10:05:00Z', { output_file: '/tmp/tasks/first.output' })],
+        '2026-09-18T10:05:00Z',
+      ),
+      bgTurn(
+        [bgNoteItem('toolu_1', 'completed', '2026-09-18T10:20:00Z', { output_file: null })],
+        '2026-09-18T10:20:00Z',
+      ),
+    ]);
+    expect(got[0].outputFile).toBe('/tmp/tasks/first.output');
+  });
+
+  it('lists a Bash call only once a notification proves it was backgrounded', () => {
+    const bash = (id: string) => ({
+      kind: 'tool' as const,
+      summary: 'Bash(command=gh run watch)',
+      error: false,
+      id,
+      name: 'Bash',
+      target: null,
+      at: '2026-09-18T10:00:01Z',
+      ended_at: null,
+      done: true,
+    });
+    expect(transcriptBackground([bgTurn([bash('toolu_fg')])])).toHaveLength(0);
+    const got = transcriptBackground([
+      bgTurn([bash('toolu_bg')]),
+      bgTurn([bgNoteItem('toolu_bg', 'completed', '2026-09-18T10:05:00Z')], '2026-09-18T10:05:00Z'),
+    ]);
+    expect(got).toHaveLength(1);
+    expect(got[0].kind).toBe('Bash');
+  });
+
+  it('drops a finished foreground agent', () => {
+    expect(transcriptBackground([bgTurn([bgAgentItem('toolu_1', true)])])).toHaveLength(0);
+  });
+
+  it('puts running entries first, then the newest', () => {
+    const got = transcriptBackground([
+      bgTurn([{ ...bgAgentItem('toolu_old'), at: '2026-09-18T09:00:00Z' }]),
+      bgTurn([bgNoteItem('toolu_old', 'completed', '2026-09-18T09:30:00Z')], '2026-09-18T09:30:00Z'),
+      bgTurn([{ ...bgAgentItem('toolu_new'), at: '2026-09-18T11:00:00Z' }]),
+    ]);
+    expect(got.map((e) => e.status)).toEqual(['running', 'done']);
+  });
+
+  it('ignores a notification that names nothing in the window', () => {
+    expect(
+      transcriptBackground([bgTurn([bgNoteItem('toolu_gone', 'completed', '2026-09-18T10:00:00Z')])]),
+    ).toHaveLength(0);
+  });
+});
+
+describe('fleetBackground', () => {
+  const row = (over: Partial<SessionRow>): SessionRow => ({ ...baseSessionRow, ...over }) as SessionRow;
+
+  it('lists sessions whose parent is this one', () => {
+    const got = fleetBackground(
+      [
+        row({ id: 2, parent_session_id: 7, kind: 'bg', friendly_name: 'Load layers', claude_status: 'working' }),
+        row({ id: 3, parent_session_id: 9, kind: 'bg', friendly_name: 'Someone else' }),
+      ],
+      [],
+      7,
+    );
+    expect(got).toHaveLength(1);
+    expect(got[0].key).toBe('session:2');
+    expect(got[0].label).toBe('Load layers');
+    expect(got[0].status).toBe('running');
+    expect(got[0].sessionId).toBe(2);
+  });
+
+  it('maps every claude_status a child session can carry', () => {
+    // `blocked` is alive and wants attention, `idle` is neither running nor
+    // finished. Folding both into `done` made the one view meant to answer
+    // "what is still live" say a session on a trust prompt had finished.
+    const of = (claude_status: SessionRow['claude_status']) =>
+      fleetBackground([row({ id: 2, parent_session_id: 7, claude_status })], [], 7)[0].status;
+    expect(of('working')).toBe('running');
+    expect(of('blocked')).toBe('running');
+    expect(of('idle')).toBe('idle');
+    expect(of('stopped')).toBe('stopped');
+    expect(of('failed')).toBe('failed');
+    expect(of('completed')).toBe('done');
+    expect(of(null)).toBe('done');
+  });
+
+  it('lists tasks this session dispatched, with the worker to switch to', () => {
+    const got = fleetBackground(
+      [],
+      [
+        {
+          id: 11,
+          requester_session_id: 7,
+          worker_session_id: 4,
+          prompt: 'Implement task 2\nmore detail',
+          state: 'running',
+          result: null,
+          error: null,
+          created_at: 1,
+          started_at: 2,
+          finished_at: null,
+        },
+      ],
+      7,
+    );
+    expect(got[0].key).toBe('fleettask:11');
+    expect(got[0].label).toBe('Implement task 2');
+    expect(got[0].status).toBe('running');
+    expect(got[0].sessionId).toBe(4);
+    expect(got[0].taskId).toBe(11);
+  });
+
+  it('maps every task state', () => {
+    const of = (state: TaskRow['state']) =>
+      fleetBackground([], [{ ...baseTaskRow, requester_session_id: 7, state }], 7)[0].status;
+    expect(of('queued')).toBe('running');
+    expect(of('running')).toBe('running');
+    expect(of('done')).toBe('done');
+    expect(of('failed')).toBe('failed');
+    expect(of('cancelled')).toBe('stopped');
   });
 });

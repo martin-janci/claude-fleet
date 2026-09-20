@@ -763,6 +763,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 host_alias: "hostb".into(),
                 name: "x".into(),
                 prompt: "p".into(),
+                requester_session_id: None,
             }),
         )
         .await

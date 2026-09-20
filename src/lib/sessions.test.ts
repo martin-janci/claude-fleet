@@ -169,7 +169,14 @@ describe('newBgSession', () => {
     if (r.ok) expect(r.value).toEqual(payload);
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
       'new_bg_session',
-      { args: { host_alias: 'local', name: 'my-session', prompt: 'Do the thing' } },
+      {
+        args: {
+          host_alias: 'local',
+          name: 'my-session',
+          prompt: 'Do the thing',
+          requester_session_id: null,
+        },
+      },
     ]);
   });
 });

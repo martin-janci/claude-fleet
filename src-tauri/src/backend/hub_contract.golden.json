@@ -60,6 +60,17 @@
       "during_tool",
       "kind"
     ],
+    "ConvItem::Notification": [
+      "at",
+      "event",
+      "kind",
+      "output_file",
+      "result",
+      "status",
+      "summary",
+      "task_id",
+      "tool_use_id"
+    ],
     "ConvItem::Subagent": [
       "agent_type",
       "at",

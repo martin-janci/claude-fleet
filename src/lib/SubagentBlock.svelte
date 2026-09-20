@@ -9,14 +9,25 @@
     item,
     nowMs,
     live,
+    onOpen,
   }: {
     item: Extract<ConvGroup, { kind: 'subagent' }>;
     nowMs: number;
     /** In the running turn of the current conversation (see ToolLine). */
     live: boolean;
+    /** Show this block's background detail. Passed only when the switcher
+     *  actually holds an entry for this call; absent, no control appears. */
+    onOpen?: () => void;
   } = $props();
 
   let expanded = $state(false);
+
+  // The same words the switcher and the detail use, read off what the block
+  // already knows — no new data, and no claim the item cannot back. An
+  // unfinished block outside the live turn is the one case we cannot name:
+  // it is not running (nothing is driving it) and it is not done, so it
+  // gets no word and the duration's "no result" stands alone.
+  const statusWord = $derived(item.error ? 'failed' : item.done ? 'done' : live ? 'running' : null);
 
   const elapsed = $derived(toolDurationMs(item.at, item.ended_at, item.done || !live ? null : nowMs));
   const noResult = $derived(!item.done && !live);
@@ -40,6 +51,14 @@
     <span class="sub-type">{item.agent_type ?? 'subagent'}</span>
     {#if item.description}<span class="sep" aria-hidden="true">·</span><span class="sub-desc">{item.description}</span>{/if}
     {#if duration}<span class="sub-dur" class:muted={noResult}>{duration}</span>{/if}
+    {#if statusWord}
+      <span class="sub-status" class:pushed={!duration} data-status={statusWord} data-testid="conv-subagent-status"
+        >{statusWord}</span
+      >
+    {/if}
+    {#if onOpen}
+      <button type="button" class="sub-open" data-testid="conv-subagent-open" onclick={onOpen}>Open</button>
+    {/if}
   </div>
   {#if item.result}
     <div
@@ -95,6 +114,31 @@
   .sub-dur.muted {
     font-style: italic;
     opacity: 0.7;
+  }
+  .sub-status {
+    flex: 0 0 auto;
+    font-size: 0.7rem;
+  }
+  /* Without a duration beside it the status is the first thing on the
+     right, so it takes over pushing the group there. */
+  .sub-status.pushed {
+    margin-left: auto;
+  }
+  .sub-status[data-status='failed'] {
+    color: var(--usage-crit);
+  }
+  .sub-open {
+    flex: 0 0 auto;
+    padding: 0 0.25rem;
+    background: none;
+    border: none;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.7rem;
+    cursor: pointer;
+  }
+  .sub-open:hover {
+    text-decoration: underline;
   }
   .sub-err {
     flex: 0 0 auto;

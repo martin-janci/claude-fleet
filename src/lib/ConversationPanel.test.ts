@@ -15,9 +15,15 @@ vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
 });
+vi.mock('./selection', async () => {
+  const actual = await vi.importActual<typeof import('./selection')>('./selection');
+  return { ...actual, selectSession: vi.fn() };
+});
 import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
-import { sendPrompt, type SessionRow } from './sessions';
+import { sendPrompt, sessions, type SessionRow } from './sessions';
+import { selectSession } from './selection';
+import { tasks, type TaskRow } from './tasks';
 import { composerPresets, resetComposerPresets } from './composer_presets';
 import { composerDrafts } from './conversation';
 import { openPathRequest } from './app_views';
@@ -44,6 +50,7 @@ const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
 const mockedAct = sessionActivity as unknown as ReturnType<typeof vi.fn>;
 const mockedList = listConversations as unknown as ReturnType<typeof vi.fn>;
 const mockedDetail = toolDetail as unknown as ReturnType<typeof vi.fn>;
+const selectSessionSpy = selectSession as unknown as ReturnType<typeof vi.fn>;
 
 function session(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -110,6 +117,7 @@ beforeEach(() => {
   mockedAct.mockReset();
   mockedList.mockReset();
   mockedDetail.mockReset();
+  selectSessionSpy.mockReset();
   mockedDetail.mockResolvedValue({
     ok: true,
     value: { id: 't1', name: 'Bash', input: '{}', edit: null, command: 'ls', result: 'out', is_error: false },
@@ -120,6 +128,8 @@ beforeEach(() => {
   resetComposerPresets();
   setVisibility('visible');
   hubStatus.set({ ...STANDALONE });
+  sessions.set([]);
+  tasks.set([]);
 });
 
 afterEach(() => {
@@ -1708,6 +1718,42 @@ describe('ConversationPanel conversations', () => {
     expect(screen.getByTestId('conv-interrupt').textContent).toContain('Interrupted during a tool call');
   });
 
+  it('renders a task notification as an event row, never as XML', async () => {
+    // A conversation whose only turn carries one notification item.
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: null,
+              at: '2026-09-18T10:01:00Z',
+              ended_at: null,
+              items: [
+                {
+                  kind: 'notification',
+                  task_id: 'a6',
+                  tool_use_id: 'toolu_1',
+                  status: 'failed',
+                  summary: 'Agent "Posúdiť stratégiu testov" failed',
+                  result: null,
+                  output_file: '/private/tmp/x/tasks/a6.output',
+                  event: null,
+                  at: null,
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const row = screen.getByTestId('conv-notification');
+    expect(row.textContent).toContain('Agent "Posúdiť stratégiu testov" failed');
+    expect(row.getAttribute('data-tone')).toBe('error');
+    expect(document.body.textContent).not.toContain('<task-notification>');
+  });
+
   it('clamps a long command output behind Show more; a compact without summary says so', async () => {
     const long = Array.from({ length: 12 }, (_, i) => `line ${i}`).join('\n');
     mockedConv.mockReturnValue(
@@ -2567,5 +2613,221 @@ describe('ConversationPanel detail UX fixes', () => {
     // user types, so the field must carry its own label.
     expect(box.getAttribute('aria-label')).toBe('Prompt');
     expect(screen.getByTestId('conv-composer-send').getAttribute('aria-keyshortcuts')).toBe('Enter');
+  });
+});
+
+// ─── Background switcher (task 6) ────────────────────────────────────────
+
+const bgSubagentItem = {
+  kind: 'subagent' as const,
+  id: 'toolu_1',
+  name: 'Agent',
+  agent_type: 'general-purpose',
+  description: 'Posúdiť stratégiu testov',
+  result: null,
+  error: false,
+  at: '2026-09-13T10:00:00.000Z',
+  ended_at: null,
+  done: false,
+};
+
+const bgNotificationItem = {
+  kind: 'notification' as const,
+  task_id: 'a6',
+  tool_use_id: 'toolu_1',
+  status: 'completed',
+  summary: 'Posúdiť stratégiu testov finished',
+  result: 'All good.',
+  output_file: null,
+  event: null,
+  at: '2026-09-13T10:05:00.000Z',
+};
+
+const convWithBackgroundAgent: Conversation = conv({
+  turns: [
+    { prompt: 'go check', at: '2026-09-13T10:00:00.000Z', ended_at: null, items: [bgSubagentItem] },
+    { prompt: null, at: '2026-09-13T10:05:00.000Z', ended_at: '2026-09-13T10:05:01.000Z', items: [bgNotificationItem] },
+  ],
+});
+
+const convWithNoBackground: Conversation = conv();
+
+async function renderWithConversation(c: Conversation, opts: { sessions?: SessionRow[]; tasks?: TaskRow[] } = {}) {
+  sessions.set(opts.sessions ?? []);
+  tasks.set(opts.tasks ?? []);
+  mockedConv.mockReturnValue(ok(c));
+  const result = render(ConversationPanel, { session: session(), visible: true });
+  await settle();
+  return result;
+}
+
+describe('ConversationPanel background switcher', () => {
+  it('offers a background switcher listing what the conversation launched', async () => {
+    const { getByTestId, getAllByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    await fireEvent.click(getByTestId('conv-background-button'));
+    const rows = getAllByTestId('conv-background-item');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain('Posúdiť stratégiu testov');
+  });
+
+  it('hides the switcher when nothing ran in the background', async () => {
+    const { queryByTestId } = await renderWithConversation(convWithNoBackground);
+    expect(queryByTestId('conv-background-button')).toBeNull();
+  });
+
+  it('replaces the thread with the picked entry, and comes back', async () => {
+    const { getByTestId, getAllByTestId, queryByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    await fireEvent.click(getByTestId('conv-background-button'));
+    await fireEvent.click(getAllByTestId('conv-background-item')[0]);
+    expect(getByTestId('bg-detail')).toBeTruthy();
+    expect(queryByTestId('conv-scroller')).toBeNull();
+    expect(queryByTestId('conv-composer')).toBeNull();
+    await fireEvent.click(getByTestId('bg-detail-back'));
+    expect(getByTestId('conv-scroller')).toBeTruthy();
+  });
+
+  it('opens the entry a notification row names', async () => {
+    const { getByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    await fireEvent.click(getByTestId('conv-notification'));
+    expect(getByTestId('bg-detail-label').textContent).toContain('Posúdiť stratégiu testov');
+  });
+
+  it('lists a launch and the resume that reports the same task id as two rows', async () => {
+    // `each_key_duplicate` is a hard throw in dev AND prod: the tab used to
+    // break the moment the dropdown opened on this very ordinary shape.
+    const sendItem = {
+      kind: 'tool' as const,
+      summary: 'SendMessage(agent=a6)',
+      error: false,
+      id: 'toolu_S',
+      name: 'SendMessage',
+      target: null,
+      at: '2026-09-13T10:10:00.000Z',
+      ended_at: null,
+      done: true,
+    };
+    const c: Conversation = conv({
+      turns: [
+        { prompt: 'go check', at: '2026-09-13T10:00:00.000Z', ended_at: null, items: [bgSubagentItem] },
+        { prompt: null, at: '2026-09-13T10:05:00.000Z', ended_at: null, items: [bgNotificationItem] },
+        { prompt: 'now resume it', at: '2026-09-13T10:10:00.000Z', ended_at: null, items: [sendItem] },
+        {
+          prompt: null,
+          at: '2026-09-13T10:15:00.000Z',
+          ended_at: null,
+          items: [{ ...bgNotificationItem, tool_use_id: 'toolu_S', at: '2026-09-13T10:15:00.000Z' }],
+        },
+      ],
+    });
+    const { getByTestId, getAllByTestId } = await renderWithConversation(c);
+    await fireEvent.click(getByTestId('conv-background-button'));
+    expect(getAllByTestId('conv-background-item')).toHaveLength(2);
+  });
+
+  it('keeps an open detail open when the agent reports in', async () => {
+    // The entry's key must not change under the open detail: it used to
+    // mutate from `tool:<id>` to `task:<id>` on the first notification, and
+    // the detail snapped shut at exactly the moment the report landed.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const running: Conversation = conv({
+      turns: [{ prompt: 'go check', at: '2026-09-13T10:00:00.000Z', ended_at: null, items: [bgSubagentItem] }],
+    });
+    const { getByTestId, getAllByTestId } = await renderWithConversation(running);
+    await fireEvent.click(getByTestId('conv-background-button'));
+    await fireEvent.click(getAllByTestId('conv-background-item')[0]);
+    expect(getByTestId('bg-detail')).toBeTruthy();
+    // The next poll carries the notification.
+    mockedConv.mockReturnValue(ok(convWithBackgroundAgent));
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await settle();
+    expect(getByTestId('bg-detail')).toBeTruthy();
+    expect(getByTestId('bg-detail-result').textContent).toContain('All good.');
+  });
+
+  it('opens the right entry from a notification row whose sibling carried no task id', async () => {
+    // First notification: no task-id. Second: task-id a6. Keying the entry
+    // by the task id left the FIRST row looking up a key nothing had, so it
+    // rendered as a dead, non-clickable div.
+    const c: Conversation = conv({
+      turns: [
+        { prompt: 'go check', at: '2026-09-13T10:00:00.000Z', ended_at: null, items: [bgSubagentItem] },
+        {
+          prompt: null,
+          at: '2026-09-13T10:03:00.000Z',
+          ended_at: null,
+          items: [
+            { ...bgNotificationItem, task_id: null, status: null, summary: 'still going', result: null },
+            bgNotificationItem,
+          ],
+        },
+      ],
+    });
+    const { getByTestId, getAllByTestId } = await renderWithConversation(c);
+    const rows = getAllByTestId('conv-notification');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].tagName).toBe('BUTTON');
+    await fireEvent.click(rows[0]);
+    expect(getByTestId('bg-detail-label').textContent).toContain('Posúdiť stratégiu testov');
+  });
+
+  it('puts the time on a notification row', async () => {
+    const { getAllByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    const row = getAllByTestId('conv-notification')[0];
+    expect(row.querySelector('time')?.getAttribute('datetime')).toBe('2026-09-13T10:05:00.000Z');
+  });
+
+  it('gives a backgrounded subagent block a way into its detail', async () => {
+    const { getByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    await fireEvent.click(getByTestId('conv-subagent-open'));
+    expect(getByTestId('bg-detail-label').textContent).toContain('Posúdiť stratégiu testov');
+  });
+
+  it('leaves a foreground subagent block without one', async () => {
+    const c: Conversation = conv({
+      turns: [
+        {
+          prompt: 'go check',
+          at: '2026-09-13T10:00:00.000Z',
+          ended_at: null,
+          items: [{ ...bgSubagentItem, done: true, result: 'inline report' }],
+        },
+      ],
+    });
+    const { queryByTestId } = await renderWithConversation(c);
+    expect(queryByTestId('conv-subagent')).toBeTruthy();
+    expect(queryByTestId('conv-subagent-open')).toBeNull();
+  });
+
+  it("switches the app to a fleet task's worker session from the detail", async () => {
+    const { getByTestId, getAllByTestId } = await renderWithConversation(convWithNoBackground, {
+      sessions: [session({ id: 4, friendly_name: 'Worker' })],
+      tasks: [
+        {
+          id: 11,
+          requester_session_id: 1,
+          worker_session_id: 4,
+          prompt: 'Implement task 2',
+          state: 'running',
+          result: null,
+          error: null,
+          created_at: 1,
+          started_at: 2,
+          finished_at: null,
+        },
+      ],
+    });
+    await fireEvent.click(getByTestId('conv-background-button'));
+    await fireEvent.click(getAllByTestId('conv-background-item')[0]);
+    await fireEvent.click(getByTestId('bg-detail-open-session'));
+    expect(selectSessionSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 4 }));
+  });
+
+  it('switches the app to a fleet child session rather than showing a detail', async () => {
+    const { getByTestId, getAllByTestId } = await renderWithConversation(convWithNoBackground, {
+      sessions: [session({ id: 2, parent_session_id: 1, friendly_name: 'Load layers' })],
+    });
+    await fireEvent.click(getByTestId('conv-background-button'));
+    await fireEvent.click(getAllByTestId('conv-background-item')[0]);
+    expect(selectSessionSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }));
   });
 });

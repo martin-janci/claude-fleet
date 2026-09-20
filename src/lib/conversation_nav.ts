@@ -23,6 +23,8 @@ function itemTexts(it: ConvItem): (string | null)[] {
       return [it.description, it.result];
     case 'compact':
       return [it.summary];
+    case 'notification':
+      return [it.summary, it.event];
     case 'interrupt':
       return [];
   }

@@ -877,7 +877,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "new_bg_session",
             "new_bg_session",
-            json!({ "host_alias": "trn", "name": "worker", "prompt": "go" }),
+            json!({ "host_alias": "trn", "name": "worker", "prompt": "go", "requester_session_id": 41 }),
             r#"{"claude_session_id":"abc"}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::new_bg_session(
@@ -886,6 +886,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         host_alias: "trn".into(),
                         name: "worker".into(),
                         prompt: "go".into(),
+                        requester_session_id: Some(41),
                     },
                     s,
                     h,
