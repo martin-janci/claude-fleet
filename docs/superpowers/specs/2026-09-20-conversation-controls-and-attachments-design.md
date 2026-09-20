@@ -420,9 +420,13 @@ Until someone paired to a hub actually wants to attach a file, the honest
 verdict is `LocalOnly` with a sentence that says why — the same verdict
 `upload_to_session` already carries.
 
-**Sessions on agent-only hosts** cannot receive attachments in any mode: the
-desktop has no SSH route to them. Same treatment — a stated reason, not a
-silently dead button.
+**Sessions on agent-only hosts.** An earlier draft of this spec said they
+cannot receive attachments at all, because the desktop has no SSH route to
+them. That is wrong, and the whole-branch review caught it: `SshClient::run`
+and `SshClient::upload_file` both route through `agent_route`, so an
+agent-only host is reachable by the same calls every other host uses. No gate
+was built for it and none is needed. The claim is recorded here only so the
+next reader does not act on the version that shipped in the draft.
 
 **Attaching pasted bytes.** A dropped file and a picked file both arrive as a
 path this process put on the allow-list. A pasted screenshot arrives as bytes
