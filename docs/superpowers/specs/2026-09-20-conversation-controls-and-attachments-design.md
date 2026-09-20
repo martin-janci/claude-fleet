@@ -205,8 +205,10 @@ and `N turns` stays reachable.
 
 The header's `.chip` spans become `.tag`. The context meter keeps its pill,
 because it is a meter and not a chip, but takes the full colour for its border
-instead of `contextTint()`'s ≈33% wash (≈1.3:1); `contextTint` loses its only
-consumer and goes.
+instead of `contextTint()`'s ≈33% wash (≈1.3:1). `contextTint` has **three**
+consumers, not one — `ConversationHeader.svelte:161`, `SessionRowItem.svelte:372`
+and `SessionDetails.svelte:403` — so it goes at all three or not at all. It
+goes: three meters drawn two ways is a worse outcome than the wash it replaces.
 
 One inset expression — `max(1.1rem, calc((100% - var(--chat-col)) / 2 + 1.1rem))`
 — is shared by `.conv-header`, `.thread` and `.composer`. Today `.thread`
@@ -322,15 +324,20 @@ in `src/` today, so this is greenfield.
   composer's growth is quantised and `preserveThread()` corrects by a clean
   integer instead of chasing a pixel-at-a-time creep as thumbnails decode.
 - **The tile is reserved before the thumbnail decodes.** Push the attachment
-  with `thumb: null, state: 'reading'` first, fill `thumb` on load. Zero reflow
-  from decoding. Object URLs are revoked on remove and on teardown, or a long
-  session leaks every screenshot ever pasted.
+  with `thumb: null, state: 'reading'` first, fill `thumb` when the preview
+  arrives. Zero reflow from decoding. The preview is a `data:` URL returned by
+  Rust, not an object URL, so there is nothing to revoke and nothing to leak —
+  and it is capped at 2 MiB, above which the tile shows the file's extension
+  instead. No image-decoding crate is added: `object-fit: cover` on a 44px tile
+  does the scaling, and a new dependency would mean a `cargo deny` review for a
+  thumbnail.
 - **Drop target is the shell, not the panel.** `dragleave` fires for every child
   element, so nesting is tracked with a depth counter, not a boolean.
 - **Paste**: files win only when `text/plain` is empty, so pasting from a
   rich-text source does not swallow the text half. Screenshots arrive named
   `image.png`; rename to `pasted-<HH.mm.ss>.png` so ten pastes are
-  distinguishable.
+  distinguishable. **A pasted file has no filesystem path**, so it cannot pass
+  the allow-list the way a dropped or picked file does — see *Deferred*.
 - **Remove is 18×18 on a scrim**, visible on `:hover` **and** `:focus-within` —
   never hover-only, or a keyboard user cannot remove an attachment at all. This
   is the one deliberate exception to the 24px floor: the 44px tile is the
@@ -396,6 +403,14 @@ verdict is `LocalOnly` with a sentence that says why — the same verdict
 **Sessions on agent-only hosts** cannot receive attachments in any mode: the
 desktop has no SSH route to them. Same treatment — a stated reason, not a
 silently dead button.
+
+**Attaching pasted bytes.** A dropped file and a picked file both arrive as a
+path this process put on the allow-list. A pasted screenshot arrives as bytes
+in the clipboard with no path at all, so there is nothing to authorise. Making
+it work needs a command that takes the bytes, writes them to a temp file and
+authorises *that* — a third entry point with its own threat model. Until then
+the composer accepts a paste for display and refuses it at send time with a
+stated reason, rather than pretending a path exists.
 
 **Chunked upload.** `move_session` chunks its reads but writes with a single
 `put`; the transfer roadmap already lists this as an open debt. Attachments
