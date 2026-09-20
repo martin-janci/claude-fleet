@@ -26,9 +26,7 @@
 use super::{RemoteConfig, UnavailableHub};
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::transcript::Conversation;
-use fleet_core::service::{
-    bg_sessions, move_session, repair, repo_read, safe_kill, sessions, worktrees,
-};
+use fleet_core::service::{bg_sessions, move_session, repair, safe_kill, sessions, worktrees};
 use fleet_core::store::{AccountRow, ConversationRow, HostRow, SessionEvent, SessionRow, TaskRow};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -373,6 +371,82 @@ impl HubBackend {
     }
 }
 
+// --- routing one command -----------------------------------------------------
+//
+// [`HubBackend::call`] takes a tool name and a `Value`; a command has neither.
+// These two turn the one into the other, and they are how a routed command
+// reaches the hub: the tool comes from the command's own row in
+// [`VERDICTS`](super::verdicts::VERDICTS) — the table the frontend list and
+// the docs are generated from — rather than from a second literal written
+// here, and the arguments are whatever `args` serialises to.
+
+impl HubBackend {
+    /// Call the tool `command`'s verdict names, with `args` as its arguments,
+    /// and deserialise the answer into `T`.
+    ///
+    /// `args` is the command's own argument struct wherever the wire is that
+    /// struct field for field, and a `json!` literal wherever it is not — a
+    /// defaulted value, a clamped one, a key sent only when it is set. The
+    /// difference is the thing to get right, so it stays written down at the
+    /// call site rather than being inferred here.
+    pub async fn route<A: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        command: &str,
+        args: &A,
+    ) -> Result<T, IpcError> {
+        let tool = self.tool_for(command)?;
+        self.call(tool, arguments(command, args)?).await
+    }
+
+    /// [`Self::route`] for the tools that answer prose rather than JSON.
+    pub async fn route_text<A: serde::Serialize>(
+        &self,
+        command: &str,
+        args: &A,
+    ) -> Result<String, IpcError> {
+        let tool = self.tool_for(command)?;
+        self.call_text(tool, arguments(command, args)?).await
+    }
+
+    /// The hub tool `command` routes to.
+    ///
+    /// **It fails closed**, for the same reason
+    /// [`FleetBackend::refuse_local_only`](super::routing::FleetBackend::refuse_local_only)
+    /// does: a command with no row, or with a row that names no tool, is a
+    /// bug — `every_route_names_a_command_the_table_can_route` makes shipping
+    /// one impossible — but if one ever got out, the call must fail rather
+    /// than guess at a tool. Loud in a debug build and in every test, an
+    /// `IpcError` in release, never a panic on a user path.
+    fn tool_for(&self, command: &str) -> Result<&'static str, IpcError> {
+        let tool = super::verdicts::verdict(command).and_then(super::verdicts::Verdict::tool);
+        debug_assert!(
+            tool.is_some(),
+            "{command} routes to the hub but VERDICTS names no tool for it"
+        );
+        tool.ok_or_else(|| {
+            IpcError::new(
+                codes::E_INTERNAL,
+                format!(
+                    "{command} was not run: this build has no hub tool recorded for it, \
+                     which is a bug in the app"
+                ),
+            )
+        })
+    }
+}
+
+/// `args` as the tool's `arguments` object. A value that cannot serialise is
+/// this app's bug rather than the hub's, so it is reported as one instead of
+/// being sent as whatever survived.
+fn arguments<A: serde::Serialize>(command: &str, args: &A) -> Result<Value, IpcError> {
+    serde_json::to_value(args).map_err(|e| {
+        IpcError::new(
+            codes::E_INTERNAL,
+            format!("{command}'s arguments could not be encoded for the hub: {e}"),
+        )
+    })
+}
+
 /// `E_` followed by upper-case ASCII, digits or `_` — the shape every code in
 /// `fleet_core::ipc_error::codes` has.
 fn is_error_code(s: &str) -> bool {
@@ -535,114 +609,6 @@ impl HubBackend {
     /// `commands::health::health_check`.
     pub async fn fleet_health(&self) -> Result<fleet_core::service::health::Health, IpcError> {
         self.call("fleet_health", json!({})).await
-    }
-}
-
-// --- the repo-browsing reads -------------------------------------------------
-//
-// The eight `commands/history.rs` + `commands/files.rs` reads. Task 2 left
-// them out to keep its `fleet-core` diff reviewable; their return types gained
-// `Deserialize` in Task 3.
-//
-// Unlike the list tools above, every tool in `mcp::tools::repo` answers
-// through plain `ok_json`, so nulls are still on the wire and these types
-// carry NO `#[serde(default)]`. A renamed field fails loudly here. See the
-// note on `service::repo_read`'s wire types.
-
-impl HubBackend {
-    /// `commands::history::repo_log`. The desktop's `all`/`limit`/`skip` are
-    /// concrete where the tool's are optional, so they are forwarded as given
-    /// rather than omitted: the tool's own defaults (`all: true`, `limit: 50`)
-    /// differ from the desktop's, and letting them apply would quietly change
-    /// what the History view shows.
-    pub async fn repo_log(
-        &self,
-        args: &repo_read::RepoLogArgs,
-    ) -> Result<Vec<repo_read::Commit>, IpcError> {
-        self.call(
-            "repo_log",
-            json!({
-                "session_id": args.session_id,
-                "all": args.all,
-                "limit": args.limit,
-                "skip": args.skip,
-            }),
-        )
-        .await
-    }
-
-    /// `commands::history::repo_branches`.
-    pub async fn repo_branches(&self, session_id: i64) -> Result<Vec<repo_read::Branch>, IpcError> {
-        self.call("repo_branches", json!({ "session_id": session_id }))
-            .await
-    }
-
-    /// `commands::history::repo_commit`.
-    pub async fn repo_commit(
-        &self,
-        session_id: i64,
-        hash: &str,
-    ) -> Result<repo_read::CommitDetail, IpcError> {
-        self.call(
-            "repo_commit",
-            json!({ "session_id": session_id, "hash": hash }),
-        )
-        .await
-    }
-
-    /// `commands::history::repo_commit_diff`.
-    pub async fn repo_commit_diff(
-        &self,
-        session_id: i64,
-        hash: &str,
-        path: &str,
-    ) -> Result<repo_read::FileDiff, IpcError> {
-        self.call(
-            "repo_commit_diff",
-            json!({ "session_id": session_id, "hash": hash, "path": path }),
-        )
-        .await
-    }
-
-    /// `commands::files::repo_changes`.
-    pub async fn repo_changes(
-        &self,
-        session_id: i64,
-    ) -> Result<Vec<repo_read::ChangedFile>, IpcError> {
-        self.call("repo_changes", json!({ "session_id": session_id }))
-            .await
-    }
-
-    /// `commands::files::repo_tree`.
-    pub async fn repo_tree(&self, session_id: i64) -> Result<repo_read::RepoTree, IpcError> {
-        self.call("repo_tree", json!({ "session_id": session_id }))
-            .await
-    }
-
-    /// `commands::files::repo_file`.
-    pub async fn repo_file(
-        &self,
-        session_id: i64,
-        path: &str,
-    ) -> Result<repo_read::FileContent, IpcError> {
-        self.call(
-            "repo_file",
-            json!({ "session_id": session_id, "path": path }),
-        )
-        .await
-    }
-
-    /// `commands::files::repo_diff`.
-    pub async fn repo_diff(
-        &self,
-        session_id: i64,
-        path: &str,
-    ) -> Result<repo_read::FileDiff, IpcError> {
-        self.call(
-            "repo_diff",
-            json!({ "session_id": session_id, "path": path }),
-        )
-        .await
     }
 }
 

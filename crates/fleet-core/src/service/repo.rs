@@ -12,7 +12,7 @@ use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -34,7 +34,7 @@ pub const NO_WORKTREE_SENTINEL: &str = "__CF_NO_WORKTREE__";
 // The one-field argument struct shared by every per-session repo call.
 // (A `//` comment, not `///`: a struct-level doc would become the schema's
 // top-level `description` once this is served as an MCP tool parameter.)
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "SessionIdParams")]
 pub struct SessionIdArgs {
     /// Fleet session id (from list_sessions).
