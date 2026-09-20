@@ -150,6 +150,8 @@
       "schema_version",
       "sessions_total",
       "stuck",
+      "tunnels",
+      "tunnels_flapping",
       "usage_by_day",
       "usage_by_host",
       "version"

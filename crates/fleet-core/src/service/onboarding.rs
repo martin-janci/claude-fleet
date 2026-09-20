@@ -1,6 +1,7 @@
 //! Read-only logic backing the first-run onboarding checklist:
 //! local prerequisite detection and a tunnel-status snapshot mapping.
 
+use crate::service::tunnel::TunnelHealth;
 use crate::store::HostRow;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -18,15 +19,18 @@ pub struct LocalPrereqs {
     pub projects_count: u32,
 }
 
-/// Tunnel liveness as surfaced to the onboarding UI. There is intentionally no
-/// `Starting` state: `TunnelSupervisor::snapshot()` reports a single bool per
-/// host (task alive vs. finished), so a supervised task that is up *or*
-/// mid-backoff both read as `Up`; `NotStarted` means no task exists (e.g. the
-/// Control API is disabled).
+/// Tunnel liveness as surfaced to the onboarding UI.
+///
+/// `Up` is deliberately optimistic for a tunnel that has not failed yet (just
+/// spawned, still connecting); `Flapping` is the state that used to be missing,
+/// where the supervising task is alive but its ssh keeps dying, so the host
+/// reported `Up` while never once connecting.
 #[derive(Serialize, Debug, PartialEq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelState {
     Up,
+    /// Supervised, but ssh keeps exiting before the connection is established.
+    Flapping,
     Down,
     NotStarted,
 }
@@ -35,6 +39,10 @@ pub enum TunnelState {
 pub struct TunnelStatusRow {
     pub host_alias: String,
     pub state: TunnelState,
+    /// Exits-before-healthy since the last good connection (0 when healthy).
+    pub consecutive_failures: u32,
+    /// Tail of the last ssh stderr — why it is failing, for the UI tooltip.
+    pub last_error: Option<String>,
 }
 
 /// Pull a semver-ish token out of a `--version` line. Returns the first
@@ -50,20 +58,29 @@ pub fn parse_tool_version(output: &str) -> Option<String> {
         .map(|tok| tok.trim_start_matches('v').to_string())
 }
 
-/// Map a per-host liveness snapshot (from `TunnelSupervisor::snapshot`) onto the
-/// non-hidden hosts. Absent host => `NotStarted` (e.g. MCP disabled); present &
-/// alive => `Up`; present & finished => `Down`.
-pub fn map_tunnel_states(hosts: &[HostRow], alive: &HashMap<String, bool>) -> Vec<TunnelStatusRow> {
+/// Map per-host tunnel health onto the non-hidden hosts. Absent host =>
+/// `NotStarted` (e.g. MCP disabled); task finished => `Down`; supervised and
+/// failing => `Flapping`; otherwise `Up`.
+pub fn map_tunnel_states(
+    hosts: &[HostRow],
+    health: &HashMap<String, TunnelHealth>,
+) -> Vec<TunnelStatusRow> {
     hosts
         .iter()
         .filter(|h| !h.hidden)
-        .map(|h| TunnelStatusRow {
-            host_alias: h.alias.clone(),
-            state: match alive.get(&h.alias) {
-                Some(true) => TunnelState::Up,
-                Some(false) => TunnelState::Down,
-                None => TunnelState::NotStarted,
-            },
+        .map(|h| {
+            let t = health.get(&h.alias);
+            TunnelStatusRow {
+                host_alias: h.alias.clone(),
+                state: match t {
+                    None => TunnelState::NotStarted,
+                    Some(t) if !t.supervised => TunnelState::Down,
+                    Some(t) if t.is_flapping() => TunnelState::Flapping,
+                    Some(_) => TunnelState::Up,
+                },
+                consecutive_failures: t.map(|t| t.consecutive_failures).unwrap_or(0),
+                last_error: t.and_then(|t| t.last_error.clone()),
+            }
         })
         .collect()
 }
@@ -125,6 +142,7 @@ pub async fn local_prereqs(store: &std::sync::Mutex<crate::store::Store>) -> Loc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::tunnel::TunnelHealth;
 
     fn host(alias: &str, hidden: bool) -> HostRow {
         HostRow {
@@ -153,6 +171,27 @@ mod tests {
         assert_eq!(parse_tool_version(""), None);
     }
 
+    /// `TunnelHealth` for a tunnel that is up and has been for a while.
+    fn connected() -> TunnelHealth {
+        TunnelHealth {
+            supervised: true,
+            connected: true,
+            ..Default::default()
+        }
+    }
+
+    /// `TunnelHealth` for a supervised tunnel whose ssh keeps dying.
+    fn flapping(failures: u32) -> TunnelHealth {
+        TunnelHealth {
+            supervised: true,
+            connected: false,
+            consecutive_failures: failures,
+            last_exit_code: Some(255),
+            last_error: Some("bind [127.0.0.1]:4180: Address already in use".into()),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn maps_tunnel_states() {
         let hosts = vec![
@@ -161,27 +200,49 @@ mod tests {
             host("none", false),
             host("hidden", true),
         ];
-        let mut alive = HashMap::new();
-        alive.insert("up".to_string(), true);
-        alive.insert("dead".to_string(), false);
+        let health = HashMap::from([
+            ("up".to_string(), connected()),
+            ("dead".to_string(), TunnelHealth::default()),
+        ]);
 
-        let rows = map_tunnel_states(&hosts, &alive);
+        let rows = map_tunnel_states(&hosts, &health);
         assert_eq!(
-            rows,
-            vec![
-                TunnelStatusRow {
-                    host_alias: "up".into(),
-                    state: TunnelState::Up
-                },
-                TunnelStatusRow {
-                    host_alias: "dead".into(),
-                    state: TunnelState::Down
-                },
-                TunnelStatusRow {
-                    host_alias: "none".into(),
-                    state: TunnelState::NotStarted
-                },
-            ]
+            rows.iter().map(|r| r.state).collect::<Vec<_>>(),
+            vec![TunnelState::Up, TunnelState::Down, TunnelState::NotStarted]
         );
+        assert_eq!(rows[0].host_alias, "up");
+    }
+
+    #[test]
+    fn a_crash_looping_tunnel_is_flapping_not_up() {
+        // The bug this replaces: the supervising task being alive was reported
+        // as `Up`, so a host whose ssh had never once connected rendered as a
+        // working tunnel in onboarding.
+        let hosts = vec![host("trn", false)];
+        let health = HashMap::from([("trn".to_string(), flapping(412))]);
+
+        let rows = map_tunnel_states(&hosts, &health);
+        assert_eq!(rows[0].state, TunnelState::Flapping);
+        assert_eq!(rows[0].consecutive_failures, 412);
+        assert_eq!(
+            rows[0].last_error.as_deref(),
+            Some("bind [127.0.0.1]:4180: Address already in use"),
+            "the operator needs the reason, not just the state"
+        );
+    }
+
+    #[test]
+    fn a_tunnel_that_has_not_failed_yet_is_not_flapping() {
+        // Freshly spawned, still connecting: `Up` (optimistic) rather than an
+        // alarming badge that clears itself a second later.
+        let hosts = vec![host("trn", false)];
+        let health = HashMap::from([(
+            "trn".to_string(),
+            TunnelHealth {
+                supervised: true,
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(map_tunnel_states(&hosts, &health)[0].state, TunnelState::Up);
     }
 }

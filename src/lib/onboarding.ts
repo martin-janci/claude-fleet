@@ -15,10 +15,17 @@ export interface LocalPrereqs {
   projects_count: number;
 }
 
-export type TunnelState = 'up' | 'down' | 'not_started';
+// `flapping`: supervised, but ssh keeps exiting before the connection is
+// established. Before it existed, a crash-looping tunnel arrived as `up`,
+// because the backend only reported whether the supervising task was alive.
+export type TunnelState = 'up' | 'flapping' | 'down' | 'not_started';
 export interface TunnelStatusRow {
   host_alias: string;
   state: TunnelState;
+  /** Exits-before-healthy since the last good connection (0 when healthy). */
+  consecutive_failures: number;
+  /** Tail of the last ssh stderr — why it is failing. */
+  last_error: string | null;
 }
 
 // ---- Persisted flags --------------------------------------------------------
@@ -96,8 +103,10 @@ export function deriveSteps(i: DeriveInputs): OnboardingStep[] {
 
   // Provision step: needs a provisioned host; tunnel meaning depends on MCP.
   const tunnelUp = i.tunnels.some((t) => t.state === 'up');
+  const flapping = i.tunnels.filter((t) => t.state === 'flapping');
   let provisionDone: boolean;
   let provisionBadge: StepBadge | undefined;
+  let provisionSub: string | undefined;
   if (!i.provisionedHost) {
     provisionDone = false;
   } else if (!i.mcpEnabled) {
@@ -105,9 +114,22 @@ export function deriveSteps(i: DeriveInputs): OnboardingStep[] {
     provisionBadge = { text: 'tunnel: starts with Control API', tone: 'warn' };
   } else {
     provisionDone = tunnelUp;
-    provisionBadge = tunnelUp
-      ? { text: 'tunnel: up', tone: 'up' }
-      : { text: 'tunnel: down — retrying', tone: 'warn' };
+    if (tunnelUp) {
+      provisionBadge = { text: 'tunnel: up', tone: 'up' };
+    } else if (flapping.length > 0) {
+      // Say how bad it is and why: a flapping tunnel that only said "down"
+      // sent the reader to logs the flapping itself had flooded.
+      const worst = flapping.reduce((a, b) =>
+        b.consecutive_failures > a.consecutive_failures ? b : a,
+      );
+      provisionBadge = {
+        text: `tunnel: flapping — ${worst.consecutive_failures} failed attempts`,
+        tone: 'warn',
+      };
+      provisionSub = worst.last_error ?? `${worst.host_alias}: ssh keeps exiting`;
+    } else {
+      provisionBadge = { text: 'tunnel: down — retrying', tone: 'warn' };
+    }
   }
 
   // Build with raw done-flags first; assign exactly one 'active' afterward.
@@ -123,6 +145,7 @@ export function deriveSteps(i: DeriveInputs): OnboardingStep[] {
     {
       id: 'provision',
       label: 'Provision & tunnels',
+      sublabel: provisionSub,
       optional: false,
       done: provisionDone,
       badge: provisionBadge,

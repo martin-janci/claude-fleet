@@ -31,6 +31,6 @@ pub fn tunnel_status(
 ) -> Result<Vec<TunnelStatusRow>, IpcError> {
     backend.refuse_local_only("tunnel_status")?;
     let hosts = hosts::list_hosts(&store)?;
-    let alive = tunnels.snapshot();
+    let alive = tunnels.health();
     Ok(onboarding::map_tunnel_states(&hosts, &alive))
 }

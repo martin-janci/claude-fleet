@@ -524,8 +524,9 @@ pub async fn write_host_file_secret(
                 format!("write {epath}: {e}"),
             ));
         }
-        if let Err(e) = std::fs::rename(etmp_path, &epath) {
-            let _ = std::fs::remove_file(etmp_path);
+        if let Err(e) = place_private_file(etmp_path, std::path::Path::new(&epath), |f, t| {
+            std::fs::rename(f, t)
+        }) {
             return Err(IpcError::new(
                 codes::E_PROVISION,
                 format!("write {epath}: {e}"),
@@ -710,12 +711,55 @@ fn remote_touch_private_script(dir: &str, path: &str) -> String {
     )
 }
 
-/// Remote `bash -lc` script body that atomically renames `tmp` onto `path` —
-/// the last step of [`write_host_file_secret`]'s tmp-file dance. `path` is
-/// never truncated in place: a reader either sees the old content or the
-/// new, never a partial write.
+/// Move `tmp` onto `target`, falling back to a copy when the rename fails.
+///
+/// The local twin of [`remote_rename_script`]'s fallback, and for the same
+/// reason: a bind-mounted target cannot be replaced by a rename (EBUSY), only
+/// written through. `rename` is a parameter so the fallback is testable
+/// without a second filesystem or a real mount.
+///
+/// The copy branch forces mode 0600 — a copy onto an existing file keeps
+/// THAT file's mode, and every caller is writing a secret — and leaves `tmp`
+/// in place when it fails, so the content is still recoverable.
+fn place_private_file(
+    tmp: &std::path::Path,
+    target: &std::path::Path,
+    mut rename: impl FnMut(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if rename(tmp, target).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(tmp, target)?;
+    std::fs::set_permissions(
+        target,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )?;
+    let _ = std::fs::remove_file(tmp);
+    Ok(())
+}
+
+/// Remote `bash -lc` script body that renames `tmp` onto `path` — the last
+/// step of [`write_host_file_secret`]'s tmp-file dance. The rename is the
+/// normal path: `path` is not truncated, so a reader either sees the old
+/// content or the new, never a partial write.
+///
+/// The fallback copies the content in place instead. `mv` fails with EBUSY
+/// when the target is a bind mount, which is how `~/.claude.json` is set up
+/// in the containerised hosts (`claude-fleet-host`): the mount point cannot
+/// be replaced, only written through. Without the fallback provisioning
+/// aborts there with "Device or resource busy" and the host keeps whatever
+/// hooks and MCP entry it had — the failure this exists for.
+///
+/// Writing in place is the weaker guarantee (a reader can catch a truncated
+/// file, and a failure mid-write leaves it short), so it is only reached
+/// after the rename failed. The tmp file is deliberately kept when the copy
+/// fails, so the content is still recoverable on the host. `chmod 600`
+/// follows the copy because an in-place write keeps the TARGET's mode, and
+/// every caller of this script is writing a secret ([`write_host_file_secret`]
+/// is the only one) — a pre-existing 0644 file must not keep that mode.
 fn remote_rename_script(tmp: &str, path: &str) -> String {
-    format!("mv -f {} {}", remote_path(tmp), remote_path(path))
+    let (t, p) = (remote_path(tmp), remote_path(path));
+    format!("mv -f {t} {p} 2>/dev/null || {{ cat {t} > {p} && chmod 600 {p} && rm -f {t}; }}")
 }
 
 /// Expand a leading `~/` — or a bare `~` — against the LOCAL home dir.
@@ -858,6 +902,73 @@ mod tests {
         let quoted = crate::shell::quote(&s);
         assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
         assert!(quoted.contains("\"$HOME\""));
+    }
+
+    #[test]
+    fn remote_rename_script_falls_back_to_an_in_place_write() {
+        let s = remote_rename_script("~/.claude.json.fleet-tmp", "~/.claude.json");
+        // The rename is still the normal path…
+        assert!(s.starts_with("mv -f \"$HOME\"/'.claude.json.fleet-tmp' \"$HOME\"/'.claude.json'"));
+        // …and the fallback writes THROUGH the target, which is the only way
+        // onto a bind-mounted file (EBUSY on rename): `claude-fleet-host`
+        // containers mount ~/.claude.json in.
+        assert!(
+            s.contains("|| { cat \"$HOME\"/'.claude.json.fleet-tmp' > \"$HOME\"/'.claude.json'")
+        );
+        // The secret must not inherit the old file's mode, and the tmp file
+        // is only removed once the copy succeeded.
+        assert!(s.contains("&& chmod 600 \"$HOME\"/'.claude.json' && rm -f"));
+        let quoted = crate::shell::quote(&s);
+        assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
+        assert!(quoted.contains("\"$HOME\""));
+    }
+
+    /// The local twin of the remote fallback: when the rename fails the way
+    /// a bind-mounted target makes it fail, the content must still land, at
+    /// 0600 even though the target was world-readable, with no tmp left.
+    #[test]
+    fn place_private_file_falls_back_to_a_copy_when_the_rename_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("secret.json.fleet-tmp");
+        let target = dir.path().join("secret.json");
+        std::fs::write(&tmp, "s3cret").unwrap();
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        place_private_file(&tmp, &target, |_, _| {
+            Err(std::io::Error::from_raw_os_error(16)) // EBUSY, as on a bind mount
+        })
+        .expect("the copy fallback");
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "s3cret");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            !tmp.exists(),
+            "the tmp file is removed once the copy landed"
+        );
+    }
+
+    /// A rename that works is still the normal path — the fallback must not
+    /// run (and so must not need the target to exist).
+    #[test]
+    fn place_private_file_prefers_the_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("a.fleet-tmp");
+        let target = dir.path().join("a");
+        std::fs::write(&tmp, "v").unwrap();
+        let mut renamed = false;
+        place_private_file(&tmp, &target, |f, t| {
+            renamed = true;
+            std::fs::rename(f, t)
+        })
+        .unwrap();
+        assert!(renamed);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "v");
+        assert!(!tmp.exists());
     }
 
     #[test]
