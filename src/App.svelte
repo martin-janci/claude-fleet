@@ -394,8 +394,17 @@
     sessionView.set(v);
     showSession();
   }
-  /** ⌘J: flip to the other sub-view, closing whatever covers the panel. */
+  /**
+   * ⌘J. Leaving an overlay (Files/Assets/Hosts) returns you to the view you
+   * left, not somewhere else — it should feel like closing a window, not
+   * navigating. The flip is reserved for the second press, once the Session
+   * tab is already showing.
+   */
   function flipSessionView() {
+    if (!sessionTabActive) {
+      showSession();
+      return;
+    }
     setSessionView(otherSessionView(effectiveView));
   }
   const NO_PANE_TITLE = 'Runs outside tmux — no terminal';

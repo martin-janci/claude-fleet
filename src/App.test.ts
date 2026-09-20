@@ -338,4 +338,30 @@ describe('App: the Conversation tab', () => {
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
     expect(checked('subtab-terminal')).toBe('true');
   });
+
+  it('the chord returns to the view you left, and only a second press flips it', async () => {
+    const { sessionView } = await import('./lib/prefs');
+    const { get } = await import('svelte/store');
+    await mountAndSelect(work);
+    await fireEvent.click(tab('tab-files'));
+    await tick();
+    expect(selected('tab-files')).toBe('true');
+
+    // jsdom's userAgent isn't macOS, so the chord is Ctrl+Shift+J.
+    await fireEvent.keyDown(window, { key: 'J', ctrlKey: true, shiftKey: true });
+    await tick();
+    // Back to the Session tab, showing the view left behind (Conversation),
+    // not the Terminal — and the pref is untouched.
+    expect(selected('tab-files')).toBe('false');
+    expect(selected('tab-session')).toBe('true');
+    expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
+    expect(get(sessionView)).toBe('conversation');
+
+    // Session tab is already active, so this press is the flip.
+    await fireEvent.keyDown(window, { key: 'J', ctrlKey: true, shiftKey: true });
+    await tick();
+    expect(screen.queryByTestId('conversation-panel')).toBeNull();
+    expect(checked('subtab-terminal')).toBe('true');
+    expect(get(sessionView)).toBe('terminal');
+  });
 });
