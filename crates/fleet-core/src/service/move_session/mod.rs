@@ -1698,14 +1698,22 @@ fn target_dirty(cwd: &str, target: &str, verdict: &Adopted) -> IpcError {
             ),
         ),
     };
-    let (ours, theirs) = match verdict {
-        Adopted::Ours(l) | Adopted::Theirs(l) => (l.ours.clone(), l.theirs.clone()),
-        _ => (Vec::new(), Vec::new()),
+    let (ours, theirs, more_ours, more_theirs) = match verdict {
+        Adopted::Ours(l) | Adopted::Theirs(l) => {
+            (l.ours.clone(), l.theirs.clone(), l.more_ours, l.more_theirs)
+        }
+        _ => (Vec::new(), Vec::new(), 0, 0),
     };
+    // `ours`/`theirs` are capped at `carry::LEFTOVER_CAP`; `more_ours`/
+    // `more_theirs` say how many were left out, so a caller offering to
+    // replace "these paths" (a destructive cleanup) can say so honestly
+    // instead of silently acting on more than it showed.
     IpcError::new(codes::E_MOVE_TARGET_DIRTY, message).with_details(serde_json::json!({
         "leftovers": kind,
         "ours": ours,
         "theirs": theirs,
+        "more_ours": more_ours,
+        "more_theirs": more_theirs,
     }))
 }
 
@@ -3438,6 +3446,41 @@ mod tests {
         assert!(err.message.contains("src/lib.rs"), "{}", err.message);
     }
 
+    // R-T11-2: `carry::parse_leftovers` already counts what the cap left out
+    // (`Leftovers::more_ours`/`more_theirs`) — `target_dirty` must forward
+    // both into `details`, not just the capped path lists, or a caller
+    // offering to replace "these paths" (a destructive cleanup) understates
+    // how much it is about to touch.
+    #[tokio::test]
+    async fn ours_leftovers_beyond_the_cap_are_counted_in_details() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!(
+                        "{}\nours\tsrc/lib.rs\0more\tours\t200\0",
+                        carry::LEFTOVERS_DIFFER
+                    ),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        let d = err.details.clone().unwrap();
+        assert_eq!(d["leftovers"], "ours");
+        assert_eq!(d["more_ours"], 200);
+        assert_eq!(d["more_theirs"], 0);
+    }
+
     #[tokio::test]
     async fn the_targets_own_work_is_theirs_and_is_refused_outright() {
         let (f, _bus) = recorded_fixture();
@@ -3467,6 +3510,10 @@ mod tests {
         assert_eq!(d["theirs"][0], "their_notes.md");
         assert!(err.message.contains("their_notes.md"), "{}", err.message);
         assert!(err.message.contains("7 more"), "{}", err.message);
+        // R-T11-2: the count the message already speaks of ("7 more") must
+        // also be machine-readable in `details`, not just prose.
+        assert_eq!(d["more_theirs"], 7);
+        assert_eq!(d["more_ours"], 0);
     }
 
     #[tokio::test]

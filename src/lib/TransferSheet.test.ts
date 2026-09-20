@@ -38,6 +38,7 @@ import type { IpcError } from './result';
 import { sessions, type SessionRow } from './sessions';
 import { hosts, type HostRow } from './hosts';
 import { selectedSession, selectSession } from './selection';
+import { toasts, clearToasts } from './toasts';
 
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -379,6 +380,7 @@ describe('TransferSheet: recovery actions', () => {
       status: 'failed',
       report: null,
       error: { code: err.code, message: err.message ?? 'x', details: err.details ?? null },
+      resolveError: null,
       startedAt: Date.now(),
       settledAt: Date.now(),
       cleanTarget: false,
@@ -410,6 +412,7 @@ describe('TransferSheet: recovery actions', () => {
         target: targetRow,
       } as MoveReport,
       error: null,
+      resolveError: null,
       startedAt: Date.now(),
       settledAt: Date.now(),
       cleanTarget: false,
@@ -418,7 +421,7 @@ describe('TransferSheet: recovery actions', () => {
     };
   }
 
-  function partialRun(opts: { resolveError?: IpcError } = {}): MoveRun {
+  function partialRun(opts: { resolveError?: IpcError | null } = {}): MoveRun {
     return {
       sessionId: 7,
       sessionName: 'sess7',
@@ -429,11 +432,12 @@ describe('TransferSheet: recovery actions', () => {
       steps: blankSteps(),
       status: 'partial',
       report: null,
-      error: opts.resolveError ?? {
+      error: {
         code: 'E_MOVE_PARTIAL',
         message: '',
         details: { step: 'confirming the target is running', target_session_id: 8 },
       },
+      resolveError: opts.resolveError ?? null,
       startedAt: Date.now(),
       settledAt: Date.now(),
       cleanTarget: false,
@@ -479,6 +483,25 @@ describe('TransferSheet: recovery actions', () => {
     expect(queryByTestId('transfer-clean-confirm')).toBeNull();
   });
 
+  // Fix round 1, finding 2: `carry.rs` caps leftovers at 50 and reports the
+  // rest in `more_ours`; a confirmation that only counts the 50 it was shown
+  // would silently understate what it is about to delete on another machine.
+  it('names the true total, and how many were left out, when the cleanup was capped', async () => {
+    const shown = Array.from({ length: 50 }, (_, i) => `f${i}.txt`);
+    const { getByTestId } = renderSheet(
+      failedRun({
+        code: 'E_MOVE_TARGET_DIRTY',
+        details: { leftovers: 'ours', ours: shown, more_ours: 150 },
+      }),
+    );
+    await fireEvent.click(getByTestId('transfer-clean'));
+    // (The `.what` sentence above already says "150 more" too, so scope the
+    // path-list check to the failure body rather than matching anywhere.)
+    expect(getByTestId('transfer-failure').textContent).toContain('150 more');
+    // 50 shown + 150 left out — the confirm button must not claim only 50.
+    expect(getByTestId('transfer-clean-confirm').textContent).toContain('200');
+  });
+
   it('never offers a cleanup for the target own work', () => {
     const { queryByTestId } = renderSheet(
       failedRun({ code: 'E_MOVE_TARGET_DIRTY', details: { leftovers: 'theirs', theirs: ['x.md'] } }),
@@ -514,14 +537,30 @@ describe('TransferSheet: recovery actions', () => {
     expect(resolveMoveRun).toHaveBeenCalledWith(7, 'undo');
   });
 
+  // Fix round 1, finding 1: this drives the REAL `resolveMoveRun` (moves.ts)
+  // through the mocked `invoke`, so a genuine resolve failure reaches the run
+  // and the sheet, rather than a fixture pre-baking the text `describeMoveError`
+  // would show anyway. Deleting the rendering in TransferSheet.svelte (the
+  // `{#if resolveError}` block) must fail this test — verified below by doing
+  // exactly that and watching it fail before restoring it.
   it('shows a refusal from Finish in place, not as a toast', async () => {
-    const { getByTestId } = renderSheet(
-      partialRun({ resolveError: { code: 'E_INVALID_STATE', message: 'the target took a turn', details: null } }),
+    clearToasts();
+    const real = await vi.importActual<typeof import('./moves')>('./moves');
+    vi.mocked(resolveMoveRun).mockImplementationOnce(real.resolveMoveRun);
+    mockInvoke.mockImplementation((cmd: string) =>
+      cmd === 'resolve_move'
+        ? Promise.reject({ code: 'E_INVALID_STATE', message: 'the target took a turn', details: null })
+        : Promise.resolve(undefined),
     );
-    // The raw-details `<pre>` repeats the same message, so scope the check to
-    // the failure body rather than matching text anywhere in the document.
-    expect(getByTestId('transfer-failure').textContent).toContain('took a turn');
+    const { getByTestId } = renderSheet(partialRun());
+    await fireEvent.click(getByTestId('transfer-finish'));
+    await fireEvent.click(getByTestId('transfer-finish-confirm'));
+    await flush();
+    await tick();
+    expect(getByTestId('transfer-resolve-error').textContent).toContain('took a turn');
+    // The buttons stay up: the user can still act on what the refusal says.
     expect(getByTestId('transfer-finish')).toBeTruthy();
+    expect(get(toasts)).toHaveLength(0);
   });
 
   it('an undone run reads as undone', () => {
@@ -530,5 +569,26 @@ describe('TransferSheet: recovery actions', () => {
     );
     expect(getByText(/undid/)).toBeTruthy();
     expect(queryByTestId('transfer-retry')).toBeNull();
+  });
+
+  // Fix round 1, finding 3: the brief requires a confirm — and now a
+  // refusal — to never survive the sheet moving to another session.
+  it('resets an armed confirm and any in-place refusal when the sheet moves to another session', async () => {
+    const a = partialRun({
+      resolveError: { code: 'E_INVALID_STATE', message: 'the target took a turn', details: null },
+    });
+    const b = { ...partialRun(), sessionId: 9, sessionName: 'sess9' };
+    putRunForTest(a);
+    putRunForTest(b);
+    transferSheetFor.set(a.sessionId);
+    const { getByTestId, queryByTestId } = render(TransferSheet);
+    expect(getByTestId('transfer-resolve-error')).toBeTruthy();
+    await fireEvent.click(getByTestId('transfer-finish'));
+    expect(getByTestId('transfer-finish-confirm')).toBeTruthy();
+
+    transferSheetFor.set(b.sessionId);
+    await tick();
+    expect(queryByTestId('transfer-finish-confirm')).toBeNull();
+    expect(queryByTestId('transfer-resolve-error')).toBeNull();
   });
 });

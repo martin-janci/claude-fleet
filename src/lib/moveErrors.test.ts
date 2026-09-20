@@ -190,6 +190,36 @@ describe('describeMoveError', () => {
     expect(f.what).toContain('a.txt');
   });
 
+  // Fix round 1, finding 2: the backend caps `ours`/`theirs` at 50 and reports
+  // how many more there were in `more_ours`/`more_theirs`; a cleanup
+  // confirmation that only counts what it was shown would silently understate
+  // what it is about to delete.
+  it('names how many more leftovers were left out when the list was capped', () => {
+    const f = describeMoveError(
+      {
+        code: 'E_MOVE_TARGET_DIRTY',
+        message: 'raw',
+        details: { leftovers: 'ours', ours: ['a.txt'], more_ours: 200 },
+      },
+      'failed',
+      'turanga',
+      'replay',
+    );
+    expect(f.action).toEqual({ kind: 'clean', paths: ['a.txt'], more: 200 });
+    expect(f.what).toContain('200 more');
+  });
+
+  it('reports no more leftovers when the list was not capped', () => {
+    const f = describeMoveError(
+      { code: 'E_MOVE_TARGET_DIRTY', message: 'raw', details: { leftovers: 'ours', ours: ['a.txt'] } },
+      'failed',
+      'turanga',
+      'replay',
+    );
+    expect(f.action).toEqual({ kind: 'clean', paths: ['a.txt'], more: 0 });
+    expect(f.what).not.toContain('more');
+  });
+
   it('says nothing was overwritten when the target is holding its own work', () => {
     const f = describeMoveError(
       { code: 'E_MOVE_TARGET_DIRTY', message: 'raw', details: { leftovers: 'theirs', theirs: ['x'] } },

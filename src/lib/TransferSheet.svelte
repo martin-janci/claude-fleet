@@ -8,7 +8,6 @@
   import type { ResolveAction } from './moveSession';
   import { stepLabel } from './moveProgress';
   import { dismissMove, displaySteps, moves, resolveMoveRun, retryMove, startMove, transferSheetFor } from './moves';
-  import type { IpcError } from './result';
   import { selectSession } from './selection';
   import { sessions } from './sessions';
 
@@ -19,6 +18,11 @@
   const session = $derived(id === null ? undefined : $sessions.find((s) => s.id === id));
   const targets = $derived(session ? moveTargetsFor(session, $hosts) : []);
   const blocked = $derived(moveBlockedReason($hubStatus, $hubConnection));
+  /** A refusal from the last Finish/Undo attempt, carried on the run itself
+   *  (`moves.ts`'s `settleResolve`) rather than local component state, so it
+   *  is naturally per-session: switching the sheet to another run's `id`
+   *  reads that run's own `resolveError`, never a leftover from this one. */
+  const resolveError = $derived(run?.resolveError ?? null);
 
   let target = $state('');
   let keepSource = $state(false);
@@ -26,9 +30,6 @@
   // Which destructive action is one click from happening. Cleared whenever the
   // sheet's session changes, like `showDetails`.
   let confirming = $state<'clean' | 'finish' | 'undo' | null>(null);
-  /** A refusal from Finish / Undo, shown in the sheet rather than as a toast:
-   *  the user is looking straight at it. */
-  let resolveError = $state<IpcError | null>(null);
 
   // A fresh setup each time the sheet opens on a session.
   $effect(() => {
@@ -41,7 +42,6 @@
     keepSource = false;
     showDetails = false;
     confirming = null;
-    resolveError = null;
   });
   // Nothing to show: the row is gone and no run remembers it.
   $effect(() => {
@@ -132,7 +132,8 @@
   function resolve(action: ResolveAction): void {
     if (id === null) return;
     confirming = null;
-    resolveError = null;
+    // `resolveMoveRun` clears any stale `resolveError` on the run itself
+    // before making a fresh attempt.
     resolveMoveRun(id, action);
   }
 
@@ -317,11 +318,11 @@
         {/if}
         {#if confirming === 'clean' && cleanAction}
           <ul class="clean-paths">
-            {#each cleanAction.paths.slice(0, 50) as p (p)}
+            {#each cleanAction.paths as p (p)}
               <li><code>{p}</code></li>
             {/each}
-            {#if cleanAction.paths.length > 50}
-              <li class="muted">+{cleanAction.paths.length - 50} more</li>
+            {#if cleanAction.more > 0}
+              <li class="muted">+{cleanAction.more} more</li>
             {/if}
           </ul>
         {/if}
@@ -348,7 +349,7 @@
         {:else if cleanAction}
           {#if confirming === 'clean'}
             <button class="danger" onclick={() => retry(true)} data-testid="transfer-clean-confirm">
-              Replace {cleanAction.paths.length} file(s) on {run.toHost} and retry
+              Replace {cleanAction.paths.length + cleanAction.more} file(s) on {run.toHost} and retry
             </button>
           {:else}
             <button onclick={() => (confirming = 'clean')} data-testid="transfer-clean">

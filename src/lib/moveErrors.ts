@@ -8,9 +8,12 @@ export interface MoveFailure {
   what: string;
   standing: string;
   /** What the sheet may offer. `clean` carries the paths a cleanup would
-   *  replace, so the confirmation can name them; `null` means there is nothing
-   *  the app can do — only the user, on that host. */
-  action: { kind: 'retry' } | { kind: 'clean'; paths: string[] } | null;
+   *  replace, so the confirmation can name them, and `more` — how many the
+   *  backend's cap (`carry::LEFTOVER_CAP`) left out of `paths` — so a
+   *  truncated confirmation can say so instead of understating what it is
+   *  about to delete; `null` means there is nothing the app can do — only the
+   *  user, on that host. */
+  action: { kind: 'retry' } | { kind: 'clean'; paths: string[]; more: number } | null;
 }
 
 /** A frontend-only marker code meaning "this run ended because you undid the
@@ -68,6 +71,19 @@ function stringArrayField(details: unknown, key: string): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }
 
+function numberField(details: unknown, key: string): number {
+  if (typeof details !== 'object' || details === null) return 0;
+  const v = (details as Record<string, unknown>)[key];
+  return typeof v === 'number' ? v : 0;
+}
+
+/** `a, b and 7 more` — an older backend without `more_*` in `details` simply
+ *  never adds the tail. */
+function withMore(paths: string[], more: number): string {
+  const s = paths.join(', ');
+  return more > 0 ? `${s}${s ? ' and ' : ''}${more} more` : s;
+}
+
 type Action = MoveFailure['action'];
 
 /** `E_MOVE_TARGET_DIRTY`: `details.leftovers` says whose work the target is
@@ -78,18 +94,20 @@ function targetDirtyWhat(details: unknown, toHost: string): { what: string; acti
   const leftovers = field(details, 'leftovers');
   if (leftovers === 'ours') {
     const paths = stringArrayField(details, 'ours');
+    const more = numberField(details, 'more_ours');
     return {
       what:
         `${toHost} still holds work an earlier transfer attempt left behind, and it differs from ` +
-        `what is being carried now: ${paths.join(', ')}.`,
-      action: { kind: 'clean', paths },
+        `what is being carried now: ${withMore(paths, more)}.`,
+      action: { kind: 'clean', paths, more },
     };
   }
   if (leftovers === 'theirs') {
     const paths = stringArrayField(details, 'theirs');
+    const more = numberField(details, 'more_theirs');
     return {
       what:
-        `${toHost} has uncommitted work of its own in this worktree: ${paths.join(', ')}. Commit or ` +
+        `${toHost} has uncommitted work of its own in this worktree: ${withMore(paths, more)}. Commit or ` +
         'discard it there first.',
       action: null,
     };

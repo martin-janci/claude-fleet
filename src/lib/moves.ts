@@ -44,6 +44,11 @@ export interface MoveRun {
   cleanTarget: boolean;
   /** 1 for the original attempt; `retryMove` bumps it, on the same run. */
   attempt: number;
+  /** A refusal from the last Finish/Undo attempt (`resolveMoveRun`), shown in
+   *  the sheet rather than as a toast — the user is looking straight at it
+   *  when the click comes back refused. Cleared on the next `resolveMoveRun`
+   *  call for this run, and whenever the attempt settles either way. */
+  resolveError: IpcError | null;
   /**
    * True from the moment `retryMove` resets this run until its own first
    * `move:progress` event (`check`/`started`) arrives; every other event is
@@ -182,6 +187,7 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     status: 'running',
     report: null,
     error: null,
+    resolveError: null,
     startedAt: Date.now(),
     settledAt: null,
     cleanTarget: false,
@@ -286,6 +292,7 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     status: 'running',
     report: null,
     error: null,
+    resolveError: null,
     cleanTarget,
     attempt: run.attempt + 1,
     startedAt: Date.now(),
@@ -317,11 +324,15 @@ function settleResolve(sessionId: number, action: ResolveAction, r: Result<Resol
   const run = get(store).get(sessionId);
   if (!run) return;
   if (!r.ok) {
-    pushError(r.error, `Resolving the transfer of ${run.sessionName}`);
+    // Shown in the sheet, not as a toast (fix round 1, finding 1): the user
+    // is looking straight at it — they just clicked Finish/Undo and are still
+    // on the confirm they clicked through. A toast here would be the wrong
+    // place, and would say nothing the sheet cannot say better in context.
+    put({ ...run, resolveError: r.error });
     return;
   }
   if (action === 'finish') {
-    put({ ...run, status: 'done', settledAt: Date.now() });
+    put({ ...run, status: 'done', resolveError: null, settledAt: Date.now() });
     return;
   }
   put({
@@ -331,6 +342,7 @@ function settleResolve(sessionId: number, action: ResolveAction, r: Result<Resol
       code: UNDONE,
       message: `The new session on ${run.toHost} was killed; ${run.sessionName} keeps running on ${run.fromHost}.`,
     },
+    resolveError: null,
     settledAt: Date.now(),
   });
 }
@@ -352,6 +364,8 @@ export function resolveMoveRun(sessionId: number, action: ResolveAction): void {
     push({ kind: 'error', message: `${run.sessionName}: no target session to resolve.` });
     return;
   }
+  // A stale refusal from a previous attempt must not linger through this one.
+  if (run.resolveError) put({ ...run, resolveError: null });
   void resolveMove(targetId, action).then((r) => settleResolve(sessionId, action, r));
 }
 
@@ -386,6 +400,7 @@ export function adoptPartial(p: UnresolvedPartial, sessionName: string): void {
       message: '',
       details: { step: p.step, target_session_id: p.targetSessionId, target_host: p.toHost },
     },
+    resolveError: null,
     cleanTarget: false,
     attempt: 1,
     awaitingStart: false,
@@ -407,6 +422,7 @@ function observed(p: MoveProgress): MoveRun {
     status: 'running',
     report: null,
     error: null,
+    resolveError: null,
     startedAt: Date.now(),
     settledAt: null,
     cleanTarget: false,
