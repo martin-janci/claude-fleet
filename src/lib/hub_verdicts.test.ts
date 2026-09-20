@@ -192,10 +192,9 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   gatedByAddHostDialog: ['probe_ssh_alias'],
   // Guarded directly with `ownsTheFleet($hubStatus)` at the call site
   // instead of `hubBlock`/`REASONS`: the call is skipped and a safe
-  // substitute used in its place (NewSessionDialog.svelte reads an empty
-  // worktree list instead of scanning; ConversationPanel.svelte's
-  // `probeLive` simply never becomes true, so the pane is never polled).
-  guardedDirectlyWithOwnsTheFleet: ['list_host_worktrees', 'session_activity'],
+  // substitute used in its place (ConversationPanel.svelte's `probeLive`
+  // simply never becomes true, so the pane is never polled).
+  guardedDirectlyWithOwnsTheFleet: ['session_activity'],
   // Reachable and attempted even on a hub client — ToolLine.svelte fetches
   // it when a tool row is expanded — but handled per-click with an inline,
   // non-retryable `E_LOCAL_ONLY` message (`loadRetryable = r.error.code !==

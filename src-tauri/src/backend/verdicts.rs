@@ -191,9 +191,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "list_host_worktrees",
-        Verdict::LocalOnly {
-            instead: "it scans the host over this machine's SSH connection and caches what \
-                      it finds; use list_worktrees, which the hub answers",
+        Verdict::Routed {
+            tool: "list_host_worktrees",
         },
     ),
     (

@@ -240,6 +240,17 @@ pub mod codes {
     /// the banner does; `details` carries the hub's revision and the bound it
     /// missed.
     pub const E_HUB_CONTRACT: &str = "E_HUB_CONTRACT";
+    /// Remote (hub-client) mode: the hub answered the call with a JSON-RPC
+    /// *protocol* error rather than a tool result — it serves no tool by that
+    /// name, or could not bind the arguments. That is the two sides
+    /// disagreeing about what the API is, which in practice means a hub older
+    /// than this app: a tool added here is not on it yet.
+    ///
+    /// Its own code, and not `E_INTERNAL`, because it is the one failure a
+    /// caller can reasonably *degrade* past. A feature built on a new tool
+    /// can fall back to what it did before this code, where it must not do
+    /// so for an ordinary internal error.
+    pub const E_HUB_PROTOCOL: &str = "E_HUB_PROTOCOL";
     /// Pairing: the hub URL is plain `http://` to a host that is not
     /// loopback, so the client token this pairing is about to mint — a
     /// credential for the whole fleet — would cross the network in the clear

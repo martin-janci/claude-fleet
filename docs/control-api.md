@@ -243,7 +243,8 @@ Index by area (names only; see the reference for details):
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
-  `list_worktrees`, `delete_worktree`.
+  `list_worktrees`, `list_host_worktrees` (one host scanned over SSH, for the
+  worktrees fleet's own rows do not cover), `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
   `new_shell_session`, `new_bg_session`, `spawn_review`, `rename_session`,
   `set_friendly_name`, `register_self`, `whoami`.
@@ -379,8 +380,8 @@ payloads.
 `tools/list` is scoped to the caller: the list is filtered by the same
 predicates that gate the call (`readonly` mode, fleet-admin access), so a
 token is never offered a tool it would be refused. The master token sees all
-72 tools (~14.8k tokens of definitions), a per-host `full` token 62 (~12.9k),
-a `readonly` token 36 (~5.6k). Definitions are also slimmed on the way out —
+73 tools (~15.0k tokens of definitions), a per-host `full` token 63 (~13.1k),
+a `readonly` token 37 (~5.8k). Definitions are also slimmed on the way out —
 `$schema`, `title`, numeric `format`s and `"default": null` carry no meaning
 for a caller — and each tool carries the MCP hints from its policy row
 (`readOnlyHint` on reads, `destructiveHint` on the confirmation-gated

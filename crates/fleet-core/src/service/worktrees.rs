@@ -66,14 +66,18 @@ pub fn list_worktrees(
     Ok(out)
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ListHostWorktreesArgs {
     pub host_alias: String,
     pub project_id: i64,
 }
 
 /// The worktrees of one project as they exist on one host.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Deserialize` as well as `Serialize`: the desktop in hub-client mode
+/// parses this back out of the hub's `list_host_worktrees` answer, so both
+/// arms of the command hand the frontend the same type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostWorktrees {
     pub host_alias: String,
     pub project_id: i64,
@@ -193,9 +197,16 @@ pub async fn list_host_worktrees_with(
 ) -> Result<HostWorktrees, IpcError> {
     let host = args.host_alias.as_str();
     let pid = args.project_id;
-    crate::service::hub::ensure_local_allowed(host)?;
+    // The full alias check, not just `ensure_local_allowed`: this is now also
+    // an MCP tool, so the alias can come from a paired client rather than
+    // from a host chip the app drew itself.
+    crate::validate::host_alias(host)?;
     if host == crate::service::projects::LOCAL_HOST {
         let s = lock(store)?;
+        // Resolve the project first, exactly as the remote branch does below:
+        // an id that names no project is `E_NOTFOUND` on both branches, not
+        // an empty list on one of them.
+        crate::service::sessions::fetch_owner_repo(&s, pid)?;
         let worktrees = s.list_worktrees_for_project(pid)?;
         return Ok(HostWorktrees {
             host_alias: host.to_string(),
@@ -796,6 +807,29 @@ mod tests {
         .unwrap();
         assert!(!out.cloned);
         assert!(out.worktrees.is_empty());
+    }
+
+    /// Both branches answer an unknown project the same way. `local` used to
+    /// read its (empty) worktree list without resolving the project at all,
+    /// so a caller that mistyped an id was told "this host has no worktrees"
+    /// where a remote host would have said the project does not exist — and
+    /// `E_NOTFOUND` is what the tool's own description promises.
+    #[tokio::test]
+    async fn list_host_worktrees_local_reports_an_unknown_project_as_not_found() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = FakeSsh::new();
+        let err = list_host_worktrees_with(
+            ListHostWorktreesArgs {
+                host_alias: "local".into(),
+                project_id: 4242,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
+        assert!(fake.calls().is_empty());
     }
 
     #[tokio::test]

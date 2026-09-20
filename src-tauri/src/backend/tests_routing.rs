@@ -278,7 +278,7 @@ fn routed_read_cases() -> Vec<Case> {
         RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs,
     };
     use fleet_core::service::sessions::RelatedSessionsArgs;
-    use fleet_core::service::worktrees::ListWorktreesArgs;
+    use fleet_core::service::worktrees::{ListHostWorktreesArgs, ListWorktreesArgs};
 
     vec![
         (
@@ -376,6 +376,29 @@ fn routed_read_cases() -> Vec<Case> {
                     b,
                     ListWorktreesArgs { project_id: None },
                     s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Both fields are required on both sides, so the command's own
+        // argument struct IS the wire: no defaulted key, no clamped value,
+        // nothing sent only when set. This case pins that identity — a field
+        // added to one side and not the other would change the recorded
+        // arguments here.
+        (
+            "list_host_worktrees",
+            "list_host_worktrees",
+            json!({ "host_alias": "hetzner", "project_id": 4 }),
+            r#"{"host_alias":"hetzner","project_id":4,"cloned":true,"worktrees":[{"id":9,"project_id":4,"host_alias":"hetzner","name":"main","path":"/w/r"}]}"#,
+            Box::new(|b, s, sh| {
+                block_on(commands::worktrees::routed::list_host_worktrees(
+                    b,
+                    ListHostWorktreesArgs {
+                        host_alias: "hetzner".into(),
+                        project_id: 4,
+                    },
+                    s,
+                    sh,
                 ))
                 .map(|_| ())
             }),
@@ -1281,6 +1304,36 @@ fn standalone_ssh_backed_reads_take_the_local_path() {
     }
 }
 
+/// `list_host_worktrees` used to refuse in remote mode and now routes, so
+/// its standalone arm is the half that could have been lost in the move:
+/// the scan of `local` answers from this app's own store, without a hub and
+/// without SSH.
+#[test]
+fn standalone_list_host_worktrees_still_scans_from_the_local_store() {
+    use fleet_core::service::worktrees::ListHostWorktreesArgs;
+    let (_dir, st) = store();
+    let pid = {
+        let s = st.lock().unwrap();
+        let pid = s.upsert_project("o", "r", "/p").unwrap();
+        s.upsert_worktree(pid, "main", "/p", Some("main")).unwrap();
+        pid
+    };
+    let out = block_on(commands::worktrees::routed::list_host_worktrees(
+        &FleetBackend::local(),
+        ListHostWorktreesArgs {
+            host_alias: "local".into(),
+            project_id: pid,
+        },
+        &st,
+        &ssh(),
+    ))
+    .expect("the local store answers");
+    assert_eq!(out.host_alias, "local");
+    assert!(out.cloned);
+    assert_eq!(out.worktrees.len(), 1);
+    assert_eq!(out.worktrees[0].name, "main");
+}
+
 // ── 2b. a configured hub this launch cannot use ─────────────────────────────
 
 /// What `lib.rs` builds when `hub.remote_url` is set but the hub cannot be
@@ -2112,7 +2165,7 @@ fn every_route_names_a_command_the_table_can_route() {
 /// cross-check holds against the wire. Both are hand-typed, so a typo
 /// repeated in both the same way is invisible to either — it would only
 /// surface at runtime, when the desktop asks the hub for a tool that does
-/// not exist and gets back `E_INTERNAL` ("the hub refused the … call").
+/// not exist and gets back `E_HUB_PROTOCOL` ("the hub refused the … call").
 /// `fleet_core::mcp::guard::TOOL_POLICIES` is an independent third anchor:
 /// the real list of tools the router serves. This makes that class of typo a
 /// red test instead of a runtime surprise.
