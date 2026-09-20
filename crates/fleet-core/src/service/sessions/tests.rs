@@ -402,6 +402,7 @@ fn reconcile_agent_rows_upserts_bg_session_row() {
         &agents,
         Some(&no_mtimes()),
         now_unix(),
+        now_unix(),
     )
     .unwrap();
 
@@ -432,6 +433,7 @@ fn reconcile_agent_rows_prunes_vanished_agents_two_phase() {
         &agents,
         Some(&no_mtimes()),
         now_unix(),
+        now_unix(),
     )
     .unwrap();
     let id = s
@@ -441,7 +443,17 @@ fn reconcile_agent_rows_prunes_vanished_agents_two_phase() {
         .id;
 
     // Pass 2: agent gone (empty listing) → ghosted, still present.
-    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), now_unix()).unwrap();
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &[],
+        Some(&no_mtimes()),
+        now_unix(),
+        now_unix(),
+    )
+    .unwrap();
     let row = s
         .get_session("bg:bg-uuid-1", "local")
         .unwrap()
@@ -450,7 +462,17 @@ fn reconcile_agent_rows_prunes_vanished_agents_two_phase() {
     assert!(row.lost_at.is_some());
 
     // Pass 3: still gone → hard-deleted.
-    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), now_unix()).unwrap();
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &[],
+        Some(&no_mtimes()),
+        now_unix(),
+        now_unix(),
+    )
+    .unwrap();
     assert!(
         s.get_session("bg:bg-uuid-1", "local").unwrap().is_none(),
         "dead bg row must be reaped on the second missing pass"
@@ -462,9 +484,16 @@ fn reconcile_agent_rows_prunes_vanished_agents_two_phase() {
 fn reconcile_agent_rows_resurrects_ghost_when_agent_returns() {
     // A single missing pass (e.g. a transiently failed `claude agents`
     // probe, which comes back as an empty list) must not lose the row.
+    //
+    // The passes are stamped a second apart rather than all at `now_unix()`:
+    // a ghosted row is revived only by a probe strictly newer than its
+    // `lost_at` (#172), and whole seconds are the resolution of both stamps.
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
+    let t = now_unix();
     let agents = vec![agent("bg-uuid-1", Some("my-bg-job"), Some("/tmp/proj"))];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), t, t).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), t + 1, t + 1).unwrap(); // ghosts it
     reconcile_agent_rows(
         &s,
         "local",
@@ -472,18 +501,8 @@ fn reconcile_agent_rows_resurrects_ghost_when_agent_returns() {
         &[],
         &agents,
         Some(&no_mtimes()),
-        now_unix(),
-    )
-    .unwrap();
-    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), now_unix()).unwrap(); // ghosts it
-    reconcile_agent_rows(
-        &s,
-        "local",
-        &[],
-        &[],
-        &agents,
-        Some(&no_mtimes()),
-        now_unix(),
+        t + 2,
+        t + 2,
     )
     .unwrap(); // returns
 
@@ -502,7 +521,8 @@ fn reconcile_agent_rows_resurrects_ghost_when_agent_returns() {
         &[],
         &agents,
         Some(&no_mtimes()),
-        now_unix(),
+        t + 3,
+        t + 3,
     )
     .unwrap();
     assert!(s.get_session("bg:bg-uuid-1", "local").unwrap().is_some());
@@ -522,6 +542,7 @@ fn reconcile_agent_rows_cleanup_spares_other_hosts_and_tmux_rows() {
         Some("working"),
         1,
         "bg",
+        1,
     )
     .unwrap();
     s.upsert_session("work-a", "local", None, None, 1, 1, "running", None)
@@ -529,8 +550,28 @@ fn reconcile_agent_rows_cleanup_spares_other_hosts_and_tmux_rows() {
 
     // Two empty-agent passes on `local` — enough to ghost + delete any
     // bg row this cleanup wrongly considered.
-    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), now_unix()).unwrap();
-    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), now_unix()).unwrap();
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &[],
+        Some(&no_mtimes()),
+        now_unix(),
+        now_unix(),
+    )
+    .unwrap();
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &[],
+        Some(&no_mtimes()),
+        now_unix(),
+        now_unix(),
+    )
+    .unwrap();
 
     let work = s.get_session("work-a", "local").unwrap().expect("tmux row");
     assert_eq!(work.status, "running", "tmux rows are not the bg pruner's");
@@ -580,7 +621,7 @@ fn interactive_agents_land_as_external_and_background_as_bg() {
         agent_json("interactive", INTERACTIVE_ID, r#""status":"busy""#, None),
         agent_json("background", BG_ID, r#""state":"working""#, None),
     ];
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), now).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), now, now).unwrap();
 
     let ext = s
         .get_session(&format!("bg:{INTERACTIVE_ID}"), "local")
@@ -610,6 +651,7 @@ fn misfiled_bg_row_flips_to_external() {
         Some("idle"),
         1,
         "bg",
+        1,
     )
     .unwrap();
     let agents = vec![agent_json(
@@ -618,7 +660,7 @@ fn misfiled_bg_row_flips_to_external() {
         r#""status":"idle""#,
         None,
     )];
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 100).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 100, 100).unwrap();
     assert_eq!(
         s.get_session(&tmux_name, "local").unwrap().unwrap().kind,
         "external"
@@ -636,7 +678,7 @@ fn idle_background_agent_is_stored_stopped() {
         None,
     )];
     let mtimes = std::collections::HashMap::from([(BG_ID.to_string(), now - 2 * 86_400)]);
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now, now).unwrap();
     let row = s
         .get_session(&format!("bg:{BG_ID}"), "local")
         .unwrap()
@@ -647,7 +689,7 @@ fn idle_background_agent_is_stored_stopped() {
     // A recent transcript keeps the CLI's status.
     let s = local_store();
     let fresh = std::collections::HashMap::from([(BG_ID.to_string(), now - 60)]);
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&fresh), now).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&fresh), now, now).unwrap();
     let row = s
         .get_session(&format!("bg:{BG_ID}"), "local")
         .unwrap()
@@ -668,7 +710,7 @@ fn idle_interactive_agent_is_never_stopped() {
         Some((now - 5 * 86_400) * 1000),
     )];
     let mtimes = std::collections::HashMap::from([(INTERACTIVE_ID.to_string(), now - 5 * 86_400)]);
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now, now).unwrap();
     let row = s
         .get_session(&format!("bg:{INTERACTIVE_ID}"), "local")
         .unwrap()
@@ -688,7 +730,7 @@ fn working_background_agent_is_never_stopped() {
         Some((now - 10 * 86_400) * 1000),
     )];
     let mtimes = std::collections::HashMap::from([(BG_ID.to_string(), now - 10 * 86_400)]);
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now, now).unwrap();
     let row = s
         .get_session(&format!("bg:{BG_ID}"), "local")
         .unwrap()
@@ -706,7 +748,7 @@ fn started_at_stands_in_when_no_transcript() {
         r#""state":"blocked""#,
         Some((now - 2 * 86_400) * 1000),
     )];
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), now).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), now, now).unwrap();
     let row = s
         .get_session(&format!("bg:{BG_ID}"), "local")
         .unwrap()
@@ -721,7 +763,7 @@ fn started_at_stands_in_when_no_transcript() {
         r#""state":"blocked""#,
         None,
     )];
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), now).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), now, now).unwrap();
     let row = s
         .get_session(&format!("bg:{BG_ID}"), "local")
         .unwrap()
@@ -741,7 +783,7 @@ fn transcript_mtime_wins_over_started_at() {
         Some((now - 30 * 86_400) * 1000),
     )];
     let mtimes = std::collections::HashMap::from([(BG_ID.to_string(), now - 3_600)]);
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now, now).unwrap();
     let row = s
         .get_session(&format!("bg:{BG_ID}"), "local")
         .unwrap()
@@ -763,19 +805,19 @@ fn dismissed_agent_is_skipped_until_newer_activity() {
 
     // Activity older than the dismissal → skipped, no row, dismissal kept.
     let old = std::collections::HashMap::from([(BG_ID.to_string(), 90)]);
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&old), 200).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&old), 200, 200).unwrap();
     assert!(s.get_session(&tmux_name, "local").unwrap().is_none());
     assert_eq!(s.dismissed_agents("local").unwrap().get(BG_ID), Some(&100));
 
     // Activity exactly at the dismissal → still dismissed.
     let same = std::collections::HashMap::from([(BG_ID.to_string(), 100)]);
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&same), 200).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&same), 200, 200).unwrap();
     assert!(s.get_session(&tmux_name, "local").unwrap().is_none());
     assert!(s.dismissed_agents("local").unwrap().contains_key(BG_ID));
 
     // Newer activity → row reappears and the dismissal is cleared.
     let newer = std::collections::HashMap::from([(BG_ID.to_string(), 150)]);
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&newer), 200).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&newer), 200, 200).unwrap();
     let row = s
         .get_session(&tmux_name, "local")
         .unwrap()
@@ -794,7 +836,7 @@ fn dismissed_agent_without_known_time_stays_dismissed() {
         None,
     )];
     s.dismiss_agent("local", BG_ID, 100).unwrap();
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 200).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 200, 200).unwrap();
     assert!(s
         .get_session(&format!("bg:{BG_ID}"), "local")
         .unwrap()
@@ -813,7 +855,7 @@ fn dismissal_on_another_host_does_not_hide_the_agent() {
         r#""state":"blocked""#,
         None,
     )];
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 200).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 200, 200).unwrap();
     assert!(s
         .get_session(&format!("bg:{BG_ID}"), "local")
         .unwrap()
@@ -1087,7 +1129,7 @@ fn failed_mtime_call_keeps_an_old_blocked_bg_agent_blocked() {
         r#""state":"blocked""#,
         Some((now - 5 * 86_400) * 1000),
     )];
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, None, now).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, None, now, now).unwrap();
     let row = s
         .get_session(&format!("bg:{BG_ID}"), "local")
         .unwrap()
@@ -1108,12 +1150,12 @@ fn failed_mtime_call_keeps_dismissals_in_force() {
         Some(150 * 1000),
     )];
     s.dismiss_agent("local", BG_ID, 100).unwrap();
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, None, 200).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, None, 200, 200).unwrap();
     assert!(s.get_session(&tmux_name, "local").unwrap().is_none());
     assert_eq!(s.dismissed_agents("local").unwrap().get(BG_ID), Some(&100));
 
     // A good pass with the same evidence revives it (control).
-    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 200).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 200, 200).unwrap();
     assert!(s.get_session(&tmux_name, "local").unwrap().is_some());
 }
 

@@ -262,3 +262,154 @@ fn a_kill_closes_the_current_conversation_as_killed() {
     // No id (a row never bound): only the timeline event, no error.
     record_kill(&s, id, None);
 }
+
+// ── Every path that brings a tmux name back to life must say so ────────────
+//
+// `record_tmux_created` is what lets a session created under a just-killed
+// name be inserted by the reconcile that follows. Nothing else can catch its
+// removal: the six functions below resolve their executor through
+// `exec_for`, which is not injectable, so exercising them for real would need
+// a live tmux server (and macOS CI has none). The calls are therefore pinned
+// in the source itself, in the style of the desktop's command-routing audit.
+
+/// The source of the top-level item that starts with `signature`, ending at
+/// its closing brace. Only a top-level item's closing brace sits at column 0
+/// once rustfmt has run, so the slice stops at this function and cannot run
+/// on into the next one.
+fn item_source<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source.find(signature).unwrap_or_else(|| {
+        panic!("`{signature}` is no longer in its file — update this test to follow it")
+    });
+    let rest = &source[start..];
+    let end = rest
+        .find("\n}\n")
+        .unwrap_or_else(|| panic!("`{signature}` has no closing brace at column 0"));
+    &rest[..end + 3]
+}
+
+/// One function that creates (or renames into) a tmux session and then leans
+/// on a reconcile to register the row.
+struct CreateSite {
+    /// Named in the failure message.
+    what: &'static str,
+    source: &'static str,
+    signature: &'static str,
+    /// Every tmux call in the body that leaves the name live. All must come
+    /// BEFORE the `record_tmux_created` call, so a create that fails its `?`
+    /// never forgets a real kill.
+    tmux: &'static [&'static str],
+    /// The call that registers/restores the row. One of these must follow
+    /// the `record_tmux_created` call — a match BEFORE it does not count
+    /// (`move_session_inner` reconciles the source host long before it
+    /// starts the target).
+    registers: &'static str,
+}
+
+#[test]
+fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
+    const LIFECYCLE: &str = include_str!("lifecycle.rs");
+    const REVIEW: &str = include_str!("review.rs");
+    const MOVE: &str = include_str!("../move_session/mod.rs");
+    let sites = [
+        CreateSite {
+            what: "new_session_inner",
+            source: LIFECYCLE,
+            signature: "pub(super) async fn new_session_inner(",
+            tmux: &["tmux.new_session(&args.name, &path, &pane_cmd)"],
+            registers: "reconcile_one_host(",
+        },
+        CreateSite {
+            what: "rename_session",
+            source: LIFECYCLE,
+            signature: "pub async fn rename_session(",
+            tmux: &["tmux.rename_session(&args.old_name, &args.new_name)"],
+            registers: "reconcile_one_host(",
+        },
+        CreateSite {
+            what: "restart_session",
+            source: LIFECYCLE,
+            // All three arms of the respawn match, so the call has to sit
+            // after the whole match and not inside one branch.
+            signature: "pub async fn restart_session(",
+            tmux: &[
+                "tmux.new_session(&args.name, std::path::Path::new(&rep.cwd)",
+                "tmux.respawn_pane_in(&args.name",
+                "tmux.restart_session(&args.name, &pane_cmd)",
+            ],
+            registers: "reconcile_one_host(",
+        },
+        CreateSite {
+            what: "recreate_session",
+            source: LIFECYCLE,
+            signature: "pub async fn recreate_session(",
+            tmux: &["tmux.new_session(&sess.tmux_name"],
+            // This one restores its own row instead of reconciling; the call
+            // is here so the invariant holds for every tmux create.
+            registers: "restore_session(",
+        },
+        CreateSite {
+            what: "spawn_review",
+            source: REVIEW,
+            signature: "pub async fn spawn_review(",
+            tmux: &["tmux.new_session("],
+            registers: "reconcile_one_host(",
+        },
+        CreateSite {
+            what: "move_session_inner (the target host)",
+            source: MOVE,
+            signature: "async fn move_session_inner(",
+            tmux: &[".start_target("],
+            registers: ".refresh_host(store, &target)",
+        },
+    ];
+
+    const WHY: &str = "without it, a kill and a re-create of the same tmux name in the same \
+                       unix second leave the reconcile refusing to insert the row, and the \
+                       caller fails with \"vanished after creation\" while the tmux session \
+                       is really running on the host";
+    for site in &sites {
+        let body = item_source(site.source, site.signature);
+        let forget = body
+            .find("record_tmux_created(")
+            .unwrap_or_else(|| panic!("{} no longer calls record_tmux_created — {WHY}", site.what));
+        // Searched only in what FOLLOWS the forget: an occurrence before it
+        // proves nothing, and moving the forget past the last one must fail.
+        assert!(
+            body[forget..].contains(site.registers),
+            "{}: record_tmux_created must come BEFORE `{}` — {WHY}",
+            site.what,
+            site.registers
+        );
+        for marker in site.tmux {
+            let created = body.find(marker).unwrap_or_else(|| {
+                panic!(
+                    "{}: `{marker}` is gone — update this test to follow it",
+                    site.what
+                )
+            });
+            assert!(
+                created < forget,
+                "{}: record_tmux_created must come AFTER `{marker}`, so a create that \
+                 fails never forgets a real kill",
+                site.what
+            );
+        }
+    }
+}
+
+#[test]
+fn item_source_stops_at_the_function_it_was_asked_for() {
+    let src = "fn a() {\n    if x {\n        mine();\n    }\n}\n\nfn b() {\n    neighbour();\n}\n";
+    let a = item_source(src, "fn a(");
+    assert!(a.contains("mine()"), "the whole body: {a:?}");
+    assert!(
+        !a.contains("neighbour()"),
+        "a neighbour's call must not satisfy an assertion about this function: {a:?}"
+    );
+    assert!(
+        a.contains("if x {\n        mine();\n    }\n"),
+        "a nested closing brace must not end the item: {a:?}"
+    );
+    let b = item_source(src, "fn b(");
+    assert!(b.contains("neighbour()") && !b.contains("mine()"), "{b:?}");
+}

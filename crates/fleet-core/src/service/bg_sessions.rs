@@ -452,7 +452,7 @@ mod tests {
         {
             let s = store.lock().unwrap();
             s.upsert_host("local").unwrap();
-            s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5, "bg")
+            s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5, "bg", 5)
                 .unwrap();
         }
         let row = stamp_bg_row(&store, "u1", "Review the auth PR, carefully!").expect("row");
@@ -484,6 +484,7 @@ mod tests {
                     Some("working"),
                     5,
                     "bg",
+                    5,
                 )
                 .unwrap();
             let plain = s
@@ -629,6 +630,7 @@ mod tests {
             Some(status),
             5,
             kind,
+            5,
         )
         .unwrap()
     }

@@ -349,6 +349,7 @@ mod tests {
                 Some("blocked"),
                 1,
                 "external",
+                1,
             )
             .unwrap();
         // A fleet tmux session, blocked.

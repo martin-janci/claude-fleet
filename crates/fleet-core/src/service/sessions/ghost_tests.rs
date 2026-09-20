@@ -175,7 +175,7 @@ fn set_friendly_name_works_on_bg_session_rows() {
     {
         let s = store.lock().unwrap();
         s.upsert_host("local").unwrap();
-        s.upsert_bg_session("local", &bg_name, None, uuid, Some("working"), 1, "bg")
+        s.upsert_bg_session("local", &bg_name, None, uuid, Some("working"), 1, "bg", 1)
             .unwrap();
     }
     let row = set_session_friendly_name(

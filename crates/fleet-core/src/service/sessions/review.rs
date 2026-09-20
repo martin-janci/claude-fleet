@@ -71,6 +71,9 @@ pub async fn spawn_review(
     )
     .await?;
 
+    // The review name is live now; clear any kill of it so step 3 may
+    // insert the row (the suffix makes a collision unlikely, not impossible).
+    record_tmux_created(store, &source.host_alias, &review_name);
     // 3. Register via per-host reconcile.
     reconcile_one_host(store, ssh, &source.host_alias).await?;
 

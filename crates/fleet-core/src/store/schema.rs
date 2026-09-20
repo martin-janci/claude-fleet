@@ -548,6 +548,7 @@ mod tests {
         let store = Store {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
+            kills: Default::default(),
         };
         assert!(store.has_table("handoffs").unwrap());
         assert!(session_columns(&store).contains(&"frozen_scrollback".to_string()));
@@ -613,6 +614,7 @@ mod tests {
         let store = Store {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
+            kills: Default::default(),
         };
         store.migrate().unwrap();
         let (n, src, started): (i64, String, i64) = store
@@ -838,6 +840,7 @@ mod tests {
         Store {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
+            kills: Default::default(),
         }
     }
 
@@ -1708,6 +1711,7 @@ mod tests {
         let s = Store {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
+            kills: Default::default(),
         };
         assert_eq!(s.schema_version().unwrap(), SEED_AT);
         assert!(!s.has_table("worktree_parent_fingerprints").unwrap());
