@@ -48,6 +48,7 @@
   import { attentionIdleMinutes } from './notify';
   import { push, pushError } from './toasts';
   import { hubStatus, hubBlock } from './hub';
+  import { hubConnection, connectionBanner } from './hub_connection';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
@@ -361,6 +362,18 @@
   // E_LOCAL_ONLY in remote mode (`commands/projects.rs`, `commands/sessions.rs`).
   const addProjectBlocked = $derived(hubBlock('add_project', $hubStatus));
   const purgeProjectBlocked = $derived(hubBlock('purge_project', $hubStatus));
+
+  // While the hub's wire contract is outside this build's range, every list
+  // load fails with `E_HUB_CONTRACT` and never will heal itself (unlike
+  // `reconnecting`/`offline`, where the stores already hold a real last-known
+  // list). An empty tree then reads as "you have no projects" instead of
+  // "this couldn't load" — so borrow the connection banner's own sentence for
+  // this state rather than inventing a second wording.
+  const hubSkewEmptyMessage = $derived(
+    $hubConnection.state === 'hub_too_old' || $hubConnection.state === 'hub_too_new'
+      ? connectionBanner($hubConnection, $hubStatus.url)
+      : null,
+  );
 
   /** Host the open project picker preselects (the Hosts view's `n`). */
   let pickerHost: string | undefined = $state(undefined);
@@ -718,10 +731,11 @@
         {/each}
       </ul>
     {:else if !loadError && orphanSessions.length === 0}
-      <p class="empty">
-        {$projects.length === 0
-          ? 'No projects yet. Set a projects base in Settings → Projects, or click ↻ to scan.'
-          : 'No active sessions. Click + below to start one.'}
+      <p class="empty" data-testid="sidebar-empty">
+        {hubSkewEmptyMessage ??
+          ($projects.length === 0
+            ? 'No projects yet. Set a projects base in Settings → Projects, or click ↻ to scan.'
+            : 'No active sessions. Click + below to start one.')}
       </p>
     {/if}
 

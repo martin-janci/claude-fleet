@@ -68,6 +68,8 @@ import { hosts, loadHosts, hostFilter, resetTombstonesForTests as resetHostTombs
 import { accounts, loadAccounts } from './accounts';
 import { onboardingDismissed } from './onboarding';
 import { toasts, clearToasts } from './toasts';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: { args?: { id?: number; new_name?: string; alias?: string } }) => {
@@ -117,6 +119,8 @@ beforeEach(() => {
   showBgAgents.set(true);
   showRowDetails.set(true);
   selectSession(null);
+  hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
   // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
   // (check_local_prereqs, tunnel_status, mcp_status).
   onboardingDismissed.set(true);
@@ -1414,5 +1418,64 @@ describe('Outside fleet group', () => {
     render(Sidebar);
     await tick(); await tick();
     expect(anchorEl('bg-session')).toBeDefined();
+  });
+});
+
+// #195: cold start into a hub whose wire contract this build cannot use
+// (`E_HUB_CONTRACT` on every list load) used to leave the sidebar showing
+// its ordinary "No projects yet" empty state right beside the banner that
+// already explains what is wrong — reading as "you have no sessions".
+describe('Sidebar: a hub contract skew', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  it('shows the connection banner’s own sentence instead of "No projects yet"', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'hub_too_old', hub_contract: 1, min_contract: 3 });
+    mockBackend([], []);
+    render(Sidebar);
+    await tick(); await tick();
+    const empty = await screen.findByTestId('sidebar-empty');
+    expect(empty.textContent).not.toContain('No projects yet');
+    expect(empty.textContent).toContain('fleet.example.com');
+    expect(empty.textContent?.toLowerCase()).toContain('update the hub');
+  });
+
+  it('a too-new hub says to update this app instead', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'hub_too_new', hub_contract: 9, max_contract: 3 });
+    mockBackend([], []);
+    render(Sidebar);
+    await tick(); await tick();
+    const empty = await screen.findByTestId('sidebar-empty');
+    expect(empty.textContent?.toLowerCase()).toContain('update this app');
+  });
+
+  it('a connected hub with no skew renders the ordinary empty state', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'connected' });
+    mockBackend([], []);
+    render(Sidebar);
+    await tick(); await tick();
+    const empty = await screen.findByTestId('sidebar-empty');
+    expect(empty.textContent).toContain('No projects yet');
+  });
+
+  it('standalone mode is untouched', async () => {
+    mockBackend([], []);
+    render(Sidebar);
+    await tick(); await tick();
+    const empty = await screen.findByTestId('sidebar-empty');
+    expect(empty.textContent).toContain('No projects yet');
   });
 });

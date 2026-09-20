@@ -771,3 +771,61 @@ describe('HostsView: what the former Settings hosts table covered', () => {
     expect(calls('probe_host')[0][1]).toEqual({ args: { alias: 'claude-fleet-trn' } });
   });
 });
+
+// #195: the detail pane's own empty state ("No hosts yet — add one.") shares
+// HostsList's problem when `$hosts` never arrived because of a contract
+// skew — and, unfixed, it would say the opposite of HostsList's corrected
+// message in the same view.
+describe('HostsView: a hub contract skew', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+  });
+
+  it('the detail pane shows the connection banner’s sentence instead of "No hosts yet"', async () => {
+    hosts.set([]);
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'hub_too_old', hub_contract: 1, min_contract: 3 });
+    mount();
+    await tick();
+    const empty = screen.getByTestId('hosts-detail-empty');
+    expect(empty.textContent).not.toContain('No hosts yet');
+    expect(empty.textContent?.toLowerCase()).toContain('update the hub');
+  });
+
+  it('standalone with no hosts is untouched', async () => {
+    hosts.set([]);
+    mount();
+    await tick();
+    expect(screen.getByTestId('hosts-detail-empty').textContent).toContain('No hosts yet');
+  });
+
+  // M2: a skew discovered mid-session (the hub was compatible at load time,
+  // real hosts already sit in the list) must not bump "Select a host." for
+  // a sentence about a load that already happened. Nothing is selected only
+  // when the filter narrows the visible list to zero, since HostsView
+  // otherwise always auto-selects a host once any are loaded.
+  it('with real hosts already loaded, "Select a host." wins over the skew sentence', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'hub_too_new', hub_contract: 9, max_contract: 3 });
+    mount();
+    await tick();
+    const filter = screen.getByTestId('hosts-filter') as HTMLInputElement;
+    await fireEvent.input(filter, { target: { value: 'zzz-no-such-host' } });
+    await tick();
+    expect(screen.getByTestId('hosts-detail-empty').textContent).toBe('Select a host.');
+  });
+});
