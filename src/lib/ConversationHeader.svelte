@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   // Sticky bar above the Conversations tab thread: conversation switcher,
   // context meter, model, status and last notable event (spec §6 / Task 3).
   import type { SessionRow } from './sessions';
@@ -64,14 +65,41 @@
       pick(c);
     }
   }
+  // Roving focus over the options: a listbox is walked with the arrows, not
+  // by tabbing through every past conversation.
+  let focusIndex = $state(0);
+  let items = $state<Array<HTMLLIElement | undefined>>([]);
+  function moveFocus(to: number) {
+    if (entries.length === 0) return;
+    focusIndex = Math.max(0, Math.min(to, entries.length - 1));
+    items[focusIndex]?.focus();
+  }
   function onMenuKey(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       open = false;
       button?.focus();
+      return;
     }
+    const to =
+      e.key === 'ArrowDown' ? focusIndex + 1
+      : e.key === 'ArrowUp' ? focusIndex - 1
+      : e.key === 'Home' ? 0
+      : e.key === 'End' ? entries.length - 1
+      : null;
+    if (to === null) return;
+    e.preventDefault();
+    moveFocus(to);
   }
   $effect(() => {
-    if (open) menu?.focus();
+    if (!open) return;
+    untrack(() => {
+      // Open on the entry the user is looking at, not blindly on the first.
+      const at = entries.findIndex(isSelected);
+      focusIndex = at === -1 ? 0 : at;
+      // No entries yet: the list itself takes focus so Escape still lands.
+      if (entries.length === 0) menu?.focus();
+      else items[focusIndex]?.focus();
+    });
   });
   // Close the menu on an outside pointerdown.
   $effect(() => {
@@ -98,16 +126,17 @@
     >
     {#if open}
       <ul class="menu" role="listbox" tabindex="-1" data-testid="conv-switcher-menu" bind:this={menu} onkeydown={onMenuKey}>
-        {#each entries as c (c.id)}
+        {#each entries as c, i (c.id)}
           <li
             role="option"
             aria-selected={isSelected(c)}
             class:selected={isSelected(c)}
             data-testid="conv-switcher-item"
             data-current={c.current}
+            bind:this={items[i]}
             onclick={() => pick(c)}
             onkeydown={(e) => onItemKey(e, c)}
-            tabindex="0"
+            tabindex={i === focusIndex ? 0 : -1}
           >
             <span class="t">{conversationTitle(c)}</span>
             {#if c.first_prompt}<span class="p">{c.first_prompt}</span>{/if}
@@ -194,8 +223,14 @@
     left: 0;
     z-index: 3;
     min-width: 280px;
+    /* Never wider than the pane the chat is in (see the inline-size
+       container on .conversation-panel), however wide the window is. The
+       height stays on the viewport: an inline-size container answers no
+       block-axis query, so cqh there would silently mean vh anyway. */
+    max-width: 90cqw;
     max-height: 50vh;
     overflow: auto;
+    overscroll-behavior: contain;
     margin: 0;
     padding: 0.25rem 0;
     list-style: none;
@@ -245,10 +280,10 @@
   }
   .chip[data-status='compacting'],
   .chip[data-status='blocked'] {
-    color: #e6a23c;
+    color: var(--usage-warn);
   }
   .chip[data-status='failed'] {
-    color: #e64a4a;
+    color: var(--usage-crit);
   }
   .muted {
     overflow: hidden;

@@ -41,10 +41,12 @@
     sameConversation,
     isPinned,
     emptyStateText,
+    emptyStateHint,
     relativeTime,
     groupItems,
     toolGroupLabel,
     isLongPrompt,
+    PROMPT_CLAMP_LINES,
     turnDuration,
     composerStatus,
     transcriptCarries,
@@ -72,6 +74,7 @@
     type SlashCommand,
     type ActivityProbe,
   } from './conversation';
+  import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
   import { hubStatus, ownsTheFleet } from './hub';
   import Markdown from './MarkdownView.svelte';
 
@@ -256,7 +259,7 @@
     findOpen = false;
     findQuery = '';
     findIndex = 0;
-    clearHighlights();
+    clearHighlights(hlNames);
   }
 
   /** resetView plus the send and probe state of the current conversation;
@@ -523,6 +526,19 @@
     const el = root;
     if (!el) return;
     function onKey(e: KeyboardEvent) {
+      // Escape dismisses find wherever focus sits in the panel — clicking a
+      // match moves focus into the thread, and the bar must not strand
+      // there. An open menu owns the key first, so one Escape closes one
+      // thing. The open menus are checked directly rather than through
+      // `defaultPrevented`: Svelte delegates `onkeydown` to the document, so
+      // this listener runs before the handler that would mark it handled.
+      if (e.key === 'Escape') {
+        if (findOpen && !slashOpen && !turnsOpen) {
+          e.preventDefault();
+          closeFind();
+        }
+        return;
+      }
       const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
       if (!mod || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return;
       // Nothing to search while the thread is loading or empty.
@@ -545,78 +561,20 @@
   // API where it exists; elsewhere (jsdom, older engines) the row outline
   // is the only highlight.
   const hlSuffix = ++panelSeq;
-  const HL_ALL = `conv-find-${hlSuffix}`;
-  const HL_CURRENT = `conv-find-current-${hlSuffix}`;
+  const hlNames = highlightNames(hlSuffix);
   // `::highlight()` names cannot be dynamic in the component's stylesheet:
   // each panel adds (and on unmount removes) the two rules for its own names.
   $effect(() => {
     const el = document.createElement('style');
     el.dataset.convFind = String(hlSuffix);
-    el.textContent =
-      `::highlight(${HL_ALL}) { background-color: color-mix(in srgb, #e6a23c 35%, transparent); }\n` +
-      `::highlight(${HL_CURRENT}) { background-color: color-mix(in srgb, #e6a23c 75%, transparent); color: var(--bg); }`;
+    el.textContent = highlightCss(hlNames);
     document.head.appendChild(el);
     return () => el.remove();
   });
-  const HL_MAX_RANGES = 2_000;
-  function highlightRegistry(): { set(n: string, h: unknown): void; delete(n: string): void } | null {
-    try {
-      const reg = (globalThis.CSS as unknown as { highlights?: unknown } | undefined)?.highlights;
-      if (!reg || typeof (globalThis as { Highlight?: unknown }).Highlight !== 'function') return null;
-      return reg as { set(n: string, h: unknown): void; delete(n: string): void };
-    } catch {
-      return null;
-    }
-  }
-  function clearHighlights() {
-    const reg = highlightRegistry();
-    if (!reg) return;
-    reg.delete(HL_ALL);
-    reg.delete(HL_CURRENT);
-  }
   $effect(() => {
-    const q = findQuery.trim().toLowerCase();
-    const keys = matchKeys;
-    const cur = currentMatch;
-    const reg = highlightRegistry();
-    if (!reg || !scroller || keys.size === 0 || q === '') {
-      clearHighlights();
-      return;
-    }
-    try {
-      const all: Range[] = [];
-      const current: Range[] = [];
-      for (const el of Array.from(scroller.querySelectorAll<HTMLElement>('[data-row-key]'))) {
-        const key = el.dataset.rowKey ?? '';
-        if (!keys.has(key)) continue;
-        // Only the conversation's own text: not button labels (Copy, Show
-        // more, a tool row's chrome), times, other controls or hidden
-        // chrome (a lone call's group summary).
-        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
-          acceptNode: (n) =>
-            n.parentElement?.closest('button, time, input, textarea, select, [role="button"], [aria-hidden="true"]')
-              ? NodeFilter.FILTER_REJECT
-              : NodeFilter.FILTER_ACCEPT,
-        });
-        for (let n = walker.nextNode(); n && all.length < HL_MAX_RANGES; n = walker.nextNode()) {
-          const text = (n.textContent ?? '').toLowerCase();
-          for (let at = text.indexOf(q); at !== -1 && all.length < HL_MAX_RANGES; at = text.indexOf(q, at + q.length)) {
-            const r = document.createRange();
-            r.setStart(n, at);
-            r.setEnd(n, at + q.length);
-            all.push(r);
-            if (key === cur) current.push(r);
-          }
-        }
-      }
-      const H = (globalThis as unknown as { Highlight: new (...r: Range[]) => unknown }).Highlight;
-      reg.set(HL_ALL, new H(...all));
-      reg.set(HL_CURRENT, new H(...current));
-    } catch {
-      clearHighlights();
-    }
+    paintHighlights(scroller, hlNames, { keys: matchKeys, current: currentMatch, query: findQuery });
   });
-  $effect(() => () => clearHighlights());
+  $effect(() => () => clearHighlights(hlNames));
 
   /** Turn index: jump to a turn and close the list. */
   function pickTurn(key: string) {
@@ -628,7 +586,22 @@
       e.preventDefault();
       turnsOpen = false;
       turnsButton?.focus();
+      return;
     }
+    // Arrow / Home / End walk the list: a long thread must not need one Tab
+    // per turn. The ends hold rather than wrap, so a held arrow stops.
+    const rows = Array.from(turnsList?.querySelectorAll<HTMLButtonElement>('button') ?? []);
+    if (rows.length === 0) return;
+    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const to =
+      e.key === 'ArrowDown' ? at + 1
+      : e.key === 'ArrowUp' ? at - 1
+      : e.key === 'Home' ? 0
+      : e.key === 'End' ? rows.length - 1
+      : null;
+    if (to === null) return;
+    e.preventDefault();
+    rows[Math.max(0, Math.min(to, rows.length - 1))]?.focus();
   }
   $effect(() => {
     if (turnsOpen) turnsList?.querySelector('button')?.focus();
@@ -711,12 +684,14 @@
     return () => clearInterval(t);
   });
 
-  const empty = $derived(
-    viewing !== null && errorCode === 'E_NO_TRANSCRIPT'
-      ? 'Transcript no longer on host'
-      : emptyStateText(errorCode, !!session.claude_session_id),
-  );
+  const gone = $derived(viewing !== null && errorCode === 'E_NO_TRANSCRIPT');
+  const empty = $derived(gone ? 'Transcript no longer on host' : emptyStateText(errorCode, !!session.claude_session_id));
   const canPrompt = $derived(!hasNoPane(session));
+  const emptyHint = $derived(
+    gone
+      ? 'The host no longer keeps this conversation’s transcript file.'
+      : emptyStateHint(errorCode, !!session.claude_session_id, canPrompt),
+  );
   // The scroller (and so the thread) is on screen: find has something to search.
   const threadShown = $derived(!(empty && !(pending && viewing === null)) && !loading);
 
@@ -744,6 +719,10 @@
   const suggestCompact = $derived(ctxLevel === 'warn' || ctxLevel === 'crit');
   const isCompactPreset = (p: ComposerPreset) => /^\/compact\b/.test(p.text.trim());
   const slashMatches = $derived(slashDismissedFor === draft ? [] : matchSlashCommands(draft));
+  // Ids for the combobox wiring, per panel instance so two panels never hand
+  // the same id to assistive tech.
+  const SLASH_LIST_ID = `conv-slash-list-${hlSuffix}`;
+  const slashOptionId = (i: number) => `conv-slash-opt-${hlSuffix}-${i}`;
   const history = $derived(promptHistory(conv, pending));
 
   /** ArrowUp / ArrowDown recall. Returns true when the key was consumed. */
@@ -949,6 +928,22 @@
   const CMD_CLAMP_LINES = 8;
   const isLongOutput = (out: string) => out.split('\n').length > CMD_CLAMP_LINES;
 
+  /** Grow the box with its content, chat-composer style, so a long prompt
+   *  stays visible while it is typed. The CSS min/max-height are the floor
+   *  and the ceiling; past the ceiling the box scrolls. */
+  function autoGrow(node: HTMLTextAreaElement, _value: string) {
+    const fit = () => {
+      node.style.height = 'auto';
+      const h = node.scrollHeight;
+      // 0 means nothing measurable (jsdom, a detached or hidden node): an
+      // explicit 0px would collapse the composer, so leave the CSS alone.
+      if (h > 0) node.style.height = `${h}px`;
+      else node.style.removeProperty('height');
+    };
+    fit();
+    return { update: fit };
+  }
+
   function togglePrompt(key: string) {
     const next = new Set(expanded);
     if (next.has(key)) next.delete(key);
@@ -972,12 +967,28 @@
   {/if}
   <div class="thread-area">
   {#if empty && !(pending && viewing === null)}
-    <p class="muted" data-testid="conv-empty">{empty}</p>
+    <div class="empty-state" data-testid="conv-empty-state">
+      <p class="empty-title" data-testid="conv-empty">{empty}</p>
+      {#if emptyHint}<p class="empty-hint">{emptyHint}</p>{/if}
+    </div>
   {:else if loading}
     <p class="muted">Loading…</p>
   {:else}
-    <!-- tabindex -1: a click in the thread focuses it, so Cmd/Ctrl+F finds -->
-    <div class="scroller" data-testid="conv-scroller" tabindex="-1" bind:this={scroller} onscroll={onScroll}>
+    <!-- A scrollable region has to be in the tab order, or the transcript
+         can only be scrolled with a pointer; being focusable is also what
+         lets Cmd/Ctrl+F find from inside the thread. The rule below does
+         not know about scroll containers, which are the documented
+         exception: a region that scrolls must be focusable. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <div
+      class="scroller"
+      data-testid="conv-scroller"
+      role="region"
+      aria-label="Conversation transcript"
+      tabindex="0"
+      bind:this={scroller}
+      onscroll={onScroll}
+    >
       {#if findOpen}
         <div class="find" data-testid="conv-find">
           <input
@@ -1083,7 +1094,11 @@
                       {/if}
                     </span>
                   </div>
-                  <div class="prompt-text" class:clamped={long && !expanded.has(turnKey(turn, i))}>{turn.prompt}</div>
+                  <div
+                    class="prompt-text"
+                    class:clamped={long && !expanded.has(turnKey(turn, i))}
+                    style:--clamp-lines={PROMPT_CLAMP_LINES}
+                  >{turn.prompt}</div>
                   {#if long}
                     <button type="button" class="linkish" data-testid="conv-prompt-toggle" onclick={() => togglePrompt(turnKey(turn, i))}
                       >{expanded.has(turnKey(turn, i)) ? 'Show less' : 'Show more'}</button
@@ -1129,7 +1144,10 @@
                     <div class="command" data-testid="conv-command">
                       <code>{g.name}{g.args ? ` ${g.args}` : ''}</code>
                       {#if g.output}
-                        <pre class="command-out" class:clamped={longOut && !expanded.has(cmdKey)}>{g.output}</pre>
+                        <pre
+                          class="command-out"
+                          class:clamped={longOut && !expanded.has(cmdKey)}
+                          style:--clamp-lines={CMD_CLAMP_LINES}>{g.output}</pre>
                         {#if longOut}
                           <button type="button" class="linkish" data-testid="conv-command-toggle" onclick={() => togglePrompt(cmdKey)}
                             >{expanded.has(cmdKey) ? 'Show less' : 'Show more'}</button
@@ -1200,13 +1218,22 @@
       }}
     >
       {#if slashOpen}
-        <ul class="slash-menu" role="listbox" aria-label="Claude Code commands" data-testid="conv-slash-menu">
+        <ul class="slash-menu" role="listbox" id={SLASH_LIST_ID} aria-label="Claude Code commands" data-testid="conv-slash-menu">
           {#each slashMatches as c, i (c.name)}
-            <li role="option" aria-selected={i === slashIndex} class:active={i === slashIndex} data-testid="conv-slash-item">
-              <!-- keyboard handling lives on the textarea (arrows / Tab / Enter);
-                   the button only takes the mouse, and mousedown is swallowed
-                   so the textarea keeps focus -->
-              <button type="button" tabindex="-1" onmousedown={(e) => e.preventDefault()} onclick={() => acceptSlash(c)}>
+            <li role="presentation" class:active={i === slashIndex} data-testid="conv-slash-item">
+              <!-- The button IS the option: role="option" must not wrap an
+                   interactive element, and the box points at this id through
+                   aria-activedescendant. Keyboard handling lives on the
+                   textarea (arrows / Tab / Enter); the button only takes the
+                   mouse, and mousedown is swallowed so the box keeps focus. -->
+              <button
+                type="button"
+                role="option"
+                id={slashOptionId(i)}
+                aria-selected={i === slashIndex}
+                tabindex="-1"
+                onmousedown={(e) => e.preventDefault()}
+                onclick={() => acceptSlash(c)}>
                 <span class="slash-name">/{c.name}</span>
                 <span class="slash-desc">{c.description}</span>
               </button>
@@ -1249,20 +1276,22 @@
       <div class="composer-row">
         <textarea
           data-testid="conv-composer-input"
+          aria-label="Prompt"
+          aria-controls={slashOpen ? SLASH_LIST_ID : undefined}
+          aria-activedescendant={slashOpen ? slashOptionId(Math.min(slashIndex, slashMatches.length - 1)) : undefined}
           bind:this={box}
           bind:value={draft}
           oninput={onComposerInput}
           onkeydown={onComposerKey}
           rows="2"
+          use:autoGrow={draft}
           placeholder="Send a prompt to this session (Enter to send, Shift+Enter for a new line, ↑ recalls earlier prompts)"
           disabled={sending || viewing !== null}
         ></textarea>
-        <button type="submit" data-testid="conv-composer-send" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>
+        <button type="submit" data-testid="conv-composer-send" aria-keyshortcuts="Enter" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>
       </div>
       {#if statusNote}
-        <div class="composer-foot">
-          <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
-        </div>
+        <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
       {/if}
     </form>
   {:else}
@@ -1272,6 +1301,13 @@
 
 <style>
   .conversation-panel {
+    /* The reading column every part of the thread lines up with: the turns,
+       the sticky toolbar, the chips, the slash menu and the composer. */
+    --chat-col: 80ch;
+    /* The tab is a resizable pane, not the window: what adapts below has to
+       ask this element's width, so the whole chat is one query container. */
+    container-type: inline-size;
+    container-name: chat;
     position: relative;
     height: 100%;
     display: flex;
@@ -1290,6 +1326,9 @@
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
+    /* The end of the transcript is the end of the scroll: do not hand the
+       rest of the gesture to whatever is behind the pane. */
+    overscroll-behavior: contain;
   }
   .scroller:focus {
     outline: none;
@@ -1302,7 +1341,9 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    padding: 0.25rem 1.1rem;
+    /* Full-bleed background and rule, but the controls sit over the column
+       they act on rather than out at the pane's edge. */
+    padding: 0.25rem max(1.1rem, calc((100% - var(--chat-col)) / 2));
     border-bottom: 1px solid var(--border);
     background: var(--bg);
     font-size: 0.74rem;
@@ -1356,9 +1397,10 @@
     right: 0;
     top: calc(100% + 0.25rem);
     z-index: 3;
-    width: min(60ch, 80vw);
+    width: min(60ch, 90cqw);
     max-height: 22rem;
     overflow: auto;
+    overscroll-behavior: contain;
     margin: 0;
     padding: 0.25rem 0;
     list-style: none;
@@ -1440,7 +1482,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.35rem;
-    max-width: 80ch;
+    max-width: var(--chat-col);
     margin: 0 auto 0.4rem;
   }
   .chip {
@@ -1461,21 +1503,23 @@
     cursor: default;
   }
   .chip.stuck {
-    border-color: #e6a23c;
-    color: #e6a23c;
+    border-color: var(--usage-warn);
+    color: var(--usage-warn);
   }
   .composer-row {
     display: flex;
     align-items: flex-end;
     gap: 0.5rem;
-    max-width: 80ch;
+    max-width: var(--chat-col);
     margin: 0 auto;
   }
   .composer textarea {
     flex: 1 1 auto;
     min-height: 2.6rem;
     max-height: 12rem;
-    resize: vertical;
+    /* The box sizes itself to the draft (see autoGrow); a manual drag would
+       only be overwritten on the next keystroke. */
+    resize: none;
     padding: 0.45rem 0.6rem;
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -1506,9 +1550,10 @@
   }
   .slash-menu {
     list-style: none;
-    max-width: 80ch;
+    max-width: var(--chat-col);
     max-height: 14rem;
     overflow: auto;
+    overscroll-behavior: contain;
     margin: 0 auto 0.4rem;
     padding: 0.25rem 0;
     border: 1px solid var(--border);
@@ -1545,32 +1590,22 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .composer-error,
-  .composer-status {
-    max-width: 80ch;
+  .composer-error {
+    max-width: var(--chat-col);
     margin: 0 auto 0.35rem;
+    color: var(--usage-crit);
     font-size: 0.75rem;
   }
-  .composer-error {
-    color: #e64a4a;
-  }
-  .composer-foot {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    max-width: 80ch;
-    margin: 0.35rem auto 0;
-  }
   .composer-status {
-    margin: 0;
+    max-width: var(--chat-col);
+    margin: 0.35rem auto 0;
     color: var(--fg-muted);
     font-size: 0.75rem;
   }
   .chip.suggest {
-    border-color: var(--usage-warn, #e6a23c);
+    border-color: var(--usage-warn);
     color: var(--fg);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--usage-warn, #e6a23c) 25%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--usage-warn) 25%, transparent);
   }
   .indicator {
     display: flex;
@@ -1617,6 +1652,10 @@
       animation: none;
       opacity: 0.7;
     }
+    .copy-slot,
+    .tools summary::before {
+      transition: none;
+    }
   }
   .blocked {
     display: flex;
@@ -1624,10 +1663,10 @@
     gap: 0.75rem;
     margin: 0.35rem 0 0.6rem;
     padding: 0.5rem 0.75rem;
-    border: 1px solid #e6a23c;
+    border: 1px solid var(--usage-warn);
     border-left-width: 3px;
     border-radius: 6px;
-    background: color-mix(in srgb, #e6a23c 10%, var(--bg-pane));
+    background: color-mix(in srgb, var(--usage-warn) 10%, var(--bg-pane));
     font-size: 0.8rem;
   }
   .blocked-text {
@@ -1645,7 +1684,7 @@
   .blocked-btn {
     flex: 0 0 auto;
     padding: 0.3rem 0.7rem;
-    border: 1px solid #e6a23c;
+    border: 1px solid var(--usage-warn);
     border-radius: 6px;
     background: transparent;
     color: var(--fg);
@@ -1653,14 +1692,36 @@
     cursor: pointer;
   }
   .blocked-btn:hover {
-    background: color-mix(in srgb, #e6a23c 20%, var(--bg-pane));
+    background: color-mix(in srgb, var(--usage-warn) 20%, var(--bg-pane));
   }
   .thread {
-    max-width: 80ch;
+    max-width: var(--chat-col);
     margin: 0 auto;
     padding: 1rem 1.1rem 2.5rem;
   }
   .muted { color: var(--fg-muted); font-style: italic; font-size: 0.8rem; margin: 0.6rem; }
+  .empty-state {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
+    padding: 1.5rem 1.1rem;
+    text-align: center;
+  }
+  .empty-title {
+    margin: 0;
+    color: var(--fg);
+    font-size: 0.9rem;
+  }
+  .empty-hint {
+    margin: 0;
+    max-width: 44ch;
+    color: var(--fg-muted);
+    font-size: 0.8rem;
+    line-height: 1.5;
+  }
   .truncated { text-align: center; margin: 0 0 1rem; }
   .error-row {
     display: flex;
@@ -1668,7 +1729,7 @@
     gap: 0.5rem;
     margin-bottom: 0.75rem;
   }
-  .err { color: #e64a4a; font-size: 0.8rem; }
+  .err { color: var(--usage-crit); font-size: 0.8rem; }
   .turn {
     padding: 0.2rem 0 1.1rem;
   }
@@ -1714,8 +1775,11 @@
   .prompt-text.clamped {
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 6;
-    line-clamp: 6;
+    /* --clamp-lines comes from PROMPT_CLAMP_LINES, the same constant
+       isLongPrompt decides on: a copy here drifts into a "Show more" over
+       text nothing clipped. */
+    -webkit-line-clamp: var(--clamp-lines);
+    line-clamp: var(--clamp-lines);
     overflow: hidden;
   }
   .linkish {
@@ -1743,7 +1807,7 @@
     font-size: 0.7rem;
   }
   .tools.has-err summary {
-    color: #e64a4a;
+    color: var(--usage-crit);
   }
   .tools {
     margin: 0.3rem 0 0.5rem;
@@ -1831,10 +1895,10 @@
     overflow-wrap: anywhere;
   }
   .event[data-tone='warn'] {
-    color: #e6a23c;
+    color: var(--usage-warn);
   }
   .event[data-tone='error'] {
-    color: #e64a4a;
+    color: var(--usage-crit);
   }
   .compact {
     margin: 0.4rem 0 0.6rem;
@@ -1870,12 +1934,14 @@
     overflow-wrap: anywhere;
   }
   .command-out.clamped {
-    max-height: calc(8 * 1.45em + 0.7rem);
+    /* --clamp-lines comes from CMD_CLAMP_LINES; 1.45em is this block's own
+       line-height and 0.7rem its vertical padding. */
+    max-height: calc(var(--clamp-lines) * 1.45em + 0.7rem);
     overflow: hidden;
   }
   .interrupt {
     margin: 0.3rem 0 0.5rem;
-    color: #e6a23c;
+    color: var(--usage-warn);
     font-size: 0.76rem;
     font-style: italic;
   }
@@ -1899,5 +1965,31 @@
     border-color: var(--accent);
     color: var(--accent);
     font-weight: 600;
+  }
+
+  /* A pane narrow enough that the 1.1rem gutters cost more than they give,
+     and the blocked notice can no longer hold its text and button on one
+     line. */
+  @container chat (max-width: 34rem) {
+    .thread,
+    .composer,
+    .readonly,
+    .viewing,
+    .switch-notice {
+      padding-inline: 0.6rem;
+    }
+    .toolbar,
+    .find {
+      padding-inline: 0.6rem;
+    }
+    .blocked {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.45rem;
+    }
+    .latest {
+      right: 0.5rem;
+      bottom: 0.5rem;
+    }
   }
 </style>

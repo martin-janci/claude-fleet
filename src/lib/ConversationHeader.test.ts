@@ -109,6 +109,28 @@ describe('ConversationHeader', () => {
     expect(screen.queryByTestId('conv-switcher-menu')).toBeNull();
   });
 
+  it('opens on the viewed conversation and walks the list with the arrow keys', async () => {
+    render(ConversationHeader, { session: session(), conversations: list, viewing: 'aaa', lastEvent: null, newerAvailable: false, onSelect: vi.fn() });
+    await fireEvent.click(screen.getByTestId('conv-switcher'));
+    const items = screen.getAllByTestId('conv-switcher-item');
+    // Focus starts on the entry being viewed, not blindly on the first row.
+    expect(document.activeElement).toBe(items[1]);
+    expect(items[1].getAttribute('tabindex')).toBe('0');
+    expect(items[0].getAttribute('tabindex')).toBe('-1');
+
+    await fireEvent.keyDown(screen.getByTestId('conv-switcher-menu'), { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(items[0]);
+    // The ends do not wrap past themselves.
+    await fireEvent.keyDown(screen.getByTestId('conv-switcher-menu'), { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(items[0]);
+    await fireEvent.keyDown(screen.getByTestId('conv-switcher-menu'), { key: 'End' });
+    expect(document.activeElement).toBe(items[1]);
+    await fireEvent.keyDown(screen.getByTestId('conv-switcher-menu'), { key: 'Home' });
+    expect(document.activeElement).toBe(items[0]);
+    await fireEvent.keyDown(screen.getByTestId('conv-switcher-menu'), { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[1]);
+  });
+
   it('an outside pointerdown closes the switcher, an inside one does not', async () => {
     render(ConversationHeader, { session: session(), conversations: list, viewing: null, lastEvent: null, newerAvailable: false, onSelect: vi.fn() });
     await fireEvent.click(screen.getByTestId('conv-switcher'));

@@ -15,7 +15,7 @@ vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
 });
-import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
+import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, type SessionRow } from './sessions';
 import { composerPresets, resetComposerPresets } from './composer_presets';
@@ -637,6 +637,44 @@ describe('ConversationPanel composer', () => {
   });
 });
 
+describe('ConversationPanel composer auto-grow', () => {
+  /** jsdom has no layout: scrollHeight is always 0, so the box's content
+   *  height has to be stubbed for the grow to have anything to measure. */
+  function stubScrollHeight(el: HTMLElement, px: number) {
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => px });
+  }
+
+  it('grows the box to fit the draft and shrinks back when it is sent', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+
+    stubScrollHeight(box, 180);
+    await fireEvent.input(box, { target: { value: 'a\nb\nc\nd\ne\nf' } });
+    expect(box.style.height).toBe('180px');
+
+    // Sending empties the draft: the box must come back down, not stay tall.
+    stubScrollHeight(box, 42);
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(box.value).toBe('');
+    expect(box.style.height).toBe('42px');
+  });
+
+  it('leaves the CSS height alone when the content height cannot be measured', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    // scrollHeight is 0 here (no layout); an explicit 0px height would
+    // collapse the composer, so nothing must be written.
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    expect(box.style.height).toBe('');
+  });
+});
+
 describe('ConversationPanel slash commands', () => {
   async function mountWithDraft(text: string) {
     mockedConv.mockReturnValue(ok(conv()));
@@ -647,6 +685,29 @@ describe('ConversationPanel slash commands', () => {
     await fireEvent.input(box, { target: { value: text } });
     return box;
   }
+
+  it('wires the box to the menu so assistive tech follows the highlighted command', async () => {
+    const box = await mountWithDraft('/');
+    const menu = screen.getByTestId('conv-slash-menu');
+    // The listbox must be reachable from the box, and the highlighted option
+    // must be the one aria-activedescendant names.
+    expect(menu.id).toBeTruthy();
+    expect(box.getAttribute('aria-controls')).toBe(menu.id);
+    const options = within(menu).getAllByRole('option');
+    expect(options[0].id).toBeTruthy();
+    expect(box.getAttribute('aria-activedescendant')).toBe(options[0].id);
+    expect(options[0].getAttribute('aria-selected')).toBe('true');
+
+    await fireEvent.keyDown(box, { key: 'ArrowDown' });
+    expect(box.getAttribute('aria-activedescendant')).toBe(options[1].id);
+    expect(options[1].getAttribute('aria-selected')).toBe('true');
+    expect(options[0].getAttribute('aria-selected')).toBe('false');
+
+    // Closed again, the box points at nothing.
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    expect(box.getAttribute('aria-activedescendant')).toBeNull();
+    expect(box.getAttribute('aria-controls')).toBeNull();
+  });
 
   it('typing a slash opens the command list, a prefix narrows it, plain text closes it', async () => {
     const box = await mountWithDraft('/');
@@ -680,11 +741,13 @@ describe('ConversationPanel slash commands', () => {
 
   it('arrows move the highlight and Tab accepts the highlighted command', async () => {
     const box = await mountWithDraft('/co');
-    const items = screen.getAllByTestId('conv-slash-item');
+    // aria-selected lives on the option itself (the button), not the li.
+    const opts = () => screen.getAllByTestId('conv-slash-item').map((li) => li.querySelector('[role="option"]')!);
+    const items = opts();
     expect(items.length).toBeGreaterThan(1);
     expect(items[0].getAttribute('aria-selected')).toBe('true');
     await fireEvent.keyDown(box, { key: 'ArrowDown' });
-    const after = screen.getAllByTestId('conv-slash-item');
+    const after = opts();
     expect(after[0].getAttribute('aria-selected')).toBe('false');
     expect(after[1].getAttribute('aria-selected')).toBe('true');
     const wanted = after[1].textContent ?? '';
@@ -1678,6 +1741,37 @@ describe('ConversationPanel conversations', () => {
     expect(screen.getByTestId('conv-interrupt').textContent!.trim()).toBe('Interrupted');
   });
 
+  it('clamps prompts and command output to the line counts the module defines', async () => {
+    const longPrompt = Array.from({ length: PROMPT_CLAMP_LINES + 3 }, (_, i) => `p ${i}`).join('\n');
+    const longOut = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: longPrompt,
+              at: TURN1_AT,
+              ended_at: null,
+              items: [{ kind: 'command', name: '/cost', args: null, output: longOut }],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    // The CSS must read its clamp from the module, not carry its own copy:
+    // a changed constant that the stylesheet did not follow shows "Show
+    // more" over text nothing actually clipped.
+    const text = screen.getByTestId('conv-prompt').querySelector('.prompt-text') as HTMLElement;
+    expect(text.classList.contains('clamped')).toBe(true);
+    expect(text.style.getPropertyValue('--clamp-lines')).toBe(String(PROMPT_CLAMP_LINES));
+
+    const out = screen.getByTestId('conv-command').querySelector('pre') as HTMLElement;
+    expect(out.classList.contains('clamped')).toBe(true);
+    expect(Number(out.style.getPropertyValue('--clamp-lines'))).toBeGreaterThan(0);
+  });
+
   it('interleaves timeline events and appends pushed ones', async () => {
     mockedConv.mockReturnValue(
       ok(
@@ -2202,6 +2296,85 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(screen.queryByTestId('conv-turn-index')).toBeNull();
   });
 
+  it('the empty state says what to do about it', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    const { unmount } = render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const state = screen.getByTestId('conv-empty-state');
+    expect(within(state).getByTestId('conv-empty').textContent).toBe('No conversation yet');
+    expect(state.textContent).toContain('Send a prompt below');
+    unmount();
+
+    // A session with no pane has no composer to point at.
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    render(ConversationPanel, { session: session({ kind: 'bg' }), visible: true });
+    await settle();
+    const ro = screen.getByTestId('conv-empty-state');
+    expect(ro.textContent).not.toContain('Send a prompt below');
+    expect(ro.textContent).toContain('outside tmux');
+  });
+
+  it('the transcript is a named region a keyboard can reach and scroll', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const scroller = screen.getByTestId('conv-scroller');
+    // A scrollable region that is not in the tab order cannot be scrolled
+    // without a pointer; and once it is reachable it needs a name.
+    expect(scroller.getAttribute('tabindex')).toBe('0');
+    expect(scroller.getAttribute('role')).toBe('region');
+    expect(scroller.getAttribute('aria-label')).toBeTruthy();
+  });
+
+  it('Escape closes find from anywhere in the panel, but not over a menu that handled it', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-find-button'));
+    await settle();
+    expect(screen.getByTestId('conv-find')).toBeTruthy();
+
+    // Focus has moved into the thread (clicking a match); Escape must still
+    // dismiss the bar rather than leaving it stranded.
+    await fireEvent.keyDown(screen.getByTestId('conv-scroller'), { key: 'Escape' });
+    await settle();
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+
+    // The slash menu handles its own Escape: that must not also close find.
+    await fireEvent.click(screen.getByTestId('conv-find-button'));
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '/' } });
+    expect(screen.getByTestId('conv-slash-menu')).toBeTruthy();
+    await fireEvent.keyDown(box, { key: 'Escape' });
+    await settle();
+    expect(screen.queryByTestId('conv-slash-menu')).toBeNull();
+    expect(screen.getByTestId('conv-find')).toBeTruthy();
+  });
+
+  it('the turn index walks with the arrow keys and Home/End', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-turns-button'));
+    await settle();
+    const list = screen.getByTestId('conv-turn-index');
+    const items = screen.getAllByTestId('conv-turn-index-item');
+    expect(document.activeElement).toBe(items[0]);
+
+    await fireEvent.keyDown(list, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[1]);
+    await fireEvent.keyDown(list, { key: 'End' });
+    expect(document.activeElement).toBe(items[2]);
+    // The ends hold rather than wrap.
+    await fireEvent.keyDown(list, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[2]);
+    await fireEvent.keyDown(list, { key: 'Home' });
+    expect(document.activeElement).toBe(items[0]);
+    await fireEvent.keyDown(list, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(items[0]);
+  });
+
   it('an unfinished tool call in an earlier turn shows "no result"; the running turn counts up', async () => {
     const at = new Date(Date.now() - 3_000).toISOString();
     mockedConv.mockReturnValue(
@@ -2382,5 +2555,17 @@ describe('ConversationPanel detail UX fixes', () => {
       g.CSS = savedCss;
       g.Highlight = savedHl;
     }
+  });
+  it('the composer textarea and Send button carry accessible names and the Enter shortcut', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const box = screen.getByTestId('conv-composer-input');
+    // A placeholder is not an accessible name: it disappears as soon as the
+    // user types, so the field must carry its own label.
+    expect(box.getAttribute('aria-label')).toBe('Prompt');
+    expect(screen.getByTestId('conv-composer-send').getAttribute('aria-keyshortcuts')).toBe('Enter');
   });
 });
