@@ -16,7 +16,6 @@
   import { createDrainLoop } from './terminal_drain';
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
   import { createMouseController } from './terminal_mouse';
-  import { hubStatus, hubBlock, ownsTheFleet } from './hub';
   import TransferChip from './TransferChip.svelte';
   import { fitCells } from './terminal_size';
 
@@ -1057,22 +1056,30 @@
     return style;
   }
 
-  // The hub-mode hint below needs to know whether the selected session's host
-  // is reachable over SSH at all. `selectedSession` only carries `host_alias`,
-  // so look the row up; an unknown host (not yet loaded) falls back to the
-  // ssh hint rather than asserting agent-only reach it hasn't confirmed.
+  // Whether the selected session's host is reachable over SSH at all.
+  // `selectedSession` only carries `host_alias`, so look the row up; an
+  // unknown host (not yet loaded) is treated as `ssh`, which means we try to
+  // attach and let ssh itself say no, rather than refusing on a guess.
   const selectedSessionHostTransport = $derived(
     $selectedSession ? ($hostByAlias.get($selectedSession.host_alias)?.transport ?? 'ssh') : 'ssh',
   );
+  // An agent host is the ONLY session this pane cannot attach. Being a hub
+  // client is not a reason on its own: `pty_open` spawns `ssh <host>` /
+  // `tmux attach` from THIS machine, against this machine's ssh config, and
+  // reads nothing out of the local store — so it works the same in both
+  // modes. An agent host, by contrast, has no SSH route from anywhere: it
+  // dials the hub outbound precisely because nothing can dial it.
+  const cannotAttachSelected = $derived(
+    !!$selectedSession && selectedSessionHostTransport === 'agent',
+  );
 </script>
 
-{#if !ownsTheFleet($hubStatus)}
-  <!-- The spec's named non-goal. The PTY attaches a local `ssh`/`tmux`
-       process; a hub client would need the hub to stream a pane, which is its
-       own design. `pty_open` is guarded on the backend, so mounting the
-       terminal here would put an error toast where a terminal should be —
-       and the honest answer is not "no", it is "from a shell, like this". -->
-  <div class="empty" data-testid="terminal-remote">
+{#if cannotAttachSelected}
+  <!-- No SSH route exists to this host from any machine, so there is no
+       attach to offer — not the local one, and not one via the hub either.
+       The honest answer here really is "you can't from here", unlike the
+       ordinary hub-client case, which attaches exactly as standalone does. -->
+  <div class="empty" data-testid="terminal-no-attach">
     <svg
       class="empty-icon"
       viewBox="0 0 64 64"
@@ -1091,22 +1098,14 @@
       <polyline points="16,32 22,38 16,44" />
       <line x1="27" y1="44" x2="42" y2="44" />
     </svg>
-    <p class="empty-msg">The terminal is local-only.</p>
-    <p class="empty-msg remote-why">{hubBlock('terminal', $hubStatus)}</p>
+    <p class="empty-msg">This session cannot be attached.</p>
     {#if $selectedSession}
-      <p class="transfer-row"><TransferChip session={$selectedSession} /></p>
-    {/if}
-    {#if $selectedSession && selectedSessionHostTransport === 'agent'}
-      <p class="empty-msg" data-testid="terminal-agent-transport">
+      <p class="empty-msg remote-why" data-testid="terminal-agent-transport">
         {$selectedSession.host_alias} (session {$selectedSession.tmux_name}) is reached through
-        fleet-agent, not SSH — there is no SSH route to it from this desktop or from the hub, so
-        this session can't be attached to from here.
+        fleet-agent, not SSH. Nothing can dial that host — which is exactly why it dials the hub
+        instead — so no terminal can attach it: not this one, and not one on the hub either.
       </p>
-    {:else if $selectedSession}
-      <pre class="attach-line" data-testid="terminal-attach-line">ssh {$selectedSession.host_alias}
-tmux attach -t {$selectedSession.tmux_name}</pre>
-    {:else}
-      <p class="empty-msg">Select a session for the command that attaches it.</p>
+      <p class="transfer-row"><TransferChip session={$selectedSession} /></p>
     {/if}
   </div>
 {:else if $selectedSession}
@@ -1525,18 +1524,6 @@ tmux attach -t {$selectedSession.tmux_name}</pre>
     text-align: center;
   }
   .transfer-row { margin: 0 0 0.5rem; }
-  .attach-line {
-    margin: 0;
-    padding: 0.5rem 0.8rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg-pane);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
-    user-select: text;
-    white-space: pre;
-    text-align: left;
-  }
   .err {
     flex: 0 0 auto;
     color: #e64a4a;

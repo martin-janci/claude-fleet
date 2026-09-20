@@ -351,9 +351,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("repo_diff", Verdict::Routed { tool: "repo_diff" }),
     (
         "upload_to_session",
-        Verdict::LocalOnly {
-            instead: "the file is on this machine and the session's host is the hub's to \
-                      reach; copy it there yourself, or drop it on a standalone app",
+        Verdict::SameInBoth {
+            why: "the same story as `pty_open`: the bytes are on this machine and so is the \
+                  `ssh` that carries them, addressed by the alias passed in, reading no \
+                  state.db. It is the drop handler behind the terminal pane, so it has to \
+                  work wherever that pane attaches",
         },
     ),
     ("repo_log", Verdict::Routed { tool: "repo_log" }),
@@ -878,9 +880,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── the terminal, and this process's cancellation registry ──────────────
     (
         "pty_open",
-        Verdict::LocalOnly {
-            instead: "the terminal attaches over this machine's SSH connection to the \
-                      session's host; attach from that host, or from a standalone app",
+        Verdict::SameInBoth {
+            why: "the attach is this machine's own `ssh … tmux attach`, built from the alias \
+                  and tmux name passed in; it reads no state.db and the hub is not in the \
+                  path, so a paired client attaches exactly as a standalone app does. The \
+                  session it cannot attach is one on an AGENT host, which has no SSH route \
+                  from anywhere — the terminal pane declines that one itself",
         },
     ),
     (
