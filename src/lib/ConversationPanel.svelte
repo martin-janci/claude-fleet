@@ -1355,6 +1355,10 @@
     /* The reading column every part of the thread lines up with: the turns,
        the sticky toolbar, the chips, the slash menu and the composer. */
     --chat-col: 80ch;
+    /* The tab is a resizable pane, not the window: what adapts below has to
+       ask this element's width, so the whole chat is one query container. */
+    container-type: inline-size;
+    container-name: chat;
     position: relative;
     height: 100%;
     display: flex;
@@ -1441,7 +1445,7 @@
     right: 0;
     top: calc(100% + 0.25rem);
     z-index: 3;
-    width: min(60ch, 80vw);
+    width: min(60ch, 90cqw);
     max-height: 22rem;
     overflow: auto;
     margin: 0;
@@ -1981,5 +1985,31 @@
     border-color: var(--accent);
     color: var(--accent);
     font-weight: 600;
+  }
+
+  /* A pane narrow enough that the 1.1rem gutters cost more than they give,
+     and the blocked notice can no longer hold its text and button on one
+     line. */
+  @container chat (max-width: 34rem) {
+    .thread,
+    .composer,
+    .readonly,
+    .viewing,
+    .switch-notice {
+      padding-inline: 0.6rem;
+    }
+    .toolbar,
+    .find {
+      padding-inline: 0.6rem;
+    }
+    .blocked {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.45rem;
+    }
+    .latest {
+      right: 0.5rem;
+      bottom: 0.5rem;
+    }
   }
 </style>

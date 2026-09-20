@@ -223,6 +223,11 @@
     left: 0;
     z-index: 3;
     min-width: 280px;
+    /* Never wider than the pane the chat is in (see the inline-size
+       container on .conversation-panel), however wide the window is. The
+       height stays on the viewport: an inline-size container answers no
+       block-axis query, so cqh there would silently mean vh anyway. */
+    max-width: 90cqw;
     max-height: 50vh;
     overflow: auto;
     margin: 0;

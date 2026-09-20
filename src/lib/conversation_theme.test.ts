@@ -59,3 +59,22 @@ describe('chat stylesheet hygiene', () => {
     expect(panel.match(/^\s*\.composer-status[\s,{]/gm) ?? []).toHaveLength(1);
   });
 });
+
+describe('chat sizes itself to its pane', () => {
+  const panel = SOURCES['./ConversationPanel.svelte'];
+  const header = SOURCES['./ConversationHeader.svelte'];
+
+  it('declares a query container on the panel', () => {
+    // The Conversation tab is a resizable pane, not the window: everything
+    // that adapts has to ask the pane's width, not the viewport's.
+    expect(panel).toContain('container-type: inline-size');
+    expect(panel).toContain('@container');
+  });
+
+  it('sizes the pop-ups against the pane rather than the viewport', () => {
+    // A 80vw dropdown inside a narrow pane of a wide window overflows it.
+    expect(panel).not.toMatch(/\d+vw/);
+    expect(header).not.toMatch(/\d+vw/);
+    expect(panel).toMatch(/cqw/);
+  });
+});
