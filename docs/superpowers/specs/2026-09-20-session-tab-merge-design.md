@@ -164,9 +164,11 @@ the same shape as the existing `hosts` chord, for the same reason: `⌘` and
 terminal. `Alt` continues to disqualify any chord. `J` is unused (`⌘I`
 Hosts, `⌘,` Settings, `⌘K`/`⌘P` quick switcher).
 
-The chord toggles `sessionView` between the two values. If Files, Assets or
-Hosts is open it closes them first, so one key always returns to the session
-— landing on the *other* sub-view from the one you left.
+The chord toggles `sessionView` between the two values — but only when the
+Session tab already owns the panel. If Files, Assets or Hosts is open, the
+chord just returns to the session, showing the sub-view you left and writing
+nothing to the pref; a second press then flips. Leaving an overlay should put
+you back where you were, not somewhere else.
 
 A chord that lands on a disabled sub-view is a no-op: it does not write the
 pref and does not change the view.
