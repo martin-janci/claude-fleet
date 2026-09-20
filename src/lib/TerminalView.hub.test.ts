@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
@@ -13,7 +14,7 @@ import TerminalView from './TerminalView.svelte';
 import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
 import { hosts, type HostRow } from './hosts';
 import { selectSession, clearSelection } from './selection';
-import { clearToasts } from './toasts';
+import { clearToasts, toasts } from './toasts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 
 function makeSession(over: Partial<SessionRow>): SessionRow {
@@ -189,5 +190,32 @@ describe('the terminal tab against a hub', () => {
     await settle();
     expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
     expect(screen.queryByTestId('terminal-no-attach')).toBeNull();
+  });
+
+  // The automatic pre-attach check is `repair_session { explicit: false }`,
+  // which a paired desktop REFUSES by design (`verdicts.rs`: routing it would
+  // quietly become the hub's always-explicit repair). Calling it anyway meant
+  // an E_LOCAL_ONLY toast on every attach of a project-backed session. There
+  // is no safe variant to route, so the check simply does not exist here —
+  // the same way an offline host is left to the attach error. Repair
+  // workspace still works: it passes `explicit: true` and routes.
+  it('skips the automatic workspace check instead of refusing it', async () => {
+    hubStatus.set(remote);
+    hosts.set([makeHost({ alias: 'trn', transport: 'ssh' })]);
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'repair_session')).toBe(false);
+    expect(get(toasts)).toEqual([]);
+    // The attach itself is unaffected.
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
+  });
+
+  it('standalone still runs the automatic workspace check', async () => {
+    hosts.set([makeHost({ alias: 'trn', transport: 'ssh' })]);
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'repair_session')).toBe(true);
   });
 });
