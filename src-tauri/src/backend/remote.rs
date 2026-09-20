@@ -385,7 +385,9 @@ impl HubBackend {
 
         // A JSON-RPC `error` is a *protocol* failure — an unknown tool, or
         // arguments rmcp could not bind. That is this client disagreeing with
-        // the hub about the contract, not something the user did.
+        // the hub about the contract, not something the user did, and it has
+        // its own code so a caller built on a tool an older hub does not
+        // serve can degrade to what it did before that tool existed.
         if let Some(err) = envelope.get("error") {
             // Scrubbed like every other scrap of text that came from outside
             // this process. rmcp builds this message from its own dispatch and
@@ -398,7 +400,7 @@ impl HubBackend {
                     .unwrap_or("no message"),
             );
             return Err(IpcError::new(
-                codes::E_INTERNAL,
+                codes::E_HUB_PROTOCOL,
                 format!("the hub refused the {tool} call: {message}"),
             ));
         }

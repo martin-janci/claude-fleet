@@ -1,8 +1,9 @@
 //! Tauri IPC wrappers for worktree management. Real logic lives in
 //! `service::worktrees`.
 //!
-//! Remote mode: `list_worktrees` and `delete_worktree` route to their tools.
-//! `list_host_worktrees` has none — it scans a host over SSH from here.
+//! Remote mode: all three route to their tools. `list_host_worktrees` is the
+//! scan itself, run by whichever side has the SSH route — this app when it
+//! owns the fleet, the hub when it does not.
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
@@ -34,8 +35,7 @@ pub async fn list_host_worktrees(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<HostWorktrees, IpcError> {
-    backend.refuse_local_only("list_host_worktrees")?;
-    worktrees::list_host_worktrees(args, &store, &ssh).await
+    routed::list_host_worktrees(&backend, args, &store, &ssh).await
 }
 
 #[tauri::command]
@@ -59,6 +59,21 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.list_worktrees(args.project_id).await,
             None => worktrees::list_worktrees(args, store),
+        }
+    }
+
+    /// The tool's parameters are this command's argument struct field for
+    /// field — both required, neither defaulted — so `route` sends the
+    /// struct itself rather than a `json!` literal.
+    pub async fn list_host_worktrees(
+        backend: &FleetBackend,
+        args: ListHostWorktreesArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<HostWorktrees, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("list_host_worktrees", &args).await,
+            None => worktrees::list_host_worktrees(args, store, ssh).await,
         }
     }
 

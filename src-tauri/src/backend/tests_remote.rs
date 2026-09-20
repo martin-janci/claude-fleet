@@ -483,6 +483,10 @@ fn an_uncoded_tool_error_is_not_mistaken_for_a_code() {
     );
 }
 
+/// A hub that serves no such tool is the shape an OLDER hub takes: every
+/// tool this app learns to call is a tool some hub out there has not got
+/// yet. It gets its own code so a caller can tell "your hub is behind" from
+/// an internal error and degrade instead of showing a failure.
 #[test]
 fn a_jsonrpc_protocol_error_is_reported_as_one() {
     let fake = Fake::answering(Ok(sse(json!({
@@ -490,7 +494,7 @@ fn a_jsonrpc_protocol_error_is_reported_as_one() {
         "error": { "code": -32601, "message": "tool not found: list_sessions" },
     }))));
     let err = block_on(backend(&fake).list_sessions(false)).expect_err("an error");
-    assert_eq!(err.code, codes::E_INTERNAL);
+    assert_eq!(err.code, codes::E_HUB_PROTOCOL);
     assert!(err.message.contains("tool not found"), "{}", err.message);
 }
 
