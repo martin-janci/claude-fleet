@@ -638,7 +638,7 @@
               aria-checked={effectiveView === 'conversation'}
               aria-keyshortcuts={isMac ? 'Meta+J' : 'Control+Shift+J'}
               disabled={!selHasClaudeId && !selNoPane}
-              title={!selHasClaudeId && !selNoPane
+              title={!selHasClaudeId
                 ? 'No Claude session id yet'
                 : `Claude conversation from the transcript (${sessionViewChord})`}
               onclick={() => setSessionView('conversation')}
