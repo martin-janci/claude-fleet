@@ -67,6 +67,7 @@ pub mod carry;
 pub mod claude_state;
 mod finalise;
 mod progress;
+pub mod resolve;
 
 use crate::events::MoveStep;
 use crate::ipc_error::lock;
@@ -86,6 +87,9 @@ pub const DEFAULT_MAX_TRANSCRIPT_MB: u64 = 200;
 
 /// Timeline event recorded on both rows of a completed move.
 pub const EVENT_MOVED: &str = "session_moved";
+/// Timeline event recorded on both rows when `resolve_move` discards a
+/// partial move (Task 6): the target is killed, the source is left as-is.
+pub const EVENT_MOVE_UNDONE: &str = "session_move_undone";
 
 const LOCAL: &str = "local";
 

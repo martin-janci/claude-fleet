@@ -172,7 +172,21 @@ pub(super) async fn finalise_source(
     });
     if let (Some(base), serde_json::Value::Object(extra)) = (detail.as_object_mut(), a.extra_detail)
     {
-        base.extend(extra);
+        // `Map::extend` would silently overwrite a canonical key
+        // (`source_killed`, `from_session_id`, …) if a future caller's
+        // `extra_detail` ever collided with one; skip the key instead and
+        // flag it in debug builds, so a collision is loud in tests rather
+        // than a silently rewritten timeline event in production.
+        for (k, v) in extra {
+            if base.contains_key(&k) {
+                debug_assert!(
+                    false,
+                    "finalise_source: extra_detail key {k:?} collides with a canonical session_moved field and was ignored"
+                );
+                continue;
+            }
+            base.insert(k, v);
+        }
     }
     let detail = detail.to_string();
     if let Ok(s) = store.lock() {
