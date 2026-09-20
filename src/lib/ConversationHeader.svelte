@@ -493,9 +493,15 @@
     text-align: left;
     cursor: pointer;
   }
-  .turn-index button:hover,
+  .turn-index button:hover {
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  }
+  /* The shared ring (controls.css), not `outline: none` plus a ~1.1:1 tint:
+     a tint that faint is not a focus indicator, and suppressing the outline
+     left keyboard users with nothing. Drawn inward because the list clips. */
   .turn-index button:focus-visible {
-    outline: none;
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
     background: color-mix(in srgb, var(--accent) 12%, var(--bg));
   }
   .ti-label {

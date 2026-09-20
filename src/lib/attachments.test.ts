@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, NEEDS_REATTACH, MAX_FILES, MAX_BYTES } from './attachments';
+import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, NEEDS_REATTACH, MAX_FILES, MAX_BYTES, MAX_TOTAL } from './attachments';
 
 const file = (o: Partial<{ path: string; name: string; size: number; kind: 'image' | 'text' | 'binary' }> = {}) => ({
   path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' as const, ...o,
@@ -11,7 +11,11 @@ describe('addFiles', () => {
     expect(rejected).toEqual([]);
     expect(next).toHaveLength(1);
     expect(next[0]).toMatchObject({ name: 'a.png', kind: 'image', state: 'reading', thumb: null });
-    expect(next[0].id).toBeTruthy();
+    // `toBeTruthy()` on `att-${++seq}` could never fail. What matters is
+    // that two files never share an id — `{#each … (a.id)}` keys on it, and
+    // a collision would make removing one tile remove the other.
+    const { next: two } = addFiles([], [file({ path: '/tmp/x.png' }), file({ path: '/tmp/y.png' })]);
+    expect(new Set([next[0].id, two[0].id, two[1].id]).size).toBe(3);
   });
 
   it('rejects a file over the per-file limit, naming the size and the limit', () => {
@@ -19,6 +23,45 @@ describe('addFiles', () => {
     expect(next).toHaveLength(0);
     expect(rejected[0]).toContain('big.png');
     expect(rejected[0]).toContain('10 MB');
+  });
+
+  // The limits were only ever exercised far past the line, so a `>` flipped
+  // to `>=` (or the reverse) passed. These sit exactly on it.
+  it('accepts a file of exactly the per-file limit and rejects one byte more', () => {
+    const { next, rejected } = addFiles([], [file({ path: '/tmp/edge.png', size: MAX_BYTES })]);
+    expect(next).toHaveLength(1);
+    expect(rejected).toEqual([]);
+
+    const over = addFiles([], [file({ path: '/tmp/over.png', size: MAX_BYTES + 1 })]);
+    expect(over.next).toHaveLength(0);
+    expect(over.rejected).toHaveLength(1);
+  });
+
+  it('accepts a batch of exactly the total budget and rejects one byte more', () => {
+    // Five files, each inside the per-file limit, summing to exactly
+    // MAX_TOTAL: the only thing under test here is the total.
+    const fifth = MAX_TOTAL / 5;
+    const batch = (lastSize: number) =>
+      [0, 1, 2, 3, 4].map((i) =>
+        file({ path: `/tmp/t${i}.bin`, name: `t${i}.bin`, size: i === 4 ? lastSize : fifth }),
+      );
+
+    const exact = addFiles([], batch(fifth));
+    expect(exact.next).toHaveLength(5);
+    expect(exact.rejected).toEqual([]);
+
+    const over = addFiles([], batch(fifth + 1));
+    expect(over.next).toHaveLength(4);
+    expect(over.rejected[0]).toContain('t4.bin');
+    expect(over.rejected[0]).toContain('in total');
+  });
+
+  it('accepts exactly MAX_FILES and rejects the next one', () => {
+    const full = Array.from({ length: MAX_FILES }, (_, i) => file({ path: `/tmp/f${i}.png`, name: `f${i}.png`, size: 1 }));
+    const { next, rejected } = addFiles([], full);
+    expect(next).toHaveLength(MAX_FILES);
+    expect(rejected).toEqual([]);
+    expect(addFiles(next, [file({ path: '/tmp/one-more.png', size: 1 })]).rejected).toHaveLength(1);
   });
 
   it('rejects past the count cap instead of silently truncating', () => {

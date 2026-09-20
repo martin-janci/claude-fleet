@@ -133,6 +133,26 @@ mod tests {
         );
     }
 
+    // Exactly on the line, both ways: without these a `>` flipped to `>=`
+    // (or the reverse) passes every other test in this module.
+    #[test]
+    fn a_file_of_exactly_the_per_file_limit_is_allowed_and_one_byte_more_is_not() {
+        assert!(check_budget(&[("edge.bin".to_string(), MAX_BYTES)]).is_ok());
+        assert!(check_budget(&[("edge.bin".to_string(), MAX_BYTES + 1)]).is_err());
+    }
+
+    #[test]
+    fn a_batch_of_exactly_the_total_budget_is_allowed_and_one_byte_more_is_not() {
+        let fifth = MAX_TOTAL / 5;
+        let batch = |last: u64| -> Vec<(String, u64)> {
+            (0..5)
+                .map(|i| (format!("t{i}.bin"), if i == 4 { last } else { fifth }))
+                .collect()
+        };
+        assert!(check_budget(&batch(fifth)).is_ok());
+        assert!(check_budget(&batch(fifth + 1)).is_err());
+    }
+
     #[test]
     fn a_batch_inside_both_budgets_passes() {
         assert!(check_budget(&[

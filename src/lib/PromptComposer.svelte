@@ -232,9 +232,12 @@
   }
   .account { color: var(--fg-muted); font-size: 0.75rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; }
-  .warn { color: #d4a017; }
-  .ok { color: rgb(80, 200, 110); }
-  .err { color: #e64a4a; font-size: 0.75rem; }
+  /* The severity tokens, not hand-picked hexes: #50c86e is the exact green
+     this branch removed from attention.ts for failing its contrast floor
+     (2.05:1 on --bg-pane), and its twin lived on here. */
+  .warn { color: var(--usage-warn); }
+  .ok { color: var(--usage-ok); }
+  .err { color: var(--usage-crit); font-size: 0.75rem; }
 
   .show-all {
     display: flex;

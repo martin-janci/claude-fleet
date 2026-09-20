@@ -3,6 +3,13 @@
  * so the contrast floors those blocks claim in comments are actually
  * asserted. Nothing imports this at runtime — it exists to be tested.
  *
+ * This used to be a hand transcription that nothing held to account: a
+ * colour edited in app.css left the whole contrast suite green against the
+ * old value, which is the one failure mode a palette test exists to prevent.
+ * `tokens.test.ts` now parses app.css itself (`parseThemeBlocks`) and fails
+ * if any entry below disagrees with the file, in either of the two places
+ * each theme is declared.
+ *
  * When you add or change a token in app.css, change it here too and add the
  * pair it has to clear to CONTRAST_PAIRS.
  */
@@ -33,8 +40,16 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'control-bg-active': '#e4e4e4',
     'control-border': '#cfcfcf',
     'control-border-strong': '#8e8e8e',
+    'control-fg': '#1a1a1a',
     'control-fg-quiet': '#5a5a5a',
     'accent-fg': '#ffffff',
+    // Computed in CSS (`color-mix(in srgb, var(--accent) 10%, var(--bg))`);
+    // resolved here so it can be measured. The cross-check in
+    // tokens.test.ts does the same mix and compares.
+    'accent-soft': '#e9effd',
+    // An alias for --accent. Kept as its own entry so the alias is asserted
+    // rather than assumed.
+    ring: '#2563eb',
   },
   dark: {
     bg: '#0f0f0f',
@@ -51,8 +66,12 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'control-bg-active': '#303030',
     'control-border': '#3a3a3a',
     'control-border-strong': '#6e6e6e',
+    'control-fg': '#ededed',
     'control-fg-quiet': '#a8a8a8',
     'accent-fg': '#0b1220',
+    // `color-mix(in srgb, var(--accent) 16%, var(--bg))`.
+    'accent-soft': '#1c2735',
+    ring: '#60a5fa',
   },
 };
 
@@ -66,6 +85,13 @@ export const CONTRAST_PAIRS: ContrastPair[] = [
   { fg: 'control-fg-quiet', bg: 'bg-pane', min: 4.5, note: 'quiet control labels' },
   { fg: 'control-border-strong', bg: 'bg-pane', min: 3, note: 'state boundaries' },
   { fg: 'accent-fg', bg: 'accent', min: 4.5, note: 'text on a filled primary' },
+  { fg: 'control-fg', bg: 'control-bg', min: 4.5, note: 'control labels' },
+  // The surface this branch introduced: the composer shell while a file is
+  // being dragged over it. The draft stays readable on the tint, and the
+  // accent border/veil is still legible against it.
+  { fg: 'fg', bg: 'accent-soft', min: 4.5, note: 'the draft over a drag tint' },
+  { fg: 'accent', bg: 'accent-soft', min: 3, note: 'drag border over its own tint' },
+  { fg: 'ring', bg: 'bg', min: 3, note: 'the focus ring alias' },
 ];
 
 function channel(v: number): number {

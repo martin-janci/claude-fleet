@@ -13,6 +13,26 @@ describe('withAttachments', () => {
   it('works when the draft is empty', () => {
     expect(withAttachments('', ['/w/a.png'])).toBe('Attached files:\n/w/a.png');
   });
+
+  // A remote name is `dedupe_names(basenames_of(...))`'d Rust-side but never
+  // sanitised, so whatever the user attached rides into the prompt body.
+  // This function must pass it through verbatim: it is not the quoter (that
+  // is `crate::shell::quote`, measured by `tooLong`), and silently rewriting
+  // a path here would name a file that is not the one on disk.
+  it('passes a hostile filename through verbatim rather than rewriting it', () => {
+    const nasty = "/w/p/.claude-fleet-attachments/a file's \u00e9\u5199 name.png";
+    expect(withAttachments('look', [nasty])).toBe(`look\n\nAttached files:\n${nasty}`);
+  });
+
+  // A newline in a basename is the one shape that would forge a second
+  // entry in the list. Rust drops such a name before it can ever reach here
+  // (`record_picked` skips any name containing \n or \r), so this pins the
+  // pass-through rather than a scrub — if that Rust guard is ever removed,
+  // the forged line is what it would look like, and this test is where the
+  // reader is told to go look.
+  it('does not invent an escape for a newline — Rust drops those names first', () => {
+    expect(withAttachments('look', ['/w/a\nb.png'])).toBe('look\n\nAttached files:\n/w/a\nb.png');
+  });
 });
 
 describe('tooLong', () => {

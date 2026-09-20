@@ -2735,6 +2735,12 @@ describe('ConversationPanel attachments', () => {
   type InvokeImpl = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
   const baseInvoke = mockedInvoke.getMockImplementation() as unknown as InvokeImpl;
 
+  beforeEach(() => {
+    // Cleared so a test cannot drive a callback left behind by the previous
+    // render — and so `drag()` below fails when a render did not subscribe.
+    dragDrop = null;
+  });
+
   afterEach(() => {
     mockedInvoke.mockImplementation(baseInvoke);
   });
@@ -2787,6 +2793,11 @@ describe('ConversationPanel attachments', () => {
   it('the DOM drop clears the veil and attaches nothing; a drop on the transcript does nothing either', async () => {
     await renderPanel();
     const shell = document.querySelector('.composer-shell')!;
+    // Raise the veil first: asserting it is absent after a drop that never
+    // raised it is an assertion that cannot fail.
+    await fireEvent.dragEnter(shell, { dataTransfer: { types: ['Files'], files: [] } });
+    expect(shell.className).toContain('is-dragging');
+
     await fireEvent.drop(shell, { dataTransfer: { types: ['Files'], files: [] } });
     expect(shell.className).not.toContain('is-dragging');
 
@@ -2809,6 +2820,19 @@ describe('ConversationPanel attachments', () => {
     expect(btn.getAttribute('aria-disabled')).toBe('true');
     expect(btn.getAttribute('title')).toContain('standalone');
   });
+
+  /**
+   * Deliver a Tauri drag-drop event, failing loudly if the panel never
+   * subscribed. `dragDrop?.(…)` was the shape before: with the `$effect`
+   * removed, every negative assertion in the drag tests below would have
+   * passed vacuously — nothing fired, so nothing attached. `dragDrop` is
+   * reset to null before each test (above), so this also proves THIS
+   * render's subscription, not an earlier one's.
+   */
+  function drag(payload: DragDropPayload) {
+    if (!dragDrop) throw new Error('the panel never subscribed to onDragDropEvent');
+    dragDrop({ payload });
+  }
 
   /** Stand the shell somewhere measurable: jsdom lays nothing out, so state
    *  the rect the way real layout would. */
@@ -2837,12 +2861,12 @@ describe('ConversationPanel attachments', () => {
       return baseInvoke(cmd, args);
     });
 
-    dragDrop?.({ payload: { type: 'drop', position: { x: 10, y: 10 }, paths: ['/tmp/outside.png'] } });
+    drag({ type: 'drop', position: { x: 10, y: 10 }, paths: ['/tmp/outside.png'] });
     for (let i = 0; i < 3; i++) await settle();
     expect(screen.queryByTestId('conv-attachments')).toBeNull();
     expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());
 
-    dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/inside.png'] } });
+    drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/inside.png'] });
     for (let i = 0; i < 4; i++) await settle();
     const tiles = screen.getAllByTestId('conv-attachment');
     expect(tiles).toHaveLength(1);
@@ -2871,7 +2895,7 @@ describe('ConversationPanel attachments', () => {
       return baseInvoke(cmd, args);
     });
 
-    dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/big.png'] } });
+    drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/big.png'] });
     for (let i = 0; i < 4; i++) await settle();
 
     expect(screen.queryByTestId('conv-attachments')).toBeNull();
@@ -2899,7 +2923,7 @@ describe('ConversationPanel attachments', () => {
         if (cmd === 'attachment_preview') return null;
         return baseInvoke(cmd, args);
       });
-      dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/retina.png'] } });
+      drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/retina.png'] });
       for (let i = 0; i < 4; i++) await settle();
       expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
     } finally {
@@ -2911,16 +2935,16 @@ describe('ConversationPanel attachments', () => {
     await renderPanel();
     const shell = placeShell();
 
-    dragDrop?.({ payload: { type: 'over', position: { x: 10, y: 10 } } });
+    drag({ type: 'over', position: { x: 10, y: 10 } });
     await settle();
     expect(shell.className).not.toContain('is-dragging');
 
-    dragDrop?.({ payload: { type: 'over', position: { x: 300, y: 450 } } });
+    drag({ type: 'over', position: { x: 300, y: 450 } });
     await settle();
     expect(shell.className).toContain('is-dragging');
     expect(screen.getByText('Drop to attach')).toBeTruthy();
 
-    dragDrop?.({ payload: { type: 'leave', position: { x: 0, y: 0 } } });
+    drag({ type: 'leave', position: { x: 0, y: 0 } });
     await settle();
     expect(shell.className).not.toContain('is-dragging');
   });
@@ -2929,7 +2953,7 @@ describe('ConversationPanel attachments', () => {
     await renderPanelInHubMode();
     placeShell();
     mockedInvoke.mockClear();
-    dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/a.png'] } });
+    drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/a.png'] });
     for (let i = 0; i < 3; i++) await settle();
     expect(screen.queryByTestId('conv-attachments')).toBeNull();
     expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());
@@ -2988,11 +3012,11 @@ describe('ConversationPanel attachments', () => {
     const shell = placeShell();
     mockedInvoke.mockClear();
 
-    dragDrop?.({ payload: { type: 'over', position: { x: 300, y: 450 } } });
+    drag({ type: 'over', position: { x: 300, y: 450 } });
     await settle();
     expect(shell.className).not.toContain('is-dragging');
 
-    dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/hidden.png'] } });
+    drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/hidden.png'] });
     for (let i = 0; i < 3; i++) await settle();
     expect(screen.queryByTestId('conv-attachments')).toBeNull();
     expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());

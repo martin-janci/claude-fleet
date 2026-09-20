@@ -15,8 +15,9 @@ const SOURCES = import.meta.glob('./{ConversationPanel,ConversationHeader,ToolLi
 const LITERALS = /#e6a23c|#e64a4a/gi;
 
 // That the tokens themselves exist and are what the chat asks for is
-// attention.test.ts's job (contextColor / contextTint); vitest does not
-// process CSS imports, so app.css cannot be read from here.
+// attention.test.ts's job (`contextColor`); that they match app.css is
+// tokens.test.ts's. Vite's `?raw` cannot read a `.css` module's text, which
+// is why neither happens here.
 
 describe('chat colour tokens', () => {
   it('covers every component of the Conversation tab', () => {
@@ -95,9 +96,14 @@ describe('chat sizes itself to its pane', () => {
 
 describe('chat motion and scroll containment', () => {
   it('every component that animates also honours prefers-reduced-motion', () => {
-    for (const [path, source] of Object.entries(SOURCES)) {
-      const animates = /\btransition:|\banimation:/.test(source);
-      if (!animates) continue;
+    const animating = Object.entries(SOURCES).filter(([, source]) =>
+      /\btransition:|\banimation:/.test(source),
+    );
+    // Without this the whole test is vacuous the day the last transition is
+    // deleted — or the day the glob stops resolving — and it would go on
+    // passing while claiming to guard something.
+    expect(animating.length, 'no component animates: this test is asserting nothing').toBeGreaterThan(0);
+    for (const [path, source] of animating) {
       expect(source, `${path} animates but never asks about reduced motion`).toContain(
         'prefers-reduced-motion: reduce',
       );
