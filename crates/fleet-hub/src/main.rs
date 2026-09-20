@@ -191,6 +191,56 @@ async fn main() -> ExitCode {
     }
 }
 
+/// `fleet-hub demo-seed` — see [`demo`] for what it writes and why.
+///
+/// Like `token` and `agent-token`, this never *creates* a data dir or a
+/// database: demo rows in a fresh one would belong to no hub, and the mistake
+/// they would hide is exactly the one this command exists to make visible.
+fn demo_seed(
+    opts: &HubOptions,
+    env: &std::collections::HashMap<String, String>,
+    hosts: Option<usize>,
+    clear: bool,
+    force: bool,
+) -> Result<ExitCode, String> {
+    serve::existing_db(&config::resolve_data_dir(opts, env))?;
+    let store = serve::open_store(opts, env)?;
+
+    if clear {
+        let removed = demo::clear(&store)?;
+        out::line(&format!("removed {removed} demo session(s)"));
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Checked before anything is written, so a refusal leaves the store
+    // exactly as it was rather than half seeded.
+    if !force && demo::holds_real_rows(&store)? {
+        return Err(
+            "this hub already has hosts or sessions of its own; demo rows would be mixed in \
+             with them and only their names would tell them apart. Pass --force if that is \
+             what you want, or --clear to remove demo rows."
+                .to_string(),
+        );
+    }
+
+    let hosts = hosts.unwrap_or(2);
+    if hosts == 0 || hosts > 4 {
+        return Err(format!("--hosts must be between 1 and 4, got {hosts}"));
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let sessions = demo::seed(&store, &demo::Plan { hosts }, now)?;
+
+    out::line(&format!(
+        "seeded {hosts} demo host(s) and {sessions} demo session(s). \
+         Remove them with: fleet-hub demo-seed --clear"
+    ));
+    Ok(ExitCode::SUCCESS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,54 +427,4 @@ mod tests {
         assert_eq!(tls.as_deref(), Some("cert"));
         assert!(Cli::try_parse_from(["fleet-hub", "bogus"]).is_err());
     }
-}
-
-/// `fleet-hub demo-seed` — see [`demo`] for what it writes and why.
-///
-/// Like `token` and `agent-token`, this never *creates* a data dir or a
-/// database: demo rows in a fresh one would belong to no hub, and the mistake
-/// they would hide is exactly the one this command exists to make visible.
-fn demo_seed(
-    opts: &HubOptions,
-    env: &std::collections::HashMap<String, String>,
-    hosts: Option<usize>,
-    clear: bool,
-    force: bool,
-) -> Result<ExitCode, String> {
-    serve::existing_db(&config::resolve_data_dir(opts, env))?;
-    let store = serve::open_store(opts, env)?;
-
-    if clear {
-        let removed = demo::clear(&store)?;
-        out::line(&format!("removed {removed} demo session(s)"));
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    // Checked before anything is written, so a refusal leaves the store
-    // exactly as it was rather than half seeded.
-    if !force && demo::holds_real_rows(&store)? {
-        return Err(
-            "this hub already has hosts or sessions of its own; demo rows would be mixed in \
-             with them and only their names would tell them apart. Pass --force if that is \
-             what you want, or --clear to remove demo rows."
-                .to_string(),
-        );
-    }
-
-    let hosts = hosts.unwrap_or(2);
-    if hosts == 0 || hosts > 4 {
-        return Err(format!("--hosts must be between 1 and 4, got {hosts}"));
-    }
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let sessions = demo::seed(&store, &demo::Plan { hosts }, now)?;
-
-    out::line(&format!(
-        "seeded {hosts} demo host(s) and {sessions} demo session(s). \
-         Remove them with: fleet-hub demo-seed --clear"
-    ));
-    Ok(ExitCode::SUCCESS)
 }

@@ -32,11 +32,7 @@ pub(crate) const DEMO_PREFIX: &str = "demo-";
 /// attention" filter keeps, and a client that filters or groups wrongly only
 /// shows it when at least one row is in each state — which on a real fleet
 /// happens when it happens, not when somebody is looking.
-const SESSIONS: &[(&str, &str)] = &[
-    ("api", "working"),
-    ("ui", "blocked"),
-    ("docs", "completed"),
-];
+const SESSIONS: &[(&str, &str)] = &[("api", "working"), ("ui", "blocked"), ("docs", "completed")];
 
 /// Hosts to seed, in order. Two is enough to exercise grouping by host.
 const HOSTS: &[&str] = &["box", "pine", "mac", "nuc"];
@@ -71,7 +67,11 @@ pub(crate) fn seed(store: &Store, plan: &Plan, now: i64) -> Result<usize, String
             .map_err(|e| format!("probe host {alias}: {e}"))?;
 
         let project = store
-            .upsert_project("demo", &format!("widget-{h}"), &format!("/srv/demo/widget-{h}"))
+            .upsert_project(
+                "demo",
+                &format!("widget-{h}"),
+                &format!("/srv/demo/widget-{h}"),
+            )
             .map_err(|e| format!("insert project: {e}"))?;
 
         for (suffix, claude_status) in SESSIONS {
@@ -128,7 +128,9 @@ pub(crate) fn holds_real_rows(store: &Store) -> Result<bool, String> {
         return Ok(true);
     }
     let sessions = store.list_all_sessions().map_err(|e| e.to_string())?;
-    Ok(sessions.iter().any(|s| !s.tmux_name.starts_with(DEMO_PREFIX)))
+    Ok(sessions
+        .iter()
+        .any(|s| !s.tmux_name.starts_with(DEMO_PREFIX)))
 }
 
 #[cfg(test)]
@@ -186,15 +188,28 @@ mod tests {
     fn clear_removes_only_the_demo_rows() {
         let (_d, s) = store();
         s.insert_host("prod-box", None).unwrap();
-        s.upsert_bg_session("prod-box", "real-work", None, "rw", Some("working"), 1, "bg", 1)
-            .unwrap();
+        s.upsert_bg_session(
+            "prod-box",
+            "real-work",
+            None,
+            "rw",
+            Some("working"),
+            1,
+            "bg",
+            1,
+        )
+        .unwrap();
         seed(&s, &Plan::default(), 1_000).unwrap();
 
         let removed = clear(&s).unwrap();
 
         assert_eq!(removed, SESSIONS.len() * 2);
         assert_eq!(
-            s.list_hosts().unwrap().iter().map(|h| h.alias.clone()).collect::<Vec<_>>(),
+            s.list_hosts()
+                .unwrap()
+                .iter()
+                .map(|h| h.alias.clone())
+                .collect::<Vec<_>>(),
             vec!["prod-box".to_string()],
             "a real host must survive its neighbours being cleared"
         );
@@ -207,7 +222,10 @@ mod tests {
     #[test]
     fn a_store_with_real_rows_is_recognised() {
         let (_d, s) = store();
-        assert!(!holds_real_rows(&s).unwrap(), "an empty store is not 'real'");
+        assert!(
+            !holds_real_rows(&s).unwrap(),
+            "an empty store is not 'real'"
+        );
 
         s.insert_host("prod-box", None).unwrap();
 
@@ -222,8 +240,17 @@ mod tests {
         seed(&s, &Plan::default(), 1_000).unwrap();
         assert!(!holds_real_rows(&s).unwrap());
 
-        s.upsert_bg_session("demo-box", "real-work", None, "rw", Some("working"), 1, "bg", 1)
-            .unwrap();
+        s.upsert_bg_session(
+            "demo-box",
+            "real-work",
+            None,
+            "rw",
+            Some("working"),
+            1,
+            "bg",
+            1,
+        )
+        .unwrap();
 
         assert!(
             holds_real_rows(&s).unwrap(),
