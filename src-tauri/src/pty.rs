@@ -357,6 +357,13 @@ pub(crate) fn attach_argv(
         // ssh in the way, so this is the only place the two differ.
         "-o".into(),
         "EscapeChar=none".into(),
+        // Bound the INITIAL connect only — never the attached session, which
+        // is long-lived by design. Without it a host nothing can dial (an
+        // agent-transport host with no SSH route from this machine) hangs on
+        // the OS TCP default, ~75s of blank pane, before the UI can say so.
+        // A reused ControlMaster connection skips the connect entirely.
+        "-o".into(),
+        "ConnectTimeout=10".into(),
     ];
     argv.extend(mux_opts.iter().cloned());
     argv.extend([
@@ -787,10 +794,39 @@ mod tests {
     #[test]
     fn remote_attach_reuses_mux_opts_and_ends_option_parsing_before_the_host() {
         let argv = attach_argv("hetzner", "dev-foo", &mux());
-        assert_eq!(&argv[..4], ["ssh", "-tt", "-o", "EscapeChar=none"]);
-        assert_eq!(&argv[4..10], mux().as_slice());
-        assert_eq!(&argv[10..14], ["--", "hetzner", "bash", "-lc"]);
-        assert_eq!(argv.len(), 15);
+        assert_eq!(
+            &argv[..6],
+            [
+                "ssh",
+                "-tt",
+                "-o",
+                "EscapeChar=none",
+                "-o",
+                "ConnectTimeout=10"
+            ]
+        );
+        assert_eq!(&argv[6..12], mux().as_slice());
+        assert_eq!(&argv[12..16], ["--", "hetzner", "bash", "-lc"]);
+        assert_eq!(argv.len(), 17);
+    }
+
+    #[test]
+    fn remote_attach_bounds_the_initial_connect() {
+        // Without this, a host nothing can dial hangs on the OS TCP default
+        // (~75s) with a blank pane before the UI can explain itself. It
+        // bounds only the INITIAL connect, never the attached session, and a
+        // reused ControlMaster connection skips it entirely.
+        let argv = attach_argv("hetzner", "dev-foo", &[]);
+        let at = argv
+            .iter()
+            .position(|a| a == "ConnectTimeout=10")
+            .expect("ssh attach carries a connect timeout");
+        assert_eq!(argv[at - 1], "-o");
+        assert!(at < argv.iter().position(|a| a == "--").unwrap());
+        // A local attach runs tmux directly — no ssh, nothing to bound.
+        assert!(!attach_argv("local", "dev-foo", &[])
+            .iter()
+            .any(|a| a.contains("ConnectTimeout")));
     }
 
     #[test]
