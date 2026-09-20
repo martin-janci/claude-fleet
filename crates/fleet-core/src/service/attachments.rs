@@ -12,6 +12,63 @@ use crate::shell::quote;
 /// Where attachments live, relative to the worktree root.
 pub const ATTACH_DIR: &str = ".claude-fleet-attachments";
 
+// ---- the byte budget ------------------------------------------------------
+//
+// The composer enforces these too (`src/lib/attachments.ts`), but that is UX:
+// it stops a user queueing a file that will not go. THIS is the bound — the
+// one that still holds when the frontend is wrong, when a command is called
+// directly, or when a tray built before a limit changed is sent afterwards.
+// Without it `upload_attachments` would stream a 4 GB file under a 60-second
+// per-file timeout over a link the user may not control.
+//
+// The numbers live here, on the side that enforces them; a test in
+// `src-tauri/src/commands/upload.rs` reads `src/lib/attachments.ts` and fails
+// if the two ever drift.
+
+/// Per-file ceiling.
+pub const MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// Ceiling for one send's attachments together.
+pub const MAX_TOTAL: u64 = 25 * 1024 * 1024;
+
+const MAX_BYTES_MB: u64 = MAX_BYTES / (1024 * 1024);
+const MAX_TOTAL_MB: u64 = MAX_TOTAL / (1024 * 1024);
+
+/// Mirrors `fmtBytes` in `src/lib/attachments.ts`, so a refusal from here
+/// reads exactly like the one the composer already showed.
+pub fn fmt_bytes(n: u64) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{} KB", (n as f64 / 1024.0).round() as u64)
+    } else {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Check `(name, size)` pairs against both ceilings, in order, and return the
+/// first refusal as the sentence to show. Pure: the caller does the `stat`,
+/// so every file is measured BEFORE anything is transferred — a batch is
+/// refused whole rather than three files in.
+pub fn check_budget(files: &[(String, u64)]) -> Result<(), String> {
+    let mut total: u64 = 0;
+    for (name, size) in files {
+        if *size > MAX_BYTES {
+            return Err(format!(
+                "{name} is {} — the limit is {MAX_BYTES_MB} MB.",
+                fmt_bytes(*size)
+            ));
+        }
+        total = total.saturating_add(*size);
+        if total > MAX_TOTAL {
+            return Err(format!(
+                "{name} would make {} in total — the limit is {MAX_TOTAL_MB} MB in total.",
+                fmt_bytes(total)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Print the session's worktree root on stdout, or fail.
 pub fn root_script(tmux_name: &str) -> String {
     let target = quote(&crate::tmux::exact_pane(tmux_name));
@@ -47,6 +104,43 @@ pub fn stage_script(root: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fmt_bytes_reads_the_way_the_composer_already_showed_it() {
+        assert_eq!(fmt_bytes(512), "512 B");
+        assert_eq!(fmt_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(fmt_bytes(11 * 1024 * 1024), "11.0 MB");
+    }
+
+    #[test]
+    fn a_file_over_the_per_file_limit_is_refused_in_the_wording_the_user_saw() {
+        let err = check_budget(&[("big.png".to_string(), MAX_BYTES + 1)]).unwrap_err();
+        assert_eq!(err, "big.png is 10.0 MB — the limit is 10 MB.");
+    }
+
+    #[test]
+    fn a_batch_over_the_total_budget_is_refused_naming_the_file_that_crossed_it() {
+        let nine = 9 * 1024 * 1024;
+        let err = check_budget(&[
+            ("a.bin".to_string(), nine),
+            ("b.bin".to_string(), nine),
+            ("c.bin".to_string(), nine),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "c.bin would make 27.0 MB in total — the limit is 25 MB in total."
+        );
+    }
+
+    #[test]
+    fn a_batch_inside_both_budgets_passes() {
+        assert!(check_budget(&[
+            ("a.bin".to_string(), 9 * 1024 * 1024),
+            ("b.bin".to_string(), 9 * 1024 * 1024),
+        ])
+        .is_ok());
+    }
 
     #[test]
     fn the_root_script_asks_tmux_then_git() {

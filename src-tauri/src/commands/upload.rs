@@ -590,6 +590,33 @@ pub struct AttachArgs {
     pub local_paths: Vec<String>,
 }
 
+/// Measure every attachment and check it against the byte budget BEFORE a
+/// single byte moves.
+///
+/// The composer checks the same limits (`src/lib/attachments.ts`), but that
+/// is UX; this is the bound. Measured up front and refused whole: staging
+/// three files and failing on the fourth would leave the session's worktree
+/// holding half an attachment set nobody asked for.
+///
+/// A file that cannot be stat'ed is an error here, not a skip — unlike
+/// `record_picked`, which is describing a batch, this is about to send the
+/// thing. An unmeasurable file must not slip past the ceiling.
+fn check_upload_budget(paths: &[String]) -> Result<(), IpcError> {
+    let mut files = Vec::with_capacity(paths.len());
+    for p in paths {
+        let meta = std::fs::metadata(p)
+            .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("stat {p}: {e}")))?;
+        let name = Path::new(p)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        files.push((name, meta.len()));
+    }
+    fleet_core::service::attachments::check_budget(&files)
+        .map_err(|m| IpcError::new(codes::E_UPLOAD, m))
+}
+
 /// Stage attachments under the session's worktree root
 /// (`.claude-fleet-attachments/`, excluded untracked — see
 /// `fleet_core::service::attachments`) and return their absolute remote
@@ -613,6 +640,9 @@ pub async fn upload_attachments(
         return Ok(vec![]);
     }
     check_paths_allowed(&allow, &args.local_paths)?;
+    // Before `consume`: a refusal over size is the user's to fix by removing
+    // a tile, and they should not have to re-attach everything else to do it.
+    check_upload_budget(&args.local_paths)?;
     allow.consume(&args.local_paths);
 
     let timeout = Duration::from_secs(UPLOAD_TIMEOUT_SECS);
@@ -901,6 +931,88 @@ mod tests {
         assert!(preview_for(&allow, big.to_str().unwrap())
             .unwrap()
             .is_none());
+    }
+
+    // ── the byte budget ─────────────────────────────────────────────────────
+    // `upload_attachments` is the last gate before bytes move; the composer's
+    // copy of these limits is UX, this is the bound.
+
+    fn write_file(dir: &std::path::Path, name: &str, bytes: usize) -> String {
+        let p = dir.join(name);
+        std::fs::write(&p, vec![0u8; bytes]).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_single_oversized_attachment_is_refused_before_anything_transfers() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = write_file(
+            dir.path(),
+            "big.bin",
+            (fleet_core::service::attachments::MAX_BYTES + 1) as usize,
+        );
+        let err = check_upload_budget(&[big]).unwrap_err();
+        assert_eq!(err.code, codes::E_UPLOAD);
+        assert_eq!(err.message, "big.bin is 10.0 MB — the limit is 10 MB.");
+    }
+
+    #[test]
+    fn a_batch_over_the_total_budget_is_refused_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let nine = 9 * 1024 * 1024;
+        let paths = vec![
+            write_file(dir.path(), "a.bin", nine),
+            write_file(dir.path(), "b.bin", nine),
+            write_file(dir.path(), "c.bin", nine),
+        ];
+        let err = check_upload_budget(&paths).unwrap_err();
+        assert_eq!(err.code, codes::E_UPLOAD);
+        assert!(
+            err.message.contains("c.bin") && err.message.contains("25 MB in total"),
+            "unexpected wording: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_batch_inside_both_budgets_is_allowed_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = vec![
+            write_file(dir.path(), "a.bin", 1024),
+            write_file(dir.path(), "b.bin", 2048),
+        ];
+        assert!(check_upload_budget(&paths).is_ok());
+    }
+
+    #[test]
+    fn an_unmeasurable_attachment_is_an_error_not_a_free_pass() {
+        let err = check_upload_budget(&["/nonexistent/gone.bin".to_string()]).unwrap_err();
+        assert_eq!(err.code, codes::E_UPLOAD);
+        assert!(err.message.contains("stat "), "{}", err.message);
+    }
+
+    /// The two copies of the limits must not drift: the composer shows them,
+    /// this crate enforces them, and a user who was told "10 MB" must not hit
+    /// a different number here. Reads the frontend source rather than trusting
+    /// a comment.
+    #[test]
+    fn the_frontend_limits_match_the_ones_enforced_here() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/lib/attachments.ts"
+        ))
+        .expect("src/lib/attachments.ts must be readable from the repo");
+        for (decl, value) in [
+            ("MAX_BYTES", fleet_core::service::attachments::MAX_BYTES),
+            ("MAX_TOTAL", fleet_core::service::attachments::MAX_TOTAL),
+        ] {
+            let mb = value / (1024 * 1024);
+            let expected = format!("export const {decl} = {mb} * 1024 * 1024;");
+            assert!(
+                src.contains(&expected),
+                "src/lib/attachments.ts should declare `{expected}` to match the Rust limit"
+            );
+        }
     }
 
     // ── attachment_describe / describe_for ──────────────────────────────────

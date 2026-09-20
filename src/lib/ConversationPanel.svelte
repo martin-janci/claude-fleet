@@ -847,6 +847,8 @@
     // Attachments (and their remote allow-list entries) are spent the
     // moment the upload succeeds, regardless of what triggered the send.
     if (attachments.length > 0) attachments = [];
+    // The notes were about the tray that just went; they do not carry over.
+    attachErrors = [];
     if (text === '') return;
     switchNotice = null;
     // Only the box's own text is spent by a send; a chip sent with
@@ -1020,7 +1022,10 @@
 
   async function attach(picked: PickedFile[]) {
     const { next, rejected } = addFiles(attachments, picked);
-    attachErrors = rejected;
+    // Appended, not replaced: two gestures that each rejected a file owe the
+    // user two sentences. `attachNotes` dedupes, so a repeat says it once,
+    // and a send clears the lot.
+    attachErrors = [...attachErrors, ...rejected];
     preserveThread(() => (attachments = next));
     // `pasted` is belt and braces: addFiles already lands a pasted entry as
     // `error`, never `reading`. Previewing one would come back E_FORBIDDEN
@@ -1038,6 +1043,16 @@
             : { ...x, state: 'error' as const, error: r.error.message },
       );
     }
+  }
+
+  /** The tile is the 44px control; the 18px × on it is a pointer shortcut.
+   *  Backspace and Delete are what a composer's attachment chip does
+   *  everywhere else, and without them the only way to remove one is that
+   *  sub-24px button. */
+  function onTileKey(e: KeyboardEvent, id: string) {
+    if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+    e.preventDefault();
+    removeAttachment(id);
   }
 
   function removeAttachment(id: string) {
@@ -1081,7 +1096,12 @@
   }
 
   function pointInShell(px: number, py: number): boolean {
-    if (!shellEl) return false;
+    // `.view-slot` is `position: absolute; inset: 0`, so App.svelte's Hosts
+    // and Assets overlays cover a panel that is still mounted and still laid
+    // out at these very coordinates. Without this, a drop while one of them
+    // is open attaches a file under an opaque overlay — the veil drawn
+    // beneath it, the user seeing nothing happen.
+    if (!visible || !shellEl) return false;
     // NOT divided by devicePixelRatio: the event's position is already in
     // logical points (see the contract on `pointInRect` in geometry.ts).
     return pointInRect(px, py, shellEl.getBoundingClientRect());
@@ -1137,7 +1157,11 @@
       .then((fn) => {
         if (disposed) fn();
         else unlisten = fn;
-      });
+      })
+      // Subscribing can reject (no Tauri host, a webview torn down
+      // mid-call). Dropping the drag-drop feed costs the drop target, not
+      // the panel — so it must not surface as an unhandled rejection.
+      .catch(() => {});
     return () => {
       disposed = true;
       unlisten?.();
@@ -1527,7 +1551,19 @@
         {#if attachments.length}
           <ul class="attach-strip" data-testid="conv-attachments" aria-label="Attachments">
             {#each attachments as a (a.id)}
-              <li class="attach" data-testid="conv-attachment" data-state={a.state} title="{a.name}{a.size > 0 ? ` · ${fmtBytes(a.size)}` : ''}{a.error ? ` · ${a.error}` : ''}">
+              <!-- The tile is deliberately focusable: it is the 44px control,
+                   and Backspace/Delete on it is the keyboard path the 18px ×
+                   is too small to be on its own. A role would be a lie (the
+                   tile is a list item that CONTAINS a button, not a button),
+                   so the two rules are suppressed rather than papered over
+                   with role="button". The accessible name says what the key
+                   does. -->
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+              <li class="attach" data-testid="conv-attachment" data-state={a.state}
+                tabindex="0" onkeydown={(e) => onTileKey(e, a.id)}
+                aria-label="{a.name}, press Backspace to remove"
+                title="{a.name}{a.size > 0 ? ` · ${fmtBytes(a.size)}` : ''}{a.error ? ` · ${a.error}` : ''}">
                 {#if a.thumb}
                   <!-- A preview can be an SVG data URL (classify maps .svg to
                        an image). Inside <img> it cannot run script; inlined as
@@ -1720,6 +1756,10 @@
     background: var(--bg-pane);
     overflow: hidden;
   }
+  .attach:focus-visible {
+    outline: var(--ring-w) solid var(--accent);
+    outline-offset: 1px;
+  }
   .attach-img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .attach-ext {
     font-family: var(--mono);
@@ -1728,9 +1768,11 @@
     letter-spacing: 0.04em;
     color: var(--control-fg-quiet);
   }
-  /* 18px is the one deliberate exception to the 24px floor: the 44px tile is
-     the primary target and Backspace on a focused tile removes it too, which
-     is WCAG 2.5.8's equivalent-control path. It is bounded to this case. */
+  /* 18px, below the 24px target floor, and bounded to this one case. What
+     makes that survivable is the tile itself: 44px, focusable, and removing
+     on Backspace/Delete (`onTileKey`), so the × is a pointer shortcut rather
+     than the only way out. On a coarse pointer it is also always visible
+     instead of hover-revealed. */
   .attach-x {
     position: absolute;
     top: 2px;

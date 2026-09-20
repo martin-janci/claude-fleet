@@ -2935,6 +2935,64 @@ describe('ConversationPanel attachments', () => {
     expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_preview', expect.anything());
   });
 
+  // `.view-slot` is `position: absolute; inset: 0`, so App.svelte's Hosts and
+  // Assets overlays sit ON TOP of a ConversationPanel that is still mounted
+  // and still laid out. Without this guard a drop at composer coordinates
+  // while one of those is open attaches a file the user never sees dropped.
+  it('a drop is ignored, veil and all, while the panel is not the visible view', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: false });
+    await settle();
+    const shell = placeShell();
+    mockedInvoke.mockClear();
+
+    dragDrop?.({ payload: { type: 'over', position: { x: 300, y: 450 } } });
+    await settle();
+    expect(shell.className).not.toContain('is-dragging');
+
+    dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/hidden.png'] } });
+    for (let i = 0; i < 3; i++) await settle();
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());
+  });
+
+  // The 18px remove button is below the 24px target floor; the 44px tile is
+  // the control that carries the keyboard path, so it has to actually exist.
+  it('a focused tile removes itself on Backspace and on Delete', async () => {
+    await renderPanel();
+    await addAttachments([
+      { path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' },
+      { path: '/tmp/b.log', name: 'b.log', size: 2048, kind: 'text' },
+    ]);
+    const tiles = () => screen.getAllByTestId('conv-attachment');
+    expect(tiles()[0].getAttribute('tabindex')).toBe('0');
+
+    await fireEvent.keyDown(tiles()[0], { key: 'Backspace' });
+    expect(tiles()).toHaveLength(1);
+    expect(tiles()[0].getAttribute('title')).toContain('b.log');
+
+    await fireEvent.keyDown(tiles()[0], { key: 'Delete' });
+    expect(screen.queryByTestId('conv-attachment')).toBeNull();
+  });
+
+  it('an ordinary key on a focused tile leaves it alone', async () => {
+    await renderPanel();
+    await addAttachments([{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }]);
+    await fireEvent.keyDown(screen.getByTestId('conv-attachment'), { key: 'a' });
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+  });
+
+  // Two gestures, two reasons: the second batch must not silently wipe the
+  // first batch's sentence.
+  it('keeps the reasons from every batch, not just the last', async () => {
+    await renderPanel();
+    await addAttachments([{ path: '/tmp/big.png', name: 'big.png', size: 11 * 1024 * 1024, kind: 'image' }]);
+    await addAttachments([{ path: '/tmp/huge.log', name: 'huge.log', size: 12 * 1024 * 1024, kind: 'text' }]);
+    const text = screen.getAllByTestId('conv-attach-error').map((p) => p.textContent).join(' ');
+    expect(text).toContain('big.png');
+    expect(text).toContain('huge.log');
+  });
+
   // SEC-9: a pasted file has no filesystem path, so nothing authorised it for
   // the Rust allow-list. Previewing it would come back E_FORBIDDEN and
   // overwrite the honest sentence with a permission error.
