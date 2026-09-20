@@ -41,12 +41,26 @@
   // What the steps list shows: a settled run completes its own picture at
   // render time rather than by rewriting what its events reported.
   const shown = $derived(run ? displaySteps(run) : []);
+  /** The last step that is not pending: how far the move actually got. */
+  const reached = $derived(shown.findLast((s) => s.state !== 'pending')?.step ?? null);
   const failure = $derived(
     run && (run.status === 'failed' || run.status === 'partial')
-      ? describeMoveError(run.error, run.status, run.toHost)
+      ? describeMoveError(run.error, run.status, run.toHost, reached)
       : null,
   );
   const carried = $derived(run?.report?.carried ?? null);
+
+  /** Everything the move left behind, from all three lists, keyed by both —
+   *  the same path can be left behind by two of them. */
+  const leftBehind = $derived(
+    carried
+      ? [
+          ...carried.ignored_left_behind.map((f) => ({ ...f, key: `ignored:${f.path}` })),
+          ...carried.session_state.left_behind.map((f) => ({ ...f, key: `session:${f.path}` })),
+          ...carried.memory.left_behind.map((f) => ({ ...f, key: `memory:${f.path}` })),
+        ]
+      : [],
+  );
 
   /** The session a finished move produced, when this window can find it. */
   const newSession = $derived.by(() => {
@@ -145,11 +159,16 @@
         </button>
       </div>
     {:else if run && run.status === 'running'}
-      {#if run.origin === 'observed'}
+      {#if run.error}
+        <p class="note">Lost contact with the hub — the move may still be running there.</p>
+      {:else if run.origin === 'observed'}
         <p class="note">Started elsewhere — this window is following along.</p>
       {/if}
       {@render steps()}
       <div class="buttons">
+        {#if run.origin === 'observed'}
+          <button onclick={done} data-testid="transfer-stop-following">Stop following</button>
+        {/if}
         <button onclick={close} data-testid="transfer-close">Close</button>
       </div>
     {:else if run && run.status === 'done'}
@@ -194,15 +213,16 @@
           {#if run.report && run.report.warnings.length > 0}
             <div class="warnings">
               <p class="warn-head">{n(run.report.warnings.length, 'warning')}</p>
-              {#each run.report.warnings as w (w)}
+              <!-- By index: two warnings can read exactly the same. -->
+              {#each run.report.warnings as w, i (i)}
                 <p class="warn" data-testid="transfer-warning">{w}</p>
               {/each}
             </div>
           {/if}
           {#if showDetails}
             <div class="details">
-              {#each [...carried.ignored_left_behind, ...carried.session_state.left_behind, ...carried.memory.left_behind] as f (f.path)}
-                <p><code>{f.path}</code> — {REASON[f.reason]}</p>
+              {#each leftBehind as f (f.key)}
+                <p><code>{f.path}</code> — {REASON[f.reason] ?? f.reason}</p>
               {/each}
               {#each carried.session_state.kept_target as p (p)}
                 <p><code>{p}</code> — kept the target's copy</p>

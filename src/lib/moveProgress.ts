@@ -45,7 +45,9 @@ export function stepLabel(step: MoveStep, toHost: string): string {
     case 'git':
       return 'Carry the git work';
     case 'replay':
-      return 'Replay uncommitted work';
+      // The worktree is created and fast-forwarded here, after the fetch —
+      // see `MoveStep` in `crates/fleet-core/src/events.rs`.
+      return 'Set up the worktree, replay uncommitted work';
     case 'ignored':
       return 'Ignored files';
     case 'claude_state':

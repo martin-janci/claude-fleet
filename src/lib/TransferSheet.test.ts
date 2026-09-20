@@ -192,9 +192,99 @@ describe('TransferSheet', () => {
     p.reject({ code: 'E_MOVE_PARTIAL', message: 'x', details: { target_session_id: 6 } });
     await flush();
     await tick();
-    expect((await screen.findByTestId('transfer-failure')).textContent).toContain('is running on turanga');
+    expect((await screen.findByTestId('transfer-failure')).textContent)
+      .toContain('A new session exists on turanga and the source is still there.');
     await fireEvent.click(screen.getByTestId('transfer-open-target'));
     expect(get(selectedSession)?.id).toBe(6);
+  });
+
+  // F3: an observed run is someone else's move. Without a way out, a window
+  // that had seen one running was stuck showing it.
+  it('progress: an observed run can be stopped following', async () => {
+    applyMoveProgress(ev('check', 'started'));
+    transferSheetFor.set(5);
+    render(TransferSheet);
+    await fireEvent.click(await screen.findByTestId('transfer-stop-following'));
+    expect(get(moves).has(5)).toBe(false);
+    expect(get(transferSheetFor)).toBeNull();
+  });
+
+  // B3/F1: the hub never answered. Saying "started elsewhere" would be wrong
+  // — this window started it, and nobody knows how it ended.
+  it('progress: a run whose hub went quiet says so instead', async () => {
+    const p = pendingMove();
+    startMove(source, 'turanga', { keepSource: false });
+    transferSheetFor.set(5);
+    render(TransferSheet);
+    p.reject({ code: 'E_HUB_UNREACHABLE', message: 'no answer', details: null });
+    await flush();
+    await tick();
+    const dialog = screen.getByTestId('move-dialog');
+    expect(dialog.textContent).toContain('Lost contact with the hub — the move may still be running there.');
+    expect(dialog.textContent).not.toContain('Started elsewhere');
+    expect(screen.getByTestId('transfer-stop-following')).toBeTruthy();
+  });
+
+  // P-T5: the result view of a move this window only watched.
+  it('result: an observed run has no report, and offers the new session when it can find it', async () => {
+    applyMoveProgress(ev('check', 'started'));
+    applyMoveProgress(ev('handoff', 'done'));
+    transferSheetFor.set(5);
+    render(TransferSheet);
+    await tick();
+    expect((await screen.findByTestId('transfer-result')).textContent)
+      .toContain('Started elsewhere — this window has no report for it.');
+    expect(screen.queryByTestId('transfer-details')).toBeNull();
+    expect(screen.queryByTestId('transfer-open-target')).toBeNull();
+    expect(screen.getByTestId('transfer-done')).toBeTruthy();
+
+    sessions.set([source, target]);
+    await tick();
+    expect((screen.getByTestId('transfer-open-target') as HTMLElement).textContent)
+      .toContain('Open on turanga');
+  });
+
+  // F6: the sheet passes the step the move reached, so the standing sentence
+  // can tell "nothing was copied" from "the clone is still over there".
+  it('failure: a refusal in the check says nothing was copied', async () => {
+    const p = pendingMove();
+    startMove(source, 'turanga', { keepSource: false });
+    transferSheetFor.set(5);
+    render(TransferSheet);
+    p.reject({ code: 'E_MOVE_DIRTY', message: 'dirty', details: null });
+    await flush();
+    await tick();
+    const failure = await screen.findByTestId('transfer-failure');
+    expect(failure.textContent).toContain('Nothing was copied to turanga.');
+    expect(failure.textContent).not.toContain('was left there');
+  });
+
+  // P-T5: two identical warnings, and one path left behind by two different
+  // lists, are both legal — a keyed `{#each}` on the value alone throws.
+  it('result: duplicate warnings and a repeated path still render', async () => {
+    const p = pendingMove();
+    startMove(source, 'turanga', { keepSource: false });
+    transferSheetFor.set(5);
+    render(TransferSheet);
+    const both = { path: 'same.bin', bytes: 1, reason: 'over_cap' as const };
+    p.resolve({
+      ...report,
+      warnings: ['the very same warning', 'the very same warning'],
+      carried: {
+        ...report.carried,
+        ignored_left_behind: [both],
+        session_state: { ...report.carried.session_state, left_behind: [both] },
+        memory: { ...report.carried.memory, left_behind: [{ ...both, reason: 'from_a_newer_backend' }] },
+      },
+    });
+    await flush();
+    await tick();
+    const result = await screen.findByTestId('transfer-result');
+    expect(result.querySelectorAll('[data-testid="transfer-warning"]')).toHaveLength(2);
+    await fireEvent.click(screen.getByTestId('transfer-details'));
+    expect(result.textContent?.match(/same\.bin/g)).toHaveLength(3);
+    // F11: a reason this build does not know is shown as it came.
+    expect(result.textContent).toContain('from_a_newer_backend');
   });
 
   it('closes itself when the session is gone and there is no run', async () => {

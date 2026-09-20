@@ -239,6 +239,28 @@ describe('subscribeToRowEvents → store integration', () => {
     await flush();
     expect(seen).toEqual(['p1:0/2:local/claude', 'p1:2/2:/']);
   });
+
+  // F8: nothing else held the `move:progress` subscription in place — delete
+  // the one `sub(...)` line and the Transfer sheet silently stops moving.
+  it('fires onMoveProgress for move:progress events, from the first to the last step', async () => {
+    const seen: string[] = [];
+    await subscribeToRowEvents({
+      onMoveProgress: (p) => seen.push(`${p.session_id}->${p.to_host}:${p.step}:${p.state}:${p.index}/${p.total}`),
+    });
+    fire('move:progress', {
+      session_id: 5, to_host: 'turanga', step: 'check', index: 1, total: 9,
+      state: 'started', detail: null,
+    });
+    fire('move:progress', {
+      session_id: 5, to_host: 'turanga', step: 'handoff', index: 9, total: 9,
+      state: 'done', detail: '2 commits',
+    });
+    await flush();
+    expect(seen).toEqual([
+      '5->turanga:check:started:1/9',
+      '5->turanga:handoff:done:9/9',
+    ]);
+  });
 });
 
 // FE-10: the reconcile tick emits one session:updated per session; each one

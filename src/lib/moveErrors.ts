@@ -1,6 +1,7 @@
 // A failed move, in words. The backend's messages are written for an
 // operator reading a log; the sheet needs one sentence on what failed and one
 // on where things stand.
+import type { MoveStep } from './moveProgress';
 import type { IpcError } from './result';
 
 export interface MoveFailure {
@@ -24,10 +25,41 @@ const CARRY_STEP: Record<string, string> = {
  *  is the older name and costs nothing to keep. */
 const TIMEOUTS = new Set(['E_SSH_TIMEOUT', 'E_TIMEOUT']);
 
+/**
+ * The steps that touch nothing on the target. Up to and including
+ * `transcript` the move has only read the source, so "nothing was copied" is
+ * true; from `workspace` on, a clone, a worktree or files exist over there.
+ */
+const NOTHING_COPIED_YET: ReadonlySet<MoveStep> = new Set<MoveStep>(['check', 'transcript']);
+
 function field(details: unknown, key: string): string | null {
   if (typeof details !== 'object' || details === null) return null;
   const v = (details as Record<string, unknown>)[key];
   return typeof v === 'string' ? v : null;
+}
+
+/** A move that stopped after the target session existed. The `step` strings
+ *  are the ones `partial(…)` is called with in
+ *  `crates/fleet-core/src/service/move_session/mod.rs`; a step this build
+ *  does not know falls back, so renaming one there is safe. */
+function partialWhat(details: unknown, toHost: string): string {
+  const step = field(details, 'step');
+  if (step === 'confirming the target is running') {
+    return `The new session on ${toHost} did not confirm that it is running.`;
+  }
+  if (step === 'source transcript changed after copy') {
+    return (
+      `The source wrote to the conversation after it was copied, so ${toHost} is missing the ` +
+      `latest turn. Kill the session on ${toHost} and transfer again.`
+    );
+  }
+  if (step !== null && step.startsWith('killing the source')) {
+    return `The new session is running on ${toHost}, but the source could not be stopped. Kill the source yourself.`;
+  }
+  if (step === 'reconciling the target host') {
+    return `The new session was started on ${toHost}, but fleet could not confirm it there.`;
+  }
+  return 'The new session started, but the last step of the move failed.';
 }
 
 function what(error: IpcError, toHost: string): string {
@@ -45,11 +77,14 @@ function what(error: IpcError, toHost: string): string {
     case 'E_LOCAL_ONLY':
       return 'This desktop is a window onto a hub, and the hub refused the move.';
     case 'E_INVALID_STATE':
-      return error.message.includes('already in progress')
-        ? 'This session is already being moved.'
-        : error.message;
+      if (error.message.includes('already in progress')) return 'This session is already being moved.';
+      // `require_source_idle`: the one refusal the user can simply wait out.
+      if (error.message.includes('is not idle')) {
+        return 'The source Claude is in the middle of a turn. Wait for it to finish, then transfer.';
+      }
+      return error.message;
     case 'E_MOVE_PARTIAL':
-      return 'The new session started, but the last step of the move failed.';
+      return partialWhat(error.details, toHost);
     case 'E_MOVE_CARRY': {
       const step = field(error.details, 'step');
       const sentence = step === null ? undefined : CARRY_STEP[step];
@@ -63,15 +98,24 @@ function what(error: IpcError, toHost: string): string {
   }
 }
 
+/**
+ * `reached` is the last step that is not pending — what the move had got to
+ * when it stopped. It decides how much the target was left holding: the
+ * cleanup removes the transfer scratch directories and nothing else.
+ */
 export function describeMoveError(
   error: IpcError | null,
   status: 'failed' | 'partial',
   toHost: string,
+  reached: MoveStep | null,
 ): MoveFailure {
   const standing =
     status === 'partial'
-      ? `The session is running on ${toHost}, but the source could not be retired. Both sessions were left as they are.`
-      : `The source session was not touched. Anything copied to ${toHost} was cleaned up.`;
+      ? `A new session exists on ${toHost} and the source is still there. Nothing was killed.`
+      : reached === null || NOTHING_COPIED_YET.has(reached)
+        ? `Nothing was copied to ${toHost}. The source session was not touched.`
+        : 'The source session was not touched. Temporary transfer files were removed; what was ' +
+          `already set up on ${toHost} — the clone, the worktree, copied files — was left there.`;
   if (error === null) {
     return {
       what: 'The move failed. It was started elsewhere, so the reason is in that window or in the session timeline.',
