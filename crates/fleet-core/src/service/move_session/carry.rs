@@ -639,11 +639,20 @@ pub struct Leftovers {
 /// Longest path list either side of [`Leftovers`] carries.
 const LEFTOVER_CAP: usize = 50;
 
-/// The rollback shared by [`apply_script`] and [`recover_script`]: restore
-/// the worktree to a clean `HEAD`, then remove EXACTLY the paths the snapshot
-/// tree adds relative to `HEAD` — never `git clean`, which would also take
-/// the target's own untracked files and empty directories. Sets `n` to the
-/// number of files removed. Requires `$id` to be set and guarded.
+/// The rollback shared by [`apply_script`] and [`recover_script`]: reset the
+/// worktree and index to `HEAD` via `git read-tree -u --reset HEAD`, then
+/// remove EXACTLY the paths the snapshot tree adds relative to `HEAD` — never
+/// `git clean`, which would also take the target's own untracked files and
+/// empty directories. Sets `n` to the number of files removed. Requires `$id`
+/// to be set and guarded.
+///
+/// `read-tree -u --reset HEAD` is a hard reset of every TRACKED path: it
+/// discards any uncommitted modification to a tracked file, whoever made it
+/// — the snapshot's or the target's own. What it does NOT touch is anything
+/// untracked: a git-ignored file, or an untracked path the snapshot does not
+/// add. So this body is only safe to run once the caller already knows every
+/// dirty tracked path in the worktree belongs to the snapshot — see
+/// [`recover_script`]'s doc for the required gate.
 fn recover_body() -> String {
     r#"n=0
 recover() {
@@ -657,10 +666,20 @@ recover() {
     .to_string()
 }
 
-/// Undo what an unfinished earlier attempt replayed into `cwd`, and nothing
-/// else: [`recover_body`], then [`OUT_MARKER`] and the number of files
-/// removed. Parse with [`parse_recover`]. Never touches a git-ignored file,
-/// a path the snapshot does not add, or the target's own untracked files.
+/// Undo what an unfinished earlier attempt replayed into `cwd`: [`recover_body`],
+/// then [`OUT_MARKER`] and the number of files removed. Parse with
+/// [`parse_recover`]. It never touches a git-ignored file, an untracked path
+/// the snapshot does not add, or any path outside the snapshot's additions —
+/// but [`recover_body`]'s `read-tree -u --reset HEAD` DOES discard any
+/// uncommitted change to a TRACKED file in that worktree, including the
+/// target's own, with no way to tell whose it was after the fact.
+///
+/// So this must only be called once the caller has already established that
+/// every dirty tracked path in the worktree is one the snapshot itself
+/// writes — never on a target that might hold its own genuine work. That is
+/// exactly what [`verify_replayed_script`]'s `ours`/`theirs` split exists to
+/// answer first: a non-empty `theirs` means real target work is present, and
+/// `recover_script` must not run.
 pub fn recover_script(cwd: &str, claude_id: &str) -> String {
     format!(
         r#"# cf-carry:recover
