@@ -596,8 +596,7 @@
         class:active={sessionTabActive}
         role="tab"
         aria-selected={sessionTabActive}
-        disabled={!$selectedSession}
-        title={!$selectedSession ? 'Select a session first' : 'The running session — its conversation and its terminal'}
+        title={!$selectedSession ? 'No session selected' : 'The running session — its conversation and its terminal'}
         onclick={showSession}
         data-testid="tab-session">Session</button
       >

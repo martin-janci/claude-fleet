@@ -248,7 +248,7 @@ describe('App: the Hosts view', () => {
     expect(screen.getByTestId('host-detail').dataset.alias).toBe('mefistos');
   });
 
-  it('the Hosts tab is never disabled, even with no session selected; Terminal leaves the view', async () => {
+  it('the Hosts tab is never disabled, even with no session selected; Session leaves the view', async () => {
     await mountApp();
     const tab = screen.getByTestId('tab-hosts') as HTMLButtonElement;
     expect(tab.disabled).toBe(false);
@@ -256,7 +256,9 @@ describe('App: the Hosts view', () => {
     await fireEvent.click(tab);
     await tick();
     expect(hostsView()).not.toBeNull();
-    await fireEvent.click(screen.getByTestId('tab-session'));
+    const sessionTab = screen.getByTestId('tab-session') as HTMLButtonElement;
+    expect(sessionTab.disabled).toBe(false);
+    await fireEvent.click(sessionTab);
     await tick();
     expect(hostsView()).toBeNull();
   });
