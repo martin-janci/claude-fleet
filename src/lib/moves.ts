@@ -4,11 +4,13 @@
 // window, the MCP API, a hub client) is settled by its events. Nothing here
 // is persisted: the session timeline already records the move.
 import { get, writable, type Readable } from 'svelte/store';
+import { UNDONE } from './moveErrors';
 import { MOVE_STEPS, type MoveProgress, type MoveStep, type MoveStepState } from './moveProgress';
-import { moveSession, type MoveReport } from './moveSession';
+import { moveSession, resolveMove, type MoveReport, type ResolveAction, type ResolveMoveReport } from './moveSession';
 import type { IpcError, Result } from './result';
 import { sessions, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
+import type { UnresolvedPartial } from './timeline';
 import { push, pushError } from './toasts';
 
 export type StepState = 'pending' | MoveStepState;
@@ -37,6 +39,11 @@ export interface MoveRun {
   startedAt: number;
   /** When the command's result settled this run; null while it runs. */
   settledAt: number | null;
+  /** Whether the last (re)try asked to replace a stale attempt's leftovers
+   *  on the target instead of refusing with `E_MOVE_TARGET_DIRTY`. */
+  cleanTarget: boolean;
+  /** 1 for the original attempt; `retryMove` bumps it, on the same run. */
+  attempt: number;
 }
 
 const DETAIL_MAX = 80;
@@ -162,6 +169,8 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     error: null,
     startedAt: Date.now(),
     settledAt: null,
+    cleanTarget: false,
+    attempt: 1,
   });
   void moveSession(session.id, toHost, { keepSource: opts.keepSource }).then((r) =>
     settle(session.id, r),
@@ -246,6 +255,122 @@ function settle(sessionId: number, r: Result<MoveReport>): void {
   if (!sheetOpen) pushError(r.error, `Move of ${run.sessionName} failed`);
 }
 
+/**
+ * Run the same move again, on the same run entry. Only for a run that FAILED:
+ * a running one is already going, and a partial needs `resolveMoveRun` — a
+ * second `move_session` there would build a second target.
+ */
+export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {}): void {
+  const run = get(store).get(sessionId);
+  if (!run || run.status !== 'failed' || run.origin !== 'local') return;
+  const cleanTarget = opts.cleanTarget ?? false;
+  put({
+    ...run,
+    steps: blank(),
+    status: 'running',
+    report: null,
+    error: null,
+    cleanTarget,
+    attempt: run.attempt + 1,
+    startedAt: Date.now(),
+    settledAt: null,
+  });
+  void moveSession(sessionId, run.toHost, {
+    keepSource: run.keepSource ?? false,
+    cleanTarget,
+  }).then((r) => settle(sessionId, r));
+}
+
+/** The TARGET session's id `resolve_move` needs, from whichever of the run's
+ *  two places still names it: a finished report, or a partial error's
+ *  details. `null` when neither does — there is nothing to act on. */
+function targetIdOf(run: MoveRun): number | null {
+  if (run.report) return run.report.target_session_id;
+  const details = run.error?.details;
+  if (typeof details === 'object' && details !== null) {
+    const v = (details as Record<string, unknown>).target_session_id;
+    if (typeof v === 'number') return v;
+  }
+  return null;
+}
+
+function settleResolve(sessionId: number, action: ResolveAction, r: Result<ResolveMoveReport>): void {
+  const run = get(store).get(sessionId);
+  if (!run) return;
+  if (!r.ok) {
+    pushError(r.error, `Resolving the transfer of ${run.sessionName}`);
+    return;
+  }
+  if (action === 'finish') {
+    put({ ...run, status: 'done', settledAt: Date.now() });
+    return;
+  }
+  put({
+    ...run,
+    status: 'failed',
+    error: {
+      code: UNDONE,
+      message: `The new session on ${run.toHost} was killed; ${run.sessionName} keeps running on ${run.fromHost}.`,
+    },
+    settledAt: Date.now(),
+  });
+}
+
+/**
+ * Finish or undo a partial move (`E_MOVE_PARTIAL`). `sessionId` is the run's
+ * key — the SOURCE session's id — but `resolve_move` itself takes the
+ * TARGET's id, which `targetIdOf` finds in the run. Nothing to act on is a
+ * toast, not a call.
+ */
+export function resolveMoveRun(sessionId: number, action: ResolveAction): void {
+  const run = get(store).get(sessionId);
+  if (!run) return;
+  const targetId = targetIdOf(run);
+  if (targetId === null) {
+    push({ kind: 'error', message: `${run.sessionName}: no target session to resolve.` });
+    return;
+  }
+  void resolveMove(targetId, action).then((r) => settleResolve(sessionId, action, r));
+}
+
+/**
+ * Rebuild a `partial` run from a recorded `session_move_partial` event, so
+ * the sheet can offer Finish/Undo for a move this window never saw — usually
+ * because the app was restarted before anyone resolved it. Keyed like a live
+ * partial: the source id when known, the target id otherwise. A no-op when a
+ * run already exists for that key — a live run is always the better picture.
+ */
+export function adoptPartial(p: UnresolvedPartial, sessionName: string): void {
+  const key = p.sourceSessionId ?? p.targetSessionId;
+  if (get(store).has(key)) return;
+  const cutoff = MOVE_STEPS.indexOf('start');
+  const steps: MoveRunStep[] = MOVE_STEPS.map((step, i) => ({
+    step,
+    state: (i <= cutoff ? 'done' : 'pending') as StepState,
+    detail: null,
+  }));
+  put({
+    sessionId: key,
+    sessionName,
+    fromHost: p.fromHost,
+    toHost: p.toHost,
+    keepSource: null,
+    origin: 'local',
+    steps,
+    status: 'partial',
+    report: null,
+    error: {
+      code: 'E_MOVE_PARTIAL',
+      message: '',
+      details: { step: p.step, target_session_id: p.targetSessionId, target_host: p.toHost },
+    },
+    cleanTarget: false,
+    attempt: 1,
+    startedAt: Date.now(),
+    settledAt: Date.now(),
+  });
+}
+
 function observed(p: MoveProgress): MoveRun {
   const row = get(sessions).find((s) => s.id === p.session_id);
   return {
@@ -261,6 +386,8 @@ function observed(p: MoveProgress): MoveRun {
     error: null,
     startedAt: Date.now(),
     settledAt: null,
+    cleanTarget: false,
+    attempt: 1,
   };
 }
 

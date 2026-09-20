@@ -82,7 +82,10 @@ describe('TransferSheet', () => {
     await fireEvent.click(screen.getByTestId('move-keep-source'));
     await fireEvent.click(screen.getByTestId('confirm-move'));
     expect(mockInvoke).toHaveBeenCalledWith('move_session', {
-      args: { session_id: 5, target_host_alias: 'turanga', keep_source: true, strict: false },
+      args: {
+        session_id: 5, target_host_alias: 'turanga', keep_source: true, strict: false,
+        clean_target: false,
+      },
     });
     expect(await screen.findByTestId('transfer-steps')).toBeTruthy();
   });
