@@ -40,6 +40,17 @@ export const MAX_TOTAL = 25 * 1024 * 1024;
 const MAX_BYTES_MB = MAX_BYTES / (1024 * 1024);
 const MAX_TOTAL_MB = MAX_TOTAL / (1024 * 1024);
 
+/**
+ * `upload_attachments` consumes each path's allow-list entry the moment it
+ * passes the byte budget — before a single byte transfers
+ * (`UploadAllowList::consume` in `src-tauri/src/commands/upload.rs`, which
+ * runs unconditionally and is not undone by a later failure). A tile
+ * carrying this message is spent: its local path will not upload again as
+ * it is, so `addFiles` below treats attaching the same path again as a
+ * replacement rather than a duplicate — see `markNeedsReattach`.
+ */
+export const NEEDS_REATTACH = 'Not sent — attach it again to retry.';
+
 export function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
@@ -76,6 +87,38 @@ let seq = 0;
  * allow-list yet, and it would otherwise silently duplicate against every
  * other paste, or fail much later as a confusing permission error.
  */
+/** A fresh, authorised tile for `f` — what a brand new attach, or a
+ *  replacement of a spent one, both produce. */
+function readingTile(f: PickedFile): Attachment {
+  return {
+    id: `att-${++seq}`,
+    path: f.path,
+    name: f.name,
+    size: f.size,
+    kind: f.kind,
+    // The tile is reserved at full size before the preview decodes, so
+    // decoding causes no reflow.
+    thumb: null,
+    state: 'reading',
+    error: null,
+    pasted: false,
+  };
+}
+
+/** The rejection sentence for `f` against the two byte budgets, measured
+ *  with `f` added to `totalSoFar` — or `null` if it fits both. Shared by
+ *  the ordinary-add and the replace-a-spent-tile paths below, so a
+ *  replacement is checked the same way a fresh attach is. */
+function budgetRejection(f: PickedFile, totalSoFar: number): string | null {
+  if (f.size > MAX_BYTES) {
+    return `${f.name} is ${fmtBytes(f.size)} — the limit is ${MAX_BYTES_MB} MB.`;
+  }
+  if (totalSoFar + f.size > MAX_TOTAL) {
+    return `${f.name} would make ${fmtBytes(totalSoFar + f.size)} in total — the limit is ${MAX_TOTAL_MB} MB in total.`;
+  }
+  return null;
+}
+
 export function addFiles(
   current: Attachment[],
   picked: PickedFile[],
@@ -99,54 +142,55 @@ export function addFiles(
       });
       continue;
     }
-    if (next.some((a) => a.path === f.path)) continue;
+
+    const dupIndex = next.findIndex((a) => a.path === f.path);
+    if (dupIndex !== -1) {
+      const existing = next[dupIndex];
+      // An ordinary live duplicate still collapses. A tile whose
+      // authorisation is already spent (`NEEDS_REATTACH`) does not: it is
+      // telling the user to attach the file again, and silently dropping
+      // that second attach as a "duplicate" would ignore the very action
+      // it asked for. Replace it with a fresh, authorised entry instead —
+      // checked against the total with the STALE entry's bytes removed
+      // first, so a replacement is not double-counted against itself.
+      if (existing.error !== NEEDS_REATTACH) continue;
+      const totalWithout = total - existing.size;
+      const reason = budgetRejection(f, totalWithout);
+      if (reason) {
+        rejected.push(reason);
+        continue;
+      }
+      total = totalWithout + f.size;
+      next[dupIndex] = readingTile(f);
+      continue;
+    }
+
     if (next.length >= MAX_FILES) {
       rejected.push(`${f.name} was not added — the limit is ${MAX_FILES} files.`);
       continue;
     }
-    if (f.size > MAX_BYTES) {
-      rejected.push(`${f.name} is ${fmtBytes(f.size)} — the limit is ${MAX_BYTES_MB} MB.`);
-      continue;
-    }
-    if (total + f.size > MAX_TOTAL) {
-      rejected.push(
-        `${f.name} would make ${fmtBytes(total + f.size)} in total — the limit is ${MAX_TOTAL_MB} MB in total.`,
-      );
+    const reason = budgetRejection(f, total);
+    if (reason) {
+      rejected.push(reason);
       continue;
     }
     total += f.size;
-    next.push({
-      id: `att-${++seq}`,
-      path: f.path,
-      name: f.name,
-      size: f.size,
-      kind: f.kind,
-      // The tile is reserved at full size before the preview decodes, so
-      // decoding causes no reflow.
-      thumb: null,
-      state: 'reading',
-      error: null,
-      pasted: false,
-    });
+    next.push(readingTile(f));
   }
   return { next, rejected };
 }
 
 // ---- after a send ----------------------------------------------------
 //
-// `upload_attachments` consumes each path's allow-list entry the moment it
-// passes the byte budget — before a single byte transfers
-// (`UploadAllowList::consume` in `src-tauri/src/commands/upload.rs`, which
-// runs unconditionally and is not undone by a later failure). So a failure
-// anywhere downstream of a successful upload call — this side's own
-// too-long refusal, a failed `send_prompt` — or the upload call itself
-// failing, leaves an attempted tile's local path unusable for a second try,
-// even though nothing about the tile says so. Pressing Send again would
-// call `upload_attachments` with the same path and get back "not attached
-// by the user, or its authorisation has expired" — a confusing failure for
-// something that looks untouched.
-
-export const NEEDS_REATTACH = 'Not sent — attach it again to retry.';
+// (`NEEDS_REATTACH` itself lives above, next to the other exported
+// constants — `addFiles` needs it too, to tell a spent tile apart from a
+// live duplicate.) A failure anywhere downstream of a successful upload
+// call — this side's own too-long refusal, a failed `send_prompt` — or the
+// upload call itself failing, leaves an attempted tile's local path
+// unusable for a second try, even though nothing about the tile says so.
+// Pressing Send again would call `upload_attachments` with the same path
+// and get back "not attached by the user, or its authorisation has
+// expired" — a confusing failure for something that looks untouched.
 
 /**
  * Mark every attachment whose id is in `ids` as spent, so the tile stops

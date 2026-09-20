@@ -45,6 +45,54 @@ describe('addFiles', () => {
     expect(after).toHaveLength(1);
   });
 
+  // FINDING 1 (fix round 2): a tile marked `NEEDS_REATTACH` tells the user
+  // to attach the file again, but the plain dedupe above would silently
+  // drop that second attach as a duplicate — telling the user to act and
+  // then ignoring the action is worse than the failure that put the tile
+  // there. Attaching the same path while it is in that state must replace
+  // it with a fresh, authorised entry; an ordinary live duplicate must
+  // still collapse exactly as before.
+  describe('re-attaching a path already in the tray', () => {
+    const spent = {
+      id: 'att-x', path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' as const,
+      thumb: null, state: 'error' as const, error: NEEDS_REATTACH, pasted: false,
+    };
+    const live = { ...spent, id: 'att-live', state: 'ready' as const, error: null };
+
+    it('replaces a needs-reattach tile with a fresh, authorised entry', () => {
+      const { next, rejected } = addFiles([spent], [file()]);
+      expect(rejected).toEqual([]);
+      expect(next).toHaveLength(1);
+      expect(next[0].id).not.toBe('att-x');
+      expect(next[0]).toMatchObject({ path: '/tmp/a.png', state: 'reading', error: null });
+    });
+
+    it('still collapses two attaches of the same live file — an ordinary no-op', () => {
+      const { next } = addFiles([live], [file()]);
+      expect(next).toHaveLength(1);
+      expect(next[0]).toBe(live);
+    });
+
+    it('checks a replacement against the total budget without double-counting the stale entry', () => {
+      const other = {
+        id: 'att-other', path: '/tmp/other.png', name: 'other.png', size: 20 * 1024 * 1024,
+        kind: 'image' as const, thumb: null, state: 'ready' as const, error: null, pasted: false,
+      };
+      const smallSpent = { ...spent, size: 1024 };
+      // Replacing the spent 1 KB entry with a fresh 6 MB one would bring the
+      // total to just over 25 MB alongside the other 20 MB file — refused,
+      // and the stale tile must still be there since the replacement did
+      // not happen.
+      const { next, rejected } = addFiles(
+        [other, smallSpent],
+        [file({ size: 6 * 1024 * 1024 })],
+      );
+      expect(rejected[0]).toContain('in total');
+      expect(next).toHaveLength(2);
+      expect(next.find((a) => a.id === 'att-x')).toBeTruthy();
+    });
+  });
+
   // Pasted files (a clipboard screenshot) arrive with no filesystem path —
   // nothing authorised one, so the Rust allow-list can never accept them.
   // addFiles represents that honestly instead of letting it fail later as a

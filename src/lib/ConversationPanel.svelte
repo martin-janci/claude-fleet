@@ -846,7 +846,10 @@
     }
 
     const body = withAttachments(text, paths);
-    if (tooLong(body)) {
+    // A remote send is quoted twice (see attach_prompt.ts's header comment
+    // for why that compounds rather than doubles), so the bound applied
+    // here must match the host the prompt is actually going to.
+    if (tooLong(body, session.host_alias === 'local')) {
       // The file(s), if any, already uploaded successfully — only the
       // prompt text is refused — so a retry needs a shorter prompt AND,
       // since the upload above already spent the tile, a fresh attach.
