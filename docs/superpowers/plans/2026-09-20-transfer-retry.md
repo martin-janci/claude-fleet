@@ -86,7 +86,7 @@ Generated files (never hand-edited): `docs/control-api-reference.md`,
 ```
 1 → 2 → 3 → 4 → 5 → 6 → 7        (Rust, strictly sequential: 2-6 all write mod.rs)
 9, 10 in parallel                 (moveErrors.ts, timeline.ts)
-        8 (needs 9, for UNDONE)
+        8 (needs 9 for UNDONE, 10 for UnresolvedPartial)
                 11 (needs 8, 9)   12 (needs 10)
 ```
 
@@ -1128,7 +1128,8 @@ git -C /Users/martinjanci/projects/github.com/martin-janci/claude-fleet/.claude/
   - `pub(super) struct PartialCtx { from_host, to_tmux_name, claude_session_id, branch, source_transcript: Option<Located>, to_turn_seq: Option<i64>, to_last_turn_at: Option<i64> }`
   - the `session_move_partial` detail keys `from_host`, `to_tmux_name`,
     `claude_session_id`, `branch`, `source_transcript_size`,
-    `source_transcript_mtime`, `to_turn_seq`, `to_last_turn_at`.
+    `source_transcript_mtime`, `source_transcript_path`, `to_turn_seq`,
+    `to_last_turn_at`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1155,6 +1156,7 @@ git -C /Users/martinjanci/projects/github.com/martin-janci/claude-fleet/.claude/
         assert!(d["to_tmux_name"].is_string(), "{d}");
         assert!(d["source_transcript_size"].is_u64(), "{d}");
         assert!(d["source_transcript_mtime"].is_i64(), "{d}");
+        assert!(d["source_transcript_path"].is_string(), "{d}");
         assert!(d["to_turn_seq"].is_i64() || d["to_turn_seq"].is_null(), "{d}");
         assert!(d["step"].is_string(), "{d}");
     }
@@ -1234,6 +1236,11 @@ cannot) and adds to its `details`:
         "to_turn_seq": ctx.to_turn_seq,
         "to_last_turn_at": ctx.to_last_turn_at,
 ```
+
+plus `"source_transcript_path": ctx.source_transcript.as_ref().map(|l| &l.path)`.
+**Pre-flight ruling R1:** the path is recorded as well as the size and mtime,
+because Task 6 rebuilds a whole `Located` from this detail and a recovery that
+guessed the path would compare the wrong file.
 
 `record_partial` copies exactly those keys through into the event detail
 alongside the ones it already writes. `serde_json` writes an `Option::None` as
@@ -1467,6 +1474,13 @@ Both report types are wire types: `Serialize + Deserialize`, **no**
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
+    // Pre-flight ruling R3: `mod.rs`'s `mod tests` is private and
+    // `#[cfg(test)]`, so this module defines its own constants rather than
+    // widening that one to share three values.
+    const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const TRANSCRIPT_LEN: usize = 128;
+    const MTIME: i64 = 1_700_000_000;
+
     /// Two rows and a `session_move_partial` event between them: what the
     /// store looks like after a move stopped with the target running. With
     /// `unresolved = false` a later `session_moved` marks it already resolved.
@@ -1502,8 +1516,9 @@ Both report types are wire types: `Serialize + Deserialize`, **no**
             "to_tmux_name": "dev-o-r--feat",
             "claude_session_id": SID,
             "branch": "feat",
-            "source_transcript_size": TRANSCRIPT.len(),
+            "source_transcript_size": TRANSCRIPT_LEN,
             "source_transcript_mtime": MTIME,
+            "source_transcript_path": "/home/a/.claude/projects/p/c.jsonl",
             "to_turn_seq": 0,
             "to_last_turn_at": serde_json::Value::Null,
         })
@@ -1926,8 +1941,9 @@ git -C /Users/martinjanci/projects/github.com/martin-janci/claude-fleet/.claude/
   `retryMove`, `resolveMoveRun`.
 - Test: `src/lib/moves.test.ts` (extend; it already exists for `startMove`).
 
-**Needs Task 9** (it imports `UNDONE` from `moveErrors.ts`). Runs in parallel
-with Task 10 — different files, no shared symbols.
+**Needs Tasks 9 and 10** — `UNDONE` from `moveErrors.ts`, and
+`UnresolvedPartial` (the type of `adoptPartial`'s parameter) from `timeline.ts`.
+Pre-flight ruling R2.
 
 **Interfaces:**
 - Consumes from Task 3 and 6 (wire only, no Rust import): the `clean_target`
@@ -2184,7 +2200,7 @@ git -C /Users/martinjanci/projects/github.com/martin-janci/claude-fleet/.claude/
 - Modify: `src/lib/moveErrors.ts`
 - Test: `src/lib/moveErrors.test.ts`
 
-**Runs in parallel with Task 10; Task 8 waits on it** (for `UNDONE`).
+**Runs in parallel with Task 10; Task 8 waits on both.**
 
 **Interfaces:**
 - Consumes: `IpcError.details.leftovers` (`'ours' | 'theirs' | 'unknown'`),
