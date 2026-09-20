@@ -854,9 +854,13 @@ In `ConversationHeader.svelte`'s `<style>`, replace `.conv-header` and add the s
     font-size: var(--control-font);
   }
   .find-inline .field:focus {
+    border-color: var(--accent);
+  }
+  /* :focus-visible, not :focus — the global constraint reserves the 2px ring
+     for it, and controls.css says so verbatim. */
+  .find-inline .field:focus-visible {
     outline: var(--ring-w) solid var(--ring);
     outline-offset: var(--ring-offset);
-    border-color: var(--accent);
   }
   .find-count {
     min-width: 4.5ch;
