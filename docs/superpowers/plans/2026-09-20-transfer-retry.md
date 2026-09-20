@@ -790,9 +790,14 @@ fn target_dirty(cwd: &str, target: &str, verdict: &Adopted) -> IpcError {
 
 - [ ] **Step 5: Wire it into the two `TARGET_DIRTY` sites**
 
-At `mod.rs:2091` (the `# cf-move:prep` refusal — a target behind the source HEAD
-*and* dirty) and at `mod.rs:2161` (the `# cf-carry:apply` refusal), replace
-`return Err(target_dirty(&cwd, &target));` with the same block:
+At `mod.rs:2161` (the `# cf-carry:apply` refusal) replace
+`return Err(target_dirty(&cwd, &target));` with the block below. **Corrected
+during execution:** the `# cf-move:prep` site at `mod.rs:2091` keeps a plain
+`return Err(target_dirty(&cwd, &target, &Adopted::Unknown));` and is NOT
+classified — prep emits `TARGET_DIRTY` only when the target HEAD is a strict
+ancestor of the source HEAD, and the verifier requires `HEAD == want_head`, so an
+adopt there is unreachable and the call only added an `E_PARSE` path in a
+fast-forward race. Put the reason in a comment at that site.
 
 ```rust
         if err.contains(carry::TARGET_DIRTY) {

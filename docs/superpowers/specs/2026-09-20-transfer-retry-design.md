@@ -113,10 +113,16 @@ becomes `target_dirty(&cwd, &target)`:
    message verbatim, with `details.leftovers = "unknown"`. A broken check must
    never widen what the move is willing to overwrite.
 
-The same three-way split applies to the `TARGET_DIRTY` that
-`target_prep_script` can return before the replay (the fast-forward path):
-there the snapshot refs are already fetched, so the verify script can run
-there too.
+The `TARGET_DIRTY` that `target_prep_script` can return before the replay (the
+fast-forward path) is **not** classified — it keeps today's refusal. Corrected
+during Task 2, where the review showed the original claim was unreachable: prep
+emits that sentinel only when the target HEAD is a strict ancestor of the source
+HEAD, while `verify_replayed_script` requires `HEAD == want_head`, so the verify
+could only ever answer `HEAD_MISMATCH` there. It is unreachable in principle
+too — a target an earlier attempt fast-forwarded has `HEAD == want` on the retry
+and prep does not refuse, and a target that was never fast-forwarded never ran
+the replay, so it holds no leftovers of ours. Calling the verifier there bought
+nothing and added an `E_PARSE` path in a fast-forward race.
 
 ## 4. `clean_target`
 
