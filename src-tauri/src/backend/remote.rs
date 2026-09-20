@@ -917,8 +917,12 @@ impl HubTransport for NoTransport {
 /// The hub over HTTP or HTTPS, written by hand onto a `TcpStream` — the same
 /// way `fleet-hub`'s own CLI talks to `/mcp`. One request, one response,
 /// `Connection: close`; there is no connection pool because a desktop makes a
-/// handful of calls a second at worst, and no HTTP client crate is in this
-/// workspace's graph to borrow one from.
+/// handful of calls a second at worst, and no *usable outbound HTTP client*
+/// crate is in this workspace's graph to borrow one from: `hyper` is present
+/// only as `axum`'s server side (via `fleet-core`'s embedded MCP server), and
+/// `reqwest` appears in `Cargo.lock` only through a target-specific `tauri`
+/// dependency that is not compiled here (`cargo tree -i reqwest` prints
+/// nothing on this platform).
 ///
 /// `https://` is the case that matters: `docs/hub.md` refuses to serve a
 /// public hub in plaintext, so a real hub is always TLS. `http://` stays for a
@@ -1005,61 +1009,57 @@ async fn tls_connector() -> Result<&'static tokio_rustls::TlsConnector, String> 
 /// needs. One implementation for every request this app makes — `POST /mcp`
 /// and the `GET /events` stream alike — so a fix to the parsing cannot land
 /// in one and not the other.
+///
+/// The parsing itself is [`fleet_proto::net::Endpoint`]'s, shared with
+/// `fleet-agent` and `fleet-hub`. What stays here is this transport's own
+/// policy — a WebSocket URL is not a hub address for a request this app
+/// writes by hand — and the request-line target that policy needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
-    /// The host to connect to and to check the certificate against.
-    /// **Unbracketed**, so an IPv6 literal works: `url::Url::host_str` returns
-    /// `[::1]` with the brackets, which neither resolves nor parses as a
-    /// `ServerName`, and an IPv6 hub was simply unreachable before this.
-    pub host: String,
-    pub port: u16,
-    pub tls: bool,
-    /// What the `Host` header must carry. Here the brackets are REQUIRED
-    /// (`[::1]:8787`), and the port is part of it unless it is the scheme's
-    /// default — the hub's allowlist is matched against exactly this string.
-    pub authority: String,
-    /// Path plus query, ready to go on the request line.
-    pub target: String,
+    at: fleet_proto::net::Endpoint,
 }
 
 impl Endpoint {
-    /// Parse a hub URL. `extra_path` is appended to whatever path prefix the
-    /// base URL already carries (`/mcp`, `/events`), and `query` goes on as
-    /// given, without a leading `?`.
+    /// Parse a hub URL: scheme, authority and a path prefix, with `/mcp`,
+    /// `/events` or `/pair` already appended by the caller.
     pub fn parse(url: &str) -> Result<Self, String> {
-        let parsed = url::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
-        let tls = match parsed.scheme() {
-            "https" => true,
-            "http" => false,
-            other => return Err(format!("{other}:// is not a hub address")),
-        };
-        let host = match parsed.host() {
-            // `to_string` on the address itself, NOT `host_str`, which keeps
-            // the URL's brackets.
-            Some(url::Host::Ipv6(v6)) => v6.to_string(),
-            Some(url::Host::Ipv4(v4)) => v4.to_string(),
-            Some(url::Host::Domain(d)) => d.to_string(),
-            None => return Err("no host in the hub URL".to_string()),
-        };
-        let port = parsed
-            .port_or_known_default()
-            .unwrap_or(if tls { 443 } else { 80 });
-        let bracketed = parsed.host_str().unwrap_or(&host);
-        let authority = match parsed.port() {
-            Some(p) => format!("{bracketed}:{p}"),
-            None => bracketed.to_string(),
-        };
-        let target = match parsed.query() {
-            Some(q) => format!("{}?{}", parsed.path(), q),
-            None => parsed.path().to_string(),
-        };
-        Ok(Self {
-            host,
-            port,
-            tls,
-            authority,
-            target,
-        })
+        let at = fleet_proto::net::Endpoint::parse(url).map_err(|e| format!("{url}: {e}"))?;
+        if at.scheme().is_websocket() {
+            // The agent dials a WebSocket; everything this app sends is HTTP
+            // it writes itself.
+            return Err(format!("{}:// is not a hub address", at.scheme()));
+        }
+        Ok(Self { at })
+    }
+
+    /// The host to connect to and to check the certificate against.
+    /// **Unbracketed**, so an IPv6 literal works: the bracketed `[::1]`
+    /// neither resolves nor parses as a `ServerName`, and an IPv6 hub was
+    /// simply unreachable before that was fixed.
+    pub fn host(&self) -> &str {
+        self.at.host()
+    }
+
+    pub fn port(&self) -> u16 {
+        self.at.port()
+    }
+
+    pub fn is_tls(&self) -> bool {
+        self.at.is_tls()
+    }
+
+    /// What the `Host` header must carry. Here the brackets are REQUIRED
+    /// (`[::1]:8787`), and the port is part of it unless it is the scheme's
+    /// default — the hub's allowlist is matched against exactly this string.
+    pub fn authority(&self) -> &str {
+        self.at.authority()
+    }
+
+    /// The path, ready to go on the request line. A query would have been
+    /// refused by the parser: this value is built by concatenation
+    /// (`{base_url}/mcp`), which a query silently breaks.
+    pub fn target(&self) -> String {
+        self.at.request_target()
     }
 }
 
@@ -1075,25 +1075,25 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> Duplex for 
 /// Connect to `at`, wrapping in TLS when it says so. The one place a socket
 /// to a hub is opened.
 pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
-    let tcp = tokio::net::TcpStream::connect((at.host.as_str(), at.port))
+    let tcp = tokio::net::TcpStream::connect((at.host(), at.port()))
         .await
-        .map_err(|e| format!("connect {}:{}: {e}", at.host, at.port))?;
-    if !at.tls {
+        .map_err(|e| format!("connect {}:{}: {e}", at.host(), at.port()))?;
+    if !at.is_tls() {
         return Ok(Box::new(tcp));
     }
     let connector = tls_connector().await?;
     // The name the certificate is checked against. An IP literal is accepted
     // by `ServerName` and matched as an IP SAN, which is what a hub reached
     // at `https://10.0.0.5` needs.
-    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(at.host.clone())
-        .map_err(|e| format!("{} is not a valid certificate name: {e}", at.host))?;
+    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(at.host().to_string())
+        .map_err(|e| format!("{} is not a valid certificate name: {e}", at.host()))?;
     let stream = connector
         .connect(server_name, tcp)
         .await
         // The usual causes are an expired or self-signed certificate and a
         // name that does not match; rustls says which, and the operator needs
         // to hear it verbatim.
-        .map_err(|e| format!("TLS handshake with {}:{} failed: {e}", at.host, at.port))?;
+        .map_err(|e| format!("TLS handshake with {}:{} failed: {e}", at.host(), at.port()))?;
     Ok(Box::new(stream))
 }
 
@@ -1121,8 +1121,8 @@ impl HubTransport for TcpTransport {
             "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
              Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            at.target,
-            at.authority,
+            at.target(),
+            at.authority(),
             body.len()
         );
         let raw = tokio::time::timeout(CALL_TIMEOUT, exchange(&at, &request))
@@ -1136,7 +1136,7 @@ impl HubTransport for TcpTransport {
 /// the body may be chunked and only [`split_response`] may decode it.
 pub(crate) async fn exchange(at: &Endpoint, request: &str) -> Result<Vec<u8>, String> {
     let conn = connect(at).await?;
-    speak(conn, &at.host, at.port, request).await
+    speak(conn, at.host(), at.port(), request).await
 }
 
 /// Write `request` and read until the peer closes. Generic over the stream so
@@ -1209,85 +1209,25 @@ where
 /// the shortcut; it is the same latent bug, not a different one.)
 ///
 /// Bytes in, text out, decoded ONCE at the end: a chunk size is a byte count,
-/// and a chunk boundary may fall inside a multi-byte character.
+/// and a chunk boundary may fall inside a multi-byte character. The head
+/// parsing and de-chunking themselves are [`super::http1`]'s, shared with
+/// `events.rs`'s streaming reader; this is the one-shot assembly on top.
 pub fn split_response(raw: impl AsRef<[u8]>) -> Result<HubResponse, String> {
     let raw = raw.as_ref();
-    let split = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or("the hub sent a malformed HTTP response")?;
+    let split =
+        super::http1::find(raw, b"\r\n\r\n").ok_or("the hub sent a malformed HTTP response")?;
     // The head is ASCII by the grammar; a stray byte in it is not worth
     // failing over.
     let head = String::from_utf8_lossy(&raw[..split]);
     let head = head.as_ref();
     let body = &raw[split + 4..];
-    let status_line = head.lines().next().unwrap_or_default();
-    // The status token, not a substring: a `contains(" 200")` would match the
-    // reason phrase and any header that happened to carry " 200" too.
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| format!("unreadable status line: {status_line:?}"))?;
-    let body = if head_is_chunked(head) {
-        String::from_utf8_lossy(&dechunk(body)?).into_owned()
+    let status = super::http1::parse_status(head)?;
+    let body = if super::http1::head_is_chunked(head) {
+        String::from_utf8_lossy(&super::http1::dechunk(body)?).into_owned()
     } else {
         String::from_utf8_lossy(body).into_owned()
     };
     Ok(HubResponse { status, body })
-}
-
-/// Does this response head declare `Transfer-Encoding: chunked`? Header names
-/// are case-insensitive and the value may be a list (`gzip, chunked`).
-pub fn head_is_chunked(head: &str) -> bool {
-    head.lines().skip(1).any(|line| {
-        line.split_once(':').is_some_and(|(name, value)| {
-            name.trim().eq_ignore_ascii_case("transfer-encoding")
-                && value
-                    .split(',')
-                    .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
-        })
-    })
-}
-
-/// Undo `Transfer-Encoding: chunked` over a whole body.
-///
-/// A chunk is `<hex size>[;ext]CRLF<size bytes>CRLF`, and a zero-size chunk
-/// ends the body. A body that stops mid-chunk (the peer closed early) yields
-/// what had arrived rather than an error: [`speak`] already tolerates a
-/// half-closed connection, and failing here would undo that.
-///
-/// Over BYTES: a chunk size is a byte count and says nothing about character
-/// boundaries, so a chunk may legitimately end halfway through a character.
-/// The caller decodes the joined result.
-pub fn dechunk(body: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    loop {
-        let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") else {
-            // The body ended mid-header; whatever decoded is what there is.
-            return Ok(out);
-        };
-        let size_line = String::from_utf8_lossy(&rest[..eol]);
-        let after = &rest[eol + 2..];
-        // `;` introduces chunk extensions, which nothing here uses.
-        let size_token = size_line.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_token, 16)
-            .map_err(|_| format!("unreadable chunk size {size_token:?}"))?;
-        if size == 0 {
-            return Ok(out);
-        }
-        if after.len() < size {
-            // Truncated final chunk: take what arrived.
-            out.extend_from_slice(after);
-            return Ok(out);
-        }
-        out.extend_from_slice(&after[..size]);
-        // Skip the chunk's own trailing CRLF.
-        rest = after[size..]
-            .strip_prefix(b"\r\n")
-            .unwrap_or(&after[size..]);
-    }
 }
 
 #[cfg(test)]

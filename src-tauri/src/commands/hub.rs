@@ -53,8 +53,11 @@ pub struct HubStatus {
     /// between a pairing and the restart that applies it.
     pub configured_url: Option<String>,
     pub configured_client_name: Option<String>,
-    /// `hub.allow_plaintext`: this operator decided to send the client token
-    /// over plain http to a routable host.
+    /// `hub.client_plaintext_token`
+    /// ([`crate::backend::ALLOW_PLAINTEXT_KEY`]): this operator decided to
+    /// send the client token over plain http to a routable host. The wire
+    /// name stays `allow_plaintext` — it is a field between this app's
+    /// halves, not the stored key, and not the daemon's setting of that name.
     pub allow_plaintext: bool,
     /// Why a configured hub is not in use, or why the one in use is risky —
     /// for the stored configuration, as the next launch would resolve it.

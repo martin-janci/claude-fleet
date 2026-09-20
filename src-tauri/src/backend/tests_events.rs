@@ -29,6 +29,26 @@ use fleet_core::store::AssetInventoryRow;
 use serde_json::json;
 use std::sync::Mutex as StdMutex;
 
+/// Each recorded wait belongs to the step of the curve it should: the
+/// reconnect backoff is jittered (`fleet_proto::backoff`), so a delay is a
+/// point in the upper half of `FIRST_BACKOFF * multiple`, capped at
+/// `MAX_BACKOFF` — never an exact number.
+#[track_caller]
+fn assert_steps(waits: &[Duration], multiples: &[u32], why: &str) {
+    assert_eq!(
+        waits.len(),
+        multiples.len(),
+        "{why}: {waits:?} against steps {multiples:?}"
+    );
+    for (wait, multiple) in waits.iter().zip(multiples) {
+        let step = (FIRST_BACKOFF * *multiple).min(MAX_BACKOFF);
+        assert!(
+            *wait >= step / 2 && *wait <= step,
+            "{why}: {wait:?} is not inside the {step:?} step of {waits:?}"
+        );
+    }
+}
+
 // --- doubles -----------------------------------------------------------------
 
 /// Records every `(name, payload)` the bridge emitted.
@@ -617,10 +637,10 @@ async fn a_dropped_stream_reconnects_with_backoff_and_re_lists_once_per_connecti
          so every reconnection leaves a hole"
     );
     assert_eq!(opens, 2, "it reconnected after the first stream ended");
-    assert_eq!(
-        delay.waits().first(),
-        Some(&FIRST_BACKOFF),
-        "a reconnection waits before retrying rather than spinning"
+    assert_steps(
+        &delay.waits()[..1],
+        &[1],
+        "a reconnection waits before retrying rather than spinning",
     );
 }
 
@@ -671,11 +691,7 @@ async fn a_hub_that_will_not_answer_backs_off_and_keeps_trying() {
         0,
         "nothing to re-list against a hub that never answered"
     );
-    assert_eq!(
-        delay.waits()[..3],
-        [FIRST_BACKOFF, FIRST_BACKOFF * 2, FIRST_BACKOFF * 4],
-        "the wait grows"
-    );
+    assert_steps(&delay.waits()[..3], &[1, 2, 4], "the wait grows");
 }
 
 /// The failure a `Gap { delivered }` exists for: a hub that accepts the
@@ -705,11 +721,11 @@ async fn a_hub_that_accepts_and_delivers_nothing_does_not_reset_the_backoff() {
         3,
         "it did re-list each time — which is exactly why the wait must grow"
     );
-    assert_eq!(
-        delay.waits()[..3],
-        [FIRST_BACKOFF, FIRST_BACKOFF * 2, FIRST_BACKOFF * 4],
+    assert_steps(
+        &delay.waits()[..3],
+        &[1, 2, 4],
         "an empty connection is not a working connection, whatever the socket \
-         said"
+         said",
     );
 }
 
@@ -729,15 +745,10 @@ async fn a_row_event_is_what_calls_a_connection_working() {
         Connection::Delivers(vec![]),
     ])
     .await;
-    assert_eq!(
-        delay.waits()[..4],
-        [
-            FIRST_BACKOFF,
-            FIRST_BACKOFF * 2,
-            FIRST_BACKOFF,
-            FIRST_BACKOFF * 2
-        ],
-        "the third connection delivered, so the wait after it starts over"
+    assert_steps(
+        &delay.waits()[..4],
+        &[1, 2, 1, 2],
+        "the third connection delivered, so the wait after it starts over",
     );
 }
 
@@ -755,15 +766,10 @@ async fn a_connection_that_only_says_ready_does_not_reset_the_backoff() {
     ])
     .await;
     assert_eq!(resync.count(), 4);
-    assert_eq!(
-        delay.waits()[..4],
-        [
-            FIRST_BACKOFF,
-            FIRST_BACKOFF * 2,
-            FIRST_BACKOFF * 4,
-            FIRST_BACKOFF * 8
-        ],
-        "`ready` is sent before the hub touches its bus, so it proves nothing"
+    assert_steps(
+        &delay.waits()[..4],
+        &[1, 2, 4, 8],
+        "`ready` is sent before the hub touches its bus, so it proves nothing",
     );
 }
 
@@ -853,10 +859,10 @@ async fn a_too_new_hub_does_not_reset_the_backoff() {
     ])
     .await;
     assert_eq!(resync.count(), 0);
-    assert_eq!(
-        delay.waits()[..3],
-        [FIRST_BACKOFF, FIRST_BACKOFF * 2, FIRST_BACKOFF * 4],
-        "a hub outside the accepted range must not tight-loop reconnecting"
+    assert_steps(
+        &delay.waits()[..3],
+        &[1, 2, 4],
+        "a hub outside the accepted range must not tight-loop reconnecting",
     );
 }
 
@@ -971,11 +977,11 @@ async fn a_connection_that_ends_lagged_does_not_reset_the_backoff() {
         ]),
     ])
     .await;
-    assert_eq!(
-        delay.waits()[..3],
-        [FIRST_BACKOFF, FIRST_BACKOFF * 2, FIRST_BACKOFF * 4],
+    assert_steps(
+        &delay.waits()[..3],
+        &[1, 2, 4],
         "a connection that ended by falling behind is the hot loop itself, \
-         even if a row squeezed through first"
+         even if a row squeezed through first",
     );
 }
 
@@ -1034,15 +1040,10 @@ async fn a_quiet_connection_that_stayed_up_counts_as_working() {
         Connection::Delivers(vec![]),
     ])
     .await;
-    assert_eq!(
-        delay.waits()[..4],
-        [
-            FIRST_BACKOFF,
-            FIRST_BACKOFF * 2,
-            FIRST_BACKOFF,
-            FIRST_BACKOFF * 2
-        ],
-        "75 s of heartbeats is a stream that worked"
+    assert_steps(
+        &delay.waits()[..4],
+        &[1, 2, 1, 2],
+        "75 s of heartbeats is a stream that worked",
     );
 }
 
@@ -1096,10 +1097,15 @@ async fn a_hub_that_refuses_is_offline_with_a_growing_attempt_and_its_reason() {
         .take(2)
         .collect();
     assert_eq!(
-        offline.iter().map(|(a, r, _)| (*a, *r)).collect::<Vec<_>>(),
-        [(1, 1), (2, 2)],
+        offline.iter().map(|(a, _, _)| *a).collect::<Vec<_>>(),
+        [1, 2],
         "{states:?}"
     );
+    // The wait the banner names is the jittered one the loop will really
+    // sleep, rounded and never zero: a point in the upper half of the 1 s
+    // step, then of the 2 s step.
+    assert_eq!(offline[0].1, 1, "{states:?}");
+    assert!((1..=2).contains(&offline[1].1), "{states:?}");
     assert!(
         offline
             .iter()
@@ -1146,20 +1152,23 @@ fn the_production_bridge_reports_its_connection_state() {
 }
 
 /// A hub that accepts a socket and drops it immediately must not become a
-/// one-second hot loop on a successful-but-useless connection.
+/// one-second hot loop on a successful-but-useless connection. The curve is
+/// `fleet_proto::backoff`'s and pinned there; this pins THIS client's
+/// numbers, and that every draw lands inside its own step.
 #[test]
 fn the_backoff_doubles_and_is_capped() {
-    let mut wait = FIRST_BACKOFF;
-    let mut seen = vec![wait];
-    for _ in 0..10 {
-        wait = next_backoff(wait);
-        seen.push(wait);
-    }
-    assert_eq!(seen[0], Duration::from_secs(1));
-    assert_eq!(seen[1], Duration::from_secs(2));
-    assert_eq!(seen[2], Duration::from_secs(4));
-    assert_eq!(*seen.last().unwrap(), MAX_BACKOFF);
+    let mut b = backoff();
+    let seen: Vec<Duration> = (0..11).map(|_| b.next(jitter())).collect();
+    assert_steps(
+        &seen,
+        &[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+        "the curve doubles and is capped",
+    );
     assert!(seen.iter().all(|w| *w <= MAX_BACKOFF));
+    assert!(
+        *seen.last().unwrap() >= MAX_BACKOFF / 2,
+        "the curve reaches its cap: {seen:?}"
+    );
 }
 
 #[tokio::test]
@@ -1212,37 +1221,11 @@ fn take_utf8_does_not_stall_on_genuinely_invalid_bytes() {
     assert!(buf.is_empty());
 }
 
-#[test]
-fn the_dechunker_is_transparent_when_the_body_is_not_chunked() {
-    let mut d = Dechunker::new(false);
-    let mut raw = b"data: 1\n\n".to_vec();
-    assert_eq!(d.take(&mut raw).unwrap(), b"data: 1\n\n");
-    assert!(raw.is_empty());
-    assert!(!d.finished());
-}
-
-/// THE case that made a whole-body de-chunker useless here: a size line
-/// arriving in one read and its data in the next.
-#[test]
-fn the_dechunker_waits_for_a_size_line_that_has_not_finished_arriving() {
-    let mut d = Dechunker::new(true);
-    // 0xb = 11, the length of "data: 12345".
-    let mut raw = b"b".to_vec();
-    assert!(d.take(&mut raw).unwrap().is_empty(), "'b' might be 'be'");
-    raw.extend_from_slice(b"\r\ndata: 12345");
-    assert_eq!(d.take(&mut raw).unwrap(), b"data: 12345");
-    raw.extend_from_slice(b"\r\n5\r\nabcde\r\n0\r\n\r\n");
-    assert_eq!(d.take(&mut raw).unwrap(), b"abcde");
-    assert!(d.finished());
-}
-
-#[test]
-fn the_dechunker_refuses_a_size_it_cannot_read() {
-    let mut d = Dechunker::new(true);
-    let mut raw = b"zz\r\nxx".to_vec();
-    let err = d.take(&mut raw).unwrap_err();
-    assert!(err.contains("chunk size"), "{err}");
-}
+// `Dechunker` itself moved to `backend::http1` and its unit tests moved with
+// it: `the_dechunker_is_transparent_when_the_body_is_not_chunked`,
+// `the_dechunker_waits_for_a_size_line_that_has_not_finished_arriving` and
+// `the_dechunker_refuses_a_size_it_cannot_read` are now in `tests_http1.rs`.
+// The real-socket test below is this module's own integration coverage of it.
 
 // --- the real stream, against a real socket ----------------------------------
 

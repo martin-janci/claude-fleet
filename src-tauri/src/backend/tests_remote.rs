@@ -866,27 +866,51 @@ fn a_real_read_error_is_not_swallowed_even_with_bytes_in_hand() {
 #[test]
 fn an_endpoint_splits_a_hub_url_into_what_a_hand_written_request_needs() {
     let at = Endpoint::parse("https://fleet.example.com/mcp").expect("a hub URL");
-    assert_eq!(at.host, "fleet.example.com");
-    assert_eq!(at.port, 443, "https defaults to 443");
-    assert!(at.tls);
+    assert_eq!(at.host(), "fleet.example.com");
+    assert_eq!(at.port(), 443, "https defaults to 443");
+    assert!(at.is_tls());
     assert_eq!(
-        at.authority, "fleet.example.com",
+        at.authority(),
+        "fleet.example.com",
         "no port in the Host header when it is the scheme's default — the \
          hub's allowlist is matched against exactly this string"
     );
-    assert_eq!(at.target, "/mcp");
+    assert_eq!(at.target(), "/mcp");
 
     let at = Endpoint::parse("http://hub.example.com:4180/fleet/events").expect("a hub URL");
-    assert_eq!(at.port, 4180);
-    assert!(!at.tls);
+    assert_eq!(at.port(), 4180);
+    assert!(!at.is_tls());
     assert_eq!(
-        at.authority, "hub.example.com:4180",
+        at.authority(),
+        "hub.example.com:4180",
         "a non-default port is"
     );
-    assert_eq!(at.target, "/fleet/events");
+    assert_eq!(at.target(), "/fleet/events");
 
     assert!(Endpoint::parse("ftp://hub.example.com").is_err());
     assert!(Endpoint::parse("not a url").is_err());
+}
+
+/// The other half of `fleet_proto::net::Endpoint`'s two authority forms.
+/// This app has never put a scheme-default port in its `Host` header — the
+/// `url` crate it parsed with dropped one — and a hub's `allowed_hosts` may
+/// be spelled without it, so it must keep not doing so. (`fleet-agent` keeps
+/// the port it was given; see `authority_as_written` there.)
+#[test]
+fn a_scheme_default_port_stays_out_of_the_host_header() {
+    for (url, authority) in [
+        ("https://fleet.example.com:443/mcp", "fleet.example.com"),
+        ("http://fleet.example.com:80/mcp", "fleet.example.com"),
+        ("https://[::1]:443/mcp", "[::1]"),
+        // A non-default port is part of the header, as before.
+        (
+            "https://fleet.example.com:8443/mcp",
+            "fleet.example.com:8443",
+        ),
+    ] {
+        let at = Endpoint::parse(url).unwrap_or_else(|e| panic!("{url}: {e}"));
+        assert_eq!(at.authority(), authority, "{url}");
+    }
 }
 
 /// An IPv6-literal hub was simply unreachable: `host_str()` keeps the URL's
@@ -897,17 +921,19 @@ fn an_endpoint_splits_a_hub_url_into_what_a_hand_written_request_needs() {
 fn an_ipv6_literal_hub_connects_and_still_sends_a_bracketed_host_header() {
     let at = Endpoint::parse("https://[2001:db8::1]:8787/mcp").expect("an IPv6 hub URL");
     assert_eq!(
-        at.host, "2001:db8::1",
+        at.host(),
+        "2001:db8::1",
         "the connect and SNI name must be unbracketed"
     );
-    assert_eq!(at.port, 8787);
+    assert_eq!(at.port(), 8787);
     assert_eq!(
-        at.authority, "[2001:db8::1]:8787",
+        at.authority(),
+        "[2001:db8::1]:8787",
         "the Host header keeps the brackets"
     );
     // And the unbracketed form really is what rustls accepts as a name.
     assert!(
-        tokio_rustls::rustls::pki_types::ServerName::try_from(at.host.clone()).is_ok(),
+        tokio_rustls::rustls::pki_types::ServerName::try_from(at.host().to_string()).is_ok(),
         "an IP literal is matched against an IP SAN"
     );
     assert!(
@@ -916,8 +942,8 @@ fn an_ipv6_literal_hub_connects_and_still_sends_a_bracketed_host_header() {
     );
     // Loopback too, since that is the tunnelled setup docs/hub.md describes.
     let at = Endpoint::parse("http://[::1]:8787/events").expect("a loopback IPv6 hub URL");
-    assert_eq!(at.host, "::1");
-    assert_eq!(at.authority, "[::1]:8787");
+    assert_eq!(at.host(), "::1");
+    assert_eq!(at.authority(), "[::1]:8787");
 }
 
 // --- chunked framing ---------------------------------------------------------
@@ -963,25 +989,6 @@ fn a_body_that_did_not_declare_chunked_is_left_alone() {
     );
 }
 
-#[test]
-fn the_transfer_encoding_header_is_matched_case_insensitively_and_in_a_list() {
-    for head in [
-        "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked",
-        "HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked",
-        "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked",
-    ] {
-        assert!(head_is_chunked(head), "{head:?}");
-    }
-    for head in [
-        "HTTP/1.1 200 OK\r\nContent-Length: 3",
-        // The status line is skipped, so a reason phrase cannot match.
-        "HTTP/1.1 200 Transfer-Encoding: chunked",
-        "HTTP/1.1 200 OK\r\nX-Note: Transfer-Encoding: chunked",
-    ] {
-        assert!(!head_is_chunked(head), "{head:?}");
-    }
-}
-
 /// SF-6. The whole-body path decoded UTF-8 BEFORE de-chunking: `speak` ran
 /// `from_utf8_lossy` over the raw bytes, chunk framing and all, so a
 /// character split by a chunk boundary became two replacement characters,
@@ -1018,32 +1025,12 @@ fn a_character_split_across_two_chunks_survives_the_whole_body_path() {
     assert_eq!(r.body, text, "de-chunk the bytes, THEN decode them");
 }
 
-/// A peer that dies mid-chunk leaves what arrived, matching `speak`'s own
-/// tolerance for a half-close. Refusing here would undo that.
+/// The de-chunking itself (partial-chunk tolerance, a malformed size line, a
+/// chunk splitting a character) is `http1`'s and tested there
+/// (`tests_http1.rs`); this is `split_response`'s own wiring of it — decode
+/// lossily rather than panic on bytes that are not valid UTF-8 at all.
 #[test]
-fn a_truncated_chunked_body_yields_what_arrived() {
-    assert_eq!(dechunk(b"5\r\nhel").expect("partial"), b"hel");
-    assert_eq!(
-        dechunk(b"5\r\nhello\r\n6\r\n wor").expect("partial"),
-        b"hello wor"
-    );
-}
-
-#[test]
-fn an_unreadable_chunk_size_is_an_error_not_a_guess() {
-    let e = dechunk(b"zz\r\nxx").expect_err("zz is not hex");
-    assert!(e.contains("chunk size"), "{e}");
-}
-
-/// A chunk size is a BYTE count, so a chunk may end inside a character —
-/// that is legal framing, not a malformed body. (This used to assert an
-/// error, which is the SF-6 bug stated as a requirement.) Bytes that are not
-/// UTF-8 at all still cannot panic: they decode lossily at the end.
-#[test]
-fn a_chunk_may_end_inside_a_character_and_invalid_bytes_never_panic() {
-    // "ä" is 0xC3 0xA4: one byte per chunk.
-    let joined = dechunk(b"1\r\n\xC3\r\n1\r\n\xA4\r\n0\r\n\r\n").expect("legal framing");
-    assert_eq!(joined, "ä".as_bytes());
+fn invalid_utf8_in_a_chunked_response_decodes_lossily_via_split_response() {
     let r = split_response(
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n\xFF\r\n0\r\n\r\n",
     )

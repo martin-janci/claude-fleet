@@ -15,6 +15,7 @@
 //!    once connected used to render as `Up`, because the task supervising its
 //!    failures was alive.
 
+use fleet_proto::backoff::{jitter, Backoff};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
@@ -33,28 +34,6 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const HEALTHY_AFTER: Duration = Duration::from_secs(60);
 /// How much of ssh's stderr is kept for the health record and the log line.
 const MAX_STDERR: usize = 400;
-
-/// The delay to wait after `current` before the next restart attempt.
-fn next_backoff(current: Duration) -> Duration {
-    (current * 2).min(MAX_BACKOFF)
-}
-
-/// The delay after a child that ran for `ran_for`. A tunnel that lived long
-/// enough to be healthy starts over at `initial`: a blip after six good hours
-/// should reconnect in a second, not inherit the 30s cap from the failures that
-/// preceded them.
-fn backoff_after(
-    current: Duration,
-    initial: Duration,
-    ran_for: Duration,
-    healthy_after: Duration,
-) -> Duration {
-    if ran_for >= healthy_after {
-        initial
-    } else {
-        next_backoff(current)
-    }
-}
 
 /// Whether a failure at this count deserves a WARN. Four hosts restarting every
 /// 30s wrote ~11,500 lines a day and drowned everything else in the 3-day log
@@ -423,7 +402,10 @@ impl TunnelSupervisor {
             );
         }
         let handle = tokio::spawn(async move {
-            let mut backoff = initial_backoff;
+            // Jittered (`fleet_proto::backoff`), so that a central machine
+            // whose network dropped does not re-dial every host in the fleet
+            // in the same instant when it comes back.
+            let mut backoff = Backoff::new(initial_backoff, MAX_BACKOFF);
             // The first attempt always sweeps: anything matching our argv right
             // now belongs to an instance that is gone. Later attempts sweep
             // only after a bind conflict.
@@ -461,8 +443,14 @@ impl TunnelSupervisor {
                 let was_healthy = ran_for >= healthy_after;
                 let stderr = tail_stderr(&exit.stderr);
                 let conflict = looks_like_bind_conflict(&exit.stderr);
-                let delay = backoff_after(backoff, initial_backoff, ran_for, healthy_after);
-                backoff = delay;
+                // A tunnel that lived long enough to be healthy starts the
+                // curve over: a blip after six good hours should reconnect in
+                // a second, not inherit the 30s cap from the failures that
+                // preceded them.
+                if was_healthy {
+                    backoff.reset();
+                }
+                let delay = backoff.next(jitter());
 
                 let failures = {
                     let mut st = stats
@@ -800,21 +788,22 @@ mod tests {
         sup.stop_all();
     }
 
+    /// The curve is [`fleet_proto::backoff`]'s and pinned there; what this
+    /// pins is the supervisor's own numbers — 1 s doubling to 30 s — and
+    /// that each delay lands in the upper half of its step, which is the
+    /// jitter this loop gained when it stopped having a curve of its own.
     #[test]
-    fn next_backoff_doubles_and_caps_at_30s() {
-        assert_eq!(next_backoff(Duration::from_secs(1)), Duration::from_secs(2));
-        assert_eq!(
-            next_backoff(Duration::from_secs(8)),
-            Duration::from_secs(16)
-        );
-        assert_eq!(
-            next_backoff(Duration::from_secs(16)),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            next_backoff(Duration::from_secs(30)),
-            Duration::from_secs(30)
-        );
+    fn the_restart_backoff_doubles_and_caps_at_30s() {
+        let mut b = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
+        let steps = [1u64, 2, 4, 8, 16, 30, 30, 30];
+        for step in steps {
+            let step = Duration::from_secs(step);
+            let drawn = b.next(jitter());
+            assert!(
+                drawn >= step / 2 && drawn <= step,
+                "{drawn:?} is not inside the {step:?} step"
+            );
+        }
     }
 
     /// Spawn log for the fake tunnel spawner: `(argv, when)` per spawn.
@@ -897,12 +886,14 @@ mod tests {
         for (argv, _) in &spawns {
             assert_eq!(argv, &tunnel_argv("mefistos", 4180, 4180));
         }
-        // Lower bounds only — an upper bound would flake under CI load.
+        // Lower bounds only — an upper bound would flake under CI load — and
+        // they are the FLOOR of each jittered step (half of it), not the step
+        // itself.
         let gap1 = spawns[1].1 - spawns[0].1;
         let gap2 = spawns[2].1 - spawns[1].1;
-        assert!(gap1 >= Duration::from_millis(20), "first backoff: {gap1:?}");
+        assert!(gap1 >= Duration::from_millis(10), "first backoff: {gap1:?}");
         assert!(
-            gap2 >= Duration::from_millis(40),
+            gap2 >= Duration::from_millis(20),
             "second backoff: {gap2:?}"
         );
         // Still supervised (mid-backoff counts as up).
@@ -943,33 +934,6 @@ mod tests {
     }
 
     // ---- Bug 3: health must distinguish "connected" from "crash-looping" ----
-
-    #[test]
-    fn backoff_after_a_healthy_run_returns_to_the_initial_delay() {
-        let initial = Duration::from_secs(1);
-        let healthy = Duration::from_secs(60);
-        // Exited before it was ever healthy: keep doubling.
-        assert_eq!(
-            backoff_after(
-                Duration::from_secs(8),
-                initial,
-                Duration::from_secs(1),
-                healthy
-            ),
-            Duration::from_secs(16)
-        );
-        // Ran long enough to count as healthy: a later blip must reconnect
-        // promptly instead of inheriting a 30s delay from hours ago.
-        assert_eq!(
-            backoff_after(
-                Duration::from_secs(30),
-                initial,
-                Duration::from_secs(600),
-                healthy
-            ),
-            initial
-        );
-    }
 
     #[tokio::test]
     async fn health_reports_connected_once_the_child_outlives_the_healthy_threshold() {
@@ -1037,9 +1001,12 @@ mod tests {
 
     #[tokio::test]
     async fn health_backoff_returns_to_the_initial_delay_after_a_healthy_run() {
-        // Third spawn stays up past the healthy threshold, then exits; the
-        // supervisor must go back to the initial delay rather than the 4x one
-        // the two earlier fast failures had grown.
+        // Four fast failures grow the step to 160ms; the fifth child stays up
+        // past the healthy threshold, so the curve must start over instead of
+        // making the next blip wait out the grown delay. The steps are
+        // jittered into their upper halves, so assert on ranges that cannot
+        // overlap: >=80ms is only reachable at the 160ms step, and <=20ms only
+        // after a reset back to the 20ms base.
         let n = Arc::new(Mutex::new(0u32));
         let spawner: TunnelSpawner = Arc::new(move |_| {
             let mut c = n.lock().unwrap();
@@ -1047,7 +1014,7 @@ mod tests {
             let nth = *c;
             drop(c);
             Box::pin(async move {
-                if nth == 3 {
+                if nth == 5 {
                     tokio::time::sleep(Duration::from_millis(80)).await;
                 }
                 TunnelExit::code(255)
@@ -1065,18 +1032,18 @@ mod tests {
             || {
                 sup.health()
                     .get("mefistos")
-                    .is_some_and(|h| h.backoff_ms == 80)
+                    .is_some_and(|h| h.backoff_ms >= 80)
             },
-            "backoff grown to 80ms by two fast failures",
+            "the curve grown by four fast failures",
         )
         .await;
         wait_until(
             || {
                 sup.health()
                     .get("mefistos")
-                    .is_some_and(|h| h.backoff_ms == 20)
+                    .is_some_and(|h| h.backoff_ms <= 20)
             },
-            "backoff reset to 20ms after the healthy run",
+            "the curve reset after the healthy run",
         )
         .await;
         sup.stop_all();

@@ -184,15 +184,12 @@ pub fn resolve_token(
 
 /// True if `value` (a `Host`-header authority — `host` or `host:port`, IPv6
 /// in brackets) names the local machine.
+///
+/// Splitting the authority is this function's job; deciding what counts as
+/// the local machine is [`fleet_proto::net::is_loopback`]'s, shared with the
+/// agent, the hub's bind check and the desktop.
 pub fn is_loopback_host(value: &str) -> bool {
-    let host = value.trim();
-    // Bracketed IPv6: `[::1]` or `[::1]:port`.
-    if let Some(rest) = host.strip_prefix('[') {
-        return rest.split(']').next() == Some("::1");
-    }
-    // `hostname[:port]` or `ipv4[:port]`.
-    let name = host.split(':').next().unwrap_or(host);
-    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1"
+    fleet_proto::net::is_loopback(&authority_host(value))
 }
 
 /// True if an `Origin` header value is a loopback `http(s)` origin. Anything
@@ -485,6 +482,14 @@ mod tests {
         for h in [
             "127.0.0.1",
             "127.0.0.1:4180",
+            // The whole of 127.0.0.0/8, since the rule moved to
+            // `fleet_proto::net`. A `Host` header that is an IP literal
+            // cannot be an attacker's DNS-rebinding name, so widening from
+            // the single address costs nothing: these really are this
+            // machine.
+            "127.0.0.53",
+            "127.0.0.53:4180",
+            "127.255.255.255",
             "localhost",
             "localhost:4180",
             "LocalHost:4180",
@@ -503,6 +508,13 @@ mod tests {
             "127.0.0.1.evil.com",
             "10.0.0.5",
             "0.0.0.0",
+            // A name under `localhost` is a DNS lookup on a resolver that
+            // does not honour RFC 6761, so it is not this machine.
+            "evil.localhost",
+            "evil.localhost:4180",
+            // An IPv4-mapped v6 address is routable, not `::1`.
+            "[::ffff:127.0.0.1]",
+            "[::ffff:127.0.0.1]:4180",
         ] {
             assert!(!is_loopback_host(h), "should reject {h}");
         }

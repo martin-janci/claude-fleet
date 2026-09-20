@@ -22,6 +22,7 @@
 pub mod connection;
 pub mod contract;
 pub mod events;
+mod http1;
 pub mod pairing;
 pub mod remote;
 pub mod routing;
@@ -40,8 +41,8 @@ pub const REMOTE_URL_KEY: &str = "hub.remote_url";
 pub const CLIENT_NAME_KEY: &str = "hub.client_name";
 /// What Settings shows before pairing has told us otherwise.
 const DEFAULT_CLIENT_NAME: &str = "desktop";
-/// Opt-in for sending the client token over plain `http://` to a host that is
-/// **not** loopback. Mirrors the hub's own `--allow-plaintext`
+/// Opt-in for sending **this app's client token** over plain `http://` to a
+/// host that is not loopback. Mirrors the hub's own `--allow-plaintext`
 /// (`docs/hub.md`), which refuses to serve a routable bind in the clear
 /// without being told to.
 ///
@@ -50,12 +51,38 @@ const DEFAULT_CLIENT_NAME: &str = "desktop";
 /// typed `http://` instead of `https://` in Settings got a working app that
 /// put a fleet-control bearer token on the wire in the clear on every call,
 /// forever, with nothing ever saying so.
-pub const ALLOW_PLAINTEXT_KEY: &str = "hub.allow_plaintext";
+///
+/// **Not the daemon's key**, though both are about plaintext and both live in
+/// the same settings table: `fleet_core::service::hub::SETTING_ALLOW_PLAINTEXT`
+/// (`hub.allow_plaintext`) says a `fleet-hub` may *serve* a routable bind in
+/// the clear, and this one says this *client* may send its own credential
+/// that way. They were once the same string, so a `state.db` copied from a
+/// daemon to a desktop silently answered a question nobody had asked it.
+/// There is no fallback read of the old name, because a fallback would be
+/// that same cross-contamination.
+///
+/// The IPC field on the Tauri command args and in `src/lib/hub.ts` is still
+/// `allow_plaintext`: that is a wire name between this app's halves, not a
+/// row in anyone's database.
+pub const ALLOW_PLAINTEXT_KEY: &str = "hub.client_plaintext_token";
 
 /// `Some(reason)` when reaching this hub would put the bearer token on the
 /// wire in the clear — plain `http://` to anything but a loopback address.
 /// `None` for `https://`, and for `http://` to loopback, which is the tunnelled
 /// or port-forwarded setup and needs no ceremony.
+///
+/// The host is read with the **same parser the socket is opened from**
+/// ([`fleet_proto::net::Endpoint`], via [`remote::Endpoint`]), not with a
+/// second one. `url` answers only "is this `http://` at all", because that is
+/// the question `normalise_base_url` has already been asked. Two parsers over
+/// one string can be talked into seeing two different hosts —
+/// `http://evil.example@localhost` is the short version — and the one that
+/// must win is the one that picks where the token goes.
+///
+/// **Fails closed.** An `http://` URL the shared parser refuses is a URL this
+/// app cannot reach at all, and that must be reported as a risk rather than
+/// as "no risk": a caller that reached here without `normalise_base_url`
+/// would otherwise be cleared for a hop nobody inspected.
 ///
 /// Public because pairing (Task 5) hits `POST /pair` with a URL the user just
 /// typed, *before* any token is stored and therefore before [`Backend::resolve`]
@@ -66,17 +93,7 @@ pub fn plaintext_risk(base_url: &str) -> Option<String> {
     if parsed.scheme() != "http" {
         return None;
     }
-    let loopback = match parsed.host() {
-        // RFC 6761: `localhost` and anything under it resolve to loopback.
-        Some(url::Host::Domain(d)) => {
-            let d = d.to_ascii_lowercase();
-            d == "localhost" || d.ends_with(".localhost")
-        }
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    };
-    if loopback {
+    if fleet_proto::net::Endpoint::parse(base_url).is_ok_and(|at| at.is_loopback()) {
         return None;
     }
     Some(format!(
@@ -807,7 +824,6 @@ mod tests {
             "http://127.0.0.5:8787",
             "http://localhost:8787",
             "http://LOCALHOST:8787",
-            "http://hub.localhost:8787",
             "http://[::1]:8787",
         ] {
             assert_eq!(plaintext_risk(safe), None, "for {safe}");
@@ -818,6 +834,16 @@ mod tests {
             "http://[2001:db8::1]:8787",
             // Not loopback: a name that merely *contains* localhost.
             "http://localhost.evil.example.com",
+            // Nor a name UNDER `localhost`. RFC 6761 says a resolver should
+            // keep the subtree on the machine, but "should" is not "must" —
+            // musl's does not, so a DNS server that answers for
+            // `<anything>.localhost` would choose where this app's
+            // fleet-wide token goes. Such a URL now needs the plaintext
+            // opt-in like any other, which is the fail-safe direction.
+            "http://hub.localhost:8787",
+            "http://localhost.localhost:8787",
+            // An IPv4-mapped v6 address is routable, not `::1`.
+            "http://[::ffff:127.0.0.1]:8787",
         ] {
             let risk = plaintext_risk(risky).unwrap_or_else(|| panic!("{risky} must be a risk"));
             assert!(risk.contains("in the clear"), "for {risky}: {risk}");
@@ -854,6 +880,98 @@ mod tests {
             let warning = resolved.warning.expect("an opted-in hub still warns");
             assert!(warning.contains("deliberate"), "for {value}: {warning}");
         }
+    }
+
+    /// **The credential gate and the connect path must read one string one
+    /// way.** `plaintext_risk` answers "may this app's fleet-wide token go
+    /// out in the clear"; `remote::Endpoint` picks the host the socket is
+    /// actually opened to. Two parsers over one string that agree by luck is
+    /// exactly the shape #159 exists to remove, so this pins the invariant
+    /// rather than leaving it to `normalise_base_url` happening to run first:
+    ///
+    /// > whenever `plaintext_risk` clears an `http://` URL, the connect path
+    /// > parses the same string AND lands on a loopback host.
+    ///
+    /// The probes are the spellings where a URL parser can be talked into
+    /// seeing a different host from the next one — userinfo that hides the
+    /// real authority, and the short/hex/decimal IPv4 forms that `inet_aton`
+    /// resolves to 127.0.0.1 but `Ipv4Addr::from_str` does not.
+    #[test]
+    fn whatever_plaintext_risk_clears_the_connect_path_reads_the_same_way() {
+        let probes = [
+            // Ordinary, and cleared.
+            "http://localhost:8787",
+            "http://127.0.0.1:8787",
+            "http://[::1]:4180",
+            "https://anything.example",
+            "https://fleet.example.com/mcp",
+            // Userinfo hiding the authority one parser reads.
+            "http://evil.example@localhost",
+            "http://localhost@evil.example",
+            // Short, hex and decimal IPv4: `inet_aton` reaches 127.0.0.1,
+            // Rust's parser does not.
+            "http://127.1",
+            "http://0x7f.0.0.1",
+            "http://2130706433",
+            // Names that merely look local.
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://x.localhost",
+            "http://localhost.",
+            "http://evil.example",
+            // Local in fact, but not by this rule.
+            "http://[::ffff:127.0.0.1]",
+        ];
+        for probe in probes {
+            // Both the raw string and the form this app actually stores —
+            // the invariant must not depend on `normalise_base_url` having
+            // run.
+            let forms = std::iter::once(probe.to_string()).chain(normalise_base_url(probe));
+            for url in forms {
+                if plaintext_risk(&url).is_some() {
+                    // Naming a risk is always a safe answer.
+                    continue;
+                }
+                if url.starts_with("https://") {
+                    // TLS: the host does not have to be this machine.
+                    continue;
+                }
+                let at = remote::Endpoint::parse(&url).unwrap_or_else(|e| {
+                    panic!("{url}: cleared as no risk, but the connect path refuses it: {e}")
+                });
+                assert!(
+                    fleet_proto::net::is_loopback(at.host()),
+                    "{url}: cleared as no risk, but the socket would go to {}",
+                    at.host()
+                );
+            }
+        }
+    }
+
+    /// The daemon's `hub.allow_plaintext` and this app's opt-in were the same
+    /// string in the same table, and they mean different things: the daemon's
+    /// is "serve a routable bind in the clear", this app's is "put MY client
+    /// token on the wire in the clear". A `state.db` copied from a hub to a
+    /// desktop therefore carried one decision into the other. There is
+    /// deliberately no fallback read of the old key — a fallback would be
+    /// exactly the cross-contamination.
+    #[test]
+    fn the_daemons_plaintext_key_does_not_opt_this_app_in() {
+        assert_ne!(
+            ALLOW_PLAINTEXT_KEY,
+            fleet_core::service::hub::SETTING_ALLOW_PLAINTEXT,
+            "the two settings must not share a row"
+        );
+        let (_dir, store) = store_with(&[
+            (REMOTE_URL_KEY, "http://fleet.example.com"),
+            (fleet_core::service::hub::SETTING_ALLOW_PLAINTEXT, "true"),
+        ]);
+        let resolved = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("cl_tok"));
+        assert_unavailable(
+            &resolved,
+            Some("http://fleet.example.com"),
+            "the daemon's key must not opt this app in",
+        );
     }
 
     /// A loopback hub is the tunnelled setup `docs/hub.md` describes. It must

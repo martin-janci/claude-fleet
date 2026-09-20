@@ -222,7 +222,7 @@ fn a_plaintext_hub_without_the_opt_in_starts_nothing() {
         started_after_resolving(&store, &InMemoryTokenStore::with_token("cl_live")),
         NOTHING,
         "{}",
-        two_brains("plain http without hub.allow_plaintext")
+        two_brains("plain http without hub.client_plaintext_token")
     );
     // An explicit "false" is the same refusal as an absent opt-in.
     let (_dir, store) = store_with(&[
@@ -233,7 +233,7 @@ fn a_plaintext_hub_without_the_opt_in_starts_nothing() {
         started_after_resolving(&store, &InMemoryTokenStore::with_token("cl_live")),
         NOTHING,
         "{}",
-        two_brains("plain http with hub.allow_plaintext=false")
+        two_brains("plain http with hub.client_plaintext_token=false")
     );
 }
 

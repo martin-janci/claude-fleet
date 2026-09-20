@@ -44,10 +44,12 @@
 
 use super::connection::{ConnectionReporter, HubConnection, NoReporter};
 use super::contract;
+use super::http1::{find, Dechunker};
 use super::remote::{connect, Endpoint, HubBackend};
 use super::RemoteConfig;
 use fleet_core::events::EVENT_NAMES;
 use fleet_core::mcp::wire::SseDecoder;
+use fleet_proto::backoff::{jitter, Backoff};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -133,6 +135,21 @@ pub const FIRST_BACKOFF: Duration = Duration::from_secs(1);
 /// up on it.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// This client's reconnect curve, from the shared [`fleet_proto::backoff`]:
+/// [`FIRST_BACKOFF`] doubling to [`MAX_BACKOFF`], each delay jittered into
+/// the upper half of its step so that a fleet of desktops that lost the same
+/// hub does not come back at it in one wave.
+pub fn backoff() -> Backoff {
+    Backoff::new(FIRST_BACKOFF, MAX_BACKOFF)
+}
+
+/// A jittered delay as whole seconds, for the banner that says "next try in
+/// N s". Rounded, and never zero: the first step is half a second to a
+/// second, and a banner promising a retry in 0 s reads as a bug.
+fn retry_in_secs(wait: Duration) -> u64 {
+    (wait.as_secs_f64().round() as u64).max(1)
+}
+
 /// How long a stream may say nothing at all before it is presumed dead.
 ///
 /// The hub writes a keep-alive comment every
@@ -151,11 +168,6 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_millis(
 /// [`IDLE_TIMEOUT`], so a stream that said `ready` and then went silent does
 /// not qualify.
 pub const HEALTHY_AFTER: Duration = Duration::from_secs(60);
-
-/// The next wait after `previous` failed: doubling, capped.
-pub fn next_backoff(previous: Duration) -> Duration {
-    std::cmp::min(previous.saturating_mul(2), MAX_BACKOFF)
-}
 
 /// The `&'static str` the frontend listens for, or `None` if this is not one
 /// of them.
@@ -265,13 +277,16 @@ impl EventBridge {
     /// is down is a hub that may come back, and giving up would leave a
     /// desktop showing a frozen fleet with nothing to say why.
     pub async fn run(&self) {
-        let mut backoff = FIRST_BACKOFF;
+        let mut backoff = backoff();
         // Retries since the stream last worked — what the banner counts.
         let mut attempt: u32 = 0;
         loop {
             if self.cancel.is_cancelled() {
                 return;
             }
+            // Drawn before anything is reported, so the banner names the
+            // delay this loop will really wait rather than a nominal one.
+            let wait;
             match self.stream.open().await {
                 Ok(body) => {
                     // Reporting `Connected` and re-listing both move into
@@ -289,33 +304,36 @@ impl EventBridge {
                             // Never resets: a hub that fails the version
                             // check has proven nothing about the connection.
                             attempt = attempt.saturating_add(1);
+                            wait = backoff.next(jitter());
                         }
                         StreamEnd::Gap { delivered, why } => {
                             // A connection that carried nothing is not a
                             // working connection, whatever the socket said.
                             if delivered {
-                                backoff = FIRST_BACKOFF;
+                                backoff.reset();
                                 attempt = 0;
                             }
                             attempt = attempt.saturating_add(1);
+                            wait = backoff.next(jitter());
                             self.status.report(HubConnection::Reconnecting {
                                 attempt,
-                                retry_in_secs: backoff.as_secs(),
+                                retry_in_secs: retry_in_secs(wait),
                                 reason: why,
                             });
                         }
                     }
                 }
                 Err(e) => {
+                    attempt = attempt.saturating_add(1);
+                    wait = backoff.next(jitter());
                     tracing::warn!(
                         error = %e,
-                        retry_in = ?backoff,
+                        retry_in = ?wait,
                         "[hub events] could not open the hub's event stream"
                     );
-                    attempt = attempt.saturating_add(1);
                     self.status.report(HubConnection::Offline {
                         attempt,
-                        retry_in_secs: backoff.as_secs(),
+                        retry_in_secs: retry_in_secs(wait),
                         reason: e,
                     });
                 }
@@ -323,8 +341,7 @@ impl EventBridge {
             if self.cancel.is_cancelled() {
                 return;
             }
-            self.delay.sleep(backoff).await;
-            backoff = next_backoff(backoff);
+            self.delay.sleep(wait).await;
         }
     }
 
@@ -803,14 +820,15 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
          Accept: text/event-stream\r\nCache-Control: no-cache\r\n\r\n",
-        at.target, at.authority
+        at.target(),
+        at.authority()
     );
     conn.write_all(request.as_bytes())
         .await
-        .map_err(|e| format!("send to {}:{}: {e}", at.host, at.port))?;
+        .map_err(|e| format!("send to {}:{}: {e}", at.host(), at.port()))?;
     conn.flush()
         .await
-        .map_err(|e| format!("send to {}:{}: {e}", at.host, at.port))?;
+        .map_err(|e| format!("send to {}:{}: {e}", at.host(), at.port()))?;
 
     // Read until the blank line that ends the head. Anything past it is the
     // first of the body and must not be thrown away.
@@ -826,7 +844,7 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
         let n = conn
             .read(&mut buf)
             .await
-            .map_err(|e| format!("read from {}:{}: {e}", at.host, at.port))?;
+            .map_err(|e| format!("read from {}:{}: {e}", at.host(), at.port()))?;
         if n == 0 {
             return Err("the hub closed the connection before answering".to_string());
         }
@@ -834,14 +852,12 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
     };
     let leftover = head.split_off(split);
     let head = String::from_utf8_lossy(&head).into_owned();
-    let status = head
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| format!("unreadable status line from {}", at.authority))?;
+    // The status line and header parsing are `http1`'s, shared with the
+    // one-shot `POST /mcp` path; only the wording of a malformed status line
+    // stays this call's own, naming the hub rather than a status line nobody
+    // asked to see verbatim.
+    let status = super::http1::parse_status(&head)
+        .map_err(|_| format!("unreadable status line from {}", at.authority()))?;
     if status != 200 {
         // `/events` answers 503 with `events are not enabled on this server`
         // and 429 with `too many concurrent event streams`, both as plain
@@ -854,7 +870,7 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
             format!("the hub answered {status} to GET /events: {said}")
         });
     }
-    let chunked = super::remote::head_is_chunked(&head);
+    let chunked = super::http1::head_is_chunked(&head);
     Ok(Box::new(SseBody {
         conn,
         dechunker: Dechunker::new(chunked),
@@ -863,7 +879,7 @@ async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamB
         // that follows.
         pending: leftover,
         payload: Vec::new(),
-        where_from: format!("{}:{}", at.host, at.port),
+        where_from: format!("{}:{}", at.host(), at.port()),
     }))
 }
 
@@ -948,82 +964,6 @@ fn take_utf8(bytes: &mut Vec<u8>) -> String {
             text
         }
     }
-}
-
-/// Undo `Transfer-Encoding: chunked` incrementally.
-///
-/// The one-shot path can de-chunk a whole body at once
-/// (`remote::dechunk`); a stream cannot, because a chunk boundary falls
-/// wherever the hub flushed and the next size line may not have arrived yet.
-struct Dechunker {
-    chunked: bool,
-    /// Bytes left in the chunk being read.
-    remaining: usize,
-    /// The zero-size chunk arrived.
-    done: bool,
-}
-
-impl Dechunker {
-    fn new(chunked: bool) -> Self {
-        Self {
-            chunked,
-            remaining: 0,
-            done: false,
-        }
-    }
-
-    fn finished(&self) -> bool {
-        self.done
-    }
-
-    /// Take whatever payload `raw` now yields, leaving the rest in place.
-    fn take(&mut self, raw: &mut Vec<u8>) -> Result<Vec<u8>, String> {
-        if !self.chunked {
-            return Ok(std::mem::take(raw));
-        }
-        let mut out = Vec::new();
-        loop {
-            if self.done {
-                raw.clear();
-                break;
-            }
-            if self.remaining > 0 {
-                let take = self.remaining.min(raw.len());
-                if take == 0 {
-                    break;
-                }
-                out.extend(raw.drain(..take));
-                self.remaining -= take;
-                continue;
-            }
-            // A size line, possibly preceded by the CRLF that ended the
-            // previous chunk's data.
-            let skip = if raw.starts_with(b"\r\n") { 2 } else { 0 };
-            let Some(eol) = find(&raw[skip..], b"\r\n") else {
-                // Not a whole size line yet.
-                break;
-            };
-            let line = String::from_utf8_lossy(&raw[skip..skip + eol]).into_owned();
-            let token = line.split(';').next().unwrap_or("").trim().to_string();
-            let size = usize::from_str_radix(&token, 16)
-                .map_err(|_| format!("unreadable chunk size {token:?}"))?;
-            raw.drain(..skip + eol + 2);
-            if size == 0 {
-                self.done = true;
-                raw.clear();
-                break;
-            }
-            self.remaining = size;
-        }
-        Ok(out)
-    }
-}
-
-/// First offset of `needle` in `haystack`.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 /// Start the bridge as a background task.
