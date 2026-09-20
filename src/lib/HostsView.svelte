@@ -38,7 +38,7 @@
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
   import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
-  import { hubConnection } from './hub_connection';
+  import { hubConnection, connectionBanner } from './hub_connection';
 
   let {
     preselect = null,
@@ -342,6 +342,20 @@
   const addHostBlocked = $derived(hubBlock('add_host', $hubStatus));
   const usageRefreshBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
 
+  // Same honest-empty-state fix as HostsList's own list: while the hub's
+  // wire contract is skewed AND `$hosts` never arrived, "No hosts yet — add
+  // one" beside HostsList's now-correct message would say the opposite thing
+  // in the same view. Gated on `$hosts.length === 0` like HostsList's own
+  // message — a skew discovered mid-session, with real hosts still sitting
+  // in the list beside this pane, must not bump "Select a host." for a
+  // sentence about a load that already happened.
+  const hubSkewEmptyMessage = $derived(
+    $hosts.length === 0 &&
+      ($hubConnection.state === 'hub_too_old' || $hubConnection.state === 'hub_too_new')
+      ? connectionBanner($hubConnection, $hubStatus.url)
+      : null,
+  );
+
   const LEGEND: [string, string][] = [
     ['↑ ↓  j k  Home End', 'move the selection (in the detail: between sessions)'],
     ['Enter  →', 'open the detail'],
@@ -464,7 +478,9 @@
           />
         {/key}
       {:else}
-        <p class="empty">{$hosts.length === 0 ? 'No hosts yet — add one.' : 'Select a host.'}</p>
+        <p class="empty" data-testid="hosts-detail-empty">
+          {hubSkewEmptyMessage ?? ($hosts.length === 0 ? 'No hosts yet — add one.' : 'Select a host.')}
+        </p>
       {/if}
     </div>
   </div>

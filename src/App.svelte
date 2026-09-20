@@ -140,7 +140,14 @@
 
   function reportBootstrap(what: string, r: Result<unknown>): string | null {
     if (r.ok) return null;
-    pushError(r.error, `Failed to load ${what}`);
+    // `E_HUB_CONTRACT` is the one code every bootstrap load can fail with at
+    // once (a skewed hub refuses all of them the same way), and it already
+    // has two permanent homes on screen: the hub-connection banner at the
+    // top of the window and this footer, right below, naming which loads
+    // failed. Stacking up to four more sticky toasts on top of that would
+    // just be the #166 "toast storm" repeated — so this is the one code that
+    // does not also toast. Every other failure still does.
+    if (r.error.code !== 'E_HUB_CONTRACT') pushError(r.error, `Failed to load ${what}`);
     return `${what}: ${r.error.code}`;
   }
 
@@ -158,11 +165,21 @@
     // Only a hub client has a live link to lose; see HubConnectionBanner.
     if (get(hubStatus).remote) void startHubConnection();
     const hr0 = await healthCheck();
+    // `health_check` routes to the hub's `fleet_health` in remote mode, so
+    // it hits the same skewed-contract gate as every list load below — and
+    // gets the same treatment: no toast (the banner already says it), and
+    // its failure folds into the one footer line below instead of the
+    // generic "health check failed" wording, which would both toast on its
+    // own and hide which loads actually failed. Every other failure code
+    // keeps today's behaviour: it sets `healthError` (which pre-empts the
+    // footer's bootstrap line — a real health failure is the more important
+    // thing to say) and toasts.
+    let healthFailure: string | null = null;
     if (hr0.ok) {
       health = hr0.value;
+    } else if (hr0.error.code === 'E_HUB_CONTRACT') {
+      healthFailure = `health: ${hr0.error.code}`;
     } else {
-      // Routed to the hub's `fleet_health` in remote mode, so this is now a
-      // real, reportable failure rather than a silently zeroed fleet.
       healthError = `${hr0.error.code}: ${hr0.error.message}`;
       push({ kind: 'error', code: hr0.error.code, message: `Health check failed: ${hr0.error.message}` });
     }
@@ -173,6 +190,7 @@
       loadAccounts(),
     ]);
     const failures = [
+      healthFailure,
       reportBootstrap('projects', pr),
       reportBootstrap('sessions', sr),
       reportBootstrap('hosts', hr),
@@ -234,6 +252,11 @@
     const now = Date.now();
     if (now - lastFocusFetch < FOCUS_FETCH_INTERVAL_MS) return;
     lastFocusFetch = now;
+    // Both discard their Result, same as every other focus-driven refresh:
+    // the next event or refresh heals a transient failure. A contract skew
+    // (`E_HUB_CONTRACT`) will not heal on its own, but it is not silent
+    // either — the hub-connection banner already says so, persistently, so a
+    // toast on every alt-tab back into the window would only repeat that.
     void loadProjects();
     void loadSessions();
   }
