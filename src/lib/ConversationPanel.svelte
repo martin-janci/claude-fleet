@@ -80,6 +80,7 @@
   import { hubConnection } from './hub_connection';
   import { invokeCmd } from './result';
   import { addFiles, pastedName, fmtBytes, type Attachment, type PickedFile } from './attachments';
+  import { withAttachments, tooLong } from './attach_prompt';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pointInRect } from './geometry';
   import Markdown from './MarkdownView.svelte';
@@ -795,7 +796,46 @@
     sending = true;
     sendError = null;
     const id = session.id;
-    const r = await sendPrompt(session.host_alias, session.tmux_name, text);
+
+    // Attachments upload first; their remote paths ride along in the prompt
+    // text. A pasted entry has an empty `path` (see attachments.ts) — never
+    // authorised for the allow-list — so it is left out of `local_paths`
+    // rather than sent to `upload_attachments` at all. With nothing
+    // uploadable, nothing can fail: the draft (if any) still goes out on its
+    // own rather than being refused over a tile that was already showing its
+    // own honest error.
+    const toUpload = attachments.filter((a) => a.path !== '');
+    let paths: string[] = [];
+    if (toUpload.length > 0) {
+      const up = await invokeCmd<string[]>('upload_attachments', {
+        args: {
+          host_alias: session.host_alias,
+          session_name: session.tmux_name,
+          local_paths: toUpload.map((a) => a.path),
+        },
+      });
+      if (session.id !== id) {
+        sending = false;
+        return;
+      }
+      if (!up.ok) {
+        // The draft stays: a prompt without its attachment is a worse
+        // outcome than no prompt at all.
+        sendError = up.error.message;
+        sending = false;
+        return;
+      }
+      paths = up.value;
+    }
+
+    const body = withAttachments(text, paths);
+    if (tooLong(body)) {
+      sendError = 'That prompt is too long to send through tmux. Shorten it.';
+      sending = false;
+      return;
+    }
+
+    const r = await sendPrompt(session.host_alias, session.tmux_name, body);
     sending = false;
     // The selection moved while the send was on the wire: the prompt landed
     // in the old session; none of its state belongs to the new one.
@@ -804,6 +844,9 @@
       sendError = r.error.message;
       return;
     }
+    // Attachments (and their remote allow-list entries) are spent the
+    // moment the upload succeeds, regardless of what triggered the send.
+    if (attachments.length > 0) attachments = [];
     if (text === '') return;
     switchNotice = null;
     // Only the box's own text is spent by a send; a chip sent with
@@ -821,11 +864,11 @@
     sentTurnSeq = session.turn_seq;
     idleSeenSinceSend = false;
     pending = {
-      prompt: text,
+      prompt: body,
       at: new Date().toISOString(),
       // how many turns already carried this exact text, so a repeat of an
       // earlier prompt is not mistaken for the transcript catching up
-      seen: conv?.turns.filter((t) => t.prompt === text).length ?? 0,
+      seen: conv?.turns.filter((t) => t.prompt === body).length ?? 0,
     };
     await tick();
     scrollToBottom();

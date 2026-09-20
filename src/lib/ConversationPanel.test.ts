@@ -2986,4 +2986,68 @@ describe('ConversationPanel attachments', () => {
     expect(tile.querySelector('svg')).toBeNull();
     expect(tile.innerHTML).not.toContain('onload');
   });
+
+  // `sendPrompt` (from ./sessions) is mocked at module scope for this whole
+  // file, so it never reaches `invoke` itself — `order` stands in for the
+  // brief's `invoked` array, recording both the upload (via the shared
+  // `mockedInvoke` stub) and the send (via `mockedSend`) on one timeline.
+  it('uploads before sending and puts the paths in the prompt', async () => {
+    await renderPanel();
+    const order: string[] = [];
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') {
+        order.push('upload_attachments');
+        return ['/w/p/.claude-fleet-attachments/a.png'];
+      }
+      return baseInvoke(cmd, args);
+    });
+    mockedSend.mockImplementation(async () => {
+      order.push('send_prompt');
+      return { ok: true, value: undefined };
+    });
+
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    await fireEvent.input(screen.getByTestId('conv-composer-input'), { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    expect(mockedSend).toHaveBeenCalledWith(
+      'local',
+      'ctl',
+      'look\n\nAttached files:\n/w/p/.claude-fleet-attachments/a.png',
+    );
+    expect(order).toEqual(['upload_attachments', 'send_prompt']);
+    // Sent successfully: the tray is spent along with the draft.
+    expect(screen.queryAllByTestId('conv-attachment')).toHaveLength(0);
+  });
+
+  it('a failed upload cancels the send and keeps the draft', async () => {
+    await renderPanel();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') throw { code: 'E_UPLOAD', message: 'host unreachable' };
+      return baseInvoke(cmd, args);
+    });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    expect(box.value).toBe('look');
+    expect(screen.getByTestId('conv-composer-error').textContent).toContain('host unreachable');
+    expect(mockedSend).not.toHaveBeenCalled();
+    // The draft is worthless without its attachment: the tile stays exactly
+    // as it was so the user can retry.
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+  });
 });
