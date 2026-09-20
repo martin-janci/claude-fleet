@@ -15,8 +15,16 @@ vite.config.ts.timestamp-*
 # git worktrees created under the repo (not part of the tree)
 .worktrees/
 
-# local Claude Code settings (machine-specific, e.g. CARGO_TARGET_DIR on CargoSD)
-.claude/settings.local.json
+# Claude Code session state, its per-session worktrees (checkouts of this same
+# repo — tens of GB) and local MCP wiring. Only settings.local.json used to be
+# ignored, so `git status` showed `?? .claude/` and a `git add -A` would try to
+# stage the whole worktree tree. Nothing under .claude/ is tracked; to share a
+# file from it later, add a `!` negation line below.
+.claude/
+.mcp.json
+
+# ripgrep-only overrides (re-admits the gitignored graft/ tree to search)
+.ignore
 
 # cargo workspace target dir (root Cargo.toml)
 /target/
