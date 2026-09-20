@@ -202,14 +202,21 @@ fn check(cases: Vec<Case>) {
 }
 
 /// Routed commands that no row of the two tables drives, each with the test
-/// that pins its tool and arguments instead. An empty list would be better;
-/// a silent gap would be worse, because a row whose tool nothing exercises is
-/// a row whose tool nothing checks.
+/// that does [`check`]'s job for it instead. An empty list would be better; a
+/// silent gap would be worse, because a row whose tool nothing exercises is a
+/// row whose tool nothing checks.
+///
+/// The named test must do what `check` does — hold the row's `tool` against
+/// the tool the recorded request carried. "It asserts the tool" is not
+/// enough: asserting a wire value against a second hand-typed literal leaves
+/// the row itself unchecked, which is how the first version of this list was
+/// wrong.
 const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[(
     "health_check",
-    "its tool (fleet_health) and its empty arguments are pinned by \
-     health_is_the_hubs_fleet_not_this_apps_empty_database, which also needs a \
-     seeded local store to prove the answer is not the local one",
+    "health_is_the_hubs_fleet_not_this_apps_empty_database asserts its empty \
+     arguments and cross-checks its VERDICTS row against the tool the request \
+     carried, the same way check does; it is not a case because it also needs \
+     a seeded local store to prove the answer is not the local one",
 )];
 
 /// The other half of the tool check in [`check`]: a wrong tool must not be
@@ -1023,6 +1030,18 @@ fn health_is_the_hubs_fleet_not_this_apps_empty_database() {
     let (tool, args) = fake.only_call();
     assert_eq!(tool, "fleet_health");
     assert_eq!(args, json!({}));
+    // `health_check` is the one routed command the two case tables do not
+    // drive, so this is where its VERDICTS row gets the cross-check `check`
+    // does for the other 35: the row's tool against the tool the request
+    // actually carried, not against a second hand-typed literal.
+    // ROUTED_WITHOUT_A_CASE names this test for exactly this line.
+    assert_eq!(
+        verdicts::verdict("health_check").and_then(Verdict::tool),
+        Some(tool.as_str()),
+        "health_check sent {tool}, but its VERDICTS row names {:?} — Task 2 \
+         publishes that row to the frontend and the docs",
+        verdicts::verdict("health_check").and_then(Verdict::tool),
+    );
     assert_eq!(got.stuck, 3, "a zero here is the bug this test exists for");
     assert_eq!(got.ghosts, 2);
     assert_eq!(got.sessions_total, 12);
