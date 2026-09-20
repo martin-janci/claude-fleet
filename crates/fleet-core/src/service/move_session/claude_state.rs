@@ -23,6 +23,9 @@ pub const INDEX_APPEND_MAX_BYTES: usize = 32 * 1024;
 pub const INDEX_NAME: &str = "MEMORY.md";
 /// The heredoc delimiter of the index-append script; never allowed as a line.
 pub(super) const INDEX_HEREDOC: &str = "CF_INDEX";
+/// Archive name for a memory carry (`carry::pack_script` /
+/// `carry::extract_keep_existing_script`).
+pub const MEMORY_ARCHIVE: &str = "memory.tgz";
 
 fn records(stdout: &[u8]) -> impl Iterator<Item = Vec<&str>> {
     payload(stdout)
@@ -338,6 +341,101 @@ pub fn merge_index(
         append: format!("{prefix}{body}"),
         lines,
     }
+}
+
+/// Where a repo's Claude memory lives and what is in it. Claude Code keys
+/// memory by the MAIN checkout (the parent of the git common dir), not by the
+/// worktree; `fallback_dir` (the worktree itself) is tried when that has no
+/// `memory/`. First record `dir\t<abs>\t<0|1>` — reported even when the dir
+/// does not exist, because a target creates it there.
+pub fn memory_list_script(repo_dir: &str, fallback_dir: Option<&str>) -> String {
+    format!(
+        r#"# cf-carry:memory-list
+set +e
+r={r}
+fb={fb}
+{home_guard}
+fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
+enc() {{ ( cd -- "$1" 2>/dev/null && pwd -P ) | sed 's/[^A-Za-z0-9]/-/g'; }}
+cd -- "$r" 2>/dev/null || fail cd
+g=$(git rev-parse --git-common-dir 2>/dev/null) || fail not-a-repo
+top=$( cd -- "$g" 2>/dev/null && cd .. && pwd -P ) || fail common-dir
+[ -n "$top" ] || fail common-dir
+m="$HOME/.claude/projects/$(enc "$top")/memory"
+if [ ! -d "$m" ] && [ -n "$fb" ]; then
+  alt="$HOME/.claude/projects/$(enc "$fb")/memory"
+  [ -d "$alt" ] && m="$alt"
+fi
+printf '\n{OUT_MARKER}\n'
+if [ -d "$m" ]; then printf 'dir\t%s\t1\0' "$m"; else printf 'dir\t%s\t0\0' "$m"; exit 0; fi
+for f in "$m"/*.md; do
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
+  h=$(git hash-object --no-filters -- "$f" 2>/dev/null) || continue
+  n=$(wc -c < "$f" | tr -d ' ')
+  printf '%s\t%s\t%s\0' "$h" "${{n:-0}}" "$(basename -- "$f")"
+done
+exit 0
+"#,
+        r = quote(repo_dir),
+        fb = quote(fallback_dir.unwrap_or("")),
+        home_guard = home_guard(),
+    )
+}
+
+/// The target's or source's `MEMORY.md`: after the marker, `present` or
+/// `absent` on the first line, then at most [`INDEX_READ_MAX_BYTES`] + 1
+/// bytes of content (one over, so the caller can tell "too large").
+pub fn memory_read_index_script(memory_dir: &str) -> String {
+    format!(
+        r#"# cf-carry:memory-index
+set +e
+m={m}
+f="$m/{INDEX_NAME}"
+printf '\n{OUT_MARKER}\n'
+if [ -f "$f" ] && [ ! -L "$f" ]; then printf 'present\n'; head -c {max} -- "$f"; else printf 'absent\n'; fi
+exit 0
+"#,
+        m = quote(memory_dir),
+        max = INDEX_READ_MAX_BYTES + 1,
+    )
+}
+
+/// `None`: no marker; `Some(None)`: no index file; `Some(Some(text))`: the
+/// index's content, exactly as read (up to the read cap).
+pub fn parse_index(stdout: &str) -> Option<Option<String>> {
+    let body = payload_str(stdout)?;
+    match body.split_once('\n') {
+        Some(("present", text)) => Some(Some(text.to_string())),
+        Some(("absent", _)) => Some(None),
+        None if body == "absent" => Some(None),
+        _ => None,
+    }
+}
+
+/// Append `text` (from [`merge_index`]) to the target's index. The text
+/// reaches the file through a QUOTED heredoc, so nothing in it is expanded;
+/// `merge_index` never emits a line equal to the delimiter. Empty text → a
+/// no-op that creates nothing.
+pub fn memory_append_index_script(memory_dir: &str, text: &str) -> String {
+    if text.is_empty() {
+        return "# cf-carry:memory-append\nexit 0\n".to_string();
+    }
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    format!(
+        r#"# cf-carry:memory-append
+set +e
+m={m}
+umask 077
+mkdir -p -- "$m" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
+f="$m/{INDEX_NAME}"
+if [ -L "$f" ]; then printf '{FAILED} symlink\n' >&2; exit 5; fi
+cat >> "$f" <<'{INDEX_HEREDOC}' || {{ printf '{FAILED} append\n' >&2; exit 5; }}
+{body}
+{INDEX_HEREDOC}
+printf 'ok\n'
+"#,
+        m = quote(memory_dir),
+    )
 }
 
 /// Every regular file under `<project dir>/<id>/` as `<bytes>\t<path>\0`,
@@ -1100,18 +1198,11 @@ with tarfile.open(out, "w:gz") as tar:
     /// losing the report lines for files already moved.
     #[test]
     fn a_find_failure_mid_merge_is_reported_without_losing_files_already_moved() {
-        if !require(&["bash", "tar"]) {
+        if !require(&["bash", "tar", "python3"]) {
             return;
         }
         if is_root() {
             eprintln!("skipping: uid 0 can traverse a mode-000 directory anyway");
-            return;
-        }
-        let py = std::process::Command::new("python3")
-            .arg("--version")
-            .output();
-        if py.is_err() {
-            eprintln!("skipping: python3 is not available");
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1791,5 +1882,428 @@ with tarfile.open(out, "w:gz") as tar:
             parse_merge("carried\t10\tgood.jsonl\n").is_none(),
             "only a missing marker is None"
         );
+    }
+
+    // --- Task 4: memory scripts ---
+
+    /// The physical path of `p` (symlinks resolved, e.g. macOS `/var` →
+    /// `/private/var`), encoded exactly as `memory_list_script`'s own `enc()`
+    /// does: every char outside `[A-Za-z0-9]` becomes `-`.
+    fn enc(p: &std::path::Path) -> String {
+        let real = std::fs::canonicalize(p).unwrap();
+        real.to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    }
+
+    fn memory_dir_for(home: &std::path::Path, enc_name: &str) -> std::path::PathBuf {
+        home.join(".claude/projects").join(enc_name).join("memory")
+    }
+
+    #[test]
+    fn memory_is_found_by_the_repo_root_not_the_worktree() {
+        if !require(&["bash", "git"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let r = tmp.path().join("r");
+        std::fs::create_dir_all(&r).unwrap();
+        crate::service::move_session::carry::tests::git(&r, &["init", "-q", "-b", "main"]);
+        std::fs::write(r.join("f.txt"), "x\n").unwrap();
+        crate::service::move_session::carry::tests::git(&r, &["add", "-A"]);
+        crate::service::move_session::carry::tests::git(&r, &["commit", "-q", "-m", "base"]);
+        let wt = tmp.path().join("wt");
+        crate::service::move_session::carry::tests::git(
+            &r,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
+
+        let r_enc = enc(&r);
+        let wt_enc = enc(&wt);
+        assert_ne!(r_enc, wt_enc, "sanity: the two paths encode differently");
+
+        // --- primary: memory keyed by the repo root exists ---
+        let r_memory = memory_dir_for(&home, &r_enc);
+        std::fs::create_dir_all(r_memory.join("sub")).unwrap();
+        std::fs::write(r_memory.join("note.md"), "hello\n").unwrap();
+        std::fs::write(r_memory.join("MEMORY.md"), "# Memory Index\n").unwrap();
+        std::fs::write(r_memory.join("notes.txt"), "not memory\n").unwrap();
+        std::os::unix::fs::symlink(r_memory.join("note.md"), r_memory.join("linked.md")).unwrap();
+
+        let out = bash(
+            &memory_list_script(wt.to_str().unwrap(), Some(wt.to_str().unwrap())),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let listing = parse_memory_list(&out.stdout).expect("listing");
+        assert!(listing.exists);
+        assert_eq!(listing.dir, r_memory.to_str().unwrap());
+        let mut names: Vec<&str> = listing.files.iter().map(|f| f.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["MEMORY.md", "note.md"],
+            "sub/, the symlink and the non-.md file are never listed"
+        );
+        for f in &listing.files {
+            let expect_hash = crate::service::move_session::carry::tests::git(
+                &r_memory,
+                &["hash-object", "--no-filters", "--", &f.name],
+            )
+            .trim()
+            .to_string();
+            assert_eq!(f.hash, expect_hash, "{}", f.name);
+        }
+
+        // --- the repo-root memory is gone; the worktree's own is used as a fallback ---
+        std::fs::remove_dir_all(&r_memory).unwrap();
+        let wt_memory = memory_dir_for(&home, &wt_enc);
+        std::fs::create_dir_all(&wt_memory).unwrap();
+        std::fs::write(wt_memory.join("fallback.md"), "fb\n").unwrap();
+
+        let out = bash(
+            &memory_list_script(wt.to_str().unwrap(), Some(wt.to_str().unwrap())),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let listing = parse_memory_list(&out.stdout).expect("listing");
+        assert!(listing.exists);
+        assert_eq!(listing.dir, wt_memory.to_str().unwrap(), "the fallback dir");
+        assert_eq!(
+            listing
+                .files
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fallback.md"]
+        );
+
+        // --- neither exists: exists=false, dir is still the repo-root one ---
+        std::fs::remove_dir_all(&wt_memory).unwrap();
+        let out = bash(
+            &memory_list_script(wt.to_str().unwrap(), Some(wt.to_str().unwrap())),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let listing = parse_memory_list(&out.stdout).expect("listing");
+        assert!(!listing.exists);
+        assert_eq!(
+            listing.dir,
+            r_memory.to_str().unwrap(),
+            "a target would create memory at the repo-root location"
+        );
+    }
+
+    #[test]
+    fn memory_files_are_added_and_never_replaced() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let src_mem = tmp.path().join("src-memory");
+        std::fs::create_dir_all(&src_mem).unwrap();
+        std::fs::write(src_mem.join("new.md"), "new content\n").unwrap();
+        std::fs::write(src_mem.join("differs.md"), "source version\n").unwrap();
+
+        // --- the target already has its own differs.md; only new.md is carried ---
+        let tgt_mem = tmp.path().join("tgt-memory");
+        std::fs::create_dir_all(&tgt_mem).unwrap();
+        std::fs::write(tgt_mem.join("differs.md"), "target version\n").unwrap();
+
+        let out = bash(
+            &crate::service::move_session::carry::pack_script(
+                src_mem.to_str().unwrap(),
+                ID,
+                MEMORY_ARCHIVE,
+                &["new.md".to_string()],
+            ),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (_bytes, archive) =
+            crate::service::move_session::carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+                .unwrap();
+
+        let out = bash(
+            &crate::service::move_session::carry::extract_keep_existing_script(
+                tgt_mem.to_str().unwrap(),
+                &archive,
+                true,
+            ),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(tgt_mem.join("new.md")).unwrap(),
+            "new content\n"
+        );
+        assert_eq!(mode(&tgt_mem.join("new.md")), 0o600, "arrived private");
+        assert_eq!(
+            std::fs::read_to_string(tgt_mem.join("differs.md")).unwrap(),
+            "target version\n",
+            "not part of the archive: byte-identical to before"
+        );
+
+        // --- pack BOTH names: the target's differs.md still wins ---
+        let out = bash(
+            &crate::service::move_session::carry::pack_script(
+                src_mem.to_str().unwrap(),
+                ID,
+                MEMORY_ARCHIVE,
+                &["new.md".to_string(), "differs.md".to_string()],
+            ),
+            &home,
+        );
+        assert!(out.status.success());
+        let (_bytes, archive2) =
+            crate::service::move_session::carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+                .unwrap();
+        let out = bash(
+            &crate::service::move_session::carry::extract_keep_existing_script(
+                tgt_mem.to_str().unwrap(),
+                &archive2,
+                true,
+            ),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(tgt_mem.join("differs.md")).unwrap(),
+            "target version\n",
+            "still wins even though the source's differs.md was in this archive too"
+        );
+
+        // --- a missing target dir is created private ---
+        let fresh_tgt = tmp.path().join("fresh-tgt-memory");
+        assert!(!fresh_tgt.exists());
+        let out = bash(
+            &crate::service::move_session::carry::extract_keep_existing_script(
+                fresh_tgt.to_str().unwrap(),
+                &archive,
+                true,
+            ),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(mode(&fresh_tgt), 0o700, "the created dir is private");
+        assert_eq!(
+            std::fs::read_to_string(fresh_tgt.join("new.md")).unwrap(),
+            "new content\n"
+        );
+    }
+
+    #[test]
+    fn the_index_is_only_ever_appended_to() {
+        if !require(&["bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        // --- append onto an existing index with no trailing newline ---
+        let mem_a = tmp.path().join("memory-a");
+        std::fs::create_dir_all(&mem_a).unwrap();
+        let original = "# Memory Index\n\n- [Mine](mine.md) — t";
+        std::fs::write(mem_a.join(INDEX_NAME), original).unwrap();
+        std::fs::set_permissions(
+            mem_a.join(INDEX_NAME),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        let merge = merge_index(
+            "- [New](new.md) — hook\n",
+            Some(original),
+            &["new.md".to_string()],
+        );
+        assert_eq!(merge.append, "\n- [New](new.md) — hook\n");
+        let out = bash(
+            &memory_append_index_script(mem_a.to_str().unwrap(), &merge.append),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got = std::fs::read_to_string(mem_a.join(INDEX_NAME)).unwrap();
+        assert_eq!(got, format!("{original}{}", merge.append));
+        assert_eq!(mode(&mem_a.join(INDEX_NAME)), 0o644, "mode is untouched");
+
+        // --- no index on the target: created 0600 with exactly `append` ---
+        let mem_b = tmp.path().join("memory-b");
+        let merge2 = merge_index("- [New](new.md) — hook\n", None, &["new.md".to_string()]);
+        assert!(merge2.append.starts_with("# Memory Index\n\n"));
+        let out = bash(
+            &memory_append_index_script(mem_b.to_str().unwrap(), &merge2.append),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got2 = std::fs::read_to_string(mem_b.join(INDEX_NAME)).unwrap();
+        assert_eq!(got2, merge2.append);
+        assert_eq!(mode(&mem_b.join(INDEX_NAME)), 0o600);
+        assert_eq!(mode(&mem_b), 0o700, "the memory dir is created too");
+
+        // --- empty text: a no-op that creates nothing ---
+        let mem_c = tmp.path().join("memory-c");
+        let out = bash(
+            &memory_append_index_script(mem_c.to_str().unwrap(), ""),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!mem_c.exists(), "no directory is created for a no-op");
+
+        // --- round-trip content with quotes, $(...), backslashes, and a
+        // __CF_OUT__-lookalike mid-line; a missing index reports Some(None) ---
+        let tricky = "line with 'quotes' and \"double\"\nline with $(cmd) substitution\nline with \\backslash\\ chars\nsomething __CF_OUT__ mid-line here\n";
+        let mem_d = tmp.path().join("memory-d");
+        let out = bash(
+            &memory_append_index_script(mem_d.to_str().unwrap(), tricky),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = bash(&memory_read_index_script(mem_d.to_str().unwrap()), &home);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            parse_index(&String::from_utf8_lossy(&out.stdout)),
+            Some(Some(tricky.to_string())),
+            "nothing in the body was expanded"
+        );
+
+        let mem_e = tmp.path().join("memory-e");
+        std::fs::create_dir_all(&mem_e).unwrap();
+        let out = bash(&memory_read_index_script(mem_e.to_str().unwrap()), &home);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            parse_index(&String::from_utf8_lossy(&out.stdout)),
+            Some(None),
+            "a missing index file"
+        );
+    }
+
+    #[test]
+    fn memory_scripts_fail_cleanly_and_quote_everything() {
+        if !require(&["bash", "git"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        // memory_list_script refuses a path that is not a git repo, without
+        // ever printing the marker.
+        let plain = tmp.path().join("not-a-repo");
+        std::fs::create_dir_all(&plain).unwrap();
+        let out = bash(&memory_list_script(plain.to_str().unwrap(), None), &home);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        assert!(
+            crate::service::move_session::carry::payload(&out.stdout).is_none(),
+            "no marker on a real failure"
+        );
+        let out = bash(
+            &memory_list_script(plain.to_str().unwrap(), Some(plain.to_str().unwrap())),
+            &home,
+        );
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+
+        // Every interpolated value is a single inert shell word.
+        let evil = "a b'$(touch /tmp/pwn)\n;x";
+        let q = quote(evil);
+        for script in [
+            memory_list_script(evil, Some(evil)),
+            memory_read_index_script(evil),
+            memory_append_index_script(evil, "safe text\n"),
+        ] {
+            assert!(script.contains(&q), "{script}");
+            let without = script.replace(&q, "");
+            assert!(
+                !without.contains("touch /tmp/pwn"),
+                "raw value leaked: {script}"
+            );
+        }
+
+        // The generalised carry functions this task introduces quote too.
+        for script in [
+            crate::service::move_session::carry::pack_script(evil, evil, evil, &[evil.to_string()]),
+            crate::service::move_session::carry::extract_keep_existing_script(evil, evil, true),
+        ] {
+            let alt = quote(&format!("./{evil}"));
+            assert!(script.contains(&q) || script.contains(&alt), "{script}");
+            let without = script.replace(&q, "").replace(&alt, "");
+            assert!(
+                !without.contains("touch /tmp/pwn"),
+                "raw value leaked: {script}"
+            );
+        }
+
+        // extract_keep_existing_script still refuses a missing/corrupt archive.
+        let cwd = tmp.path().join("extract-target");
+        let out = bash(
+            &crate::service::move_session::carry::extract_keep_existing_script(
+                cwd.to_str().unwrap(),
+                "/nonexistent.tgz",
+                true,
+            ),
+            &home,
+        );
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
     }
 }

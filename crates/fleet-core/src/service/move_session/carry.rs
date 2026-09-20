@@ -685,14 +685,24 @@ exit 0
     )
 }
 
-/// Tar the chosen entries into the transfer dir. Each path is a quoted argv
-/// word prefixed with `./` (so a leading `-` is never an option);
+/// Shared body of [`ignored_pack_script`] and [`pack_script`]: tar the
+/// chosen entries into the transfer dir. Each path is a quoted argv word
+/// prefixed with `./` (so a leading `-` is never an option);
 /// `COPYFILE_DISABLE` keeps macOS `._*` files out. Prints [`OUT_MARKER`]
-/// then `<bytes>\t<path>`.
-pub fn ignored_pack_script(worktree: &str, claude_id: &str, paths: &[String]) -> String {
+/// then `<bytes>\t<path>`. `marker` is only ever `"ignored-pack"` or
+/// `"pack"` — the two call sites below — and picks the `# cf-carry:` comment
+/// a `FakeSsh` test rule matches on.
+fn pack_script_as(
+    marker: &str,
+    dir: &str,
+    claude_id: &str,
+    archive_name: &str,
+    paths: &[String],
+) -> String {
     let argv: Vec<String> = paths.iter().map(|p| quote(&format!("./{p}"))).collect();
+    let archive = quote(archive_name);
     format!(
-        r#"# cf-carry:ignored-pack
+        r#"# cf-carry:{marker}
 set +e
 wt={wt}
 id={id}
@@ -702,18 +712,30 @@ umask 077
 cd -- "$wt" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
 dir="$HOME/.cache/claude-fleet/transfer/$id"
 mkdir -p -- "$dir" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
-COPYFILE_DISABLE=1 tar -czf "$dir/ignored.tgz" {argv} >/dev/null 2>&1 || {{ printf '{FAILED} tar\n' >&2; exit 5; }}
-n=$(wc -c < "$dir/ignored.tgz" | tr -d ' ')
+COPYFILE_DISABLE=1 tar -czf "$dir/"{archive} {argv} >/dev/null 2>&1 || {{ printf '{FAILED} tar\n' >&2; exit 5; }}
+n=$(wc -c < "$dir/"{archive} | tr -d ' ')
 [ -n "$n" ] || {{ printf '{FAILED} size\n' >&2; exit 5; }}
 printf '\n{OUT_MARKER}\n'
-printf '%s\t%s\n' "$n" "$dir/ignored.tgz"
+printf '%s\t%s\n' "$n" "$dir/"{archive}
 "#,
-        wt = quote(worktree),
+        wt = quote(dir),
         id = quote(claude_id),
         argv = argv.join(" "),
         id_guard = id_guard(),
         home_guard = home_guard(),
+        marker = marker,
+        archive = archive,
     )
+}
+
+/// Tar the worktree's chosen git-ignored entries into `ignored.tgz`.
+pub fn ignored_pack_script(worktree: &str, claude_id: &str, paths: &[String]) -> String {
+    pack_script_as("ignored-pack", worktree, claude_id, "ignored.tgz", paths)
+}
+
+/// [`ignored_pack_script`] for any directory and archive name.
+pub fn pack_script(dir: &str, claude_id: &str, archive_name: &str, paths: &[String]) -> String {
+    pack_script_as("pack", dir, claude_id, archive_name, paths)
 }
 
 pub fn parse_pack(stdout: &str) -> Result<(u64, String), IpcError> {
@@ -732,24 +754,49 @@ pub fn parse_pack(stdout: &str) -> Result<(u64, String), IpcError> {
     Ok((bytes, path.to_string()))
 }
 
-/// Extract in the target worktree; a file already there wins
-/// (`--skip-old-files` on GNU tar, `-k` on BSD tar — GNU's `-k` reports
-/// existing files as errors).
-pub fn ignored_extract_script(cwd: &str, archive: &str) -> String {
+/// Shared body of [`ignored_extract_script`] and [`extract_keep_existing_script`]:
+/// extract into `dir`; a file already there wins (`--skip-old-files` on GNU
+/// tar, `-k` on BSD tar — GNU's `-k` reports existing files as errors).
+/// `create_dir`: `mkdir -p -- "$cwd"` (private, `umask 077`) before the `cd`,
+/// for a target whose memory directory may not exist yet — the ignored-file
+/// extract never needs this, since the worktree it extracts into already
+/// exists. `marker` is only ever `"ignored-extract"` or `"extract"`.
+fn extract_script_as(marker: &str, dir: &str, archive: &str, create_dir: bool) -> String {
+    let mkdir = if create_dir {
+        format!(
+            r#"umask 077; mkdir -p -- "$cwd" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
+"#
+        )
+    } else {
+        String::new()
+    };
     format!(
-        r#"# cf-carry:ignored-extract
+        r#"# cf-carry:{marker}
 set +e
 cwd={cwd}
 a={a}
-cd -- "$cwd" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
+{mkdir}cd -- "$cwd" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
 tar -tzf "$a" >/dev/null 2>&1 || {{ printf '{FAILED} corrupt archive\n' >&2; exit 5; }}
 if tar --version 2>/dev/null | grep -q 'GNU tar'; then k=--skip-old-files; else k=-k; fi
 tar -xzf "$a" $k >/dev/null 2>&1 || {{ printf '{FAILED} extract\n' >&2; exit 5; }}
 printf 'ok\n'
 "#,
-        cwd = quote(cwd),
+        cwd = quote(dir),
         a = quote(archive),
+        mkdir = mkdir,
+        marker = marker,
     )
+}
+
+/// Extract `archive` in the target worktree.
+pub fn ignored_extract_script(cwd: &str, archive: &str) -> String {
+    extract_script_as("ignored-extract", cwd, archive, false)
+}
+
+/// [`ignored_extract_script`] for any directory and archive, optionally
+/// creating `dir` first (`create_dir`) for a target that may not have it yet.
+pub fn extract_keep_existing_script(dir: &str, archive: &str, create_dir: bool) -> String {
+    extract_script_as("extract", dir, archive, create_dir)
 }
 
 /// The real-script tests of both this module and `mod.rs` share the
