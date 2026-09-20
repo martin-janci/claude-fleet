@@ -147,7 +147,12 @@ When both constraints fire at once — a pane-less row with no
 `claude_session_id` — rule 1 wins and the Conversation panel shows its own
 empty state. That row has nothing else to offer.
 
-Crucially, the forced cases **never write the pref**. So: you are in Terminal,
+Crucially, the forced cases **never write the pref** — and that is a rule
+about *writes*, not only about reads. On a row that forces one view, that
+view is already showing and its pill is already checked, so clicking that
+pill is a visual no-op; it must not quietly rewrite the preference another
+row is relying on. The write is therefore guarded on the row being able to
+offer both views, not merely on the picked view being showable. So: you are in Terminal,
 you click a background agent and see its Conversation, you click back to a
 tmux row — you are in Terminal again. This replaces the `prevNoPane` flag and
 its effect, which exist only to approximate that behaviour today.
@@ -218,3 +223,5 @@ default is the intended behaviour for everyone.
 | `src/lib/session_view.test.ts` | New |
 | `src/lib/app_views.test.ts` | Chord cases |
 | `src/App.hosts.test.ts` | New test ids, segment visibility |
+| `docs/conversation-view.md` | Renamed from `conversation-tab.md`; the Conversation is a sub-view now, not a tab |
+| `docs/README.md` | The docs-index link to the renamed file |
