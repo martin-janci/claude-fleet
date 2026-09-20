@@ -648,6 +648,29 @@ describe('ConversationPanel slash commands', () => {
     return box;
   }
 
+  it('wires the box to the menu so assistive tech follows the highlighted command', async () => {
+    const box = await mountWithDraft('/');
+    const menu = screen.getByTestId('conv-slash-menu');
+    // The listbox must be reachable from the box, and the highlighted option
+    // must be the one aria-activedescendant names.
+    expect(menu.id).toBeTruthy();
+    expect(box.getAttribute('aria-controls')).toBe(menu.id);
+    const options = within(menu).getAllByRole('option');
+    expect(options[0].id).toBeTruthy();
+    expect(box.getAttribute('aria-activedescendant')).toBe(options[0].id);
+    expect(options[0].getAttribute('aria-selected')).toBe('true');
+
+    await fireEvent.keyDown(box, { key: 'ArrowDown' });
+    expect(box.getAttribute('aria-activedescendant')).toBe(options[1].id);
+    expect(options[1].getAttribute('aria-selected')).toBe('true');
+    expect(options[0].getAttribute('aria-selected')).toBe('false');
+
+    // Closed again, the box points at nothing.
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    expect(box.getAttribute('aria-activedescendant')).toBeNull();
+    expect(box.getAttribute('aria-controls')).toBeNull();
+  });
+
   it('typing a slash opens the command list, a prefix narrows it, plain text closes it', async () => {
     const box = await mountWithDraft('/');
     expect(screen.getByTestId('conv-slash-menu')).toBeTruthy();
@@ -680,11 +703,13 @@ describe('ConversationPanel slash commands', () => {
 
   it('arrows move the highlight and Tab accepts the highlighted command', async () => {
     const box = await mountWithDraft('/co');
-    const items = screen.getAllByTestId('conv-slash-item');
+    // aria-selected lives on the option itself (the button), not the li.
+    const opts = () => screen.getAllByTestId('conv-slash-item').map((li) => li.querySelector('[role="option"]')!);
+    const items = opts();
     expect(items.length).toBeGreaterThan(1);
     expect(items[0].getAttribute('aria-selected')).toBe('true');
     await fireEvent.keyDown(box, { key: 'ArrowDown' });
-    const after = screen.getAllByTestId('conv-slash-item');
+    const after = opts();
     expect(after[0].getAttribute('aria-selected')).toBe('false');
     expect(after[1].getAttribute('aria-selected')).toBe('true');
     const wanted = after[1].textContent ?? '';

@@ -744,6 +744,10 @@
   const suggestCompact = $derived(ctxLevel === 'warn' || ctxLevel === 'crit');
   const isCompactPreset = (p: ComposerPreset) => /^\/compact\b/.test(p.text.trim());
   const slashMatches = $derived(slashDismissedFor === draft ? [] : matchSlashCommands(draft));
+  // Ids for the combobox wiring, per panel instance so two panels never hand
+  // the same id to assistive tech.
+  const SLASH_LIST_ID = `conv-slash-list-${hlSuffix}`;
+  const slashOptionId = (i: number) => `conv-slash-opt-${hlSuffix}-${i}`;
   const history = $derived(promptHistory(conv, pending));
 
   /** ArrowUp / ArrowDown recall. Returns true when the key was consumed. */
@@ -1200,13 +1204,22 @@
       }}
     >
       {#if slashOpen}
-        <ul class="slash-menu" role="listbox" aria-label="Claude Code commands" data-testid="conv-slash-menu">
+        <ul class="slash-menu" role="listbox" id={SLASH_LIST_ID} aria-label="Claude Code commands" data-testid="conv-slash-menu">
           {#each slashMatches as c, i (c.name)}
-            <li role="option" aria-selected={i === slashIndex} class:active={i === slashIndex} data-testid="conv-slash-item">
-              <!-- keyboard handling lives on the textarea (arrows / Tab / Enter);
-                   the button only takes the mouse, and mousedown is swallowed
-                   so the textarea keeps focus -->
-              <button type="button" tabindex="-1" onmousedown={(e) => e.preventDefault()} onclick={() => acceptSlash(c)}>
+            <li role="presentation" class:active={i === slashIndex} data-testid="conv-slash-item">
+              <!-- The button IS the option: role="option" must not wrap an
+                   interactive element, and the box points at this id through
+                   aria-activedescendant. Keyboard handling lives on the
+                   textarea (arrows / Tab / Enter); the button only takes the
+                   mouse, and mousedown is swallowed so the box keeps focus. -->
+              <button
+                type="button"
+                role="option"
+                id={slashOptionId(i)}
+                aria-selected={i === slashIndex}
+                tabindex="-1"
+                onmousedown={(e) => e.preventDefault()}
+                onclick={() => acceptSlash(c)}>
                 <span class="slash-name">/{c.name}</span>
                 <span class="slash-desc">{c.description}</span>
               </button>
@@ -1250,6 +1263,8 @@
         <textarea
           data-testid="conv-composer-input"
           aria-label="Prompt"
+          aria-controls={slashOpen ? SLASH_LIST_ID : undefined}
+          aria-activedescendant={slashOpen ? slashOptionId(Math.min(slashIndex, slashMatches.length - 1)) : undefined}
           bind:this={box}
           bind:value={draft}
           oninput={onComposerInput}
