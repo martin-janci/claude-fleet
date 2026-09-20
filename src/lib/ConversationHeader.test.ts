@@ -183,4 +183,16 @@ describe('ConversationHeader', () => {
     // The facts yield the middle slot to find, not the tool cluster.
     expect(screen.queryByTestId('conv-model')).toBeNull();
   });
+
+  it('model and status are information, not controls', () => {
+    render(ConversationHeader, {
+      session: session(), conversations: list, viewing: null, lastEvent: null,
+      newerAvailable: false, onSelect: vi.fn(), ...findProps,
+    });
+    const model = screen.getByTestId('conv-model');
+    expect(model.tagName).toBe('SPAN');
+    expect(model.className).toContain('tag');
+    expect(model.className).not.toContain('chip');
+    expect(screen.getByTestId('conv-status').className).toContain('tag');
+  });
 });

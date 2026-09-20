@@ -12,7 +12,7 @@
     type ConversationSummary,
   } from './conversation';
   import type { TurnIndexEntry } from './conversation_nav';
-  import { contextColor, contextTint } from './attention';
+  import { contextColor } from './attention';
 
   // The find and turn-index state lives in ConversationPanel (it owns the
   // thread and the scroller); the header only renders the controls and
@@ -274,13 +274,13 @@
         aria-valuenow={Math.round(meter.pct)}
         aria-label="context usage"
         title={meter.title}
-        style="color: {contextColor(meter.level)}; border-color: {contextTint(meter.level)};"
+        style="color: {contextColor(meter.level)}; border-color: {contextColor(meter.level)};"
         ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, meter.pct))}%; background: {contextColor(meter.level)};"></span><span class="ctx-pct">{meter.label}</span></span
       >
     {/if}
-    {#if model}<span class="chip" data-testid="conv-model">{model}</span>{/if}
-    {#if status}<span class="chip" data-testid="conv-status" data-status={status}>{status}</span>{/if}
-    {#if lastEvent}<span class="muted" data-testid="conv-last-event">{lastEvent}</span>{/if}
+    {#if model}<span class="tag tag--mono" data-testid="conv-model">{model}</span>{/if}
+    {#if status}<span class="tag" data-testid="conv-status" data-status={status}>{status}</span>{/if}
+    {#if lastEvent}<span class="tag last-event" data-testid="conv-last-event">{lastEvent}</span>{/if}
     </div>
   {/if}
 
@@ -416,6 +416,11 @@
     gap: var(--control-gap);
     flex: 1 1 auto;
     min-width: 0;
+    /* The row itself never wraps and .switcher-wrap/.tools guard their own
+       widths; this is the backstop that keeps the non-elastic tags (.ctx,
+       the model/status tags) from pushing the pane sideways once the
+       elastic .last-event tag has already shrunk to nothing. */
+    overflow: hidden;
   }
   /* Always at the right, find open or not: no pointer relocation on ⌘F. */
   .tools {
@@ -500,38 +505,39 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .chip {
-    padding: 0.1rem 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: var(--bg);
-    color: var(--fg-muted);
-    font-size: 0.72rem;
-    white-space: nowrap;
-  }
-  .chip[data-status='compacting'],
-  .chip[data-status='blocked'] {
+  .tag[data-status='compacting'],
+  .tag[data-status='blocked'] {
     color: var(--usage-warn);
   }
-  .chip[data-status='failed'] {
+  .tag[data-status='failed'] {
     color: var(--usage-crit);
   }
-  .muted {
+  .tag.last-event {
+    flex: 1 1 auto;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--fg-muted);
-    font-size: 0.72rem;
+  }
+  /* A hairline divider instead of two competing pill borders. */
+  .facts .tag + .tag::before {
+    content: '';
+    width: 1px;
+    height: 11px;
+    margin-right: var(--control-gap);
+    background: var(--control-border);
   }
   .ctx {
     position: relative;
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
     flex: 0 0 auto;
-    padding: 0.1rem 0.45rem;
+    height: 18px;
+    padding: 0 7px;
     border: 1px solid;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     overflow: hidden;
-    font-size: 0.68rem;
+    font-size: var(--control-font-sm);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
@@ -540,10 +546,8 @@
   }
   .ctx-bar {
     position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    opacity: 0.25;
+    inset: 0 auto 0 0;
+    opacity: 0.22;
   }
   .ctx-pct {
     position: relative;
@@ -553,6 +557,14 @@
   @container chat (max-width: 34rem) {
     .conv-header {
       padding-inline: 0.6rem;
+    }
+  }
+  /* The model tag is the lowest-value fact (status and the context meter
+     matter more, last-event already truncates itself) — drop it before the
+     row is narrow enough to need .facts' overflow:hidden backstop above. */
+  @container chat (max-width: 26rem) {
+    .facts .tag--mono {
+      display: none;
     }
   }
 </style>

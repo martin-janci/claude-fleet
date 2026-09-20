@@ -7,7 +7,6 @@ import {
   claudeStatusLabel,
   contextLevel,
   contextColor,
-  contextTint,
   countNeedsYou,
   displayName,
   formatElapsed,
@@ -111,8 +110,6 @@ describe('contextColor', () => {
     expect(contextColor('warn')).toBe('var(--usage-warn)');
     expect(contextColor('ok')).toBe('var(--usage-ok)');
     expect(contextColor(null)).toBe('transparent');
-    expect(contextTint('crit')).toBe('color-mix(in srgb, var(--usage-crit) 33%, transparent)');
-    expect(contextTint(null)).toBe('transparent');
   });
 });
 

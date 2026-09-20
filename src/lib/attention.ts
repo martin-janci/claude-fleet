@@ -84,9 +84,7 @@ export function contextLevel(pct: number | null): ContextLevel | null {
 
 /** A CSS colour for the context meter. Every level uses the theme tokens
  *  shared with the usage bars (`--usage-ok` / `--usage-warn` / `--usage-crit`
- *  in app.css), so they keep their contrast in both themes. Being `var(...)`,
- *  the result cannot be suffixed with hex alpha — use `contextTint` for a
- *  translucent border. */
+ *  in app.css), so they keep their contrast in both themes. */
 export function contextColor(level: ContextLevel | null): string {
   switch (level) {
     case 'crit':
@@ -98,12 +96,6 @@ export function contextColor(level: ContextLevel | null): string {
     default:
       return 'transparent';
   }
-}
-
-/** `contextColor` at one-third opacity, for the meter's border. */
-export function contextTint(level: ContextLevel | null): string {
-  if (level === null) return 'transparent';
-  return `color-mix(in srgb, ${contextColor(level)} 33%, transparent)`;
 }
 
 // ── triage ranking (P13) ──
