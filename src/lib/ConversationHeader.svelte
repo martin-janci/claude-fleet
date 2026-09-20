@@ -172,7 +172,11 @@
   .conv-header {
     position: sticky;
     top: 0;
-    z-index: 2;
+    /* Above the thread's own sticky bars (the toolbar / find row, z-index 2)
+       and the turn index they open (3): both are later in the DOM, so an
+       equal z-index would let them paint over the switcher menu that drops
+       out of this header. */
+    z-index: 4;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
