@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.29] - 2026-09-21
+
+### Added
+- **hub:** demo-seed, so a freshly paired client has something to draw
+
+### Changed
+- **hub:** rustfmt, and move demo_seed above the test module
+
+### Fixed
+- **terminal:** an agent host is attached and only then explained
 ## [0.2.28] - 2026-09-21
 
 ### Added
@@ -1063,6 +1073,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.29]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.29
 [0.2.28]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.28
 [0.2.26]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.26
 [0.2.25]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.25
