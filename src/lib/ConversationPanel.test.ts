@@ -886,6 +886,22 @@ describe('ConversationPanel quick actions', () => {
     expect(more.getAttribute('aria-expanded')).toBe('true');
     expect(row.getAttribute('data-expanded')).toBe('true');
   });
+
+  it('re-measures when the preset list changes, not just on resize', async () => {
+    await mount();
+    const row = screen.getByTestId('conv-chips');
+    // The row's own border-box need not change when the preset count does,
+    // so a plain ResizeObserver on it can miss this — state the overflow
+    // the way real layout would, then change the list with no resize event.
+    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
+    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
+    expect(screen.queryByTestId('conv-chips-more')).toBeNull();
+
+    composerPresets.set([{ label: 'Clear', text: '/clear' }, { label: 'Tests', text: 'run the tests' }]);
+    await tick();
+
+    expect(screen.getByTestId('conv-chips-more')).toBeTruthy();
+  });
 });
 
 describe('ConversationPanel live indicator', () => {

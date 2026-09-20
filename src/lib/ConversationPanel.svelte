@@ -687,6 +687,10 @@
   }
   $effect(() => {
     if (!chipsRow) return;
+    // The row's own border-box need not change when the preset count does,
+    // so a ResizeObserver on it alone can miss a preset-list change. Read
+    // the store here so the effect re-runs (and re-measures) whenever it does.
+    void $composerPresets;
     measureChips();
     // ResizeObserver is absent in jsdom; the resize listener is what the
     // component test drives, and both paths call the same measurement.
@@ -1219,7 +1223,7 @@
         <div class="stuck-row">
           <button
             type="button"
-            class="btn btn--toggle btn--warn"
+            class="btn btn--chip btn--warn"
             data-testid="conv-chip-enter"
             title="The session is waiting on a key press. Sends a bare Enter."
             disabled={sending || viewing !== null}
@@ -1232,7 +1236,7 @@
             {@const suggested = suggestCompact && isCompactPreset(p)}
             <button
               type="button"
-              class="btn btn--toggle"
+              class="btn btn--chip"
               class:btn--warn={suggested}
               data-testid="conv-chip"
               data-suggested={suggested || undefined}
@@ -1248,7 +1252,7 @@
       {#if chipsOverflow}
         <button
           type="button"
-          class="btn btn--toggle chips-more"
+          class="btn btn--chip chips-more"
           data-testid="conv-chips-more"
           aria-expanded={chipsExpanded}
           onclick={() => (chipsExpanded = !chipsExpanded)}>{chipsExpanded ? 'Less' : 'More'} ▾</button>

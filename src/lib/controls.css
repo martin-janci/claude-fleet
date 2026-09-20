@@ -4,6 +4,11 @@
  * different "primary button" conventions.
  *
  * Pill + border ⇒ clickable. Bare text ⇒ information (.tag). One rule.
+ *
+ * `--radius-pill` (the `.btn--chip` shape) means "this is a chip": a
+ * preset, a one-shot action, a toggle. `.btn--toggle` extends `.btn--chip`
+ * with a pressed state (`aria-pressed`/`.is-active`) and is never used
+ * alone — a pressed state is optional, the pill shape is not.
  */
 
 .btn {
@@ -88,16 +93,22 @@
   background: var(--control-bg);
 }
 
-.btn--toggle {
+/* A pill means a chip-shaped control: a preset, a one-shot action, a
+   toggle. Use `.btn--toggle` alongside it only when the control actually
+   has a pressed state (`aria-pressed`) — a pressed state is optional. */
+.btn--chip {
   border-radius: var(--radius-pill);
   border-color: var(--control-border);
   background: var(--control-bg);
   color: var(--control-fg-quiet);
 }
-.btn--toggle:hover:not(:disabled) {
+.btn--chip:hover:not(:disabled) {
   border-color: var(--control-border-strong);
   color: var(--control-fg);
 }
+/* The pressed state only. Extends `.btn--chip` — always pair the two — and
+   adds nothing on its own; a `.btn--toggle` without `.btn--chip` has no
+   resting shape. */
 /* Selected is carried by the boundary (4.95:1); the fill only reinforces
    it. A tint alone is ~1.2:1 and is decoration, not information. */
 .btn--toggle[aria-pressed='true'],
