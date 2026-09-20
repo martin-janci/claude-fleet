@@ -19,6 +19,7 @@
   import { sendPrompt, hasNoPane, type SessionRow } from './sessions';
   import { hintAnchor } from './hints';
   import { composerPresets, type ComposerPreset } from './composer_presets';
+  import { needsMore } from './composer_overflow';
   import { contextLevel } from './attention';
   import { timeAgo } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
@@ -120,6 +121,11 @@
   let sendError = $state<string | null>(null);
   let pending = $state<PendingPrompt | null>(null);
   let box: HTMLTextAreaElement | undefined = $state();
+  // The chip row holds one line; whatever does not fit collapses behind
+  // "More". Measured, not computed, since it depends on layout.
+  let chipsRow: HTMLDivElement | undefined = $state();
+  let chipsOverflow = $state(false);
+  let chipsExpanded = $state(false);
   // Slash-command menu: highlighted row, and the draft the user dismissed
   // the menu for (Escape) so it stays hidden until the text changes.
   let slashIndex = $state(0);
@@ -674,6 +680,24 @@
     if (!visible || !canPrompt) return;
     void tick().then(() => box?.focus());
   });
+  function measureChips() {
+    if (!chipsRow) return;
+    chipsOverflow = needsMore(chipsRow.scrollWidth, chipsRow.clientWidth);
+    if (!chipsOverflow) chipsExpanded = false;
+  }
+  $effect(() => {
+    if (!chipsRow) return;
+    measureChips();
+    // ResizeObserver is absent in jsdom; the resize listener is what the
+    // component test drives, and both paths call the same measurement.
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measureChips);
+    ro?.observe(chipsRow);
+    window.addEventListener('resize', measureChips);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', measureChips);
+    };
+  });
   const canSend = $derived(draft.trim().length > 0 && !sending && viewing === null);
   const statusNote = $derived(
     viewing !== null
@@ -690,6 +714,7 @@
   // the same id to assistive tech.
   const SLASH_LIST_ID = `conv-slash-list-${hlSuffix}`;
   const slashOptionId = (i: number) => `conv-slash-opt-${hlSuffix}-${i}`;
+  const COMPOSER_HINT_ID = `conv-composer-hint-${hlSuffix}`;
   const history = $derived(promptHistory(conv, pending));
 
   /** ArrowUp / ArrowDown recall. Returns true when the key was consumed. */
@@ -1190,11 +1215,11 @@
       {#if sendError}
         <div class="composer-error" data-testid="conv-composer-error">{sendError}</div>
       {/if}
-      <div class="chips" data-testid="conv-chips">
+      <div class="chips" data-testid="conv-chips" data-expanded={chipsExpanded} bind:this={chipsRow}>
         {#if liveStuck === 'press_enter'}
           <button
             type="button"
-            class="chip stuck"
+            class="btn btn--toggle btn--warn"
             data-testid="conv-chip-enter"
             title="The session is waiting on a key press. Sends a bare Enter."
             disabled={sending || viewing !== null}
@@ -1206,7 +1231,7 @@
             {@const suggested = suggestCompact && isCompactPreset(p)}
             <button
               type="button"
-              class="chip"
+              class="btn btn--toggle"
               class:suggest={suggested}
               data-testid="conv-chip"
               data-suggested={suggested || undefined}
@@ -1219,6 +1244,14 @@
           {/if}
         {/each}
       </div>
+      {#if chipsOverflow}
+        <button
+          type="button"
+          class="btn btn--toggle chips-more"
+          data-testid="conv-chips-more"
+          aria-expanded={chipsExpanded}
+          onclick={() => (chipsExpanded = !chipsExpanded)}>{chipsExpanded ? 'Less' : 'More'} ▾</button>
+      {/if}
       <div class="composer-shell">
         <textarea
           class="composer-input"
@@ -1226,6 +1259,7 @@
           aria-label="Prompt"
           aria-controls={slashOpen ? SLASH_LIST_ID : undefined}
           aria-activedescendant={slashOpen ? slashOptionId(Math.min(slashIndex, slashMatches.length - 1)) : undefined}
+          aria-describedby={COMPOSER_HINT_ID}
           bind:this={box}
           bind:value={draft}
           oninput={onComposerInput}
@@ -1236,7 +1270,7 @@
           disabled={sending || viewing !== null}
         ></textarea>
         <div class="composer-actions">
-          <span class="composer-hint" aria-hidden="true">↵ send · ⇧↵ newline · ↑ history</span>
+          <span class="composer-hint" id={COMPOSER_HINT_ID}>↵ send · ⇧↵ newline · ↑ history</span>
           <button
             type="submit"
             class="btn btn--icon btn--primary"
@@ -1336,30 +1370,15 @@
   }
   .chips {
     display: flex;
+    gap: var(--control-gap);
+    margin: 0 0 6px;
+    /* One row by default; growth is a deliberate toggle, not a reflow. */
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+  .chips[data-expanded='true'] {
     flex-wrap: wrap;
-    gap: 0.35rem;
-    margin: 0 0 0.4rem;
-  }
-  .chip {
-    padding: 0.15rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: var(--bg);
-    color: var(--fg-muted);
-    font-size: 0.72rem;
-    cursor: pointer;
-  }
-  .chip:hover:not(:disabled) {
-    border-color: var(--accent);
-    color: var(--fg);
-  }
-  .chip:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .chip.stuck {
-    border-color: var(--usage-warn);
-    color: var(--usage-warn);
+    overflow: visible;
   }
   .composer-shell {
     position: relative;
@@ -1460,7 +1479,7 @@
     color: var(--fg-muted);
     font-size: 0.75rem;
   }
-  .chip.suggest {
+  .btn--toggle.suggest {
     border-color: var(--usage-warn);
     color: var(--fg);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--usage-warn) 25%, transparent);

@@ -645,6 +645,18 @@ describe('ConversationPanel composer', () => {
     expect(send.closest('.composer-shell')).not.toBeNull();
     expect(screen.getByTestId('conv-composer-input').getAttribute('placeholder')).toBe('Send a prompt…');
   });
+
+  it('the keyboard hint is exposed to the textarea for screen readers', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input');
+    const describedBy = box.getAttribute('aria-describedby');
+    expect(describedBy).toBeTruthy();
+    const description = document.getElementById(describedBy!);
+    expect(description).not.toBeNull();
+    expect(description!.textContent).toContain('↵ send · ⇧↵ newline · ↑ history');
+  });
 });
 
 describe('ConversationPanel composer auto-grow', () => {
@@ -842,6 +854,23 @@ describe('ConversationPanel quick actions', () => {
   it('a bg row shows no chips', async () => {
     await mount({ kind: 'bg', tmux_name: 'bg:abc' });
     expect(screen.queryByTestId('conv-chip')).toBeNull();
+  });
+
+  it('collapses overflowing chips behind More and expands them', async () => {
+    await mount();
+    const row = screen.getByTestId('conv-chips');
+    // jsdom lays nothing out, so state the overflow the way the observer would.
+    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
+    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+
+    const more = screen.getByTestId('conv-chips-more');
+    expect(more.getAttribute('aria-expanded')).toBe('false');
+    expect(row.getAttribute('data-expanded')).toBe('false');
+    await fireEvent.click(more);
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    expect(row.getAttribute('data-expanded')).toBe('true');
   });
 });
 
