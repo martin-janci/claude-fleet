@@ -16,7 +16,7 @@
   // they stay read-only.
   import { untrack, tick, setContext } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
-  import { sendPrompt, hasNoPane, type SessionRow } from './sessions';
+  import { sendPrompt, hasNoPane, sessions, type SessionRow } from './sessions';
   import { hintAnchor } from './hints';
   import { composerPresets, type ComposerPreset } from './composer_presets';
   import { contextLevel } from './attention';
@@ -48,6 +48,8 @@
     notificationTone,
     notificationMark,
     notificationLabel,
+    transcriptBackground,
+    fleetBackground,
     isLongPrompt,
     PROMPT_CLAMP_LINES,
     turnDuration,
@@ -76,10 +78,14 @@
     type PendingPrompt,
     type SlashCommand,
     type ActivityProbe,
+    type BackgroundEntry,
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
   import { hubStatus, ownsTheFleet } from './hub';
   import Markdown from './MarkdownView.svelte';
+  import BackgroundDetail from './BackgroundDetail.svelte';
+  import { selectSession } from './selection';
+  import { tasks } from './tasks';
 
   let {
     session,
@@ -179,6 +185,19 @@
   let pushed = $state<SessionEvent[]>([]);
   let listSeq = 0;
 
+  // The background entry whose detail replaces the thread; null = the thread.
+  // Keyed by BackgroundEntry.key, not by index: the list re-derives on every
+  // poll and a running entry moves as it finishes.
+  let background = $state<string | null>(null);
+  let backgroundOpen = $state(false);
+
+  const bgEntries = $derived(
+    conv
+      ? [...transcriptBackground(conv.turns), ...fleetBackground($sessions, $tasks, session.id)]
+      : fleetBackground($sessions, $tasks, session.id),
+  );
+  const bgEntry = $derived(bgEntries.find((e) => e.key === background) ?? null);
+
   // Paths in reply text open in the Files tab (MarkdownInline reads this).
   setContext<OpenPathFn>(OPEN_PATH_CONTEXT, (path, line) => requestOpenPath(sessionId, path, line));
 
@@ -245,7 +264,10 @@
 
   /** Drop the conversation on screen: content, live events, errors,
    *  expansions, scroll state and the turn window; a fetch in flight is
-   *  made stale. */
+   *  made stale. Also the natural place to drop an open background detail —
+   *  this runs on every path that changes what the panel shows (a session
+   *  switch via resetThread, an automatic /clear or /resume follow via
+   *  resetThread, and the header switcher's `select`). */
   function resetView() {
     seq++;
     conv = null;
@@ -259,6 +281,8 @@
     turnsWanted = undefined;
     loadingOlder = false;
     turnsOpen = false;
+    background = null;
+    backgroundOpen = false;
     findOpen = false;
     findQuery = '';
     findIndex = 0;
@@ -584,6 +608,32 @@
     turnsOpen = false;
     scrollToRow(key);
   }
+
+  /** Open a background entry. A fleet session is a place, not a report: it
+   *  has its own transcript, terminal and composer, so it takes the whole
+   *  app rather than this pane. */
+  function openBackground(e: BackgroundEntry): void {
+    backgroundOpen = false;
+    if (e.source === 'fleet_session' && e.sessionId !== null) {
+      const row = $sessions.find((s) => s.id === e.sessionId);
+      if (row) selectSession(row);
+      return;
+    }
+    background = e.key;
+  }
+
+  /** The entry a notification row belongs to, by task id first and by the
+   *  call it named second — the same keying `transcriptBackground` uses. */
+  function entryForNotification(n: { task_id: string | null; tool_use_id: string | null }): BackgroundEntry | null {
+    const keys = [n.task_id ? `task:${n.task_id}` : null, n.tool_use_id ? `tool:${n.tool_use_id}` : null];
+    for (const k of keys) {
+      if (k === null) continue;
+      const hit = bgEntries.find((e) => e.key === k);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
   function onTurnsKey(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -969,7 +1019,9 @@
     </div>
   {/if}
   <div class="thread-area">
-  {#if empty && !(pending && viewing === null)}
+  {#if bgEntry}
+    <BackgroundDetail entry={bgEntry} onBack={() => (background = null)} />
+  {:else if empty && !(pending && viewing === null)}
     <div class="empty-state" data-testid="conv-empty-state">
       <p class="empty-title" data-testid="conv-empty">{empty}</p>
       {#if emptyHint}<p class="empty-hint">{emptyHint}</p>{/if}
@@ -1030,6 +1082,31 @@
                       <button type="button" data-testid="conv-turn-index-item" onclick={() => pickTurn(t.rowKey)}>
                         <span class="ti-label">{t.label}</span>
                         {#if t.at}<time datetime={t.at}>{relativeTime(t.at, nowMs)}</time>{/if}
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          {/if}
+          {#if bgEntries.length > 0}
+            <div class="turns-wrap">
+              <button
+                type="button"
+                class="tb-btn"
+                data-testid="conv-background-button"
+                aria-expanded={backgroundOpen}
+                onclick={() => (backgroundOpen = !backgroundOpen)}
+                >{bgEntries.length} background</button
+              >
+              {#if backgroundOpen}
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <ul class="turn-index" aria-label="Background work" data-testid="conv-background-list">
+                  {#each bgEntries as e (e.key)}
+                    <li>
+                      <button type="button" data-testid="conv-background-item" onclick={() => openBackground(e)}>
+                        <span class="ti-label">{e.kind} · {e.label}</span>
+                        <span class="bg-item-status" data-status={e.status}>{e.status}</span>
                       </button>
                     </li>
                   {/each}
@@ -1161,10 +1238,24 @@
                   {:else if g.kind === 'interrupt'}
                     <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
                   {:else if g.kind === 'notification'}
-                    <div class="notification" data-testid="conv-notification" data-tone={notificationTone(g.status)}>
-                      <span class="note-mark" aria-hidden="true">{notificationMark(g.status)}</span>
-                      <span class="note-label">{notificationLabel(g)}</span>
-                    </div>
+                    {@const target = entryForNotification(g)}
+                    {#if target}
+                      <button
+                        type="button"
+                        class="notification clickable"
+                        data-testid="conv-notification"
+                        data-tone={notificationTone(g.status)}
+                        onclick={() => openBackground(target)}
+                      >
+                        <span class="note-mark" aria-hidden="true">{notificationMark(g.status)}</span>
+                        <span class="note-label">{notificationLabel(g)}</span>
+                      </button>
+                    {:else}
+                      <div class="notification" data-testid="conv-notification" data-tone={notificationTone(g.status)}>
+                        <span class="note-mark" aria-hidden="true">{notificationMark(g.status)}</span>
+                        <span class="note-label">{notificationLabel(g)}</span>
+                      </div>
+                    {/if}
                   {:else if g.kind === 'subagent'}
                     <SubagentBlock item={g} {nowMs} live={turnLive} />
                   {/if}
@@ -1215,7 +1306,7 @@
     {/if}
   {/if}
   </div>
-  {#if canPrompt}
+  {#if canPrompt && bgEntry === null}
     <form
       class="composer"
       data-testid="conv-composer"
@@ -1302,7 +1393,7 @@
         <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
       {/if}
     </form>
-  {:else}
+  {:else if !canPrompt}
     <p class="muted readonly" data-testid="conv-readonly">Read-only: this agent runs outside tmux, so there is no terminal to prompt.</p>
   {/if}
 </div>
@@ -1445,6 +1536,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .bg-item-status {
+    margin-left: auto;
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+  }
+  .bg-item-status[data-status='failed'] {
+    color: var(--usage-crit);
+  }
+  .bg-item-status[data-status='stopped'] {
+    color: var(--usage-warn);
   }
   [data-match] {
     outline: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
@@ -1970,6 +2072,15 @@
   }
   .notification[data-tone='error'] {
     border-left-color: var(--usage-crit);
+  }
+  .notification.clickable {
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+  }
+  .notification.clickable:hover {
+    border-left-color: var(--accent);
   }
   .note-mark {
     flex: 0 0 auto;

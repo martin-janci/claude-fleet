@@ -15,9 +15,15 @@ vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
 });
+vi.mock('./selection', async () => {
+  const actual = await vi.importActual<typeof import('./selection')>('./selection');
+  return { ...actual, selectSession: vi.fn() };
+});
 import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
-import { sendPrompt, type SessionRow } from './sessions';
+import { sendPrompt, sessions, type SessionRow } from './sessions';
+import { selectSession } from './selection';
+import { tasks, type TaskRow } from './tasks';
 import { composerPresets, resetComposerPresets } from './composer_presets';
 import { composerDrafts } from './conversation';
 import { openPathRequest } from './app_views';
@@ -44,6 +50,7 @@ const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
 const mockedAct = sessionActivity as unknown as ReturnType<typeof vi.fn>;
 const mockedList = listConversations as unknown as ReturnType<typeof vi.fn>;
 const mockedDetail = toolDetail as unknown as ReturnType<typeof vi.fn>;
+const selectSessionSpy = selectSession as unknown as ReturnType<typeof vi.fn>;
 
 function session(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -110,6 +117,7 @@ beforeEach(() => {
   mockedAct.mockReset();
   mockedList.mockReset();
   mockedDetail.mockReset();
+  selectSessionSpy.mockReset();
   mockedDetail.mockResolvedValue({
     ok: true,
     value: { id: 't1', name: 'Bash', input: '{}', edit: null, command: 'ls', result: 'out', is_error: false },
@@ -120,6 +128,8 @@ beforeEach(() => {
   resetComposerPresets();
   setVisibility('visible');
   hubStatus.set({ ...STANDALONE });
+  sessions.set([]);
+  tasks.set([]);
 });
 
 afterEach(() => {
@@ -2603,5 +2613,91 @@ describe('ConversationPanel detail UX fixes', () => {
     // user types, so the field must carry its own label.
     expect(box.getAttribute('aria-label')).toBe('Prompt');
     expect(screen.getByTestId('conv-composer-send').getAttribute('aria-keyshortcuts')).toBe('Enter');
+  });
+});
+
+// ─── Background switcher (task 6) ────────────────────────────────────────
+
+const bgSubagentItem = {
+  kind: 'subagent' as const,
+  id: 'toolu_1',
+  name: 'Agent',
+  agent_type: 'general-purpose',
+  description: 'Posúdiť stratégiu testov',
+  result: null,
+  error: false,
+  at: '2026-09-13T10:00:00.000Z',
+  ended_at: null,
+  done: false,
+};
+
+const bgNotificationItem = {
+  kind: 'notification' as const,
+  task_id: 'a6',
+  tool_use_id: 'toolu_1',
+  status: 'completed',
+  summary: 'Posúdiť stratégiu testov finished',
+  result: 'All good.',
+  output_file: null,
+  event: null,
+  at: '2026-09-13T10:05:00.000Z',
+};
+
+const convWithBackgroundAgent: Conversation = conv({
+  turns: [
+    { prompt: 'go check', at: '2026-09-13T10:00:00.000Z', ended_at: null, items: [bgSubagentItem] },
+    { prompt: null, at: '2026-09-13T10:05:00.000Z', ended_at: '2026-09-13T10:05:01.000Z', items: [bgNotificationItem] },
+  ],
+});
+
+const convWithNoBackground: Conversation = conv();
+
+async function renderWithConversation(c: Conversation, opts: { sessions?: SessionRow[]; tasks?: TaskRow[] } = {}) {
+  sessions.set(opts.sessions ?? []);
+  tasks.set(opts.tasks ?? []);
+  mockedConv.mockReturnValue(ok(c));
+  const result = render(ConversationPanel, { session: session(), visible: true });
+  await settle();
+  return result;
+}
+
+describe('ConversationPanel background switcher', () => {
+  it('offers a background switcher listing what the conversation launched', async () => {
+    const { getByTestId, getAllByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    await fireEvent.click(getByTestId('conv-background-button'));
+    const rows = getAllByTestId('conv-background-item');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain('Posúdiť stratégiu testov');
+  });
+
+  it('hides the switcher when nothing ran in the background', async () => {
+    const { queryByTestId } = await renderWithConversation(convWithNoBackground);
+    expect(queryByTestId('conv-background-button')).toBeNull();
+  });
+
+  it('replaces the thread with the picked entry, and comes back', async () => {
+    const { getByTestId, getAllByTestId, queryByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    await fireEvent.click(getByTestId('conv-background-button'));
+    await fireEvent.click(getAllByTestId('conv-background-item')[0]);
+    expect(getByTestId('bg-detail')).toBeTruthy();
+    expect(queryByTestId('conv-scroller')).toBeNull();
+    expect(queryByTestId('conv-composer')).toBeNull();
+    await fireEvent.click(getByTestId('bg-detail-back'));
+    expect(getByTestId('conv-scroller')).toBeTruthy();
+  });
+
+  it('opens the entry a notification row names', async () => {
+    const { getByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    await fireEvent.click(getByTestId('conv-notification'));
+    expect(getByTestId('bg-detail-label').textContent).toContain('Posúdiť stratégiu testov');
+  });
+
+  it('switches the app to a fleet child session rather than showing a detail', async () => {
+    const { getByTestId, getAllByTestId } = await renderWithConversation(convWithNoBackground, {
+      sessions: [session({ id: 2, parent_session_id: 1, friendly_name: 'Load layers' })],
+    });
+    await fireEvent.click(getByTestId('conv-background-button'));
+    await fireEvent.click(getAllByTestId('conv-background-item')[0]);
+    expect(selectSessionSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }));
   });
 });
