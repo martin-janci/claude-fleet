@@ -4,6 +4,497 @@
 //! the scripts. Both halves only ever ADD to the target.
 //! See `docs/superpowers/specs/2026-09-20-move-carry-claude-state-design.md`.
 
+use crate::service::move_session::carry::{payload, IgnoredEntry, LeftBehind, LeftReason};
+
 /// `settings` key: largest per-session directory (MiB) a move carries.
 pub const SETTING_MAX_SESSION_STATE_MB: &str = "move.max_session_state_mb";
 pub const DEFAULT_MAX_SESSION_STATE_MB: u64 = 200;
+pub const MAX_SESSION_EXCLUDES: usize = 200;
+pub const MEMORY_FILE_MAX_BYTES: u64 = 1 << 20;
+pub const MEMORY_TOTAL_MAX_BYTES: u64 = 8 << 20;
+pub const MEMORY_MAX_FILES: usize = 300;
+pub const INDEX_READ_MAX_BYTES: u64 = 256 * 1024;
+pub const INDEX_APPEND_MAX_BYTES: usize = 32 * 1024;
+pub const INDEX_NAME: &str = "MEMORY.md";
+/// The heredoc delimiter of the index-append script; never allowed as a line.
+pub(super) const INDEX_HEREDOC: &str = "CF_INDEX";
+
+fn records(stdout: &[u8]) -> impl Iterator<Item = Vec<&str>> {
+    payload(stdout)
+        .unwrap_or_default()
+        .split(|b| *b == 0)
+        .filter(|r| !r.is_empty())
+        .filter_map(|r| std::str::from_utf8(r).ok())
+        .map(|r| r.split('\t').collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedFile {
+    pub path: String,
+    pub bytes: u64,
+}
+
+/// `<bytes>\t<path>\0` records after the marker. No marker, a non-UTF-8 or a
+/// malformed record → dropped: a listing can never fail a move.
+pub fn parse_file_list(stdout: &[u8]) -> Vec<ListedFile> {
+    records(stdout)
+        .filter_map(|p| match p.as_slice() {
+            [n, path] => Some(ListedFile {
+                path: path.to_string(),
+                bytes: n.trim().parse().ok()?,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn safe_session_path(p: &str) -> bool {
+    !p.is_empty()
+        && p.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
+        && !p.split('/').any(|seg| seg == ".." || seg.is_empty())
+}
+
+/// A tar exclude pattern for `path` that cannot carry shell or glob syntax of
+/// the caller's making: every char outside the safe set becomes `?` (one-char
+/// wildcard on GNU and BSD tar alike).
+pub fn exclude_pattern(path: &str) -> String {
+    path.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._/-".contains(c) {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionSelection {
+    pub carry: Vec<IgnoredEntry>,
+    /// Exclude patterns, relative to `<id>/`.
+    pub exclude: Vec<String>,
+    pub left: Vec<LeftBehind>,
+    /// Set when the half must be skipped; `carry`/`exclude` are then empty.
+    pub skip: Option<String>,
+}
+
+/// The whole directory travels unless it is over `cap_bytes`; then the
+/// largest files stay behind, one by one, until the rest fits.
+pub fn select_session_files(listed: Vec<ListedFile>, cap_bytes: u64) -> SessionSelection {
+    let mut sel = SessionSelection::default();
+    let mut ok: Vec<ListedFile> = Vec::new();
+    for f in listed {
+        if safe_session_path(&f.path) {
+            ok.push(f);
+        } else {
+            sel.exclude.push(exclude_pattern(&f.path));
+            sel.left.push(LeftBehind {
+                path: f.path,
+                bytes: Some(f.bytes),
+                reason: LeftReason::UnsupportedName,
+            });
+        }
+    }
+    ok.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
+    let mut total: u64 = ok.iter().fold(0u64, |t, f| t.saturating_add(f.bytes));
+    let mut keep_from = 0;
+    while total > cap_bytes && keep_from < ok.len() {
+        let f = &ok[keep_from];
+        total -= f.bytes;
+        sel.exclude.push(f.path.clone());
+        sel.left.push(LeftBehind {
+            path: f.path.clone(),
+            bytes: Some(f.bytes),
+            reason: LeftReason::OverCap,
+        });
+        keep_from += 1;
+    }
+    if sel.exclude.len() > MAX_SESSION_EXCLUDES {
+        return SessionSelection {
+            left: sel.left,
+            skip: Some(format!(
+                "more than {MAX_SESSION_EXCLUDES} files would have to stay behind; raise {SETTING_MAX_SESSION_STATE_MB}"
+            )),
+            ..Default::default()
+        };
+    }
+    sel.carry = ok[keep_from..]
+        .iter()
+        .map(|f| IgnoredEntry {
+            path: f.path.clone(),
+            bytes: f.bytes,
+        })
+        .collect();
+    sel.carry.sort_by(|a, b| a.path.cmp(&b.path));
+    sel
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedMemory {
+    pub hash: String,
+    pub bytes: u64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryListing {
+    /// Absolute path of the memory dir (it may not exist yet).
+    pub dir: String,
+    pub exists: bool,
+    pub files: Vec<ListedMemory>,
+}
+
+/// First record `dir\t<abs path>\t<0|1>`, then `<hash>\t<bytes>\t<name>`.
+pub fn parse_memory_list(stdout: &[u8]) -> Option<MemoryListing> {
+    let mut recs = records(stdout);
+    let (dir, exists) = match recs.next()?.as_slice() {
+        ["dir", d, e] if d.starts_with('/') => (d.to_string(), *e == "1"),
+        _ => return None,
+    };
+    let files = recs
+        .filter_map(|p| match p.as_slice() {
+            [h, n, name] => Some(ListedMemory {
+                hash: h.to_string(),
+                bytes: n.trim().parse().ok()?,
+                name: name.to_string(),
+            }),
+            _ => None,
+        })
+        .collect();
+    Some(MemoryListing { dir, exists, files })
+}
+
+fn safe_memory_name(n: &str) -> bool {
+    n.len() > 3
+        && n.ends_with(".md")
+        && !n.starts_with('.')
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryDecision {
+    pub carry: Vec<IgnoredEntry>,
+    pub kept_target: Vec<String>,
+    pub identical: u32,
+    pub left: Vec<LeftBehind>,
+}
+
+/// Memory only ever adds: a name the target has is never carried, and the
+/// index is merged line-wise elsewhere, never copied.
+pub fn decide_memory(source: &[ListedMemory], target: &[ListedMemory]) -> MemoryDecision {
+    let mut d = MemoryDecision::default();
+    let mut src: Vec<&ListedMemory> = source.iter().filter(|f| f.name != INDEX_NAME).collect();
+    src.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut total = 0u64;
+    for f in src {
+        let left = |reason| LeftBehind {
+            path: f.name.clone(),
+            bytes: Some(f.bytes),
+            reason,
+        };
+        if !safe_memory_name(&f.name) {
+            d.left.push(left(LeftReason::UnsupportedName));
+        } else if let Some(t) = target.iter().find(|t| t.name == f.name) {
+            if t.hash == f.hash {
+                d.identical += 1
+            } else {
+                d.kept_target.push(f.name.clone())
+            }
+        } else if f.bytes > MEMORY_FILE_MAX_BYTES
+            || d.carry.len() >= MEMORY_MAX_FILES
+            || total.saturating_add(f.bytes) > MEMORY_TOTAL_MAX_BYTES
+        {
+            d.left.push(left(LeftReason::OverCap));
+        } else {
+            total += f.bytes;
+            d.carry.push(IgnoredEntry {
+                path: f.name.clone(),
+                bytes: f.bytes,
+            });
+        }
+    }
+    d
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexMerge {
+    /// Exactly the text to append to the target's index ("" → do nothing).
+    pub append: String,
+    pub lines: u32,
+}
+
+/// The file a line's FIRST markdown link points at (`](name.md)`), without
+/// a leading `./`.
+fn link_target(line: &str) -> Option<&str> {
+    let rest = &line[line.find("](")? + 2..];
+    let t = &rest[..rest.find(')')?];
+    Some(t.strip_prefix("./").unwrap_or(t))
+}
+
+/// An index line travels only with its carried file. The target's own lines
+/// are never touched — this only produces text to append.
+pub fn merge_index(
+    source_index: &str,
+    target_index: Option<&str>,
+    carried: &[String],
+) -> IndexMerge {
+    let mut body = String::new();
+    let mut lines = 0u32;
+    for line in source_index.lines() {
+        let travels = link_target(line).is_some_and(|t| carried.iter().any(|c| c == t));
+        if !travels || line == INDEX_HEREDOC {
+            continue;
+        }
+        if body.len() + line.len() + 1 > INDEX_APPEND_MAX_BYTES - 64 {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+        lines += 1;
+    }
+    if lines == 0 {
+        return IndexMerge::default();
+    }
+    let prefix = match target_index {
+        None => "# Memory Index\n\n",
+        Some(t) if !t.is_empty() && !t.ends_with('\n') => "\n",
+        Some(_) => "",
+    };
+    IndexMerge {
+        append: format!("{prefix}{body}"),
+        lines,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::move_session::carry::{LeftReason, OUT_MARKER};
+
+    fn marked(body: &[u8]) -> Vec<u8> {
+        let mut v = format!("banner\n\n{OUT_MARKER}\n").into_bytes();
+        v.extend_from_slice(body);
+        v
+    }
+    fn f(path: &str, bytes: u64) -> ListedFile {
+        ListedFile {
+            path: path.into(),
+            bytes,
+        }
+    }
+    fn m(name: &str, hash: &str, bytes: u64) -> ListedMemory {
+        ListedMemory {
+            hash: hash.into(),
+            bytes,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn file_list_parses_after_the_marker_and_is_empty_without_one() {
+        let got = parse_file_list(&marked(
+            b"2048\tsubagents/agent-ab.jsonl\x0012\tcustom-title.json\x00garbage\x00",
+        ));
+        assert_eq!(got.len(), 2, "the record without a tab is dropped");
+        assert_eq!(
+            (got[0].path.as_str(), got[0].bytes),
+            ("subagents/agent-ab.jsonl", 2048)
+        );
+        assert!(parse_file_list(b"12\tno-marker\0").is_empty());
+    }
+
+    #[test]
+    fn under_the_cap_the_whole_session_directory_travels() {
+        let sel = select_session_files(
+            vec![
+                f("subagents/a.jsonl", 600),
+                f("tool-results/x.txt", 300),
+                f("custom-title.json", 20),
+            ],
+            1000,
+        );
+        assert!(sel.exclude.is_empty() && sel.left.is_empty() && sel.skip.is_none());
+        assert_eq!(sel.carry.len(), 3);
+    }
+
+    #[test]
+    fn over_the_cap_the_largest_files_stay_behind_first() {
+        let sel = select_session_files(
+            vec![
+                f("subagents/big.jsonl", 900),
+                f("subagents/mid.jsonl", 400),
+                f("subagents/small.jsonl", 100),
+                f("custom-title.json", 20),
+            ],
+            600,
+        );
+        assert_eq!(
+            sel.exclude,
+            vec!["subagents/big.jsonl"],
+            "dropping the largest is enough: 520 <= 600"
+        );
+        assert_eq!(sel.left[0].reason, LeftReason::OverCap);
+        assert_eq!(sel.left[0].bytes, Some(900));
+        let carried: Vec<&str> = sel.carry.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(carried.len(), 3);
+        assert!(!carried.contains(&"subagents/big.jsonl"));
+    }
+
+    #[test]
+    fn odd_names_are_excluded_by_a_wildcard_pattern_never_interpolated_raw() {
+        let sel = select_session_files(
+            vec![
+                f("ok.json", 1),
+                f("we ird*[x].txt", 1),
+                f("../escape", 1),
+                f("a/../b", 1),
+            ],
+            u64::MAX,
+        );
+        assert_eq!(sel.carry.len(), 1);
+        assert_eq!(
+            sel.left
+                .iter()
+                .filter(|l| l.reason == LeftReason::UnsupportedName)
+                .count(),
+            3
+        );
+        assert!(
+            sel.exclude.contains(&"we?ird??x?.txt".to_string()),
+            "{:?}",
+            sel.exclude
+        );
+        assert!(sel.exclude.iter().all(|p| p
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/-?".contains(c))));
+        assert_eq!(exclude_pattern("a b"), "a?b");
+    }
+
+    #[test]
+    fn too_many_exclusions_skip_the_half_instead_of_building_a_huge_command() {
+        let many: Vec<ListedFile> = (0..MAX_SESSION_EXCLUDES + 5)
+            .map(|i| f(&format!("subagents/a{i:04}.jsonl"), 1000))
+            .collect();
+        let sel = select_session_files(many, 1); // nothing fits → every file would be excluded
+        assert!(
+            sel.skip.as_deref().is_some_and(|w| w.contains("200")),
+            "{:?}",
+            sel.skip
+        );
+        assert!(sel.carry.is_empty() && sel.exclude.is_empty());
+    }
+
+    #[test]
+    fn memory_list_needs_its_directory_record() {
+        let l = parse_memory_list(&marked(
+            b"dir\t/h/.claude/projects/-r/memory\t1\0aaa\t10\tnote.md\0bbb\tx\tbad.md\0",
+        ))
+        .unwrap();
+        assert_eq!(
+            (l.dir.as_str(), l.exists, l.files.len()),
+            ("/h/.claude/projects/-r/memory", true, 1)
+        );
+        assert!(
+            parse_memory_list(&marked(b"aaa\t10\tnote.md\0")).is_none(),
+            "no dir record"
+        );
+        assert!(
+            parse_memory_list(&marked(b"dir\trelative\t1\0")).is_none(),
+            "the dir must be absolute"
+        );
+        assert!(parse_memory_list(b"dir\t/x\t1\0").is_none(), "no marker");
+    }
+
+    #[test]
+    fn memory_only_ever_adds_and_the_index_never_travels_as_a_file() {
+        let d = decide_memory(
+            &[
+                m("new.md", "h1", 100),
+                m("same.md", "h2", 50),
+                m("differs.md", "h3", 70),
+                m("MEMORY.md", "h4", 30),
+                m("we ird.md", "h5", 5),
+                m("note.txt", "h6", 5),
+                m("huge.md", "h7", MEMORY_FILE_MAX_BYTES + 1),
+            ],
+            &[
+                m("same.md", "h2", 50),
+                m("differs.md", "OTHER", 99),
+                m("MEMORY.md", "hX", 10),
+            ],
+        );
+        assert_eq!(
+            d.carry.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+            vec!["new.md"]
+        );
+        assert_eq!(d.kept_target, vec!["differs.md"]);
+        assert_eq!(d.identical, 1);
+        let reason = |n: &str| d.left.iter().find(|l| l.path == n).map(|l| l.reason);
+        assert_eq!(reason("we ird.md"), Some(LeftReason::UnsupportedName));
+        assert_eq!(
+            reason("note.txt"),
+            Some(LeftReason::UnsupportedName),
+            "only *.md is memory"
+        );
+        assert_eq!(reason("huge.md"), Some(LeftReason::OverCap));
+        assert!(d.left.iter().all(|l| l.path != "MEMORY.md"));
+    }
+
+    #[test]
+    fn memory_stops_at_the_total_and_count_bounds() {
+        let many: Vec<ListedMemory> = (0..MEMORY_MAX_FILES + 2)
+            .map(|i| m(&format!("n{i:04}.md"), "h", 10))
+            .collect();
+        let d = decide_memory(&many, &[]);
+        assert_eq!(d.carry.len(), MEMORY_MAX_FILES);
+        assert_eq!(d.left.len(), 2);
+        let big: Vec<ListedMemory> = (0..10)
+            .map(|i| m(&format!("b{i}.md"), "h", MEMORY_FILE_MAX_BYTES))
+            .collect();
+        assert_eq!(decide_memory(&big, &[]).carry.len(), 8, "8 MiB in total");
+    }
+
+    #[test]
+    fn an_index_line_travels_only_with_its_carried_file() {
+        let src = "# Memory Index\n\n- [New](new.md) — hook\n- [Kept](differs.md) — src view\n- plain line without a link\n- [Two](new.md) and [other](x.md)\n- [Dot](./dotted.md) — dot-slash link\n";
+        let carried = vec!["new.md".to_string(), "dotted.md".to_string()];
+        let got = merge_index(
+            src,
+            Some("# Memory Index\n\n- [Mine](mine.md) — target\n"),
+            &carried,
+        );
+        assert_eq!(
+            got.append,
+            "- [New](new.md) — hook\n- [Two](new.md) and [other](x.md)\n- [Dot](./dotted.md) — dot-slash link\n"
+        );
+        assert_eq!(got.lines, 3);
+        // no trailing newline on the target: start on a fresh line
+        assert!(merge_index(src, Some("- [Mine](mine.md)"), &carried)
+            .append
+            .starts_with("\n- [New]"));
+        // no index on the target: create one with a header
+        assert!(merge_index(src, None, &carried)
+            .append
+            .starts_with("# Memory Index\n\n- [New]"));
+        // nothing carried → nothing appended, not even a header
+        let none = merge_index(src, None, &[]);
+        assert_eq!((none.append.as_str(), none.lines), ("", 0));
+    }
+
+    #[test]
+    fn the_index_append_is_bounded_and_cannot_close_the_heredoc() {
+        let line = format!("- [N](n.md) {}\n", "x".repeat(1000));
+        let src = format!("{}CF_INDEX\n", line.repeat(100)); // ~100 KiB, plus a hostile bare delimiter line
+        let got = merge_index(&src, Some(""), &["n.md".to_string()]);
+        assert!(
+            got.append.len() <= INDEX_APPEND_MAX_BYTES,
+            "{}",
+            got.append.len()
+        );
+        assert!(got.lines > 0 && got.append.ends_with('\n'));
+        assert!(!got.append.lines().any(|l| l == "CF_INDEX"));
+    }
+}
