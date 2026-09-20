@@ -171,15 +171,19 @@
     </section>
 
     <div class="actions">
-      <button onclick={onClose}>Cancel</button>
+      <button type="button" class="btn btn--quiet is-bounded" onclick={onClose}>Cancel</button>
       <button
-        class="primary"
-        disabled={!canSend}
-        title={sendBlocked ?? ''}
-        onclick={send}
+        type="button"
+        class="btn btn--primary"
+        aria-disabled={!canSend}
+        aria-describedby={sendBlocked ? 'composer-send-blocked' : undefined}
+        onclick={canSend ? send : undefined}
         data-testid="composer-send"
       >{sending ? 'Sending…' : 'Send →'}</button>
     </div>
+    {#if sendBlocked}
+      <p id="composer-send-blocked" class="blocked-reason" role="status">{sendBlocked}</p>
+    {/if}
   </div>
 </Modal>
 
@@ -255,19 +259,11 @@
     min-height: 6rem;
   }
 
-  .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
-  .actions button {
-    font-size: 0.85rem;
-    padding: 0.3rem 0.8rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .actions button.primary {
-    border-color: var(--accent);
-    color: var(--fg);
+  .actions { display: flex; gap: var(--control-gap); justify-content: flex-end; }
+  .blocked-reason {
+    margin: 0.35rem 0 0;
+    color: var(--usage-warn);
+    font-size: var(--control-font-sm);
+    text-align: right;
   }
 </style>
