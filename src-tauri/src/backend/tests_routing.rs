@@ -1936,10 +1936,23 @@ fn every_refusal_names_a_command_the_table_can_refuse() {
 /// and the literal. A call whose name is not a literal at all is skipped and
 /// would be invisible here — there is none today, and a command name is not
 /// the sort of thing that should ever be computed.
+///
+/// Comment lines are blanked out first ([`strip_line_comments`]), so a
+/// `route("…")` example inside a `//`/`///`/`//!` comment cannot stand in for
+/// a real call the scanner should have seen deleted.
 #[test]
 fn every_route_names_a_command_the_table_can_route() {
     let mut routed_by_name = BTreeSet::new();
-    for (file, src) in SOURCES {
+    // Stripped once per file and kept alive for the whole function: the
+    // names borrowed below point into these owned strings, not into
+    // `SOURCES`'s `'static` ones (stripping a `'static &str` yields an
+    // owned `String` with a shorter lifetime).
+    let stripped: Vec<(&str, String)> = SOURCES
+        .iter()
+        .map(|(file, src)| (*file, strip_line_comments(src)))
+        .collect();
+    for (file, src) in &stripped {
+        let src = src.as_str();
         for call in ["route(", "route_text("] {
             for (i, _) in src.match_indices(call) {
                 let Some(rest) = src[i + call.len()..].trim_start().strip_prefix('"') else {
@@ -1972,6 +1985,86 @@ fn every_route_names_a_command_the_table_can_route() {
         routed_by_name.difference(&can_route).collect::<Vec<_>>(),
         can_route.difference(&routed_by_name).collect::<Vec<_>>(),
     );
+}
+
+/// Every `Verdict::tool()` in [`VERDICTS`] names a tool the hub actually
+/// serves.
+///
+/// Two literals have to agree for a routed row to be right at all: the tool
+/// name in the row, and the tool name in the case table that `check`'s
+/// cross-check holds against the wire. Both are hand-typed, so a typo
+/// repeated in both the same way is invisible to either — it would only
+/// surface at runtime, when the desktop asks the hub for a tool that does
+/// not exist and gets back `E_INTERNAL` ("the hub refused the … call").
+/// `fleet_core::mcp::guard::TOOL_POLICIES` is an independent third anchor:
+/// the real list of tools the router serves. This makes that class of typo a
+/// red test instead of a runtime surprise.
+#[test]
+fn every_routed_tool_is_a_tool_the_hub_serves() {
+    let served: BTreeSet<&str> = fleet_core::mcp::guard::TOOL_POLICIES
+        .iter()
+        .map(|policy| policy.name)
+        .collect();
+    let missing: Vec<(&str, &str)> = VERDICTS
+        .iter()
+        .filter_map(|(name, v)| v.tool().map(|tool| (*name, tool)))
+        .filter(|(_, tool)| !served.contains(tool))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these VERDICTS rows name a tool that TOOL_POLICIES does not list — \
+         the hub has no such tool to call:\n  {}",
+        missing
+            .iter()
+            .map(|(name, tool)| format!("{name} -> {tool}"))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+/// Blank out every line whose trimmed form starts with `//` — an ordinary
+/// comment, a doc comment (`///`), or a module doc comment (`//!`) — so a
+/// `route("…")` written as a comment's example cannot be mistaken by
+/// [`every_route_names_a_command_the_table_can_route`] for the real call it
+/// is documenting. Line-based rather than a full comment parser: every real
+/// call in this codebase is `self.route(` / `hub.route(`, never split across
+/// a `//` prefix, so nothing live is lost.
+fn strip_line_comments(src: &str) -> String {
+    src.lines()
+        .map(|line| {
+            if line.trim_start().starts_with("//") {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn strip_line_comments_blanks_a_route_example_in_a_doc_comment() {
+    // A doc-comment example that quotes a real call, next to the call it
+    // once documented having since been deleted. Before the fix, the bare
+    // substring scan would still find `route("delete_worktree", …)` inside
+    // the comment and count `delete_worktree` as routed, masking the
+    // deletion of the real call below it.
+    let src = "\
+/// Example: `self.route(\"delete_worktree\", &args).await?`
+//! same trick, module-doc flavour: route(\"delete_worktree\", &x)
+// and a plain comment: route(\"delete_worktree\", &y)
+pub async fn delete_worktree(&self) -> Result<(), IpcError> {
+    // the real call used to be here; it is gone now
+    Ok(())
+}
+";
+    let stripped = strip_line_comments(src);
+    assert!(
+        !stripped.contains("route(\"delete_worktree\""),
+        "a route(...) call inside a comment must not survive stripping:\n{stripped}"
+    );
+    // The real (non-comment) code is untouched.
+    assert!(stripped.contains("pub async fn delete_worktree"));
 }
 
 /// Every source file the scanners above need to read.
