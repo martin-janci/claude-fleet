@@ -46,3 +46,16 @@ describe('chat column width', () => {
     expect(panel).toContain('max(1.1rem, calc((100% - var(--chat-col)) / 2))');
   });
 });
+
+describe('chat stylesheet hygiene', () => {
+  const panel = SOURCES['./ConversationPanel.svelte'];
+
+  it('states the composer status once, without a wrapper that carries nothing', () => {
+    // .composer-foot was a flex row with space-between built for two items;
+    // only the status note was ever left in it.
+    expect(panel).not.toContain('composer-foot');
+    // ...and the status must not be declared twice, once in a shared group
+    // and once on its own with a conflicting margin.
+    expect(panel.match(/^\s*\.composer-status[\s,{]/gm) ?? []).toHaveLength(1);
+  });
+});

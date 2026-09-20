@@ -1329,9 +1329,7 @@
         <button type="submit" data-testid="conv-composer-send" aria-keyshortcuts="Enter" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>
       </div>
       {#if statusNote}
-        <div class="composer-foot">
-          <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
-        </div>
+        <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
       {/if}
     </form>
   {:else}
@@ -1621,25 +1619,15 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .composer-error,
-  .composer-status {
+  .composer-error {
     max-width: var(--chat-col);
     margin: 0 auto 0.35rem;
+    color: var(--usage-crit);
     font-size: 0.75rem;
   }
-  .composer-error {
-    color: var(--usage-crit);
-  }
-  .composer-foot {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
+  .composer-status {
     max-width: var(--chat-col);
     margin: 0.35rem auto 0;
-  }
-  .composer-status {
-    margin: 0;
     color: var(--fg-muted);
     font-size: 0.75rem;
   }
