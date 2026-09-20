@@ -65,6 +65,7 @@
 
 pub mod carry;
 pub mod claude_state;
+mod finalise;
 mod progress;
 
 use crate::events::MoveStep;
@@ -200,8 +201,10 @@ pub trait MoveHooks: Send + Sync {
     ) -> Result<(), IpcError>;
     /// Reconcile one host so its rows reflect tmux.
     async fn refresh_host(&self, store: &Mutex<Store>, host: &str) -> Result<(), IpcError>;
-    /// The normal kill path for the source.
-    async fn kill_source(
+    /// Kill a tmux session outright: the normal kill path for the source, and
+    /// (Task 6) how Undo retires the target of a partial move it discards.
+    /// Named for what it does, not for the one caller it originally had.
+    async fn kill_tmux_session(
         &self,
         store: &Mutex<Store>,
         host: &str,
@@ -265,7 +268,7 @@ impl MoveHooks for RealHooks<'_> {
         crate::service::sessions::reconcile_one_host(store, self.ssh, host).await
     }
 
-    async fn kill_source(
+    async fn kill_tmux_session(
         &self,
         store: &Mutex<Store>,
         host: &str,
@@ -2701,130 +2704,47 @@ async fn move_session_inner(
     partial_ctx.to_last_turn_at = target_row.last_turn_at;
 
     progress.start(MoveStep::Handoff);
-    // 6. The source: check it wrote nothing since the copy, kill it (unless
-    //    keep_source), and only then record the move.
-    let mut source_killed = false;
-    if !args.keep_source {
-        // The source kept running through the copy: if its transcript moved
-        // on since, it took a turn the target does not have. Killing it would
-        // lose that turn, so stop here with both sessions alive.
-        let recheck = locate_on(ssh, &src, snap.stored_transcript.as_deref(), &id)
-            .await
-            .map_err(|e| {
-                partial(
-                    "re-checking the source transcript",
-                    &partial_ctx,
-                    Some(target_row.id),
-                    &e,
-                )
-            })?;
-        if recheck.size != located.size || recheck.mtime != located.mtime {
-            return Err(partial(
-                "source transcript changed after copy",
-                &partial_ctx,
-                Some(target_row.id),
-                &IpcError::new(
-                    codes::E_INVALID_STATE,
-                    format!(
-                        "the source transcript went from {} to {} bytes (mtime {} -> {}) after it was copied, so the source took a turn the target does not have; kill the target session {tmux_name} on {target} and retry move_session once the source is idle",
-                        located.size, recheck.size, located.mtime, recheck.mtime
-                    ),
-                ),
-            ));
-        }
-        // Snapshot the source's lifetime usage and usage cursor before the
-        // kill drops its row.
-        let (source_usage, source_cursor) = store
-            .lock()
-            .ok()
-            .map(|s| {
-                (
-                    s.get_session_by_id(snap.row.id)
-                        .ok()
-                        .flatten()
-                        .map(|r| r.usage),
-                    s.usage_cursor(snap.row.id).ok().flatten(),
-                )
-            })
-            .unwrap_or((None, None));
-        hooks
-            .kill_source(store, &src, &snap.row.tmux_name)
-            .await
-            .map_err(|e| {
-                partial(
-                    &format!("killing the source {} on {src}", snap.row.tmux_name),
-                    &partial_ctx,
-                    Some(target_row.id),
-                    &e,
-                )
-            })?;
-        source_killed = true;
-        // One last look: a write between the final check and the kill means
-        // the target may lack the source's last turn. Nothing is left to undo,
-        // so say so in the report.
-        match locate_on(ssh, &src, snap.stored_transcript.as_deref(), &id).await {
-            Ok(after) if after.size != recheck.size || after.mtime != recheck.mtime => {
-                warnings.push(format!(
-                    "the source wrote after the final check and before the kill (transcript {} -> {} bytes, mtime {} -> {}); the target may be missing its last turn — compare the two with session_transcript",
-                    recheck.size, after.size, recheck.mtime, after.mtime
-                ));
-            }
-            Ok(_) => {}
-            Err(e) => warnings.push(format!(
-                "could not re-check the source transcript after the kill ({}: {}); the target may be missing its last turn",
-                e.code, e.message
-            )),
-        }
-        // The spend follows the session. Never under keep_source: both rows
-        // stay live there and would report it twice.
-        if let Ok(s) = store.lock() {
-            if let Some(u) = source_usage.as_ref() {
-                if let Err(e) = s.add_usage_totals(target_row.id, u) {
-                    tracing::warn!(
-                        "move_session: carrying usage totals to {} failed: {e}",
-                        target_row.id
-                    );
-                }
-            }
-            // A source usage pass between the inherit and the kill counted
-            // lines the target's cursor still points before: catch up.
-            if let Some(c) = source_cursor.as_ref() {
-                if let Err(e) = s.raise_usage_cursor(target_row.id, c) {
-                    tracing::warn!(
-                        "move_session: raising the usage cursor on {} failed: {e}",
-                        target_row.id
-                    );
-                }
-            }
-        }
-    }
-
-    // 7. The move is complete: record it on both rows.
-    let detail = serde_json::json!({
-        "from_host": src,
-        "to_host": target,
-        "from_session_id": snap.row.id,
-        "to_session_id": target_row.id,
-        "claude_session_id": id,
-        "branch": snap.branch,
-        "bytes": copied,
-        "kept_source": args.keep_source,
-        "source_killed": source_killed,
-        "carried": &carried,
-    })
-    .to_string();
-    if let Ok(s) = store.lock() {
-        for sid in [snap.row.id, target_row.id] {
-            if let Err(e) = s.insert_session_event(sid, EVENT_MOVED, Some(&detail)) {
-                tracing::warn!(
-                    kind = EVENT_MOVED,
-                    session_id = sid,
-                    error = %e,
-                    "[event] insert failed"
-                );
-            }
-        }
-    }
+    // 6/7. The source: check it wrote nothing since the copy, kill it (unless
+    // keep_source), and only then record the move — see `finalise::finalise_source`.
+    // It returns plain errors; wrapping them as PARTIAL is this call site's
+    // job, not the shared step's, so a later recovery can wrap the same
+    // errors differently.
+    let finalise::FinaliseOutcome {
+        source_killed,
+        warnings: finalise_warnings,
+    } = finalise::finalise_source(
+        finalise::FinaliseArgs {
+            source_row_id: snap.row.id,
+            source_host: &src,
+            source_tmux_name: &snap.row.tmux_name,
+            target_row_id: target_row.id,
+            target_host: &target,
+            target_tmux_name: &tmux_name,
+            claude_id: &id,
+            branch: &snap.branch,
+            stored_transcript: snap.stored_transcript.as_deref(),
+            copied: located.clone(),
+            transcript_bytes: copied,
+            keep_source: args.keep_source,
+            extra_detail: serde_json::json!({}),
+        },
+        store,
+        ssh,
+        hooks,
+        &carried,
+    )
+    .await
+    .map_err(|e| {
+        let step = e
+            .details
+            .as_ref()
+            .and_then(|d| d.get("step"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("finalising the move")
+            .to_string();
+        partial(&step, &partial_ctx, Some(target_row.id), &e)
+    })?;
+    warnings.extend(finalise_warnings);
 
     Ok(MoveReport {
         source_session_id: snap.row.id,
@@ -3001,7 +2921,7 @@ mod tests {
         worktree_id: i64,
         /// Status the target row gets on reconcile.
         target_status: &'static str,
-        /// `kill_source` fails.
+        /// `kill_tmux_session` fails.
         kill_fails: bool,
         /// Starting the target makes the source transcript grow (a turn
         /// taken on the source after the copy).
@@ -3102,7 +3022,7 @@ mod tests {
             }
             Ok(())
         }
-        async fn kill_source(
+        async fn kill_tmux_session(
             &self,
             store: &Mutex<Store>,
             host: &str,
@@ -5620,6 +5540,36 @@ mod tests {
         let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         hooks.grow_source_on_start = true;
         assert!(run(&f, &hooks, true).await.is_ok());
+    }
+
+    /// The seam itself: `finalise_source` refuses when the source transcript
+    /// has moved past the copy, and does not kill anything in that case.
+    #[tokio::test]
+    async fn finalise_refuses_a_source_that_wrote_after_the_copy() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        // The re-locate answers a larger transcript than `copied` records.
+        // `on_host_once` so only the FIRST `# cf-move:locate` call (the
+        // initial copy in step 2) sees it; the recheck inside
+        // `finalise_source` falls through to the fixture's standing reply,
+        // which is smaller — the mismatch the seam must refuse on.
+        f.fake.on_host_once(
+            "alpha",
+            Match::script_contains("# cf-move:locate"),
+            Reply::ok("999999\t1700000000\t/home/a/.claude/projects/p/c.jsonl\n"),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL);
+        assert!(
+            err.message.contains("after it was copied"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !hooks.log().iter().any(|l| l.starts_with("kill")),
+            "nothing is killed when the source moved on"
+        );
     }
 
     #[tokio::test]
