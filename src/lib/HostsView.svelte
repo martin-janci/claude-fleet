@@ -343,11 +343,15 @@
   const usageRefreshBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
 
   // Same honest-empty-state fix as HostsList's own list: while the hub's
-  // wire contract is skewed, `$hosts` never arrives, and "No hosts yet — add
+  // wire contract is skewed AND `$hosts` never arrived, "No hosts yet — add
   // one" beside HostsList's now-correct message would say the opposite thing
-  // in the same view.
+  // in the same view. Gated on `$hosts.length === 0` like HostsList's own
+  // message — a skew discovered mid-session, with real hosts still sitting
+  // in the list beside this pane, must not bump "Select a host." for a
+  // sentence about a load that already happened.
   const hubSkewEmptyMessage = $derived(
-    $hubConnection.state === 'hub_too_old' || $hubConnection.state === 'hub_too_new'
+    $hosts.length === 0 &&
+      ($hubConnection.state === 'hub_too_old' || $hubConnection.state === 'hub_too_new')
       ? connectionBanner($hubConnection, $hubStatus.url)
       : null,
   );

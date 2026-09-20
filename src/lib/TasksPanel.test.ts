@@ -8,6 +8,8 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import TasksPanel from './TasksPanel.svelte';
 import { tasks, type TaskRow } from './tasks';
 import { sessions, type SessionRow } from './sessions';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 
 function session(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -33,6 +35,8 @@ function task(over: Partial<TaskRow> = {}): TaskRow {
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
+  hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
   sessions.set([
     session({ id: 1, tmux_name: 'ctl', friendly_name: 'controller' }),
     session({ id: 2, tmux_name: 'worker-a' }),
@@ -98,5 +102,49 @@ describe('TasksPanel', () => {
     const states = screen.getAllByTestId('task-state').map((e) => e.textContent?.trim());
     expect(states[0]).toBe('done');
     expect(screen.getAllByTestId('task-result')[0].textContent).toBe('shipped');
+  });
+});
+
+// #195 (I1): `list_tasks` fails with `E_HUB_CONTRACT` under a skewed hub the
+// same as every other list load, discarded like every "heals itself"
+// failure — so `$tasks` never arrives and the panel used to read as "No
+// tasks dispatched yet." instead of "this couldn't load".
+describe('TasksPanel: a hub contract skew', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  it('shows the connection banner’s sentence instead of "No tasks dispatched yet"', () => {
+    tasks.set([]);
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'hub_too_old', hub_contract: 1, min_contract: 3 });
+    render(TasksPanel, {});
+    const empty = screen.getByTestId('tasks-empty');
+    expect(empty.textContent).not.toContain('No tasks dispatched yet');
+    expect(empty.textContent).toContain('fleet.example.com');
+    expect(empty.textContent?.toLowerCase()).toContain('update the hub');
+  });
+
+  it('a connected hub with no skew renders the ordinary empty state', () => {
+    tasks.set([]);
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'connected' });
+    render(TasksPanel, {});
+    expect(screen.getByTestId('tasks-empty').textContent).toContain('No tasks dispatched yet');
+  });
+
+  it('standalone mode is untouched', () => {
+    tasks.set([]);
+    render(TasksPanel, {});
+    expect(screen.getByTestId('tasks-empty').textContent).toContain('No tasks dispatched yet');
   });
 });

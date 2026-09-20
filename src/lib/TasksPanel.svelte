@@ -5,12 +5,23 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
-  import { hubConnection } from './hub_connection';
+  import { hubConnection, connectionBanner } from './hub_connection';
 
   // cancel_task routes to the hub, so it stays enabled on a hub client — but
   // only once the live connection to it is up; while it is not, sending it
   // would just wait on a socket that is not there.
   const cancelBlocked = $derived(hubActionBlocked('cancel_task', $hubStatus, $hubConnection));
+
+  // Same honest-empty-state fix as Sidebar/HostsList: `list_tasks` fails
+  // with `E_HUB_CONTRACT` under a skewed hub, discarded like every other
+  // "heals itself" failure (`void loadTasks()` in App.svelte), so `$tasks`
+  // never arrives and this would otherwise read as "no tasks" rather than
+  // "this couldn't load".
+  const hubSkewEmptyMessage = $derived(
+    $hubConnection.state === 'hub_too_old' || $hubConnection.state === 'hub_too_new'
+      ? connectionBanner($hubConnection, $hubStatus.url)
+      : null,
+  );
 
   // `sessionId` narrows the list to tasks where that session is the
   // requester or the worker (the SessionDetails mount); omit it for the
@@ -66,7 +77,8 @@
   <h3>Tasks ({rows.length})</h3>
   {#if rows.length === 0}
     <p class="empty" data-testid="tasks-empty">
-      {sessionId === null ? 'No tasks dispatched yet.' : 'No tasks involve this session.'}
+      {hubSkewEmptyMessage ??
+        (sessionId === null ? 'No tasks dispatched yet.' : 'No tasks involve this session.')}
     </p>
   {:else}
     <ul class="list">

@@ -812,4 +812,20 @@ describe('HostsView: a hub contract skew', () => {
     await tick();
     expect(screen.getByTestId('hosts-detail-empty').textContent).toContain('No hosts yet');
   });
+
+  // M2: a skew discovered mid-session (the hub was compatible at load time,
+  // real hosts already sit in the list) must not bump "Select a host." for
+  // a sentence about a load that already happened. Nothing is selected only
+  // when the filter narrows the visible list to zero, since HostsView
+  // otherwise always auto-selects a host once any are loaded.
+  it('with real hosts already loaded, "Select a host." wins over the skew sentence', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'hub_too_new', hub_contract: 9, max_contract: 3 });
+    mount();
+    await tick();
+    const filter = screen.getByTestId('hosts-filter') as HTMLInputElement;
+    await fireEvent.input(filter, { target: { value: 'zzz-no-such-host' } });
+    await tick();
+    expect(screen.getByTestId('hosts-detail-empty').textContent).toBe('Select a host.');
+  });
 });

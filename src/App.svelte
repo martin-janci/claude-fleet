@@ -163,11 +163,21 @@
     // Only a hub client has a live link to lose; see HubConnectionBanner.
     if (get(hubStatus).remote) void startHubConnection();
     const hr0 = await healthCheck();
+    // `health_check` routes to the hub's `fleet_health` in remote mode, so
+    // it hits the same skewed-contract gate as every list load below — and
+    // gets the same treatment: no toast (the banner already says it), and
+    // its failure folds into the one footer line below instead of the
+    // generic "health check failed" wording, which would both toast on its
+    // own and hide which loads actually failed. Every other failure code
+    // keeps today's behaviour: it sets `healthError` (which pre-empts the
+    // footer's bootstrap line — a real health failure is the more important
+    // thing to say) and toasts.
+    let healthFailure: string | null = null;
     if (hr0.ok) {
       health = hr0.value;
+    } else if (hr0.error.code === 'E_HUB_CONTRACT') {
+      healthFailure = `health: ${hr0.error.code}`;
     } else {
-      // Routed to the hub's `fleet_health` in remote mode, so this is now a
-      // real, reportable failure rather than a silently zeroed fleet.
       healthError = `${hr0.error.code}: ${hr0.error.message}`;
       push({ kind: 'error', code: hr0.error.code, message: `Health check failed: ${hr0.error.message}` });
     }
@@ -178,6 +188,7 @@
       loadAccounts(),
     ]);
     const failures = [
+      healthFailure,
       reportBootstrap('projects', pr),
       reportBootstrap('sessions', sr),
       reportBootstrap('hosts', hr),

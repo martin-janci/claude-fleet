@@ -218,10 +218,15 @@ describe('the disconnected banner', () => {
         code: 'E_HUB_CONTRACT',
         message: `${cmd} was not run: https://fleet.example.com’s wire contract is revision 1, older than the 3 this app requires. Update the hub.`,
       });
+    // `health_check` routes to the hub the same as every list load
+    // (`tests_routing.rs`'s `a_hub_with_a_skewed_wire_contract_refuses_every_routed_command`
+    // pins that the skew gate covers every routed command, health_check
+    // included) — a real skewed hub refuses it exactly like the rest, so the
+    // mock must too.
     const { restore } = await routeInvoke((cmd) => {
       if (cmd === 'hub_status') return remote;
       if (cmd === 'hub_connection') return skew;
-      if (['list_sessions', 'list_projects', 'list_hosts', 'list_accounts'].includes(cmd)) {
+      if (['health_check', 'list_sessions', 'list_projects', 'list_hosts', 'list_accounts'].includes(cmd)) {
         return contractError(cmd);
       }
       return undefined;
@@ -229,7 +234,10 @@ describe('the disconnected banner', () => {
     try {
       render(App);
       const failed = await screen.findByTestId('bootstrap-error');
-      expect(failed.textContent).toContain('E_HUB_CONTRACT');
+      expect(failed.textContent).toContain('health: E_HUB_CONTRACT');
+      expect(failed.textContent).toContain('sessions: E_HUB_CONTRACT');
+      // The generic health-check line must not shadow the per-load detail.
+      expect(screen.queryByTestId('health-error')).toBeNull();
       // The banner and the footer already say it; no toast repeats it.
       expect(screen.queryByTestId('toast')).toBeNull();
     } finally {
