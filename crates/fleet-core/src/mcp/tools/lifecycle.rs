@@ -344,7 +344,12 @@ impl FleetTools {
         pushed, committed or stashed, the source worktree is never modified), \
         create the worktree on the target, start it with --resume so the same \
         conversation continues, and only once the target is confirmed running \
-        kill the source (keep_source=true leaves it running). strict=true \
+        kill the source (keep_source=true leaves it running). It also carries \
+        the session's Claude directory (subagent transcripts, tool results, \
+        title; up to move.max_session_state_mb, biggest files stay behind \
+        above it) and the project's Claude memory — adding files the target \
+        lacks and appending their MEMORY.md lines, never replacing anything \
+        there; neither can fail the move (warnings). strict=true \
         refuses a dirty worktree (E_MOVE_DIRTY) or an unpushed branch \
         (E_MOVE_UNPUSHED) instead of carrying them. Refused when the source is \
         mid merge/rebase (E_MOVE_MIDOP), when an existing target worktree has \
@@ -359,7 +364,8 @@ impl FleetTools {
         MoveReport: source_session_id, target_session_id, from_host, to_host, \
         tmux_name, transcript_bytes, source_killed, warnings, carried (commits, \
         bundle_bytes, dirty_entries, ignored_carried, ignored_left_behind, \
-        target_seeded), target (the new row, parent_session_id = source).")]
+        target_seeded, session_state, memory), target (the new row, \
+        parent_session_id = source).")]
     pub(super) async fn move_session(
         &self,
         Extension(caller): Extension<Caller>,

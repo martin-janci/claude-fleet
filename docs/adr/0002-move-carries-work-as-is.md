@@ -36,6 +36,14 @@ The principle stays; the refusal goes.
   or by `git init` plus the bundle when origin is unreachable.
 - Small git-ignored files travel in a separate archive under size caps and a
   deny-list; what stays behind is reported.
+- The Claude-side state travels too: the per-session directory (subagent
+  transcripts, tool results, title) is merged file by file — a file lands
+  only where the target has none or a strictly smaller one, since these
+  files are append-only and the larger copy is therefore the newer one,
+  which is what keeps a return trip A→B→A correct — and the project's Claude
+  memory travels keyed by the repo root, not the worktree: only names the
+  target lacks are added, index lines travel only with the file they
+  describe, and the target's own files and index lines are never rewritten.
 - What the move writes on the source: unreferenced git objects, the private
   ref namespace and a temp directory. The refs and the directory are removed
   when the move returns — on success and on every failure path once the
@@ -71,3 +79,6 @@ The principle stays; the refusal goes.
   being dropped silently.
 - Payloads pass through the orchestrator in 8 MiB chunks and a `0600` temp
   file, bounded by `move.max_bundle_mb`.
+- Host-specific notes travel like any other note: the move does not judge
+  portability. Transcript content is never rewritten, so a `tool-results`
+  path it holds stays the source's absolute path and is stale on the target.
