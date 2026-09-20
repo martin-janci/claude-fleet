@@ -17,6 +17,10 @@
   --usage-crit: #c62828;
   /* Healthy context. 4.91:1 vs --bg-pane #fafafa (5.13:1 vs --bg #fff). */
   --usage-ok: #2e7d32;
+  /* Read at 16 sites that have been falling through to their fallback
+     since the token was designed and never shipped. 59 more hardcode the
+     stack; they are not this task's business. */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 @media (prefers-color-scheme: dark) {

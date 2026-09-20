@@ -1040,7 +1040,7 @@
         {#if errorMsg && !empty}
           <div class="error-row">
             <span class="err" data-testid="conv-error">{errorMsg}</span>
-            <button type="button" data-testid="conv-retry" onclick={() => void load()}>Retry</button>
+            <button type="button" class="retry-btn" data-testid="conv-retry" onclick={() => void load()}>Retry</button>
           </div>
         {/if}
         {#if conv?.truncated}
@@ -1729,6 +1729,17 @@
     gap: 0.5rem;
     margin-bottom: 0.75rem;
   }
+  .retry-btn {
+    padding: 0.1rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.74rem;
+    cursor: pointer;
+  }
+  .retry-btn:hover { border-color: var(--accent); }
   .err { color: var(--usage-crit); font-size: 0.8rem; }
   .turn {
     padding: 0.2rem 0 1.1rem;
