@@ -1231,7 +1231,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 73);
+    assert_eq!(served, 75);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1328,6 +1328,36 @@ fn every_router_tool_has_exactly_one_tool_policy_row() {
             row.name
         );
     }
+}
+
+/// The operator's lifecycle must be reachable by the desktop, which pairs as
+/// an ORDINARY CLIENT and never holds the master token — so these two are
+/// `Access::Client`. They are not confirm-gated (creating the agent is what
+/// the person just asked for by pressing the button) and `ensure_operator`
+/// spawns a session, so it is `Deadline::Lifecycle`.
+#[test]
+fn the_operator_tools_are_client_reachable_and_not_admin() {
+    for name in ["ensure_operator", "operator_status"] {
+        let p = crate::mcp::guard::policy(name)
+            .unwrap_or_else(|| panic!("{name} has no TOOL_POLICIES row"));
+        assert!(
+            !crate::mcp::guard::is_admin_tool(name),
+            "{name} is not fleet admin"
+        );
+        assert!(
+            crate::mcp::guard::is_client_tool(name),
+            "{name} is client-reachable"
+        );
+        assert!(!p.confirm, "{name} is not confirm-gated");
+    }
+    assert!(
+        crate::mcp::guard::is_readonly_tool("operator_status"),
+        "reading the agent's readiness observes, it does not change"
+    );
+    assert!(
+        !crate::mcp::guard::is_readonly_tool("ensure_operator"),
+        "creating the agent is a write"
+    );
 }
 
 #[test]

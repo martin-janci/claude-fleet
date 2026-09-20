@@ -364,5 +364,23 @@ impl FleetTools {
         ok_json(&res)
     }
 
+    #[tool(description = "Ensure the UX agent's operator session exists; returns its row.")]
+    pub(super) async fn ensure_operator(&self) -> Result<CallToolResult, McpError> {
+        audit("ensure_operator", "");
+        let row = crate::service::operator::ensure_operator(&self.store, &self.ssh, &self.reg)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(
+        description = "Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked."
+    )]
+    pub(super) async fn operator_status(&self) -> Result<CallToolResult, McpError> {
+        audit("operator_status", "");
+        let status = crate::service::operator::operator_status(&self.store).map_err(to_mcp_err)?;
+        ok_json(&status)
+    }
+
     // ── Orchestration (Wave 3 Track E) ───────────────────────────────────
 }
