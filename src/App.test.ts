@@ -276,6 +276,9 @@ describe('App: the Conversation tab', () => {
     // Back on a tmux row: the preference survived the detour.
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
     expect(checked('subtab-terminal')).toBe('true');
+    // The terminal must actually be remounted and reachable after returning to the tmux row.
+    expect(await screen.findByTestId('terminal-host')).toBeInTheDocument();
+    expect(subtab('subtab-terminal').disabled).toBe(false);
   });
 
   it('Esc leaves Files even with focus parked on the terminal input proxy (F9)', async () => {
