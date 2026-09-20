@@ -639,7 +639,9 @@
               aria-keyshortcuts={isMac ? 'Meta+J' : 'Control+Shift+J'}
               disabled={!selHasClaudeId && !selNoPane}
               title={!selHasClaudeId
-                ? 'No Claude session id yet'
+                ? selNoPane
+                  ? 'No transcript yet — nothing to show'
+                  : 'No Claude session id yet'
                 : `Claude conversation from the transcript (${sessionViewChord})`}
               onclick={() => setSessionView('conversation')}
               data-testid="subtab-conversation">Conversation</button

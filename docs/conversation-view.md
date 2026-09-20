@@ -4,9 +4,9 @@ The Session tab holds two views of a running session — Conversation and
 Terminal — switched by the segmented control at its top right or by
 ⌘J (Ctrl+Shift+J on Windows/Linux). Which one you land on is a remembered
 preference that defaults to Conversation; a row that can only offer one view
-(no `claude_session_id` yet → Terminal, no tmux pane → Conversation) shows
-that one without touching the preference, so stepping off it returns you to
-where you were.
+(no `claude_session_id` yet → Terminal, no tmux pane → Conversation; a row
+that is both lands on Conversation) shows that one without touching the
+preference, so stepping off it returns you to where you were.
 
 The Conversation view shows a session's Claude Code transcript as turns and
 lets you drive the session from there, without the terminal. It works for
