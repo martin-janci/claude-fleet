@@ -332,9 +332,14 @@ pub fn merge_index(
     if lines == 0 {
         return IndexMerge::default();
     }
+    // The fresh-line decision (does the target need a "\n" before this text)
+    // belongs to `memory_append_index_script`, not here: `target_index` is
+    // only ever a possibly-truncated read (capped at `INDEX_READ_MAX_BYTES`,
+    // or empty when the file could not be read despite existing), so ITS
+    // trailing-newline state is not reliable evidence about the real file's
+    // last byte. The script inspects the real file directly instead.
     let prefix = match target_index {
         None => "# Memory Index\n\n",
-        Some(t) if !t.is_empty() && !t.ends_with('\n') => "\n",
         Some(_) => "",
     };
     IndexMerge {
@@ -347,7 +352,15 @@ pub fn merge_index(
 /// memory by the MAIN checkout (the parent of the git common dir), not by the
 /// worktree; `fallback_dir` (the worktree itself) is tried when that has no
 /// `memory/`. First record `dir\t<abs>\t<0|1>` — reported even when the dir
-/// does not exist, because a target creates it there.
+/// does not exist, because a target creates it there. `enc()`'s result is
+/// checked before use: an empty encoding for `top` (which is always supposed
+/// to resolve, having just been validated) fails the script outright, rather
+/// than silently collapsing `m` to `$HOME/.claude/projects//memory` — a path
+/// with no per-repo hash at all, which a coincidental directory there would
+/// then be mistaken for. A nonexistent `fallback_dir` is not an anomaly
+/// (unlike an empty `top`), so an empty fallback encoding is never fatal: the
+/// fallback is simply skipped and the primary `m` is reported, exactly as
+/// when no fallback applies at all.
 pub fn memory_list_script(repo_dir: &str, fallback_dir: Option<&str>) -> String {
     format!(
         r#"# cf-carry:memory-list
@@ -361,10 +374,15 @@ cd -- "$r" 2>/dev/null || fail cd
 g=$(git rev-parse --git-common-dir 2>/dev/null) || fail not-a-repo
 top=$( cd -- "$g" 2>/dev/null && cd .. && pwd -P ) || fail common-dir
 [ -n "$top" ] || fail common-dir
-m="$HOME/.claude/projects/$(enc "$top")/memory"
+enc_top=$(enc "$top")
+[ -n "$enc_top" ] || fail enc
+m="$HOME/.claude/projects/$enc_top/memory"
 if [ ! -d "$m" ] && [ -n "$fb" ]; then
-  alt="$HOME/.claude/projects/$(enc "$fb")/memory"
-  [ -d "$alt" ] && m="$alt"
+  enc_fb=$(enc "$fb")
+  if [ -n "$enc_fb" ]; then
+    alt="$HOME/.claude/projects/$enc_fb/memory"
+    [ -d "$alt" ] && m="$alt"
+  fi
 fi
 printf '\n{OUT_MARKER}\n'
 if [ -d "$m" ]; then printf 'dir\t%s\t1\0' "$m"; else printf 'dir\t%s\t0\0' "$m"; exit 0; fi
@@ -412,13 +430,37 @@ pub fn parse_index(stdout: &str) -> Option<Option<String>> {
     }
 }
 
-/// Append `text` (from [`merge_index`]) to the target's index. The text
-/// reaches the file through a QUOTED heredoc, so nothing in it is expanded;
-/// `merge_index` never emits a line equal to the delimiter. Empty text → a
-/// no-op that creates nothing.
+/// Append `text` (typically from [`merge_index`], but this builder is `pub`
+/// and takes any `&str` — it does not trust its caller) to the target's
+/// index. The text reaches the file through a QUOTED heredoc, so nothing in
+/// it is expanded; but bash still ends a heredoc on the FIRST line that is an
+/// exact match for the delimiter, whoever wrote it. A `text` with such a line
+/// would truncate the `cat` early and hand the remainder of THIS SCRIPT to
+/// the shell as real commands — `merge_index`'s own `line == INDEX_HEREDOC`
+/// filter only protects text it built itself, not an arbitrary caller, so
+/// this builder refuses the text itself: any line exactly equal to
+/// [`INDEX_HEREDOC`], or text longer than [`INDEX_APPEND_MAX_BYTES`], yields
+/// a script that touches nothing and reports `{FAILED} index-text`. A line
+/// that merely contains the delimiter text, or has leading/trailing
+/// whitespace around it, is not an exact match and is accepted unchanged.
+///
+/// Before appending, if the index already exists, is non-empty and its LAST
+/// BYTE is not a newline, one is written first — the script decides this
+/// from the real file, not from `merge_index`'s (possibly truncated, or
+/// empty because an existing file could not be read) view of it. Empty text
+/// → a no-op that creates nothing, but still prints `ok`: one success
+/// predicate for both the no-op and the real append.
+///
+/// `cat >>` is not atomic: an interrupted append is reported (the sentinel,
+/// non-zero) but can leave a partial line at the end of the file, and simply
+/// retrying can duplicate lines already written. The index is append-only by
+/// design — nothing here ever re-reads or rewrites it to repair that.
 pub fn memory_append_index_script(memory_dir: &str, text: &str) -> String {
     if text.is_empty() {
-        return "# cf-carry:memory-append\nexit 0\n".to_string();
+        return "# cf-carry:memory-append\nprintf 'ok\\n'\n".to_string();
+    }
+    if text.len() > INDEX_APPEND_MAX_BYTES || text.lines().any(|l| l == INDEX_HEREDOC) {
+        return format!("# cf-carry:memory-append\nprintf '{FAILED} index-text\\n' >&2\nexit 5\n");
     }
     let body = text.strip_suffix('\n').unwrap_or(text);
     format!(
@@ -429,6 +471,7 @@ umask 077
 mkdir -p -- "$m" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
 f="$m/{INDEX_NAME}"
 if [ -L "$f" ]; then printf '{FAILED} symlink\n' >&2; exit 5; fi
+[ -s "$f" ] && [ -n "$(tail -c 1 -- "$f")" ] && printf '\n' >> "$f"
 cat >> "$f" <<'{INDEX_HEREDOC}' || {{ printf '{FAILED} append\n' >&2; exit 5; }}
 {body}
 {INDEX_HEREDOC}
@@ -1713,10 +1756,18 @@ with tarfile.open(out, "w:gz") as tar:
             "- [New](new.md) — hook\n- [Two](new.md) and [other](x.md)\n- [Dot](./dotted.md) — dot-slash link\n"
         );
         assert_eq!(got.lines, 3);
-        // no trailing newline on the target: start on a fresh line
-        assert!(merge_index(src, Some("- [Mine](mine.md)"), &carried)
+        // The fresh-line decision now belongs to `memory_append_index_script`
+        // (it can see the real file's last byte; `merge_index` only ever sees
+        // a possibly-truncated read) — a target WITH an index never gets a
+        // prefix here, whatever its trailing-newline state.
+        assert!(!merge_index(src, Some("- [Mine](mine.md)"), &carried)
             .append
-            .starts_with("\n- [New]"));
+            .starts_with('\n'));
+        assert_eq!(
+            merge_index(src, Some("- [Mine](mine.md)"), &carried).append,
+            merge_index(src, Some("- [Mine](mine.md)\n"), &carried).append,
+            "Some(_) is always \"\", regardless of the target's trailing newline"
+        );
         // no index on the target: create one with a header
         assert!(merge_index(src, None, &carried)
             .append
@@ -2135,7 +2186,8 @@ with tarfile.open(out, "w:gz") as tar:
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
 
-        // --- append onto an existing index with no trailing newline ---
+        // --- append onto an existing index with NO trailing newline: the
+        // SCRIPT (not `merge_index`) notices and inserts the missing "\n" ---
         let mem_a = tmp.path().join("memory-a");
         std::fs::create_dir_all(&mem_a).unwrap();
         let original = "# Memory Index\n\n- [Mine](mine.md) — t";
@@ -2151,7 +2203,10 @@ with tarfile.open(out, "w:gz") as tar:
             Some(original),
             &["new.md".to_string()],
         );
-        assert_eq!(merge.append, "\n- [New](new.md) — hook\n");
+        assert_eq!(
+            merge.append, "- [New](new.md) — hook\n",
+            "merge_index never prefixes a newline for Some(_) any more"
+        );
         let out = bash(
             &memory_append_index_script(mem_a.to_str().unwrap(), &merge.append),
             &home,
@@ -2162,8 +2217,62 @@ with tarfile.open(out, "w:gz") as tar:
             String::from_utf8_lossy(&out.stderr)
         );
         let got = std::fs::read_to_string(mem_a.join(INDEX_NAME)).unwrap();
-        assert_eq!(got, format!("{original}{}", merge.append));
+        assert_eq!(
+            got,
+            format!("{original}\n{}", merge.append),
+            "the script inserted the missing newline itself"
+        );
         assert_eq!(mode(&mem_a.join(INDEX_NAME)), 0o644, "mode is untouched");
+
+        // --- append onto an existing index that ALREADY ends with a
+        // newline: no blank line is introduced ---
+        let mem_a2 = tmp.path().join("memory-a2");
+        std::fs::create_dir_all(&mem_a2).unwrap();
+        let original2 = "# Memory Index\n\n- [Mine](mine.md) — t\n";
+        std::fs::write(mem_a2.join(INDEX_NAME), original2).unwrap();
+        let merge_a2 = merge_index(
+            "- [New](new.md) — hook\n",
+            Some(original2),
+            &["new.md".to_string()],
+        );
+        let out = bash(
+            &memory_append_index_script(mem_a2.to_str().unwrap(), &merge_a2.append),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(mem_a2.join(INDEX_NAME)).unwrap(),
+            format!("{original2}{}", merge_a2.append),
+            "no blank line is introduced when the target already ends with a newline"
+        );
+
+        // --- an existing but EMPTY index file: lines only, nothing prepended ---
+        let mem_a3 = tmp.path().join("memory-a3");
+        std::fs::create_dir_all(&mem_a3).unwrap();
+        std::fs::write(mem_a3.join(INDEX_NAME), "").unwrap();
+        let merge_a3 = merge_index(
+            "- [New](new.md) — hook\n",
+            Some(""),
+            &["new.md".to_string()],
+        );
+        let out = bash(
+            &memory_append_index_script(mem_a3.to_str().unwrap(), &merge_a3.append),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(mem_a3.join(INDEX_NAME)).unwrap(),
+            merge_a3.append,
+            "an empty existing file gets exactly the lines"
+        );
 
         // --- no index on the target: created 0600 with exactly `append` ---
         let mem_b = tmp.path().join("memory-b");
@@ -2183,7 +2292,8 @@ with tarfile.open(out, "w:gz") as tar:
         assert_eq!(mode(&mem_b.join(INDEX_NAME)), 0o600);
         assert_eq!(mode(&mem_b), 0o700, "the memory dir is created too");
 
-        // --- empty text: a no-op that creates nothing ---
+        // --- empty text: a no-op that creates nothing, but still signals
+        // success the same way the real append path does ---
         let mem_c = tmp.path().join("memory-c");
         let out = bash(
             &memory_append_index_script(mem_c.to_str().unwrap(), ""),
@@ -2195,6 +2305,11 @@ with tarfile.open(out, "w:gz") as tar:
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(!mem_c.exists(), "no directory is created for a no-op");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "ok",
+            "one success predicate for both the no-op and the real path"
+        );
 
         // --- round-trip content with quotes, $(...), backslashes, and a
         // __CF_OUT__-lookalike mid-line; a missing index reports Some(None) ---
@@ -2233,6 +2348,147 @@ with tarfile.open(out, "w:gz") as tar:
             parse_index(&String::from_utf8_lossy(&out.stdout)),
             Some(None),
             "a missing index file"
+        );
+    }
+
+    // --- Fix round 1 ---
+
+    /// (Important) `memory_append_index_script` embeds `text` raw between
+    /// `<<'CF_INDEX'` and `CF_INDEX`; it is `pub` and takes any `&str`, so
+    /// `merge_index`'s own `line == INDEX_HEREDOC` filter (which only ever
+    /// sees text IT built) is not a defence for this function. A `text`
+    /// containing a bare `CF_INDEX` line ends the heredoc early and the
+    /// remainder is executed as shell — proven here with real bash: this
+    /// test's `touch`, if it ran, would leave `pwned.txt` in the memory dir.
+    /// The builder must refuse such text (and over-long text) itself, doing
+    /// NOTHING to the file, before ever emitting the heredoc.
+    #[test]
+    fn memory_append_index_script_refuses_a_delimiter_line_or_over_long_text() {
+        if !require(&["bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let mem = tmp.path().join("memory");
+        std::fs::create_dir_all(&mem).unwrap();
+        std::fs::write(mem.join(INDEX_NAME), "# Memory Index\n\n- [Old](old.md)\n").unwrap();
+        let before = std::fs::read(mem.join(INDEX_NAME)).unwrap();
+
+        // A bare delimiter line followed by a command: if the heredoc ends
+        // early, this "runs" as a real shell command.
+        let hostile = format!(
+            "- [New](new.md) — hook\n{INDEX_HEREDOC}\ntouch {}/pwned.txt\n",
+            mem.to_str().unwrap()
+        );
+        let out = bash(
+            &memory_append_index_script(mem.to_str().unwrap(), &hostile),
+            &home,
+        );
+        assert!(
+            !out.status.success(),
+            "must refuse rather than half-execute: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("index-text"));
+        assert!(
+            !mem.join("pwned.txt").exists(),
+            "the remainder was never executed as shell"
+        );
+        assert_eq!(
+            std::fs::read(mem.join(INDEX_NAME)).unwrap(),
+            before,
+            "the index is untouched, never half-appended"
+        );
+
+        // Over-long text: the same refusal, nothing written.
+        let huge = "x".repeat(INDEX_APPEND_MAX_BYTES + 1);
+        let out = bash(
+            &memory_append_index_script(mem.to_str().unwrap(), &huge),
+            &home,
+        );
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        assert_eq!(std::fs::read(mem.join(INDEX_NAME)).unwrap(), before);
+
+        // A line that merely CONTAINS the delimiter text, or has
+        // leading/trailing spaces around it, does not end the heredoc: it is
+        // accepted and lands byte-exactly.
+        let benign = format!("- [x](x.md) {INDEX_HEREDOC}\n  {INDEX_HEREDOC}  \n");
+        let out = bash(
+            &memory_append_index_script(mem.to_str().unwrap(), &benign),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got = std::fs::read_to_string(mem.join(INDEX_NAME)).unwrap();
+        assert_eq!(
+            got,
+            format!("{}{benign}", String::from_utf8_lossy(&before)),
+            "a line that merely contains the delimiter is not the delimiter"
+        );
+    }
+
+    /// `enc()`'s result was never checked: if its `cd` fails the encoded name
+    /// is empty and `m` collapses to `$HOME/.claude/projects//memory` — a
+    /// path `parse_memory_list` accepts and a later `create_dir` extract
+    /// would happily create, which a coincidental `.claude/projects/memory`
+    /// directory (no per-repo hash at all) would then be mistaken for this
+    /// repo's memory. A nonexistent fallback (a normal, expected condition —
+    /// not an anomaly, unlike an empty `top`) must never be used as `m`; the
+    /// primary is reported instead, exactly as when no fallback applies.
+    #[test]
+    fn a_nonexistent_fallback_never_yields_a_double_slash_memory_dir() {
+        if !require(&["bash", "git"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let r = tmp.path().join("r2");
+        std::fs::create_dir_all(&r).unwrap();
+        crate::service::move_session::carry::tests::git(&r, &["init", "-q", "-b", "main"]);
+        std::fs::write(r.join("f.txt"), "x\n").unwrap();
+        crate::service::move_session::carry::tests::git(&r, &["add", "-A"]);
+        crate::service::move_session::carry::tests::git(&r, &["commit", "-q", "-m", "base"]);
+
+        let r_enc = enc(&r);
+        let r_memory = memory_dir_for(&home, &r_enc);
+        assert!(!r_memory.exists(), "the primary starts out absent");
+
+        // The directory an empty-encoded fallback would silently collapse
+        // onto: `$HOME/.claude/projects//memory` is the same path as this on
+        // any POSIX filesystem.
+        let trap = home.join(".claude/projects/memory");
+        std::fs::create_dir_all(&trap).unwrap();
+        std::fs::write(trap.join("someone-elses.md"), "not this repo's memory\n").unwrap();
+
+        let missing_fb = tmp.path().join("does-not-exist-fb");
+        assert!(!missing_fb.exists());
+
+        let out = bash(
+            &memory_list_script(r.to_str().unwrap(), Some(missing_fb.to_str().unwrap())),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "a nonexistent fallback is not itself a failure: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let listing = parse_memory_list(&out.stdout).expect("listing");
+        assert!(
+            !listing.exists,
+            "the trap directory must never be mistaken for this repo's memory"
+        );
+        assert_eq!(
+            listing.dir,
+            r_memory.to_str().unwrap(),
+            "the correctly-encoded primary is reported, never the trap directory"
         );
     }
 
