@@ -1333,6 +1333,9 @@
 
 <style>
   .conversation-panel {
+    /* The reading column every part of the thread lines up with: the turns,
+       the sticky toolbar, the chips, the slash menu and the composer. */
+    --chat-col: 80ch;
     position: relative;
     height: 100%;
     display: flex;
@@ -1363,7 +1366,9 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    padding: 0.25rem 1.1rem;
+    /* Full-bleed background and rule, but the controls sit over the column
+       they act on rather than out at the pane's edge. */
+    padding: 0.25rem max(1.1rem, calc((100% - var(--chat-col)) / 2));
     border-bottom: 1px solid var(--border);
     background: var(--bg);
     font-size: 0.74rem;
@@ -1501,7 +1506,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.35rem;
-    max-width: 80ch;
+    max-width: var(--chat-col);
     margin: 0 auto 0.4rem;
   }
   .chip {
@@ -1529,7 +1534,7 @@
     display: flex;
     align-items: flex-end;
     gap: 0.5rem;
-    max-width: 80ch;
+    max-width: var(--chat-col);
     margin: 0 auto;
   }
   .composer textarea {
@@ -1569,7 +1574,7 @@
   }
   .slash-menu {
     list-style: none;
-    max-width: 80ch;
+    max-width: var(--chat-col);
     max-height: 14rem;
     overflow: auto;
     margin: 0 auto 0.4rem;
@@ -1610,7 +1615,7 @@
   }
   .composer-error,
   .composer-status {
-    max-width: 80ch;
+    max-width: var(--chat-col);
     margin: 0 auto 0.35rem;
     font-size: 0.75rem;
   }
@@ -1622,7 +1627,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    max-width: 80ch;
+    max-width: var(--chat-col);
     margin: 0.35rem auto 0;
   }
   .composer-status {
@@ -1719,7 +1724,7 @@
     background: color-mix(in srgb, var(--usage-warn) 20%, var(--bg-pane));
   }
   .thread {
-    max-width: 80ch;
+    max-width: var(--chat-col);
     margin: 0 auto;
     padding: 1rem 1.1rem 2.5rem;
   }

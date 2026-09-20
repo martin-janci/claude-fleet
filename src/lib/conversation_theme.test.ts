@@ -29,3 +29,20 @@ describe('chat colour tokens', () => {
     });
   }
 });
+
+describe('chat column width', () => {
+  const panel = SOURCES['./ConversationPanel.svelte'];
+
+  it('states the reading column once, as a token', () => {
+    // The thread, the chips, the composer row, the slash menu and the
+    // toolbar all have to agree; seven copies of `80ch` is how they drift.
+    expect(panel.match(/80ch/g) ?? []).toHaveLength(1);
+    expect(panel).toContain('--chat-col: 80ch');
+    expect(panel.match(/max-width: var\(--chat-col\)/g)?.length ?? 0).toBeGreaterThanOrEqual(6);
+  });
+
+  it('centres the sticky toolbar over the reading column', () => {
+    // Full-bleed background and border, but the controls track the text.
+    expect(panel).toContain('max(1.1rem, calc((100% - var(--chat-col)) / 2))');
+  });
+});
