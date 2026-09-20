@@ -139,4 +139,60 @@ describe('ConversationHeader', () => {
     await fireEvent.pointerDown(document.body);
     expect(screen.queryByTestId('conv-switcher-menu')).toBeNull();
   });
+
+  const findProps = {
+    findOpen: false, findQuery: '', findCount: '', matchCount: 0,
+    turnEntries: [{ rowKey: 'r1', label: 'fix the bug', at: null }],
+    turnsOpen: false,
+    onFindOpen: vi.fn(), onFindClose: vi.fn(), onFindInput: vi.fn(),
+    onFindKey: vi.fn(), onFindStep: vi.fn(), onTurnsToggle: vi.fn(), onPickTurn: vi.fn(),
+  };
+
+  it('carries the find and turns controls', () => {
+    render(ConversationHeader, {
+      session: session(), conversations: list, viewing: null, lastEvent: null,
+      newerAvailable: false, onSelect: vi.fn(), ...findProps,
+    });
+    expect(screen.getByTestId('conv-find-button')).toBeTruthy();
+    expect(screen.getByTestId('conv-turns-button').textContent).toContain('1 turn');
+  });
+
+  it('disables the find button when there is nothing to search', () => {
+    const { unmount } = render(ConversationHeader, {
+      session: session(), conversations: list, viewing: null, lastEvent: null,
+      newerAvailable: false, onSelect: vi.fn(), ...findProps, findDisabled: true,
+    });
+    // Disabled, not hidden: hiding it would make the tool cluster jump.
+    expect((screen.getByTestId('conv-find-button') as HTMLButtonElement).disabled).toBe(true);
+    unmount();
+    render(ConversationHeader, {
+      session: session(), conversations: list, viewing: null, lastEvent: null,
+      newerAvailable: false, onSelect: vi.fn(), ...findProps, findDisabled: false,
+    });
+    expect((screen.getByTestId('conv-find-button') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('keeps the turns button reachable while find is open', () => {
+    render(ConversationHeader, {
+      session: session(), conversations: list, viewing: null, lastEvent: null,
+      newerAvailable: false, onSelect: vi.fn(), ...findProps, findOpen: true, matchCount: 2, findCount: '1/2',
+    });
+    expect(screen.getByTestId('conv-find-input')).toBeTruthy();
+    // The regression this task exists to prevent: today this is null.
+    expect(screen.queryByTestId('conv-turns-button')).not.toBeNull();
+    // The facts yield the middle slot to find, not the tool cluster.
+    expect(screen.queryByTestId('conv-model')).toBeNull();
+  });
+
+  it('model and status are information, not controls', () => {
+    render(ConversationHeader, {
+      session: session(), conversations: list, viewing: null, lastEvent: null,
+      newerAvailable: false, onSelect: vi.fn(), ...findProps,
+    });
+    const model = screen.getByTestId('conv-model');
+    expect(model.tagName).toBe('SPAN');
+    expect(model.className).toContain('tag');
+    expect(model.className).not.toContain('chip');
+    expect(screen.getByTestId('conv-status').className).toContain('tag');
+  });
 });

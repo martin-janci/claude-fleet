@@ -11,6 +11,18 @@ vi.mock('./clipboard', async () => {
   const actual = await vi.importActual<typeof import('./clipboard')>('./clipboard');
   return { ...actual, copyText: vi.fn() };
 });
+// Same shape as TerminalView.test.ts: the setup file's stub returns a fresh
+// no-op each call, so a test cannot reach the callback. Capture it instead.
+type DragDropPayload = { type: string; position: { x: number; y: number }; paths?: string[] };
+let dragDrop: ((e: { payload: DragDropPayload }) => void) | null = null;
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: async (cb: (e: { payload: DragDropPayload }) => void) => {
+      dragDrop = cb;
+      return () => {};
+    },
+  }),
+}));
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
@@ -31,6 +43,8 @@ import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_eve
 import type { SessionEvent } from './timeline';
 import { copyText } from './clipboard';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { invoke } from '@tauri-apps/api/core';
+import type { PickedFile } from './attachments';
 
 const REMOTE: HubStatus = {
   remote: true,
@@ -645,6 +659,28 @@ describe('ConversationPanel composer', () => {
     expect(screen.getByTestId('conv-empty').textContent).toBe('No conversation yet');
     expect(screen.getByTestId('conv-composer-input')).toBeTruthy();
   });
+
+  it('send is an icon button inside the shell and still submits', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const send = screen.getByTestId('conv-composer-send');
+    expect(send.getAttribute('aria-label')).toBe('Send prompt');
+    expect(send.closest('.composer-shell')).not.toBeNull();
+    expect(screen.getByTestId('conv-composer-input').getAttribute('placeholder')).toBe('Send a prompt…');
+  });
+
+  it('the keyboard hint is exposed to the textarea for screen readers', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input');
+    const describedBy = box.getAttribute('aria-describedby');
+    expect(describedBy).toBeTruthy();
+    const description = document.getElementById(describedBy!);
+    expect(description).not.toBeNull();
+    expect(description!.textContent).toContain('↵ send · ⇧↵ newline · ↑ history');
+  });
 });
 
 describe('ConversationPanel composer auto-grow', () => {
@@ -842,6 +878,107 @@ describe('ConversationPanel quick actions', () => {
   it('a bg row shows no chips', async () => {
     await mount({ kind: 'bg', tmux_name: 'bg:abc' });
     expect(screen.queryByTestId('conv-chip')).toBeNull();
+  });
+
+  it('the stuck prompt gets its own row, not a seat among the presets', async () => {
+    await mount({ claude_status: 'blocked', stuck_kind: 'press_enter' });
+    const enter = screen.getByTestId('conv-chip-enter');
+    expect(enter.closest('[data-testid="conv-chips"]')).toBeNull();
+    expect(enter.className).toContain('btn--warn');
+  });
+
+  it('a suggested chip is toned, not ringed', async () => {
+    await mount({ context_pct: 88 });
+    const chip = screen.getAllByTestId('conv-chip').find((c) => c.dataset.suggested === 'true');
+    expect(chip).toBeTruthy();
+    expect(chip!.className).toContain('btn--warn');
+  });
+
+  it('collapses overflowing chips behind More and expands them', async () => {
+    await mount();
+    const row = screen.getByTestId('conv-chips');
+    // jsdom lays nothing out, so state the overflow the way the observer would.
+    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
+    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+
+    const more = screen.getByTestId('conv-chips-more');
+    expect(more.getAttribute('aria-expanded')).toBe('false');
+    expect(row.getAttribute('data-expanded')).toBe('false');
+    await fireEvent.click(more);
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    expect(row.getAttribute('data-expanded')).toBe('true');
+  });
+
+  it('preserveThread keeps the viewport on the same content when the composer grows', async () => {
+    await mount();
+    const row = screen.getByTestId('conv-chips');
+    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
+    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+
+    const scroller = screen.getByTestId('conv-scroller');
+    // Expanding the chips row (More) is the composer growing: model that by
+    // tying the scroller's measured height to the row's own expanded state,
+    // the way real layout would shrink the scroller underneath it.
+    Object.defineProperty(scroller, 'clientHeight', {
+      configurable: true,
+      get: () => (row.getAttribute('data-expanded') === 'true' ? 350 : 400),
+    });
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    scroller.scrollTop = 500;
+    // Not pinned to the bottom: the correction must apply.
+    await fireEvent.scroll(scroller);
+
+    const more = screen.getByTestId('conv-chips-more');
+    await fireEvent.click(more);
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    expect(scroller.scrollTop).toBe(550);
+  });
+
+  it('preserveThread re-pins the transcript when the reader was already at the bottom', async () => {
+    await mount();
+    const row = screen.getByTestId('conv-chips');
+    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
+    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'clientHeight', {
+      configurable: true,
+      get: () => (row.getAttribute('data-expanded') === 'true' ? 350 : 400),
+    });
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    // Pinned: composing at the bottom, which is where an attachment strip
+    // appears from. The offset correction is wrong here — it would leave a
+    // gap below the last turn — so this branch re-pins instead.
+    scroller.scrollTop = 1600;
+    await fireEvent.scroll(scroller);
+
+    const more = screen.getByTestId('conv-chips-more');
+    await fireEvent.click(more);
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    // The new bottom, not 1650 (1600 + the 50px the scroller gave up).
+    expect(scroller.scrollTop).toBe(2000);
+  });
+
+  it('re-measures when the preset list changes, not just on resize', async () => {
+    await mount();
+    const row = screen.getByTestId('conv-chips');
+    // The row's own border-box need not change when the preset count does,
+    // so a plain ResizeObserver on it can miss this — state the overflow
+    // the way real layout would, then change the list with no resize event.
+    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
+    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
+    expect(screen.queryByTestId('conv-chips-more')).toBeNull();
+
+    composerPresets.set([{ label: 'Clear', text: '/clear' }, { label: 'Tests', text: 'run the tests' }]);
+    await tick();
+
+    expect(screen.getByTestId('conv-chips-more')).toBeTruthy();
   });
 });
 
@@ -2249,6 +2386,26 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(screen.queryByTestId('conv-find')).toBeNull();
   });
 
+  it('the find button is disabled while there is no thread, enabled once there is', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    const { unmount } = render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-empty')).toBeTruthy();
+    // The button is on screen either way — the tool cluster must not jump —
+    // but it cannot open a find bar over nothing.
+    const off = screen.getByTestId('conv-find-button') as HTMLButtonElement;
+    expect(off.disabled).toBe(true);
+    await fireEvent.click(off);
+    await settle();
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+    unmount();
+
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect((screen.getByTestId('conv-find-button') as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('while blocked on a prompt the last turn\'s pending tool call keeps running, not "no result"', async () => {
     const at = new Date(Date.now() - 3_000).toISOString();
     mockedConv.mockReturnValue(
@@ -2294,7 +2451,7 @@ describe('ConversationPanel find, copy and turn index', () => {
     await fireEvent.click(btn);
     await settle();
     expect(mockedCopy).toHaveBeenCalledWith('and the lexer');
-    expect(btn.textContent).toContain('Copied');
+    expect(btn.getAttribute('aria-label')).toBe('Copied');
   });
 
   it('copy on a text group copies its markdown source', async () => {
@@ -2869,5 +3026,585 @@ describe('ConversationPanel background switcher', () => {
     await fireEvent.click(getByTestId('conv-background-button'));
     await fireEvent.click(getAllByTestId('conv-background-item')[0]);
     expect(selectSessionSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }));
+  });
+});
+
+describe('ConversationPanel attachments', () => {
+  const mockedInvoke = invoke as unknown as ReturnType<typeof vi.fn>;
+  // The global Tauri stub from vitest.setup.ts. Captured once so a test can
+  // answer two attachment commands without losing hub_status, list_hosts and
+  // the rest of it.
+  type InvokeImpl = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  const baseInvoke = mockedInvoke.getMockImplementation() as unknown as InvokeImpl;
+
+  beforeEach(() => {
+    // Cleared so a test cannot drive a callback left behind by the previous
+    // render — and so `drag()` below fails when a render did not subscribe.
+    dragDrop = null;
+  });
+
+  afterEach(() => {
+    mockedInvoke.mockImplementation(baseInvoke);
+  });
+
+  async function renderPanel(over: Partial<SessionRow> = {}) {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    const { rerender } = render(ConversationPanel, { session: session(over), visible: true });
+    await settle();
+    return rerender;
+  }
+
+  async function renderPanelInHubMode() {
+    hubStatus.set(REMOTE);
+    await renderPanel();
+  }
+
+  /**
+   * Go through the real attach path rather than poking state: the OS picker
+   * is the only origin the button has, so stub what Rust would have returned
+   * and click. `attachment_preview` answers null — the ordinary outcome for a
+   * file that is not an inlineable image or is over 2 MiB.
+   */
+  async function addAttachments(picked: PickedFile[]) {
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments') return picked;
+      if (cmd === 'attachment_preview') return null;
+      return baseInvoke(cmd, args);
+    });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    // One round trip for the pick, then one per file for the preview.
+    for (let i = 0; i < picked.length + 3; i++) await settle();
+  }
+
+  it('shows a tile per attachment and removes one without losing the rest', async () => {
+    await renderPanel();
+    await addAttachments([
+      { path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' },
+      { path: '/tmp/b.log', name: 'b.log', size: 2048, kind: 'text' },
+    ]);
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(2);
+    await fireEvent.click(screen.getAllByTestId('conv-attachment-remove')[0]);
+    const left = screen.getAllByTestId('conv-attachment');
+    expect(left).toHaveLength(1);
+    expect(left[0].getAttribute('title')).toContain('b.log');
+  });
+
+  // The DOM half drives the veil and stops App.svelte's window-level file://
+  // guard from swallowing the drop; the paths come from Tauri's event below.
+  it('the DOM drop clears the veil and attaches nothing; a drop on the transcript does nothing either', async () => {
+    await renderPanel();
+    const shell = document.querySelector('.composer-shell')!;
+    // Raise the veil first: asserting it is absent after a drop that never
+    // raised it is an assertion that cannot fail.
+    await fireEvent.dragEnter(shell, { dataTransfer: { types: ['Files'], files: [] } });
+    expect(shell.className).toContain('is-dragging');
+
+    await fireEvent.drop(shell, { dataTransfer: { types: ['Files'], files: [] } });
+    expect(shell.className).not.toContain('is-dragging');
+
+    const scroller = screen.getByTestId('conv-scroller');
+    const ev = new Event('drop', { bubbles: true, cancelable: true });
+    await fireEvent(scroller, ev);
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+  });
+
+  it('a rejected file stays visible with its reason', async () => {
+    await renderPanel();
+    await addAttachments([{ path: '/tmp/big.png', name: 'big.png', size: 11 * 1024 * 1024, kind: 'image' }]);
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('big.png');
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('10 MB');
+  });
+
+  it('the attach button states why it is unavailable in hub mode', async () => {
+    await renderPanelInHubMode();
+    const btn = screen.getByTestId('conv-attach-button');
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(btn.getAttribute('title')).toContain('standalone');
+  });
+
+  /**
+   * Deliver a Tauri drag-drop event, failing loudly if the panel never
+   * subscribed. `dragDrop?.(…)` was the shape before: with the `$effect`
+   * removed, every negative assertion in the drag tests below would have
+   * passed vacuously — nothing fired, so nothing attached. `dragDrop` is
+   * reset to null before each test (above), so this also proves THIS
+   * render's subscription, not an earlier one's.
+   */
+  function drag(payload: DragDropPayload) {
+    if (!dragDrop) throw new Error('the panel never subscribed to onDragDropEvent');
+    dragDrop({ payload });
+  }
+
+  /** Stand the shell somewhere measurable: jsdom lays nothing out, so state
+   *  the rect the way real layout would. */
+  function placeShell(rect: Partial<DOMRect> = {}): HTMLElement {
+    const shell = document.querySelector('.composer-shell') as HTMLElement;
+    const r = { left: 100, top: 400, right: 500, bottom: 500, width: 400, height: 100, x: 100, y: 400, ...rect };
+    shell.getBoundingClientRect = () => ({ ...r, toJSON: () => r }) as DOMRect;
+    return shell;
+  }
+
+  // The DOM event cannot carry a filesystem path in a WKWebView; Tauri's
+  // drag-drop event can, and it is the same event lib.rs listens to in order
+  // to authorise those paths. So this is the one that must attach.
+  it('a drop inside the shell describes and attaches the event’s paths; a drop outside it does nothing', async () => {
+    await renderPanel();
+    placeShell();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'attachment_describe')
+        return (args?.paths as string[]).map((path) => ({
+          path,
+          name: path.split('/').pop(),
+          size: 1024,
+          kind: 'image',
+        }));
+      if (cmd === 'attachment_preview') return null;
+      return baseInvoke(cmd, args);
+    });
+
+    drag({ type: 'drop', position: { x: 10, y: 10 }, paths: ['/tmp/outside.png'] });
+    for (let i = 0; i < 3; i++) await settle();
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());
+
+    drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/inside.png'] });
+    for (let i = 0; i < 4; i++) await settle();
+    const tiles = screen.getAllByTestId('conv-attachment');
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0].getAttribute('title')).toContain('inside.png');
+    expect(mockedInvoke).toHaveBeenCalledWith('attachment_describe', { paths: ['/tmp/inside.png'] });
+    expect(mockedInvoke).toHaveBeenCalledWith('attachment_preview', { path: '/tmp/inside.png' });
+  });
+
+  // The hole Task 6b closes: a dropped file used to arrive with a client-side
+  // `size: 0` placeholder, which `addFiles`'s MAX_BYTES/MAX_TOTAL checks
+  // cannot enforce against. `attachment_describe` gives it a real size, so it
+  // hits the exact same limit — and the exact same message — a picked file
+  // over that size would.
+  it('an oversized dropped file is rejected with the same message an oversized picked file gets', async () => {
+    await renderPanel();
+    placeShell();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'attachment_describe')
+        return (args?.paths as string[]).map((path) => ({
+          path,
+          name: 'big.png',
+          size: 11 * 1024 * 1024,
+          kind: 'image',
+        }));
+      if (cmd === 'attachment_preview') return null;
+      return baseInvoke(cmd, args);
+    });
+
+    drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/big.png'] });
+    for (let i = 0; i < 4; i++) await settle();
+
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('big.png');
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('10 MB');
+  });
+
+  // A known past bug in this codebase (see the contract on `pointInRect` in
+  // geometry.ts): Tauri's position is already in logical points, so dividing
+  // it by devicePixelRatio halves it and the hit-test misses everywhere.
+  it('hit-tests the drop point unscaled, so a 2× display still hits the shell', async () => {
+    const dpr = window.devicePixelRatio;
+    Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });
+    try {
+      await renderPanel();
+      placeShell();
+      mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'attachment_describe')
+          return (args?.paths as string[]).map((path) => ({
+            path,
+            name: path.split('/').pop(),
+            size: 1024,
+            kind: 'image',
+          }));
+        if (cmd === 'attachment_preview') return null;
+        return baseInvoke(cmd, args);
+      });
+      drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/retina.png'] });
+      for (let i = 0; i < 4; i++) await settle();
+      expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+    } finally {
+      Object.defineProperty(window, 'devicePixelRatio', { value: dpr, configurable: true });
+    }
+  });
+
+  it('the drag veil follows the Tauri event, and only over the shell', async () => {
+    await renderPanel();
+    const shell = placeShell();
+
+    drag({ type: 'over', position: { x: 10, y: 10 } });
+    await settle();
+    expect(shell.className).not.toContain('is-dragging');
+
+    drag({ type: 'over', position: { x: 300, y: 450 } });
+    await settle();
+    expect(shell.className).toContain('is-dragging');
+    expect(screen.getByText('Drop to attach')).toBeTruthy();
+
+    drag({ type: 'leave', position: { x: 0, y: 0 } });
+    await settle();
+    expect(shell.className).not.toContain('is-dragging');
+  });
+
+  it('a drop is refused in hub mode, where nothing could upload it', async () => {
+    await renderPanelInHubMode();
+    placeShell();
+    mockedInvoke.mockClear();
+    drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/a.png'] });
+    for (let i = 0; i < 3; i++) await settle();
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());
+    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_preview', expect.anything());
+  });
+
+  // The panel is ONE instance for every session (App.svelte does not `{#key}`
+  // it), so anything left in the tray belongs to the session that is gone.
+  // The allow-list cannot save us here: it authorises a path, not a path plus
+  // a destination, and a picked path stays valid for four hours — so a stale
+  // tile would stage session A's file into session B's worktree, on B's host,
+  // and name it in B's prompt.
+  it('drops the tray when the session changes, so a file cannot follow to another host', async () => {
+    const rerender = await renderPanel({ id: 1, host_alias: 'alpha', tmux_name: 'a' });
+    await addAttachments([
+      { path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' },
+      { path: '/tmp/big.png', name: 'big.png', size: 11 * 1024 * 1024, kind: 'image' },
+    ]);
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+    expect(screen.getByTestId('conv-attach-error')).toBeTruthy();
+
+    await rerender({ session: session({ id: 2, host_alias: 'beta', tmux_name: 'b' }), visible: true });
+    await settle();
+
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    // The rejection sentence was about the tray that just left with it.
+    expect(screen.queryByTestId('conv-attach-error')).toBeNull();
+  });
+
+  it('a send after a session switch uploads nothing of the previous session', async () => {
+    const rerender = await renderPanel({ id: 1, host_alias: 'alpha', tmux_name: 'a' });
+    await addAttachments([{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }]);
+    await rerender({ session: session({ id: 2, host_alias: 'beta', tmux_name: 'b' }), visible: true });
+    await settle();
+
+    mockedInvoke.mockClear();
+    const box = screen.getByTestId('conv-composer-input');
+    await fireEvent.input(box, { target: { value: 'hello beta' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    await settle();
+
+    expect(mockedInvoke).not.toHaveBeenCalledWith('upload_attachments', expect.anything());
+    // The prompt goes out on its own, with no attachment block bolted on.
+    expect(mockedSend).toHaveBeenCalledWith('beta', 'b', 'hello beta');
+  });
+
+  // `.view-slot` is `position: absolute; inset: 0`, so App.svelte's Hosts and
+  // Assets overlays sit ON TOP of a ConversationPanel that is still mounted
+  // and still laid out. Without this guard a drop at composer coordinates
+  // while one of those is open attaches a file the user never sees dropped.
+  it('a drop is ignored, veil and all, while the panel is not the visible view', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: false });
+    await settle();
+    const shell = placeShell();
+    mockedInvoke.mockClear();
+
+    drag({ type: 'over', position: { x: 300, y: 450 } });
+    await settle();
+    expect(shell.className).not.toContain('is-dragging');
+
+    drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/hidden.png'] });
+    for (let i = 0; i < 3; i++) await settle();
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());
+  });
+
+  // The 18px remove button is below the 24px target floor; the 44px tile is
+  // the control that carries the keyboard path, so it has to actually exist.
+  it('a focused tile removes itself on Backspace and on Delete', async () => {
+    await renderPanel();
+    await addAttachments([
+      { path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' },
+      { path: '/tmp/b.log', name: 'b.log', size: 2048, kind: 'text' },
+    ]);
+    const tiles = () => screen.getAllByTestId('conv-attachment');
+    expect(tiles()[0].getAttribute('tabindex')).toBe('0');
+
+    await fireEvent.keyDown(tiles()[0], { key: 'Backspace' });
+    expect(tiles()).toHaveLength(1);
+    expect(tiles()[0].getAttribute('title')).toContain('b.log');
+
+    await fireEvent.keyDown(tiles()[0], { key: 'Delete' });
+    expect(screen.queryByTestId('conv-attachment')).toBeNull();
+  });
+
+  it('an ordinary key on a focused tile leaves it alone', async () => {
+    await renderPanel();
+    await addAttachments([{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }]);
+    await fireEvent.keyDown(screen.getByTestId('conv-attachment'), { key: 'a' });
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+  });
+
+  // Two gestures, two reasons: the second batch must not silently wipe the
+  // first batch's sentence.
+  it('keeps the reasons from every batch, not just the last', async () => {
+    await renderPanel();
+    await addAttachments([{ path: '/tmp/big.png', name: 'big.png', size: 11 * 1024 * 1024, kind: 'image' }]);
+    await addAttachments([{ path: '/tmp/huge.log', name: 'huge.log', size: 12 * 1024 * 1024, kind: 'text' }]);
+    const text = screen.getAllByTestId('conv-attach-error').map((p) => p.textContent).join(' ');
+    expect(text).toContain('big.png');
+    expect(text).toContain('huge.log');
+  });
+
+  // SEC-9: a pasted file has no filesystem path, so nothing authorised it for
+  // the Rust allow-list. Previewing it would come back E_FORBIDDEN and
+  // overwrite the honest sentence with a permission error.
+  it('a pasted file is never previewed and reads as unsupported, not as a failure', async () => {
+    await renderPanel();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'attachment_preview') throw { code: 'E_FORBIDDEN', message: 'not attached by the user' };
+      return baseInvoke(cmd, args);
+    });
+    const box = screen.getByTestId('conv-composer-input');
+    const file = new File([new Uint8Array([1, 2, 3])], 'image.png', { type: 'image/png' });
+    // The Tauri stub is a module-level vi.fn shared by the whole file; only
+    // the calls this paste makes are under test.
+    mockedInvoke.mockClear();
+    await fireEvent.paste(box, {
+      clipboardData: { files: [file], types: ['Files'], getData: () => '' },
+    });
+    await settle();
+    await settle();
+
+    const tile = screen.getByTestId('conv-attachment');
+    expect(tile.getAttribute('data-state')).toBe('error');
+    expect(tile.getAttribute('title')).toMatch(/pasted-\d\d\.\d\d\.\d\d\.png/);
+    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_preview', expect.anything());
+    // Visible, not just a tooltip: a bare red square reads as a failure.
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it from disk');
+    expect(screen.getByTestId('conv-attach-error').textContent).not.toContain('E_FORBIDDEN');
+  });
+
+  // An SVG is an image to `classify`, and `mime_for` returns image/svg+xml —
+  // so a preview can be an SVG data URL. Inlined as markup it would run
+  // script in the app's own origin; inside an <img> it cannot.
+  it('renders a preview only through an <img>, never as inlined markup', async () => {
+    await renderPanel();
+    const svg = 'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIi8+';
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/x.svg', name: 'x.svg', size: 64, kind: 'image' }];
+      if (cmd === 'attachment_preview') return svg;
+      return baseInvoke(cmd, args);
+    });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    const tile = screen.getByTestId('conv-attachment');
+    const img = tile.querySelector('img');
+    expect(img).toBeTruthy();
+    expect(img!.getAttribute('src')).toBe(svg);
+    expect(tile.querySelector('svg')).toBeNull();
+    expect(tile.innerHTML).not.toContain('onload');
+  });
+
+  // `sendPrompt` (from ./sessions) is mocked at module scope for this whole
+  // file, so it never reaches `invoke` itself — `order` stands in for the
+  // brief's `invoked` array, recording both the upload (via the shared
+  // `mockedInvoke` stub) and the send (via `mockedSend`) on one timeline.
+  it('uploads before sending and puts the paths in the prompt', async () => {
+    await renderPanel();
+    const order: string[] = [];
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') {
+        order.push('upload_attachments');
+        return ['/w/p/.claude-fleet-attachments/a.png'];
+      }
+      return baseInvoke(cmd, args);
+    });
+    mockedSend.mockImplementation(async () => {
+      order.push('send_prompt');
+      return { ok: true, value: undefined };
+    });
+
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    await fireEvent.input(screen.getByTestId('conv-composer-input'), { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    expect(mockedSend).toHaveBeenCalledWith(
+      'local',
+      'ctl',
+      'look\n\nAttached files:\n/w/p/.claude-fleet-attachments/a.png',
+    );
+    expect(order).toEqual(['upload_attachments', 'send_prompt']);
+    // Sent successfully: the tray is spent along with the draft.
+    expect(screen.queryAllByTestId('conv-attachment')).toHaveLength(0);
+  });
+
+  it('a failed upload cancels the send, keeps the draft, and marks the tile as needing reattachment', async () => {
+    await renderPanel();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') throw { code: 'E_UPLOAD', message: 'host unreachable' };
+      return baseInvoke(cmd, args);
+    });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    expect(box.value).toBe('look');
+    expect(screen.getByTestId('conv-composer-error').textContent).toContain('host unreachable');
+    expect(mockedSend).not.toHaveBeenCalled();
+    // The tile stays so the user can retry — but `upload_attachments`
+    // consumes a path's authorisation before a failure like this one can be
+    // told apart from a genuine mid-transfer failure (`UploadAllowList::
+    // consume` in `upload.rs` runs unconditionally, ahead of the transfer),
+    // so a plain retry is not actually safe. The tile must say so rather
+    // than looking untouched.
+    const tile = screen.getByTestId('conv-attachment');
+    expect(tile.getAttribute('data-state')).toBe('error');
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
+  });
+
+  // Coordinator review Finding 1: `attachments = []` used to fire on ANY
+  // successful send, keyed on the unfiltered array — so a pasted tile that
+  // was never uploadable got wiped along with the ones that sent, and its
+  // "pasting isn't supported" message (the only record it never went) went
+  // with it. `clearSent` now only removes the ids a send actually uploaded.
+  it('a mixed tray sends only the uploadable file and keeps the pasted tile as evidence', async () => {
+    await renderPanel();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') return ['/w/p/.claude-fleet-attachments/a.png'];
+      return baseInvoke(cmd, args);
+    });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    const box = screen.getByTestId('conv-composer-input');
+    const file = new File([new Uint8Array([1, 2, 3])], 'image.png', { type: 'image/png' });
+    await fireEvent.paste(box, {
+      clipboardData: { files: [file], types: ['Files'], getData: () => '' },
+    });
+    await settle();
+    await settle();
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(2);
+
+    await fireEvent.input(box, { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    expect(mockedSend).toHaveBeenCalledWith(
+      'local',
+      'ctl',
+      'look\n\nAttached files:\n/w/p/.claude-fleet-attachments/a.png',
+    );
+    // The pasted tile was never part of the upload: it must still be there,
+    // not silently cleared along with the one that sent.
+    const left = screen.getAllByTestId('conv-attachment');
+    expect(left).toHaveLength(1);
+    expect(left[0].getAttribute('title')).toMatch(/pasted-\d\d\.\d\d\.\d\d\.png/);
+  });
+
+  it('a pasted-only tray sends the text alone, uploading nothing, and keeps the tile', async () => {
+    await renderPanel();
+    // The Tauri stub is a module-level vi.fn shared by the whole file and
+    // nothing resets its call history between tests; only the calls this
+    // test itself makes are under test.
+    mockedInvoke.mockClear();
+    const box = screen.getByTestId('conv-composer-input');
+    const file = new File([new Uint8Array([1, 2, 3])], 'image.png', { type: 'image/png' });
+    await fireEvent.paste(box, {
+      clipboardData: { files: [file], types: ['Files'], getData: () => '' },
+    });
+    await settle();
+    await settle();
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+
+    await fireEvent.input(box, { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    // Nothing uploadable was ever in the tray, so nothing was attempted and
+    // nothing can have failed: the text goes out on its own.
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'look');
+    expect(mockedInvoke).not.toHaveBeenCalledWith('upload_attachments', expect.anything());
+    // Never sent, never cleared: the pasted tile is the only record it was
+    // excluded, and it must still be there afterwards.
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+  });
+
+  // Coordinator review Finding 2: a body that only becomes too long once the
+  // attachment paths are appended is refused AFTER the upload already
+  // succeeded — the file is already on the host and its local path already
+  // consumed, so the tile must not look retry-safe either.
+  it('a prompt too long only once the attachment paths are appended marks the tile as needing reattachment', async () => {
+    await renderPanel();
+    const hugePath = `/w/${'p'.repeat(200 * 1024)}`;
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') return [hugePath];
+      return baseInvoke(cmd, args);
+    });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(box.value).toBe('look');
+    expect(screen.getByTestId('conv-composer-error').textContent).toContain('too long');
+    const tile = screen.getByTestId('conv-attachment');
+    expect(tile.getAttribute('data-state')).toBe('error');
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
+  });
+
+  it('a failed send after a successful upload marks the tile as needing reattachment', async () => {
+    await renderPanel();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'pick_attachments')
+        return [{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }];
+      if (cmd === 'attachment_preview') return null;
+      if (cmd === 'upload_attachments') return ['/w/p/.claude-fleet-attachments/a.png'];
+      return baseInvoke(cmd, args);
+    });
+    mockedSend.mockResolvedValue({ ok: false, error: { code: 'E_TMUX', message: "can't find session" } });
+    await fireEvent.click(screen.getByTestId('conv-attach-button'));
+    for (let i = 0; i < 4; i++) await settle();
+
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'look' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+
+    expect(box.value).toBe('look');
+    expect(screen.getByTestId('conv-composer-error').textContent).toContain("can't find session");
+    const tile = screen.getByTestId('conv-attachment');
+    expect(tile.getAttribute('data-state')).toBe('error');
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
   });
 });

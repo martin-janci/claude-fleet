@@ -27,12 +27,10 @@ describe('CopyButton', () => {
     render(CopyButton, { text: 'hi', label: 'Copy prompt' });
     const btn = screen.getByTestId('conv-copy');
     expect(btn.getAttribute('aria-label')).toBe('Copy prompt');
-    expect(btn.textContent).toBe('Copy');
     await fireEvent.click(btn);
     await settle();
     expect(mockedCopy).toHaveBeenCalledWith('hi');
     expect(btn.getAttribute('aria-label')).toBe('Copied');
-    expect(btn.textContent).toBe('Copied');
     expect(btn.getAttribute('title')).toBe('Copied');
   });
 

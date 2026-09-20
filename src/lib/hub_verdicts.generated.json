@@ -4,6 +4,8 @@
     "add_project",
     "assets_inventory",
     "assets_scan_hosts",
+    "attachment_describe",
+    "attachment_preview",
     "catalog_add_resource",
     "catalog_apply_sync",
     "catalog_commit_pending",
@@ -48,6 +50,7 @@
     "list_host_tokens",
     "mcp_configure",
     "mcp_status",
+    "pick_attachments",
     "probe_ssh_alias",
     "provision_hosts",
     "purge_project",
@@ -69,7 +72,8 @@
     "set_account_nickname",
     "set_fleet_setting",
     "set_host_token_mode",
-    "tunnel_status"
+    "tunnel_status",
+    "upload_attachments"
   ],
   "routed": [
     "cancel_task",

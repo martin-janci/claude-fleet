@@ -1,9 +1,12 @@
 <script lang="ts">
   // A small "Copy" button for the Conversations tab (prompts, reply text,
-  // tool results). The parent shows it on hover / focus-within; after a
-  // successful copy it reads "Copied" for 1.5 s. `label` names what it
-  // copies for assistive tech ("Copy prompt"); `copiedNote` qualifies the
-  // copy in the tooltip ("Copied (truncated at 8 000 chars)").
+  // tool results). It is a 24px target its parent keeps visible — the
+  // opacity: 0 hover-reveal this comment used to describe was removed with
+  // ToolLine's `.copy-slot`, because a control you have to find by hovering
+  // is not a control a keyboard or touch user has. After a successful copy
+  // it reads "Copied" for 1.5 s. `label` names what it copies for assistive
+  // tech ("Copy prompt"); `copiedNote` qualifies the copy in the tooltip
+  // ("Copied (truncated at 8 000 chars)").
   import { copyText } from './clipboard';
 
   let {
@@ -27,30 +30,15 @@
 
 <button
   type="button"
-  class="conv-copy"
+  class="btn btn--icon btn--quiet conv-copy"
   class:copied
   data-testid="conv-copy"
   aria-label={copied ? 'Copied' : label}
   title={copied ? (copiedNote ? `Copied (${copiedNote})` : 'Copied') : label}
-  onclick={() => void copy()}>{copied ? 'Copied' : 'Copy'}</button
+  onclick={() => void copy()}>⧉</button
 >
 
 <style>
-  .conv-copy {
-    padding: 0.05rem 0.4rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--fg-muted);
-    font-size: 0.68rem;
-    line-height: 1.4;
-    cursor: pointer;
-  }
-  .conv-copy:hover,
-  .conv-copy:focus-visible {
-    border-color: var(--accent);
-    color: var(--fg);
-  }
   .conv-copy.copied {
     color: var(--accent);
   }

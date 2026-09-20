@@ -200,6 +200,16 @@ const REASONS = {
     'the hub exposes no tool that discards a worktree and kills in one step — use Safe remove’s "Ask Claude" path, or do it from the hub',
   dismiss_agent_session:
     'use Kill instead: the hub’s kill_session removes an inactive agent from the list exactly as this would',
+
+  // --- attachments: local bytes, and the hub has no tool that takes them ---
+  pick_attachments:
+    'the file picker opens on this machine’s desktop and authorises what it returns for this app’s own uploader, which only a standalone app runs',
+  attachment_preview:
+    'the thumbnail is decoded from a file on this machine’s disk, which only a standalone app reads',
+  attachment_describe:
+    'a dropped file is measured from this machine’s disk, which only a standalone app reads',
+  upload_attachments:
+    'attachments are copied into the session’s worktree over this machine’s SSH connection, which only a standalone app does',
 } as const;
 
 export type HubAction = keyof typeof REASONS;

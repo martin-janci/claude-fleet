@@ -265,12 +265,19 @@
     void loadSessions();
   }
 
+  // A drop that reaches the window navigates a WKWebView to file://… and
+  // takes the whole app state with it: no router, no recovery. Drop
+  // targets call stopPropagation(), so this only ever sees strays.
+  const swallowDrag = (e: DragEvent) => e.preventDefault();
+
   onMount(() => {
     window.addEventListener('focus', onFocus);
     window.addEventListener('keydown', onKeydown);
     // Capture phase: the app chords must beat the terminal's own keydown
     // handler (same approach as the quick switcher).
     window.addEventListener('keydown', onChordKeydown, true);
+    window.addEventListener('dragover', swallowDrag);
+    window.addEventListener('drop', swallowDrag);
   });
 
   // Opening a session from anywhere (sidebar, quick switcher, a Hosts-view
@@ -282,6 +289,8 @@
     window.removeEventListener('focus', onFocus);
     window.removeEventListener('keydown', onKeydown);
     window.removeEventListener('keydown', onChordKeydown, true);
+    window.removeEventListener('dragover', swallowDrag);
+    window.removeEventListener('drop', swallowDrag);
     unsubOpened();
     unlistenEvents?.();
   });

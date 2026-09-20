@@ -30,6 +30,37 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# A machine-local guard runs first, if one is installed.
+#
+# With core.hooksPath pointing here, git no longer looks in .git/hooks, so a
+# local hook that used to live there would silently stop running. Anything
+# private — patterns naming real domains or people, which must never be
+# committed to a public repo — belongs in .githooks/pre-commit.local, which
+# .gitignore keeps untracked. A non-zero exit from it aborts the commit,
+# because set -e is in force.
+if [[ -x .githooks/pre-commit.local ]]; then
+  .githooks/pre-commit.local "$@"
+fi
+
+# Keep this tree's build artifacts out of another tree's target directory.
+#
+# A commit made from a linked worktree inherits CARGO_TARGET_DIR from the
+# shell that launched it, and that value is keyed to whichever checkout set
+# it — usually the main one. Two trees then share one target dir: cargo here
+# compiles against another branch's artifacts and fails on symbols this tree
+# has never seen, which reads as a real compile error in files you did not
+# touch. Re-key it to THIS workspace, keeping whatever parent directory the
+# environment already chose so a custom location (an external volume, say)
+# still applies. Unset is already correct: cargo then uses <root>/target,
+# which is per-worktree by construction.
+if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+  want="$(dirname "$CARGO_TARGET_DIR")/$(basename "$ROOT")"
+  if [[ "$CARGO_TARGET_DIR" != "$want" ]]; then
+    echo "pre-commit: CARGO_TARGET_DIR pointed at $(basename "$CARGO_TARGET_DIR"); using $want for this worktree"
+    export CARGO_TARGET_DIR="$want"
+  fi
+fi
+
 staged="$(git diff --cached --name-only --diff-filter=ACMRD)"
 [[ -z "$staged" ]] && exit 0
 

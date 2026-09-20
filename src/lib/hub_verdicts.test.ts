@@ -104,8 +104,8 @@ describe('REASONS against the generated local_only commands', () => {
 
 // Coverage the other way: a `local_only` command the UI can reach with no
 // `REASONS` entry at all would fail open (or, worse, open a dialog whose
-// click then dies with a raw `E_LOCAL_ONLY`). Every one of the 53 commands
-// below is `local_only` today, is not a `REASONS` key (checked below), and
+// click then dies with a raw `E_LOCAL_ONLY`). Every command listed below is
+// `local_only` today, is not a `REASONS` key (checked below), and
 // falls into one of these groups. Seeded from today's truth
 // (generated `local_only` minus the `REASONS` keys that are command names);
 // each group below names the component whose own gate covers it, which is

@@ -70,8 +70,7 @@
     {@const locked = lockedReason(h.alias)}
     <button
       type="button"
-      class="host-pick"
-      class:active={active === h.alias}
+      class="btn btn--chip btn--toggle tag--mono host-pick"
       aria-pressed={active === h.alias}
       data-alias={h.alias}
       disabled={disabled || (!h.reachable && h.alias !== 'local') || locked !== null}
@@ -104,17 +103,10 @@
     overflow-y: auto;
   }
   .host-row.with-usage { max-height: 8.4rem; }
-  .host-pick {
-    font-size: 0.75rem;
-    padding: 0.2rem 0.6rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg-muted);
-    border-radius: 999px;
-    cursor: pointer;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
+  /* The usage variant stacks alias + usage over two lines, so it needs its
+     own height and a squarer corner than the pill's resting shape. */
   .with-usage .host-pick {
+    height: auto;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
@@ -128,8 +120,6 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
-  .host-pick.active { color: var(--fg); border-color: var(--accent); }
-  .host-pick:disabled { opacity: 0.4; cursor: not-allowed; }
   .selected-line {
     margin: 0;
     font-size: 0.72rem;

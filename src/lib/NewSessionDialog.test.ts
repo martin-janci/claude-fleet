@@ -107,7 +107,7 @@ describe('NewSessionDialog', () => {
   it('defaults to last-host pref (local on first run)', async () => {
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
-    const active = document.querySelector('.host-pick.active');
+    const active = document.querySelector(".host-pick[aria-pressed='true']");
     expect(active?.getAttribute('data-alias')).toBe('local');
   });
 
@@ -577,7 +577,7 @@ describe('NewSessionDialog — generated names', () => {
       { alias: 'hetzner', ssh_alias: 'hetzner', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
       { alias: 'hidden-box', ssh_alias: 'hidden-box', reachable: true, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
     ] as typeof h);
-    const active = () => document.querySelector('.host-pick.active')?.getAttribute('data-alias');
+    const active = () => document.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias');
     const open = async () => {
       const r = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
       await tick();
@@ -665,7 +665,7 @@ describe('NewSessionDialog — generated names', () => {
     // Re-open: the remembered choices are applied.
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
-    expect(document.querySelector('.host-pick.active')?.getAttribute('data-alias')).toBe('mefistos');
+    expect(document.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias')).toBe('mefistos');
     expect((document.querySelector('.kind-pick.active') as HTMLElement).textContent?.trim()).toBe('Shell');
     expect(screen.getByTestId('new-worktree-name')).toBeTruthy();
     spy.mockRestore();
@@ -1116,7 +1116,7 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
 
   const chip = (alias: string) => document.querySelector<HTMLButtonElement>(`.host-pick[data-alias="${alias}"]`)!;
   const chipUsage = (alias: string) => chip(alias).querySelector('[data-testid="chip-usage"]')?.textContent?.trim();
-  const active = () => document.querySelector('.host-pick.active')?.getAttribute('data-alias');
+  const active = () => document.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias');
 
   it('each chip shows % left and the reset; stale gets ~ and ◷; expired ? left; no account; offline', async () => {
     const { NOW, five, accountUsage, WORK } = await setup();

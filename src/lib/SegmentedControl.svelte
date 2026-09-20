@@ -33,12 +33,11 @@
   }
 </script>
 
-<div class="seg" role="group" aria-label={label} bind:this={root}>
+<div class="btn-group seg" role="group" aria-label={label} bind:this={root}>
   {#each options as o (o.id)}
     <button
       type="button"
-      class="seg-pick"
-      class:active={value === o.id}
+      class="btn btn--chip btn--toggle seg-pick"
       aria-pressed={value === o.id}
       {disabled}
       data-testid="{testidPrefix}{o.id}"
@@ -51,23 +50,16 @@
 <style>
   .seg {
     display: flex;
-    border: 1px solid var(--border);
     border-radius: 4px;
     overflow: hidden;
   }
+  /* `.btn--chip` gives every segment its own resting border; collapse the
+     shared edge instead of doubling it. */
   .seg-pick {
     flex: 1 1 0;
-    font-size: 0.75rem;
-    padding: 0.3rem 0.4rem;
-    border: 0;
-    border-right: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg-muted);
-    cursor: pointer;
+    border-radius: 0;
   }
-  .seg-pick:last-child { border-right: 0; }
-  .seg-pick.active { color: var(--fg); background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  /* `.seg` clips its children, so draw the focus ring inside the button. */
-  .seg-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .seg-pick:disabled { cursor: not-allowed; }
+  .seg-pick + .seg-pick {
+    margin-left: -1px;
+  }
 </style>

@@ -21,8 +21,11 @@
 //!   hold them to it instead. All four lists, not just the two below —
 //!   `hub_verdicts.test.ts` needs `routed`/`routed_unless` too.
 //! - `docs/hub.md`, between `BEGIN_MARKER`/`END_MARKER` — the REFUSAL table:
-//!   one row per command that is `LocalOnly` or `RoutedUnless` (73 of 123
-//!   today), with what to do instead. `Routed`/`SameInBoth` rows are left
+//!   one row per command that is `LocalOnly` or `RoutedUnless`, with what to
+//!   do instead. The counts are deliberately NOT written here: two copies of
+//!   them drifted apart (and from the truth) the moment a command was added.
+//!   [`summary_sentence`] computes them from `VERDICTS` on every regen, and
+//!   the generated block in `docs/hub.md` is where to read them. `Routed`/`SameInBoth` rows are left
 //!   out on purpose — `| list_sessions | \`list_sessions\` |` tells an
 //!   operator nothing they came to docs to learn; the full verdict, for
 //!   every command, is what `verdicts.rs` is *for*, and the generated
@@ -181,8 +184,9 @@ pub fn summary_sentence(
 }
 
 /// Render the whole generated block: the summary sentence, then the refusal
-/// table — one row per `LocalOnly`/`RoutedUnless` command (74 of 123 today),
-/// sorted alphabetically by command name. `VERDICTS`' own order is
+/// table — one row per `LocalOnly`/`RoutedUnless` command, sorted
+/// alphabetically by command name. The count is [`summary_sentence`]'s,
+/// computed from `VERDICTS`; it is not repeated here. `VERDICTS`' own order is
 /// `generate_handler!`'s, which groups by feature area and is a worse read
 /// as a lookup table than a straight alphabetical list.
 pub fn render_doc_table() -> String {

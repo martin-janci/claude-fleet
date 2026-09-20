@@ -19,6 +19,7 @@
   import { sendPrompt, hasNoPane, sessions, type SessionRow } from './sessions';
   import { hintAnchor } from './hints';
   import { composerPresets, type ComposerPreset } from './composer_presets';
+  import { needsMore } from './composer_overflow';
   import { contextLevel } from './attention';
   import { timeAgo } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
@@ -81,7 +82,13 @@
     type BackgroundEntry,
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
-  import { hubStatus, ownsTheFleet } from './hub';
+  import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { invokeCmd } from './result';
+  import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, type Attachment, type PickedFile } from './attachments';
+  import { withAttachments, tooLong } from './attach_prompt';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { pointInRect } from './geometry';
   import Markdown from './MarkdownView.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
   import { selectSession } from './selection';
@@ -141,6 +148,11 @@
   let sendError = $state<string | null>(null);
   let pending = $state<PendingPrompt | null>(null);
   let box: HTMLTextAreaElement | undefined = $state();
+  // The chip row holds one line; whatever does not fit collapses behind
+  // "More". Measured, not computed, since it depends on layout.
+  let chipsRow: HTMLDivElement | undefined = $state();
+  let chipsOverflow = $state(false);
+  let chipsExpanded = $state(false);
   // Slash-command menu: highlighted row, and the draft the user dismissed
   // the menu for (Escape) so it stays hidden until the text changes.
   let slashIndex = $state(0);
@@ -332,6 +344,15 @@
       draftFor = session.id;
       histIndex = null;
       sendError = null;
+      // The tray belongs to the session it was filled for. This panel is ONE
+      // instance for every session (App.svelte does not `{#key}` it), and the
+      // Rust allow-list authorises a path, not a path plus a destination — a
+      // picked path stays valid for four hours. So a tile left here would
+      // stage the old session's file into the NEW session's worktree, on the
+      // new host, and name it in the new prompt. Nothing downstream can
+      // catch that; it has to be dropped here.
+      attachments = [];
+      attachErrors = [];
       void load();
       void loadConversations();
     });
@@ -515,11 +536,9 @@
   let findOpen = $state(false);
   let findQuery = $state('');
   let findIndex = $state(0);
-  let findInput: HTMLInputElement | undefined = $state();
   let turnsOpen = $state(false);
-  let turnsWrap: HTMLDivElement | undefined = $state();
-  let turnsList: HTMLUListElement | undefined = $state();
-  let turnsButton: HTMLButtonElement | undefined = $state();
+  /** The header renders the find box and the turn index; ⌘F needs its input. */
+  let header: ConversationHeader | undefined = $state();
 
   const matches = $derived(findOpen ? findMatches(thread, findQuery) : []);
   const matchKeys = $derived(new Set(matches.map((m) => m.rowKey)));
@@ -538,11 +557,14 @@
   }
 
   async function openFind() {
+    // Nothing to search while the thread is loading or empty. The shortcut
+    // checks this too (it also owns preventDefault); the header's ⌕ button
+    // is always on screen now, so the guard has to live here as well.
+    if (!threadShown) return;
     turnsOpen = false;
     findOpen = true;
     await tick();
-    findInput?.focus();
-    findInput?.select();
+    header?.focusFindInput();
   }
   function closeFind() {
     findOpen = false;
@@ -663,41 +685,6 @@
     return bgEntries.find((e) => e.key === `tool:${id}`) ?? null;
   }
 
-  function onTurnsKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      turnsOpen = false;
-      turnsButton?.focus();
-      return;
-    }
-    // Arrow / Home / End walk the list: a long thread must not need one Tab
-    // per turn. The ends hold rather than wrap, so a held arrow stops.
-    const rows = Array.from(turnsList?.querySelectorAll<HTMLButtonElement>('button') ?? []);
-    if (rows.length === 0) return;
-    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
-    const to =
-      e.key === 'ArrowDown' ? at + 1
-      : e.key === 'ArrowUp' ? at - 1
-      : e.key === 'Home' ? 0
-      : e.key === 'End' ? rows.length - 1
-      : null;
-    if (to === null) return;
-    e.preventDefault();
-    rows[Math.max(0, Math.min(to, rows.length - 1))]?.focus();
-  }
-  $effect(() => {
-    if (turnsOpen) turnsList?.querySelector('button')?.focus();
-  });
-  // Close the list on an outside pointerdown (as ConversationHeader does).
-  $effect(() => {
-    if (!turnsOpen) return;
-    function onDocPointerDown(e: PointerEvent) {
-      if (turnsWrap && e.target instanceof Node && !turnsWrap.contains(e.target)) turnsOpen = false;
-    }
-    document.addEventListener('pointerdown', onDocPointerDown);
-    return () => document.removeEventListener('pointerdown', onDocPointerDown);
-  });
-
   // One probe in flight at a time (a wedged host must not stack ssh
   // processes every 2 s), and a slow one never overwrites a newer result.
   let probing = false;
@@ -789,6 +776,28 @@
     if (!visible || !canPrompt) return;
     void tick().then(() => box?.focus());
   });
+  function measureChips() {
+    if (!chipsRow) return;
+    chipsOverflow = needsMore(chipsRow.scrollWidth, chipsRow.clientWidth);
+    if (!chipsOverflow) chipsExpanded = false;
+  }
+  $effect(() => {
+    if (!chipsRow) return;
+    // The row's own border-box need not change when the preset count does,
+    // so a ResizeObserver on it alone can miss a preset-list change. Read
+    // the store here so the effect re-runs (and re-measures) whenever it does.
+    void $composerPresets;
+    measureChips();
+    // ResizeObserver is absent in jsdom; the resize listener is what the
+    // component test drives, and both paths call the same measurement.
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measureChips);
+    ro?.observe(chipsRow);
+    window.addEventListener('resize', measureChips);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', measureChips);
+    };
+  });
   const canSend = $derived(draft.trim().length > 0 && !sending && viewing === null);
   const statusNote = $derived(
     viewing !== null
@@ -805,6 +814,7 @@
   // the same id to assistive tech.
   const SLASH_LIST_ID = `conv-slash-list-${hlSuffix}`;
   const slashOptionId = (i: number) => `conv-slash-opt-${hlSuffix}-${i}`;
+  const COMPOSER_HINT_ID = `conv-composer-hint-${hlSuffix}`;
   const history = $derived(promptHistory(conv, pending));
 
   /** ArrowUp / ArrowDown recall. Returns true when the key was consumed. */
@@ -876,15 +886,85 @@
     sending = true;
     sendError = null;
     const id = session.id;
-    const r = await sendPrompt(session.host_alias, session.tmux_name, text);
+
+    // Attachments upload first; their remote paths ride along in the prompt
+    // text. A pasted entry has an empty `path` (see attachments.ts) — never
+    // authorised for the allow-list — so it is left out of `local_paths`
+    // rather than sent to `upload_attachments` at all. With nothing
+    // uploadable, nothing can fail: the draft (if any) still goes out on its
+    // own rather than being refused over a tile that was already showing its
+    // own honest error, and the tile itself is never touched below — it was
+    // never attempted, so it is not this send's to clear or flag.
+    const toUpload = attachments.filter((a) => a.path !== '');
+    const toUploadIds = new Set(toUpload.map((a) => a.id));
+
+    // `upload_attachments` consumes each path's allow-list entry the moment
+    // it clears the byte budget — before a byte moves, and not undone by a
+    // later failure (`UploadAllowList::consume` in
+    // `src-tauri/src/commands/upload.rs`). So a failure anywhere downstream
+    // of that point — the upload call itself, this side's own `tooLong`
+    // refusal, or a failed `sendPrompt` — can leave a tile in `toUpload`
+    // looking untouched while its local path is already unusable for a
+    // second attempt: pressing Send again would call `upload_attachments`
+    // with the same path and get back an authorisation error instead of a
+    // real retry. Rather than guess which specific failure actually
+    // consumed it, every failure below marks the attempted tiles as spent —
+    // occasionally more cautious than strictly necessary (a size-budget
+    // refusal happens before `consume`), never wrong.
+    let paths: string[] = [];
+    if (toUpload.length > 0) {
+      const up = await invokeCmd<string[]>('upload_attachments', {
+        args: {
+          host_alias: session.host_alias,
+          session_name: session.tmux_name,
+          local_paths: toUpload.map((a) => a.path),
+        },
+      });
+      if (session.id !== id) {
+        sending = false;
+        return;
+      }
+      if (!up.ok) {
+        // The draft stays: a prompt without its attachment is a worse
+        // outcome than no prompt at all.
+        sendError = up.error.message;
+        attachments = markNeedsReattach(attachments, toUploadIds);
+        sending = false;
+        return;
+      }
+      paths = up.value;
+    }
+
+    const body = withAttachments(text, paths);
+    // A remote send is quoted twice (see attach_prompt.ts's header comment
+    // for why that compounds rather than doubles), so the bound applied
+    // here must match the host the prompt is actually going to.
+    if (tooLong(body, session.host_alias === 'local')) {
+      // The file(s), if any, already uploaded successfully — only the
+      // prompt text is refused — so a retry needs a shorter prompt AND,
+      // since the upload above already spent the tile, a fresh attach.
+      sendError = 'That prompt is too long to send through tmux. Shorten it.';
+      attachments = markNeedsReattach(attachments, toUploadIds);
+      sending = false;
+      return;
+    }
+
+    const r = await sendPrompt(session.host_alias, session.tmux_name, body);
     sending = false;
     // The selection moved while the send was on the wire: the prompt landed
     // in the old session; none of its state belongs to the new one.
     if (session.id !== id) return;
     if (!r.ok) {
       sendError = r.error.message;
+      attachments = markNeedsReattach(attachments, toUploadIds);
       return;
     }
+    // Only the attachments this send actually uploaded are spent; anything
+    // it could not upload (a pasted entry) was never attempted and stays,
+    // so the evidence that it did not go is not lost.
+    attachments = clearSent(attachments, toUploadIds);
+    // The notes were about the tray that just went; they do not carry over.
+    attachErrors = [];
     if (text === '') return;
     switchNotice = null;
     // Only the box's own text is spent by a send; a chip sent with
@@ -902,11 +982,11 @@
     sentTurnSeq = session.turn_seq;
     idleSeenSinceSend = false;
     pending = {
-      prompt: text,
+      prompt: body,
       at: new Date().toISOString(),
       // how many turns already carried this exact text, so a repeat of an
       // earlier prompt is not mistaken for the transcript catching up
-      seen: conv?.turns.filter((t) => t.prompt === text).length ?? 0,
+      seen: conv?.turns.filter((t) => t.prompt === body).length ?? 0,
     };
     await tick();
     scrollToBottom();
@@ -991,6 +1071,237 @@
     if (atBottom) unseen = 0;
   }
 
+  /** Run a mutation that changes the composer's height without moving the
+   *  transcript under the reader. The composer is flex: 0 0 auto at the
+   *  bottom of a column flex, so it grows by taking from the scroller. */
+  export function preserveThread(mutate: () => void): void {
+    const el = scroller;
+    if (!el) {
+      mutate();
+      return;
+    }
+    const wasAtBottom = atBottom;
+    const before = el.clientHeight;
+    mutate();
+    requestAnimationFrame(() => {
+      if (wasAtBottom) {
+        el.scrollTop = el.scrollHeight;
+        return;
+      }
+      el.scrollTop += before - el.clientHeight;
+    });
+  }
+
+  // ---- attachments -------------------------------------------------------
+  //
+  // The composer holds the list; the limits, the naming and every rejection
+  // sentence live in `attachments.ts`. Only two origins can ever produce a
+  // path the Rust side will read or upload: the OS picker
+  // (`pick_attachments` authorises its own result) and an OS drop (the Tauri
+  // window event puts the paths on the allow-list before the webview sees
+  // anything). A pasted file has neither, and `addFiles` says so.
+
+  let attachments = $state<Attachment[]>([]);
+  let attachErrors = $state<string[]>([]);
+  /** dragleave fires for every child, so DOM nesting is counted, not flagged. */
+  let dragDepth = $state(0);
+  /** The veil's other source: Tauri's drag-drop event, hit-tested against the
+   *  shell. Kept apart from `dragDepth` because the two arrive independently
+   *  and neither can clear the other's state. */
+  let dragOverShell = $state(false);
+  let shellEl = $state<HTMLDivElement | null>(null);
+  const dragging = $derived(dragDepth > 0 || dragOverShell);
+
+  /** Attaching exists to upload: gate the control on the command that does
+   *  the work, not on the picker that only feeds it. */
+  const attachBlocked = $derived(
+    hubActionBlocked('upload_attachments', $hubStatus, $hubConnection),
+  );
+
+  /**
+   * Every sentence the composer owes the user about attaching: the
+   * rejections `addFiles` returned, plus the per-tile errors — a pasted
+   * file's above all, which would otherwise live only in a tooltip and read
+   * as a bare red square. Deduped: the same sentence twice says nothing
+   * twice (and `{#each}` needs the key to be unique).
+   */
+  const attachNotes = $derived([
+    ...new Set([
+      ...attachErrors,
+      ...attachments.flatMap((a) => (a.state === 'error' && a.error ? [a.error] : [])),
+    ]),
+  ]);
+
+  function hasFiles(dt: DataTransfer | null): boolean {
+    return !!dt && Array.from(dt.types).includes('Files');
+  }
+
+  async function attach(picked: PickedFile[]) {
+    const { next, rejected } = addFiles(attachments, picked);
+    // Appended, not replaced: two gestures that each rejected a file owe the
+    // user two sentences. `attachNotes` dedupes, so a repeat says it once,
+    // and a send clears the lot.
+    attachErrors = [...attachErrors, ...rejected];
+    preserveThread(() => (attachments = next));
+    // `pasted` is belt and braces: addFiles already lands a pasted entry as
+    // `error`, never `reading`. Previewing one would come back E_FORBIDDEN
+    // (no path was ever authorised) and replace an honest sentence with a
+    // permission error.
+    for (const a of next.filter((x) => !x.pasted && x.state === 'reading')) {
+      const r = await invokeCmd<string | null>('attachment_preview', { path: a.path });
+      attachments = attachments.map((x) =>
+        x.id !== a.id
+          ? x
+          : r.ok
+            ? // null is an ordinary answer: not an inlineable image, or over
+              // 2 MiB. The tile falls back to its extension, not to an error.
+              { ...x, thumb: r.value, state: 'ready' as const }
+            : { ...x, state: 'error' as const, error: r.error.message },
+      );
+    }
+  }
+
+  /** The tile is the 44px control; the 18px × on it is a pointer shortcut.
+   *  Backspace and Delete are what a composer's attachment chip does
+   *  everywhere else, and without them the only way to remove one is that
+   *  sub-24px button. */
+  function onTileKey(e: KeyboardEvent, id: string) {
+    if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+    e.preventDefault();
+    removeAttachment(id);
+  }
+
+  function removeAttachment(id: string) {
+    preserveThread(() => (attachments = attachments.filter((a) => a.id !== id)));
+  }
+
+  async function pickFiles() {
+    if (attachBlocked !== null) return;
+    const r = await invokeCmd<PickedFile[]>('pick_attachments', {});
+    if (r.ok) await attach(r.value ?? []);
+    else attachErrors = [r.error.message];
+  }
+
+  function onShellDragEnter(e: DragEvent) {
+    if (!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth++;
+  }
+  function onShellDragOver(e: DragEvent) {
+    if (!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  }
+  function onShellDragLeave() {
+    dragDepth = Math.max(0, dragDepth - 1);
+  }
+  /**
+   * The DOM drop carries NO usable file: in a WKWebView a dropped `File` has
+   * no filesystem path, and a path is the only thing the Rust allow-list
+   * matches on. So this handler exists for one reason — to stop the event
+   * reaching App.svelte's window-level guard, which would otherwise let the
+   * webview navigate to `file://` and take the whole app state with it. The
+   * paths arrive on Tauri's own drag-drop event instead (see below).
+   */
+  function onShellDrop(e: DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth = 0;
+  }
+
+  function pointInShell(px: number, py: number): boolean {
+    // `.view-slot` is `position: absolute; inset: 0`, so App.svelte's Hosts
+    // and Assets overlays cover a panel that is still mounted and still laid
+    // out at these very coordinates. Without this, a drop while one of them
+    // is open attaches a file under an opaque overlay — the veil drawn
+    // beneath it, the user seeing nothing happen.
+    if (!visible || !shellEl) return false;
+    // NOT divided by devicePixelRatio: the event's position is already in
+    // logical points (see the contract on `pointInRect` in geometry.ts).
+    return pointInRect(px, py, shellEl.getBoundingClientRect());
+  }
+
+  /**
+   * Measures dropped paths in Rust (`attachment_describe`) before attaching
+   * them — Tauri's drag-drop event carries paths only, with no size, so
+   * without this round trip a dropped file would sail past `addFiles`'s
+   * `MAX_BYTES`/`MAX_TOTAL` the way a picked one never can. A failure (an
+   * expired allow-list entry, most likely) is shown the same way a failed
+   * pick is, rather than falling back to an unmeasured attachment.
+   */
+  async function describeDroppedPaths(paths: string[]) {
+    const r = await invokeCmd<PickedFile[]>('attachment_describe', { paths });
+    if (r.ok) await attach(r.value ?? []);
+    else attachErrors = [r.error.message];
+  }
+
+  function onDroppedPaths(paths: string[]) {
+    // The same refusal the attach button carries: nothing here could upload.
+    if (attachBlocked !== null || paths.length === 0) return;
+    // These paths are already on the Rust allow-list — `lib.rs` recorded them
+    // from this very event before the webview heard about it.
+    const real = paths.filter((p) => p !== '');
+    if (real.length === 0) return;
+    void describeDroppedPaths(real);
+  }
+
+  /**
+   * Tauri's drag-drop event: the only place the webview learns a dropped
+   * file's path, and the same event the backend authorises those paths from.
+   * Hit-tested against the shell, the way TerminalView hit-tests its grid, so
+   * a drop anywhere else in the window does nothing at all.
+   */
+  $effect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === 'enter' || p.type === 'over') {
+          dragOverShell = pointInShell(p.position.x, p.position.y);
+        } else if (p.type === 'leave') {
+          dragOverShell = false;
+        } else if (p.type === 'drop') {
+          const over = pointInShell(p.position.x, p.position.y);
+          dragOverShell = false;
+          dragDepth = 0;
+          if (over) onDroppedPaths(p.paths ?? []);
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      // Subscribing can reject (no Tauri host, a webview torn down
+      // mid-call). Dropping the drag-drop feed costs the drop target, not
+      // the panel — so it must not surface as an unhandled rejection.
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
+
+  function onComposerPaste(e: ClipboardEvent) {
+    const dt = e.clipboardData;
+    if (!dt || dt.files.length === 0) return;
+    // A rich-text paste carries both; the text half wins.
+    if (dt.getData('text/plain').trim().length > 0) return;
+    e.preventDefault();
+    void attach(
+      Array.from(dt.files).map((f) => ({
+        // Deliberately empty: clipboard bytes have no filesystem path, and
+        // `addFiles` keys the "not supported yet" tile off exactly that.
+        path: '',
+        name: f.name === 'image.png' ? pastedName(new Date()) : f.name,
+        size: f.size,
+        kind: f.type.startsWith('image/') ? ('image' as const) : ('binary' as const),
+      })),
+    );
+  }
+
   /** Open a tool group when it becomes the running turn's last group; never
    *  close one, and never re-open one the user closed while it stays the
    *  running group, so manual toggles survive transcript refreshes. */
@@ -1035,7 +1346,37 @@
 </script>
 
 <div class="conversation-panel" data-testid="conversation-panel" bind:this={root}>
-  <ConversationHeader {session} {conversations} {viewing} {lastEvent} {newerAvailable} onSelect={select} />
+  <ConversationHeader
+    {session}
+    {conversations}
+    {viewing}
+    {lastEvent}
+    {newerAvailable}
+    onSelect={select}
+    bind:this={header}
+    {findOpen}
+    findDisabled={!threadShown}
+    {findQuery}
+    {findCount}
+    matchCount={matches.length}
+    {turnEntries}
+    {turnsOpen}
+    {nowMs}
+    onFindOpen={() => void openFind()}
+    onFindClose={closeFind}
+    onFindInput={(q) => {
+      findQuery = q;
+      findIndex = 0;
+    }}
+    {onFindKey}
+    onFindStep={stepFind}
+    onTurnsToggle={() => (turnsOpen = !turnsOpen)}
+    onPickTurn={pickTurn}
+    {bgGroups}
+    {backgroundOpen}
+    onBackgroundToggle={() => (backgroundOpen = !backgroundOpen)}
+    onPickBackground={openBackground}
+  />
   {#if viewing !== null}
     <div class="viewing" data-testid="conv-viewing-banner">
       Viewing an earlier conversation · <button type="button" class="linkish" data-testid="conv-back-current" onclick={() => select(null)}>Back to current</button>
@@ -1073,87 +1414,11 @@
       bind:this={scroller}
       onscroll={onScroll}
     >
-      {#if findOpen}
-        <div class="find" data-testid="conv-find">
-          <input
-            type="search"
-            data-testid="conv-find-input"
-            aria-label="Find in conversation"
-            placeholder="Find in conversation"
-            bind:this={findInput}
-            bind:value={findQuery}
-            oninput={() => (findIndex = 0)}
-            onkeydown={onFindKey}
-          />
-          <span class="find-count" data-testid="conv-find-count" aria-live="polite">{findCount}</span>
-          <button type="button" class="tb-btn" data-testid="conv-find-prev" aria-label="Previous match" disabled={matches.length === 0} onclick={() => stepFind(-1)}>↑</button>
-          <button type="button" class="tb-btn" data-testid="conv-find-next" aria-label="Next match" disabled={matches.length === 0} onclick={() => stepFind(1)}>↓</button>
-          <button type="button" class="tb-btn" data-testid="conv-find-close" aria-label="Close find" onclick={closeFind}>×</button>
-        </div>
-      {:else if conv}
-        <div class="toolbar" data-testid="conv-toolbar">
-          <button type="button" class="tb-btn" data-testid="conv-find-button" aria-label="Find in conversation" title="Find (⌘F / Ctrl+F)" onclick={() => void openFind()}>⌕ Find</button>
-          {#if turnEntries.length > 0}
-            <div class="turns-wrap" bind:this={turnsWrap}>
-              <button
-                type="button"
-                class="tb-btn"
-                data-testid="conv-turns-button"
-                aria-expanded={turnsOpen}
-                bind:this={turnsButton}
-                onclick={() => (turnsOpen = !turnsOpen)}>{turnEntries.length} turn{turnEntries.length === 1 ? '' : 's'}</button
-              >
-              {#if turnsOpen}
-                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-                <ul class="turn-index" aria-label="Turns" data-testid="conv-turn-index" bind:this={turnsList} onkeydown={onTurnsKey}>
-                  {#each turnEntries as t (t.rowKey)}
-                    <li>
-                      <button type="button" data-testid="conv-turn-index-item" onclick={() => pickTurn(t.rowKey)}>
-                        <span class="ti-label">{t.label}</span>
-                        {#if t.at}<time datetime={t.at}>{relativeTime(t.at, nowMs)}</time>{/if}
-                      </button>
-                    </li>
-                  {/each}
-                </ul>
-              {/if}
-            </div>
-          {/if}
-          {#if bgEntries.length > 0}
-            <div class="turns-wrap">
-              <button
-                type="button"
-                class="tb-btn"
-                data-testid="conv-background-button"
-                aria-expanded={backgroundOpen}
-                onclick={() => (backgroundOpen = !backgroundOpen)}
-                >{bgEntries.length} background</button
-              >
-              {#if backgroundOpen}
-                <div class="turn-index bg-groups" data-testid="conv-background-list">
-                  {#each bgGroups as g (g.title)}
-                    <div class="bg-group" data-testid="conv-background-group">{g.title}</div>
-                    <ul aria-label={g.title}>
-                      {#each g.entries as e (e.key)}
-                        <li>
-                          <button type="button" data-testid="conv-background-item" onclick={() => openBackground(e)}>
-                            <span class="ti-label">{e.kind} · {e.label}</span>
-                            <span class="bg-item-status" data-status={e.status}>{e.status}</span>
-                          </button>
-                        </li>
-                      {/each}
-                    </ul>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          {/if}
-        </div>
-      {/if}
       <div class="thread">
         {#if errorMsg && !empty}
           <div class="error-row">
             <span class="err" data-testid="conv-error">{errorMsg}</span>
-            <button type="button" data-testid="conv-retry" onclick={() => void load()}>Retry</button>
+            <button type="button" class="btn btn--quiet is-bounded" data-testid="conv-retry" onclick={() => void load()}>Retry</button>
           </div>
         {/if}
         {#if conv?.truncated}
@@ -1379,24 +1644,25 @@
       {#if sendError}
         <div class="composer-error" data-testid="conv-composer-error">{sendError}</div>
       {/if}
-      <div class="chips" data-testid="conv-chips">
-        {#if liveStuck === 'press_enter'}
+      {#if liveStuck === 'press_enter'}
+        <div class="stuck-row">
           <button
             type="button"
-            class="chip stuck"
+            class="btn btn--chip btn--warn"
             data-testid="conv-chip-enter"
             title="The session is waiting on a key press. Sends a bare Enter."
             disabled={sending || viewing !== null}
-            onclick={() => void sendText('')}>⏎ Press Enter</button
-          >
-        {/if}
+            onclick={() => void sendText('')}>⏎ Press Enter</button>
+        </div>
+      {/if}
+      <div class="chips" data-testid="conv-chips" data-expanded={chipsExpanded} bind:this={chipsRow}>
         {#each $composerPresets as p, i (i)}
           {#if p.label.trim() && p.text.trim()}
             {@const suggested = suggestCompact && isCompactPreset(p)}
             <button
               type="button"
-              class="chip"
-              class:suggest={suggested}
+              class="btn btn--chip"
+              class:btn--warn={suggested}
               data-testid="conv-chip"
               data-suggested={suggested || undefined}
               title={suggested
@@ -1408,22 +1674,96 @@
           {/if}
         {/each}
       </div>
-      <div class="composer-row">
+      {#if chipsOverflow}
+        <button
+          type="button"
+          class="btn btn--chip chips-more"
+          data-testid="conv-chips-more"
+          aria-expanded={chipsExpanded}
+          onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : 'More'} ▾</button>
+      {/if}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="composer-shell"
+        bind:this={shellEl}
+        class:is-dragging={dragging}
+        ondragenter={onShellDragEnter}
+        ondragover={onShellDragOver}
+        ondragleave={onShellDragLeave}
+        ondrop={onShellDrop}
+      >
+        {#if attachments.length}
+          <ul class="attach-strip" data-testid="conv-attachments" aria-label="Attachments">
+            {#each attachments as a (a.id)}
+              <!-- The tile is deliberately focusable: it is the 44px control,
+                   and Backspace/Delete on it is the keyboard path the 18px ×
+                   is too small to be on its own. A role would be a lie (the
+                   tile is a list item that CONTAINS a button, not a button),
+                   so the two rules are suppressed rather than papered over
+                   with role="button". The accessible name says what the key
+                   does. -->
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+              <li class="attach" data-testid="conv-attachment" data-state={a.state}
+                tabindex="0" onkeydown={(e) => onTileKey(e, a.id)}
+                aria-label="{a.name}, press Backspace to remove"
+                title="{a.name}{a.size > 0 ? ` · ${fmtBytes(a.size)}` : ''}{a.error ? ` · ${a.error}` : ''}">
+                {#if a.thumb}
+                  <!-- A preview can be an SVG data URL (classify maps .svg to
+                       an image). Inside <img> it cannot run script; inlined as
+                       markup it would, in this app's origin. Never an html tag. -->
+                  <img class="attach-img" src={a.thumb} alt="" />
+                {:else}
+                  <span class="attach-ext">{a.name.split('.').pop() ?? 'file'}</span>
+                {/if}
+                <button type="button" class="btn btn--icon btn--quiet attach-x" data-testid="conv-attachment-remove"
+                  aria-label="Remove {a.name}" title="Remove {a.name}" onclick={() => removeAttachment(a.id)}>×</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#each attachNotes as msg (msg)}
+          <p class="attach-error" role="status" data-testid="conv-attach-error">{msg}</p>
+        {/each}
         <textarea
+          class="composer-input"
           data-testid="conv-composer-input"
           aria-label="Prompt"
           aria-controls={slashOpen ? SLASH_LIST_ID : undefined}
           aria-activedescendant={slashOpen ? slashOptionId(Math.min(slashIndex, slashMatches.length - 1)) : undefined}
+          aria-describedby={COMPOSER_HINT_ID}
           bind:this={box}
           bind:value={draft}
           oninput={onComposerInput}
           onkeydown={onComposerKey}
           rows="2"
           use:autoGrow={draft}
-          placeholder="Send a prompt to this session (Enter to send, Shift+Enter for a new line, ↑ recalls earlier prompts)"
+          onpaste={onComposerPaste}
+          placeholder="Send a prompt…"
           disabled={sending || viewing !== null}
         ></textarea>
-        <button type="submit" data-testid="conv-composer-send" aria-keyshortcuts="Enter" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>
+        <div class="composer-actions">
+          <button
+            type="button"
+            class="btn btn--icon btn--quiet"
+            data-testid="conv-attach-button"
+            aria-label="Attach files"
+            title={attachBlocked ?? 'Attach files'}
+            aria-disabled={attachBlocked !== null}
+            onclick={pickFiles}>⌾</button>
+          <span class="composer-hint" id={COMPOSER_HINT_ID}>↵ send · ⇧↵ newline · ↑ history</span>
+          <button
+            type="submit"
+            class="btn btn--icon btn--primary"
+            data-testid="conv-composer-send"
+            aria-label="Send prompt"
+            title="Send (Enter)"
+            aria-keyshortcuts="Enter"
+            disabled={!canSend}>{sending ? '…' : '↑'}</button>
+        </div>
+        {#if dragging}
+          <div class="drop-veil" aria-hidden="true">Drop to attach</div>
+        {/if}
       </div>
       {#if statusNote}
         <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
@@ -1437,8 +1777,12 @@
 <style>
   .conversation-panel {
     /* The reading column every part of the thread lines up with: the turns,
-       the sticky toolbar, the chips, the slash menu and the composer. */
+       the sticky header, the chips, the slash menu and the composer. */
     --chat-col: 80ch;
+    /* The one horizontal inset: the header, the turns and the composer all
+       start on this edge. Before this existed, the textarea sat 15px left
+       of the bubbles it produced. */
+    --chat-inset: max(1.1rem, calc((100% - var(--chat-col)) / 2 + 1.1rem));
     /* The tab is a resizable pane, not the window: what adapts below has to
        ask this element's width, so the whole chat is one query container. */
     container-type: inline-size;
@@ -1468,141 +1812,6 @@
   .scroller:focus {
     outline: none;
   }
-  .toolbar,
-  .find {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    /* Full-bleed background and rule, but the controls sit over the column
-       they act on rather than out at the pane's edge. */
-    padding: 0.25rem max(1.1rem, calc((100% - var(--chat-col)) / 2));
-    border-bottom: 1px solid var(--border);
-    background: var(--bg);
-    font-size: 0.74rem;
-  }
-  .toolbar {
-    justify-content: flex-end;
-  }
-  .find input {
-    flex: 1 1 auto;
-    min-width: 0;
-    max-width: 40ch;
-    padding: 0.2rem 0.45rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg-pane);
-    color: var(--fg);
-    font: inherit;
-  }
-  .find input:focus {
-    outline: none;
-    border-color: var(--accent);
-  }
-  .find-count {
-    min-width: 4.5ch;
-    color: var(--fg-muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .tb-btn {
-    padding: 0.1rem 0.45rem;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: none;
-    color: var(--fg-muted);
-    font-size: 0.74rem;
-    cursor: pointer;
-  }
-  .tb-btn:hover:not(:disabled),
-  .tb-btn:focus-visible {
-    border-color: var(--border);
-    color: var(--fg);
-  }
-  .tb-btn:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-  .turns-wrap {
-    position: relative;
-  }
-  .turn-index {
-    position: absolute;
-    right: 0;
-    top: calc(100% + 0.25rem);
-    z-index: 3;
-    width: min(60ch, 90cqw);
-    max-height: 22rem;
-    overflow: auto;
-    overscroll-behavior: contain;
-    margin: 0;
-    padding: 0.25rem 0;
-    list-style: none;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    box-shadow: 0 4px 14px color-mix(in srgb, var(--fg) 15%, transparent);
-  }
-  .turn-index:focus {
-    outline: none;
-  }
-  .turn-index button {
-    display: flex;
-    width: 100%;
-    align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.3rem 0.65rem;
-    border: none;
-    background: none;
-    color: var(--fg);
-    font: inherit;
-    font-size: 0.78rem;
-    text-align: left;
-    cursor: pointer;
-  }
-  .turn-index button:hover,
-  .turn-index button:focus-visible {
-    outline: none;
-    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
-  }
-  .ti-label {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* The grouped dropdown keeps `.turn-index`'s popup chrome; the inner lists
-     shed the browser's own list styling. */
-  .bg-groups ul {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-  .bg-group {
-    padding: 0.3rem 0.65rem 0.15rem;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--fg-muted);
-  }
-  .bg-group:not(:first-child) {
-    margin-top: 0.25rem;
-    border-top: 1px solid var(--border);
-    padding-top: 0.4rem;
-  }
-  .bg-item-status {
-    margin-left: auto;
-    font-size: 0.72rem;
-    color: var(--fg-muted);
-  }
-  .bg-item-status[data-status='failed'] {
-    color: var(--usage-crit);
-  }
-  .bg-item-status[data-status='stopped'] {
-    color: var(--usage-warn);
-  }
   [data-match] {
     outline: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
     outline-offset: 3px;
@@ -1610,16 +1819,6 @@
   }
   [data-current-match] {
     outline: 2px solid var(--accent);
-  }
-  .copy-slot {
-    opacity: 0;
-    transition: opacity 0.1s ease;
-  }
-  .prompt:hover .copy-slot,
-  .prompt:focus-within .copy-slot,
-  .text:hover > .copy-slot,
-  .text:focus-within > .copy-slot {
-    opacity: 1;
   }
   .head-right {
     display: inline-flex;
@@ -1641,85 +1840,168 @@
     flex: 0 0 auto;
     border-top: 1px solid var(--border);
     background: var(--bg-pane);
-    padding: 0.55rem 1.1rem 0.6rem;
+    padding: 0.55rem var(--chat-inset) 0.6rem;
+  }
+  .stuck-row {
+    display: flex;
+    margin: 0 0 6px;
+  }
+  .stuck-row .btn {
+    width: 100%;
+    justify-content: flex-start;
   }
   .chips {
     display: flex;
+    gap: var(--control-gap);
+    margin: 0 0 6px;
+    /* One row by default; growth is a deliberate toggle, not a reflow. */
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+  .chips[data-expanded='true'] {
     flex-wrap: wrap;
-    gap: 0.35rem;
-    max-width: var(--chat-col);
-    margin: 0 auto 0.4rem;
+    overflow: visible;
   }
-  .chip {
-    padding: 0.15rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: var(--bg);
-    color: var(--fg-muted);
-    font-size: 0.72rem;
-    cursor: pointer;
-  }
-  .chip:hover:not(:disabled) {
-    border-color: var(--accent);
-    color: var(--fg);
-  }
-  .chip:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .chip.stuck {
-    border-color: var(--usage-warn);
-    color: var(--usage-warn);
-  }
-  .composer-row {
+  .composer-shell {
+    position: relative;
     display: flex;
-    align-items: flex-end;
-    gap: 0.5rem;
-    max-width: var(--chat-col);
-    margin: 0 auto;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 6px 4px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-md);
+    background: var(--control-bg);
   }
-  .composer textarea {
-    flex: 1 1 auto;
-    min-height: 2.6rem;
-    max-height: 12rem;
+  .composer-shell:focus-within {
+    border-color: var(--accent);
+  }
+  .attach-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--control-gap);
+    margin: 0 0 2px;
+    padding: 0 2px;
+    list-style: none;
+    /* Exactly two rows, then scroll: growth is quantised to 50px so
+       preserveThread corrects by a clean integer. */
+    max-height: 94px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .attach {
+    position: relative;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-pane);
+    overflow: hidden;
+  }
+  .attach:focus-visible {
+    outline: var(--ring-w) solid var(--accent);
+    outline-offset: 1px;
+  }
+  .attach-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .attach-ext {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--control-fg-quiet);
+  }
+  /* 18px, below the 24px target floor, and bounded to this one case. What
+     makes that survivable is the tile itself: 44px, focusable, and removing
+     on Backspace/Delete (`onTileKey`), so the × is a pointer shortcut rather
+     than the only way out. On a coarse pointer it is also always visible
+     instead of hover-revealed. */
+  .attach-x {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    background: color-mix(in srgb, var(--bg) 78%, transparent);
+    color: var(--fg);
+    font-size: 13px;
+    opacity: 0;
+  }
+  .attach:hover .attach-x,
+  .attach:focus-within .attach-x,
+  .attach-x:focus-visible { opacity: 1; }
+  @media (hover: none) { .attach-x { opacity: 1; } }
+  .attach[data-state='reading'] { opacity: 0.6; }
+  .attach[data-state='error'] {
+    border-color: var(--usage-crit);
+    box-shadow: inset 0 0 0 1px var(--usage-crit);
+  }
+  .attach-error {
+    margin: 0 0 2px;
+    padding: 0 2px;
+    color: var(--usage-crit);
+    font-size: var(--control-font-sm);
+  }
+  .composer-shell.is-dragging {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .drop-veil {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    color: var(--accent);
+    font-size: var(--control-font);
+    font-weight: 600;
+    /* Must not eat the drop event. */
+    pointer-events: none;
+  }
+  .composer-input {
+    min-height: 40px;
+    max-height: 168px;
     /* The box sizes itself to the draft (see autoGrow); a manual drag would
        only be overwritten on the next keystroke. */
     resize: none;
-    padding: 0.45rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
+    padding: 2px 4px;
+    border: 0;
+    background: none;
     color: var(--fg);
     font: inherit;
-    font-size: 0.85rem;
+    font-size: 13px;
     line-height: 1.45;
   }
-  .composer textarea:focus {
+  .composer-input:focus {
     outline: none;
-    border-color: var(--accent);
   }
-  .composer button {
-    flex: 0 0 auto;
-    padding: 0.45rem 0.9rem;
-    border: 1px solid var(--accent);
-    border-radius: 6px;
-    background: var(--accent);
-    color: var(--bg);
-    font-size: 0.8rem;
-    font-weight: 600;
-    cursor: pointer;
+  .composer-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--control-gap);
+    min-height: var(--control-h-lg);
   }
-  .composer button:disabled {
-    opacity: 0.45;
-    cursor: default;
+  .composer-hint {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--control-fg-quiet);
+    font-size: var(--control-font-sm);
+  }
+  @container chat (max-width: 26rem) {
+    .composer-hint { display: none; }
   }
   .slash-menu {
     list-style: none;
-    max-width: var(--chat-col);
     max-height: 14rem;
     overflow: auto;
     overscroll-behavior: contain;
-    margin: 0 auto 0.4rem;
+    margin: 0 0 0.4rem;
     padding: 0.25rem 0;
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -1756,21 +2038,14 @@
     white-space: nowrap;
   }
   .composer-error {
-    max-width: var(--chat-col);
-    margin: 0 auto 0.35rem;
+    margin: 0 0 0.35rem;
     color: var(--usage-crit);
     font-size: 0.75rem;
   }
   .composer-status {
-    max-width: var(--chat-col);
-    margin: 0.35rem auto 0;
+    margin: 0.35rem 0 0;
     color: var(--fg-muted);
     font-size: 0.75rem;
-  }
-  .chip.suggest {
-    border-color: var(--usage-warn);
-    color: var(--fg);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--usage-warn) 25%, transparent);
   }
   .indicator {
     display: flex;
@@ -1817,7 +2092,6 @@
       animation: none;
       opacity: 0.7;
     }
-    .copy-slot,
     .tools summary::before {
       transition: none;
     }
@@ -1860,9 +2134,13 @@
     background: color-mix(in srgb, var(--usage-warn) 20%, var(--bg-pane));
   }
   .thread {
-    max-width: var(--chat-col);
-    margin: 0 auto;
-    padding: 1rem 1.1rem 2.5rem;
+    /* No max-width/margin centering here: a centered chat-col box plus a
+       --chat-inset padding would double-count the outer margin on wide
+       panes. A full-width box with only the inset padding gives the same
+       effective column (chat-col minus the gutters) and, critically, the
+       same left edge as the header and the composer, which use the same
+       recipe. */
+    padding: 1rem var(--chat-inset) 2.5rem;
   }
   .muted { color: var(--fg-muted); font-style: italic; font-size: 0.8rem; margin: 0.6rem; }
   .empty-state {
@@ -2181,10 +2459,6 @@
     .readonly,
     .viewing,
     .switch-notice {
-      padding-inline: 0.6rem;
-    }
-    .toolbar,
-    .find {
       padding-inline: 0.6rem;
     }
     .blocked {

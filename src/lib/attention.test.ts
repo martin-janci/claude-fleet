@@ -7,7 +7,6 @@ import {
   claudeStatusLabel,
   contextLevel,
   contextColor,
-  contextTint,
   countNeedsYou,
   displayName,
   formatElapsed,
@@ -109,10 +108,8 @@ describe('contextColor', () => {
   it('uses the shared usage theme tokens for warn and crit', () => {
     expect(contextColor('crit')).toBe('var(--usage-crit)');
     expect(contextColor('warn')).toBe('var(--usage-warn)');
-    expect(contextColor('ok')).toBe('#50c86e');
+    expect(contextColor('ok')).toBe('var(--usage-ok)');
     expect(contextColor(null)).toBe('transparent');
-    expect(contextTint('crit')).toBe('color-mix(in srgb, var(--usage-crit) 33%, transparent)');
-    expect(contextTint(null)).toBe('transparent');
   });
 });
 
