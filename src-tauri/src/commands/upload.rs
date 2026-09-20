@@ -399,7 +399,22 @@ async fn resolve_worktree_root(
 ) -> Result<String, IpcError> {
     let script = fleet_core::service::attachments::root_script(session_name);
     let out = run_script(ssh, host, &script, timeout).await?;
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    last_nonempty_line(&String::from_utf8_lossy(&out.stdout), host)
+}
+
+/// The worktree root is whichever line the script printed LAST — a login
+/// shell's `bash -lc` can prepend banner/profile output ahead of the real
+/// `git rev-parse` line — and must not be empty: building a path from
+/// nothing would silently point at `/`.
+fn last_nonempty_line(stdout: &str, host: &str) -> Result<String, IpcError> {
+    let root = stdout.lines().next_back().unwrap_or("").trim();
+    if root.is_empty() {
+        return Err(IpcError::new(
+            codes::E_UPLOAD,
+            format!("on {host}: resolving the worktree root produced no output"),
+        ));
+    }
+    Ok(root.to_string())
 }
 
 /// Copy `local_paths` (named `names`, in order) into `dir` on `host` and
@@ -587,6 +602,26 @@ fn suffix_name(name: &str, n: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_worktree_root_takes_the_last_line() {
+        // A chatty `bash -lc` login profile can print banner output before
+        // the real `git rev-parse` line — the root is whichever line came
+        // LAST, not the whole trimmed blob.
+        let got = last_nonempty_line("Welcome to bash!\n/home/user/worktree\n", "host").unwrap();
+        assert_eq!(got, "/home/user/worktree");
+    }
+
+    #[test]
+    fn resolve_worktree_root_refuses_empty_output() {
+        let err = last_nonempty_line("   \n\n", "myhost").unwrap_err();
+        assert_eq!(err.code, codes::E_UPLOAD);
+        assert!(
+            err.message.contains("myhost"),
+            "the error should name the host: {}",
+            err.message
+        );
+    }
 
     #[test]
     fn keeps_unique_names() {
