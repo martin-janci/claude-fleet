@@ -16,9 +16,12 @@ export interface MoveFailure {
   action: { kind: 'retry' } | { kind: 'clean'; paths: string[]; more: number } | null;
 }
 
-/** A frontend-only marker code meaning "this run ended because you undid the
- *  partial move". It never comes from the backend. */
-export const UNDONE = 'E_MOVE_UNDONE';
+/** A frontend-only marker meaning "this run ended because you undid the
+ *  partial move". It never comes from the backend and never crosses the
+ *  wire, so it deliberately does NOT wear the `E_*` prefix: those codes are
+ *  the backend's namespace (`ipc_error.rs`), and a frontend copy of one
+ *  would collide the day the backend mints its own. */
+export const UNDONE = 'MOVE_UNDONE';
 
 const CARRY_STEP: Record<string, string> = {
   seed: 'The target could not be given a clone of the repository to receive the work into.',

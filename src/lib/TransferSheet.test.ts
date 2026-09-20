@@ -32,6 +32,7 @@ import {
   resetMovesForTest,
   type MoveRun,
 } from './moves';
+import { UNDONE } from './moveErrors';
 import { MOVE_STEPS, type MoveProgress, type MoveStep, type MoveStepState } from './moveProgress';
 import type { MoveReport } from './moveSession';
 import type { IpcError } from './result';
@@ -385,11 +386,12 @@ describe('TransferSheet: recovery actions', () => {
       settledAt: Date.now(),
       cleanTarget: false,
       attempt: 1,
+      resolving: false,
       awaitingStart: false,
     };
   }
 
-  function doneRun(opts: { fromHost: string; toHost: string }): MoveRun {
+  function doneRun(opts: { fromHost: string; toHost: string; sourceKilled?: boolean }): MoveRun {
     const targetRow = {
       ...source, id: 8, tmux_name: 'sess7', host_alias: opts.toHost, parent_session_id: 7,
     } as SessionRow;
@@ -409,6 +411,7 @@ describe('TransferSheet: recovery actions', () => {
         target_session_id: 8,
         from_host: opts.fromHost,
         to_host: opts.toHost,
+        source_killed: opts.sourceKilled ?? true,
         target: targetRow,
       } as MoveReport,
       error: null,
@@ -417,11 +420,14 @@ describe('TransferSheet: recovery actions', () => {
       settledAt: Date.now(),
       cleanTarget: false,
       attempt: 1,
+      resolving: false,
       awaitingStart: false,
     };
   }
 
-  function partialRun(opts: { resolveError?: IpcError | null } = {}): MoveRun {
+  function partialRun(
+    opts: { resolveError?: IpcError | null; details?: unknown; resolving?: boolean } = {},
+  ): MoveRun {
     return {
       sessionId: 7,
       sessionName: 'sess7',
@@ -435,13 +441,17 @@ describe('TransferSheet: recovery actions', () => {
       error: {
         code: 'E_MOVE_PARTIAL',
         message: '',
-        details: { step: 'confirming the target is running', target_session_id: 8 },
+        details:
+          'details' in opts
+            ? opts.details
+            : { step: 'confirming the target is running', target_session_id: 8 },
       },
       resolveError: opts.resolveError ?? null,
       startedAt: Date.now(),
       settledAt: Date.now(),
       cleanTarget: false,
       attempt: 1,
+      resolving: opts.resolving ?? false,
       awaitingStart: false,
     };
   }
@@ -525,6 +535,45 @@ describe('TransferSheet: recovery actions', () => {
     );
   });
 
+  // Whole-branch review, finding 2: a `keep_source` move leaves the ORIGIN
+  // running the same conversation in the same worktree. "Move back" there
+  // would aim the transfer at that live session's own worktree — the engine
+  // now refuses it, and the sheet must not offer it in the first place.
+  it('offers Move back only when the move actually killed the source', () => {
+    const { queryByTestId } = renderSheet(
+      doneRun({ fromHost: 'alpha', toHost: 'beta', sourceKilled: false }),
+    );
+    expect(queryByTestId('transfer-move-back')).toBeNull();
+    // The rest of the result view is unaffected.
+    expect(queryByTestId('transfer-done')).toBeTruthy();
+  });
+
+  // Whole-branch review, finding 6: the two earliest partial steps record no
+  // target id at all, so `resolve_move` has nothing to act on and refuses.
+  // Offering a red "Kill the new session on beta" that can only answer "no
+  // target session to resolve" is worse than offering nothing.
+  it('offers no Finish or Undo for a partial nothing can resolve', () => {
+    const { queryByTestId } = renderSheet(
+      partialRun({ details: { step: 'reconciling the target host', target_session_id: null } }),
+    );
+    expect(queryByTestId('transfer-finish')).toBeNull();
+    expect(queryByTestId('transfer-undo')).toBeNull();
+    expect(queryByTestId('transfer-done')).toBeTruthy();
+  });
+
+  // …and finding 8's UI half: while one resolve is out, the confirm the user
+  // is still looking at must not take a second click.
+  it('disables the confirm while a resolve is in flight', async () => {
+    const { getByTestId } = renderSheet(partialRun({ resolving: true }));
+    await fireEvent.click(getByTestId('transfer-finish'));
+    const confirm = getByTestId('transfer-finish-confirm') as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    // (jsdom dispatches a click on a disabled button all the same, so the
+    // second click is pinned where it is actually refused: `resolveMoveRun`'s
+    // own `resolving` guard, in moves.test.ts.)
+    expect((getByTestId('transfer-undo') as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('offers Finish and Undo on a partial, each behind its own confirm', async () => {
     const { getByTestId } = renderSheet(partialRun());
     await fireEvent.click(getByTestId('transfer-finish'));
@@ -596,7 +645,7 @@ describe('TransferSheet: recovery actions', () => {
 
   it('an undone run reads as undone', () => {
     const { getByText, queryByTestId } = renderSheet(
-      failedRun({ code: 'E_MOVE_UNDONE', details: null }),
+      failedRun({ code: UNDONE, details: null }),
     );
     expect(getByText(/undid/)).toBeTruthy();
     expect(queryByTestId('transfer-retry')).toBeNull();

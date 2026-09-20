@@ -26,7 +26,8 @@ import { hosts } from './hosts';
 import { accounts } from './accounts';
 import { projects } from './projects';
 import { sessions, type SessionRow } from './sessions';
-import { startMove, resolveMoveRun, transferSheetFor } from './moves';
+import { get } from 'svelte/store';
+import { moves, resetMovesForTest, startMove, resolveMoveRun, transferSheetFor } from './moves';
 
 const sampleSession = {
   id: 1,
@@ -553,6 +554,7 @@ describe('SessionDetails recovery actions from the timeline', () => {
     (startMove as ReturnType<typeof vi.fn>).mockReset();
     (resolveMoveRun as ReturnType<typeof vi.fn>).mockReset();
     transferSheetFor.set(null);
+    resetMovesForTest();
   });
 
   it('offers Move back when the session was moved here', async () => {
@@ -597,6 +599,103 @@ describe('SessionDetails recovery actions from the timeline', () => {
     const { getByTestId } = render(SessionDetails, { props: { session: row({ id: 8, host_alias: 'beta' }) } });
     await waitFor(() => expect(getByTestId('details-finish-move')).toBeTruthy());
     expect(getByTestId('details-undo-move')).toBeTruthy();
+  });
+
+  // Whole-branch review, finding 2: `session_moved` is recorded on BOTH rows
+  // and a `keep_source` move leaves the origin running this very conversation
+  // in the same worktree — so "Move back" there would aim a transfer at that
+  // live session's own worktree. One `$sessions` check covers both shapes:
+  // the target's panel after a kept-source move, and the source's own panel
+  // (whose copy of the event names the host it is already on).
+  it('does not offer Move back while the origin still runs this conversation', async () => {
+    const moved = [
+      {
+        id: 1,
+        session_id: 8,
+        at: 1700000000,
+        kind: 'session_moved',
+        detail: JSON.stringify({ from_host: 'alpha', to_host: 'beta', claude_session_id: 'c1' }),
+        claude_session_id: null,
+      },
+    ];
+    inv().mockImplementation(async (cmd: string) => (cmd === 'session_history' ? moved : undefined));
+    const targetRow = row({ id: 8, host_alias: 'beta', claude_session_id: 'c1' });
+    sessions.set([targetRow]);
+    const { getByTestId, queryByTestId } = render(SessionDetails, { props: { session: targetRow } });
+    // The source is gone (an ordinary move killed it): the trip back is on.
+    await waitFor(() => expect(getByTestId('details-move-back')).toBeTruthy());
+    // …and it goes away the moment a live session on that host is holding
+    // the same conversation.
+    sessions.set([
+      targetRow,
+      row({ id: 7, host_alias: 'alpha', claude_session_id: 'c1', status: 'running' }),
+    ]);
+    await waitFor(() => expect(queryByTestId('details-move-back')).toBeNull());
+  });
+
+  it("does not offer the source's own panel a move back to where it already is", async () => {
+    const moved = [
+      {
+        id: 1,
+        session_id: 7,
+        at: 1700000000,
+        kind: 'session_moved',
+        detail: JSON.stringify({ from_host: 'alpha', to_host: 'beta', claude_session_id: 'c1' }),
+        claude_session_id: null,
+      },
+    ];
+    inv().mockImplementation(async (cmd: string) => (cmd === 'session_history' ? moved : undefined));
+    const sourceRow = row({ id: 7, host_alias: 'alpha', claude_session_id: 'c1', status: 'running' });
+    sessions.set([sourceRow, row({ id: 8, host_alias: 'beta', claude_session_id: 'c1' })]);
+    const { queryByTestId, findByTestId } = render(SessionDetails, { props: { session: sourceRow } });
+    // Wait for the timeline to have been read before asserting on an absence.
+    await findByTestId('session-host');
+    await waitFor(() => expect(inv()).toHaveBeenCalled());
+    await tick();
+    expect(queryByTestId('details-move-back')).toBeNull();
+  });
+
+  // The id-matching between `adoptPartial`'s key and the id the sheet opens
+  // on, driven rather than hand-traced — and the panel must never resolve a
+  // move itself: the sheet owns the confirmations.
+  it('Finish and Undo hand the partial to the sheet, and resolve nothing themselves', async () => {
+    const events = [
+      {
+        id: 1,
+        session_id: 8,
+        at: 1700000000,
+        kind: 'session_move_partial',
+        detail: JSON.stringify({
+          step: 'killing the source s on alpha',
+          from_host: 'alpha',
+          to_host: 'beta',
+          from_session_id: 7,
+          to_session_id: 8,
+          kept_source: true,
+        }),
+        claude_session_id: null,
+      },
+    ];
+    inv().mockImplementation(async (cmd: string) => (cmd === 'session_history' ? events : undefined));
+    const targetRow = row({ id: 8, tmux_name: 'sess8', host_alias: 'beta' });
+    sessions.set([targetRow]);
+    const { getByTestId } = render(SessionDetails, { props: { session: targetRow } });
+    await waitFor(() => expect(getByTestId('details-finish-move')).toBeTruthy());
+
+    await fireEvent.click(getByTestId('details-finish-move'));
+    // Keyed by the SOURCE id — which is the id the sheet is opened on.
+    expect(get(transferSheetFor)).toBe(7);
+    const run = get(moves).get(7)!;
+    expect(run.status).toBe('partial');
+    expect(run.toHost).toBe('beta');
+    expect(run.keepSource).toBe(true);
+    expect(resolveMoveRun).not.toHaveBeenCalled();
+
+    // Undo goes to the same place: neither button kills anything from here.
+    transferSheetFor.set(null);
+    await fireEvent.click(getByTestId('details-undo-move'));
+    expect(get(transferSheetFor)).toBe(7);
+    expect(resolveMoveRun).not.toHaveBeenCalled();
   });
 
   it('offers neither when the timeline has no move in it', async () => {

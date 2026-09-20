@@ -49,19 +49,32 @@ export interface MoveRun {
    *  when the click comes back refused. Cleared on the next `resolveMoveRun`
    *  call for this run, and whenever the attempt settles either way. */
   resolveError: IpcError | null;
+  /** True while a `resolve_move` (Finish/Undo) for this run is in flight.
+   *  Finish and Undo each kill a live session, so a second click must not
+   *  fire a second call: the first answer would settle the run and the
+   *  second refusal would land on a run no view renders any more. Cleared
+   *  the moment the call answers, either way. */
+  resolving: boolean;
   /**
-   * True from the moment `retryMove` resets this run until its own first
-   * `move:progress` event (`check`/`started`) arrives; every other event is
-   * dropped while it is true.
+   * True from the moment `startMove` or `retryMove` (re)sets this run until
+   * its own first `move:progress` event (`check`/`started`) arrives; every
+   * other event is dropped while it is true.
    *
    * `move:progress` carries only the session id, not a per-move id, so a
    * straggler from the attempt this run replaced looks exactly like this
    * attempt's own next step: `applyMoveProgress` would otherwise apply it
-   * straight onto the fresh (blank) step list, since `retryMove` already put
-   * `status: 'running'` and `settledAt: null` — the very shape that lets
+   * straight onto the fresh (blank) step list, since the (re)start already
+   * put `status: 'running'` and `settledAt: null` — the very shape that lets
    * ordinary events through. A per-move id on the wire would make this flag
    * unnecessary; that is backend work tracked separately, not part of this
    * task.
+   *
+   * `startMove` needs it whenever it REPLACES a settled run under the same
+   * key, for the same reason: a straggler that marks a step `failed` on the
+   * fresh run makes `endedInTheSteps` answer `'failed'`, and an
+   * `E_HUB_UNREACHABLE` answer then settles a move still running on the hub
+   * as a failure. A first move of a session has no earlier attempt to
+   * straggle, so it does not wait.
    */
   awaitingStart: boolean;
 }
@@ -169,6 +182,25 @@ export function runForSession(
     ) {
       return run;
     }
+    // A partial's target, which has no report to be found through: a Finish
+    // settles the run with `report: null` (the recovery's own report carries
+    // no tmux name, so synthesising one would mean lying to the guard just
+    // above), and by then the run is keyed to a source id the Finish reaped.
+    // The partial error's details are what is left that names the target.
+    const d = run.error?.details;
+    if (typeof d === 'object' && d !== null) {
+      const details = d as Record<string, unknown>;
+      const name = details.target_tmux_name;
+      if (
+        details.target_session_id === session.id &&
+        run.toHost === session.host_alias &&
+        // A run adopted from a recorded partial has no tmux name to check —
+        // it is held to the id and the host, like an `observed` run.
+        (typeof name !== 'string' || name === session.tmux_name)
+      ) {
+        return run;
+      }
+    }
   }
   return undefined;
 }
@@ -176,6 +208,13 @@ export function runForSession(
 /** Start a move without waiting for it. A no-op while one is running. */
 export function startMove(session: SessionRow, toHost: string, opts: { keepSource: boolean }): void {
   if (activeMoveFor(session.id)) return;
+  // A run already under this key is a settled one this start replaces (a
+  // failed attempt, a done move of a re-discovered row): its last events may
+  // still be on their way, and this run has the very shape that lets them
+  // through. A key nothing has used cannot have stragglers, and waiting for
+  // an event that may never come (an old hub, a dropped stream) would leave
+  // such a run blank — so the flag is only raised where the hazard is real.
+  const replacing = get(store).has(session.id);
   put({
     sessionId: session.id,
     sessionName: session.tmux_name,
@@ -192,7 +231,9 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     settledAt: null,
     cleanTarget: false,
     attempt: 1,
-    awaitingStart: false,
+    resolving: false,
+    // Same mechanism as `retryMove`. See `MoveRun.awaitingStart`.
+    awaitingStart: replacing,
   });
   void moveSession(session.id, toHost, { keepSource: opts.keepSource }).then((r) =>
     settle(session.id, r),
@@ -295,6 +336,7 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     resolveError: null,
     cleanTarget,
     attempt: run.attempt + 1,
+    resolving: false,
     startedAt: Date.now(),
     settledAt: null,
     // See the field comment on `MoveRun.awaitingStart`: a straggler from the
@@ -302,6 +344,10 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     awaitingStart: true,
   });
   void moveSession(sessionId, run.toHost, {
+    // `null` only for a run this window never started (an `observed` one —
+    // which `retryMove` refuses above) or a recorded partial whose event
+    // predates `kept_source`. Nothing better is knowable there; every run
+    // that does know carries the answer (`adoptPartial`).
     keepSource: run.keepSource ?? false,
     cleanTarget,
   }).then((r) => settle(sessionId, r));
@@ -344,16 +390,19 @@ function settleResolve(
     // is looking straight at it — they just clicked Finish/Undo and are still
     // on the confirm they clicked through. A toast here would be the wrong
     // place, and would say nothing the sheet cannot say better in context.
-    put({ ...run, resolveError: r.error });
+    // The guard is released with it: a refusal leaves the run `partial`, and
+    // the user may try the other action.
+    put({ ...run, resolveError: r.error, resolving: false });
     return;
   }
   if (action === 'finish') {
-    put({ ...run, status: 'done', resolveError: null, settledAt: Date.now() });
+    put({ ...run, status: 'done', resolveError: null, resolving: false, settledAt: Date.now() });
     return;
   }
   put({
     ...run,
     status: 'failed',
+    resolving: false,
     error: {
       code: UNDONE,
       message: `The new session on ${run.toHost} was killed; ${run.sessionName} keeps running on ${run.fromHost}.`,
@@ -375,13 +424,17 @@ export function resolveMoveRun(sessionId: number, action: ResolveAction): void {
   // backend would answer E_INVALID_STATE, so refuse the round-trip here,
   // mirroring retryMove's own status guard.
   if (!run || run.status !== 'partial') return;
+  // One resolve at a time: both actions kill a live session, and the confirm
+  // button stays on screen while the call is out, so a double click would
+  // otherwise send two.
+  if (run.resolving) return;
   const targetId = targetIdOf(run);
   if (targetId === null) {
     push({ kind: 'error', message: `${run.sessionName}: no target session to resolve.` });
     return;
   }
   // A stale refusal from a previous attempt must not linger through this one.
-  if (run.resolveError) put({ ...run, resolveError: null });
+  put({ ...run, resolveError: null, resolving: true });
   const sessionName = run.sessionName;
   void resolveMove(targetId, action).then((r) => settleResolve(sessionId, sessionName, action, r));
 }
@@ -407,7 +460,10 @@ export function adoptPartial(p: UnresolvedPartial, sessionName: string): void {
     sessionName,
     fromHost: p.fromHost,
     toHost: p.toHost,
-    keepSource: null,
+    // What the transfer was told to do with the source, as the event
+    // recorded it — `null` when it did not say. A retry from this run must
+    // not turn "leave the source running" into "kill it" (see `retryMove`).
+    keepSource: p.keptSource,
     origin: 'local',
     steps,
     status: 'partial',
@@ -420,6 +476,7 @@ export function adoptPartial(p: UnresolvedPartial, sessionName: string): void {
     resolveError: null,
     cleanTarget: false,
     attempt: 1,
+    resolving: false,
     awaitingStart: false,
     startedAt: Date.now(),
     settledAt: Date.now(),
@@ -444,6 +501,7 @@ function observed(p: MoveProgress): MoveRun {
     settledAt: null,
     cleanTarget: false,
     attempt: 1,
+    resolving: false,
     awaitingStart: false,
   };
 }

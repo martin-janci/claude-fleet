@@ -11,6 +11,7 @@ import {
   activeMoveFor, stepNumber, displaySteps, runForSession, resetMovesForTest,
   SETTLE_GRACE_MS, retryMove, resolveMoveRun, adoptPartial,
 } from './moves';
+import { UNDONE } from './moveErrors';
 import type { MoveProgress, MoveStep, MoveStepState } from './moveProgress';
 import { MOVE_STEPS } from './moveProgress';
 import type { MoveReport } from './moveSession';
@@ -710,7 +711,7 @@ describe('resolveMoveRun and adoptPartial', () => {
 
   it('adopts a recorded partial so the sheet can act on it after a restart', () => {
     adoptPartial(
-      { targetSessionId: 8, sourceSessionId: 7, fromHost: 'alpha', toHost: 'beta', step: 'killing the source s on alpha' },
+      { targetSessionId: 8, sourceSessionId: 7, fromHost: 'alpha', toHost: 'beta', step: 'killing the source s on alpha', keptSource: null },
       's',
     );
     const run = get(moves).get(7)!;
@@ -742,7 +743,9 @@ describe('resolveMoveRun and adoptPartial', () => {
     await flush();
     const run = get(moves).get(7)!;
     expect(run.status).toBe('failed');
-    expect(run.error?.code).toBe('E_MOVE_UNDONE');
+    expect(run.error?.code).toBe(UNDONE);
+    // …and that marker is frontend-only: it must not mint an `E_*` code.
+    expect(UNDONE.startsWith('E_')).toBe(false);
   });
 
   // Fix round 1, Finding 2: the backend really can answer E_MOVE_PARTIAL
@@ -776,5 +779,138 @@ describe('resolveMoveRun and adoptPartial', () => {
     resolveMoveRun(5, 'finish');
     await flush();
     expect(invoked.mock.calls.length).toBe(calls);
+  });
+});
+
+// Whole-branch review, findings 3, 4, 5 and 8: what the run store still got
+// wrong once retry, resolve and the recorded-partial path were all in place.
+describe('a run that outlives the ids it started with', () => {
+  /** A local run left `partial` by a move of session 7 onto `beta`. */
+  async function partialRun(over: Record<string, unknown> = {}) {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(
+      err('E_MOVE_PARTIAL', 'partial', {
+        step: 'killing the source s on alpha',
+        target_session_id: 8,
+        target_host: 'beta',
+        target_tmux_name: 's',
+        ...over,
+      }),
+    );
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('partial');
+    return session;
+  }
+
+  const resolved = (action: string, over: Record<string, unknown> = {}) =>
+    ok({
+      action,
+      source_session_id: 7,
+      target_session_id: 8,
+      from_host: 'alpha',
+      to_host: 'beta',
+      source_killed: action === 'finish',
+      target_killed: action === 'undo',
+      warnings: [],
+      ...over,
+    });
+
+  // Finding 3: Finish settles with `report: null` and the run stays keyed to
+  // a source id it just reaped, so the only row left that could render it —
+  // the target — has to be able to find it through the partial's details.
+  it("a finished partial's target row finds the run", async () => {
+    await partialRun();
+    invoked.mockResolvedValueOnce(resolved('finish'));
+    resolveMoveRun(7, 'finish');
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('done');
+    const targetRow = row({ id: 8, tmux_name: 's', host_alias: 'beta' });
+    expect(runForSession(get(moves), targetRow)?.sessionId).toBe(7);
+    // The same id-reuse guard as the report branch: a different session that
+    // inherited the id must not wear this run.
+    expect(runForSession(get(moves), row({ id: 8, tmux_name: 'other', host_alias: 'beta' })))
+      .toBeUndefined();
+    expect(runForSession(get(moves), row({ id: 8, tmux_name: 's', host_alias: 'gamma' })))
+      .toBeUndefined();
+  });
+
+  // Finding 4: after an Undo the run is `failed`, so Retry is offered — and
+  // a run rebuilt from a recorded partial must not coerce an unknown
+  // `keep_source` into "kill the source".
+  it('a retry after an undo keeps a source the transfer was told to keep', async () => {
+    adoptPartial(
+      {
+        targetSessionId: 8,
+        sourceSessionId: 7,
+        fromHost: 'alpha',
+        toHost: 'beta',
+        step: 'killing the source s on alpha',
+        keptSource: true,
+      },
+      's',
+    );
+    expect(get(moves).get(7)!.keepSource).toBe(true);
+    invoked.mockResolvedValueOnce(resolved('undo'));
+    resolveMoveRun(7, 'undo');
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('failed');
+    invoked.mockResolvedValueOnce(ok(report({ target_session_id: 9 })));
+    retryMove(7);
+    await flush();
+    expect(invoked.mock.calls.at(-1)![1].args).toMatchObject({ keep_source: true });
+  });
+
+  // Finding 5: `startMove` reuses the map key of a stale failed run, so a
+  // straggler from the attempt before it lands on the fresh step list —
+  // and a stale `failed` step then settles an E_HUB_UNREACHABLE run as
+  // failed, though the move is still running on the hub.
+  it('a straggler from the previous attempt cannot settle a fresh start', async () => {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(err('E_MOVE_CARRY', 'x', { step: 'fetch' }));
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('failed');
+
+    let settle!: (v: unknown) => void;
+    invoked.mockReturnValueOnce(new Promise((r) => (settle = r)));
+    startMove(session, 'beta', { keepSource: false });
+    // The previous attempt's last event, arriving after the fresh start.
+    applyMoveProgress(ev('handoff', 'failed', { session_id: 7, to_host: 'beta' }));
+    expect(get(moves).get(7)!.steps.every((s) => s.state === 'pending')).toBe(true);
+
+    // The hub never answered, so the move is most likely still running there.
+    settle(err('E_HUB_UNREACHABLE', 'no answer'));
+    await flush();
+    const run = get(moves).get(7)!;
+    expect(run.status).toBe('running');
+    expect(run.origin).toBe('observed');
+
+    // This attempt's own first event is still accepted.
+    applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: 'beta' }));
+    expect(get(moves).get(7)!.steps[0].state).toBe('started');
+  });
+
+  // Finding 8: Finish and Undo each kill a live session. A double click must
+  // not fire two of them — the second refusal would land on a run that is
+  // already `done`, where no view renders it.
+  it('fires one resolve_move for a double click, and allows a retry after a refusal', async () => {
+    await partialRun();
+    let settle!: (v: unknown) => void;
+    invoked.mockReturnValueOnce(new Promise((r) => (settle = r)));
+    resolveMoveRun(7, 'finish');
+    resolveMoveRun(7, 'finish');
+    const resolves = () => invoked.mock.calls.filter((c) => c[0] === 'resolve_move').length;
+    expect(resolves()).toBe(1);
+
+    settle(err('E_INVALID_STATE', 'the target took a turn'));
+    await flush();
+    expect(get(moves).get(7)!.resolveError?.code).toBe('E_INVALID_STATE');
+    // The refusal released the guard: the user may try the other action.
+    invoked.mockResolvedValueOnce(resolved('undo'));
+    resolveMoveRun(7, 'undo');
+    await flush();
+    expect(resolves()).toBe(2);
+    expect(get(moves).get(7)!.status).toBe('failed');
   });
 });

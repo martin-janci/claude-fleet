@@ -123,6 +123,11 @@ export interface UnresolvedPartial {
   fromHost: string;
   toHost: string;
   step: string | null;
+  /** What the transfer was told to do with the source (`keep_source`), or
+   *  `null` when the record does not say — an event written before the
+   *  backend carried the fact. A run rebuilt from this decides whether a
+   *  later retry kills the source, so "unknown" must not read as `false`. */
+  keptSource: boolean | null;
 }
 
 const MOVE_KINDS = new Set(['session_moved', 'session_move_partial', 'session_move_undone']);
@@ -173,7 +178,8 @@ export function unresolvedPartial(events: SessionEvent[]): UnresolvedPartial | n
     const toHost = typeof d.to_host === 'string' ? d.to_host : '';
     const sourceSessionId = typeof d.from_session_id === 'number' ? d.from_session_id : null;
     const step = typeof d.step === 'string' ? d.step : null;
-    return { targetSessionId, sourceSessionId, fromHost, toHost, step };
+    const keptSource = typeof d.kept_source === 'boolean' ? d.kept_source : null;
+    return { targetSessionId, sourceSessionId, fromHost, toHost, step, keptSource };
   }
   return null;
 }

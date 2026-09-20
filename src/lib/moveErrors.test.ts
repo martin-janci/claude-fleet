@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { describeMoveError } from './moveErrors';
+import { describeMoveError, UNDONE } from './moveErrors';
 import type { MoveStep } from './moveProgress';
 
 const err = (code: string, details?: unknown, message = 'raw backend text') => ({ code, message, details });
@@ -232,8 +232,10 @@ describe('describeMoveError', () => {
   });
 
   it('an undone partial reads as undone, not as a failure', () => {
+    // The marker is frontend-only, so it must not mint a backend `E_*` code.
+    expect(UNDONE.startsWith('E_')).toBe(false);
     const f = describeMoveError(
-      { code: 'E_MOVE_UNDONE', message: '', details: null },
+      { code: UNDONE, message: '', details: null },
       'failed',
       'turanga',
       'start',

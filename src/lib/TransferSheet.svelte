@@ -63,6 +63,22 @@
    *  `.paths` in scope across the `{#if}` that tests `.kind`. */
   const cleanAction = $derived(failure?.action?.kind === 'clean' ? failure.action : null);
 
+  /** Whether this partial names a target `resolve_move` could act on. The two
+   *  earliest partial steps record no target id at all (the row does not
+   *  exist yet), so Finish and Undo have nothing to kill and the backend
+   *  refuses both — offering a red "Kill the new session on {host}" that can
+   *  only answer "no target session to resolve" is worse than offering
+   *  nothing. Read the same way `moves.ts`'s own `targetIdOf` reads it. */
+  const resolvableTargetId = $derived.by(() => {
+    if (run?.report) return run.report.target_session_id;
+    const details = run?.error?.details;
+    if (typeof details === 'object' && details !== null) {
+      const v = (details as Record<string, unknown>).target_session_id;
+      if (typeof v === 'number') return v;
+    }
+    return null;
+  });
+
   /** Everything the move left behind, from all three lists, keyed by both —
    *  the same path can be left behind by two of them. */
   const leftBehind = $derived(
@@ -92,10 +108,16 @@
    *  by `report.target_session_id` — never the snapshot embedded in the
    *  report, which can be stale by the time "Move back" is clicked. The
    *  source row is gone by now, so this is what a move back actually moves;
-   *  no row here means nothing left to move back. */
+   *  no row here means nothing left to move back.
+   *
+   *  `source_killed` is the gate: a `keep_source` move left the ORIGIN
+   *  running this very conversation, in the same worktree, so a move "back"
+   *  there would aim the transfer at that live session's own worktree. The
+   *  engine refuses it (`E_INVALID_STATE`); the sheet does not offer it. */
   const moveBackTarget = $derived.by(() => {
-    const targetId = run?.report?.target_session_id;
-    return targetId === undefined ? undefined : $sessions.find((s) => s.id === targetId);
+    if (!run?.report?.source_killed) return undefined;
+    const targetId = run.report.target_session_id;
+    return $sessions.find((s) => s.id === targetId);
   });
 
   const n = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
@@ -332,19 +354,31 @@
           {#if newSession}
             <button onclick={openTarget} data-testid="transfer-open-target">Open on {run.toHost}</button>
           {/if}
-          {#if confirming === 'finish'}
-            <button class="danger" onclick={() => resolve('finish')} data-testid="transfer-finish-confirm">
-              Kill {run.sessionName} on {run.fromHost}
-            </button>
-          {:else}
-            <button onclick={() => (confirming = 'finish')} data-testid="transfer-finish">Finish the move</button>
-          {/if}
-          {#if confirming === 'undo'}
-            <button class="danger" onclick={() => resolve('undo')} data-testid="transfer-undo-confirm">
-              Kill the new session on {run.toHost}
-            </button>
-          {:else}
-            <button onclick={() => (confirming = 'undo')} data-testid="transfer-undo">Undo</button>
+          {#if resolvableTargetId !== null}
+            {#if confirming === 'finish'}
+              <button
+                class="danger"
+                onclick={() => resolve('finish')}
+                disabled={run.resolving}
+                data-testid="transfer-finish-confirm"
+              >
+                Kill {run.sessionName} on {run.fromHost}
+              </button>
+            {:else}
+              <button onclick={() => (confirming = 'finish')} data-testid="transfer-finish">Finish the move</button>
+            {/if}
+            {#if confirming === 'undo'}
+              <button
+                class="danger"
+                onclick={() => resolve('undo')}
+                disabled={run.resolving}
+                data-testid="transfer-undo-confirm"
+              >
+                Kill the new session on {run.toHost}
+              </button>
+            {:else}
+              <button onclick={() => (confirming = 'undo')} data-testid="transfer-undo">Undo</button>
+            {/if}
           {/if}
         {:else if cleanAction}
           {#if confirming === 'clean'}

@@ -343,7 +343,31 @@
   // second time here (see Timeline.svelte). `moveOrigin`/`unresolvedPartial`
   // are pure over that same event list.
   let timelineEvents = $state<SessionEvent[]>([]);
-  const moveBackOrigin = $derived(moveOrigin(timelineEvents));
+  /**
+   * Where this session came from — unless that host is still running this
+   * very conversation, in which case there is no trip back to offer.
+   *
+   * Two shapes, one check. A `keep_source` move leaves the origin running
+   * the same `claude_session_id` in the same worktree, so a move "back"
+   * would aim the transfer at that live session's own worktree (the engine
+   * refuses it with `E_INVALID_STATE`; the panel does not offer it). And
+   * `session_moved` is recorded on BOTH rows, so the SOURCE row's own panel
+   * reads an event naming the host it is already on — that row is itself the
+   * live session the search finds, which is why nothing here excludes it.
+   */
+  const moveBackOrigin = $derived.by(() => {
+    const origin = moveOrigin(timelineEvents);
+    if (!origin) return null;
+    const conversation = origin.claudeSessionId ?? session.claude_session_id;
+    if (conversation === null) return origin;
+    const stillThere = $sessions.some(
+      (s) =>
+        s.host_alias === origin.fromHost &&
+        s.status === 'running' &&
+        s.claude_session_id === conversation,
+    );
+    return stillThere ? null : origin;
+  });
   const unresolvedMove = $derived(unresolvedPartial(timelineEvents));
 
   function openMoveBack() {

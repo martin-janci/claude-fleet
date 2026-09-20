@@ -150,7 +150,24 @@ describe('moveOrigin / unresolvedPartial', () => {
         fromHost: 'alpha',
         toHost: 'beta',
         step: 'killing the source s on alpha',
+        keptSource: null,
       });
+    });
+
+    // A run rebuilt from this event decides whether a later retry kills the
+    // source, so `kept_source` travels rather than being guessed. An older
+    // event that never recorded it reads as null — unknown, not false.
+    it('carries what the transfer was told to do with the source', () => {
+      const kept = ev(1, 'session_move_partial', {
+        step: 'killing the source s on alpha',
+        from_host: 'alpha',
+        to_host: 'beta',
+        from_session_id: 7,
+        to_session_id: 8,
+        kept_source: true,
+      });
+      expect(unresolvedPartial(newestFirst(kept))!.keptSource).toBe(true);
+      expect(unresolvedPartial(newestFirst(partial(1)))!.keptSource).toBeNull();
     });
 
     it('is null once the move was finished or undone', () => {
