@@ -199,7 +199,7 @@ pub fn render_doc_table() -> String {
         .iter()
         .filter_map(|(name, verdict)| refusal_detail(verdict).map(|detail| (*name, detail)))
         .collect();
-    rows.sort_by(|(a, _), (b, _)| a.cmp(b));
+    rows.sort_by_key(|(name, _)| *name);
 
     let mut out = String::new();
     out.push_str(BEGIN_MARKER);
