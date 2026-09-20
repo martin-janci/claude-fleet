@@ -29,16 +29,35 @@ export interface MoveRun {
   /** null for an observed run: only the starter knows. */
   keepSource: boolean | null;
   origin: 'local' | 'observed';
-  /** Always the nine steps, in order. */
+  /** Always the nine steps, in order, exactly as the events left them. */
   steps: MoveRunStep[];
   status: MoveStatus;
   report: MoveReport | null;
   error: IpcError | null;
   startedAt: number;
+  /** When the command's result settled this run; null while it runs. */
+  settledAt: number | null;
 }
 
 const DETAIL_MAX = 80;
 const RANK: Record<StepState, number> = { pending: 0, started: 1, done: 2, warned: 2, failed: 2 };
+const STATES: ReadonlySet<string> = new Set<MoveStepState>(['started', 'done', 'warned', 'failed']);
+
+/**
+ * How long after a local run settles its own queued events may still arrive.
+ *
+ * The result and the events are two streams: the command's answer can win the
+ * race against the `move:progress` events it produced. Inside this window an
+ * event may only move the step list forward — it can never revive the run or
+ * overwrite the result the user is looking at. After it, a `check:started` is
+ * a genuinely new move of the same session.
+ */
+export const SETTLE_GRACE_MS = 5000;
+
+/** The code the hub client answers with when the hub said nothing at all
+ *  (no connection, a timed-out exchange, a proxy's 5xx). The move is very
+ *  probably still running there, so it is not a failure. */
+const NO_ANSWER = 'E_HUB_UNREACHABLE';
 
 const store = writable<Map<number, MoveRun>>(new Map());
 
@@ -69,6 +88,54 @@ export function stepNumber(run: MoveRun): number {
   return n;
 }
 
+/**
+ * The steps as the sheet shows them — never what is stored.
+ *
+ * A finished run is the truth about its own outcome even when its events
+ * never arrived (an old hub, a dropped stream, a result that simply won the
+ * race), so the picture is completed here, at render time. Settling itself
+ * leaves `steps` alone, so a late event can still name the step that failed.
+ */
+export function displaySteps(run: MoveRun): MoveRunStep[] {
+  if (run.status === 'done') {
+    return run.steps.map((s) => (s.state === 'warned' ? s : { ...s, state: 'done' as StepState }));
+  }
+  if (run.status === 'running' || run.steps.some((s) => s.state === 'failed')) return run.steps;
+  // Failed or partial with no `failed` event — the events lost the race, or
+  // never came. The step that was running is the one that failed; failing
+  // that, the one the move had got to (step 1 when nothing arrived at all).
+  // Never step 1 when step 1 is known to have finished: showing a step the
+  // user watched succeed as failed is worse than showing nothing.
+  const pending = run.steps.findIndex((s) => s.state === 'pending');
+  let at = pending < 0 ? run.steps.length - 1 : pending;
+  run.steps.forEach((s, i) => {
+    if (s.state === 'started') at = i;
+  });
+  return run.steps.map((s, i) => (i === at ? { ...s, state: 'failed' as StepState } : s));
+}
+
+/**
+ * The run the chip should show beside `session`, if any.
+ *
+ * Keyed by the SOURCE session's id — but a row id is reused when a session is
+ * re-discovered, so the run must still name the same session; otherwise an
+ * unrelated session that inherited the id would wear someone else's move.
+ * A session that a move PRODUCED finds the run through the report.
+ */
+export function runForSession(
+  map: Map<number, MoveRun>,
+  session: SessionRow,
+): MoveRun | undefined {
+  const own = map.get(session.id);
+  if (own && own.sessionName === session.tmux_name && own.fromHost === session.host_alias) {
+    return own;
+  }
+  for (const run of map.values()) {
+    if (run.report?.target_session_id === session.id) return run;
+  }
+  return undefined;
+}
+
 /** Start a move without waiting for it. A no-op while one is running. */
 export function startMove(session: SessionRow, toHost: string, opts: { keepSource: boolean }): void {
   if (activeMoveFor(session.id)) return;
@@ -84,10 +151,16 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     report: null,
     error: null,
     startedAt: Date.now(),
+    settledAt: null,
   });
   void moveSession(session.id, toHost, { keepSource: opts.keepSource }).then((r) =>
     settle(session.id, r),
   );
+}
+
+/** "1 warning" / "3 warnings". */
+function warningCount(n: number): string {
+  return `${n} warning${n === 1 ? '' : 's'}`;
 }
 
 function settle(sessionId: number, r: Result<MoveReport>): void {
@@ -95,26 +168,41 @@ function settle(sessionId: number, r: Result<MoveReport>): void {
   if (!run || run.origin !== 'local' || run.status !== 'running') return;
   const sheetOpen = get(transferSheetFor) === sessionId;
   if (r.ok) {
-    put({
-      ...run,
-      status: 'done',
-      report: r.value,
-      // Events may never have arrived (an old hub, a dropped stream): the
-      // result is the truth, so everything not warned is done.
-      steps: run.steps.map((s) => (s.state === 'warned' ? s : { ...s, state: 'done' as StepState })),
-    });
-    if (get(selectedSession)?.id === sessionId) selectSession(r.value.target);
-    if (!sheetOpen) push({ kind: 'success', message: `Moved ${run.sessionName} to ${run.toHost}` });
+    put({ ...run, status: 'done', report: r.value, settledAt: Date.now() });
+    // The source row is usually gone by now — killed, which cleared the
+    // selection — so "nothing is selected" is the same case as "the source
+    // is selected": both mean the user was watching this session. `follow`
+    // keeps a move that finished behind a closed sheet from pulling them
+    // out of whatever view they moved on to.
+    const sel = get(selectedSession);
+    if (sel === null || sel.id === sessionId) selectSession(r.value.target, { follow: true });
+    if (!sheetOpen) {
+      const warnings = r.value.warnings.length;
+      push({
+        kind: 'success',
+        message:
+          `Moved ${run.sessionName} to ${run.toHost}` +
+          (warnings > 0 ? ` · ${warningCount(warnings)}` : '') +
+          (r.value.source_killed ? '' : ' · the source keeps running'),
+        // Warnings are the one case worth reading, so that toast waits.
+        sticky: warnings > 0,
+        action: { label: 'View', run: () => transferSheetFor.set(sessionId) },
+      });
+    }
     return;
   }
-  const hasFailed = run.steps.some((s) => s.state === 'failed');
+  if (r.error.code === NO_ANSWER) {
+    // The hub never answered. The move is most likely still running there,
+    // and its events still reach this window — so keep following it as if it
+    // had been started elsewhere, and let the user stop following (F3).
+    put({ ...run, origin: 'observed', error: r.error });
+    return;
+  }
   put({
     ...run,
     status: r.error.code === 'E_MOVE_PARTIAL' ? 'partial' : 'failed',
     error: r.error,
-    steps: hasFailed
-      ? run.steps
-      : run.steps.map((s) => (s.state === 'started' ? { ...s, state: 'failed' as StepState } : s)),
+    settledAt: Date.now(),
   });
   if (!sheetOpen) pushError(r.error, `Move of ${run.sessionName} failed`);
 }
@@ -133,25 +221,54 @@ function observed(p: MoveProgress): MoveRun {
     report: null,
     error: null,
     startedAt: Date.now(),
+    settledAt: null,
   };
 }
 
-/** Patch a run from one `move:progress` event. */
+/**
+ * Patch a run from one `move:progress` event.
+ *
+ * The payload crossed an IPC boundary from a backend that may be a version
+ * ahead, so every field this reads is checked before anything is touched: a
+ * malformed event changes nothing, and nothing here throws — a throw would
+ * be inside the event batch and would lose the whole batch with it.
+ */
 export function applyMoveProgress(p: MoveProgress): void {
+  if (typeof p !== 'object' || p === null) return;
+  if (typeof p.session_id !== 'number' || typeof p.to_host !== 'string') return;
+  if (!Number.isInteger(p.index)) return;
   const i = p.index - 1;
-  if (!Number.isInteger(i) || i < 0 || i >= MOVE_STEPS.length || MOVE_STEPS[i] !== p.step) return;
+  if (i < 0 || i >= MOVE_STEPS.length || MOVE_STEPS[i] !== p.step) return;
+  if (!STATES.has(p.state)) return;
+  const detail = typeof p.detail === 'string' ? p.detail.slice(0, DETAIL_MAX) : null;
+
   let run = get(store).get(p.session_id);
+  let settledLocal = false;
   if (run && run.status !== 'running') {
-    // Settled. Only the first event of a NEW move of this session replaces it.
-    if (!(i === 0 && p.state === 'started')) return;
-    run = undefined;
+    if (
+      run.origin === 'local' &&
+      run.settledAt !== null &&
+      Date.now() - run.settledAt < SETTLE_GRACE_MS
+    ) {
+      // Its own events, still arriving. They may name the step that failed;
+      // they may not touch the outcome the user is already reading.
+      settledLocal = true;
+    } else if (i === 0 && p.state === 'started') {
+      run = undefined; // a NEW move of this session
+    } else {
+      return;
+    }
   }
   run ??= observed(p);
   const steps = run.steps.map((s, n) => {
     if (n < i) return RANK[s.state] < 2 ? { ...s, state: 'done' as StepState } : s;
     if (n > i || RANK[p.state] <= RANK[s.state]) return s;
-    return { ...s, state: p.state, detail: p.detail === null ? null : p.detail.slice(0, DETAIL_MAX) };
+    return { ...s, state: p.state, detail };
   });
+  if (settledLocal) {
+    put({ ...run, steps });
+    return;
+  }
   let status: MoveStatus = run.status;
   if (run.origin === 'observed') {
     if (p.state === 'failed') status = 'failed';
@@ -160,9 +277,15 @@ export function applyMoveProgress(p: MoveProgress): void {
   put({ ...run, steps, status });
 }
 
-/** Forget a settled run. A running one cannot be dismissed. */
+/**
+ * Forget a run. A LOCAL running one cannot be dismissed — this window owns
+ * it and its result is still coming. An observed run is only this window's
+ * view of someone else's move, so it can always be let go of; the next event
+ * re-creates it.
+ */
 export function dismissMove(sessionId: number): void {
-  if (activeMoveFor(sessionId)) return;
+  const run = get(store).get(sessionId);
+  if (run && run.origin === 'local' && run.status === 'running') return;
   store.update((m) => {
     const next = new Map(m);
     next.delete(sessionId);

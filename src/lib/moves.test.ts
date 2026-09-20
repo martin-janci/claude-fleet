@@ -5,7 +5,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import {
   moves, transferSheetFor, startMove, applyMoveProgress, dismissMove,
-  activeMoveFor, stepNumber, resetMovesForTest,
+  activeMoveFor, stepNumber, displaySteps, runForSession, resetMovesForTest,
+  SETTLE_GRACE_MS,
 } from './moves';
 import type { MoveProgress, MoveStep, MoveStepState } from './moveProgress';
 import { MOVE_STEPS } from './moveProgress';
@@ -113,7 +114,8 @@ describe('startMove', () => {
     const run = get(moves).get(5)!;
     expect(run.status).toBe('done');
     expect(run.report?.target_session_id).toBe(6);
-    expect(states()).toEqual(['done', 'done', 'done', 'done', 'done', 'warned', 'done', 'done', 'done']);
+    expect(displaySteps(run).map((s) => s.state))
+      .toEqual(['done', 'done', 'done', 'done', 'done', 'warned', 'done', 'done', 'done']);
     expect(get(selectedSession)?.id).toBe(6);
     expect(get(toasts)).toHaveLength(0); // the sheet is open on this run
     expect(activeMoveFor(5)).toBeUndefined();
@@ -140,7 +142,8 @@ describe('startMove', () => {
     const run = get(moves).get(5)!;
     expect(run.status).toBe('failed');
     expect(run.error?.code).toBe('E_MOVE_CARRY');
-    expect(states()).toEqual(['done', 'done', 'done', 'failed', 'pending', 'pending', 'pending', 'pending', 'pending']);
+    expect(displaySteps(run).map((s) => s.state))
+      .toEqual(['done', 'done', 'done', 'failed', 'pending', 'pending', 'pending', 'pending', 'pending']);
     expect(get(toasts).some((t) => t.kind === 'error')).toBe(true);
   });
 
@@ -228,8 +231,167 @@ describe('applyMoveProgress', () => {
   });
 });
 
+// F7 + P-T3: the payload crosses an IPC boundary from a hub that may be a
+// version ahead, and `applyMoveProgress` indexes an array with `index` and
+// keys the run map with `session_id`. One malformed event must change
+// nothing and must never throw — a throw inside the event batch loses the
+// whole batch.
+describe('applyMoveProgress validates the event', () => {
+  const started = () => {
+    pending();
+    startMove(source, 'turanga', { keepSource: false });
+  };
+
+  it('drops an event whose state is not one of the four', () => {
+    started();
+    applyMoveProgress(ev('git', 'done'));
+    applyMoveProgress(ev('git', 'bogus' as never));
+    applyMoveProgress(ev('git', 'pending' as never));
+    expect(states()).toEqual(['done', 'done', 'done', 'done', 'pending', 'pending', 'pending', 'pending', 'pending']);
+  });
+
+  it('never lets a `pending` state fill the gap before a step', () => {
+    started();
+    applyMoveProgress(ev('claude_state', 'pending' as never));
+    expect(states()).toEqual(Array(9).fill('pending'));
+  });
+
+  it('stores null for a detail that is not a string, without throwing', () => {
+    started();
+    expect(() => applyMoveProgress(ev('git', 'done', { detail: undefined as never }))).not.toThrow();
+    expect(get(moves).get(5)!.steps[3].detail).toBeNull();
+    expect(() => applyMoveProgress(ev('replay', 'done', { detail: 5 as never }))).not.toThrow();
+    expect(get(moves).get(5)!.steps[4].detail).toBeNull();
+  });
+
+  it('drops an event whose session_id or to_host has the wrong type', () => {
+    applyMoveProgress(ev('check', 'started', { session_id: '5' as never }));
+    applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: null as never }));
+    expect(get(moves).size).toBe(0);
+  });
+
+  it('never throws on a payload that is not an object at all', () => {
+    expect(() => applyMoveProgress(null as never)).not.toThrow();
+    expect(() => applyMoveProgress(undefined as never)).not.toThrow();
+    expect(get(moves).size).toBe(0);
+  });
+});
+
+// F2: settling used to rewrite the step list, so a result that arrived
+// before the events it raced left the sheet showing the wrong step — or, for
+// a failure, the step BEFORE the one that actually failed.
+describe('displaySteps and the settle grace', () => {
+  it('shows step 1 failed when the result beat every event, and keeps the real error', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = pending();
+      startMove(source, 'turanga', { keepSource: false });
+      p.reject({ code: 'E_MOVE_CARRY', message: 'x', details: { step: 'seed' } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(displaySteps(get(moves).get(5)!).map((s) => s.state)[0]).toBe('failed');
+      applyMoveProgress(ev('check', 'started'));
+      applyMoveProgress(ev('check', 'failed'));
+      const run = get(moves).get(5)!;
+      expect(run.origin).toBe('local');
+      expect(run.status).toBe('failed');
+      expect(run.error?.code).toBe('E_MOVE_CARRY');
+      expect(displaySteps(run).map((s) => s.state)[0]).toBe('failed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets queued events name the step that failed, without touching the result', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = pending();
+      startMove(source, 'turanga', { keepSource: false });
+      p.reject({ code: 'E_MOVE_CARRY', message: 'x', details: { step: 'fetch' } });
+      await vi.advanceTimersByTimeAsync(0);
+      applyMoveProgress(ev('git', 'started'));
+      applyMoveProgress(ev('git', 'failed'));
+      const run = get(moves).get(5)!;
+      expect(run.status).toBe('failed');
+      expect(run.error?.code).toBe('E_MOVE_CARRY');
+      expect(displaySteps(run).map((s) => s.state)).toEqual([
+        'done', 'done', 'done', 'failed', 'pending', 'pending', 'pending', 'pending', 'pending',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never marks a step the user watched finish as the one that failed', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = pending();
+      startMove(source, 'turanga', { keepSource: false });
+      applyMoveProgress(ev('git', 'done', { detail: '2 commits' }));
+      p.reject({ code: 'E_MOVE_CARRY', message: 'x', details: { step: 'target' } });
+      await vi.advanceTimersByTimeAsync(0);
+      // Nothing is `started`, and the first four steps are known to be done:
+      // the failure belongs to the step the move had got to.
+      expect(displaySteps(get(moves).get(5)!).map((s) => s.state)).toEqual([
+        'done', 'done', 'done', 'done', 'failed', 'pending', 'pending', 'pending', 'pending',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows every step done for a result with no events at all, keeping warned', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    applyMoveProgress(ev('ignored', 'warned', { detail: '0 files' }));
+    p.resolve(report);
+    await flush();
+    const run = get(moves).get(5)!;
+    // The stored steps are left alone; only what the sheet renders is filled in.
+    expect(run.steps[8].state).toBe('pending');
+    expect(displaySteps(run).map((s) => s.state)).toEqual([
+      'done', 'done', 'done', 'done', 'done', 'warned', 'done', 'done', 'done',
+    ]);
+  });
+
+  it('replaces a settled local run with a fresh observed one once the grace is over', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = pending();
+      startMove(source, 'turanga', { keepSource: false });
+      p.resolve(report);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(get(moves).get(5)!.status).toBe('done');
+      vi.setSystemTime(Date.now() + SETTLE_GRACE_MS + 1000);
+      applyMoveProgress(ev('check', 'started'));
+      expect(get(moves).get(5)).toMatchObject({ status: 'running', origin: 'observed' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// F1: the hub answered nothing. The move is very probably still running
+// there, so calling it failed is a lie — and the user must still be able to
+// stop following it (F3).
+describe('a lost hub connection', () => {
+  it('keeps the run running as an observed one, with no error toast', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    p.reject({ code: 'E_HUB_UNREACHABLE', message: 'hub did not answer', details: null });
+    await flush();
+    const run = get(moves).get(5)!;
+    expect(run.status).toBe('running');
+    expect(run.origin).toBe('observed');
+    expect(run.error?.code).toBe('E_HUB_UNREACHABLE');
+    expect(get(toasts).some((t) => t.kind === 'error')).toBe(false);
+    // From here events settle it like any other observed run.
+    applyMoveProgress(ev('handoff', 'done'));
+    expect(get(moves).get(5)!.status).toBe('done');
+  });
+});
+
 describe('dismissMove', () => {
-  it('removes a settled run and refuses a running one', () => {
+  it('removes a settled run and refuses a running local one', () => {
     pending();
     startMove(source, 'turanga', { keepSource: false });
     dismissMove(5);
@@ -239,5 +401,69 @@ describe('dismissMove', () => {
     applyMoveProgress(ev('check', 'failed'));
     dismissMove(5);
     expect(get(moves).has(5)).toBe(false);
+  });
+
+  // F3: an observed run is only this window's view of someone else's move.
+  // Refusing to let go of it left a running observed run on screen forever.
+  it('removes a RUNNING observed run, which the next event re-creates', () => {
+    applyMoveProgress(ev('check', 'started'));
+    expect(get(moves).get(5)!.status).toBe('running');
+    dismissMove(5);
+    expect(get(moves).has(5)).toBe(false);
+    applyMoveProgress(ev('git', 'started'));
+    expect(get(moves).get(5)!.status).toBe('running');
+  });
+});
+
+// F4 / F5: by the time the result arrives the source row is usually gone.
+describe('what a finished move leaves behind', () => {
+  it('selects the target even though the source row (and the selection) went away', async () => {
+    const p = pending();
+    selectSession(source);
+    startMove(source, 'turanga', { keepSource: false });
+    sessions.set([]); // the kill removed the row, which clears the selection
+    expect(get(selectedSession)).toBeNull();
+    p.resolve(report);
+    await flush();
+    expect(get(selectedSession)?.id).toBe(6);
+  });
+
+  it('toasts a result with a View action, sticky only when there are warnings', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    p.resolve({ ...report, warnings: ['one thing'], source_killed: false });
+    await flush();
+    const t = get(toasts).find((x) => x.kind === 'success')!;
+    expect(t.message).toBe('Moved dev-foo to turanga · 1 warning · the source keeps running');
+    expect(t.sticky).toBe(true);
+    expect(t.action?.label).toBe('View');
+    t.action!.run();
+    expect(get(transferSheetFor)).toBe(5);
+  });
+
+  it('does not stick a clean result, and says nothing about the source', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    p.resolve(report);
+    await flush();
+    const t = get(toasts).find((x) => x.kind === 'success')!;
+    expect(t.message).toBe('Moved dev-foo to turanga');
+    expect(t.sticky).toBe(false);
+  });
+});
+
+// F5: session row ids are reused, so a run must prove it belongs to the row
+// the chip is rendering for.
+describe('runForSession', () => {
+  it('finds the session\'s own run only when the name and host still match', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    expect(runForSession(get(moves), source)?.sessionId).toBe(5);
+    expect(runForSession(get(moves), row({ id: 5, tmux_name: 'something-else' }))).toBeUndefined();
+    expect(runForSession(get(moves), row({ id: 5, host_alias: 'elsewhere' }))).toBeUndefined();
+    p.resolve(report);
+    await flush();
+    // The session the move produced finds the source's run.
+    expect(runForSession(get(moves), target)?.sessionId).toBe(5);
   });
 });

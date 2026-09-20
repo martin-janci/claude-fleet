@@ -6,7 +6,7 @@
   import { moveBlockedReason, moveTargetsFor } from './moveEligibility';
   import { describeMoveError } from './moveErrors';
   import { stepLabel } from './moveProgress';
-  import { dismissMove, moves, startMove, transferSheetFor } from './moves';
+  import { dismissMove, displaySteps, moves, startMove, transferSheetFor } from './moves';
   import { selectSession } from './selection';
   import { sessions } from './sessions';
 
@@ -38,6 +38,9 @@
     if (id !== null && !run && !session) transferSheetFor.set(null);
   });
 
+  // What the steps list shows: a settled run completes its own picture at
+  // render time rather than by rewriting what its events reported.
+  const shown = $derived(run ? displaySteps(run) : []);
   const failure = $derived(
     run && (run.status === 'failed' || run.status === 'partial')
       ? describeMoveError(run.error, run.status, run.toHost)
@@ -95,7 +98,7 @@
 {#snippet steps()}
   {#if run}
     <ol class="steps" data-testid="transfer-steps">
-      {#each run.steps as s (s.step)}
+      {#each shown as s (s.step)}
         <li data-state={s.state}>
           <span class="mark" aria-hidden="true"></span>
           <span class="label">{stepLabel(s.step, run.toHost)}</span>
