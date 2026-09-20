@@ -239,7 +239,7 @@ git commit -m "test(theme): assert the contrast floors app.css claims in comment
 
 ### Task 3: `--mono` and a class for `conv-retry`
 
-Two independent one-liners that need no new behaviour. `var(--mono, …)` is read at 11 sites and defined nowhere, so every one of them silently falls through to its fallback. `conv-retry` has no class and no global `button` rule exists, so it renders as the only native macOS push button in the panel — on the error path, ignoring dark mode.
+Two independent one-liners that need no new behaviour. `var(--mono)` is read at 16 sites and defined nowhere, so every one of them silently falls through to its fallback; a further 59 declarations hardcode the stack independently. `conv-retry` has no class and no global `button` rule exists, so it renders as the only native macOS push button in the panel — on the error path, ignoring dark mode.
 
 **Files:**
 - Modify: `src/app.css` (`:root` only — a font stack is not per-theme)
@@ -254,8 +254,9 @@ Two independent one-liners that need no new behaviour. `var(--mono, …)` is rea
 In `src/app.css`, in the first `:root` block only:
 
 ```css
-  /* Read as var(--mono, …) at 11 sites that have been falling through to
-     their fallback since the token was designed and never shipped. */
+  /* Read at 16 sites that have been falling through to their fallback
+     since the token was designed and never shipped. 59 more hardcode the
+     stack; they are not this task's business. */
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 ```
 
@@ -1674,6 +1675,7 @@ Expected: FAIL — the file contains `!important`.
 - `CopyButton.svelte`: becomes `class="btn btn--icon btn--quiet"` with the glyph `⧉`, keeping its existing `aria-label={copied ? 'Copied' : label}` and `title`. Remove the `opacity: 0` reveal — a 16.7px target you must find by hovering becomes a 24px target that is always there.
 - `TransferChip.svelte`: `class="btn btn--quiet is-bounded"`; delete its `padding: 0` and local radius.
 - `ImportDialog.svelte`: `.primary` becomes `class="btn btn--primary"`; delete `color: white` and `border: 0`.
+- `ConversationPanel.svelte`: the `.retry-btn` rule Task 3 added as a stopgap becomes `class="btn btn--quiet is-bounded"` on the `conv-retry` button; delete the local rule.
 - `NewBgSessionDialog.svelte`: `.btn-primary` becomes `class="btn btn--primary"`; delete all three `!important` declarations and the rules that needed them.
 
 - [ ] **Step 4: Run the full suite**
@@ -1693,7 +1695,7 @@ git commit -m "refactor(ui): every shared control onto the primitives"
 ## Done when
 
 - `npx vitest run` and `npx svelte-check --tsconfig ./tsconfig.json` both pass.
-- `grep -rn '!important' src/lib/` returns nothing.
+- `grep -rn '!important' src/lib/NewBgSessionDialog.svelte` returns nothing. (`Sidebar.svelte:1077` keeps its `opacity: 1 !important` — that one fights a hover-reveal cascade, not a button's specificity, and is a separate fix.)
 - `grep -rn 'contextTint' src/` returns nothing.
 - The conversation panel has exactly one sticky bar, and `N turns` is reachable while Find is open.
 - `src/lib/tokens.test.ts` asserts every documented contrast pair in both themes.
