@@ -62,7 +62,7 @@ describe('deriveSteps', () => {
       ...base,
       provisionedHost: true,
       mcpEnabled: true,
-      tunnels: [{ host_alias: 'mefistos', state: 'up' }],
+      tunnels: [{ host_alias: 'mefistos', state: 'up', consecutive_failures: 0, last_error: null }],
     });
     const prov = byId(steps, 'provision');
     expect(prov.status).toBe('done');
@@ -74,11 +74,48 @@ describe('deriveSteps', () => {
       ...base,
       provisionedHost: true,
       mcpEnabled: true,
-      tunnels: [{ host_alias: 'mefistos', state: 'down' }],
+      tunnels: [{ host_alias: 'mefistos', state: 'down', consecutive_failures: 0, last_error: null }],
     });
     const prov = byId(steps, 'provision');
     expect(prov.status).not.toBe('done');
     expect(prov.badge?.tone).toBe('warn');
+  });
+
+  it('provisioned host with MCP on + tunnel flapping: not done, and the badge says why', () => {
+    // Regression: a crash-looping tunnel used to arrive as state 'up', so
+    // onboarding showed the provision step as complete for a host whose ssh
+    // had never once connected.
+    const steps = deriveSteps({
+      ...base,
+      provisionedHost: true,
+      mcpEnabled: true,
+      tunnels: [
+        {
+          host_alias: 'trn',
+          state: 'flapping',
+          consecutive_failures: 412,
+          last_error: 'bind [127.0.0.1]:4180: Address already in use',
+        },
+      ],
+    });
+    const prov = byId(steps, 'provision');
+    expect(prov.status).not.toBe('done');
+    expect(prov.badge?.tone).toBe('warn');
+    expect(prov.badge?.text).toContain('flapping');
+    expect(prov.sublabel).toContain('Address already in use');
+  });
+
+  it('one flapping host does not mask another that is genuinely up', () => {
+    const steps = deriveSteps({
+      ...base,
+      provisionedHost: true,
+      mcpEnabled: true,
+      tunnels: [
+        { host_alias: 'trn', state: 'flapping', consecutive_failures: 9, last_error: 'refused' },
+        { host_alias: 'mefistos', state: 'up', consecutive_failures: 0, last_error: null },
+      ],
+    });
+    expect(byId(steps, 'provision').status).toBe('done');
   });
 
   it('Control API is optional and never active', () => {

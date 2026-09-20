@@ -39,6 +39,6 @@ pub fn tunnel_status(
          the hub",
     )?;
     let hosts = hosts::list_hosts(&store)?;
-    let alive = tunnels.snapshot();
+    let alive = tunnels.health();
     Ok(onboarding::map_tunnel_states(&hosts, &alive))
 }
