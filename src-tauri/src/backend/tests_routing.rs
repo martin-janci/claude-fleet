@@ -354,6 +354,25 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // The other shape of the same argument: an omitted project filter is
+        // sent as an explicit `null`, not left off the object. Which of the
+        // two the hub sees is the difference between "every worktree" and a
+        // parameter it never bound, so both shapes are pinned rather than
+        // one.
+        (
+            "list_worktrees",
+            "list_worktrees",
+            json!({ "project_id": null }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::worktrees::routed::list_worktrees(
+                    b,
+                    ListWorktreesArgs { project_id: None },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "list_tasks",
             "list_tasks",
@@ -458,6 +477,32 @@ fn routed_read_cases() -> Vec<Case> {
                         all: true,
                         limit: 25,
                         skip: 50,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // `all`/`limit`/`skip` carry `#[serde(default)]` for the webview, so
+        // the History view can leave them out — and the desktop still SENDS
+        // the zeroes it defaulted them to, because the tool's own defaults
+        // (`all: true`, `limit: 50`) are not the desktop's. An argument
+        // quietly omitted here would change what the History view shows, so
+        // the zero shape is pinned beside the populated one.
+        (
+            "repo_log",
+            "repo_log",
+            json!({ "session_id": 7, "all": false, "limit": 0, "skip": 0 }),
+            "[]",
+            Box::new(|b, s, h| {
+                block_on(commands::history::routed::repo_log(
+                    b,
+                    RepoLogArgs {
+                        session_id: 7,
+                        all: false,
+                        limit: 0,
+                        skip: 0,
                     },
                     s,
                     h,
@@ -744,6 +789,29 @@ fn routed_mutation_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // `call_id` is this process's own cancellation-registry key and has no
+        // hub counterpart, so the tool must never see it — not as a value and
+        // not as a `null`. The case above passes `None`, which proves nothing
+        // about a key that would only appear when it is set; this one sets it.
+        (
+            "spawn_review",
+            "spawn_review",
+            json!({ "source_session_id": 7, "prompt": "review it" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::spawn_review(
+                    b,
+                    SpawnReviewArgs {
+                        source_session_id: 7,
+                        prompt: "review it".into(),
+                        call_id: Some(123),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "recreate_session",
             "recreate_session",
@@ -853,6 +921,30 @@ fn routed_mutation_cases() -> Vec<Case> {
                         target_host_alias: "hetzner".into(),
                         keep_source: false,
                         strict: true,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // The other side of both move flags. `strict` in particular decides
+        // whether a dirty worktree or an unpushed branch is refused or
+        // carried, so "the desktop sent the flag the user chose" is pinned
+        // for each value rather than for one of them.
+        (
+            "move_session",
+            "move_session",
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": true, "strict": false }),
+            MOVE_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::move_session::routed::move_session(
+                    b,
+                    MoveSessionArgs {
+                        session_id: 7,
+                        target_host_alias: "hetzner".into(),
+                        keep_source: true,
+                        strict: false,
                     },
                     s,
                     h,
