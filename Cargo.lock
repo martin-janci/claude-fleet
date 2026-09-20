@@ -677,6 +677,7 @@ name = "claude-fleet"
 version = "0.2.26"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "directories",
  "fleet-core",
  "fleet-proto",

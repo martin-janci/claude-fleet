@@ -154,6 +154,74 @@ pub fn record_picked(
     Ok(out)
 }
 
+/// Above this, the strip shows an extension tile instead of the picture: a
+/// data URL costs ~1.33x its bytes in the webview, and the tile is 44px.
+pub const PREVIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// The mime type for a data URL, for the extensions `classify` already calls
+/// [`AttachKind::Image`]. Gated on `classify` first so the two extension
+/// lists cannot drift apart; this only adds the mime string each already
+/// implies.
+fn mime_for(path: &Path) -> Option<&'static str> {
+    if classify(path) != AttachKind::Image {
+        return None;
+    }
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+/// Split out of the command so the allow-list gate is unit-testable.
+pub fn preview_for(allow: &UploadAllowList, path: &str) -> Result<Option<String>, IpcError> {
+    let p = Path::new(path);
+    if !allow.is_allowed(p) {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!("{path} was not attached by the user; it cannot be previewed"),
+        ));
+    }
+    let Some(mime) = mime_for(p) else {
+        return Ok(None);
+    };
+    let len = std::fs::metadata(p)
+        .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("stat {path}: {e}")))?
+        .len();
+    if len > PREVIEW_MAX_BYTES {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(p)
+        .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("read {path}: {e}")))?;
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(Some(format!("data:{mime};base64,{b64}")))
+}
+
+/// A data URL for an attached image, so the composer can show a thumbnail.
+/// Reading bytes stays in Rust: there is no fs plugin, and the allow-list is
+/// the only thing that decides which files this process will open.
+#[tauri::command]
+pub fn attachment_preview(
+    path: String,
+    backend: State<'_, Arc<FleetBackend>>,
+    allow: State<'_, Arc<UploadAllowList>>,
+) -> Result<Option<String>, IpcError> {
+    // The file is on THIS machine; a hub client has nothing local to read.
+    backend.refuse_local_only("attachment_preview")?;
+    preview_for(&allow, &path)
+}
+
 /// Open the OS file picker and authorise whatever the user chooses. The
 /// picker runs HERE, not in the webview, so the webview still never gets to
 /// name a path (SEC-9).
@@ -423,5 +491,41 @@ mod tests {
                 .code,
             "E_FORBIDDEN"
         );
+    }
+
+    #[test]
+    fn previews_only_small_allow_listed_images() {
+        let allow = UploadAllowList::new();
+        let dir = tempfile::tempdir().unwrap();
+
+        let png = dir.path().join("a.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
+        allow.allow(std::slice::from_ref(&png));
+        let url = preview_for(&allow, png.to_str().unwrap()).unwrap().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+
+        // A text file is not an image: no preview, no error.
+        let log = dir.path().join("b.log");
+        std::fs::write(&log, b"hello").unwrap();
+        allow.allow(std::slice::from_ref(&log));
+        assert!(preview_for(&allow, log.to_str().unwrap())
+            .unwrap()
+            .is_none());
+
+        // Not on the allow-list: refused, not read.
+        let err = preview_for(&allow, "/etc/passwd").unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN);
+    }
+
+    #[test]
+    fn a_large_image_gets_no_inline_preview() {
+        let allow = UploadAllowList::new();
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.png");
+        std::fs::write(&big, vec![0u8; (PREVIEW_MAX_BYTES + 1) as usize]).unwrap();
+        allow.allow(std::slice::from_ref(&big));
+        assert!(preview_for(&allow, big.to_str().unwrap())
+            .unwrap()
+            .is_none());
     }
 }

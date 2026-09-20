@@ -302,6 +302,7 @@ pub fn run() {
             commands::files::repo_diff,
             commands::upload::upload_to_session,
             commands::upload::pick_attachments,
+            commands::upload::attachment_preview,
             commands::history::repo_log,
             commands::history::repo_branches,
             commands::history::repo_commit,

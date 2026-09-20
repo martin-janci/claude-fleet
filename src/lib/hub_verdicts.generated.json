@@ -4,6 +4,7 @@
     "add_project",
     "assets_inventory",
     "assets_scan_hosts",
+    "attachment_preview",
     "catalog_add_resource",
     "catalog_apply_sync",
     "catalog_commit_pending",
