@@ -978,6 +978,23 @@ describe('fleetBackground', () => {
     expect(got[0].taskId).toBe(11);
   });
 
+  it('puts running children first, as the transcript group already does', () => {
+    // The dropdown is the view that answers "what is still live"; a finished
+    // child listed above a running one reads backwards.
+    const got = fleetBackground(
+      [
+        row({ id: 2, parent_session_id: 7, kind: 'bg', friendly_name: 'Finished child', claude_status: 'completed' }),
+        row({ id: 3, parent_session_id: 7, kind: 'bg', friendly_name: 'Live child', claude_status: 'working' }),
+      ],
+      [{ ...baseTaskRow, id: 11, requester_session_id: 7, state: 'done' }],
+      7,
+    );
+    expect(got.map((e) => e.status)).toEqual(['running', 'done', 'done']);
+    expect(got[0].label).toBe('Live child');
+    // Within one status band the order is sessions, then tasks.
+    expect(got.map((e) => e.key)).toEqual(['session:3', 'session:2', 'fleettask:11']);
+  });
+
   it('maps every task state', () => {
     const of = (state: TaskRow['state']) =>
       fleetBackground([], [{ ...baseTaskRow, requester_session_id: 7, state }], 7)[0].status;

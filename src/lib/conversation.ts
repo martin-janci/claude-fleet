@@ -547,7 +547,8 @@ export function fleetBackground(sessions: SessionRow[], tasks: TaskRow[], sessio
       history: [],
     });
   }
-  return out;
+  // Same rule as the transcript group: what is still live comes first.
+  return out.sort(byRunningThenNewest);
 }
 
 // ─── Tool lines / subagents / doing now (phase 3) ───────────────────────────

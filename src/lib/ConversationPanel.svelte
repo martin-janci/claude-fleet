@@ -191,11 +191,18 @@
   let background = $state<string | null>(null);
   let backgroundOpen = $state(false);
 
-  const bgEntries = $derived(
-    conv
-      ? [...transcriptBackground(conv.turns), ...fleetBackground($sessions, $tasks, session.id)]
-      : fleetBackground($sessions, $tasks, session.id),
+  // Two groups, each sorted running-first on its own. Sorting across them
+  // would interleave exactly what the headings exist to keep apart.
+  const bgTranscript = $derived(conv ? transcriptBackground(conv.turns) : []);
+  const bgFleet = $derived(fleetBackground($sessions, $tasks, session.id));
+  const bgGroups = $derived(
+    [
+      { title: 'In this conversation', entries: bgTranscript },
+      { title: 'Fleet children', entries: bgFleet },
+    ].filter((g) => g.entries.length > 0),
   );
+  // The flat list behind the count on the button and every key lookup.
+  const bgEntries = $derived([...bgTranscript, ...bgFleet]);
   const bgEntry = $derived(bgEntries.find((e) => e.key === background) ?? null);
 
   // Paths in reply text open in the Files tab (MarkdownInline reads this).
@@ -1110,17 +1117,21 @@
                 >{bgEntries.length} background</button
               >
               {#if backgroundOpen}
-                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-                <ul class="turn-index" aria-label="Background work" data-testid="conv-background-list">
-                  {#each bgEntries as e (e.key)}
-                    <li>
-                      <button type="button" data-testid="conv-background-item" onclick={() => openBackground(e)}>
-                        <span class="ti-label">{e.kind} · {e.label}</span>
-                        <span class="bg-item-status" data-status={e.status}>{e.status}</span>
-                      </button>
-                    </li>
+                <div class="turn-index bg-groups" data-testid="conv-background-list">
+                  {#each bgGroups as g (g.title)}
+                    <div class="bg-group" data-testid="conv-background-group">{g.title}</div>
+                    <ul aria-label={g.title}>
+                      {#each g.entries as e (e.key)}
+                        <li>
+                          <button type="button" data-testid="conv-background-item" onclick={() => openBackground(e)}>
+                            <span class="ti-label">{e.kind} · {e.label}</span>
+                            <span class="bg-item-status" data-status={e.status}>{e.status}</span>
+                          </button>
+                        </li>
+                      {/each}
+                    </ul>
                   {/each}
-                </ul>
+                </div>
               {/if}
             </div>
           {/if}
@@ -1549,6 +1560,25 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* The grouped dropdown keeps `.turn-index`'s popup chrome; the inner lists
+     shed the browser's own list styling. */
+  .bg-groups ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .bg-group {
+    padding: 0.3rem 0.65rem 0.15rem;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--fg-muted);
+  }
+  .bg-group:not(:first-child) {
+    margin-top: 0.25rem;
+    border-top: 1px solid var(--border);
+    padding-top: 0.4rem;
   }
   .bg-item-status {
     margin-left: auto;

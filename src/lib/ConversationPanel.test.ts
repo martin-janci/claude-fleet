@@ -2670,6 +2670,22 @@ describe('ConversationPanel background switcher', () => {
     expect(rows[0].textContent).toContain('Posúdiť stratégiu testov');
   });
 
+  it('heads each group so you can tell a transcript agent from a fleet child', async () => {
+    const { getByTestId, getAllByTestId } = await renderWithConversation(convWithBackgroundAgent, {
+      sessions: [session({ id: 2, parent_session_id: 1, kind: 'bg', friendly_name: 'Load layers' })],
+    });
+    await fireEvent.click(getByTestId('conv-background-button'));
+    const heads = getAllByTestId('conv-background-group').map((h) => h.textContent?.trim());
+    expect(heads).toEqual(['In this conversation', 'Fleet children']);
+  });
+
+  it('heads the one group that has entries', async () => {
+    const { getByTestId, getAllByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    await fireEvent.click(getByTestId('conv-background-button'));
+    const heads = getAllByTestId('conv-background-group').map((h) => h.textContent?.trim());
+    expect(heads).toEqual(['In this conversation']);
+  });
+
   it('hides the switcher when nothing ran in the background', async () => {
     const { queryByTestId } = await renderWithConversation(convWithNoBackground);
     expect(queryByTestId('conv-background-button')).toBeNull();
