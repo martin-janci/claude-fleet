@@ -154,6 +154,7 @@ pub(crate) fn sample_project_row() -> ProjectRow {
         base_path: "/home/dev/projects".into(),
         last_session_at: Some(1_725_000_000),
         adopted: true,
+        system: false,
     }
 }
 

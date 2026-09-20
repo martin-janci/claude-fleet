@@ -17,6 +17,11 @@ pub struct ProjectRow {
     /// never delete such a row for being outside the root — that is its
     /// normal shape, not evidence of staleness (see `service::projects`).
     pub adopted: bool,
+    /// Set by `service::operator` (migration 038): this row is the UX agent's
+    /// own working directory, not one of the user's repositories. The project
+    /// picker hides it and `refresh_projects`'s stale-rows sweep leaves it
+    /// alone — the same bargain `adopted` makes, for a different reason.
+    pub system: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -38,7 +43,8 @@ pub struct WorktreeRow {
 pub type FingerprintKeys = std::collections::HashMap<i64, Vec<String>>;
 
 /// Columns every `ProjectRow` query selects, in [`map_project_row`] order.
-pub(super) const PROJECT_COLUMNS: &str = "id, owner, repo, base_path, last_session_at, adopted";
+pub(super) const PROJECT_COLUMNS: &str =
+    "id, owner, repo, base_path, last_session_at, adopted, system";
 
 /// Map a row selected with [`PROJECT_COLUMNS`] (at column offset 0).
 pub(super) fn map_project_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
@@ -49,6 +55,7 @@ pub(super) fn map_project_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proje
         base_path: row.get(3)?,
         last_session_at: row.get(4)?,
         adopted: row.get::<_, i64>(5)? != 0,
+        system: row.get::<_, i64>(6)? != 0,
     })
 }
 

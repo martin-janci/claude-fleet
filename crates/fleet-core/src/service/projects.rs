@@ -323,9 +323,15 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
         // evidence of staleness. Without this, the very next refresh (the
         // Settings save path, the onboarding card, or the `refresh_projects`
         // MCP tool) would delete it before a session ever got to reference it.
+        //
+        // A SYSTEM row (`service::operator`) is exempt for the same reason,
+        // in its own words: it backs a fleet-internal working directory that
+        // lives outside the projects root by construction and is never
+        // rediscovered by a scan.
         for p in &snapshot {
             let row = &p.project;
-            if fresh_ids.contains(&row.id) || removed.contains(&row.id) || row.adopted {
+            if fresh_ids.contains(&row.id) || removed.contains(&row.id) || row.adopted || row.system
+            {
                 continue;
             }
             let inside = strip_root(&row.base_path, &root_raw).is_some()
@@ -557,6 +563,28 @@ mod tests {
         assert!(
             !ids.contains(&plain),
             "a non-adopted stale row outside the root is still dropped"
+        );
+    }
+
+    /// The operator's project lives outside the projects root and no scan will
+    /// ever rediscover it, which is exactly the shape the sweep deletes. It must
+    /// survive, or the agent loses its home on the next Settings save.
+    #[tokio::test]
+    async fn refresh_projects_keeps_a_system_row_outside_the_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let sysid = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let map = serde_json::json!({ "local": tmp.path().to_string_lossy() }).to_string();
+            settings::set(&s, settings::PROJECTS_BASE_PATH, &map).unwrap();
+            s.upsert_system_project("fleet", "operator", "/elsewhere/operator")
+                .unwrap()
+        };
+        let rows = refresh_projects(&store).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.project.id == sysid),
+            "a system row outside the root survives a refresh"
         );
     }
 
