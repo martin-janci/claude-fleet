@@ -1,6 +1,7 @@
 //! `fleet-hub` — claude-fleet without the desktop app. See `docs/hub.md`.
 
 mod config;
+mod demo;
 mod out;
 mod pair;
 mod serve;
@@ -89,6 +90,30 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
+    /// Fill the store with obviously-fake hosts, projects and sessions, so a
+    /// freshly paired client has something to draw. Development only.
+    ///
+    /// A client paired to a hub that has never run a session shows an empty
+    /// list, which is indistinguishable from a broken pairing. This makes the
+    /// difference visible. Every row is named `demo-…`, which is what lets
+    /// `--clear` remove exactly these and nothing else.
+    ///
+    /// Refuses a store that already holds rows it did not write: seeding a live
+    /// fleet would mix invented sessions into a list an operator makes
+    /// decisions from.
+    DemoSeed {
+        /// How many fake hosts to create (1-4). [default: 2]
+        #[arg(long)]
+        hosts: Option<usize>,
+        /// Remove the demo rows instead of adding them.
+        #[arg(long)]
+        clear: bool,
+        /// Seed even though the store holds real rows.
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
     /// Print this hub's SSH public key (generated on first use; derived when only the private key exists).
     SshKey,
     /// Exit 0 when a hub answers HTTP on 127.0.0.1 (for Docker HEALTHCHECK). Does not open the database.
@@ -148,6 +173,12 @@ async fn main() -> ExitCode {
             }
             ClientCmd::Revoke { name } => pair::client_revoke(&opts, &env, &name).await,
         },
+        Cmd::DemoSeed {
+            hosts,
+            clear,
+            force,
+            opts,
+        } => demo_seed(&opts, &env, hosts, clear, force),
         Cmd::SshKey => serve::ssh_key(),
         Cmd::Healthcheck { port, tls } => serve::healthcheck(port, tls, &env).await,
     };
@@ -346,4 +377,54 @@ mod tests {
         assert_eq!(tls.as_deref(), Some("cert"));
         assert!(Cli::try_parse_from(["fleet-hub", "bogus"]).is_err());
     }
+}
+
+/// `fleet-hub demo-seed` — see [`demo`] for what it writes and why.
+///
+/// Like `token` and `agent-token`, this never *creates* a data dir or a
+/// database: demo rows in a fresh one would belong to no hub, and the mistake
+/// they would hide is exactly the one this command exists to make visible.
+fn demo_seed(
+    opts: &HubOptions,
+    env: &std::collections::HashMap<String, String>,
+    hosts: Option<usize>,
+    clear: bool,
+    force: bool,
+) -> Result<ExitCode, String> {
+    serve::existing_db(&config::resolve_data_dir(opts, env))?;
+    let store = serve::open_store(opts, env)?;
+
+    if clear {
+        let removed = demo::clear(&store)?;
+        out::line(&format!("removed {removed} demo session(s)"));
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Checked before anything is written, so a refusal leaves the store
+    // exactly as it was rather than half seeded.
+    if !force && demo::holds_real_rows(&store)? {
+        return Err(
+            "this hub already has hosts or sessions of its own; demo rows would be mixed in \
+             with them and only their names would tell them apart. Pass --force if that is \
+             what you want, or --clear to remove demo rows."
+                .to_string(),
+        );
+    }
+
+    let hosts = hosts.unwrap_or(2);
+    if hosts == 0 || hosts > 4 {
+        return Err(format!("--hosts must be between 1 and 4, got {hosts}"));
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let sessions = demo::seed(&store, &demo::Plan { hosts }, now)?;
+
+    out::line(&format!(
+        "seeded {hosts} demo host(s) and {sessions} demo session(s). \
+         Remove them with: fleet-hub demo-seed --clear"
+    ));
+    Ok(ExitCode::SUCCESS)
 }
