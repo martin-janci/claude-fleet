@@ -929,6 +929,7 @@
     onSelect={select}
     bind:this={header}
     {findOpen}
+    findDisabled={!threadShown}
     {findQuery}
     {findCount}
     matchCount={matches.length}

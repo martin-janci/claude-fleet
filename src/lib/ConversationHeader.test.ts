@@ -157,6 +157,21 @@ describe('ConversationHeader', () => {
     expect(screen.getByTestId('conv-turns-button').textContent).toContain('1 turn');
   });
 
+  it('disables the find button when there is nothing to search', () => {
+    const { unmount } = render(ConversationHeader, {
+      session: session(), conversations: list, viewing: null, lastEvent: null,
+      newerAvailable: false, onSelect: vi.fn(), ...findProps, findDisabled: true,
+    });
+    // Disabled, not hidden: hiding it would make the tool cluster jump.
+    expect((screen.getByTestId('conv-find-button') as HTMLButtonElement).disabled).toBe(true);
+    unmount();
+    render(ConversationHeader, {
+      session: session(), conversations: list, viewing: null, lastEvent: null,
+      newerAvailable: false, onSelect: vi.fn(), ...findProps, findDisabled: false,
+    });
+    expect((screen.getByTestId('conv-find-button') as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('keeps the turns button reachable while find is open', () => {
     render(ConversationHeader, {
       session: session(), conversations: list, viewing: null, lastEvent: null,

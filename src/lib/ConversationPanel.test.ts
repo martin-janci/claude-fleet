@@ -2203,6 +2203,26 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(screen.queryByTestId('conv-find')).toBeNull();
   });
 
+  it('the find button is disabled while there is no thread, enabled once there is', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    const { unmount } = render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-empty')).toBeTruthy();
+    // The button is on screen either way — the tool cluster must not jump —
+    // but it cannot open a find bar over nothing.
+    const off = screen.getByTestId('conv-find-button') as HTMLButtonElement;
+    expect(off.disabled).toBe(true);
+    await fireEvent.click(off);
+    await settle();
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+    unmount();
+
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect((screen.getByTestId('conv-find-button') as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('while blocked on a prompt the last turn\'s pending tool call keeps running, not "no result"', async () => {
     const at = new Date(Date.now() - 3_000).toISOString();
     mockedConv.mockReturnValue(

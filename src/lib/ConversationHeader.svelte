@@ -26,6 +26,7 @@
     newerAvailable,
     onSelect,
     findOpen = false,
+    findDisabled = false,
     findQuery = '',
     findCount = '',
     matchCount = 0,
@@ -51,6 +52,9 @@
     onSelect: (claudeSessionId: string | null) => void;
     /** Find bar shown in place of the facts. */
     findOpen?: boolean;
+    /** Nothing to search (empty, error or loading thread): the ⌕ button is
+     *  disabled rather than hidden, so the tool cluster keeps its shape. */
+    findDisabled?: boolean;
     findQuery?: string;
     /** Rendered "n / m" label; '' hides the count. */
     findCount?: string;
@@ -58,7 +62,9 @@
     matchCount?: number;
     turnEntries?: TurnIndexEntry[];
     turnsOpen?: boolean;
-    /** The panel's ticking clock, for the turn index's relative times. */
+    /** The panel's ticking clock, for the turn index's relative times. The
+     *  default is a fallback for a header rendered on its own; it is read
+     *  once, so only a real `nowMs` from the panel ticks. */
     nowMs?: number;
     onFindOpen?: () => void;
     onFindClose?: () => void;
@@ -281,7 +287,7 @@
   <!-- Always at the right, find open or not: ⌘F must not relocate the
        pointer target, and "n turns" must not vanish while find is open. -->
   <div class="tools">
-    <button type="button" class="btn btn--icon btn--quiet" data-testid="conv-find-button" aria-label="Find in conversation" title="Find (⌘F / Ctrl+F)" onclick={onFindOpen}>⌕</button>
+    <button type="button" class="btn btn--icon btn--quiet" data-testid="conv-find-button" aria-label="Find in conversation" title="Find (⌘F / Ctrl+F)" disabled={findDisabled} onclick={onFindOpen}>⌕</button>
     {#if turnEntries.length > 0}
       <div class="turns-wrap" bind:this={turnsWrap}>
         <button
@@ -431,10 +437,15 @@
     font: inherit;
     font-size: var(--control-font);
   }
+  /* Only :focus-visible gets the 2px ring (controls.css states this as the
+     app's single rule); a plain :focus keeps the accent boundary. */
   .find-inline .field:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .find-inline .field:focus-visible {
     outline: var(--ring-w) solid var(--ring);
     outline-offset: var(--ring-offset);
-    border-color: var(--accent);
   }
   .find-count {
     min-width: 4.5ch;

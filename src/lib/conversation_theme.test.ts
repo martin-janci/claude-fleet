@@ -78,8 +78,12 @@ describe('chat sizes itself to its pane', () => {
     expect(panel).not.toMatch(/\d+vw/);
     expect(header).not.toMatch(/\d+vw/);
     // Both pop-ups — the conversation switcher and the turn index — hang off
-    // the header now, so that is where the container units live.
-    expect(header).toMatch(/cqw/);
+    // the header now, so that is where the container units live. Named
+    // individually: the switcher's `90cqw` alone predates the move, so a
+    // bare /cqw/ on the header would pass without the turn index.
+    expect(header).toContain('max-width: 90cqw');
+    expect(header).toContain('width: min(60ch, 90cqw)');
+    expect(header.match(/cqw/g) ?? []).toHaveLength(2);
   });
 });
 
