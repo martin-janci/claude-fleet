@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.26] - 2026-09-20
+
+### Added
+- **hub-client:** let the New session dialog list a remote host's worktrees
+- **hub-client:** route list_host_worktrees to the hub
+- **mcp:** a read-only tool to list a host's worktrees
+
+### Changed
+- replace personal email addresses with GitHub no-reply forms
+- **hub-e2e:** guard the worktree check on the fixture project id
+- **hub-e2e:** a paired client may list a host's worktrees
+
+### Fixed
+- **worktrees:** an unknown project is not-found on the local host too
+- **hub-client:** recognise the refusal an old hub really sends
 ## [0.2.25] - 2026-09-20
 
 ### Added
@@ -885,6 +900,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.26]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.26
 [0.2.25]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.25
 [0.2.24]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.24
 [0.2.23]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.23
