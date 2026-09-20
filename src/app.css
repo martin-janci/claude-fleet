@@ -15,6 +15,8 @@
      (vs --bg #fff: 5.02:1, 5.62:1) — text ≥ 4.5:1, bars ≥ 3:1. */
   --usage-warn: #b45309;
   --usage-crit: #c62828;
+  /* Healthy context. 4.91:1 vs --bg-pane #fafafa (5.13:1 vs --bg #fff). */
+  --usage-ok: #2e7d32;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -32,6 +34,8 @@
     /* vs --bg-pane #161616: warn 7.35:1, crit 5.19:1 (vs --bg #0f0f0f: 7.78:1, 5.50:1). */
     --usage-warn: #d29b4a;
     --usage-crit: #ef5350;
+    /* vs --bg-pane #161616: 9.37:1. */
+    --usage-ok: #5dd17a;
   }
 }
 
@@ -50,6 +54,8 @@
      (vs --bg #fff: 5.02:1, 5.62:1) — text ≥ 4.5:1, bars ≥ 3:1. */
   --usage-warn: #b45309;
   --usage-crit: #c62828;
+  /* Healthy context. 4.91:1 vs --bg-pane #fafafa (5.13:1 vs --bg #fff). */
+  --usage-ok: #2e7d32;
 }
 
 :root[data-theme='dark'] {
@@ -66,6 +72,8 @@
   /* vs --bg-pane #161616: warn 7.35:1, crit 5.19:1 (vs --bg #0f0f0f: 7.78:1, 5.50:1). */
   --usage-warn: #d29b4a;
   --usage-crit: #ef5350;
+  /* vs --bg-pane #161616: 9.37:1. */
+  --usage-ok: #5dd17a;
 }
 
 html, body, #app {
