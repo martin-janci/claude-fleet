@@ -182,16 +182,15 @@ fn the_refresh_button_asks_the_hub_to_reconcile_first() {
     assert_eq!(fake.only_call().1["force"], true);
 }
 
+/// The reads that still have a method here: the ones whose arguments are
+/// more than their command's own struct, or that the event bridge's resync
+/// shares with the command. Everything else routes straight from its
+/// argument struct and is driven through its command in `tests_routing.rs`,
+/// which is the stronger place to assert it — that path also proves the
+/// command reaches the hub arm at all.
 #[test]
 fn each_typed_read_names_its_tool_and_arguments() {
     // (what we call, the tool it must reach, the arguments it must carry)
-    let fake = Fake::answering(Ok(ok("[]")));
-    let _ = block_on(backend(&fake).related_sessions(42));
-    assert_eq!(
-        fake.only_call(),
-        ("related_sessions".into(), json!({"session_id": 42}))
-    );
-
     let fake = Fake::answering(Ok(ok("[]")));
     let _ = block_on(backend(&fake).list_hosts());
     assert_eq!(fake.only_call().0, "list_hosts");

@@ -488,11 +488,7 @@ pub fn pty_open(
     state: State<'_, Mutex<PtyState>>,
     ssh: State<'_, std::sync::Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "pty_open",
-        "the terminal attaches over this machine's SSH connection to the \
-         session's host; attach from that host, or from a standalone app",
-    )?;
+    backend.refuse_local_only("pty_open")?;
     // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
     fleet_core::validate::host_alias(&args.host_alias)?;
     fleet_core::validate::tmux_name(&args.session_name)?;

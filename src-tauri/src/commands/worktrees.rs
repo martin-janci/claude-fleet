@@ -34,11 +34,7 @@ pub async fn list_host_worktrees(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<HostWorktrees, IpcError> {
-    backend.local_only(
-        "list_host_worktrees",
-        "it scans the host over this machine's SSH connection and caches what \
-         it finds; use list_worktrees, which the hub answers",
-    )?;
+    backend.refuse_local_only("list_host_worktrees")?;
     worktrees::list_host_worktrees(args, &store, &ssh).await
 }
 
@@ -73,7 +69,9 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<(), IpcError> {
         match backend.hub() {
-            Some(hub) => hub.delete_worktree(&args).await,
+            // The tool answers prose, so the text is read — which is what
+            // surfaces a tool error — and discarded.
+            Some(hub) => hub.route_text("delete_worktree", &args).await.map(|_| ()),
             None => worktrees::delete_worktree(args, store, ssh).await,
         }
     }

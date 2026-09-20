@@ -39,7 +39,7 @@ pub fn is_prompt(body: &str) -> bool {
     !body.trim().is_empty()
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SendPromptArgs {
     pub host_alias: String,
     pub tmux_name: String,

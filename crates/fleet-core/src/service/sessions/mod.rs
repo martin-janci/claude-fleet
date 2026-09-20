@@ -12,7 +12,7 @@ use crate::store::{
     HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store, StoredIdentity,
 };
 use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;

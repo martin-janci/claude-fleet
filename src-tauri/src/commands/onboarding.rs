@@ -19,11 +19,7 @@ pub async fn check_local_prereqs(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<LocalPrereqs, IpcError> {
-    backend.local_only(
-        "check_local_prereqs",
-        "the onboarding checklist is about running a fleet from this machine, \
-         which the hub is doing instead",
-    )?;
+    backend.refuse_local_only("check_local_prereqs")?;
     Ok(onboarding::local_prereqs(&store).await)
 }
 
@@ -33,11 +29,7 @@ pub fn tunnel_status(
     store: State<'_, Arc<Mutex<Store>>>,
     tunnels: State<'_, Arc<TunnelSupervisor>>,
 ) -> Result<Vec<TunnelStatusRow>, IpcError> {
-    backend.local_only(
-        "tunnel_status",
-        "the tunnels belong to the process that owns the fleet; check them on \
-         the hub",
-    )?;
+    backend.refuse_local_only("tunnel_status")?;
     let hosts = hosts::list_hosts(&store)?;
     let alive = tunnels.health();
     Ok(onboarding::map_tunnel_states(&hosts, &alive))

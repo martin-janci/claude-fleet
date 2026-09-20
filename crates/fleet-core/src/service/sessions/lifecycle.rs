@@ -730,7 +730,7 @@ pub(super) fn derive_friendly_name(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct KillSessionArgs {
     pub host_alias: String,
     pub name: String,
@@ -931,7 +931,7 @@ pub(super) async fn kill_session_with(
     Ok(id)
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RenameSessionArgs {
     pub host_alias: String,
     pub old_name: String,
@@ -964,7 +964,7 @@ pub async fn rename_session(
         })
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SetFriendlyNameArgs {
     pub host_alias: String,
     pub tmux_name: String,
@@ -1004,7 +1004,7 @@ pub fn set_session_friendly_name(
         })
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RestartSessionArgs {
     pub host_alias: String,
     pub name: String,
@@ -1116,7 +1116,7 @@ pub(crate) fn recreate_pane_command(
     crate::tmux::pane_command_for(id, tmux_name)
 }
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "RecreateSessionParams")]
 pub struct RecreateSessionArgs {
     /// Fleet session id (from list_sessions).
@@ -1212,7 +1212,7 @@ pub async fn recreate_session(
     Ok(row)
 }
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "SessionIdParams")]
 pub struct DismissGhostSessionArgs {
     /// Fleet session id (from list_sessions).

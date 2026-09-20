@@ -17,12 +17,17 @@
 //!    the eight repo-browsing reads, `send_prompt`, `kill_session`, …
 //! 2. **Local-only** — it has no counterpart and must *not* quietly run
 //!    against this machine. It returns [`codes::E_LOCAL_ONLY`] in remote mode
-//!    with a message naming what to do instead. See [`FleetBackend::local_only`].
+//!    with a message naming what to do instead. See
+//!    [`FleetBackend::refuse_local_only`].
 //! 3. **Same in both modes** — it is about *this process*, so the local answer
 //!    is the right answer either way: `collect_diagnostics`, `open_log_folder`,
-//!    `cancel_command`. These are listed explicitly in
-//!    [`tests_routing`](super::tests_routing) so that "I forgot" and "I decided"
-//!    cannot look alike.
+//!    `cancel_command`. These carry their reason with them, so that "I forgot"
+//!    and "I decided" cannot look alike.
+//!
+//! Which one each command gets is written down once, in
+//! [`VERDICTS`](super::verdicts::VERDICTS), and every other place that needs
+//! to know — the refusal sentences, the tests, the frontend and the docs —
+//! reads it from there.
 //!
 //! The dangerous verdict is the one nobody makes. A mutation left on the local
 //! path in remote mode does not fail — it SSHes into a host with this
@@ -55,6 +60,7 @@
 //! (*Parity or refusal*), because the refusal is user-visible.
 
 use super::remote::{HubBackend, HubTransport};
+use super::verdicts::{self, Verdict};
 use super::{Backend, RemoteConfig};
 use fleet_core::ipc_error::{codes, IpcError};
 use std::sync::Arc;
@@ -117,14 +123,41 @@ impl FleetBackend {
         self.hub.is_some()
     }
 
-    /// Refuse a command that has no hub counterpart, naming what to do instead.
+    /// Refuse a command that has no hub counterpart, naming what to do
+    /// instead — with the sentence its own row in
+    /// [`VERDICTS`](super::verdicts::VERDICTS) carries.
     ///
-    /// `instead` is a sentence fragment completing "…; " — it must tell the
-    /// user where the operation *does* work, because the honest answer is
-    /// never "you cannot do this", it is "not from here". A no-op in
-    /// standalone mode, so the guard costs a paired app one branch and costs
-    /// a standalone app nothing.
-    pub fn local_only(&self, what: &str, instead: &str) -> Result<(), IpcError> {
+    /// The sentence is a fragment completing "…; " — it must tell the user
+    /// where the operation *does* work, because the honest answer is never
+    /// "you cannot do this", it is "not from here". A no-op in standalone
+    /// mode, so the guard costs a paired app one branch and costs a
+    /// standalone app nothing.
+    ///
+    /// **It fails closed.** A `command` with no row, or with a row that has
+    /// no sentence, is a bug — [`every_refusal_names_a_command_the_table_can_refuse`]
+    /// makes shipping one impossible — but if one ever got out, the user must
+    /// still be refused rather than silently allowed to mutate a fleet the
+    /// hub also manages. So the miss is a `debug_assert!` (loud in a debug
+    /// build and in every test) and, in release, an `E_LOCAL_ONLY` whose
+    /// sentence says the build is at fault. Never a panic on a user path.
+    ///
+    /// [`every_refusal_names_a_command_the_table_can_refuse`]: super::tests_routing
+    pub fn refuse_local_only(&self, command: &str) -> Result<(), IpcError> {
+        let instead = verdicts::verdict(command).and_then(Verdict::instead);
+        debug_assert!(
+            instead.is_some(),
+            "{command} refuses with E_LOCAL_ONLY but VERDICTS has no sentence for it"
+        );
+        self.local_only(command, instead.unwrap_or(NO_SENTENCE))
+    }
+
+    /// The formatting half, and the one place the "configured but unavailable"
+    /// precedence lives. Private on purpose: a command refuses by name,
+    /// through [`Self::refuse_local_only`], so that the sentence it refuses
+    /// with is the one in [`VERDICTS`](super::verdicts::VERDICTS) and nowhere
+    /// else. Pasting a sentence at a call site is now a compile error rather
+    /// than a habit.
+    fn local_only(&self, what: &str, instead: &str) -> Result<(), IpcError> {
         match self.hub() {
             None => Ok(()),
             // A configured hub this launch cannot use: "do it on the hub" is
@@ -142,6 +175,11 @@ impl FleetBackend {
         }
     }
 }
+
+/// The fail-closed sentence of [`FleetBackend::refuse_local_only`]. Nobody
+/// should ever read it; if somebody does, it says whose fault that is.
+const NO_SENTENCE: &str = "this build has no reason recorded for the refusal, which is a bug in \
+     the app; do it on the hub, or from a standalone app";
 
 #[cfg(test)]
 #[path = "tests_routing.rs"]

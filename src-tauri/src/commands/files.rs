@@ -71,7 +71,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<Vec<ChangedFile>, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.repo_changes(args.session_id).await,
+            Some(hub) => hub.route("repo_changes", &args).await,
             None => repo_read::repo_changes(args, store, ssh).await,
         }
     }
@@ -83,7 +83,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<RepoTree, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.repo_tree(args.session_id).await,
+            Some(hub) => hub.route("repo_tree", &args).await,
             None => repo_read::repo_tree(args, store, ssh).await,
         }
     }
@@ -95,7 +95,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<FileContent, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.repo_file(args.session_id, &args.path).await,
+            Some(hub) => hub.route("repo_file", &args).await,
             None => repo_read::repo_file(args, store, ssh).await,
         }
     }
@@ -107,7 +107,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<FileDiff, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.repo_diff(args.session_id, &args.path).await,
+            Some(hub) => hub.route("repo_diff", &args).await,
             None => repo_read::repo_diff(args, store, ssh).await,
         }
     }
