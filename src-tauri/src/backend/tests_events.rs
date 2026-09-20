@@ -24,7 +24,9 @@ use crate::backend::contract::tests::{
     sample_account, sample_host, sample_project_row, sample_session, sample_task,
     sample_worktree_row,
 };
-use fleet_core::events::{CatalogSummary, RowChange, SyncProgress};
+use fleet_core::events::{
+    CatalogSummary, MoveProgress, MoveStep, MoveStepState, RowChange, SyncProgress,
+};
 use fleet_core::store::AssetInventoryRow;
 use serde_json::json;
 use std::sync::Mutex as StdMutex;
@@ -431,6 +433,15 @@ async fn every_variant_this_test_can_build_crosses_unchanged() {
             done: 1,
             total: 2,
         }),
+        RowChange::MoveProgress(MoveProgress {
+            session_id: 5,
+            to_host: "trn".into(),
+            step: MoveStep::Git,
+            index: 4,
+            total: 9,
+            state: MoveStepState::Done,
+            detail: Some("2 commits".into()),
+        }),
     ];
     let body: Vec<String> = changes.iter().map(frame_for).collect();
     let expected: Vec<(&'static str, Value)> =
@@ -439,7 +450,7 @@ async fn every_variant_this_test_can_build_crosses_unchanged() {
     assert_eq!(seen.events(), expected);
 }
 
-/// The table above can build 15 of the 16 variants; this closes the last one
+/// The table above can build 16 of the 19 variants; this closes the last one
 /// and every future one by going at the name list directly.
 ///
 /// `EVENT_NAMES` is held to `RowChange` at COMPILE time in

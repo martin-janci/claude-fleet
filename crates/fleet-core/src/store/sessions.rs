@@ -1267,6 +1267,11 @@ impl Store {
             .query_row(rusqlite::params![claude_session_id], map_session_row)
             .optional()?)
     }
+
+    /// Emit `move:progress` (not a store row).
+    pub fn bus_move_progress(&self, p: &crate::events::MoveProgress) {
+        self.bus.move_progress(p);
+    }
 }
 
 #[cfg(test)]
@@ -2782,5 +2787,23 @@ mod tests {
             .record_notification_hook("nope", ClaudeStatus::Blocked, None)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn bus_move_progress_records_expected_event() {
+        use crate::events::{MoveProgress, MoveStep, MoveStepState};
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let dyn_bus: std::sync::Arc<dyn crate::events::EventBus> = bus.clone();
+        let s = crate::store::Store::open_with_bus_in_memory(dyn_bus).expect("open");
+        s.bus_move_progress(&MoveProgress {
+            session_id: 7,
+            to_host: "beta".into(),
+            step: MoveStep::Git,
+            index: 4,
+            total: 9,
+            state: MoveStepState::Done,
+            detail: None,
+        });
+        assert_eq!(bus.take(), vec!["move:progress:7:git:done"]);
     }
 }

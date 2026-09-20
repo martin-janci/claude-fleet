@@ -61,6 +61,8 @@ pub enum RowChange {
     CatalogLoaded(CatalogSummary),
     /// Progress of an in-flight sync apply (sub-project 2). Not a store row.
     SyncProgress(SyncProgress),
+    /// A step boundary of an in-flight move. Not a store row.
+    MoveProgress(MoveProgress),
 }
 
 #[derive(Serialize, Clone)]
@@ -106,6 +108,97 @@ pub struct SyncProgress {
     pub total: usize,
 }
 
+/// The nine user-facing steps of a move, in the order they run. Several of
+/// `move_session`'s internal stages fold into one step (seeding is part of
+/// `workspace`, the confirm is part of `start`): the user follows these, not
+/// the stage numbers.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveStep {
+    Check,
+    Transcript,
+    Workspace,
+    Git,
+    Replay,
+    Ignored,
+    ClaudeState,
+    Start,
+    Handoff,
+}
+
+impl MoveStep {
+    /// Every step, in order. `src/lib/moveProgress.ts` mirrors it
+    /// (`frontend_declares_the_move_steps_in_order`).
+    pub const ALL: [MoveStep; 9] = [
+        MoveStep::Check,
+        MoveStep::Transcript,
+        MoveStep::Workspace,
+        MoveStep::Git,
+        MoveStep::Replay,
+        MoveStep::Ignored,
+        MoveStep::ClaudeState,
+        MoveStep::Start,
+        MoveStep::Handoff,
+    ];
+
+    /// The wire name (what serde writes).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            MoveStep::Check => "check",
+            MoveStep::Transcript => "transcript",
+            MoveStep::Workspace => "workspace",
+            MoveStep::Git => "git",
+            MoveStep::Replay => "replay",
+            MoveStep::Ignored => "ignored",
+            MoveStep::ClaudeState => "claude_state",
+            MoveStep::Start => "start",
+            MoveStep::Handoff => "handoff",
+        }
+    }
+
+    /// 1-based position in [`Self::ALL`].
+    pub const fn index(self) -> u8 {
+        self as u8 + 1
+    }
+}
+
+/// How a [`MoveStep`] stands. `Warned` is a step that could not do all of
+/// its work but cannot fail the move (ignored files, the Claude-side state).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveStepState {
+    Started,
+    Done,
+    Warned,
+    Failed,
+}
+
+impl MoveStepState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            MoveStepState::Started => "started",
+            MoveStepState::Done => "done",
+            MoveStepState::Warned => "warned",
+            MoveStepState::Failed => "failed",
+        }
+    }
+}
+
+/// One step boundary of an in-flight `move_session`. `session_id` is the
+/// SOURCE row. `detail` is a short count ("2 commits") — never a path or
+/// stderr — and is `None` on `Failed`: the error reaches the caller through
+/// the command's result.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MoveProgress {
+    pub session_id: i64,
+    pub to_host: String,
+    pub step: MoveStep,
+    pub index: u8,
+    pub total: u8,
+    pub state: MoveStepState,
+    pub detail: Option<String>,
+}
+
 impl RowChange {
     /// The frontend event name (`src/lib/events.ts` `RowEvent.name`).
     pub fn name(&self) -> &'static str {
@@ -128,6 +221,7 @@ impl RowChange {
             RowChange::AssetInventoryCleared { .. } => "asset_inventory:cleared",
             RowChange::CatalogLoaded(_) => "catalog:loaded",
             RowChange::SyncProgress(_) => "sync:progress",
+            RowChange::MoveProgress(_) => "move:progress",
         }
     }
 
@@ -163,6 +257,7 @@ impl RowChange {
             }),
             RowChange::CatalogLoaded(s) => to_value(s),
             RowChange::SyncProgress(p) => to_value(p),
+            RowChange::MoveProgress(p) => to_value(p),
         }
     }
 }
@@ -236,6 +331,10 @@ pub trait EventBus: Send + Sync {
     fn sync_progress(&self, p: &SyncProgress) {
         self.emit(&RowChange::SyncProgress(p.clone()));
     }
+    /// See [`RowChange::MoveProgress`].
+    fn move_progress(&self, p: &MoveProgress) {
+        self.emit(&RowChange::MoveProgress(p.clone()));
+    }
 
     /// Flush a single deferred `RowChange`. Used by batched (transactional)
     /// writes to emit AFTER commit; an alias of [`EventBus::emit`] kept for
@@ -307,7 +406,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 18] = [
+pub const EVENT_NAMES: [&str; 19] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -326,12 +425,13 @@ pub const EVENT_NAMES: [&str; 18] = [
     "asset_inventory:cleared",
     "catalog:loaded",
     "sync:progress",
+    "move:progress",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 10] = [
+pub const EVENT_KINDS: [&str; 11] = [
     "session",
     "host",
     "account",
@@ -342,6 +442,7 @@ pub const EVENT_KINDS: [&str; 10] = [
     "asset_inventory",
     "catalog",
     "sync",
+    "move",
 ];
 
 /// Ring size for [`BroadcastEventBus`]. Reconcile holds its emits until the
@@ -456,6 +557,9 @@ impl EventBus for RecordingEventBus {
             RowChange::SyncProgress(p) => {
                 format!("{}:{}:{}/{}", p.host_alias, p.harness, p.done, p.total)
             }
+            RowChange::MoveProgress(p) => {
+                format!("{}:{}:{}", p.session_id, p.step.as_str(), p.state.as_str())
+            }
         };
         self.names.lock().unwrap().push(e.name());
         self.events
@@ -499,6 +603,15 @@ mod tests {
             done: 0,
             total: 0,
         };
+        let moving = MoveProgress {
+            session_id: 1,
+            to_host: String::new(),
+            step: MoveStep::Check,
+            index: 1,
+            total: 9,
+            state: MoveStepState::Started,
+            detail: None,
+        };
         let cases: Vec<(RowChange, &str)> = vec![
             (RowChange::SessionKilled(1), "session:killed"),
             (RowChange::ConversationsChanged(1), "session:conversations"),
@@ -521,6 +634,7 @@ mod tests {
             ),
             (RowChange::CatalogLoaded(summary), "catalog:loaded"),
             (RowChange::SyncProgress(progress), "sync:progress"),
+            (RowChange::MoveProgress(moving), "move:progress"),
         ];
         for (change, expected) in &cases {
             assert_eq!(change.name(), *expected);
@@ -634,6 +748,7 @@ mod tests {
                 RowChange::AssetInventoryCleared { .. } => pinned_name!("asset_inventory:cleared"),
                 RowChange::CatalogLoaded(_) => pinned_name!("catalog:loaded"),
                 RowChange::SyncProgress(_) => pinned_name!("sync:progress"),
+                RowChange::MoveProgress(_) => pinned_name!("move:progress"),
             }
         }
         // And for every variant a test can build without a full store row,
@@ -770,5 +885,79 @@ mod tests {
                 "asset_inventory:cleared:box:claude",
             ]
         );
+    }
+
+    #[test]
+    fn move_steps_are_nine_in_order_and_serialize_as_their_names() {
+        let names: Vec<&str> = MoveStep::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "check",
+                "transcript",
+                "workspace",
+                "git",
+                "replay",
+                "ignored",
+                "claude_state",
+                "start",
+                "handoff"
+            ]
+        );
+        for (i, step) in MoveStep::ALL.iter().enumerate() {
+            assert_eq!(step.index() as usize, i + 1);
+            assert_eq!(
+                serde_json::to_value(step).unwrap(),
+                serde_json::json!(step.as_str())
+            );
+        }
+        for state in [
+            MoveStepState::Started,
+            MoveStepState::Done,
+            MoveStepState::Warned,
+            MoveStepState::Failed,
+        ] {
+            assert_eq!(
+                serde_json::to_value(state).unwrap(),
+                serde_json::json!(state.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn move_progress_keeps_its_wire_shape() {
+        let p = MoveProgress {
+            session_id: 7,
+            to_host: "beta".into(),
+            step: MoveStep::Git,
+            index: 4,
+            total: 9,
+            state: MoveStepState::Done,
+            detail: Some("2 commits".into()),
+        };
+        let change = RowChange::MoveProgress(p.clone());
+        assert_eq!(change.name(), "move:progress");
+        assert_eq!(
+            change.payload(),
+            serde_json::json!({
+                "session_id": 7, "to_host": "beta", "step": "git", "index": 4,
+                "total": 9, "state": "done", "detail": "2 commits"
+            })
+        );
+        let back: MoveProgress = serde_json::from_value(change.payload()).unwrap();
+        assert_eq!(back, p);
+    }
+
+    /// The frontend's step list is the same nine names, in the same order.
+    /// `moveProgress.ts` brackets the list with two marker comments so this
+    /// test reads the list and nothing else.
+    #[test]
+    fn frontend_declares_the_move_steps_in_order() {
+        let ts = include_str!("../../../src/lib/moveProgress.ts");
+        let begin = ts.find("// move-steps:begin").expect("begin marker");
+        let end = ts.find("// move-steps:end").expect("end marker");
+        let quoted: Vec<&str> = ts[begin..end].split('\'').skip(1).step_by(2).collect();
+        let want: Vec<&str> = MoveStep::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(quoted, want);
     }
 }
