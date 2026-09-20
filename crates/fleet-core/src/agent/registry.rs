@@ -472,8 +472,11 @@ mod tests {
     // ── offline ─────────────────────────────────────────────────────────────
 
     /// The headline requirement: no live agent fails *now*, not after the
-    /// timeout. A 60 s budget that returns in under a quarter of a second is
-    /// the only way to tell "returned immediately" from "errored eventually".
+    /// timeout. The bound only has to separate "returned immediately" from
+    /// "errored after the 60 s budget" — it is not a latency measurement, so
+    /// it is loose enough that a loaded machine cannot fail it. A tight bound
+    /// here used to redden the whole suite, which then skipped every target
+    /// after this one.
     #[tokio::test]
     async fn a_request_with_no_connection_is_offline_immediately() {
         let reg = AgentRegistry::new();
@@ -484,8 +487,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, codes::E_AGENT_OFFLINE);
         assert!(
-            started.elapsed() < Duration::from_millis(250),
-            "waited {:?} before reporting an offline agent",
+            started.elapsed() < Duration::from_secs(5),
+            "waited {:?} before reporting an offline agent (the budget was 60s)",
             started.elapsed()
         );
     }
