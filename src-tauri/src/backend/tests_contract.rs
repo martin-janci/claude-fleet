@@ -7,6 +7,7 @@ use fleet_core::service::repo_read::{
     Branch, ChangedFile, Commit, CommitDetail, FileContent, FileDiff, GitRef, RepoTree,
 };
 use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversation};
+use fleet_core::service::tunnel::TunnelHealth;
 use fleet_core::service::usage::DayUsage;
 use fleet_core::service::worktrees::{WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
@@ -211,6 +212,22 @@ fn sample_health() -> Health {
             day: "2026-09-18".into(),
             totals: sample_totals(),
         }],
+        // A flapping tunnel is the case worth pinning on the wire: it is how a
+        // remote operator learns the Control API is unreachable from a host.
+        tunnels: BTreeMap::from([(
+            "trn".to_string(),
+            TunnelHealth {
+                supervised: true,
+                connected: false,
+                consecutive_failures: 412,
+                restarts: 412,
+                last_exit_code: Some(255),
+                last_error: Some("bind [127.0.0.1]:4180: Address already in use".into()),
+                last_connected_unix: None,
+                backoff_ms: 30_000,
+            },
+        )]),
+        tunnels_flapping: 1,
     }
 }
 

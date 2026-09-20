@@ -98,7 +98,7 @@ pub fn collect_diagnostics(
         DiagnosticsInputs {
             data_dir: &data_dir,
             log_dir: &log_dir,
-            tunnels: tunnels.snapshot(),
+            tunnels: tunnels.health(),
             mcp_running,
             mcp_bind_error,
         },

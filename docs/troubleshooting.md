@@ -16,6 +16,7 @@ it.
 | `claude` or `tmux` **missing** on a host | Binary not installed or not on `PATH` for non-interactive SSH sessions | Install the missing tool on the host; confirm it is on the default `PATH`. (`E_CLAUDE_CLI`) |
 | **Provisioning failed** | Cannot write `~/.claude.json`, `~/.claude/CLAUDE.md`, `~/.tmux.conf`, or the skills directory | Read the `detail` string in the per-host result; fix the permissions or path involved. (`E_PROVISION`) |
 | Tunnel shows **"down — retrying"** | Control API is disabled, or the host `sshd` blocks remote port forwarding | Enable the Control API in Settings; check `AllowTcpForwarding` / `GatewayPorts` in the host's `sshd_config`. |
+| Tunnel shows **"flapping"** | `ssh` keeps exiting before the connection is established — most often an orphaned tunnel from an earlier app instance still holding the remote port | The supervisor terminates the orphan itself on the next attempt. If it persists, read the badge's reason (the last `ssh` stderr) and see [Tunnel shows "flapping"](#tunnel-shows-flapping). |
 | **MCP bind error** — server enabled but not listening | Port 4180 (or configured port) already in use | Change the port in **Settings → Control API (MCP)**. The `bind_error` field in `McpStatus` shows the exact OS error. |
 | **No projects found** | The projects base is empty, does not exist, or uses a different layout | Set this machine's projects base and layout in **Settings → Projects**, then click **Save & rescan**. With no base set, `CLAUDE_FLEET_PROJECTS_BASE` and then `~/projects/github.com` are used. (`E_FLEET_PROJECTS_BASE`) |
 | Session **won't attach** / appears as a ghost | The underlying tmux session has been destroyed | Use **Recreate** to replace the session, or **Dismiss** to remove the ghost entry. |
@@ -77,6 +78,46 @@ remote hosts requires the remote `sshd` to allow `AllowTcpForwarding yes` (or
 at minimum `AllowTcpForwarding local`). If `GatewayPorts` is also needed,
 enable it. After changing `sshd_config`, reload sshd (`systemctl reload sshd`)
 and click **Re-provision** in the Hosts panel to restore the tunnel.
+
+### Tunnel shows "flapping"
+
+`flapping` means the supervising task is alive but its `ssh` keeps exiting
+before the connection is established — as opposed to `down`, where the
+supervisor itself has stopped. The badge carries the failure count and the last
+`ssh` stderr, which is the reason; the same detail is in the diagnostics bundle
+and in `fleet_health` (`tunnels`, `tunnels_flapping`).
+
+The three causes, in order of likelihood:
+
+1. **An orphaned tunnel still holds the remote port.** An app instance killed
+   without a clean shutdown (a crash, `SIGKILL`, the singleton restart on a dev
+   build) leaves its `ssh -R` children reparented to pid 1, still forwarding.
+   Every later attempt then dies with `bind [127.0.0.1]:<port>: Address already
+   in use`. The supervisor detects this exact stderr and terminates the orphan
+   before the next attempt, so it should clear within one backoff. To confirm by
+   hand:
+
+   ```bash
+   ps -A -o pid=,ppid=,args= | grep '[s]sh -N.*-R 127.0.0.1'
+   ```
+
+   A `ppid` of `1` on a line whose start time predates the running app is an
+   orphan.
+
+2. **`ssh` multiplexing is configured for that host.** A `ControlMaster auto`
+   entry in `~/.ssh/config` used to turn the tunnel into a multiplexed slave: it
+   handed the forward to the master and exited `0` in a fraction of a second, so
+   the supervisor restarted it every 30 s forever while the forward was actually
+   owned by a process it could not see. The tunnel argv now passes
+   `-o ControlMaster=no -o ControlPath=none`, so a user's config can no longer
+   do this. (The app's *other* ssh calls still multiplex, over their own
+   dedicated `ControlPath` under `~/.cache/claude-fleet/`.)
+
+3. **The remote `sshd` refuses the forward** — see the section above.
+
+A tunnel that has been up for at least a minute counts as healthy: a later drop
+restarts at the initial 1 s delay rather than inheriting the 30 s cap, so a
+transient blip reconnects promptly.
 
 ### MCP bind error
 

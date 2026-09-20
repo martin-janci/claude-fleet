@@ -6,7 +6,7 @@ use crate::ipc_error::lock;
 #[tool_router(router = fleet_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(
-        description = "Report claude-fleet backend health: application version, SQLite schema version, database readiness, the cached fleet roll-up, and ESTIMATED token usage and cost (micro-USD) per host and per UTC day for the last 7 days. For a per-host token the usage fields cover only its own host. Returns JSON."
+        description = "Report claude-fleet backend health: application version, SQLite schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels, plus tunnels_flapping for those supervised but crash-looping, which means the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and per UTC day for the last 7 days. For a per-host token the usage fields cover only its own host. Returns JSON."
     )]
     pub(super) async fn fleet_health(
         &self,
@@ -14,6 +14,7 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("fleet_health", "");
         let mut h = health::health_check(&self.store);
+        h.set_tunnels(self.tunnels.health());
         if let Some(host) = caller.host_alias.as_deref() {
             if let Ok(s) = self.store.lock() {
                 health::scope_usage_to_host(&mut h, &s, host);
