@@ -266,12 +266,12 @@
   }
   .x {
     flex: 0 0 auto;
-    color: #e64a4a;
+    color: var(--usage-crit);
     font-weight: 600;
   }
   .tool.err .verb,
   .tool.err .target {
-    color: #e64a4a;
+    color: var(--usage-crit);
   }
   .detail,
   .detail-error {
@@ -286,7 +286,7 @@
     display: flex;
     align-items: baseline;
     gap: 0.6rem;
-    color: #e64a4a;
+    color: var(--usage-crit);
   }
   .path {
     margin-bottom: 0.3rem;
@@ -312,7 +312,7 @@
     display: block;
   }
   .diff .del {
-    background: color-mix(in srgb, #e64a4a 14%, transparent);
+    background: color-mix(in srgb, var(--usage-crit) 14%, transparent);
   }
   .diff .add {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -339,7 +339,7 @@
     opacity: 1;
   }
   .result[data-error] {
-    color: #e64a4a;
+    color: var(--usage-crit);
   }
   .muted {
     margin: 0.2rem 0 0.4rem 1.15rem;

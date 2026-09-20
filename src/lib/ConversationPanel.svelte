@@ -566,8 +566,8 @@
     const el = document.createElement('style');
     el.dataset.convFind = String(hlSuffix);
     el.textContent =
-      `::highlight(${HL_ALL}) { background-color: color-mix(in srgb, #e6a23c 35%, transparent); }\n` +
-      `::highlight(${HL_CURRENT}) { background-color: color-mix(in srgb, #e6a23c 75%, transparent); color: var(--bg); }`;
+      `::highlight(${HL_ALL}) { background-color: color-mix(in srgb, var(--usage-warn) 35%, transparent); }\n` +
+      `::highlight(${HL_CURRENT}) { background-color: color-mix(in srgb, var(--usage-warn) 75%, transparent); color: var(--bg); }`;
     document.head.appendChild(el);
     return () => el.remove();
   });
@@ -1522,8 +1522,8 @@
     cursor: default;
   }
   .chip.stuck {
-    border-color: #e6a23c;
-    color: #e6a23c;
+    border-color: var(--usage-warn);
+    color: var(--usage-warn);
   }
   .composer-row {
     display: flex;
@@ -1615,7 +1615,7 @@
     font-size: 0.75rem;
   }
   .composer-error {
-    color: #e64a4a;
+    color: var(--usage-crit);
   }
   .composer-foot {
     display: flex;
@@ -1631,9 +1631,9 @@
     font-size: 0.75rem;
   }
   .chip.suggest {
-    border-color: var(--usage-warn, #e6a23c);
+    border-color: var(--usage-warn);
     color: var(--fg);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--usage-warn, #e6a23c) 25%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--usage-warn) 25%, transparent);
   }
   .indicator {
     display: flex;
@@ -1687,10 +1687,10 @@
     gap: 0.75rem;
     margin: 0.35rem 0 0.6rem;
     padding: 0.5rem 0.75rem;
-    border: 1px solid #e6a23c;
+    border: 1px solid var(--usage-warn);
     border-left-width: 3px;
     border-radius: 6px;
-    background: color-mix(in srgb, #e6a23c 10%, var(--bg-pane));
+    background: color-mix(in srgb, var(--usage-warn) 10%, var(--bg-pane));
     font-size: 0.8rem;
   }
   .blocked-text {
@@ -1708,7 +1708,7 @@
   .blocked-btn {
     flex: 0 0 auto;
     padding: 0.3rem 0.7rem;
-    border: 1px solid #e6a23c;
+    border: 1px solid var(--usage-warn);
     border-radius: 6px;
     background: transparent;
     color: var(--fg);
@@ -1716,7 +1716,7 @@
     cursor: pointer;
   }
   .blocked-btn:hover {
-    background: color-mix(in srgb, #e6a23c 20%, var(--bg-pane));
+    background: color-mix(in srgb, var(--usage-warn) 20%, var(--bg-pane));
   }
   .thread {
     max-width: 80ch;
@@ -1731,7 +1731,7 @@
     gap: 0.5rem;
     margin-bottom: 0.75rem;
   }
-  .err { color: #e64a4a; font-size: 0.8rem; }
+  .err { color: var(--usage-crit); font-size: 0.8rem; }
   .turn {
     padding: 0.2rem 0 1.1rem;
   }
@@ -1806,7 +1806,7 @@
     font-size: 0.7rem;
   }
   .tools.has-err summary {
-    color: #e64a4a;
+    color: var(--usage-crit);
   }
   .tools {
     margin: 0.3rem 0 0.5rem;
@@ -1894,10 +1894,10 @@
     overflow-wrap: anywhere;
   }
   .event[data-tone='warn'] {
-    color: #e6a23c;
+    color: var(--usage-warn);
   }
   .event[data-tone='error'] {
-    color: #e64a4a;
+    color: var(--usage-crit);
   }
   .compact {
     margin: 0.4rem 0 0.6rem;
@@ -1938,7 +1938,7 @@
   }
   .interrupt {
     margin: 0.3rem 0 0.5rem;
-    color: #e6a23c;
+    color: var(--usage-warn);
     font-size: 0.76rem;
     font-style: italic;
   }

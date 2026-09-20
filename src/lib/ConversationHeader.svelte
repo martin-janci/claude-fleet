@@ -274,10 +274,10 @@
   }
   .chip[data-status='compacting'],
   .chip[data-status='blocked'] {
-    color: #e6a23c;
+    color: var(--usage-warn);
   }
   .chip[data-status='failed'] {
-    color: #e64a4a;
+    color: var(--usage-crit);
   }
   .muted {
     overflow: hidden;

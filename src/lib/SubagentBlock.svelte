@@ -66,7 +66,7 @@
     background: var(--bg-pane);
   }
   .subagent.err {
-    border-left-color: #e64a4a;
+    border-left-color: var(--usage-crit);
   }
   .sub-head {
     display: flex;
@@ -98,7 +98,7 @@
   }
   .sub-err {
     flex: 0 0 auto;
-    color: #e64a4a;
+    color: var(--usage-crit);
     font-weight: 600;
   }
   .sub-result {
