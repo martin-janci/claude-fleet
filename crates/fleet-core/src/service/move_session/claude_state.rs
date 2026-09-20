@@ -646,8 +646,12 @@ printf '%s\t%s\n' "$n" "$dir/state.tgz"
 
 /// Extract into a staging dir inside the transfer dir — never in place —
 /// then move each staged REGULAR file into `<target project dir>/<id>/` iff
-/// the target has no such file or a strictly smaller one (these files are
-/// append-only: the larger copy is the newer one).
+/// the target has no such file or a strictly smaller one. The merge TREATS
+/// every file here as append-only: exact for the transcripts, where the
+/// larger copy really is the newer one, and an approximation for the small
+/// files Claude Code rewrites (`custom-title.json`, `*.meta.json`,
+/// `workflows/…`), whose equal-or-smaller target copy wins and is reported
+/// `kept` — see ADR 0002; a per-file-type policy is slice 3's.
 ///
 /// The first thing the loop does is re-check the NAME, because the three
 /// sets "what the listing selected", "what was packed" and "what is merged"
@@ -663,17 +667,17 @@ printf '%s\t%s\n' "$n" "$dir/state.tgz"
 /// expression is ASCII-exact in the C and in a UTF-8 locale alike, so no
 /// `LC_ALL` is needed.
 ///
-/// Every doubt falls toward
-/// KEEP: a destination that is not a plain regular file, OR one whose size
-/// cannot even be read (permissions, an ACL, an fs quirk), is treated as
-/// larger and kept rather than risk replacing something the merge could not
-/// verify; a STAGED file whose own size cannot be read is reported `failed`
-/// and never moved. A replacement is staged through a same-directory
-/// `<dst>.cf-part` name first, so the final step onto `<dst>` is a rename
-/// (atomic) rather than a possibly cross-filesystem copy+unlink that ENOSPC
-/// could interrupt mid-write; on any failure the `.cf-part` is removed and
-/// the entry reported `failed`. `*.cf-part` itself is never treated as real
-/// staged content (a leftover from an earlier interrupted merge). The
+/// Every doubt falls toward KEEP: a destination that is not a plain regular
+/// file, OR one whose size cannot even be read (permissions, an ACL, an fs
+/// quirk), is treated as larger and kept rather than risk replacing
+/// something the merge could not verify; a STAGED file whose own size cannot
+/// be read is reported `failed` and never moved. A replacement is staged
+/// through a same-directory `<dst>.cf-part` name first, so the final step
+/// onto `<dst>` is a rename (atomic) rather than a possibly
+/// cross-filesystem copy+unlink that ENOSPC could interrupt mid-write; on
+/// any failure the `.cf-part` is removed and the entry reported `failed`.
+/// `*.cf-part` itself is never treated as real staged content (a leftover
+/// from an earlier interrupted merge). The
 /// `find | while` pipeline's own exit status is read immediately after it
 /// (`PIPESTATUS`, not `$?`, since the pipeline's last stage is the `while`)
 /// so a `find` failure partway through (e.g. an unreadable staged
