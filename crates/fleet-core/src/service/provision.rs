@@ -767,7 +767,7 @@ fn remote_rename_script(tmp: &str, path: &str) -> String {
 /// `$HOME` (`~/.claude.json`, `~/.tmux.conf`), so it reaches `create_dir_all`
 /// on the local path; leaving it literal would create a directory named `~`
 /// in the process's cwd (`remote_path` handles the same case remotely).
-fn expand_home_local(path: &str) -> Result<String, IpcError> {
+pub(crate) fn expand_home_local(path: &str) -> Result<String, IpcError> {
     let home =
         || std::env::var("HOME").map_err(|_| IpcError::new(codes::E_PROVISION, "HOME not set"));
     if path == "~" {

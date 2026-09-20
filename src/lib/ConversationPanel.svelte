@@ -16,7 +16,7 @@
   // they stay read-only.
   import { untrack, tick, setContext } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
-  import { sendPrompt, hasNoPane, type SessionRow } from './sessions';
+  import { sendPrompt, hasNoPane, sessions, type SessionRow } from './sessions';
   import { hintAnchor } from './hints';
   import { composerPresets, type ComposerPreset } from './composer_presets';
   import { needsMore } from './composer_overflow';
@@ -46,6 +46,11 @@
     relativeTime,
     groupItems,
     toolGroupLabel,
+    notificationTone,
+    notificationMark,
+    notificationLabel,
+    transcriptBackground,
+    fleetBackground,
     isLongPrompt,
     PROMPT_CLAMP_LINES,
     turnDuration,
@@ -74,6 +79,7 @@
     type PendingPrompt,
     type SlashCommand,
     type ActivityProbe,
+    type BackgroundEntry,
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
@@ -84,6 +90,9 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pointInRect } from './geometry';
   import Markdown from './MarkdownView.svelte';
+  import BackgroundDetail from './BackgroundDetail.svelte';
+  import { selectSession } from './selection';
+  import { tasks } from './tasks';
 
   let {
     session,
@@ -91,7 +100,19 @@
     onOpenTerminal,
     // Find is Cmd+F on macOS (Ctrl+F moves the caret there), Ctrl+F elsewhere.
     isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator),
-  }: { session: SessionRow; visible: boolean; onOpenTerminal?: () => void; isMac?: boolean } = $props();
+    // Opt-out for a host that brings its own composer over this same
+    // session (AgentPanel: the context chip's prefix has to go through a
+    // composer that knows about it). Two composers sending independently
+    // into one tmux REPL is the interleaved-paste failure this flag exists
+    // to prevent — a host that sets this false owns being the only sender.
+    showComposer = true,
+  }: {
+    session: SessionRow;
+    visible: boolean;
+    onOpenTerminal?: () => void;
+    isMac?: boolean;
+    showComposer?: boolean;
+  } = $props();
 
   let conv = $state<Conversation | null>(null);
   // The conversation `conv` was read from (the id the fetch named). Tool
@@ -188,6 +209,26 @@
   let pushed = $state<SessionEvent[]>([]);
   let listSeq = 0;
 
+  // The background entry whose detail replaces the thread; null = the thread.
+  // Keyed by BackgroundEntry.key, not by index: the list re-derives on every
+  // poll and a running entry moves as it finishes.
+  let background = $state<string | null>(null);
+  let backgroundOpen = $state(false);
+
+  // Two groups, each sorted running-first on its own. Sorting across them
+  // would interleave exactly what the headings exist to keep apart.
+  const bgTranscript = $derived(conv ? transcriptBackground(conv.turns) : []);
+  const bgFleet = $derived(fleetBackground($sessions, $tasks, session.id));
+  const bgGroups = $derived(
+    [
+      { title: 'In this conversation', entries: bgTranscript },
+      { title: 'Fleet children', entries: bgFleet },
+    ].filter((g) => g.entries.length > 0),
+  );
+  // The flat list behind the count on the button and every key lookup.
+  const bgEntries = $derived([...bgTranscript, ...bgFleet]);
+  const bgEntry = $derived(bgEntries.find((e) => e.key === background) ?? null);
+
   // Paths in reply text open in the Files tab (MarkdownInline reads this).
   setContext<OpenPathFn>(OPEN_PATH_CONTEXT, (path, line) => requestOpenPath(sessionId, path, line));
 
@@ -254,7 +295,10 @@
 
   /** Drop the conversation on screen: content, live events, errors,
    *  expansions, scroll state and the turn window; a fetch in flight is
-   *  made stale. */
+   *  made stale. Also the natural place to drop an open background detail —
+   *  this runs on every path that changes what the panel shows (a session
+   *  switch via resetThread, an automatic /clear or /resume follow via
+   *  resetThread, and the header switcher's `select`). */
   function resetView() {
     seq++;
     conv = null;
@@ -268,6 +312,8 @@
     turnsWanted = undefined;
     loadingOlder = false;
     turnsOpen = false;
+    background = null;
+    backgroundOpen = false;
     findOpen = false;
     findQuery = '';
     findIndex = 0;
@@ -602,6 +648,41 @@
   function pickTurn(key: string) {
     turnsOpen = false;
     scrollToRow(key);
+  }
+
+  /** Open a background entry. A fleet session is a place, not a report: it
+   *  has its own transcript, terminal and composer, so it takes the whole
+   *  app rather than this pane. */
+  function openBackground(e: BackgroundEntry): void {
+    backgroundOpen = false;
+    if (e.source === 'fleet_session' && e.sessionId !== null) {
+      goToSession(e.sessionId);
+      return;
+    }
+    background = e.key;
+  }
+
+  /** Switch the whole app to a fleet session by id, when the store has it.
+   *  Shared by `openBackground` and the detail's worker-session link. */
+  function goToSession(id: number): void {
+    const row = $sessions.find((s) => s.id === id);
+    if (row) selectSession(row);
+  }
+
+  /** The entry a notification row belongs to: the call it named, which is
+   *  exactly how `transcriptBackground` keys one. A task id is deliberately
+   *  not tried — two calls can report the same one. */
+  function entryForNotification(n: { tool_use_id: string | null }): BackgroundEntry | null {
+    if (n.tool_use_id === null) return null;
+    return bgEntries.find((e) => e.key === `tool:${n.tool_use_id}`) ?? null;
+  }
+
+  /** The switcher entry for a subagent block, so the block can offer a way
+   *  into its detail. Null while the switcher does not list it (a finished
+   *  foreground call), and the block then shows no control. */
+  function entryForSubagent(id: string | null): BackgroundEntry | null {
+    if (id === null) return null;
+    return bgEntries.find((e) => e.key === `tool:${id}`) ?? null;
   }
 
   // One probe in flight at a time (a wedged host must not stack ssh
@@ -1291,6 +1372,10 @@
     onFindStep={stepFind}
     onTurnsToggle={() => (turnsOpen = !turnsOpen)}
     onPickTurn={pickTurn}
+    {bgGroups}
+    {backgroundOpen}
+    onBackgroundToggle={() => (backgroundOpen = !backgroundOpen)}
+    onPickBackground={openBackground}
   />
   {#if viewing !== null}
     <div class="viewing" data-testid="conv-viewing-banner">
@@ -1304,7 +1389,9 @@
     </div>
   {/if}
   <div class="thread-area">
-  {#if empty && !(pending && viewing === null)}
+  {#if bgEntry}
+    <BackgroundDetail entry={bgEntry} onBack={() => (background = null)} onOpenSession={goToSession} />
+  {:else if empty && !(pending && viewing === null)}
     <div class="empty-state" data-testid="conv-empty-state">
       <p class="empty-title" data-testid="conv-empty">{empty}</p>
       {#if emptyHint}<p class="empty-hint">{emptyHint}</p>{/if}
@@ -1448,8 +1535,30 @@
                     </div>
                   {:else if g.kind === 'interrupt'}
                     <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
+                  {:else if g.kind === 'notification'}
+                    {@const target = entryForNotification(g)}
+                    {#if target}
+                      <button
+                        type="button"
+                        class="notification clickable"
+                        data-testid="conv-notification"
+                        data-tone={notificationTone(g.status)}
+                        onclick={() => openBackground(target)}
+                      >
+                        <span class="note-mark" aria-hidden="true">{notificationMark(g.status)}</span>
+                        <span class="note-label">{notificationLabel(g)}</span>
+                        {#if g.at}<time class="note-time" datetime={g.at}>{relativeTime(g.at, nowMs)}</time>{/if}
+                      </button>
+                    {:else}
+                      <div class="notification" data-testid="conv-notification" data-tone={notificationTone(g.status)}>
+                        <span class="note-mark" aria-hidden="true">{notificationMark(g.status)}</span>
+                        <span class="note-label">{notificationLabel(g)}</span>
+                        {#if g.at}<time class="note-time" datetime={g.at}>{relativeTime(g.at, nowMs)}</time>{/if}
+                      </div>
+                    {/if}
                   {:else if g.kind === 'subagent'}
-                    <SubagentBlock item={g} {nowMs} live={turnLive} />
+                    {@const bg = entryForSubagent(g.id)}
+                    <SubagentBlock item={g} {nowMs} live={turnLive} onOpen={bg ? () => openBackground(bg) : undefined} />
                   {/if}
                 {/each}
                 {#if duration}
@@ -1498,7 +1607,7 @@
     {/if}
   {/if}
   </div>
-  {#if canPrompt}
+  {#if showComposer && canPrompt && bgEntry === null}
     <form
       class="composer"
       data-testid="conv-composer"
@@ -1660,7 +1769,7 @@
         <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
       {/if}
     </form>
-  {:else}
+  {:else if showComposer && !canPrompt}
     <p class="muted readonly" data-testid="conv-readonly">Read-only: this agent runs outside tmux, so there is no terminal to prompt.</p>
   {/if}
 </div>
@@ -2278,6 +2387,46 @@
     color: var(--usage-warn);
     font-size: 0.76rem;
     font-style: italic;
+  }
+  .notification {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    margin: 0.3rem 0;
+    padding: 0.2rem 0.5rem;
+    border-left: 3px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.82rem;
+    color: var(--fg-muted);
+    background: var(--bg-pane);
+  }
+  .notification[data-tone='warn'] {
+    border-left-color: var(--usage-warn);
+  }
+  .notification[data-tone='error'] {
+    border-left-color: var(--usage-crit);
+  }
+  .notification.clickable {
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+  }
+  .notification.clickable:hover {
+    border-left-color: var(--accent);
+  }
+  .note-mark {
+    flex: 0 0 auto;
+  }
+  .note-label {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .note-time {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding-left: 0.4rem;
+    font-size: 0.72rem;
   }
   .latest {
     position: absolute;

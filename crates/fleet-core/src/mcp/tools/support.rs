@@ -942,11 +942,23 @@ pub(super) const QUICK_CAP: std::time::Duration = std::time::Duration::from_secs
 /// row.
 pub(super) fn tool_deadline(tool: &str) -> std::time::Duration {
     match guard::policy(tool) {
-        Some(p) => match p.deadline {
-            guard::Deadline::LongPoll => LONG_POLL_CAP,
-            guard::Deadline::Lifecycle => LIFECYCLE_CAP,
-            guard::Deadline::Quick => QUICK_CAP,
-        },
+        Some(p) => {
+            let work = match p.deadline {
+                guard::Deadline::LongPoll => LONG_POLL_CAP,
+                guard::Deadline::Lifecycle => LIFECYCLE_CAP,
+                guard::Deadline::Quick => QUICK_CAP,
+            };
+            // A confirm-gated call may sit blocked on a human. The class cap
+            // bounds the WORK; the confirmation window is time the call is
+            // MEANT to spend waiting, so it is added rather than competed
+            // with. Without this the nonce outlives the call waiting on it
+            // and an approval arrives to an already-failed call.
+            if p.confirm {
+                work + guard::CONFIRM_TTL
+            } else {
+                work
+            }
+        }
         None => {
             // Reachable only for a name the router does not serve (rmcp then
             // answers "tool not found") — the exhaustiveness test keeps every

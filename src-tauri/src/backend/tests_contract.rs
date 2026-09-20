@@ -154,6 +154,7 @@ pub(crate) fn sample_project_row() -> ProjectRow {
         base_path: "/home/dev/projects".into(),
         last_session_at: Some(1_725_000_000),
         adopted: true,
+        system: false,
     }
 }
 
@@ -398,6 +399,19 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             name: "/model".into(),
             args: Some("opus".into()),
             output: Some("o".into()),
+        }),
+    );
+    put(
+        "ConvItem::Notification",
+        wire_keys(&ConvItem::Notification {
+            task_id: Some("a623962a33b4c9765".into()),
+            tool_use_id: Some("toolu_1".into()),
+            status: Some("completed".into()),
+            summary: Some("Agent finished".into()),
+            result: Some("r".into()),
+            output_file: Some("/private/tmp/x/tasks/a6.output".into()),
+            event: Some("e".into()),
+            at: Some("2026-09-18T10:12:00Z".into()),
         }),
     );
     put(

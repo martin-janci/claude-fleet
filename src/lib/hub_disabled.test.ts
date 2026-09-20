@@ -415,7 +415,7 @@ describe('safe remove and discard-kill on a hub client', () => {
 // machine's SSH (and, for Add project, GitHub credentials).
 describe('add and purge project on a hub client', () => {
   const project: ProjectTreeRow = {
-    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 1, adopted: false },
+    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 1, adopted: false, system: false },
     worktrees: [{ id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' }],
   };
   const projectSession: SessionRow = sessionFixture('local', 'dev-cf', {

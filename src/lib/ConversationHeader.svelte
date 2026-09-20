@@ -9,6 +9,7 @@
     relativeTime,
     statusChip,
     switcherEntries,
+    type BackgroundEntry,
     type ConversationSummary,
   } from './conversation';
   import type { TurnIndexEntry } from './conversation_nav';
@@ -40,6 +41,10 @@
     onFindStep = () => {},
     onTurnsToggle = () => {},
     onPickTurn = () => {},
+    bgGroups = [],
+    backgroundOpen = false,
+    onBackgroundToggle = () => {},
+    onPickBackground = () => {},
   }: {
     session: SessionRow;
     conversations: ConversationSummary[];
@@ -74,6 +79,14 @@
     /** Toggles the turn index; also how the header closes it. */
     onTurnsToggle?: () => void;
     onPickTurn?: (rowKey: string) => void;
+    /** Background work the conversation launched, already grouped by the
+     *  panel (a group with no entries is not passed). Empty hides the
+     *  control, as an empty `turnEntries` hides the turn index. */
+    bgGroups?: Array<{ title: string; entries: BackgroundEntry[] }>;
+    backgroundOpen?: boolean;
+    /** Toggles the background list; also how the header closes it. */
+    onBackgroundToggle?: () => void;
+    onPickBackground?: (entry: BackgroundEntry) => void;
   } = $props();
 
   let findInput: HTMLInputElement | undefined = $state();
@@ -207,6 +220,24 @@
     document.addEventListener('pointerdown', onDocPointerDown);
     return () => document.removeEventListener('pointerdown', onDocPointerDown);
   });
+
+  // ─── Background switcher ──────────────────────────────────────────────────
+  // Third control of the tool cluster, beside ⌕ and the turn index, rather
+  // than the second sticky bar this branch removed. The panel owns the
+  // entries and what opening one means; the header only renders the
+  // disclosure and reports the pick back.
+  let bgWrap: HTMLDivElement | undefined = $state();
+  // The count on the button and the gate on the whole control: the panel's
+  // flat list, re-added rather than passed twice.
+  const bgCount = $derived(bgGroups.reduce((n, g) => n + g.entries.length, 0));
+  $effect(() => {
+    if (!backgroundOpen) return;
+    function onDocPointerDown(e: PointerEvent) {
+      if (bgWrap && e.target instanceof Node && !bgWrap.contains(e.target)) onBackgroundToggle();
+    }
+    document.addEventListener('pointerdown', onDocPointerDown);
+    return () => document.removeEventListener('pointerdown', onDocPointerDown);
+  });
 </script>
 
 <div class="conv-header" data-testid="conv-header">
@@ -313,6 +344,34 @@
         {/if}
       </div>
     {/if}
+    {#if bgCount > 0}
+      <div class="turns-wrap" bind:this={bgWrap}>
+        <button
+          type="button"
+          class="btn btn--quiet"
+          data-testid="conv-background-button"
+          aria-expanded={backgroundOpen}
+          onclick={onBackgroundToggle}>{bgCount} background<span class="caret">▾</span></button
+        >
+        {#if backgroundOpen}
+          <div class="turn-index bg-groups" data-testid="conv-background-list">
+            {#each bgGroups as g (g.title)}
+              <div class="bg-group" data-testid="conv-background-group">{g.title}</div>
+              <ul aria-label={g.title}>
+                {#each g.entries as e (e.key)}
+                  <li>
+                    <button type="button" data-testid="conv-background-item" onclick={() => onPickBackground(e)}>
+                      <span class="ti-label">{e.kind} · {e.label}</span>
+                      <span class="bg-item-status" data-status={e.status}>{e.status}</span>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -320,7 +379,11 @@
   .conv-header {
     position: sticky;
     top: 0;
-    z-index: 2;
+    /* Above the thread's own sticky bars (the toolbar / find row, z-index 2)
+       and the turn index they open (3): both are later in the DOM, so an
+       equal z-index would let them paint over the switcher menu that drops
+       out of this header. */
+    z-index: 4;
     display: flex;
     align-items: center;
     gap: var(--control-gap);
@@ -510,6 +573,36 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* The grouped dropdown keeps `.turn-index`'s popup chrome; the inner lists
+     shed the browser's own list styling. */
+  .bg-groups ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .bg-group {
+    padding: 0.3rem 0.65rem 0.15rem;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--fg-muted);
+  }
+  .bg-group:not(:first-child) {
+    margin-top: 0.25rem;
+    border-top: 1px solid var(--border);
+    padding-top: 0.4rem;
+  }
+  .bg-item-status {
+    margin-left: auto;
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+  }
+  .bg-item-status[data-status='failed'] {
+    color: var(--usage-crit);
+  }
+  .bg-item-status[data-status='stopped'] {
+    color: var(--usage-warn);
   }
   .tag[data-status='compacting'],
   .tag[data-status='blocked'] {

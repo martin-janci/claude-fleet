@@ -539,13 +539,14 @@ async fn transfer_all(
 #[tauri::command]
 pub async fn upload_to_session(
     args: UploadArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     ssh: State<'_, Arc<SshClient>>,
     allow: State<'_, Arc<UploadAllowList>>,
 ) -> Result<Vec<String>, IpcError> {
-    // The bytes are on THIS machine and the destination is a host only the
-    // hub can reach; there is no tool that would carry a file across.
-    backend.refuse_local_only("upload_to_session")?;
+    // No remote-mode guard, for the same reason as `pty_open`: the bytes are
+    // on this machine and so is the `ssh` that carries them, addressed by the
+    // alias the caller passes. The hub is not in the path and nothing here
+    // reads `state.db`. This is the drop handler behind the terminal pane, so
+    // it has to work wherever that pane attaches.
     fleet_core::validate::host_alias(&args.host_alias)?;
     fleet_core::validate::tmux_name_addressable(&args.session_name)?;
     if args.local_paths.is_empty() {

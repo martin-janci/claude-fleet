@@ -115,79 +115,72 @@ afterEach(() => {
 });
 
 describe('the terminal tab against a hub', () => {
-  // The spec's named non-goal: the PTY attaches to a local ssh/tmux process,
-  // and the hub streams no pane. What must NOT happen is the attach being
-  // attempted anyway — `pty_open` is guarded on the backend, so the user
-  // would get an error toast where a terminal should be.
-  it('never attempts to attach a PTY', async () => {
+  // The PTY spawns `ssh <host>` then `tmux attach` FROM THIS MACHINE, using
+  // this machine's own ssh config — the hub is never in that path, and
+  // `pty_open` reads nothing out of the local store. So a paired desktop
+  // attaches exactly as a standalone one does. The one host it cannot attach
+  // is an agent host: nothing anywhere has an SSH route to one.
+  it('attaches the PTY for an ssh-transport host, exactly as standalone', async () => {
     hubStatus.set(remote);
+    hosts.set([makeHost({ alias: 'trn', transport: 'ssh' })]);
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
+    expect(screen.queryByTestId('terminal-no-attach')).toBeNull();
+  });
+
+  it('attaches for a host whose row has not loaded, rather than refusing on a guess', async () => {
+    hubStatus.set(remote);
+    hosts.set([]);
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
+  });
+
+  it('never attaches an agent host, and explains instead', async () => {
+    hubStatus.set(remote);
+    hosts.set([makeHost({ alias: 'trn', transport: 'agent' })]);
     render(TerminalView);
     selectSession(session);
     await settle();
     expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(false);
-    // …and nothing else of the terminal's machinery starts either.
-    expect(inv().mock.calls.some((c) => c[0] === 'pty_drain')).toBe(false);
-    expect(inv().mock.calls.some((c) => c[0] === 'repair_session')).toBe(false);
-  });
-
-  it('offers the shell command for the selected session instead of a dead pane', async () => {
-    hubStatus.set(remote);
-    render(TerminalView);
-    selectSession(session);
-    await settle();
-    const hint = screen.getByTestId('terminal-remote');
-    // The two halves of actually getting there, for THIS session on THIS host.
-    expect(hint.textContent).toContain('ssh trn');
-    expect(hint.textContent).toContain('tmux attach');
+    const hint = screen.getByTestId('terminal-no-attach');
+    expect(hint.textContent).toContain('fleet-agent');
     expect(hint.textContent).toContain('dev-martin-janci-claude-fleet');
-    expect(hint.textContent).toContain('fleet.example.com');
+    // Not even the ssh line, which would be a lie for this host.
+    expect(screen.queryByTestId('terminal-attach-line')).toBeNull();
   });
 
-  it('still offers Transfer: the move is hub-routed even though the pane is not', async () => {
-    // selectedSession resolves through the `sessions` store by identity, not
-    // the object passed to selectSession — the store must carry the movable
-    // fields, or the lookup resolves to the plain `session` seeded in
-    // beforeEach (worktree_id/claude_session_id: null) and canMoveSession is
-    // false.
+  it('offers Transfer from the attached pane', async () => {
     const movable = makeSession({ kind: 'work', worktree_id: 10, claude_session_id: 'c-1' });
     sessions.set([movable]);
     hubStatus.set(remote);
+    hosts.set([makeHost({ alias: 'trn', transport: 'ssh' })]);
     render(TerminalView);
     selectSession(movable);
     await settle();
     expect(screen.getByTestId('transfer-chip')).toBeTruthy();
   });
 
-  it('an agent-transport host gets no ssh command, just the explanation', async () => {
+  it('offers Transfer from the agent-host note too: the move is hub-routed', async () => {
+    const movable = makeSession({ kind: 'work', worktree_id: 10, claude_session_id: 'c-1' });
+    sessions.set([movable]);
     hubStatus.set(remote);
     hosts.set([makeHost({ alias: 'trn', transport: 'agent' })]);
     render(TerminalView);
-    selectSession(session);
+    selectSession(movable);
     await settle();
-    const hint = screen.getByTestId('terminal-remote');
-    // No attach command for this session — not "ssh trn" (the command it
-    // would otherwise print) anywhere in the hint.
-    expect(hint.textContent).not.toContain('ssh trn');
-    expect(screen.queryByTestId('terminal-attach-line')).toBeNull();
-    expect(hint.textContent).toContain('fleet-agent');
-    expect(hint.textContent).toContain('dev-martin-janci-claude-fleet');
+    expect(screen.getByTestId('transfer-chip')).toBeTruthy();
   });
 
-  it('an ssh-transport host (and an unknown host) still get the ssh command', async () => {
-    hubStatus.set(remote);
-    hosts.set([makeHost({ alias: 'trn', transport: 'ssh' })]);
-    render(TerminalView);
-    selectSession(session);
-    await settle();
-    expect(screen.getByTestId('terminal-attach-line').textContent).toContain('ssh trn');
-  });
-
-  it('says so even with no session selected, rather than "select a session"', async () => {
+  it('with no session selected it is the ordinary empty state, not a hub note', async () => {
     hubStatus.set(remote);
     render(TerminalView);
     await settle();
-    expect(screen.getByTestId('terminal-remote')).toBeInTheDocument();
-    expect(screen.queryByTestId('terminal-empty')).toBeNull();
+    expect(screen.getByTestId('terminal-empty')).toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-no-attach')).toBeNull();
   });
 
   it('standalone is untouched: the PTY still attaches', async () => {
@@ -195,6 +188,6 @@ describe('the terminal tab against a hub', () => {
     selectSession(session);
     await settle();
     expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
-    expect(screen.queryByTestId('terminal-remote')).toBeNull();
+    expect(screen.queryByTestId('terminal-no-attach')).toBeNull();
   });
 });

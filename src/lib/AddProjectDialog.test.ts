@@ -21,7 +21,7 @@ const mockedOpen = open as ReturnType<typeof vi.fn>;
 const TOKEN = 'a'.repeat(64);
 
 const row = {
-  project: { id: 7, owner: 'o', repo: 'r', base_path: '/p/o/r', last_session_at: null, adopted: false },
+  project: { id: 7, owner: 'o', repo: 'r', base_path: '/p/o/r', last_session_at: null, adopted: false, system: false },
   worktrees: [],
 };
 

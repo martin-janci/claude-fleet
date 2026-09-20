@@ -166,8 +166,12 @@ const REASONS = {
     'starting a second control API against a fleet that already has one is the failure remote mode exists to prevent',
 
   // --- things about THIS machine ------------------------------------------
-  terminal:
-    'the terminal attaches a local ssh/tmux process, and the hub streams no pane — open a shell and run `ssh <host>` then `tmux attach -t <session>`',
+  // (No `terminal` key: the terminal is not blocked by being a hub client.
+  // `pty_open` spawns this machine's own `ssh`/`tmux`, so a paired desktop
+  // attaches exactly as a standalone one does. The one session it cannot
+  // attach is one on an agent host, and that is not the hub's doing — nothing
+  // anywhere has an SSH route to it — so TerminalView says that itself rather
+  // than through a reason ending "Do it on the hub".)
   check_local_prereqs:
     'the setup checklist is about running a fleet from this machine, which the hub is doing instead',
   tunnel_status: 'the tunnels belong to whichever process owns the fleet',

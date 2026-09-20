@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { appChord, hostsChordLabel, sessionViewChordLabel } from './app_views';
+import { appChord, hostsChordLabel, sessionViewChordLabel, agentChordLabel } from './app_views';
 
 const ev = (key: string, mods: Partial<{ metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) => ({
   key,
@@ -54,5 +54,19 @@ describe('appChord', () => {
   it('labels the Session-view chord per platform', () => {
     expect(sessionViewChordLabel(true)).toBe('⌘J');
     expect(sessionViewChordLabel(false)).toBe('Ctrl+Shift+J');
+  });
+
+  it('⌘E opens the agent, and does not collide with ⌘J (Session view)', () => {
+    expect(appChord(ev('e', { metaKey: true }), true)).toBe('agent');
+    expect(appChord(ev('E', { metaKey: true }), true)).toBe('agent');
+    expect(appChord(ev('j', { metaKey: true }), true)).toBe('session-view');
+    expect(appChord(ev('e', { ctrlKey: true }), true)).toBeNull();
+    expect(appChord(ev('E', { ctrlKey: true, shiftKey: true }), false)).toBe('agent');
+    expect(appChord(ev('e', { ctrlKey: true }), false)).toBeNull();
+  });
+
+  it('labels the agent chord per platform', () => {
+    expect(agentChordLabel(true)).toBe('⌘E');
+    expect(agentChordLabel(false)).toBe('Ctrl+Shift+E');
   });
 });
