@@ -191,10 +191,13 @@ the same idiom as the turn index, so it costs no vertical space. Two groups:
 
 **In this conversation.** Derived from the parsed conversation alone: each
 launching item (`Agent`, `Bash`, `Monitor`, `Workflow`) paired with the
-notifications that carry its `tool-use-id`. An entry is keyed by its `task_id`
-once one has been seen and by the launching `tool_use` id until then; a
-launching item with no notification yet is `running`. Running entries sort first, then by
-start time descending.
+notifications that carry its `tool-use-id`. An entry is keyed by the call that
+launched it — `tool:<tool_use id>` — and that key never changes. It must not be
+keyed by `task_id`: two different calls can report the same one (an `Agent`
+plus a `SendMessage` that resumes it), which collides, and a key that changes
+when the first notification lands closes whatever detail the user has open. A
+launching item with no notification yet is `running`. Running entries sort
+first, then by start time descending.
 
 **Fleet children of this session.** `$sessions` where `parent_session_id ===
 session.id` (background sessions and dispatched-task workers) and `$tasks`
