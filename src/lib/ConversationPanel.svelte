@@ -298,6 +298,15 @@
       draftFor = session.id;
       histIndex = null;
       sendError = null;
+      // The tray belongs to the session it was filled for. This panel is ONE
+      // instance for every session (App.svelte does not `{#key}` it), and the
+      // Rust allow-list authorises a path, not a path plus a destination — a
+      // picked path stays valid for four hours. So a tile left here would
+      // stage the old session's file into the NEW session's worktree, on the
+      // new host, and name it in the new prompt. Nothing downstream can
+      // catch that; it has to be dropped here.
+      attachments = [];
+      attachErrors = [];
       void load();
       void loadConversations();
     });

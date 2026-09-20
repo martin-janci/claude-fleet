@@ -2742,8 +2742,9 @@ describe('ConversationPanel attachments', () => {
   async function renderPanel(over: Partial<SessionRow> = {}) {
     mockedConv.mockReturnValue(ok(conv()));
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
-    render(ConversationPanel, { session: session(over), visible: true });
+    const { rerender } = render(ConversationPanel, { session: session(over), visible: true });
     await settle();
+    return rerender;
   }
 
   async function renderPanelInHubMode() {
@@ -2933,6 +2934,47 @@ describe('ConversationPanel attachments', () => {
     expect(screen.queryByTestId('conv-attachments')).toBeNull();
     expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());
     expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_preview', expect.anything());
+  });
+
+  // The panel is ONE instance for every session (App.svelte does not `{#key}`
+  // it), so anything left in the tray belongs to the session that is gone.
+  // The allow-list cannot save us here: it authorises a path, not a path plus
+  // a destination, and a picked path stays valid for four hours — so a stale
+  // tile would stage session A's file into session B's worktree, on B's host,
+  // and name it in B's prompt.
+  it('drops the tray when the session changes, so a file cannot follow to another host', async () => {
+    const rerender = await renderPanel({ id: 1, host_alias: 'alpha', tmux_name: 'a' });
+    await addAttachments([
+      { path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' },
+      { path: '/tmp/big.png', name: 'big.png', size: 11 * 1024 * 1024, kind: 'image' },
+    ]);
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+    expect(screen.getByTestId('conv-attach-error')).toBeTruthy();
+
+    await rerender({ session: session({ id: 2, host_alias: 'beta', tmux_name: 'b' }), visible: true });
+    await settle();
+
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    // The rejection sentence was about the tray that just left with it.
+    expect(screen.queryByTestId('conv-attach-error')).toBeNull();
+  });
+
+  it('a send after a session switch uploads nothing of the previous session', async () => {
+    const rerender = await renderPanel({ id: 1, host_alias: 'alpha', tmux_name: 'a' });
+    await addAttachments([{ path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' }]);
+    await rerender({ session: session({ id: 2, host_alias: 'beta', tmux_name: 'b' }), visible: true });
+    await settle();
+
+    mockedInvoke.mockClear();
+    const box = screen.getByTestId('conv-composer-input');
+    await fireEvent.input(box, { target: { value: 'hello beta' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    await settle();
+
+    expect(mockedInvoke).not.toHaveBeenCalledWith('upload_attachments', expect.anything());
+    // The prompt goes out on its own, with no attachment block bolted on.
+    expect(mockedSend).toHaveBeenCalledWith('beta', 'b', 'hello beta');
   });
 
   // `.view-slot` is `position: absolute; inset: 0`, so App.svelte's Hosts and
