@@ -22,6 +22,9 @@
 //! way the hub does, and reads it back.
 
 use super::*;
+use crate::backend::connection::{
+    ConnectionReporter, ConnectionView, HubConnection, HubConnectionStatus,
+};
 use crate::backend::RemoteConfig;
 use fleet_core::ipc_error::codes;
 use fleet_core::store::SessionRow;
@@ -489,6 +492,246 @@ fn a_jsonrpc_protocol_error_is_reported_as_one() {
     let err = block_on(backend(&fake).list_sessions(false)).expect_err("an error");
     assert_eq!(err.code, codes::E_INTERNAL);
     assert!(err.message.contains("tool not found"), "{}", err.message);
+}
+
+// --- the wire-contract gate --------------------------------------------------
+//
+// The event bridge refuses to APPLY a row from a hub whose wire contract is
+// outside this build's range (`super::contract`), but a call made from a
+// command walks straight past that: its answer is deserialised into the same
+// row types, with the same `#[serde(default)]` on forty-six fields, so a
+// renamed column arrives as a silent default — the exact failure the check
+// exists to prevent. These pin the other half: while the last thing this
+// window learned about the hub is a skew, no call is made at all.
+//
+// The state is the REAL [`HubConnectionStatus`], reported into exactly as the
+// bridge reports into it. One value plays both parts on purpose: a second
+// copy of "where the connection stands" is a copy that can drift.
+//
+// What the gate reads is the last CONTRACT VERDICT, not the current state —
+// see [`a_dropped_socket_after_a_skew_does_not_reopen_the_gate`] for why the
+// difference is the whole point.
+
+/// A sink that throws the event away — these are about what the status
+/// REMEMBERS, which is what the gate reads.
+struct Silent;
+
+impl crate::backend::events::RemoteEventSink for Silent {
+    fn emit_remote(&self, _name: &'static str, _payload: Value) {}
+}
+
+fn link(state: HubConnection) -> Arc<HubConnectionStatus> {
+    let status = Arc::new(HubConnectionStatus::remote(Arc::new(Silent), &cfg().token));
+    status.report(state);
+    status
+}
+
+fn watched(fake: &Arc<Fake>, status: &Arc<HubConnectionStatus>) -> HubBackend {
+    HubBackend::with_transport(cfg(), fake.clone())
+        .watching(Arc::clone(status) as Arc<dyn ConnectionView>)
+}
+
+/// Nothing was sent. The point is not that the call failed — it is that
+/// nothing came back to deserialise.
+fn nothing_was_sent(fake: &Arc<Fake>) {
+    let seen = fake.seen.lock().unwrap();
+    assert!(
+        seen.is_empty(),
+        "a hub this build cannot read was called anyway: {seen:?}"
+    );
+}
+
+#[test]
+fn a_hub_too_old_is_refused_before_the_transport_is_touched() {
+    let fake = Fake::answering(Ok(ok("[]")));
+    let status = link(HubConnection::HubTooOld {
+        hub_contract: 1,
+        min_contract: 3,
+    });
+    let err = block_on(watched(&fake, &status).list_sessions(false))
+        .expect_err("a hub whose rows this build cannot read must not be read");
+
+    assert_eq!(err.code, codes::E_HUB_CONTRACT);
+    // The banner's own sentence for this state (`src/lib/hub_connection.ts`),
+    // so the toast and the banner say one thing rather than two.
+    assert!(
+        err.message
+            .contains("wire contract is revision 1, older than the 3 this app requires"),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("Update the hub."), "{}", err.message);
+    assert_eq!(
+        err.details,
+        Some(json!({ "hub_contract": 1, "min_contract": 3 })),
+        "the numbers ride along structurally too"
+    );
+    nothing_was_sent(&fake);
+}
+
+#[test]
+fn a_hub_too_new_is_refused_and_names_the_other_side() {
+    let fake = Fake::answering(Ok(ok("[]")));
+    let status = link(HubConnection::HubTooNew {
+        hub_contract: 9,
+        max_contract: 1,
+    });
+    let err = block_on(watched(&fake, &status).list_hosts()).expect_err("no read from here");
+
+    assert_eq!(err.code, codes::E_HUB_CONTRACT);
+    assert!(
+        err.message
+            .contains("wire contract is revision 9, newer than the 1 this app understands"),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("Update this app."), "{}", err.message);
+    assert_eq!(
+        err.details,
+        Some(json!({ "hub_contract": 9, "max_contract": 1 }))
+    );
+    nothing_was_sent(&fake);
+}
+
+/// A mutation is gated for the same reason a read is: its return value is
+/// deserialised into a row and optimistically merged into the stores.
+#[test]
+fn a_mutation_is_gated_too() {
+    let fake = Fake::answering(Ok(ok("{}")));
+    let status = link(HubConnection::HubTooOld {
+        hub_contract: 0,
+        min_contract: 2,
+    });
+    let err = block_on(watched(&fake, &status).repair_session(7)).expect_err("no mutation either");
+    assert_eq!(err.code, codes::E_HUB_CONTRACT);
+    nothing_was_sent(&fake);
+}
+
+/// A window that has never been told a hub's revision calls in every state.
+///
+/// `connecting` is the case that matters: no handshake has completed on this
+/// launch, so nothing is known, and gating it would make every startup list
+/// wait on `GET /events`. The two down states say the connection is gone, not
+/// that the hub's rows are unreadable, and they keep the behaviour they had
+/// before this gate existed.
+#[test]
+fn a_hub_that_has_never_been_judged_is_called_in_every_state() {
+    for state in [
+        HubConnection::Connecting,
+        HubConnection::Connected,
+        HubConnection::Reconnecting {
+            attempt: 2,
+            retry_in_secs: 4,
+            reason: "the hub closed the event stream".into(),
+        },
+        HubConnection::Offline {
+            attempt: 1,
+            retry_in_secs: 1,
+            reason: "connection refused".into(),
+        },
+    ] {
+        let fake = Fake::answering(Ok(ok("[]")));
+        let status = link(state.clone());
+        let rows: Vec<SessionRow> = block_on(watched(&fake, &status).list_sessions(false))
+            .unwrap_or_else(|e| panic!("{state:?} must still reach the hub: {e:?}"));
+        assert!(rows.is_empty());
+        assert_eq!(fake.seen.lock().unwrap().len(), 1, "{state:?}");
+    }
+}
+
+/// The verdict outlives the connection state that carried it.
+///
+/// `/events` and `POST /mcp` are separate sockets. After a skew the bridge
+/// ends that connection and loops, and its next iteration reports `Offline`
+/// (the open failed) or `Reconnecting` (a stream that ended before its `ready`
+/// frame) — neither of which has re-judged anything. A gate that read the
+/// CURRENT state would open there, and reads would come back from a hub still
+/// known to be incompatible: exactly the case this gate exists to prevent, and
+/// a likely one, since a hub whose event stream is down or behind a flapping
+/// proxy can still answer `/mcp`.
+#[test]
+fn a_dropped_socket_after_a_skew_does_not_reopen_the_gate() {
+    for skew in [
+        HubConnection::HubTooOld {
+            hub_contract: 1,
+            min_contract: 3,
+        },
+        HubConnection::HubTooNew {
+            hub_contract: 9,
+            max_contract: 1,
+        },
+    ] {
+        for after in [
+            HubConnection::Offline {
+                attempt: 1,
+                retry_in_secs: 1,
+                reason: "connection refused".into(),
+            },
+            HubConnection::Reconnecting {
+                attempt: 2,
+                retry_in_secs: 4,
+                reason: "the hub closed the event stream".into(),
+            },
+        ] {
+            let fake = Fake::answering(Ok(ok("[]")));
+            let status = link(skew.clone());
+            status.report(after.clone());
+            let err = block_on(watched(&fake, &status).list_sessions(false)).expect_err(
+                "a dropped socket re-judges nothing, so the hub is still the one \
+                 this build cannot read",
+            );
+            assert_eq!(err.code, codes::E_HUB_CONTRACT, "{skew:?} then {after:?}");
+            // And the numbers are still the skew's, not the reconnect's.
+            assert!(
+                err.message.contains("wire contract is revision"),
+                "{skew:?} then {after:?}: {}",
+                err.message
+            );
+            nothing_was_sent(&fake);
+        }
+    }
+}
+
+/// The hub was upgraded (or this app was) while the desktop ran: the bridge's
+/// next `ready` frame classifies it in range and reports `Connected`, and the
+/// gate opens again without a restart.
+#[test]
+fn a_later_compatible_hello_opens_the_gate_again() {
+    let fake = Fake::answering(Ok(ok("[]")));
+    let status = link(HubConnection::HubTooNew {
+        hub_contract: 9,
+        max_contract: 1,
+    });
+    assert_eq!(
+        block_on(watched(&fake, &status).list_sessions(false))
+            .expect_err("gated while skewed")
+            .code,
+        codes::E_HUB_CONTRACT
+    );
+    nothing_was_sent(&fake);
+
+    status.report(HubConnection::Connected);
+    let rows: Vec<SessionRow> =
+        block_on(watched(&fake, &status).list_sessions(false)).expect("rows");
+    assert!(rows.is_empty());
+    assert_eq!(fake.seen.lock().unwrap().len(), 1);
+}
+
+/// The gate is only as real as its wiring: a `HubBackend` nobody handed the
+/// status to never refuses anything, and every test above would still pass
+/// with the two production call sites left unwatched.
+#[test]
+fn the_production_hub_backends_are_watched() {
+    for (what, src) in [
+        ("lib.rs", include_str!("../lib.rs")),
+        ("bootstrap/tasks.rs", include_str!("../bootstrap/tasks.rs")),
+    ] {
+        assert!(
+            src.contains(".watching("),
+            "{what} builds a hub client that consults no connection state, so a hub \
+             whose wire contract this build cannot read is called anyway"
+        );
+    }
 }
 
 // --- the HTTP layer ----------------------------------------------------------

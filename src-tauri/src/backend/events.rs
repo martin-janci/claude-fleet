@@ -419,6 +419,13 @@ impl EventBridge {
                         contract::MAX_HUB_CONTRACT,
                     ) {
                         contract::ContractFit::InRange => {
+                            // Reported BEFORE the resync, and the order is
+                            // load-bearing: the resync's own client consults
+                            // this status (`bootstrap/tasks.rs`), so a
+                            // backfill after a skewed connection would be
+                            // refused by the contract gate if the verdict
+                            // were still standing. Pinned by
+                            // `the_backfill_runs_with_the_contract_verdict_already_cleared`.
                             self.status.report(HubConnection::Connected);
                             // A fresh subscription replays nothing, so
                             // everything that happened while this client was

@@ -59,6 +59,7 @@
 //! the struct again while you are there. The rule is also in `docs/hub.md`
 //! (*Parity or refusal*), because the refusal is user-visible.
 
+use super::connection::ConnectionView;
 use super::remote::{HubBackend, HubTransport};
 use super::verdicts::{self, Verdict};
 use super::{Backend, RemoteConfig};
@@ -108,6 +109,15 @@ impl FleetBackend {
         Self {
             hub: Some(HubBackend::with_transport(cfg, transport)),
         }
+    }
+
+    /// Let every hub call consult where the live connection stands, so a hub
+    /// whose wire contract this build does not read is refused rather than
+    /// deserialised ([`HubBackend::watching`]). A no-op standalone, where
+    /// there is no hub to call.
+    pub fn watching(mut self, link: Arc<dyn ConnectionView>) -> Self {
+        self.hub = self.hub.take().map(|hub| hub.watching(link));
+        self
     }
 
     /// The hub to call, or `None` when this app runs its own fleet.

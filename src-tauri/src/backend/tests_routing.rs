@@ -22,6 +22,7 @@
 
 use super::verdicts::{self, Verdict, VERDICTS};
 use super::*;
+use crate::backend::connection::{self, ConnectionReporter};
 use crate::backend::remote;
 use crate::commands;
 use fleet_core::events::NoopEventBus;
@@ -1339,6 +1340,84 @@ fn a_configured_but_unavailable_hub_refuses_local_only_commands_with_the_reason(
         err.message
     );
     assert!(err.message.contains("Settings"), "{}", err.message);
+}
+
+// ── 2c. a hub whose wire contract this build does not read ──────────────────
+
+/// A sink that throws the connection event away: this is about what the
+/// status REMEMBERS, which is what the gate in `remote.rs` reads.
+struct Silent;
+
+impl crate::backend::events::RemoteEventSink for Silent {
+    fn emit_remote(&self, _name: &'static str, _payload: Value) {}
+}
+
+/// A hub client whose last `ready` frame named a wire-contract revision
+/// outside this build's range. The status is the production one, reported
+/// into the way the event bridge reports into it.
+fn skewed_backend(fake: &Arc<Fake>, state: connection::HubConnection) -> FleetBackend {
+    let link = Arc::new(connection::HubConnectionStatus::remote(
+        Arc::new(Silent),
+        &cfg().token,
+    ));
+    link.report(state);
+    FleetBackend::remote_over(cfg(), fake.clone())
+        .watching(link as Arc<dyn connection::ConnectionView>)
+}
+
+/// The command half of #148's check. The event bridge already applies no row
+/// event and runs no backfill from a skewed hub — but a routed read or
+/// mutation deserialises that hub's answer into the very same row types, with
+/// `#[serde(default)]` on every optional field, so a renamed column becomes a
+/// silent default in the stores. Every routed command must refuse instead,
+/// and must not reach the network: the point is that nothing comes back to
+/// deserialise.
+#[test]
+fn a_hub_with_a_skewed_wire_contract_refuses_every_routed_command() {
+    for state in [
+        connection::HubConnection::HubTooOld {
+            hub_contract: 1,
+            min_contract: 3,
+        },
+        connection::HubConnection::HubTooNew {
+            hub_contract: 9,
+            max_contract: 1,
+        },
+    ] {
+        for (_, tool, _, payload, run) in routed_read_cases()
+            .into_iter()
+            .chain(routed_mutation_cases())
+        {
+            let fake = Fake::answering(payload);
+            let (_dir, st) = store();
+            let err = run(&skewed_backend(&fake, state.clone()), &st, &ssh()).expect_err(&format!(
+                "{tool} read a hub whose row shapes this build cannot trust"
+            ));
+            assert_eq!(err.code, codes::E_HUB_CONTRACT, "{tool}: {err:?}");
+            assert!(
+                err.message.contains("wire contract is revision"),
+                "{tool}: the refusal must name the revisions: {}",
+                err.message
+            );
+            fake.was_not_called();
+        }
+        // `health_check` is the one routed command the case tables do not
+        // drive (`ROUTED_WITHOUT_A_CASE`), so the sweep above cannot reach
+        // it. It goes through the same `route` → `call` → `call_text`, and
+        // the footer reading a skewed hub's fleet is as wrong as the sidebar
+        // doing it, so it is driven here by hand.
+        let fake = Fake::answering("{}");
+        let (_dir, st) = store();
+        let err = block_on(commands::health::routed::health_check(
+            &skewed_backend(&fake, state.clone()),
+            &st,
+        ))
+        // `Health` is not `Debug`, so `expect_err` is not available.
+        .err()
+        .expect("the footer must not show a skewed hub's fleet either");
+        assert_eq!(err.code, codes::E_HUB_CONTRACT, "health_check: {err:?}");
+        fake.was_not_called();
+    }
 }
 
 // ── 3. the local-only refusals ──────────────────────────────────────────────

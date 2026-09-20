@@ -84,6 +84,42 @@ pub trait ConnectionReporter: Send + Sync {
     fn report(&self, state: HubConnection);
 }
 
+/// The reading half: where the connection stands, for the code that must
+/// *consult* it rather than report into it — [`super::remote::HubBackend`],
+/// which refuses to call a hub the bridge has already found to be speaking a
+/// wire contract this build does not read.
+///
+/// A trait for the same reason [`ConnectionReporter`] is one. The two halves
+/// are deliberately worn by ONE value ([`HubConnectionStatus`] implements
+/// both), so what the bridge reports is exactly what the gate reads; a second
+/// copy of "where the connection stands" is a copy that can drift.
+pub trait ConnectionView: Send + Sync {
+    fn current(&self) -> HubConnection;
+
+    /// The last thing a `ready` frame said about this hub's wire contract:
+    /// the skew state it was judged to be in, or `None` while no hub has been
+    /// judged or the last one judged was in range.
+    ///
+    /// This, and NOT [`Self::current`], is what the gate reads. The two
+    /// answer different questions, and the difference is load-bearing:
+    /// `/events` and `POST /mcp` are separate sockets, so the state moves to
+    /// `offline` or `reconnecting` the moment the event stream drops, while
+    /// what this window knows about the hub's row shapes has not changed at
+    /// all. Reading the state would let every read back in on a failed
+    /// reconnect.
+    fn contract_verdict(&self) -> Option<HubConnection>;
+}
+
+impl ConnectionView for HubConnectionStatus {
+    fn current(&self) -> HubConnection {
+        HubConnectionStatus::current(self)
+    }
+
+    fn contract_verdict(&self) -> Option<HubConnection> {
+        HubConnectionStatus::contract_verdict(self)
+    }
+}
+
 /// For a bridge nobody is watching — the tests that are about something else.
 pub struct NoReporter;
 
@@ -94,6 +130,22 @@ impl ConnectionReporter for NoReporter {
 /// The real reporter: remembers the latest state and emits it.
 pub struct HubConnectionStatus {
     current: Mutex<HubConnection>,
+    /// The last skew a `ready` frame was judged to be, still standing.
+    ///
+    /// Beside `current` rather than derived from it, because the two have
+    /// different lifetimes: `current` is about this process's socket and
+    /// changes every time it drops, while a hub's wire contract is only
+    /// re-judged by another `ready` frame. It lives here, in the one value
+    /// the bridge already reports into, so that "what this window knows about
+    /// the hub" has a single home — see [`ConnectionView::contract_verdict`],
+    /// which is what the call gate in [`super::remote`] reads.
+    ///
+    /// Set by a skew verdict, cleared ONLY by [`HubConnection::Connected`] —
+    /// which `super::events::EventBridge::pump` reports exactly when a
+    /// `ready` frame classifies in range. Pairing and disconnecting take
+    /// effect at the next launch (the backend is resolved once, at startup),
+    /// so there is no in-process re-pair that would have to clear it too.
+    contract: Mutex<Option<HubConnection>>,
     sink: Option<Arc<dyn RemoteEventSink>>,
     /// Only ever used to blank itself out of a reason.
     token: String,
@@ -115,6 +167,7 @@ impl HubConnectionStatus {
     pub fn standalone() -> Self {
         Self {
             current: Mutex::new(HubConnection::Standalone),
+            contract: Mutex::new(None),
             sink: None,
             token: String::new(),
         }
@@ -124,6 +177,7 @@ impl HubConnectionStatus {
     pub fn remote(sink: Arc<dyn RemoteEventSink>, token: &str) -> Self {
         Self {
             current: Mutex::new(HubConnection::Connecting),
+            contract: Mutex::new(None),
             sink: Some(sink),
             token: token.to_string(),
         }
@@ -136,9 +190,34 @@ impl HubConnectionStatus {
             .map(|c| c.clone())
             .unwrap_or(HubConnection::Connecting)
     }
+
+    /// The skew a `ready` frame last judged this hub to be in, if it still
+    /// stands. See [`Self::contract`].
+    ///
+    /// A poisoned lock is read through rather than answered `None`. `None` is
+    /// the permissive answer, and "we cannot tell" is not a reason to trust
+    /// the wire; the guard is only ever held across a clone and an assignment,
+    /// so the value behind a poisoned one is still the verdict that was
+    /// written last.
+    pub fn contract_verdict(&self) -> Option<HubConnection> {
+        self.contract
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl HubConnectionStatus {
+    /// Write the contract verdict, reading through a poisoned lock for the
+    /// same reason [`Self::contract_verdict`] does: losing the write would
+    /// leave the gate open.
+    fn remember_contract(&self, verdict: Option<HubConnection>) {
+        *self
+            .contract
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = verdict;
+    }
+
     /// Blank the token out, keep it to one line, cap it.
     fn scrub(&self, reason: String) -> String {
         let redacted = if self.token.is_empty() {
@@ -185,6 +264,19 @@ impl ConnectionReporter for HubConnectionStatus {
         };
         if let Ok(mut current) = self.current.lock() {
             *current = state.clone();
+        }
+        // The contract verdict, which outlives the state that carried it. A
+        // skew is remembered until another `ready` frame judges the hub in
+        // range (which is the only thing that reports `Connected`); every
+        // other transition is about the socket and says nothing about the
+        // hub's row shapes, so it leaves the verdict alone. See
+        // [`ConnectionView::contract_verdict`].
+        match &state {
+            HubConnection::HubTooOld { .. } | HubConnection::HubTooNew { .. } => {
+                self.remember_contract(Some(state.clone()))
+            }
+            HubConnection::Connected => self.remember_contract(None),
+            _ => {}
         }
         match serde_json::to_value(&state) {
             Ok(payload) => sink.emit_remote(CONNECTION_EVENT, payload),

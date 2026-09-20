@@ -25,6 +25,7 @@
 //! is never logged, never formatted into an error, and [`RemoteConfig`]'s
 //! hand-written `Debug` redacts it.
 
+use super::connection::{ConnectionView, HubConnection};
 use super::{RemoteConfig, UnavailableHub};
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::transcript::Conversation;
@@ -64,6 +65,11 @@ pub struct HubBackend {
     /// Set for a hub that is configured but that this launch cannot use:
     /// every call is refused with this, before the transport is touched.
     unavailable: Option<UnavailableHub>,
+    /// Where this window's live link to that hub stands, when something is
+    /// watching it. `None` never gates — a test that is about something
+    /// else, and nothing in production ([`Self::watching`] is called at both
+    /// call sites, held there by a source test). See [`Self::contract_error`].
+    link: Option<Arc<dyn ConnectionView>>,
 }
 
 /// Redacting by construction: [`RemoteConfig`]'s own `Debug` hides the token,
@@ -87,7 +93,19 @@ impl HubBackend {
             cfg,
             transport,
             unavailable: None,
+            link: None,
         }
+    }
+
+    /// Consult `link` before every call, so that a hub whose wire contract
+    /// this build does not read is refused rather than deserialised.
+    ///
+    /// The value handed in is the same [`super::connection::HubConnectionStatus`]
+    /// the event bridge reports into and the `hub_connection` command answers
+    /// from — one state, read here rather than mirrored.
+    pub fn watching(mut self, link: Arc<dyn ConnectionView>) -> Self {
+        self.link = Some(link);
+        self
     }
 
     /// A hub that is configured but that this launch cannot use.
@@ -115,6 +133,7 @@ impl HubBackend {
             },
             transport: Arc::new(NoTransport),
             unavailable: Some(hub),
+            link: None,
         }
     }
 
@@ -127,6 +146,73 @@ impl HubBackend {
                 format!("{what} was not run: {}", hub.explain()),
             )
         })
+    }
+
+    /// The refusal for a call made while the last thing this window learned
+    /// about the hub is that its wire contract is outside the range this
+    /// build reads, or `None` when nothing has been learned or the last hub
+    /// judged was in range. `what` names the tool.
+    ///
+    /// # Why a call is refused and not merely distrusted
+    ///
+    /// [`super::events::EventBridge::pump`] already applies no row event and
+    /// runs no backfill from such a connection. A call made from a command
+    /// walks past that: its answer is deserialised into the same row types,
+    /// which carry `#[serde(default)]` on roughly forty-six optional fields
+    /// (see [`super::contract`]), so a renamed column arrives as a default
+    /// nobody can see rather than as a parse error. A mutation is no
+    /// different — its return value is a row too, and the frontend merges it
+    /// optimistically.
+    ///
+    /// # What it reads, and what it deliberately does not
+    ///
+    /// The last contract VERDICT
+    /// ([`ConnectionView::contract_verdict`](super::connection::ConnectionView::contract_verdict)),
+    /// not where the connection stands now. Only a `ready` frame judges a
+    /// hub's wire contract, so only a `ready` frame may change the answer:
+    ///
+    /// - a window that has never completed a handshake on this launch
+    ///   (`connecting`) calls, or every startup list would wait on
+    ///   `GET /events`;
+    /// - `reconnecting` / `offline` change nothing either way. Reading the
+    ///   *state* would open the gate there, and since `GET /events` and
+    ///   `POST /mcp` are separate sockets, a hub whose stream is merely down
+    ///   would become readable again while still known to be incompatible;
+    /// - a later `ready` frame in range makes the bridge report `Connected`,
+    ///   which clears the verdict, and the gate opens without a restart.
+    fn contract_error(&self, what: &str) -> Option<IpcError> {
+        // The numbers come from the recorded verdict rather than from this
+        // build's constants, so the message and `details` cannot disagree
+        // with the banner that is on screen for the same connection.
+        let (message, details) = match self.link.as_ref()?.contract_verdict()? {
+            HubConnection::HubTooOld {
+                hub_contract,
+                min_contract,
+            } => (
+                format!(
+                    "{what} was not run: {}'s wire contract is revision {hub_contract}, \
+                     older than the {min_contract} this app requires. Update the hub.",
+                    self.cfg.base_url
+                ),
+                json!({ "hub_contract": hub_contract, "min_contract": min_contract }),
+            ),
+            HubConnection::HubTooNew {
+                hub_contract,
+                max_contract,
+            } => (
+                format!(
+                    "{what} was not run: {}'s wire contract is revision {hub_contract}, \
+                     newer than the {max_contract} this app understands. Update this app.",
+                    self.cfg.base_url
+                ),
+                json!({ "hub_contract": hub_contract, "max_contract": max_contract }),
+            ),
+            // Only a skew is ever recorded as a verdict; anything else here
+            // would be a bug in `HubConnectionStatus::report`, and inventing
+            // a refusal for it would be worse than letting the call run.
+            _ => return None,
+        };
+        Some(IpcError::new(codes::E_HUB_CONTRACT, message).with_details(details))
     }
 
     pub fn config(&self) -> &RemoteConfig {
@@ -201,7 +287,17 @@ impl HubBackend {
     /// Not `pub`, for the same reason as [`Self::call`]: only
     /// [`Self::route_text`] calls it from outside this module.
     pub(super) async fn call_text(&self, tool: &str, args: Value) -> Result<String, IpcError> {
+        // The two refusals that happen before a socket is opened, in this
+        // order. "This launch cannot use the hub at all" comes first: it is
+        // about the configuration rather than about the hub's version, its
+        // sentence is the one the whole window is already showing, and such a
+        // client never handshakes, so it has no skew to report. The contract
+        // gate is second, and is the only other way a call ends before the
+        // transport is touched.
         if let Some(refused) = self.unavailable_error(tool) {
+            return Err(refused);
+        }
+        if let Some(refused) = self.contract_error(tool) {
             return Err(refused);
         }
         let body = json!({

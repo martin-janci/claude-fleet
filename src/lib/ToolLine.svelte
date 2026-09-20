@@ -42,8 +42,11 @@
   let open = $state(false);
   let detail = $state<ToolDetail | null>(null);
   let loadError = $state<string | null>(null);
-  // A hub-connected desktop refuses the detail read (`E_LOCAL_ONLY`, the hub
-  // has no tool for it); retrying cannot help, so no Retry is offered.
+  // Two refusals a hub-connected desktop can answer with that no amount of
+  // retrying can change: the hub has no tool for this read at all
+  // (`E_LOCAL_ONLY`), and the hub's wire contract is outside this build's
+  // range (`E_HUB_CONTRACT`), which stands until one side is upgraded. No
+  // Retry is offered for either.
   let loadRetryable = $state(true);
   let fetching = $state(false);
   let fullDiff = $state(false);
@@ -101,7 +104,7 @@
     if (r.ok) detail = r.value;
     else {
       loadError = r.error.message;
-      loadRetryable = r.error.code !== 'E_LOCAL_ONLY';
+      loadRetryable = !['E_LOCAL_ONLY', 'E_HUB_CONTRACT'].includes(r.error.code);
     }
   }
 

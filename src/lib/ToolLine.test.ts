@@ -134,6 +134,26 @@ describe('ToolLine', () => {
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
 
+  // Same reasoning as the refusal above: the hub's wire contract is outside
+  // this build's range, so the read cannot succeed until someone upgrades a
+  // binary. A Retry button there is a promise the app cannot keep.
+  it('a contract-skewed hub shows the reason without a Retry', async () => {
+    mockedDetail.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: 'E_HUB_CONTRACT',
+        message:
+          'session_tool_detail was not run: the hub’s wire contract is revision 1, ' +
+          'older than the 3 this app requires. Update the hub.',
+      },
+    });
+    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(screen.getByTestId('conv-tool-detail-error').textContent).toContain('Update the hub.');
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
   it('a call without an id is not expandable', () => {
     render(ToolLine, { line: line({ id: null }), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
     expect(screen.queryByRole('button')).toBeNull();
