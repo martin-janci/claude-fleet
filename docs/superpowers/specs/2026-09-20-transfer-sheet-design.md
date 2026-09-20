@@ -59,16 +59,19 @@ steps, in order, a `snake_case`-serialized enum `MoveStep`:
 |---|----------------|----------------------------------------------------------|---------------|
 | 1 | `check`        | 0 source idle, 1 source git state                        | no            |
 | 2 | `transcript`   | 2 locate, cap, read                                      | no            |
-| 3 | `workspace`    | 3 target worktree, 3a seed                               | no            |
+| 3 | `workspace`    | 3 resolve the target's paths, 3a seed its main clone     | no            |
 | 4 | `git`          | 3b snapshot, bundle, relay, fetch                        | no            |
-| 5 | `replay`       | 3c replay uncommitted work, verify                       | no            |
+| 5 | `replay`       | create / fast-forward the worktree and its refusals (target dirty, diverged, larger transcript), 3c replay, verify | no |
 | 6 | `ignored`      | 3d small git-ignored files                               | yes           |
 | 7 | `claude_state` | 3e session directory and project memory                  | yes           |
 | 8 | `start`        | 4 start the target, 5 confirm                            | no            |
 | 9 | `handoff`      | 6 source check and kill (or keep), 7 record on both rows | no            |
 
 `MoveStep::ALL: [MoveStep; 9]` is the single source of the order and of
-`total`. `index` is 1-based.
+`total`. `index` is 1-based. The worktree is created AFTER the fetch (it is
+fast-forwarded to a commit the fetch brings), so its setup and refusals belong
+to `replay`, which the sheet labels "Set up the worktree, replay uncommitted
+work".
 
 ### The payload
 
@@ -299,10 +302,19 @@ parts:
    unknown-status refusal and the move already in progress), `E_LOCAL_ONLY`, and a fallback that shows the
    backend's message unchanged. The failed step is highlighted in the step
    list, which stays visible.
-2. *Where things stand* — for `failed`: "The source session was not touched.
-   Anything copied to {toHost} was cleaned up." For `partial`: "The session is
-   running on {toHost}, but the source could not be retired." with links to
-   both sessions (`details.target_session_id`).
+2. *Where things stand* — honest about what cleanup does (it removes only the
+   transfer refs and the transfer directory). For `failed`, by the step
+   reached: nothing past `transcript` → "Nothing was copied to {toHost}. The
+   source session was not touched."; otherwise "The source session was not
+   touched. Temporary transfer files were removed; what was already set up on
+   {toHost} — the clone, the worktree, copied files — was left there." For
+   `partial`, a neutral line — "A new session exists on {toHost} and the
+   source is still there. Nothing was killed." — with links to both sessions
+   (`details.target_session_id`); *what failed* then comes from
+   `details.step` (confirm timeout; the source wrote after the copy → kill the
+   TARGET and transfer again; the source could not be stopped; the target
+   could not be confirmed), with a neutral fallback for a string this build
+   does not know.
 3. *Raw details* — collapsed: code, message, `details.stderr` when present.
 
 Buttons: **Done**. (Retry is 3d.)
@@ -383,3 +395,54 @@ nine `start` calls and the `Progress` plumbing),
 `src/lib/SessionDetails.svelte`, `docs/control-api.md` (the `/events` names list) and
 `docs/adr/0002-move-carries-work-as-is.md` (a short "what the user sees"
 note).
+
+## 7. Revisions after the whole-branch review (2026-09-20)
+
+The first implementation followed sections 1–6 as written; a whole-branch
+review found places where the design itself was wrong. What changed, and why:
+
+- **A settled run's steps are derived, not rewritten.** `settle()` stores
+  `status`, `report`, `error` and `settledAt` and leaves `steps` alone;
+  `displaySteps(run)` is what the UI renders (a `done` run shows every
+  non-warned step done; a `failed`/`partial` run with no failed step shows the
+  step that was running as failed — never a step the user watched succeed).
+- **Results and events race.** They travel on separate channels and events
+  wait out a 16 ms flush, so a fast refusal's own `check:started` can arrive
+  AFTER the result. Section 2's rule "a `check`/`started` event replaces a
+  settled run" would then swap the real error for an empty observed run. For
+  `SETTLE_GRACE_MS` (5 s) after a LOCAL run settles, events only patch its
+  steps forward; after that the replace rule applies. Cost: a new move of the
+  same session started within 5 s of the last one ending is drawn on the old
+  run.
+- **Every field of an event is validated** before a run is touched
+  (`session_id`, `to_host`, `index`/`step` agreement, `state` one of the four
+  wire states, `detail` a string or null): `applyMoveProgress` never throws — a
+  throw would lose the whole event batch — and the desktop's hub bridge checks
+  the payload's shape before re-emitting it.
+- **Observed runs always have a way out.** A dropped event stream would leave
+  one at "moving…" forever and block `startMove`. `dismissMove` removes an
+  observed run in any state; the running view offers "Stop following".
+- **Hub-client mode.** The hub client bounded every tool call at 30 s, so a
+  real move was reported as failed while it kept running on the hub.
+  `move_session` now has its own 15-minute call bound; a lost connection
+  (`E_HUB_UNREACHABLE`) is "outcome unknown" — the run becomes observed and
+  keeps following events, with the note "Lost contact with the hub — the move
+  may still be running there."; and a `Progress` dropped mid-step (the caller
+  went away) still emits that step's `failed`.
+- **Selection follows even though the source row is gone.** A normal move
+  kills the source row before the result returns, which clears the selection,
+  so "still the selected session" never held. Selection follows to the target
+  when it is empty or still the source, with `{ follow: true }`.
+- **A result behind a closed sheet stays reachable.** The success toast
+  carries the warning count and the keep-source note, has a View action, and
+  does not auto-dismiss when there are warnings. The NEW session's header chip
+  finds the run (`runForSession`: by `report.target_session_id`) and shows
+  "⇄ moved from {host}". A run attaches to a session id only while the name
+  and source host still match, since row ids can be reused.
+- **Smaller:** `partial` reads "⇄ move incomplete" on the chip; an unknown
+  left-behind reason renders as its raw value; the live chip has a title and
+  an aria-label; a busy source gets its own sentence.
+
+Still open, by decision: a run whose hub goes quiet never settles on its own
+(Stop following is the way out); the partial step strings are matched by value
+with a neutral fallback rather than pinned against Rust.
