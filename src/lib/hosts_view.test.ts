@@ -36,9 +36,9 @@ describe('groupHostsByAccount', () => {
   it('groups by account alphabetically, hosts alphabetically, and skips an account with no host', () => {
     const groups = groupHostsByAccount(fleetHosts(), fleetAccounts());
     expect(groups.map((g) => [g.label, g.hosts.map((h) => h.alias)])).toEqual([
-      ['admin@32bit.sk', ['claude-fleet-oci', 'mefistos']],
-      ['m.janci@32bit.sk', ['claude-fleet-htz']],
-      ['mj.janci@gmail.com', ['claude-fleet-trn', 'local']],
+      ['admin-janci@users.noreply.github.com', ['claude-fleet-oci', 'mefistos']],
+      ['m-janci@users.noreply.github.com', ['claude-fleet-htz']],
+      ['mj-janci@users.noreply.github.com', ['claude-fleet-trn', 'local']],
     ]);
   });
 
@@ -54,8 +54,8 @@ describe('groupHostsByAccount', () => {
   it('orders by the nickname when one is set, and never by headroom', () => {
     const accounts = fleetAccounts().map((a) => (a.uuid === ADMIN.uuid ? { ...a, nickname: 'work' } : a));
     expect(groupHostsByAccount(fleetHosts(), accounts).map((g) => g.label)).toEqual([
-      'm.janci@32bit.sk',
-      'mj.janci@gmail.com',
+      'm-janci@users.noreply.github.com',
+      'mj-janci@users.noreply.github.com',
       'work',
     ]);
   });
@@ -63,7 +63,7 @@ describe('groupHostsByAccount', () => {
   it('filters by alias, ssh alias or account', () => {
     const groups = groupHostsByAccount(fleetHosts(), fleetAccounts());
     expect(filterGroups(groups, 'OCI').flatMap((g) => g.hosts.map((h) => h.alias))).toEqual(['claude-fleet-oci']);
-    expect(filterGroups(groups, 'gmail').flatMap((g) => g.hosts.map((h) => h.alias))).toEqual([
+    expect(filterGroups(groups, 'mj-janci').flatMap((g) => g.hosts.map((h) => h.alias))).toEqual([
       'claude-fleet-trn',
       'local',
     ]);

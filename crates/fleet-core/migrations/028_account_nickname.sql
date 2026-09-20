@@ -1,7 +1,8 @@
--- User-set short display name for an account (the Hosts view design:
--- `m.janci@32bit.sk` and `mj.janci@gmail.com` are easy to confuse in narrow
--- labels). This is user data: `upsert_account` (the probe path) must never
--- overwrite it — only `Store::set_account_nickname` does.
+-- User-set short display name for an account (the Hosts view design: two
+-- addresses differing by one character, like `m-janci@…` and `mj-janci@…`,
+-- are easy to confuse in narrow labels). This is user data: `upsert_account`
+-- (the probe path) must never overwrite it — only
+-- `Store::set_account_nickname` does.
 ALTER TABLE accounts ADD COLUMN nickname TEXT;
 
 -- Whether `oauthAccount.hasExtraUsageEnabled` was true on the last probe:

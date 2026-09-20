@@ -35,7 +35,7 @@ describe('HostsList', () => {
   it('renders groups in stable order with a No Claude account group last', () => {
     mount({ hosts: [...fleetHosts(), host('nas')] });
     const labels = screen.getAllByTestId('group-label').map((l) => l.textContent);
-    expect(labels).toEqual(['admin@32bit.sk', 'm.janci@32bit.sk', 'mj.janci@gmail.com', 'No Claude account']);
+    expect(labels).toEqual(['admin-janci@users.noreply.github.com', 'm-janci@users.noreply.github.com', 'mj-janci@users.noreply.github.com', 'No Claude account']);
     // The no-account group has no usage bars.
     const last = screen.getAllByTestId('hosts-group').at(-1)!;
     expect(within(last).queryAllByRole('meter')).toHaveLength(0);

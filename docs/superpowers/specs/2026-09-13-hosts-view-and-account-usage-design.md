@@ -17,16 +17,16 @@ product-design expert; decisions below are binding.
 - Build the full design below.
 - In compact surfaces, show **% left and the reset time with equal weight**
   (the user sometimes moves to another account, sometimes waits for a reset).
-- Accounts get **short nicknames**, because `m.janci@32bit.sk` and
-  `mj.janci@gmail.com` are easy to confuse in narrow labels.
+- Accounts get **short nicknames**, because `m-janci@users.noreply.github.com` and
+  `mj-janci@users.noreply.github.com` are easy to confuse in narrow labels.
 
 ## Facts that shape the design
 
 - **Usage belongs to an account, not a host.** Real mapping: `mefistos` and
-  `claude-fleet-oci` share `admin@32bit.sk`; `claude-fleet-htz` →
-  `m.janci@32bit.sk`; `claude-fleet-trn` and `local` → `mj.janci@gmail.com`.
+  `claude-fleet-oci` share `admin-janci@users.noreply.github.com`; `claude-fleet-htz` →
+  `m-janci@users.noreply.github.com`; `claude-fleet-trn` and `local` → `mj-janci@users.noreply.github.com`.
 - **Bug:** `local` is logged in (`~/.claude.json` has `oauthAccount` for
-  `mj.janci@gmail.com`) but its `hosts.account_uuid` is empty. `probe_local` in
+  `mj-janci@users.noreply.github.com`) but its `hosts.account_uuid` is empty. `probe_local` in
   `service/hosts.rs` reads the file and the `OauthAccount` field types match
   the JSON (`seatTier: null` is fine for `Option<String>`), so the cause is
   elsewhere in how the local probe result reaches `set_host_account`. Fix it

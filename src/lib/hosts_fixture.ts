@@ -32,10 +32,10 @@ export function account(uuid: string, email: string, over: Partial<AccountRow> =
   };
 }
 
-export const ADMIN = account('acc-admin', 'admin@32bit.sk');
-export const WORK = account('acc-work', 'm.janci@32bit.sk');
-export const GMAIL = account('acc-gmail', 'mj.janci@gmail.com');
-export const SPARE = account('acc-spare', 'spare@32bit.sk');
+export const ADMIN = account('acc-admin', 'admin-janci@users.noreply.github.com');
+export const WORK = account('acc-work', 'm-janci@users.noreply.github.com');
+export const GMAIL = account('acc-gmail', 'mj-janci@users.noreply.github.com');
+export const SPARE = account('acc-spare', 'spare-janci@users.noreply.github.com');
 
 export function host(alias: string, over: Partial<HostRow> = {}): HostRow {
   return {

@@ -8,6 +8,11 @@
 # Disable it again with `git config --unset core.hooksPath`, or skip a single
 # commit with `git commit --no-verify`.
 #
+#   every commit
+#       -> reject staged lines that re-introduce a personal email address
+#          (see PERSONAL_EMAIL_RE below). Scrubbed from the tree in
+#          chore/scrub-personal-emails; the repo is public and these strings
+#          end up inside the shipped binary via include_str!'d migrations.
 #   staged path matches src-tauri/, crates/, Cargo.toml, Cargo.lock, deny.toml,
 #   rust-toolchain.toml
 #       -> cargo fmt --all --check, cargo clippy --workspace --all-targets -- -D warnings
@@ -33,15 +38,41 @@ cd "$ROOT"
 staged="$(git diff --cached --name-only --diff-filter=ACMRD)"
 [[ -z "$staged" ]] && exit 0
 
-run_rust=0
-run_frontend=0
-while IFS= read -r path; do
-  case "$path" in
-    src-tauri/*|crates/*|Cargo.toml|Cargo.lock|deny.toml|rust-toolchain.toml) run_rust=1 ;;
-    src/*|package.json|pnpm-lock.yaml|pnpm-workspace.yaml) run_frontend=1 ;;
-    vite.config.ts|vitest.config.ts|vitest.setup.ts|svelte.config.js|tsconfig.json|index.html) run_frontend=1 ;;
-  esac
-done <<< "$staged"
+# --- personal email guard (runs for every commit) ----------------------------
+# Portable ERE only: the BSD grep that ships with macOS has no -P, so the
+# allowed substitute is excluded with a second grep instead of a lookahead.
+# Matches any address at the private domain, and the surname at any domain.
+PERSONAL_EMAIL_RE='[A-Za-z0-9._%+-]+@(32bit\.sk|papayapos\.dev)|[A-Za-z0-9._%+-]*[Jj]anci[A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+# -U0: added lines only. Drop the leading '+' so a filename cannot match.
+hits="$(git diff --cached -U0 --diff-filter=ACMR \
+        | grep '^+' | grep -v '^+++' | cut -c2- \
+        | grep -oE "$PERSONAL_EMAIL_RE" \
+        | grep -v 'users\.noreply\.github\.com' \
+        | sort -u || true)"
+if [[ -n "$hits" ]]; then
+  echo "pre-commit: refusing to commit a personal email address." >&2
+  echo "$hits" | sed 's/^/  /' >&2
+  echo >&2
+  echo "  This repo is public and these strings reach the shipped binary" >&2
+  echo "  (migrations are include_str!'d). Use the GitHub no-reply form" >&2
+  echo "  instead, e.g. m-janci@users.noreply.github.com." >&2
+  echo "  Intentional? Commit once with: git commit --no-verify" >&2
+  exit 1
+fi
+
+# The same addresses must not arrive as the commit's author either: that lands
+# in the commit metadata of a public repo, where scrubbing files cannot reach
+# it. ~/.gitconfig already uses the GitHub no-reply form; this keeps it that way.
+author_email="$(git config user.email || true)"
+if [[ -n "$author_email" ]] \
+   && printf '%s\n' "$author_email" | grep -qE "$PERSONAL_EMAIL_RE" \
+   && ! printf '%s\n' "$author_email" | grep -q 'users\.noreply\.github\.com'; then
+  echo "pre-commit: refusing to author a commit as <$author_email>." >&2
+  echo "  This repo is public; the address would be permanent commit metadata." >&2
+  echo "  Set the GitHub no-reply identity for this repo:" >&2
+  echo "    git config user.email '2478078+martin-janci@users.noreply.github.com'" >&2
+  exit 1
+fi
 
 if [[ "$run_rust" == 1 ]]; then
   if ! pkg-config --exists gtk+-3.0 2>/dev/null; then

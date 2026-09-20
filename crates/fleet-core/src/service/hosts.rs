@@ -946,7 +946,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_claude_json(
             dir.path(),
-            r#"{"accountUuid":"796436ed-fd1f-436d-bc15-ad1a81f78a71","emailAddress":"mj.janci@gmail.com","seatTier":null}"#,
+            r#"{"accountUuid":"796436ed-fd1f-436d-bc15-ad1a81f78a71","emailAddress":"mj-janci@users.noreply.github.com","seatTier":null}"#,
         );
         let (reachable, _claude_ver, _tmux_ver, account) = probe_local_in(dir.path());
         assert!(reachable);
@@ -955,7 +955,10 @@ mod tests {
             account.uuid.as_deref(),
             Some("796436ed-fd1f-436d-bc15-ad1a81f78a71")
         );
-        assert_eq!(account.email.as_deref(), Some("mj.janci@gmail.com"));
+        assert_eq!(
+            account.email.as_deref(),
+            Some("mj-janci@users.noreply.github.com")
+        );
         assert!(account.seat_tier.is_none());
     }
 
