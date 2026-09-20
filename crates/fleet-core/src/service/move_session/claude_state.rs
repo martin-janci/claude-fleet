@@ -9,6 +9,7 @@ use crate::service::move_session::carry::{
     OUT_MARKER,
 };
 use crate::shell::quote;
+use std::collections::HashSet;
 
 /// `settings` key: largest per-session directory (MiB) a move carries.
 pub const SETTING_MAX_SESSION_STATE_MB: &str = "move.max_session_state_mb";
@@ -102,11 +103,19 @@ pub fn select_session_files(listed: Vec<ListedFile>, cap_bytes: u64) -> SessionS
         }
     }
     ok.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
-    let mut total: u64 = ok.iter().fold(0u64, |t, f| t.saturating_add(f.bytes));
+    // A u128 running total: summing as u64 can saturate on a pathological
+    // listing, and decrementing that already-saturated value with a plain
+    // `-=` panics on underflow; even `saturating_sub` on a saturated u64
+    // total would silently under-report what is left to remove (the excess
+    // above u64::MAX is gone once saturation happens). u128 has enough
+    // headroom that the sum of any listing that fits in memory never
+    // saturates, so decrementing it stays exact.
+    let mut total: u128 = ok.iter().map(|f| u128::from(f.bytes)).sum();
+    let cap = u128::from(cap_bytes);
     let mut keep_from = 0;
-    while total > cap_bytes && keep_from < ok.len() {
+    while total > cap && keep_from < ok.len() {
         let f = &ok[keep_from];
-        total -= f.bytes;
+        total = total.saturating_sub(u128::from(f.bytes));
         sel.exclude.push(f.path.clone());
         sel.left.push(LeftBehind {
             path: f.path.clone(),
@@ -116,6 +125,15 @@ pub fn select_session_files(listed: Vec<ListedFile>, cap_bytes: u64) -> SessionS
         keep_from += 1;
     }
     if sel.exclude.len() > MAX_SESSION_EXCLUDES {
+        // Every file not yet walked would still have to be excluded to fit —
+        // report it too, so the report never silently drops files.
+        for f in &ok[keep_from..] {
+            sel.left.push(LeftBehind {
+                path: f.path.clone(),
+                bytes: Some(f.bytes),
+                reason: LeftReason::OverCap,
+            });
+        }
         return SessionSelection {
             left: sel.left,
             skip: Some(format!(
@@ -170,6 +188,8 @@ pub fn parse_memory_list(stdout: &[u8]) -> Option<MemoryListing> {
     Some(MemoryListing { dir, exists, files })
 }
 
+/// Deliberately stricter than the spec's regex: a leading `.` is rejected even
+/// though the regex would allow it — hidden files are not memory.
 fn safe_memory_name(n: &str) -> bool {
     n.len() > 3
         && n.ends_with(".md")
@@ -187,12 +207,19 @@ pub struct MemoryDecision {
 }
 
 /// Memory only ever adds: a name the target has is never carried, and the
-/// index is merged line-wise elsewhere, never copied.
+/// index is merged line-wise elsewhere, never copied. Names are compared
+/// ASCII-case-insensitively throughout — the index filter, the target match,
+/// and source-vs-source collisions — because a case-insensitive target
+/// volume (macOS default) treats `Note.md` and `note.md` as one file.
 pub fn decide_memory(source: &[ListedMemory], target: &[ListedMemory]) -> MemoryDecision {
     let mut d = MemoryDecision::default();
-    let mut src: Vec<&ListedMemory> = source.iter().filter(|f| f.name != INDEX_NAME).collect();
+    let mut src: Vec<&ListedMemory> = source
+        .iter()
+        .filter(|f| !f.name.eq_ignore_ascii_case(INDEX_NAME))
+        .collect();
     src.sort_by(|a, b| a.name.cmp(&b.name));
     let mut total = 0u64;
+    let mut seen_ci: HashSet<String> = HashSet::new();
     for f in src {
         let left = |reason| LeftBehind {
             path: f.name.clone(),
@@ -201,7 +228,12 @@ pub fn decide_memory(source: &[ListedMemory], target: &[ListedMemory]) -> Memory
         };
         if !safe_memory_name(&f.name) {
             d.left.push(left(LeftReason::UnsupportedName));
-        } else if let Some(t) = target.iter().find(|t| t.name == f.name) {
+        } else if !seen_ci.insert(f.name.to_ascii_lowercase()) {
+            // A case-insensitive duplicate of an earlier source file (two
+            // names that only exist as distinct files on a case-sensitive
+            // source): only the first in name order is a candidate to carry.
+            d.left.push(left(LeftReason::UnsupportedName));
+        } else if let Some(t) = target.iter().find(|t| t.name.eq_ignore_ascii_case(&f.name)) {
             if t.hash == f.hash {
                 d.identical += 1
             } else {
@@ -248,7 +280,10 @@ pub fn merge_index(
     let mut body = String::new();
     let mut lines = 0u32;
     for line in source_index.lines() {
-        let travels = link_target(line).is_some_and(|t| carried.iter().any(|c| c == t));
+        // Case-insensitive: the carried name and the index's link spelling
+        // can differ only in case (same reasoning as `decide_memory`).
+        let travels =
+            link_target(line).is_some_and(|t| carried.iter().any(|c| c.eq_ignore_ascii_case(t)));
         if !travels || line == INDEX_HEREDOC {
             continue;
         }
@@ -1058,5 +1093,85 @@ mod tests {
         );
         assert!(got.lines > 0 && got.append.ends_with('\n'));
         assert!(!got.append.lines().any(|l| l == "CF_INDEX"));
+    }
+
+    // --- Fix round 1 ---
+
+    #[test]
+    fn decide_memory_matches_a_case_differing_target_name_as_the_same_file() {
+        // different hash, case-differing name -> kept_target, reported under the SOURCE's spelling
+        let d = decide_memory(&[m("Note.md", "h1", 10)], &[m("note.md", "OTHER", 10)]);
+        assert_eq!(d.kept_target, vec!["Note.md"]);
+        assert!(d.carry.is_empty());
+
+        // same hash, case-differing name -> identical, not kept_target/carry
+        let d2 = decide_memory(&[m("Note.md", "h1", 10)], &[m("note.md", "h1", 10)]);
+        assert_eq!(d2.identical, 1);
+        assert!(d2.kept_target.is_empty() && d2.carry.is_empty());
+    }
+
+    #[test]
+    fn decide_memory_treats_a_lowercase_memory_md_as_the_index_too() {
+        let d = decide_memory(&[m("memory.md", "h1", 10)], &[]);
+        assert!(d.carry.is_empty(), "{:?}", d.carry);
+        assert!(d.left.is_empty(), "{:?}", d.left);
+    }
+
+    #[test]
+    fn decide_memory_carries_only_the_first_of_case_colliding_source_names() {
+        let d = decide_memory(&[m("A.md", "h1", 10), m("a.md", "h2", 10)], &[]);
+        assert_eq!(
+            d.carry.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+            vec!["A.md"]
+        );
+        let reason = |n: &str| d.left.iter().find(|l| l.path == n).map(|l| l.reason);
+        assert_eq!(reason("a.md"), Some(LeftReason::UnsupportedName));
+    }
+
+    #[test]
+    fn merge_index_matches_a_carried_name_case_insensitively() {
+        let src = "# Memory Index\n\n- [Note](note.md) — hook\n";
+        let got = merge_index(src, None, &["Note.md".to_string()]);
+        assert_eq!(got.lines, 1, "{:?}", got);
+        assert!(got.append.contains("(note.md)"), "{:?}", got.append);
+    }
+
+    #[test]
+    fn a_skipped_session_directory_reports_every_listed_file() {
+        let many: Vec<ListedFile> = (0..MAX_SESSION_EXCLUDES + 1)
+            .map(|i| f(&format!("subagents/a{i:04}.jsonl"), 1000))
+            .collect();
+        let smalls: Vec<ListedFile> = (0..3).map(|i| f(&format!("small{i}.json"), 1)).collect();
+        let total_listed = many.len() + smalls.len();
+        let mut listed = many;
+        listed.extend(smalls.iter().cloned());
+        // only the 3 small (1 byte each) files would fit under this cap
+        let sel = select_session_files(listed, 3);
+        assert!(sel.skip.is_some(), "{:?}", sel.skip);
+        assert!(sel.carry.is_empty() && sel.exclude.is_empty());
+        assert_eq!(
+            sel.left.len(),
+            total_listed,
+            "every listed file must be reported, not just the ones already walked"
+        );
+        for s in &smalls {
+            let reason = sel.left.iter().find(|l| l.path == s.path).map(|l| l.reason);
+            assert_eq!(
+                reason,
+                Some(LeftReason::OverCap),
+                "{} would have fit but the whole half was skipped",
+                s.path
+            );
+        }
+    }
+
+    #[test]
+    fn a_saturated_total_does_not_panic_when_decremented() {
+        // three files whose sum overflows u64: exercises the fold's saturating_add
+        // and must not panic when the running total is later decremented.
+        let big = u64::MAX / 2 + 1;
+        let sel = select_session_files(vec![f("a", big), f("b", big), f("c", big)], 1);
+        assert!(sel.carry.is_empty(), "{:?}", sel.carry);
+        assert_eq!(sel.exclude.len(), 3);
     }
 }
