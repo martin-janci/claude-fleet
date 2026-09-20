@@ -9,6 +9,13 @@
   // brings the session back. `no_mcp` / `token_revoked` are explanatory
   // only — their fixes live outside this panel (Settings, the sidebar), so
   // there is nothing here to wire a click to.
+  //
+  // ConversationPanel carries its own composer, but it does not know about
+  // the context chip's prefix — so it is mounted with `showComposer={false}`
+  // and this panel is the only thing that ever calls `sendPrompt` for the
+  // operator session. Two composers sending independently into one tmux
+  // REPL is exactly the interleaved-paste failure `showComposer` exists to
+  // prevent.
   import ConversationPanel from './ConversationPanel.svelte';
   import {
     agentPanelOpen,
@@ -21,7 +28,7 @@
   } from './operator';
   import { agentContext, type AgentContextInput } from './agent_context';
   import { sendPrompt } from './sessions';
-  import { stuckKindLabel } from './attention';
+  import { composerStatus } from './conversation';
 
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
 
@@ -30,8 +37,13 @@
   let sending = $state(false);
 
   const session = $derived($operatorSession);
-  const working = $derived(session?.claude_status === 'working');
-  const stuckLabel = $derived(stuckKindLabel(session?.stuck_kind ?? null));
+  // Same "is the agent busy" signal ConversationPanel's own composer reads
+  // (stuck_kind first, then claude_status === 'working') — one shared
+  // definition so the two composers can never disagree about it.
+  const statusNote = $derived(
+    session ? composerStatus({ claude_status: session.claude_status, stuck_kind: session.stuck_kind }) : null,
+  );
+  const busy = $derived(statusNote !== null);
   const ctx = $derived(contextInput && !chipDropped ? agentContext(contextInput) : null);
 
   const blocked = $derived(
@@ -51,7 +63,7 @@
   );
 
   async function send() {
-    if (!session || working || sending || !draft.trim()) return;
+    if (!session || busy || sending || !draft.trim()) return;
     sending = true;
     const body = ctx ? `${ctx.prefix}\n\n${draft}` : draft;
     await sendPrompt(session.host_alias, session.tmux_name, body);
@@ -69,10 +81,7 @@
       {/if}
     {:else}
       {#if session}
-        <ConversationPanel {session} visible={true} />
-      {/if}
-      {#if stuckLabel}
-        <p class="stuck">{stuckLabel}</p>
+        <ConversationPanel {session} visible={true} showComposer={false} />
       {/if}
       {#if ctx}
         <button
@@ -86,10 +95,10 @@
       {/if}
       <div class="composer">
         <textarea bind:value={draft} placeholder="Ask the agent…" rows="2"></textarea>
-        <button onclick={() => void send()} disabled={working || sending || !session}>Send</button>
+        <button onclick={() => void send()} disabled={busy || sending || !session}>Send</button>
       </div>
-      {#if working}
-        <p class="busy">The agent is working — wait for it to finish.</p>
+      {#if statusNote}
+        <p class="busy" class:stuck={!!session?.stuck_kind}>{statusNote}</p>
       {/if}
     {/if}
   </section>
@@ -117,15 +126,13 @@
     margin: 0;
     color: var(--fg-muted);
   }
-  .stuck {
-    margin: 0;
-    color: var(--usage-crit);
-    font-size: 0.85rem;
-  }
   .busy {
     margin: 0;
     color: var(--fg-muted);
     font-size: 0.8rem;
+  }
+  .busy.stuck {
+    color: var(--usage-crit);
   }
   .chip {
     align-self: flex-start;
