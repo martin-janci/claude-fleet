@@ -159,7 +159,6 @@ describe('App: the Conversation tab', () => {
       return original ? original(cmd, ...rest) : null;
     });
     localStorage.removeItem('cf:pref:session.last');
-    localStorage.removeItem('cf:pref:ui.sessionView');
     const { sessionView } = await import('./lib/prefs');
     sessionView.set('conversation');
   });
@@ -342,7 +341,7 @@ describe('App: the Conversation tab', () => {
     expect(checked('subtab-conversation')).toBe('true');
   });
 
-  it('selecting a row with no claude_session_id drops conversation mode', async () => {
+  it('selecting a row with no claude_session_id falls back to Terminal', async () => {
     await mountAndSelect(work);
     await fireEvent.click(subtab('subtab-conversation'));
     await tick();
