@@ -469,11 +469,9 @@
   let findOpen = $state(false);
   let findQuery = $state('');
   let findIndex = $state(0);
-  let findInput: HTMLInputElement | undefined = $state();
   let turnsOpen = $state(false);
-  let turnsWrap: HTMLDivElement | undefined = $state();
-  let turnsList: HTMLUListElement | undefined = $state();
-  let turnsButton: HTMLButtonElement | undefined = $state();
+  /** The header renders the find box and the turn index; ⌘F needs its input. */
+  let header: ConversationHeader | undefined = $state();
 
   const matches = $derived(findOpen ? findMatches(thread, findQuery) : []);
   const matchKeys = $derived(new Set(matches.map((m) => m.rowKey)));
@@ -492,11 +490,14 @@
   }
 
   async function openFind() {
+    // Nothing to search while the thread is loading or empty. The shortcut
+    // checks this too (it also owns preventDefault); the header's ⌕ button
+    // is always on screen now, so the guard has to live here as well.
+    if (!threadShown) return;
     turnsOpen = false;
     findOpen = true;
     await tick();
-    findInput?.focus();
-    findInput?.select();
+    header?.focusFindInput();
   }
   function closeFind() {
     findOpen = false;
@@ -581,40 +582,6 @@
     turnsOpen = false;
     scrollToRow(key);
   }
-  function onTurnsKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      turnsOpen = false;
-      turnsButton?.focus();
-      return;
-    }
-    // Arrow / Home / End walk the list: a long thread must not need one Tab
-    // per turn. The ends hold rather than wrap, so a held arrow stops.
-    const rows = Array.from(turnsList?.querySelectorAll<HTMLButtonElement>('button') ?? []);
-    if (rows.length === 0) return;
-    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
-    const to =
-      e.key === 'ArrowDown' ? at + 1
-      : e.key === 'ArrowUp' ? at - 1
-      : e.key === 'Home' ? 0
-      : e.key === 'End' ? rows.length - 1
-      : null;
-    if (to === null) return;
-    e.preventDefault();
-    rows[Math.max(0, Math.min(to, rows.length - 1))]?.focus();
-  }
-  $effect(() => {
-    if (turnsOpen) turnsList?.querySelector('button')?.focus();
-  });
-  // Close the list on an outside pointerdown (as ConversationHeader does).
-  $effect(() => {
-    if (!turnsOpen) return;
-    function onDocPointerDown(e: PointerEvent) {
-      if (turnsWrap && e.target instanceof Node && !turnsWrap.contains(e.target)) turnsOpen = false;
-    }
-    document.addEventListener('pointerdown', onDocPointerDown);
-    return () => document.removeEventListener('pointerdown', onDocPointerDown);
-  });
 
   // One probe in flight at a time (a wedged host must not stack ssh
   // processes every 2 s), and a slow one never overwrites a newer result.
@@ -953,7 +920,32 @@
 </script>
 
 <div class="conversation-panel" data-testid="conversation-panel" bind:this={root}>
-  <ConversationHeader {session} {conversations} {viewing} {lastEvent} {newerAvailable} onSelect={select} />
+  <ConversationHeader
+    {session}
+    {conversations}
+    {viewing}
+    {lastEvent}
+    {newerAvailable}
+    onSelect={select}
+    bind:this={header}
+    {findOpen}
+    {findQuery}
+    {findCount}
+    matchCount={matches.length}
+    {turnEntries}
+    {turnsOpen}
+    {nowMs}
+    onFindOpen={() => void openFind()}
+    onFindClose={closeFind}
+    onFindInput={(q) => {
+      findQuery = q;
+      findIndex = 0;
+    }}
+    {onFindKey}
+    onFindStep={stepFind}
+    onTurnsToggle={() => (turnsOpen = !turnsOpen)}
+    onPickTurn={pickTurn}
+  />
   {#if viewing !== null}
     <div class="viewing" data-testid="conv-viewing-banner">
       Viewing an earlier conversation · <button type="button" class="linkish" data-testid="conv-back-current" onclick={() => select(null)}>Back to current</button>
@@ -989,53 +981,6 @@
       bind:this={scroller}
       onscroll={onScroll}
     >
-      {#if findOpen}
-        <div class="find" data-testid="conv-find">
-          <input
-            type="search"
-            data-testid="conv-find-input"
-            aria-label="Find in conversation"
-            placeholder="Find in conversation"
-            bind:this={findInput}
-            bind:value={findQuery}
-            oninput={() => (findIndex = 0)}
-            onkeydown={onFindKey}
-          />
-          <span class="find-count" data-testid="conv-find-count" aria-live="polite">{findCount}</span>
-          <button type="button" class="tb-btn" data-testid="conv-find-prev" aria-label="Previous match" disabled={matches.length === 0} onclick={() => stepFind(-1)}>↑</button>
-          <button type="button" class="tb-btn" data-testid="conv-find-next" aria-label="Next match" disabled={matches.length === 0} onclick={() => stepFind(1)}>↓</button>
-          <button type="button" class="tb-btn" data-testid="conv-find-close" aria-label="Close find" onclick={closeFind}>×</button>
-        </div>
-      {:else if conv}
-        <div class="toolbar" data-testid="conv-toolbar">
-          <button type="button" class="tb-btn" data-testid="conv-find-button" aria-label="Find in conversation" title="Find (⌘F / Ctrl+F)" onclick={() => void openFind()}>⌕ Find</button>
-          {#if turnEntries.length > 0}
-            <div class="turns-wrap" bind:this={turnsWrap}>
-              <button
-                type="button"
-                class="tb-btn"
-                data-testid="conv-turns-button"
-                aria-expanded={turnsOpen}
-                bind:this={turnsButton}
-                onclick={() => (turnsOpen = !turnsOpen)}>{turnEntries.length} turn{turnEntries.length === 1 ? '' : 's'}</button
-              >
-              {#if turnsOpen}
-                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-                <ul class="turn-index" aria-label="Turns" data-testid="conv-turn-index" bind:this={turnsList} onkeydown={onTurnsKey}>
-                  {#each turnEntries as t (t.rowKey)}
-                    <li>
-                      <button type="button" data-testid="conv-turn-index-item" onclick={() => pickTurn(t.rowKey)}>
-                        <span class="ti-label">{t.label}</span>
-                        {#if t.at}<time datetime={t.at}>{relativeTime(t.at, nowMs)}</time>{/if}
-                      </button>
-                    </li>
-                  {/each}
-                </ul>
-              {/if}
-            </div>
-          {/if}
-        </div>
-      {/if}
       <div class="thread">
         {#if errorMsg && !empty}
           <div class="error-row">
@@ -1302,7 +1247,7 @@
 <style>
   .conversation-panel {
     /* The reading column every part of the thread lines up with: the turns,
-       the sticky toolbar, the chips, the slash menu and the composer. */
+       the sticky header, the chips, the slash menu and the composer. */
     --chat-col: 80ch;
     /* The tab is a resizable pane, not the window: what adapts below has to
        ask this element's width, so the whole chat is one query container. */
@@ -1332,111 +1277,6 @@
   }
   .scroller:focus {
     outline: none;
-  }
-  .toolbar,
-  .find {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    /* Full-bleed background and rule, but the controls sit over the column
-       they act on rather than out at the pane's edge. */
-    padding: 0.25rem max(1.1rem, calc((100% - var(--chat-col)) / 2));
-    border-bottom: 1px solid var(--border);
-    background: var(--bg);
-    font-size: 0.74rem;
-  }
-  .toolbar {
-    justify-content: flex-end;
-  }
-  .find input {
-    flex: 1 1 auto;
-    min-width: 0;
-    max-width: 40ch;
-    padding: 0.2rem 0.45rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg-pane);
-    color: var(--fg);
-    font: inherit;
-  }
-  .find input:focus {
-    outline: none;
-    border-color: var(--accent);
-  }
-  .find-count {
-    min-width: 4.5ch;
-    color: var(--fg-muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .tb-btn {
-    padding: 0.1rem 0.45rem;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: none;
-    color: var(--fg-muted);
-    font-size: 0.74rem;
-    cursor: pointer;
-  }
-  .tb-btn:hover:not(:disabled),
-  .tb-btn:focus-visible {
-    border-color: var(--border);
-    color: var(--fg);
-  }
-  .tb-btn:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-  .turns-wrap {
-    position: relative;
-  }
-  .turn-index {
-    position: absolute;
-    right: 0;
-    top: calc(100% + 0.25rem);
-    z-index: 3;
-    width: min(60ch, 90cqw);
-    max-height: 22rem;
-    overflow: auto;
-    overscroll-behavior: contain;
-    margin: 0;
-    padding: 0.25rem 0;
-    list-style: none;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    box-shadow: 0 4px 14px color-mix(in srgb, var(--fg) 15%, transparent);
-  }
-  .turn-index:focus {
-    outline: none;
-  }
-  .turn-index button {
-    display: flex;
-    width: 100%;
-    align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.3rem 0.65rem;
-    border: none;
-    background: none;
-    color: var(--fg);
-    font: inherit;
-    font-size: 0.78rem;
-    text-align: left;
-    cursor: pointer;
-  }
-  .turn-index button:hover,
-  .turn-index button:focus-visible {
-    outline: none;
-    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
-  }
-  .ti-label {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   [data-match] {
     outline: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
@@ -1987,10 +1827,6 @@
     .readonly,
     .viewing,
     .switch-notice {
-      padding-inline: 0.6rem;
-    }
-    .toolbar,
-    .find {
       padding-inline: 0.6rem;
     }
     .blocked {

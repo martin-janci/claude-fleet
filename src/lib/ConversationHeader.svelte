@@ -6,12 +6,18 @@
   import {
     contextMeter,
     conversationTitle,
+    relativeTime,
     statusChip,
     switcherEntries,
     type ConversationSummary,
   } from './conversation';
+  import type { TurnIndexEntry } from './conversation_nav';
   import { contextColor, contextTint } from './attention';
 
+  // The find and turn-index state lives in ConversationPanel (it owns the
+  // thread and the scroller); the header only renders the controls and
+  // reports back. Every one of them is optional so the header still stands
+  // alone — a panel always passes the whole set.
   let {
     session,
     conversations,
@@ -19,6 +25,20 @@
     lastEvent,
     newerAvailable,
     onSelect,
+    findOpen = false,
+    findQuery = '',
+    findCount = '',
+    matchCount = 0,
+    turnEntries = [],
+    turnsOpen = false,
+    nowMs = Date.now(),
+    onFindOpen = () => {},
+    onFindClose = () => {},
+    onFindInput = () => {},
+    onFindKey = () => {},
+    onFindStep = () => {},
+    onTurnsToggle = () => {},
+    onPickTurn = () => {},
   }: {
     session: SessionRow;
     conversations: ConversationSummary[];
@@ -29,7 +49,34 @@
     /** A newer conversation started while an earlier one is being viewed. */
     newerAvailable: boolean;
     onSelect: (claudeSessionId: string | null) => void;
+    /** Find bar shown in place of the facts. */
+    findOpen?: boolean;
+    findQuery?: string;
+    /** Rendered "n / m" label; '' hides the count. */
+    findCount?: string;
+    /** Matches found; 0 disables the step buttons. */
+    matchCount?: number;
+    turnEntries?: TurnIndexEntry[];
+    turnsOpen?: boolean;
+    /** The panel's ticking clock, for the turn index's relative times. */
+    nowMs?: number;
+    onFindOpen?: () => void;
+    onFindClose?: () => void;
+    onFindInput?: (q: string) => void;
+    onFindKey?: (e: KeyboardEvent) => void;
+    onFindStep?: (d: 1 | -1) => void;
+    /** Toggles the turn index; also how the header closes it. */
+    onTurnsToggle?: () => void;
+    onPickTurn?: (rowKey: string) => void;
   } = $props();
+
+  let findInput: HTMLInputElement | undefined = $state();
+  /** ⌘F opens find from the panel, which owns the shortcut; the box it has
+   *  to land in lives here. */
+  export function focusFindInput(): void {
+    findInput?.focus();
+    findInput?.select();
+  }
 
   let open = $state(false);
   let menu: HTMLUListElement | undefined = $state();
@@ -110,6 +157,50 @@
     document.addEventListener('pointerdown', onDocPointerDown);
     return () => document.removeEventListener('pointerdown', onDocPointerDown);
   });
+
+  // ─── Turn index ───────────────────────────────────────────────────────────
+  // Moved here from ConversationPanel so the tool cluster is one bar: the
+  // list, its keyboard walk and its outside-pointerdown close are unchanged,
+  // except that `turnsOpen` is the panel's state, so closing goes back out
+  // through onTurnsToggle (only ever called while it is open).
+  let turnsWrap: HTMLDivElement | undefined = $state();
+  let turnsList: HTMLUListElement | undefined = $state();
+  let turnsButton: HTMLButtonElement | undefined = $state();
+
+  function onTurnsKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onTurnsToggle();
+      turnsButton?.focus();
+      return;
+    }
+    // Arrow / Home / End walk the list: a long thread must not need one Tab
+    // per turn. The ends hold rather than wrap, so a held arrow stops.
+    const rows = Array.from(turnsList?.querySelectorAll<HTMLButtonElement>('button') ?? []);
+    if (rows.length === 0) return;
+    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const to =
+      e.key === 'ArrowDown' ? at + 1
+      : e.key === 'ArrowUp' ? at - 1
+      : e.key === 'Home' ? 0
+      : e.key === 'End' ? rows.length - 1
+      : null;
+    if (to === null) return;
+    e.preventDefault();
+    rows[Math.max(0, Math.min(to, rows.length - 1))]?.focus();
+  }
+  $effect(() => {
+    if (turnsOpen) turnsList?.querySelector('button')?.focus();
+  });
+  // Close the list on an outside pointerdown (as the switcher does).
+  $effect(() => {
+    if (!turnsOpen) return;
+    function onDocPointerDown(e: PointerEvent) {
+      if (turnsWrap && e.target instanceof Node && !turnsWrap.contains(e.target)) onTurnsToggle();
+    }
+    document.addEventListener('pointerdown', onDocPointerDown);
+    return () => document.removeEventListener('pointerdown', onDocPointerDown);
+  });
 </script>
 
 <div class="conv-header" data-testid="conv-header">
@@ -145,7 +236,26 @@
       </ul>
     {/if}
   </div>
-  <div class="facts">
+  {#if findOpen}
+    <div class="find-inline" data-testid="conv-find">
+      <input
+        class="field"
+        type="search"
+        data-testid="conv-find-input"
+        aria-label="Find in conversation"
+        placeholder="Find in conversation"
+        bind:this={findInput}
+        value={findQuery}
+        oninput={(e) => onFindInput(e.currentTarget.value)}
+        onkeydown={onFindKey}
+      />
+      <span class="tag find-count" data-testid="conv-find-count" aria-live="polite">{findCount}</span>
+      <button type="button" class="btn btn--icon btn--quiet" data-testid="conv-find-prev" aria-label="Previous match" title="Previous match" disabled={matchCount === 0} onclick={() => onFindStep(-1)}>↑</button>
+      <button type="button" class="btn btn--icon btn--quiet" data-testid="conv-find-next" aria-label="Next match" title="Next match" disabled={matchCount === 0} onclick={() => onFindStep(1)}>↓</button>
+      <button type="button" class="btn btn--icon btn--quiet" data-testid="conv-find-close" aria-label="Close find" title="Close find" onclick={onFindClose}>×</button>
+    </div>
+  {:else}
+    <div class="facts">
     {#if meter}
       <span
         class="ctx"
@@ -165,6 +275,38 @@
     {#if model}<span class="chip" data-testid="conv-model">{model}</span>{/if}
     {#if status}<span class="chip" data-testid="conv-status" data-status={status}>{status}</span>{/if}
     {#if lastEvent}<span class="muted" data-testid="conv-last-event">{lastEvent}</span>{/if}
+    </div>
+  {/if}
+
+  <!-- Always at the right, find open or not: ⌘F must not relocate the
+       pointer target, and "n turns" must not vanish while find is open. -->
+  <div class="tools">
+    <button type="button" class="btn btn--icon btn--quiet" data-testid="conv-find-button" aria-label="Find in conversation" title="Find (⌘F / Ctrl+F)" onclick={onFindOpen}>⌕</button>
+    {#if turnEntries.length > 0}
+      <div class="turns-wrap" bind:this={turnsWrap}>
+        <button
+          type="button"
+          class="btn btn--quiet"
+          data-testid="conv-turns-button"
+          aria-expanded={turnsOpen}
+          bind:this={turnsButton}
+          onclick={onTurnsToggle}>{turnEntries.length} turn{turnEntries.length === 1 ? '' : 's'}<span class="caret">▾</span></button
+        >
+        {#if turnsOpen}
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <ul class="turn-index" aria-label="Turns" data-testid="conv-turn-index" bind:this={turnsList} onkeydown={onTurnsKey}>
+            {#each turnEntries as t (t.rowKey)}
+              <li>
+                <button type="button" data-testid="conv-turn-index-item" onclick={() => onPickTurn(t.rowKey)}>
+                  <span class="ti-label">{t.label}</span>
+                  {#if t.at}<time datetime={t.at}>{relativeTime(t.at, nowMs)}</time>{/if}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -174,11 +316,11 @@
     top: 0;
     z-index: 2;
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    padding: 0.4rem 1.1rem;
+    gap: var(--control-gap);
+    min-height: 32px;
+    /* One inset expression, shared with .thread and .composer (Task 8). */
+    padding: 4px max(1.1rem, calc((100% - var(--chat-col)) / 2 + 1.1rem));
     background: var(--bg-pane);
     border-bottom: 1px solid var(--border);
   }
@@ -261,13 +403,91 @@
     color: var(--fg-muted);
     font-size: 0.74rem;
   }
-  .facts {
+  .facts,
+  .find-inline {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
+    gap: var(--control-gap);
     flex: 1 1 auto;
     min-width: 0;
+  }
+  /* Always at the right, find open or not: no pointer relocation on ⌘F. */
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex: 0 0 auto;
+  }
+  .find-inline .field {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 40ch;
+    height: var(--control-h);
+    padding: 0 var(--control-px);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-sm);
+    background: var(--control-bg);
+    color: var(--fg);
+    font: inherit;
+    font-size: var(--control-font);
+  }
+  .find-inline .field:focus {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: var(--ring-offset);
+    border-color: var(--accent);
+  }
+  .find-count {
+    min-width: 4.5ch;
+    font-variant-numeric: tabular-nums;
+  }
+  .turns-wrap {
+    position: relative;
+  }
+  .turn-index {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.25rem);
+    z-index: 3;
+    width: min(60ch, 90cqw);
+    max-height: 22rem;
+    overflow: auto;
+    overscroll-behavior: contain;
+    margin: 0;
+    padding: 0.25rem 0;
+    list-style: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--fg) 15%, transparent);
+  }
+  .turn-index:focus {
+    outline: none;
+  }
+  .turn-index button {
+    display: flex;
+    width: 100%;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.3rem 0.65rem;
+    border: none;
+    background: none;
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.78rem;
+    text-align: left;
+    cursor: pointer;
+  }
+  .turn-index button:hover,
+  .turn-index button:focus-visible {
+    outline: none;
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  }
+  .ti-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .chip {
     padding: 0.1rem 0.5rem;
@@ -317,12 +537,11 @@
   .ctx-pct {
     position: relative;
   }
-  @media (max-width: 520px) {
+  /* A pane narrow enough that the 1.1rem gutters cost more than they give
+     (the rule the old .toolbar carried, now the header's). */
+  @container chat (max-width: 34rem) {
     .conv-header {
-      flex-wrap: wrap;
-    }
-    .facts {
-      justify-content: flex-start;
+      padding-inline: 0.6rem;
     }
   }
 </style>

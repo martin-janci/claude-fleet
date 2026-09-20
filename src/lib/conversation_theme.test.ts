@@ -32,6 +32,7 @@ describe('chat colour tokens', () => {
 
 describe('chat column width', () => {
   const panel = SOURCES['./ConversationPanel.svelte'];
+  const header = SOURCES['./ConversationHeader.svelte'];
 
   it('states the reading column once, as a token', () => {
     // The thread, the chips, the composer row, the slash menu and the
@@ -41,9 +42,10 @@ describe('chat column width', () => {
     expect(panel.match(/max-width: var\(--chat-col\)/g)?.length ?? 0).toBeGreaterThanOrEqual(6);
   });
 
-  it('centres the sticky toolbar over the reading column', () => {
+  it('centres the sticky bar over the reading column', () => {
     // Full-bleed background and border, but the controls track the text.
-    expect(panel).toContain('max(1.1rem, calc((100% - var(--chat-col)) / 2))');
+    // The one bar is the header now: the toolbar was folded into it.
+    expect(header).toContain('max(1.1rem, calc((100% - var(--chat-col)) / 2 + 1.1rem))');
   });
 });
 
@@ -75,7 +77,9 @@ describe('chat sizes itself to its pane', () => {
     // A 80vw dropdown inside a narrow pane of a wide window overflows it.
     expect(panel).not.toMatch(/\d+vw/);
     expect(header).not.toMatch(/\d+vw/);
-    expect(panel).toMatch(/cqw/);
+    // Both pop-ups — the conversation switcher and the turn index — hang off
+    // the header now, so that is where the container units live.
+    expect(header).toMatch(/cqw/);
   });
 });
 
