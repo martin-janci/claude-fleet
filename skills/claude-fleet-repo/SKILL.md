@@ -42,7 +42,7 @@ merge. See "Shipping a PR" below.
 
 | Adding… | File(s) | Pattern |
 |---|---|---|
-| A new MCP tool | `crates/fleet-core/src/mcp/tools/` — params struct + `#[tool]` method calling into `service::*` | Audit non-secret args; pass bodies / prompts but never log them. Return `ok_json(&result)` or `text_content`. Add the tool's name to exactly one of `guard::ADMIN_TOOLS` / `guard::CLIENT_TOOLS` (`crates/fleet-core/src/mcp/guard.rs`) — an exhaustiveness test in `mcp/tools/tests.rs` fails otherwise. After adding: `REGEN_DOCS=1 cargo test -p fleet-core reference_is_current` to refresh `docs/control-api-reference.md`. |
+| A new MCP tool | `crates/fleet-core/src/mcp/tools/` — params struct + `#[tool]` method calling into `service::*` | Audit non-secret args; pass bodies / prompts but never log them. Return `ok_json_compact(&result)` for list/report shapes, `ok_json` otherwise, or `text_content`. Add exactly one `ToolPolicy` row to `guard::TOOL_POLICIES` (`crates/fleet-core/src/mcp/guard.rs`) — it drives access, the readonly gate, confirmation, the deadline, the served list and the MCP annotations; an exhaustiveness test in `mcp/tools/tests.rs` fails without it. After adding: `REGEN_DOCS=1 cargo test -p fleet-core reference_is_current` to refresh `docs/control-api-reference.md`. |
 | A new service function | `crates/fleet-core/src/service/<area>.rs` | Take `&Mutex<Store>` + `&Arc<SshClient>`, never `tauri::State`. Same code path runs from both Tauri IPC and MCP. |
 | A new store helper | `crates/fleet-core/src/store/` | Hold the `Mutex<Store>` guard *briefly*; never across `.await`. Use `unchecked_transaction` for multi-step writes. |
 | A schema change | `crates/fleet-core/migrations/NNN_<topic>.sql` + an entry in the `MIGRATIONS` list in `crates/fleet-core/src/store/schema.rs` (latest is 37) | `Migration::plain(NNN, include_str!(…))` when the SQL is safe to re-run as written (`CREATE TABLE`/`INDEX IF NOT EXISTS`); otherwise the `Migration { version, sql, already_applied }` form with an `already_applied(&Connection) -> rusqlite::Result<bool>` guard (see `sessions_has_tmux_pane_id` etc. above `MIGRATIONS`) so a re-run of e.g. `ALTER TABLE … ADD COLUMN` or a table rebuild doesn't fail. End the `.sql` file with `INSERT OR IGNORE INTO schema_version (version) VALUES (NNN);`. |
@@ -60,6 +60,41 @@ merge. See "Shipping a PR" below.
 - **Terminal is hand-rolled**: `src/lib/ansi.ts` + `TerminalView.svelte`. xterm.js was tried and abandoned (WKWebView repaint bug). Only one PTY is attached at a time — see `pty.rs`.
 - **Test caveats**: after pulling, run `pnpm install --frozen-lockfile` — stale `node_modules` fail `App.test.ts` and `clipboard_native.test.ts` with `Failed to resolve import "@tauri-apps/plugin-clipboard-manager"`. `localStorage` is polyfilled in `vitest.setup.ts` (no known pre-existing failures). The `Sidebar` "without quadratic blow-up" perf test is timing-sensitive and occasionally flakes on a loaded box.
 - **MCP prefix stability**: every `#[tool(...)]` addition/rename/description edit in `crates/fleet-core/src/mcp/tools/` invalidates the Claude API tool-definition cache for every connected client. Add tools sparingly; when you must rename or rewrite a description, batch with sibling edits in one release rather than churning across many.
+
+## MCP tools — the token budget
+
+The served surface is the client's context: 72 tools ≈ 14.8k tokens of
+definitions for the master token (12.9k per-host, 5.6k readonly — `tools/list`
+is scoped to the caller in `mcp/tools/present.rs`), and a single careless
+result can cost more than all of them. Measured audit:
+`docs/specs/2026-09-20-mcp-token-efficiency.md`. When you add or touch a tool:
+
+- **Slim default, explicit widening.** Every list-shaped tool takes `summary`
+  (default **true**), `limit`, and the filter its callers actually use. A
+  default that is fine on a 3-row fleet and ruinous at 250 rows is a bug.
+- **Return through `ok_json_compact`**, not `ok_json` — pretty-printing plus
+  `"field": null` costs ~25% of the payload on list/report results.
+- **Descriptions select, skills instruct.** One line of purpose, the arguments
+  that change behaviour, the `E_*` codes it can answer with — aim under ~400
+  chars. Workflow prose belongs in `skills/claude-fleet-control/SKILL.md`,
+  which is loaded only when relevant; a description is paid for on every list.
+- **Write for tool search.** Clients discover tools by regex/BM25 over names,
+  descriptions, argument names and argument descriptions. Put the words a user
+  would say ("stuck", "OOM", "cost", "transcript") in the first line, and keep
+  the `list_*` / `repo_*` / `session_*` name families consistent so one search
+  matches a whole group.
+- **Keep schemas thin.** Single-line `///` docs in `params.rs`; no `format`
+  (`int64`/`uint` mean nothing to the model), no redundant `default: null`.
+- **Bounded waits over pollable reads.** If a caller would loop on a list to
+  watch for a transition, give it a `wait_for_*` long poll instead.
+- **Deprecated means removed.** A tool documented as deprecated still costs a
+  definition and competes for selection; delete it in the next release that
+  already churns definitions.
+- **Add the policy row** in `mcp/guard.rs` (`TOOL_POLICIES`) — `present.rs`
+  derives both the served list and the `readOnlyHint` / `destructiveHint`
+  annotations from it, and `the_served_definition_budget_stays_bounded` fails
+  when the surface grows past its byte budget. Raise that constant on purpose,
+  never reflexively.
 
 ## Shipping a PR
 

@@ -5,15 +5,22 @@ use crate::service::{repo, repo_read};
 
 #[tool_router(router = repo_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "List discovered projects. Slim rows by default \
-        (id, owner, repo, worktree_count, last_session_at); pass \
-        summary=false for the full nested worktree tree.")]
+    #[tool(description = "List discovered projects (repos fleet can spawn \
+        sessions in). Slim rows by default (id, owner, repo, worktree_count, \
+        last_session_at); summary=false returns the full nested worktree \
+        tree, which is large — pair it with limit.")]
     pub(super) async fn list_projects(
         &self,
         Parameters(p): Parameters<ListProjectsParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("list_projects", &format!("summary={}", p.summary));
-        let trees = projects::list_projects(&self.store).map_err(to_mcp_err)?;
+        audit(
+            "list_projects",
+            &format!("summary={} limit={:?}", p.summary, p.limit),
+        );
+        let mut trees = projects::list_projects(&self.store).map_err(to_mcp_err)?;
+        if let Some(n) = p.limit {
+            trees.truncate(n);
+        }
         if p.summary {
             let slim: Vec<ProjectSummary> = trees.into_iter().map(ProjectSummary::from).collect();
             ok_json_compact(&slim)
@@ -28,7 +35,7 @@ impl FleetTools {
         no local projects directory to scan.")]
     pub(super) async fn refresh_projects(&self) -> Result<CallToolResult, McpError> {
         audit("refresh_projects", "");
-        ok_json(
+        ok_json_compact(
             &projects::refresh_projects(&self.store)
                 .await
                 .map_err(to_mcp_err)?,
@@ -37,19 +44,52 @@ impl FleetTools {
 
     // ---- sessions ----
 
-    #[tool(description = "List git worktrees fleet knows about, each with \
-        its alive-session occupants (empty = free to delete via \
-        delete_worktree). Optional project filter.")]
+    #[tool(description = "List git worktrees fleet knows about, with their \
+        alive-session occupants (0 = free to delete via delete_worktree). \
+        Returns {total, worktrees}: total counts every match, the array holds \
+        at most `limit` (default 100; 0 = no cap). Slim rows by default; summary=false \
+        adds the worktree path and the occupant sessions. Narrow with \
+        project_id / host_alias — a fleet-wide call answers hundreds of rows.")]
     pub(super) async fn list_worktrees(
         &self,
-        Parameters(args): Parameters<worktrees::ListWorktreesArgs>,
+        Parameters(p): Parameters<ListWorktreesParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "list_worktrees",
-            &format!("project_id={:?}", args.project_id),
+            &format!(
+                "project_id={:?} host={:?} summary={} limit={:?}",
+                p.project_id, p.host_alias, p.summary, p.limit
+            ),
         );
-        let out = worktrees::list_worktrees(args, &self.store).map_err(to_mcp_err)?;
-        ok_json(&out)
+        let args = worktrees::ListWorktreesArgs {
+            project_id: p.project_id,
+        };
+        let mut out = worktrees::list_worktrees(args, &self.store).map_err(to_mcp_err)?;
+        if let Some(host) = p.host_alias.as_deref() {
+            out.retain(|w| w.worktree.host_alias == host);
+        }
+        // `total` before the cap: a caller that gets 100 of 249 rows must be
+        // able to see that it is holding a slice, or it will reason about the
+        // fleet from a silent truncation.
+        let total = out.len();
+        match p.limit {
+            // 0 = no cap: the desktop in hub-client mode needs the whole list
+            // to render the project tree, where an agent wants a page.
+            Some(0) => {}
+            Some(n) => out.truncate(n),
+            None => out.truncate(WORKTREES_DEFAULT_LIMIT),
+        }
+        let worktrees = if p.summary {
+            serde_json::to_value(
+                out.into_iter()
+                    .map(WorktreeSummary::from)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            serde_json::to_value(&out)
+        }
+        .map_err(|e| McpError::internal_error(format!("serialize worktrees: {e}"), None))?;
+        ok_json_compact(&serde_json::json!({ "total": total, "worktrees": worktrees }))
     }
 
     #[tool(description = "Delete a git worktree on its host (no --force) and \
@@ -93,7 +133,7 @@ impl FleetTools {
         let v = repo_read::repo_changes(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
-        ok_json(&v)
+        ok_json_compact(&v)
     }
 
     #[tool(description = "List a session's worktree files (tracked + untracked, \
@@ -106,7 +146,7 @@ impl FleetTools {
         let v = repo_read::repo_tree(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
-        ok_json(&v)
+        ok_json_compact(&v)
     }
 
     #[tool(description = "Read one worktree file's contents (capped). Returns \
@@ -162,7 +202,7 @@ impl FleetTools {
         )
         .await
         .map_err(to_mcp_err)?;
-        ok_json(&v)
+        ok_json_compact(&v)
     }
 
     #[tool(description = "List local + remote branches for a session's worktree \
@@ -175,7 +215,7 @@ impl FleetTools {
         let v = repo_read::repo_branches(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
-        ok_json(&v)
+        ok_json_compact(&v)
     }
 
     #[tool(description = "One commit's metadata + changed files. Returns JSON \

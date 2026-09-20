@@ -88,6 +88,13 @@ pub(super) const REPO_LOG_DEFAULT_LIMIT: u32 = 50;
 /// returned when the caller does not choose a cap.
 pub(super) const CAPTURE_DEFAULT_MAX_LINES: u32 = 200;
 
+/// Default `limit` for `list_worktrees`. A fleet accumulates worktrees far
+/// faster than sessions (every branch of every project on every host), and an
+/// uncapped fleet-wide list measured ~21k tokens — more than this server's
+/// whole tool surface. The result carries `total`, so a caller can see it is
+/// holding a page and narrow with `project_id` / `host_alias`.
+pub(super) const WORKTREES_DEFAULT_LIMIT: usize = 100;
+
 /// Keep only the last `max` lines of `text`. Returns the kept text plus the
 /// total line count so the caller can say how much was dropped. `max == 0`
 /// means no cap.
@@ -495,9 +502,15 @@ pub(super) fn text_content(text: impl Into<String>) -> Content {
     }
 }
 
-/// Serialize a successful result to pretty JSON wrapped in a tool result.
+/// Serialize a successful result to compact JSON wrapped in a tool result.
+///
+/// Compact, not pretty: a tool result is read by a model, not by a human, and
+/// the indentation of `to_string_pretty` measured ~25% of the payload on this
+/// API's own reports (`fleet_health`, `list_hosts`, `usage_report`) — tokens
+/// spent on whitespace in every caller's context. Nulls are kept here; use
+/// [`ok_json_compact`] for list/report shapes, where dropping them matters too.
 pub(super) fn ok_json<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
-    let json = serde_json::to_string_pretty(value)
+    let json = serde_json::to_string(value)
         .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
     Ok(CallToolResult::success(vec![text_content(json)]))
 }
@@ -573,8 +586,8 @@ impl From<crate::store::ClientTokenRow> for ClientSummary {
 
 /// Slim row returned by `list_sessions` when `summary: true` (the default).
 /// Trimmed to the fields a triage UI/agent actually needs to pick which session
-/// to drill into; callers fetch full state via `peek_session` / `related_sessions`
-/// or by re-calling with `summary: false`.
+/// to drill into; callers fetch full state via `peer_status` /
+/// `related_sessions` or by re-calling with `summary: false`.
 #[derive(serde::Serialize)]
 pub(super) struct SessionSummary {
     pub(super) id: i64,
@@ -668,6 +681,35 @@ impl From<crate::service::projects::ProjectTreeRow> for ProjectSummary {
             repo: t.project.repo,
             worktree_count: t.worktrees.len(),
             last_session_at: t.project.last_session_at,
+        }
+    }
+}
+
+/// Slim row returned by `list_worktrees` when `summary: true` (the default).
+/// Drops the worktree's `path` (60+ chars each, and derivable from the
+/// project) and the occupant rows in favour of a count — the one thing a
+/// caller reads them for is whether the worktree is free to delete. A fleet
+/// with a few hundred worktrees answered ~21k tokens before this shape
+/// existed; `summary: false` still returns the full occupancy rows.
+#[derive(serde::Serialize)]
+pub(super) struct WorktreeSummary {
+    pub(super) id: i64,
+    pub(super) project_id: i64,
+    pub(super) host_alias: String,
+    pub(super) name: String,
+    pub(super) branch: Option<String>,
+    pub(super) occupants: usize,
+}
+
+impl From<crate::service::worktrees::WorktreeOccupancy> for WorktreeSummary {
+    fn from(w: crate::service::worktrees::WorktreeOccupancy) -> Self {
+        Self {
+            id: w.worktree.id,
+            project_id: w.worktree.project_id,
+            host_alias: w.worktree.host_alias,
+            name: w.worktree.name,
+            branch: w.worktree.branch,
+            occupants: w.occupants.len(),
         }
     }
 }

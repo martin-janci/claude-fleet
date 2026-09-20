@@ -30,7 +30,7 @@ impl FleetTools {
         let res = catalog::inventory::scan_hosts(&self.store, &self.ssh, p.host_alias.as_deref())
             .await
             .map_err(to_mcp_err)?;
-        ok_json(&res)
+        ok_json_compact(&res)
     }
 
     #[tool(description = "Import a host's Claude config (~/.claude skills, \
@@ -171,7 +171,7 @@ impl FleetTools {
     pub(super) async fn list_layers(&self) -> Result<CallToolResult, McpError> {
         audit("list_layers", "");
         let out = catalog::list_layers(&self.store).map_err(to_mcp_err)?;
-        ok_json(&out)
+        ok_json_compact(&out)
     }
 
     #[tool(description = "Compute the effective asset set for one host after \
@@ -218,7 +218,7 @@ impl FleetTools {
     pub(super) async fn propose_layers(&self) -> Result<CallToolResult, McpError> {
         audit("propose_layers", "");
         let out = catalog::propose::propose_layers(&self.store).map_err(to_mcp_err)?;
-        ok_json(&out)
+        ok_json_compact(&out)
     }
 
     #[tool(description = "Replace a host's layer assignment: one optional role \

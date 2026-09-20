@@ -121,9 +121,9 @@ List the catalog's layer definitions (layers/*.yaml) and each host's role + acti
 
 ### `list_projects`
 
-List discovered projects. Slim rows by default (id, owner, repo, worktree_count, last_session_at); pass summary=false for the full nested worktree tree.
+List discovered projects (repos fleet can spawn sessions in). Slim rows by default (id, owner, repo, worktree_count, last_session_at); summary=false returns the full nested worktree tree, which is large — pair it with limit.
 
-Parameters: `summary`
+Parameters: `limit`, `summary`
 
 ### `list_sessions`
 
@@ -139,13 +139,13 @@ Parameters: `limit`, `requester_session_id`, `state`
 
 ### `list_worktrees`
 
-List git worktrees fleet knows about, each with its alive-session occupants (empty = free to delete via delete_worktree). Optional project filter.
+List git worktrees fleet knows about, with their alive-session occupants (0 = free to delete via delete_worktree). Returns {total, worktrees}: total counts every match, the array holds at most `limit` (default 100; 0 = no cap). Slim rows by default; summary=false adds the worktree path and the occupant sessions. Narrow with project_id / host_alias — a fleet-wide call answers hundreds of rows.
 
-Parameters: `project_id`
+Parameters: `host_alias`, `limit`, `project_id`, `summary`
 
 ### `move_session`
 
-Move a work session to another host with its work as it is: copy the Claude transcript, carry the git state through the fleet (unpushed commits, staged, modified and untracked files, plus small git-ignored files such as .env — no origin needed, nothing is pushed, committed or stashed, the source worktree is never modified), create the worktree on the target, start it with --resume so the same conversation continues, and only once the target is confirmed running kill the source (keep_source=true leaves it running). strict=true refuses a dirty worktree (E_MOVE_DIRTY) or an unpushed branch (E_MOVE_UNPUSHED) instead of carrying them. Refused when the source is mid merge/rebase (E_MOVE_MIDOP), when an existing target worktree has its own uncommitted changes (E_MOVE_TARGET_DIRTY), when the transcript is over move.max_transcript_mb or the bundle over move.max_bundle_mb (E_MOVE_TOO_LARGE, details.payload), or when a carry step fails (E_MOVE_CARRY, details.step). Nothing on the source changes before the target is confirmed; a failure after the target started returns E_MOVE_PARTIAL and leaves both sessions. Needs a token allowed on BOTH hosts (in practice the master token). Gated by mcp.confirm_destructive (retry with confirm_nonce). Returns a JSON MoveReport: source_session_id, target_session_id, from_host, to_host, tmux_name, transcript_bytes, source_killed, warnings, carried (commits, bundle_bytes, dirty_entries, ignored_carried, ignored_left_behind, target_seeded), target (the new row, parent_session_id = source).
+Move a work session to another host, carrying its work as it is: the Claude transcript, unpushed commits, staged/modified/untracked files and small git-ignored files (.env). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the same conversation and the source is killed only once the target runs (keep_source=true leaves it). strict=true refuses instead of carrying: E_MOVE_DIRTY, E_MOVE_UNPUSHED. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts (in practice the master). Returns a MoveReport with the new row as target.
 
 Parameters: `confirm_nonce`, `keep_source`, `session_id`, `strict`, `target_host_alias`
 
@@ -172,12 +172,6 @@ Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `
 Mint a single-use pairing code for a new client device (a phone, a laptop browser) and return the URL to show as a QR. The code — not a token — travels in the URL FRAGMENT, so no proxy or access log ever sees it; the device posts it to the hub's /pair once and gets a token of its own back. name must be 1-64 characters with no control characters and must not be one a live client already holds. mode is full (drive sessions fleet-wide) or readonly (observe only); fleet-admin tools are out of a client's reach either way. Codes live in memory only, so a hub restart invalidates every outstanding one. Master token only. Returns JSON { url, code, expires_in_s, name, mode }.
 
 Parameters: `mode`, `name`, `ttl_s`
-
-### `peek_session`
-
-Deprecated: use session_transcript. Returns the session's last assistant turn from its transcript. Address it with session_id OR claude_session_id (+ host_alias while the fleet row does not exist yet).
-
-Parameters: `claude_session_id`, `host_alias`, `session_id`
 
 ### `peer_status`
 
@@ -243,7 +237,7 @@ Parameters: `host_alias`, `new_name`, `old_name`, `session_id`
 
 ### `repair_session`
 
-Explicitly repair a session's workspace (the same action as the Repair workspace button): make its directory a healthy git worktree on its branch and its tmux session run there. Unlike the automatic checks on create/restart/recreate/attach (which re-add a missing worktree from its existing branch, dropping its own stale git entry first only when the parent directory's dev:inode matches the one recorded while the worktree was healthy), this may unregister this worktree's own stale git entry (git worktree remove --force; never a blanket prune), adopt its branch's checkout elsewhere (refused when another fleet workspace uses it), recreate the branch from the base branch once origin confirms it is gone, run git worktree repair, and respawn a live pane whose directory vanished. No-op on a healthy session. Gated by mcp.confirm_destructive (retry with confirm_nonce). Returns a JSON RepairReport: cwd, healthy, actions (in order), warnings, branch_source, tmux (created|respawned), sibling_session_ids. Errors: E_REPO_MISSING (never faked with mkdir), E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED.
+Repair a session workspace (the Repair workspace button): make its directory a healthy git worktree on its branch and its tmux session run there. Goes past the automatic create/restart/attach checks — may unregister this worktree stale git entry, adopt its branch checkout elsewhere, recreate the branch from base once origin confirms it is gone, and respawn a pane whose directory vanished. No-op on a healthy session. Call it after any tool answers E_REPAIR_REQUIRED, then retry that tool. Gated by mcp.confirm_destructive. Returns a RepairReport (cwd, healthy, actions, warnings, branch_source, tmux, sibling_session_ids). Errors: E_REPO_MISSING, E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED.
 
 Parameters: `confirm_nonce`, `host_alias`, `name`, `session_id`
 
@@ -345,7 +339,7 @@ Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
 ### `session_conversation`
 
-Read a session's recent conversation as structured turns: each turn carries the human prompt, its timestamp, the turn's end timestamp, and items tagged by kind: text (assistant text), tool (a one-line summary plus the tool_use id, name, target, start/end timestamps and done; flagged when the call failed), subagent (a Task/Agent call: its agent type, description, the start of its final report, timestamps, done and error), compact (a context compaction with its trigger, pre-compaction tokens and summary), command (a slash command with its args and output) or interrupt (the user interrupted the turn). Tool inputs and results are not included. The response also carries events (this conversation's timeline events, oldest first, the newest events_limit of them: default 50, at most 200) and context (the conversation's context-window usage, or null). turns defaults to 10 and is capped at 100; the character budget scales with it. Prefer this over session_transcript when you want the shape of the exchange rather than one flat blob. Pass claude_session_id (from session_conversations) to read an earlier conversation of the session instead of the current one. Read-only. Errors: E_INVALID (claude_session_id is not one of the session's conversations), E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet).
+Read a session conversation as structured turns — the shape of the exchange, where session_transcript gives one flat blob. Each turn carries the prompt, its timestamps, and items by kind: text, tool, subagent, compact, command, interrupt (tool inputs and results are never included). Also returns events (this conversation timeline, newest events_limit: default 50, max 200) and context (context-window usage, or null). turns defaults to 10, max 100; the character budget scales with it. Pass claude_session_id (from session_conversations) for an earlier conversation. Read-only. Errors: E_INVALID, E_INVALID_STATE, E_NO_TRANSCRIPT.
 
 Parameters: `claude_session_id`, `events_limit`, `session_id`, `turns`
 
