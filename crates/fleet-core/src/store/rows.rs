@@ -21,6 +21,14 @@ pub struct ProjectRow {
     /// own working directory, not one of the user's repositories. The project
     /// picker hides it and `refresh_projects`'s stale-rows sweep leaves it
     /// alone — the same bargain `adopted` makes, for a different reason.
+    ///
+    /// `serde(default)` is load-bearing, not tidiness: this row is read off
+    /// the wire by a desktop paired to a hub, and a hub built before 038
+    /// sends no `system` key at all. Without the default, `list_projects`
+    /// fails the whole response with `E_PARSE` and the paired desktop shows
+    /// no projects — which is exactly what happened in 0.2.27. `false` is
+    /// also the right answer for such a hub: it has no system projects.
+    #[serde(default)]
     pub system: bool,
 }
 
@@ -915,4 +923,55 @@ pub(super) fn fetch_project(
     ))?
     .query_row(rusqlite::params![id], map_project_row)
     .optional()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A desktop paired to a hub parses that hub's rows, and the hub may be
+    /// older than the desktop. Migration 038 added `system` to `ProjectRow`;
+    /// a hub built before it sends the key not at all. Without
+    /// `serde(default)` the whole `list_projects` response fails with
+    /// `E_PARSE` and the paired desktop shows no projects — shipped in
+    /// 0.2.27 and seen against a live hub.
+    ///
+    /// The payload below is exactly what a pre-038 hub sends: `adopted` is
+    /// there (027 long predates hub-client mode), `system` is not.
+    #[test]
+    fn a_project_row_from_a_hub_older_than_migration_038_still_parses() {
+        let older_hub = r#"{
+            "id": 3,
+            "owner": "martin-janci",
+            "repo": "claude-fleet",
+            "base_path": "/srv/projects/claude-fleet",
+            "last_session_at": 1758400000,
+            "adopted": false
+        }"#;
+        let row: ProjectRow = serde_json::from_str(older_hub)
+            .expect("a pre-038 hub's project row must still deserialize");
+        assert_eq!(row.id, 3);
+        assert!(
+            !row.system,
+            "a hub that does not know about system projects has none"
+        );
+    }
+
+    /// The same row from a current hub still round-trips, so the default has
+    /// not made the field write-only.
+    #[test]
+    fn a_project_row_from_a_current_hub_keeps_its_system_flag() {
+        let current_hub = r#"{
+            "id": 4,
+            "owner": "fleet",
+            "repo": "operator",
+            "base_path": "/home/fleet/.claude-fleet/operator",
+            "last_session_at": null,
+            "adopted": false,
+            "system": true
+        }"#;
+        let row: ProjectRow =
+            serde_json::from_str(current_hub).expect("a current hub's project row parses");
+        assert!(row.system, "the flag survives the wire when it is sent");
+    }
 }
