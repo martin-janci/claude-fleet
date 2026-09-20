@@ -953,6 +953,22 @@
   const CMD_CLAMP_LINES = 8;
   const isLongOutput = (out: string) => out.split('\n').length > CMD_CLAMP_LINES;
 
+  /** Grow the box with its content, chat-composer style, so a long prompt
+   *  stays visible while it is typed. The CSS min/max-height are the floor
+   *  and the ceiling; past the ceiling the box scrolls. */
+  function autoGrow(node: HTMLTextAreaElement, _value: string) {
+    const fit = () => {
+      node.style.height = 'auto';
+      const h = node.scrollHeight;
+      // 0 means nothing measurable (jsdom, a detached or hidden node): an
+      // explicit 0px would collapse the composer, so leave the CSS alone.
+      if (h > 0) node.style.height = `${h}px`;
+      else node.style.removeProperty('height');
+    };
+    fit();
+    return { update: fit };
+  }
+
   function togglePrompt(key: string) {
     const next = new Set(expanded);
     if (next.has(key)) next.delete(key);
@@ -1270,6 +1286,7 @@
           oninput={onComposerInput}
           onkeydown={onComposerKey}
           rows="2"
+          use:autoGrow={draft}
           placeholder="Send a prompt to this session (Enter to send, Shift+Enter for a new line, ↑ recalls earlier prompts)"
           disabled={sending || viewing !== null}
         ></textarea>
@@ -1491,7 +1508,9 @@
     flex: 1 1 auto;
     min-height: 2.6rem;
     max-height: 12rem;
-    resize: vertical;
+    /* The box sizes itself to the draft (see autoGrow); a manual drag would
+       only be overwritten on the next keystroke. */
+    resize: none;
     padding: 0.45rem 0.6rem;
     border: 1px solid var(--border);
     border-radius: 6px;

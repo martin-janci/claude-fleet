@@ -637,6 +637,44 @@ describe('ConversationPanel composer', () => {
   });
 });
 
+describe('ConversationPanel composer auto-grow', () => {
+  /** jsdom has no layout: scrollHeight is always 0, so the box's content
+   *  height has to be stubbed for the grow to have anything to measure. */
+  function stubScrollHeight(el: HTMLElement, px: number) {
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => px });
+  }
+
+  it('grows the box to fit the draft and shrinks back when it is sent', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+
+    stubScrollHeight(box, 180);
+    await fireEvent.input(box, { target: { value: 'a\nb\nc\nd\ne\nf' } });
+    expect(box.style.height).toBe('180px');
+
+    // Sending empties the draft: the box must come back down, not stay tall.
+    stubScrollHeight(box, 42);
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(box.value).toBe('');
+    expect(box.style.height).toBe('42px');
+  });
+
+  it('leaves the CSS height alone when the content height cannot be measured', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    // scrollHeight is 0 here (no layout); an explicit 0px height would
+    // collapse the composer, so nothing must be written.
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    expect(box.style.height).toBe('');
+  });
+});
+
 describe('ConversationPanel slash commands', () => {
   async function mountWithDraft(text: string) {
     mockedConv.mockReturnValue(ok(conv()));
