@@ -754,9 +754,22 @@ pub fn parse_pack(stdout: &str) -> Result<(u64, String), IpcError> {
     Ok((bytes, path.to_string()))
 }
 
+/// The two lines that extract `"$a"` into the current directory while
+/// keeping any file already there (`--skip-old-files` on GNU tar, `-k` on
+/// BSD tar — GNU's `-k` reports existing files as errors). Factored out so
+/// that `claude_state::memory_extract_script`, which validates the member
+/// list before extracting, runs byte for byte the same extraction as
+/// [`extract_keep_existing_script`] does. Assumes `$a` is set and a `cd`
+/// into the destination has already happened.
+pub(super) fn keep_existing_extract() -> String {
+    format!(
+        r#"if tar --version 2>/dev/null | grep -q 'GNU tar'; then k=--skip-old-files; else k=-k; fi
+tar -xzf "$a" $k >/dev/null 2>&1 || {{ printf '{FAILED} extract\n' >&2; exit 5; }}"#
+    )
+}
+
 /// Shared body of [`ignored_extract_script`] and [`extract_keep_existing_script`]:
-/// extract into `dir`; a file already there wins (`--skip-old-files` on GNU
-/// tar, `-k` on BSD tar — GNU's `-k` reports existing files as errors).
+/// extract into `dir`; a file already there wins (see [`keep_existing_extract`]).
 /// `create_dir`: `mkdir -p -- "$cwd"` (private, `umask 077`) before the `cd`,
 /// for a target whose memory directory may not exist yet — the ignored-file
 /// extract never needs this, since the worktree it extracts into already
@@ -777,14 +790,14 @@ cwd={cwd}
 a={a}
 {mkdir}cd -- "$cwd" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
 tar -tzf "$a" >/dev/null 2>&1 || {{ printf '{FAILED} corrupt archive\n' >&2; exit 5; }}
-if tar --version 2>/dev/null | grep -q 'GNU tar'; then k=--skip-old-files; else k=-k; fi
-tar -xzf "$a" $k >/dev/null 2>&1 || {{ printf '{FAILED} extract\n' >&2; exit 5; }}
+{extract}
 printf 'ok\n'
 "#,
         cwd = quote(dir),
         a = quote(archive),
         mkdir = mkdir,
         marker = marker,
+        extract = keep_existing_extract(),
     )
 }
 
@@ -795,6 +808,17 @@ pub fn ignored_extract_script(cwd: &str, archive: &str) -> String {
 
 /// [`ignored_extract_script`] for any directory and archive, optionally
 /// creating `dir` first (`create_dir`) for a target that may not have it yet.
+///
+/// This builder TRUSTS its archive: beyond "keep what is already there" it
+/// relies on `tar`'s own defaults for containment, so a crafted (or
+/// tampered-with) archive can still plant a symlink, a subdirectory or a
+/// name the caller never chose. That is acceptable for the git-ignored
+/// files, whose archive is built from the same worktree the extraction
+/// target is. It is NOT acceptable for the project's Claude memory, which
+/// extracts straight into a directory of the user's own notes: the memory
+/// half therefore uses `claude_state::memory_extract_script`, which
+/// validates every member before extracting and only then runs the same
+/// [`keep_existing_extract`] lines.
 pub fn extract_keep_existing_script(dir: &str, archive: &str, create_dir: bool) -> String {
     extract_script_as("extract", dir, archive, create_dir)
 }

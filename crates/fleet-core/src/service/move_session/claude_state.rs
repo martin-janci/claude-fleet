@@ -5,8 +5,8 @@
 //! See `docs/superpowers/specs/2026-09-20-move-carry-claude-state-design.md`.
 
 use crate::service::move_session::carry::{
-    home_guard, id_guard, payload, payload_str, IgnoredEntry, LeftBehind, LeftReason, FAILED,
-    OUT_MARKER,
+    home_guard, id_guard, keep_existing_extract, payload, payload_str, IgnoredEntry, LeftBehind,
+    LeftReason, FAILED, OUT_MARKER,
 };
 use crate::shell::quote;
 use std::collections::HashSet;
@@ -19,12 +19,18 @@ pub const MEMORY_FILE_MAX_BYTES: u64 = 1 << 20;
 pub const MEMORY_TOTAL_MAX_BYTES: u64 = 8 << 20;
 pub const MEMORY_MAX_FILES: usize = 300;
 pub const INDEX_READ_MAX_BYTES: u64 = 256 * 1024;
+/// How far an ANNOUNCED archive may exceed the size of the content that went
+/// into it before the orchestrator refuses to relay it. A `.tgz` is normally
+/// much smaller than its content, but tar adds a 512-byte header and up to
+/// 511 bytes of padding per member plus a 10 KiB end-of-archive block, and
+/// gzip compresses those hard but never to nothing.
+pub const PACK_OVERHEAD_ALLOWANCE_BYTES: u64 = 1 << 20;
 pub const INDEX_APPEND_MAX_BYTES: usize = 32 * 1024;
 pub const INDEX_NAME: &str = "MEMORY.md";
 /// The heredoc delimiter of the index-append script; never allowed as a line.
 pub(super) const INDEX_HEREDOC: &str = "CF_INDEX";
 /// Archive name for a memory carry (`carry::pack_script` /
-/// `carry::extract_keep_existing_script`).
+/// [`memory_extract_script`]).
 pub const MEMORY_ARCHIVE: &str = "memory.tgz";
 
 fn records(stdout: &[u8]) -> impl Iterator<Item = Vec<&str>> {
@@ -439,10 +445,20 @@ pub fn parse_index(stdout: &str) -> Option<Option<String>> {
 /// the shell as real commands — `merge_index`'s own `line == INDEX_HEREDOC`
 /// filter only protects text it built itself, not an arbitrary caller, so
 /// this builder refuses the text itself: any line exactly equal to
-/// [`INDEX_HEREDOC`], or text longer than [`INDEX_APPEND_MAX_BYTES`], yields
-/// a script that touches nothing and reports `{FAILED} index-text`. A line
-/// that merely contains the delimiter text, or has leading/trailing
-/// whitespace around it, is not an exact match and is accepted unchanged.
+/// [`INDEX_HEREDOC`], text containing a NUL byte, or text longer than
+/// [`INDEX_APPEND_MAX_BYTES`], yields a script that touches nothing and
+/// reports `{FAILED} index-text`. A line that merely contains the delimiter
+/// text, or has leading/trailing whitespace around it, is not an exact match
+/// and is accepted unchanged.
+///
+/// The NUL matters because bash DISCARDS NUL bytes while reading a script,
+/// so a line `CF_INDEX\0` is not equal to [`INDEX_HEREDOC`] in Rust yet
+/// still ends the heredoc in bash — the remainder would run as real
+/// commands. A NUL cannot survive an argv word (`execve` refuses it), so the
+/// transport rejects such a script before any host reads it; refusing here
+/// turns that spawn error into the same deterministic refusal as the
+/// delimiter line, and keeps the guarantee true for any other way this
+/// `pub` builder's output might be run.
 ///
 /// Before appending, if the index already exists, is non-empty and its LAST
 /// BYTE is not a newline, one is written first — the script decides this
@@ -459,7 +475,10 @@ pub fn memory_append_index_script(memory_dir: &str, text: &str) -> String {
     if text.is_empty() {
         return "# cf-carry:memory-append\nprintf 'ok\\n'\n".to_string();
     }
-    if text.len() > INDEX_APPEND_MAX_BYTES || text.lines().any(|l| l == INDEX_HEREDOC) {
+    if text.len() > INDEX_APPEND_MAX_BYTES
+        || text.contains('\0')
+        || text.lines().any(|l| l == INDEX_HEREDOC)
+    {
         return format!("# cf-carry:memory-append\nprintf '{FAILED} index-text\\n' >&2\nexit 5\n");
     }
     let body = text.strip_suffix('\n').unwrap_or(text);
@@ -478,6 +497,70 @@ cat >> "$f" <<'{INDEX_HEREDOC}' || {{ printf '{FAILED} append\n' >&2; exit 5; }}
 printf 'ok\n'
 "#,
         m = quote(memory_dir),
+    )
+}
+
+/// Extract a memory archive into `memory_dir` — created `0700` if absent —
+/// keeping every file already there, but only after VALIDATING the member
+/// list, which `carry::extract_keep_existing_script` deliberately does not
+/// do (see its note). This is the one extract that does not stage into a
+/// scratch directory first: it writes straight into the user's own notes, so
+/// containment cannot rest on tar's defaults. A crafted archive — or a file
+/// swapped for a symlink between the listing and the pack — would otherwise
+/// plant a symlink, a subdirectory, or a whole `MEMORY.md`.
+///
+/// Every member must be `<name>` or `./<name>` with `<name>` matching
+/// `[A-Za-z0-9._-]+\.md` (so no `/`, no `..`, no odd byte), must not be
+/// `MEMORY.md` in any ASCII case (the index is merged line-wise by
+/// [`memory_append_index_script`], never copied), and must be shown as a
+/// REGULAR file by `tar -tvzf` (first column `-`, so never a symlink, a
+/// directory or a device). One bad member refuses the whole archive: the
+/// sentinel, a non-zero exit and NOTHING extracted. The two `PIPESTATUS[1]`
+/// reads take the `while`'s status, not `tar`'s, and come immediately after
+/// their pipeline.
+///
+/// The one name shape neither pass rejects is a member whose name holds a
+/// NEWLINE and whose every line happens to look like a valid `.md` name
+/// (`a.md\n-x.md`): `tar -tzf` prints it as two lines that each pass, and
+/// `tar -tvzf` prints a second line that starts with `-`. Such a member
+/// lands as one oddly-named file inside the memory dir — it can still not
+/// escape it, be a symlink, or be the index — so it is a cosmetic residue,
+/// not a containment hole.
+pub fn memory_extract_script(memory_dir: &str, archive: &str) -> String {
+    format!(
+        r#"# cf-carry:memory-extract
+set +e
+m={m}
+a={a}
+fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
+umask 077
+mkdir -p -- "$m" || fail mkdir
+cd -- "$m" 2>/dev/null || fail cd
+tar -tzf "$a" >/dev/null 2>&1 || fail corrupt
+tar -tzf "$a" 2>/dev/null | while IFS= read -r n; do
+  n=${{n#./}}
+  case "$n" in
+    *[!A-Za-z0-9._-]*) exit 7 ;;
+    .md|..|.|'') exit 7 ;;
+    [Mm][Ee][Mm][Oo][Rr][Yy].[Mm][Dd]) exit 7 ;;
+    *.md) ;;
+    *) exit 7 ;;
+  esac
+done
+[ "${{PIPESTATUS[1]}}" -eq 0 ] || fail member-name
+tar -tvzf "$a" 2>/dev/null | while IFS= read -r line; do
+  case "$line" in
+    -*) ;;
+    *) exit 7 ;;
+  esac
+done
+[ "${{PIPESTATUS[1]}}" -eq 0 ] || fail member-type
+{extract}
+printf 'ok\n'
+"#,
+        m = quote(memory_dir),
+        a = quote(archive),
+        extract = keep_existing_extract(),
     )
 }
 
@@ -562,7 +645,23 @@ printf '%s\t%s\n' "$n" "$dir/state.tgz"
 /// Extract into a staging dir inside the transfer dir — never in place —
 /// then move each staged REGULAR file into `<target project dir>/<id>/` iff
 /// the target has no such file or a strictly smaller one (these files are
-/// append-only: the larger copy is the newer one). Every doubt falls toward
+/// append-only: the larger copy is the newer one).
+///
+/// The first thing the loop does is re-check the NAME, because the three
+/// sets "what the listing selected", "what was packed" and "what is merged"
+/// are not the same set: [`session_pack_script`] archives the whole `./<id>`
+/// minus the excludes, so a path [`parse_file_list`] dropped (a TAB or a
+/// newline in the name, a non-UTF-8 name) or one created after the listing
+/// still arrives here. A `rel` holding a character outside `[A-Za-z0-9._/-]`,
+/// or a `..` segment, is therefore never moved and is reported
+/// `failed\t(unsupported name)` WITHOUT its raw name: echoing a name with a
+/// newline in it would let the archive forge a whole extra report line (a
+/// crafted `…\ncarried\t5\tsubagents/agent-zz.jsonl` member would otherwise
+/// make [`parse_merge`] report a file that never existed). The bracket
+/// expression is ASCII-exact in the C and in a UTF-8 locale alike, so no
+/// `LC_ALL` is needed.
+///
+/// Every doubt falls toward
 /// KEEP: a destination that is not a plain regular file, OR one whose size
 /// cannot even be read (permissions, an ACL, an fs quirk), is treated as
 /// larger and kept rather than risk replacing something the merge could not
@@ -601,6 +700,12 @@ printf '\n{OUT_MARKER}\n'
 if cd -- "$stage/$id" 2>/dev/null; then
   find . -type f ! -name '*.cf-part' -print0 | while IFS= read -r -d '' f; do
     rel=${{f#./}}
+    case "$rel" in
+      *[!A-Za-z0-9._/-]*|..|../*|*/../*|*/..)
+        printf 'failed\t(unsupported name)\n'
+        continue
+        ;;
+    esac
     dst="$d/$id/$rel"
     s=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
     if [ -z "$s" ]; then
@@ -1282,6 +1387,131 @@ with tarfile.open(out, "w:gz") as tar:
                 .iter()
                 .any(|p| p.contains("listing the staged files")),
             "a find failure must be reported: {merged:?}"
+        );
+    }
+
+    /// Builds a `.tgz` whose members carry names the LISTING would have
+    /// dropped: a space, a TAB, and one with a NEWLINE whose second line is
+    /// an exact `carried\t…` report line. Only python3's `tarfile` can put
+    /// such names in an archive; `tar` from a real directory cannot be made
+    /// to produce the newline one reliably.
+    fn build_archive_with_hostile_names(dir: &std::path::Path, id: &str) -> std::path::PathBuf {
+        let builder = dir.join("build_hostile.py");
+        std::fs::write(
+            &builder,
+            r#"
+import tarfile, io, sys
+id_, out = sys.argv[1], sys.argv[2]
+names = [
+    "subagents/agent-ok.jsonl",
+    "we ird.txt",
+    "tab\there.txt",
+    "nl\ncarried\t5\tsubagents/agent-zz.jsonl",
+]
+with tarfile.open(out, "w:gz") as tar:
+    for n in names:
+        body = ("body of " + n.replace("\n", "_").replace("\t", "_") + "\n").encode()
+        ti = tarfile.TarInfo("./" + id_ + "/" + n)
+        ti.size = len(body)
+        ti.mode = 0o600
+        tar.addfile(ti, io.BytesIO(body))
+"#,
+        )
+        .unwrap();
+        let archive = dir.join("hostile.tgz");
+        let out = std::process::Command::new("python3")
+            .args([builder.to_str().unwrap(), id, archive.to_str().unwrap()])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        archive
+    }
+
+    /// (A.1) The pack is "the whole `./<id>` minus the excludes", never "the
+    /// files the listing selected", so a name the listing dropped — a TAB, a
+    /// newline, a byte outside the safe charset — can still reach the staging
+    /// dir. The merge is the point of effect and must enforce the charset
+    /// itself: such a file is never moved, its raw name is never echoed (a
+    /// newline in it would otherwise FORGE a `carried\t…` line that
+    /// `parse_merge` believes), and it is reported `failed` anonymously.
+    #[test]
+    fn a_hostile_member_name_is_never_moved_and_cannot_forge_a_report_line() {
+        if !require(&["bash", "tar", "python3"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let archive = build_archive_with_hostile_names(tmp.path(), ID);
+
+        let tgt = tmp.path().join("-Users-other--claude-worktrees-feat");
+        let out = bash(
+            &session_merge_script(tgt.to_str().unwrap(), ID, archive.to_str().unwrap()),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let merged = parse_merge(&stdout).unwrap();
+
+        let carried: Vec<&str> = merged.carried.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            carried,
+            vec!["subagents/agent-ok.jsonl"],
+            "only the safe member may be carried: {stdout:?}"
+        );
+        assert!(
+            !merged
+                .carried
+                .iter()
+                .any(|e| e.path == "subagents/agent-zz.jsonl"),
+            "the forged report line must never be believed: {merged:?}"
+        );
+        assert_eq!(
+            merged.failed,
+            vec![
+                "(unsupported name)".to_string(),
+                "(unsupported name)".to_string(),
+                "(unsupported name)".to_string()
+            ],
+            "each odd name is reported anonymously: {merged:?}"
+        );
+        for raw in ["we ird.txt", "agent-zz.jsonl", "tab\there.txt"] {
+            assert!(
+                !stdout.contains(raw),
+                "the raw name {raw:?} must never be echoed: {stdout:?}"
+            );
+        }
+
+        // Only the safe file exists on the target; nothing of the odd names.
+        fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, base, out);
+                } else {
+                    out.push(p.strip_prefix(base).unwrap().to_string_lossy().into_owned());
+                }
+            }
+        }
+        let mut landed = Vec::new();
+        walk(&tgt.join(ID), &tgt.join(ID), &mut landed);
+        landed.sort();
+        assert_eq!(landed, vec!["subagents/agent-ok.jsonl".to_string()]);
+        assert!(
+            !home
+                .join(".cache/claude-fleet/transfer")
+                .join(ID)
+                .join("state-staging")
+                .exists(),
+            "staging dir is cleaned up"
         );
     }
 
@@ -2177,6 +2407,232 @@ with tarfile.open(out, "w:gz") as tar:
         );
     }
 
+    /// Builds one `.tgz` per hostile shape python3's `tarfile` can express
+    /// but `tar` from a real directory cannot be talked into producing
+    /// safely: a symlink member, a subdirectory member, a `..` member, the
+    /// index under two spellings, and a bare directory member.
+    fn build_memory_archive(dir: &std::path::Path, shape: &str) -> std::path::PathBuf {
+        let builder = dir.join("build_memory.py");
+        std::fs::write(
+            &builder,
+            r##"
+import tarfile, io, sys
+shape, out = sys.argv[1], sys.argv[2]
+
+def reg(tar, name, body=b"carried body\n"):
+    ti = tarfile.TarInfo(name)
+    ti.size = len(body)
+    ti.mode = 0o600
+    tar.addfile(ti, io.BytesIO(body))
+
+with tarfile.open(out, "w:gz") as tar:
+    if shape == "clean":
+        reg(tar, "./new.md")
+        reg(tar, "second.md")
+    elif shape == "symlink":
+        ti = tarfile.TarInfo("./evil.md")
+        ti.type = tarfile.SYMTYPE
+        ti.linkname = "/etc/hosts"
+        tar.addfile(ti)
+    elif shape == "subdir":
+        reg(tar, "./sub/x.md")
+    elif shape == "dotdot":
+        reg(tar, "../x.md")
+    elif shape == "index":
+        reg(tar, "./MEMORY.md", b"# hijacked\n")
+    elif shape == "index-case":
+        reg(tar, "./memory.MD", b"# hijacked\n")
+    elif shape == "dir":
+        ti = tarfile.TarInfo("./sub")
+        ti.type = tarfile.DIRTYPE
+        ti.mode = 0o700
+        tar.addfile(ti)
+    elif shape == "mixed":
+        reg(tar, "./good.md")
+        reg(tar, "./bad.txt")
+    else:
+        raise SystemExit("unknown shape " + shape)
+"##,
+        )
+        .unwrap();
+        let archive = dir.join(format!("memory-{shape}.tgz"));
+        let out = std::process::Command::new("python3")
+            .args([builder.to_str().unwrap(), shape, archive.to_str().unwrap()])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        archive
+    }
+
+    /// (D) The memory half is the one extract that writes straight into the
+    /// user's own notes, so it must not trust the archive: every member is
+    /// checked before a single byte is extracted. One bad member refuses the
+    /// whole archive and leaves the memory directory byte-identical.
+    #[test]
+    fn the_memory_extract_refuses_every_member_it_did_not_ask_for() {
+        if !require(&["bash", "tar", "python3"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        for shape in [
+            "symlink",
+            "subdir",
+            "dotdot",
+            "index",
+            "index-case",
+            "dir",
+            "mixed",
+        ] {
+            let archive = build_memory_archive(tmp.path(), shape);
+            let mem = tmp.path().join(format!("memory-{shape}"));
+            std::fs::create_dir_all(&mem).unwrap();
+            std::fs::write(mem.join(INDEX_NAME), "# Memory Index\n\n- [Own](own.md)\n").unwrap();
+            std::fs::write(mem.join("own.md"), "the target's own note\n").unwrap();
+            let before: Vec<std::ffi::OsString> = {
+                let mut v: Vec<_> = std::fs::read_dir(&mem)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name())
+                    .collect();
+                v.sort();
+                v
+            };
+
+            let out = bash(
+                &memory_extract_script(mem.to_str().unwrap(), archive.to_str().unwrap()),
+                &home,
+            );
+            assert!(
+                !out.status.success(),
+                "{shape}: must be refused: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains(FAILED),
+                "{shape}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let after: Vec<std::ffi::OsString> = {
+                let mut v: Vec<_> = std::fs::read_dir(&mem)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name())
+                    .collect();
+                v.sort();
+                v
+            };
+            assert_eq!(after, before, "{shape}: nothing was extracted");
+            assert_eq!(
+                std::fs::read_to_string(mem.join(INDEX_NAME)).unwrap(),
+                "# Memory Index\n\n- [Own](own.md)\n",
+                "{shape}: the index is untouched"
+            );
+            assert_eq!(
+                std::fs::read_to_string(mem.join("own.md")).unwrap(),
+                "the target's own note\n",
+                "{shape}"
+            );
+            // Nothing escaped the memory dir either.
+            assert!(
+                !tmp.path().join("x.md").exists(),
+                "{shape}: a `..` member must never land beside the memory dir"
+            );
+        }
+    }
+
+    /// The other half of (D): a clean archive still extracts, still keeps
+    /// what the target already has, and still creates a missing memory dir
+    /// `0700` with `0600` files — the same semantics the generic
+    /// keep-existing extract has, since it runs the very same two lines.
+    #[test]
+    fn the_memory_extract_still_adds_only_what_the_target_lacks() {
+        if !require(&["bash", "tar", "python3"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let archive = build_memory_archive(tmp.path(), "clean");
+
+        // An existing memory dir whose own `second.md` must win.
+        let mem = tmp.path().join("memory-clean");
+        std::fs::create_dir_all(&mem).unwrap();
+        std::fs::write(mem.join("second.md"), "the target's version\n").unwrap();
+        let out = bash(
+            &memory_extract_script(mem.to_str().unwrap(), archive.to_str().unwrap()),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+        assert_eq!(
+            std::fs::read_to_string(mem.join("new.md")).unwrap(),
+            "carried body\n"
+        );
+        assert_eq!(mode(&mem.join("new.md")), 0o600, "arrived private");
+        assert_eq!(
+            std::fs::read_to_string(mem.join("second.md")).unwrap(),
+            "the target's version\n",
+            "the target's own copy still wins"
+        );
+
+        // A memory dir that does not exist yet is created, private.
+        let fresh = tmp.path().join("memory-fresh");
+        assert!(!fresh.exists());
+        let out = bash(
+            &memory_extract_script(fresh.to_str().unwrap(), archive.to_str().unwrap()),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(mode(&fresh), 0o700, "the created dir is private");
+        assert_eq!(
+            std::fs::read_to_string(fresh.join("new.md")).unwrap(),
+            "carried body\n"
+        );
+
+        // A missing or corrupt archive is still a clean refusal.
+        for bad in ["/nonexistent.tgz", "corrupt"] {
+            let path = if bad == "corrupt" {
+                let p = tmp.path().join("corrupt.tgz");
+                std::fs::write(&p, b"not a tarball").unwrap();
+                p.to_str().unwrap().to_string()
+            } else {
+                bad.to_string()
+            };
+            let out = bash(
+                &memory_extract_script(tmp.path().join("memory-bad").to_str().unwrap(), &path),
+                &home,
+            );
+            assert!(!out.status.success(), "{bad}");
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains(FAILED),
+                "{bad}"
+            );
+        }
+
+        // And it quotes everything, like every other builder here.
+        let evil = "a b'$(touch /tmp/pwn)\n;x";
+        let q = quote(evil);
+        let script = memory_extract_script(evil, evil);
+        assert!(script.contains(&q), "{script}");
+        assert!(
+            !script.replace(&q, "").contains("touch /tmp/pwn"),
+            "raw value leaked: {script}"
+        );
+    }
+
     #[test]
     fn the_index_is_only_ever_appended_to() {
         if !require(&["bash"]) {
@@ -2431,6 +2887,59 @@ with tarfile.open(out, "w:gz") as tar:
             got,
             format!("{}{benign}", String::from_utf8_lossy(&before)),
             "a line that merely contains the delimiter is not the delimiter"
+        );
+    }
+
+    /// (J1) bash DISCARDS a NUL byte while READING a script, so a line
+    /// `CF_INDEX\0` is not equal to [`INDEX_HEREDOC`] as far as Rust's
+    /// `l == INDEX_HEREDOC` can see, yet still ends the heredoc as far as
+    /// bash is concerned — and the remainder runs as real shell. A NUL can
+    /// never travel inside an argv word (`execve` refuses it, so `bash -lc
+    /// '<script>'` and every ssh hop reject it before the host sees it), so
+    /// the route that proves this is bash reading the script from a FILE;
+    /// that is what this test does. The builder must refuse a NUL exactly
+    /// like a bare delimiter line.
+    #[test]
+    fn memory_append_index_script_refuses_a_nul_byte_like_a_delimiter_line() {
+        if !require(&["bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mem = tmp.path().join("memory");
+        std::fs::create_dir_all(&mem).unwrap();
+        std::fs::write(mem.join(INDEX_NAME), "# Memory Index\n\n- [Old](old.md)\n").unwrap();
+        let before = std::fs::read(mem.join(INDEX_NAME)).unwrap();
+
+        let hostile = format!(
+            "{INDEX_HEREDOC}\0\ntouch {}/pwned.txt\n",
+            mem.to_str().unwrap()
+        );
+        let script = memory_append_index_script(mem.to_str().unwrap(), &hostile);
+        let path = tmp.path().join("append.sh");
+        std::fs::write(&path, script.as_bytes()).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg(&path)
+            .env("HOME", &home)
+            .output()
+            .expect("bash");
+
+        assert!(
+            !out.status.success(),
+            "must refuse rather than let the heredoc end early: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("index-text"));
+        assert!(
+            !mem.join("pwned.txt").exists(),
+            "the remainder was never executed as shell"
+        );
+        assert_eq!(
+            std::fs::read(mem.join(INDEX_NAME)).unwrap(),
+            before,
+            "the index is untouched"
         );
     }
 
