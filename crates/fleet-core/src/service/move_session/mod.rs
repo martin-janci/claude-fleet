@@ -2047,6 +2047,16 @@ async fn move_session_inner(
             &stderr_of(&out),
         ));
     }
+    // The carry is done: the commits are in the target's clone. Everything
+    // below — creating the worktree, fast-forwarding it, and the refusals
+    // that come out of that (a dirty or diverged target, a larger transcript
+    // already there) — is the replay step setting its stage, and saying
+    // "carrying the git work failed" for any of it names the wrong thing.
+    progress.done(Some(progress::git_detail(
+        carried.commits,
+        state.dirty.len(),
+    )));
+    progress.start(MoveStep::Replay);
 
     let tmux_name = pick_target_name(&snap.row.tmux_name, &snap.target_taken)?;
     crate::validate::tmux_name(&tmux_name)?;
@@ -2122,11 +2132,6 @@ async fn move_session_inner(
             prep.existing, prep.path
         ));
     }
-    progress.done(Some(progress::git_detail(
-        carried.commits,
-        state.dirty.len(),
-    )));
-    progress.start(MoveStep::Replay);
     // 3c. Replay the uncommitted work and check the claim: the target's
     //     porcelain must equal the source's.
     if prep.head != state.head {
@@ -2232,14 +2237,10 @@ async fn move_session_inner(
         }
     }
 
-    {
-        let detail = Some(progress::count(carried.ignored_carried.len(), "file"));
-        if warnings.len() > warned_before {
-            progress.warned(detail);
-        } else {
-            progress.done(detail);
-        }
-    }
+    progress.end_soft(
+        warnings.len() > warned_before,
+        Some(progress::count(carried.ignored_carried.len(), "file")),
+    );
     progress.start(MoveStep::ClaudeState);
     let warned_before = warnings.len();
     // 3e. The Claude-side state: the per-session directory and the project's
@@ -2292,17 +2293,13 @@ async fn move_session_inner(
         }
     }
 
-    {
-        let detail = Some(progress::state_detail(
+    progress.end_soft(
+        warnings.len() > warned_before,
+        Some(progress::state_detail(
             carried.session_state.carried.len(),
             carried.memory.carried.len(),
-        ));
-        if warnings.len() > warned_before {
-            progress.warned(detail);
-        } else {
-            progress.done(detail);
-        }
-    }
+        )),
+    );
     progress.start(MoveStep::Start);
     put(ssh, &target, &prep.path, &bytes)
         .await
@@ -3111,6 +3108,160 @@ mod tests {
         assert!(!seen.iter().any(|e| e.starts_with("replay:")), "{seen:?}");
     }
 
+    /// F9: the target worktree is created, fast-forwarded and checked AFTER
+    /// the fetch, so a refusal there is `replay`'s — the `git` step is over,
+    /// its commits are in the target's clone, and telling the user that
+    /// "carrying the git work" failed sends them after the wrong thing.
+    #[tokio::test]
+    async fn a_target_dirty_refusal_ends_the_stream_at_replay_failed() {
+        let (f, bus) = recorded_fixture();
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-move:prep"),
+            Reply::fail(9, carry::TARGET_DIRTY),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY, "{}", err.message);
+        let seen = progress_of(&f, &bus);
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("replay:failed"),
+            "{seen:?}"
+        );
+        assert!(seen.contains(&"git:done".to_string()), "{seen:?}");
+    }
+
+    /// F8: the confirm wait is inside the `start` step, so a target that
+    /// never comes up ends the stream there.
+    #[tokio::test]
+    async fn a_confirm_timeout_ends_the_stream_at_start_failed() {
+        let (f, bus) = recorded_fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.target_status = "ghost";
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL, "{}", err.message);
+        let seen = progress_of(&f, &bus);
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("start:failed"),
+            "{seen:?}"
+        );
+        assert!(!seen.iter().any(|e| e.starts_with("handoff:")), "{seen:?}");
+    }
+
+    /// F8: retiring the source is the `handoff` step; a kill that fails is
+    /// that step failing, not the move never getting there.
+    #[tokio::test]
+    async fn a_kill_failure_ends_the_stream_at_handoff_failed() {
+        let (f, bus) = recorded_fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.kill_fails = true;
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL, "{}", err.message);
+        let seen = progress_of(&f, &bus);
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("handoff:failed"),
+            "{seen:?}"
+        );
+    }
+
+    /// F8: `keep_source` skips the kill, not the step — the sheet must still
+    /// see all nine steps finish.
+    #[tokio::test]
+    async fn keep_source_still_reports_all_nine_steps_done() {
+        let (f, bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        run(&f, &hooks, true).await.expect("move");
+        let seen = progress_of(&f, &bus);
+        assert_eq!(
+            seen,
+            MoveStep::ALL
+                .iter()
+                .flat_map(|s| [
+                    format!("{}:started", s.as_str()),
+                    format!("{}:done", s.as_str())
+                ])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A bus that keeps the whole [`crate::events::RowChange`] rather than
+    /// the recorder's `<name>:<key>` line: the payload is what the frontend
+    /// applies, and the recorder's key cannot show a wrong `index`, a
+    /// missing `to_host` or a `detail` leaking onto a failure.
+    struct CapturingBus(std::sync::Mutex<Vec<crate::events::RowChange>>);
+
+    impl crate::events::EventBus for CapturingBus {
+        fn emit(&self, e: &crate::events::RowChange) {
+            self.0.lock().unwrap().push(e.clone());
+        }
+    }
+
+    impl CapturingBus {
+        /// Every `move:progress` payload, in emit order.
+        fn move_payloads(&self) -> Vec<serde_json::Value> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.name() == "move:progress")
+                .map(|e| e.payload())
+                .collect()
+        }
+    }
+
+    fn captured_fixture() -> (Fixture, std::sync::Arc<CapturingBus>) {
+        let bus = std::sync::Arc::new(CapturingBus(std::sync::Mutex::new(Vec::new())));
+        let dyn_bus: std::sync::Arc<dyn crate::events::EventBus> = bus.clone();
+        let f = fixture_on(Store::open_with_bus_in_memory(dyn_bus).unwrap());
+        bus.0.lock().unwrap().clear(); // the fixture's own row events
+        (f, bus)
+    }
+
+    /// F8: the whole wire shape of one step boundary, not just its key —
+    /// `index`/`total` are what the chip counts with, `to_host` is what the
+    /// sheet titles itself with, and `detail` must carry a count on a
+    /// success and nothing at all on a failure (it would be the first place
+    /// a path or a stderr line could escape).
+    #[tokio::test]
+    async fn a_step_event_carries_its_index_host_and_count() {
+        let (f, bus) = captured_fixture();
+        dirty_unpushed_carry(&f);
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        run(&f, &hooks, false).await.expect("the carried move");
+        let payloads = bus.move_payloads();
+        let git_done = payloads
+            .iter()
+            .find(|p| p["step"] == "git" && p["state"] == "done")
+            .unwrap_or_else(|| panic!("no git:done in {payloads:?}"));
+        assert_eq!(git_done["session_id"], f.source_id);
+        assert_eq!(git_done["to_host"], "beta");
+        assert_eq!(git_done["index"], 4);
+        assert_eq!(git_done["total"], 9);
+        assert_eq!(git_done["detail"], "2 commits");
+
+        // And a failing move: every `failed` event says only which step.
+        let (f, bus) = captured_fixture();
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-carry:fetch"),
+            Reply::fail(5, &format!("{} fetch", carry::FAILED)),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        run(&f, &hooks, false).await.unwrap_err();
+        let failed: Vec<serde_json::Value> = bus
+            .move_payloads()
+            .into_iter()
+            .filter(|p| p["state"] == "failed")
+            .collect();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        for p in &failed {
+            assert_eq!(p["detail"], serde_json::Value::Null, "{p}");
+        }
+    }
+
     #[tokio::test]
     async fn a_step_that_only_warns_reports_warned_and_the_move_goes_on() {
         let (f, bus) = recorded_fixture();
@@ -3467,9 +3618,10 @@ mod tests {
 
     // ── the carry ──
 
-    #[tokio::test]
-    async fn a_dirty_unpushed_source_is_carried_and_reported() {
-        let f = fixture();
+    /// A source with two uncommitted entries, two unpushed commits, one
+    /// carried ignored file and one left behind — the arrangement every
+    /// "something was actually carried" assertion needs.
+    fn dirty_unpushed_carry(f: &Fixture) {
         let porcelain = " M src/lib.rs\n?? notes.txt";
         let mut listed = out("").into_bytes();
         listed.extend_from_slice(b"4\t.env\0-1\tnode_modules/\0");
@@ -3513,6 +3665,12 @@ mod tests {
                 Match::script_contains("# cf-carry:ignored-extract"),
                 Reply::ok("ok\n"),
             );
+    }
+
+    #[tokio::test]
+    async fn a_dirty_unpushed_source_is_carried_and_reported() {
+        let f = fixture();
+        dirty_unpushed_carry(&f);
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         let rep = run(&f, &hooks, false)
             .await

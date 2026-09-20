@@ -40,10 +40,17 @@ impl<'a> Progress<'a> {
         self.end(MoveStepState::Done, detail);
     }
 
-    /// Close the current step as warned: it could not do all of its work,
-    /// and the move goes on.
-    pub(super) fn warned(&mut self, detail: Option<String>) {
-        self.end(MoveStepState::Warned, detail);
+    /// Close a step that cannot fail the move: warned when it could not do
+    /// all of its work (and the move goes on), done otherwise.
+    pub(super) fn end_soft(&mut self, warned: bool, detail: Option<String>) {
+        self.end(
+            if warned {
+                MoveStepState::Warned
+            } else {
+                MoveStepState::Done
+            },
+            detail,
+        );
     }
 
     /// Close the current step as failed. Silent when no step has started —
@@ -76,6 +83,15 @@ impl<'a> Progress<'a> {
                 "store mutex poisoned; move progress not emitted"
             ),
         }
+    }
+}
+
+impl Drop for Progress<'_> {
+    /// A move whose future is dropped mid-step (the caller went away) still
+    /// tells its observers that the step did not finish. After a normal end
+    /// `current` is `None`, so this emits nothing.
+    fn drop(&mut self) {
+        self.fail();
     }
 }
 
@@ -154,12 +170,61 @@ mod tests {
         let (store, bus) = recording();
         let mut p = Progress::new(&store, 3, "beta");
         p.start(MoveStep::Ignored);
-        p.warned(Some("0 files".into()));
+        p.end_soft(true, Some("0 files".into()));
         assert_eq!(
             bus.take(),
             vec![
                 "move:progress:3:ignored:started",
                 "move:progress:3:ignored:warned"
+            ]
+        );
+    }
+
+    /// F1: a hub client that goes away drops the move's future mid-step. No
+    /// `fail()` ever runs on that path, so the last thing every observer of
+    /// that move had heard was `…:started` — a step that never ends.
+    #[test]
+    fn a_dropped_progress_closes_the_step_it_was_in() {
+        let (store, bus) = recording();
+        {
+            let mut p = Progress::new(&store, 3, "beta");
+            p.start(MoveStep::Git);
+        }
+        assert_eq!(
+            bus.take(),
+            vec!["move:progress:3:git:started", "move:progress:3:git:failed"]
+        );
+    }
+
+    #[test]
+    fn a_progress_that_ended_normally_emits_nothing_more_when_dropped() {
+        let (store, bus) = recording();
+        {
+            let mut p = Progress::new(&store, 3, "beta");
+            p.start(MoveStep::Git);
+            p.done(Some("2 commits".into()));
+        }
+        assert_eq!(
+            bus.take(),
+            vec!["move:progress:3:git:started", "move:progress:3:git:done"]
+        );
+    }
+
+    #[test]
+    fn end_soft_is_warned_when_the_step_could_not_do_all_of_its_work() {
+        let (store, bus) = recording();
+        let mut p = Progress::new(&store, 3, "beta");
+        p.start(MoveStep::Ignored);
+        p.end_soft(false, Some("1 file".into()));
+        p.start(MoveStep::ClaudeState);
+        p.end_soft(true, Some("0 files, 0 notes".into()));
+        assert_eq!(
+            bus.take(),
+            vec![
+                "move:progress:3:ignored:started",
+                "move:progress:3:ignored:done",
+                "move:progress:3:claude_state:started",
+                "move:progress:3:claude_state:warned",
             ]
         );
     }

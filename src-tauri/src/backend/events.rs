@@ -582,6 +582,15 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
         "account:upserted" => string("uuid"),
         "account_usage:updated" => string("account_uuid"),
         "asset_inventory:cleared" => string("host_alias").and_then(|()| string("harness")),
+        // The one event the frontend reads field by field rather than
+        // merging as a row: `applyMoveProgress` keys the run by
+        // `session_id`, titles it with `to_host` and indexes its step list
+        // by `index`/`step`. So every field it will read is checked here.
+        "move:progress" => integer("session_id")
+            .and_then(|()| string("to_host"))
+            .and_then(|()| string("step"))
+            .and_then(|()| string("state"))
+            .and_then(|()| integer("index")),
         _ => Ok(()),
     }
 }

@@ -914,6 +914,36 @@ fn no_error_and_no_debug_output_ever_carries_the_token() {
     }
 }
 
+// --- how long a call may take ------------------------------------------------
+
+/// F1: one bound for every tool cut a hub-routed `move_session` off after
+/// 30 s and reported a failure while the hub was still moving the session —
+/// a move copies a repository, a transcript and the Claude state between two
+/// hosts (`COPY_TIMEOUT` 120 s, `GIT_TIMEOUT` 40 s per step, a 60 s confirm,
+/// a chunked bundle download), which is minutes, not seconds. Only that one
+/// tool gets the long bound; everything else keeps the short one, so a hub
+/// that has stopped answering is still noticed quickly.
+#[test]
+fn only_move_session_gets_the_long_call_timeout() {
+    assert_eq!(
+        call_timeout("move_session"),
+        std::time::Duration::from_secs(15 * 60)
+    );
+    for tool in [
+        "list_sessions",
+        "kill_session",
+        "session_transcript",
+        "repair_session",
+        "",
+    ] {
+        assert_eq!(
+            call_timeout(tool),
+            std::time::Duration::from_secs(30),
+            "{tool} must keep the ordinary bound"
+        );
+    }
+}
+
 // --- the raw HTTP transport --------------------------------------------------
 
 /// A hub address is http or https and nothing else. Anything else must be

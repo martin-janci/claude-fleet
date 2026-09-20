@@ -110,8 +110,13 @@ pub struct SyncProgress {
 
 /// The nine user-facing steps of a move, in the order they run. Several of
 /// `move_session`'s internal stages fold into one step (seeding is part of
-/// `workspace`, the confirm is part of `start`): the user follows these, not
-/// the stage numbers.
+/// `workspace`, the worktree is set up in `replay`, the confirm is part of
+/// `start`): the user follows these, not the stage numbers.
+///
+/// `git` ends when the carried commits are in the target's clone. The target
+/// worktree is created, fast-forwarded and checked after that, inside
+/// `replay` — so a dirty or diverged target worktree fails `replay`, which
+/// is the step that was going to replay work into it.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MoveStep {

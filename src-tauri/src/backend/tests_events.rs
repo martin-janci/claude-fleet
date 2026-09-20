@@ -466,7 +466,9 @@ async fn every_event_name_the_frontend_listens_for_crosses_the_bridge() {
     // under every name; `probe` is the unknown field that must survive.
     let payload = json!({
         "probe": 1, "id": 1, "session_id": 1, "alias": "trn", "uuid": "u-1", "account_uuid": "u-1",
-        "host_alias": "trn", "harness": "claude"
+        "host_alias": "trn", "harness": "claude",
+        // `move:progress` is read field by field rather than merged on a key.
+        "to_host": "trn", "step": "git", "state": "done", "index": 4
     });
     let body: Vec<String> = fleet_core::events::EVENT_NAMES
         .iter()
@@ -595,6 +597,47 @@ async fn a_payload_the_frontend_store_cannot_apply_is_dropped_not_emitted() {
         "only the well-formed event may reach the frontend, and a bad one must \
          not end the stream"
     );
+}
+
+/// F7: `move:progress` is the one event the frontend reads field by field
+/// (`applyMoveProgress` indexes `MOVE_STEPS` by `index` and keys the run by
+/// `session_id`), so the bridge has to check every field it will read —
+/// otherwise a payload that merely parses as JSON reaches the run store.
+#[test]
+fn a_move_progress_payload_is_checked_field_by_field() {
+    let good = RowChange::MoveProgress(MoveProgress {
+        session_id: 5,
+        to_host: "beta".into(),
+        step: MoveStep::Git,
+        index: 4,
+        total: 9,
+        state: MoveStepState::Done,
+        detail: Some("2 commits".into()),
+    })
+    .payload();
+    assert_eq!(payload_fits("move:progress", &good), Ok(()));
+
+    let without = |key: &str| {
+        let mut p = good.clone();
+        p.as_object_mut().unwrap().remove(key);
+        p
+    };
+    for key in ["session_id", "to_host", "step", "state", "index"] {
+        assert!(
+            payload_fits("move:progress", &without(key)).is_err(),
+            "a payload without `{key}` must be refused"
+        );
+    }
+    let mut wrong = good.clone();
+    wrong["session_id"] = json!("5");
+    assert!(
+        payload_fits("move:progress", &wrong).is_err(),
+        "a string session_id must be refused"
+    );
+    let mut wrong = good.clone();
+    wrong["index"] = json!("4");
+    assert!(payload_fits("move:progress", &wrong).is_err());
+    assert!(payload_fits("move:progress", &json!(42)).is_err());
 }
 
 /// The forward-compatibility the passthrough exists for is kept: a field

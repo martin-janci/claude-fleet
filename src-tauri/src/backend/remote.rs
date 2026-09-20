@@ -308,16 +308,29 @@ impl HubBackend {
         })
         .to_string();
         let url = format!("{}/mcp", self.cfg.base_url);
-        let response = self
-            .transport
-            .post_json(&url, &self.cfg.token, body)
-            .await
-            .map_err(|e| {
-                IpcError::new(
-                    codes::E_HUB_UNREACHABLE,
-                    format!("{} did not answer: {}", self.cfg.base_url, self.redact(&e)),
-                )
-            })?;
+        // The exchange is bounded HERE rather than inside the transport
+        // because this is the only layer that knows which tool is being
+        // called, and one of them ([`call_timeout`]) legitimately runs for
+        // minutes.
+        let limit = call_timeout(tool);
+        let response =
+            tokio::time::timeout(limit, self.transport.post_json(&url, &self.cfg.token, body))
+                .await
+                .map_err(|_| {
+                    IpcError::new(
+                        codes::E_HUB_UNREACHABLE,
+                        format!(
+                            "{} did not answer: no answer within {limit:.0?}",
+                            self.cfg.base_url
+                        ),
+                    )
+                })?
+                .map_err(|e| {
+                    IpcError::new(
+                        codes::E_HUB_UNREACHABLE,
+                        format!("{} did not answer: {}", self.cfg.base_url, self.redact(&e)),
+                    )
+                })?;
         self.read_response(tool, response)
     }
 
@@ -1012,8 +1025,26 @@ pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
 /// hundred kilobytes.
 const MAX_RESPONSE: u64 = 8 * 1024 * 1024;
 
-/// One whole request/response exchange.
+/// One whole request/response exchange, for a tool that answers promptly —
+/// which is every one of them but [`MOVE_CALL_TIMEOUT`]'s.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `move_session` is the one tool whose work is minutes rather than
+/// milliseconds: it copies a repository, a transcript and the Claude state
+/// between two hosts, with a 120 s copy step, a 40 s bound per git step, a
+/// 60 s confirm wait and a chunked bundle download in between. Bounding it
+/// at [`CALL_TIMEOUT`] reported a failure to the user while the hub was
+/// still moving the session — and the move then finished, unobserved.
+const MOVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// How long `tool` may take to answer. Still bounded: a hub that stops
+/// answering mid-move must not leave the window waiting forever.
+fn call_timeout(tool: &str) -> std::time::Duration {
+    match tool {
+        "move_session" => MOVE_CALL_TIMEOUT,
+        _ => CALL_TIMEOUT,
+    }
+}
 
 #[async_trait::async_trait]
 impl HubTransport for TcpTransport {
@@ -1035,9 +1066,9 @@ impl HubTransport for TcpTransport {
             at.authority(),
             body.len()
         );
-        let raw = tokio::time::timeout(CALL_TIMEOUT, exchange(&at, &request))
-            .await
-            .map_err(|_| format!("no answer within {CALL_TIMEOUT:.0?}"))??;
+        // Unbounded here on purpose: the caller that knows the tool
+        // ([`HubBackend::call_text`]) is the one that times the exchange.
+        let raw = exchange(&at, &request).await?;
         split_response(&raw)
     }
 }
