@@ -7,6 +7,7 @@
 
 import { writable } from 'svelte/store';
 import { detectMac } from './terminal_keys';
+import type { SessionView } from './session_view';
 
 const PREFIX = 'cf:pref:';
 
@@ -60,3 +61,19 @@ export const copyOnSelect = writable<boolean>(
   ),
 );
 copyOnSelect.subscribe((v) => writePref('terminal.copyOnSelect', v));
+
+// ─── Right-panel prefs ───────────────────────────────────────────────────
+
+const isSessionView = (v: unknown): v is SessionView =>
+  v === 'conversation' || v === 'terminal';
+
+/**
+ * Which sub-view the Session tab shows. One choice for the whole app, kept
+ * across restarts — picking a session should not decide for you which of
+ * its two views you get. Rows that can only offer one view override this
+ * without writing to it; see `resolveSessionView`.
+ */
+export const sessionView = writable<SessionView>(
+  readPref<SessionView>('ui.sessionView', 'conversation', isSessionView),
+);
+sessionView.subscribe((v) => writePref('ui.sessionView', v));
