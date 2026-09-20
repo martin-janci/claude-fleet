@@ -872,6 +872,15 @@ pub(super) async fn kill_session_with(
     // Lookup form: synthetic `bg:<uuid>` rows are killable too (via
     // `claude stop`, below) — only real tmux rows go through tmux.
     crate::validate::tmux_name_lookup(&args.name)?;
+    {
+        let s = lock(store)?;
+        crate::service::operator::refuse_if_operator(
+            &s,
+            &args.host_alias,
+            &args.name,
+            "kill_session",
+        )?;
+    }
     // Look up id BEFORE killing so we can return it after. Read the controller
     // under the same lock and refuse to nuke ourselves unless forced.
     let (id, kind, claude_sid, claude_status) = {
