@@ -1383,6 +1383,9 @@
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
+    /* The end of the transcript is the end of the scroll: do not hand the
+       rest of the gesture to whatever is behind the pane. */
+    overscroll-behavior: contain;
   }
   .scroller:focus {
     outline: none;
@@ -1454,6 +1457,7 @@
     width: min(60ch, 90cqw);
     max-height: 22rem;
     overflow: auto;
+    overscroll-behavior: contain;
     margin: 0;
     padding: 0.25rem 0;
     list-style: none;
@@ -1606,6 +1610,7 @@
     max-width: var(--chat-col);
     max-height: 14rem;
     overflow: auto;
+    overscroll-behavior: contain;
     margin: 0 auto 0.4rem;
     padding: 0.25rem 0;
     border: 1px solid var(--border);
@@ -1703,6 +1708,10 @@
     .pulse i {
       animation: none;
       opacity: 0.7;
+    }
+    .copy-slot,
+    .tools summary::before {
+      transition: none;
     }
   }
   .blocked {

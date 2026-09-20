@@ -298,6 +298,7 @@
     margin: 0 0 0.35rem;
     max-height: 32rem;
     overflow: auto;
+    overscroll-behavior: contain;
     padding: 0.35rem 0.5rem;
     border-radius: 4px;
     background: var(--bg);
@@ -357,5 +358,11 @@
     color: var(--accent);
     font-size: 0.72rem;
     cursor: pointer;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .chev,
+    .copy-slot {
+      transition: none;
+    }
   }
 </style>

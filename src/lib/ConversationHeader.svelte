@@ -230,6 +230,7 @@
     max-width: 90cqw;
     max-height: 50vh;
     overflow: auto;
+    overscroll-behavior: contain;
     margin: 0;
     padding: 0.25rem 0;
     list-style: none;

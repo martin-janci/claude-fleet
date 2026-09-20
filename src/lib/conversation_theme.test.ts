@@ -78,3 +78,23 @@ describe('chat sizes itself to its pane', () => {
     expect(panel).toMatch(/cqw/);
   });
 });
+
+describe('chat motion and scroll containment', () => {
+  it('every component that animates also honours prefers-reduced-motion', () => {
+    for (const [path, source] of Object.entries(SOURCES)) {
+      const animates = /\btransition:|\banimation:/.test(source);
+      if (!animates) continue;
+      expect(source, `${path} animates but never asks about reduced motion`).toContain(
+        'prefers-reduced-motion: reduce',
+      );
+    }
+  });
+
+  it('the thread and its pop-ups do not chain their scroll outwards', () => {
+    // Reaching the end of the transcript must not start scrolling whatever
+    // is behind the pane.
+    const panel = SOURCES['./ConversationPanel.svelte'];
+    expect(panel.match(/overscroll-behavior: contain/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
+    expect(SOURCES['./ConversationHeader.svelte']).toContain('overscroll-behavior: contain');
+  });
+});
