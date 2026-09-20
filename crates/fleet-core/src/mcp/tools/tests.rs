@@ -2235,3 +2235,57 @@ async fn list_worktrees_limit_zero_returns_every_row() {
         WORKTREES_DEFAULT_LIMIT + 3
     );
 }
+
+/// `clean_target` must reach the engine, not just the schema.
+///
+/// The flag is the whole of "Clean up {host} and retry": a hub-paired desktop
+/// routes `move_session` through this very tool, so a `clean_target: true`
+/// that stops at the tool boundary turns that button into a plain retry the
+/// engine refuses again, with nothing to tell the user why. The mapping is
+/// therefore one function — `MoveSessionParams::into_args` — and this test
+/// pins both halves of it: the wire name deserialises, and the value arrives
+/// in the `MoveSessionArgs` the service is called with.
+#[test]
+fn move_session_params_carry_clean_target_into_the_service_args() {
+    let p: super::params::MoveSessionParams = serde_json::from_value(serde_json::json!({
+        "session_id": 1,
+        "target_host_alias": "beta",
+        "clean_target": true,
+    }))
+    .unwrap();
+    let args = p.into_args(41);
+    assert_eq!(
+        args.session_id, 41,
+        "the resolved row id wins over the param"
+    );
+    assert_eq!(args.target_host_alias, "beta");
+    assert!(
+        args.clean_target,
+        "a clean_target=true arriving at the tool must reach the service args"
+    );
+    // The default stays false: nothing implies a cleanup.
+    let p: super::params::MoveSessionParams =
+        serde_json::from_value(serde_json::json!({ "session_id": 1, "target_host_alias": "beta" }))
+            .unwrap();
+    assert!(!p.into_args(41).clean_target);
+}
+
+/// …and the handler must be the mapping's only caller. `into_args` being
+/// correct is worth nothing if `move_session` builds its own args literal
+/// beside it — which is exactly how `clean_target: false` came to be
+/// hardcoded there in the first place. Pinned against the source because the
+/// alternative (driving the tool end to end) needs two reachable hosts.
+#[test]
+fn the_move_session_handler_builds_its_args_through_into_args() {
+    let src = include_str!("lifecycle.rs");
+    assert!(
+        src.contains("p.into_args(row.id)"),
+        "move_session's handler must map its parameters through \
+         MoveSessionParams::into_args, so a new flag cannot reach the schema \
+         and stop short of the engine"
+    );
+    assert!(
+        !src.contains("clean_target:"),
+        "no args literal in lifecycle.rs may set clean_target itself"
+    );
+}

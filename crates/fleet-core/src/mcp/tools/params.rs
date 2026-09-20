@@ -631,10 +631,33 @@ pub struct MoveSessionParams {
     /// (E_MOVE_UNPUSHED) instead of carrying them along. Default false.
     #[serde(default)]
     pub strict: bool,
+    /// Replace what an earlier attempt left in the target worktree.
+    #[serde(default)]
+    pub clean_target: bool,
     /// Nonce from a previous E_CONFIRM_REQUIRED, once approved on the
     /// desktop (only when mcp.confirm_destructive is on).
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+}
+
+impl MoveSessionParams {
+    /// The service args this call becomes. The one place the tool's
+    /// parameters are mapped, so a flag cannot reach the schema and stop
+    /// short of the engine: `session_id` is the row the handler resolved (a
+    /// host-scoped caller may address a session it is allowed to see), every
+    /// other field travels as given.
+    pub(super) fn into_args(
+        self,
+        session_id: i64,
+    ) -> crate::service::move_session::MoveSessionArgs {
+        crate::service::move_session::MoveSessionArgs {
+            session_id,
+            target_host_alias: self.target_host_alias,
+            keep_source: self.keep_source,
+            strict: self.strict,
+            clean_target: self.clean_target,
+        }
+    }
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
