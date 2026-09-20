@@ -8,6 +8,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.25] - 2026-09-20
+
+### Added
+- **ui:** merge Terminal and Conversation into one Session tab
+- **ui:** add the session-view chord to appChord
+- **ui:** sessionView pref and the rule that resolves it
+- **move:** the session directory and the project memory travel with a move
+- **move:** find, list and merge the project's Claude memory
+- **chat-ui:** tell the empty state what to do next
+- **chat-ui:** size the chat to its pane, not to the window
+- **chat-ui:** grow the composer with its draft
+- **move:** list, pack and merge the per-session Claude directory
+- **hub-client:** generate the verdict table into docs/hub.md
+- **move:** selection and merge policies for the Claude-side state
+- **move:** report fields and the cap for the Claude-side state
+
+### Changed
+- drop a no-op reset and rename a stale test title
+- **hub-client:** pin what a contract-refused read shows
+- **sessions:** pin the forget-the-kill call at every tmux create site
+- cover terminal remount and enablement after a pane-less row
+- **move:** carry_e2e covers the Claude-side session state and memory
+- drop plan-step references from comments in the desktop and frontend
+- **hub-client:** sort the refusal rows by key, as newer clippy asks
+- **mcp:** scope, slim and cap the control-API surface
+- **hub-client:** drop plan-internal wording this branch introduced
+- **hub-client:** comment-proof the route scanner, check tools against the hub
+- **chat-ui:** lift the find highlighting out of the panel
+- **chat-ui:** drop the empty composer foot and the doubled status rule
+- **chat-ui:** one reading column, and put the toolbar on it
+- **hub-client:** send the argument struct instead of re-spelling it
+- **hub-client:** route a command by name, from the verdict table
+- **hub-client:** pin the argument shapes a struct derive could disturb
+- **hub-client:** hold ROUTED_ACTIONS and REASONS to the generated verdicts
+- **hub-client:** tie health_check's row to the tool it really sends
+- **hub-client:** check the table's tool, and where a body ends
+- **hub-client:** refuse by name, with the sentence from the table
+- **hub-client:** one verdict table for every Tauri command
+- **hub-client:** pin every E_LOCAL_ONLY message in a fixture
+
+### Fixed
+- **ui:** distinguish an empty transcript from a missing session id
+- **conversation:** no Retry for a tool detail refused on contract skew
+- **hub-client:** make the wire-contract refusal outlive the socket
+- **ui:** honest Conversation tooltip on a pane-less, id-less row
+- **ui:** keep the Session tab clickable with no session selected
+- **ui:** don't overwrite the session-view pref when a row forces it
+- **ui:** leaving an overlay with the chord returns to the view you left
+- **hub-client:** refuse hub calls while the wire contract is skewed
+- **sessions:** let a re-created tmux name be inserted in the killing second
+- **store:** revive a lost background session only from a newer probe
+- **store:** do not re-insert a killed session from an older probe
+- **agent:** sanitise peer-controlled request id and hub_version before logging
+- **proto:** keep sanitize_for_log within its cap and close Malformed construction
+- **move:** the flow reconciles the merge and re-checks the announced sizes
+- **move:** the scripts enforce the name rules at the point of effect
+- **hub-client:** drop the plan-step parenthetical from mcp_status's refusal sentence
+- **ci:** match tool results whose JSON is compact in hub-e2e
+- **move:** the index append refuses a delimiter line and finds the fresh line itself
+- **hub-client:** narrow HubBackend::call/call_text to pub(super)
+- **chat-ui:** honour reduced motion everywhere, and contain the scroll
+- **chat-ui:** let a keyboard reach and scroll the transcript
+- **chat-ui:** clamp from the constants that decide what is long
+- **chat-ui:** state warn and error through the theme tokens
+- **move:** a memory name matches its exact target entry first, then any case variant
+- **chat-ui:** Escape closes find from anywhere in the panel
+- **chat-ui:** walk the turn index with the arrow keys and Home/End
+- **chat-ui:** walk the conversation switcher with the arrow keys
+- **chat-ui:** wire the slash menu to the composer as a real listbox
+- **chat-ui:** give the composer an accessible name and announce the Enter shortcut
+- **move:** the session merge keeps what it cannot read, cleans its staging, replaces atomically
+- **hub-client:** gate verdict_gen test-only, narrow docs/hub.md to refusals
+- **move:** memory names compare case-insensitively; a skipped session dir reports every file
+
+### Documentation
+- **specs:** Open terminal persists the preference, like the segment
+- **hub-client:** say what the test guards in its own words
+- **specs:** guard the pref write, and list the user-facing docs
+- update the Conversation doc for the Session-tab merge
+- **specs:** the session-view chord returns to the view you left
+- **move:** the merge script's own comment states the append-only approximation
+- **move:** say what the merge really does and what a mixed fleet needs
+- **move:** describe what move_session now carries
+- **hub-client:** point CLAUDE.md and the skill at verdicts.rs
+- **plans:** implementation plan for the Session tab merge
+- **specs:** merge Terminal and Conversation into one Session tab
+- **hub-client:** drop plan-internal task references from assert messages
+- **hub-client:** section the verdict table, rewrap the hub.rs header
+- **plan:** move carry slice 2 — the Claude-side state
+- **spec:** move carry slice 2 — session directory and project memory travel too
 ## [0.2.24] - 2026-09-20
 
 ### Changed
@@ -795,6 +885,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.25]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.25
 [0.2.24]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.24
 [0.2.23]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.23
 [0.2.22]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.22
