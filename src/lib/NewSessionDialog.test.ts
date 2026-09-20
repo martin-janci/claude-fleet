@@ -1242,3 +1242,88 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
     expect((screen.getByRole('dialog', { name: 'New session' }) as HTMLElement).style.width).toBe('520px');
   });
 });
+
+// #191: a hub-routed `new_session` sends no `call_id` (`HubBackend::new_session`
+// in `src-tauri/src/backend/remote.rs`, deliberately — the hub has no tool to
+// cancel by one), so aborting the local wait does not stop the hub from
+// finishing the create; the session it was building appears anyway. In
+// hub-client mode the dialog must not offer a cancel that lies.
+describe('NewSessionDialog: Cancel creation while a hub-routed create is in flight (#191)', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  it('local mode: Cancel creation still aborts the in-flight request (unchanged)', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const spy = vi
+      .spyOn(sessionsModule, 'newSessionAbortable')
+      .mockImplementation((_args, signal) => {
+        capturedSignal = signal;
+        return new Promise(() => {}) as any;
+      });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    const cancelBtn = screen.getByTestId('cancel-create');
+    expect(cancelBtn.textContent).toBe('Cancel creation');
+    expect(screen.queryByTestId('hub-create-note')).toBeNull();
+    await fireEvent.click(cancelBtn);
+    expect(capturedSignal?.aborted).toBe(true);
+    spy.mockRestore();
+  });
+
+  it('hub-client mode: no cancel is offered, and the dialog says why', async () => {
+    hubStatus.set(remote);
+    let capturedSignal: AbortSignal | undefined;
+    const spy = vi
+      .spyOn(sessionsModule, 'newSessionAbortable')
+      .mockImplementation((_args, signal) => {
+        capturedSignal = signal;
+        return new Promise(() => {}) as any;
+      });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(screen.queryByTestId('cancel-create')).toBeNull();
+    const note = screen.getByTestId('hub-create-note');
+    expect(note.textContent).toContain('fleet.example.com');
+    expect(note.textContent?.toLowerCase()).toContain("can't be cancelled");
+    expect(note.textContent?.toLowerCase()).toContain('appear');
+    // No hidden cancel either — nothing aborts the wait from this state.
+    expect(capturedSignal?.aborted).toBe(false);
+    spy.mockRestore();
+  });
+
+  it('hub-client mode: the dialog is still closable during creation, without pretending to cancel it', async () => {
+    hubStatus.set(remote);
+    let capturedSignal: AbortSignal | undefined;
+    const spy = vi
+      .spyOn(sessionsModule, 'newSessionAbortable')
+      .mockImplementation((_args, signal) => {
+        capturedSignal = signal;
+        return new Promise(() => {}) as any;
+      });
+    const onCancel = vi.fn();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    const dlg = screen.getByRole('dialog') as HTMLDialogElement;
+    dlg.dispatchEvent(new Event('cancel', { cancelable: true }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    // Closing the dialog is not a cancel: the in-flight request is untouched.
+    expect(capturedSignal?.aborted).toBe(false);
+    spy.mockRestore();
+  });
+});

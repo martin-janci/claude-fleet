@@ -469,6 +469,20 @@
   let error: string | null = $state(null);
   let createController: AbortController | null = null;
 
+  // A hub-routed `new_session` sends no `call_id` (`HubBackend::new_session`,
+  // deliberately — it has no hub-side counterpart to cancel by), so
+  // aborting the wait here does not stop the hub from finishing the create:
+  // the session it was building appears anyway, right after "Cancel
+  // creation" made it look gone. Parity or refusal — and there is no hub
+  // tool to route a cancel to — so this dialog refuses instead: while a
+  // hub-client creation is in flight, say so rather than offer a button that
+  // would only abandon the local wait.
+  const hubCreateNote = $derived(
+    busy && $hubStatus.remote
+      ? `${$hubStatus.url ?? 'the hub'} is creating this session — it can't be cancelled from here, and will appear when it's ready.`
+      : null,
+  );
+
   function onPickKind(kind: 'work' | 'shell') {
     chosenKind = kind;
     nameOverride = null;
@@ -772,7 +786,9 @@
   <div class="actions">
     <span class="hint">↵ create · Ctrl/⌘R re-roll</span>
     <button onclick={onCancel} disabled={busy}>Cancel</button>
-    {#if busy}
+    {#if hubCreateNote}
+      <span class="hub-create-note" data-testid="hub-create-note" title={hubCreateNote}>{hubCreateNote}</span>
+    {:else if busy}
       <button type="button" data-testid="cancel-create" onclick={cancelCreate}>Cancel creation</button>
     {:else}
       <button
@@ -869,6 +885,7 @@
     border-top: 1px solid var(--border);
   }
   .actions .hint { margin-right: auto; font-size: 0.68rem; color: var(--fg-muted); }
+  .hub-create-note { font-size: 0.68rem; color: var(--fg-muted); text-align: right; }
   .actions button {
     font-size: 0.85rem;
     padding: 0.3rem 0.8rem;
