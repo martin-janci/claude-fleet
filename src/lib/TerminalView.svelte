@@ -18,6 +18,7 @@
   import { createMouseController } from './terminal_mouse';
   import TransferChip from './TransferChip.svelte';
   import { fitCells } from './terminal_size';
+  import { ownsTheFleet } from './hub';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -451,7 +452,16 @@
       // those are Repair workspace only; we say so instead. A healthy session
       // costs one probe; orphans and background rows have nothing to check. An
       // offline host is left to the attach error.
-      if (sess.project_id != null && !hasNoPane(sess)) {
+      //
+      // A paired desktop does not run it at all. The check is
+      // `repair_session { explicit: false }`, which the hub client REFUSES on
+      // purpose (`backend/verdicts.rs`): routing it would quietly become the
+      // hub's always-explicit repair, which unregisters, adopts and
+      // rebranches. There is no safe variant to route, so there is nothing to
+      // ask for — attempting it anyway put an E_LOCAL_ONLY toast on every
+      // attach of a project-backed session. Repair workspace is unaffected:
+      // it passes `explicit: true` and routes.
+      if (sess.project_id != null && !hasNoPane(sess) && ownsTheFleet()) {
         const rep = await repairSession(sess.id);
         if (standDown()) return;
         if (rep.ok) {
