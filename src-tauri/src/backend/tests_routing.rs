@@ -149,6 +149,10 @@ const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"fro
 /// null-stripping `ok_json_compact`, so every `Option` is present as a real
 /// key — `null` included — and every non-`Option` field is required).
 const REPAIR_PAYLOAD: &str = r#"{"session_id":7,"host_alias":"trn","tmux_name":"demo","project_root":"/p","cwd":"/p","cwd_physical":null,"healthy":true,"actions":[],"warnings":[],"needs_explicit_repair":false,"deferred":[],"branch_source":null,"tmux":null,"tmux_alive":true,"tmux_dead":false,"tmux_cwd_stale":false,"worktree_row_updated":false,"sibling_session_ids":[],"vanished_guard":null}"#;
+/// A complete `OperatorStatus`: both `Option` fields are required on the
+/// wire (no `#[serde(default)]`), so `session` and `blocked` are spelled out
+/// as `null` rather than omitted.
+const OPERATOR_STATUS_PAYLOAD: &str = r#"{"ready":true,"session":null,"blocked":null}"#;
 
 /// One row of the tables below: the command it drives, the tool that command
 /// must name, and the arguments it must send.
@@ -658,6 +662,17 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // The simple `(b, s, _)` shape: `operator_status` needs neither ssh
+        // nor a cancellation registry, unlike `ensure_operator` below.
+        (
+            "operator_status",
+            "operator_status",
+            json!({}),
+            OPERATOR_STATUS_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::operator_status(b, s)).map(|_| ())
+            }),
+        ),
     ]
 }
 
@@ -1039,6 +1054,36 @@ fn routed_mutation_cases() -> Vec<Case> {
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // `ensure_operator` needs `ssh` and `reg` the way `move_session` and
+        // `new_session` do, so it copies their entry shape rather than the
+        // simpler `(b, s, _)` one `operator_status` below uses. Its service
+        // call additionally needs the store as an `Arc` (to clone into the
+        // `LiveHost` it hands to `new_session`'s own lifecycle, which
+        // outlives a single lock), which the table's shared `Mutex<Store>`
+        // is not — so the closure builds its own throwaway one. That is
+        // sound only because remote mode never touches it:
+        // `routed::ensure_operator` takes the hub branch before the local
+        // store or ssh client is ever read.
+        (
+            "ensure_operator",
+            "ensure_operator",
+            json!({}),
+            SESSION_PAYLOAD,
+            Box::new(|b, _s, h| {
+                let dir = tempfile::tempdir().unwrap();
+                let throwaway_store = Arc::new(Mutex::new(
+                    Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus))
+                        .unwrap(),
+                ));
+                block_on(commands::operator::routed::ensure_operator(
+                    b,
+                    &throwaway_store,
+                    h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
                 ))
                 .map(|_| ())
             }),
@@ -2269,6 +2314,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/onboarding.rs",
         include_str!("../commands/onboarding.rs"),
+    ),
+    (
+        "commands/operator.rs",
+        include_str!("../commands/operator.rs"),
     ),
     (
         "commands/projects.rs",
