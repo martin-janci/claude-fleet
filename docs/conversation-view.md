@@ -1,9 +1,18 @@
-# The Conversation tab
+# The Conversation view
 
-The Conversation tab shows a session's Claude Code transcript as turns and
+The Session tab holds two views of a running session — Conversation and
+Terminal — switched by the segmented control at its top right or by
+⌘J (Ctrl+Shift+J on Windows/Linux). Which one you land on is a remembered
+preference that defaults to Conversation; a row that can only offer one view
+(no `claude_session_id` yet → Terminal, no tmux pane → Conversation) shows
+that one without touching the preference, so stepping off it returns you to
+where you were.
+
+The Conversation view shows a session's Claude Code transcript as turns and
 lets you drive the session from there, without the terminal. It works for
 every tmux-backed session; background (`bg:`) and external rows are
-read-only, since they have no REPL to type into.
+read-only, since they have no REPL to type into — for these rows Conversation
+is the only view, since they have no tmux pane to show a Terminal for.
 
 ## Reading
 
@@ -48,7 +57,7 @@ read-only, since they have no REPL to type into.
 
 ## How it stays cheap
 
-The transcript is read every 5 s while the tab is open and the session is
+The transcript is read every 5 s while the view is open and the session is
 unknown, working or blocked, and only every 15 s (or the moment a turn
 completes) when it is quiet. The live indicator probes the pane every 2 s
 only while something is happening, one probe at a time, and a probe never
