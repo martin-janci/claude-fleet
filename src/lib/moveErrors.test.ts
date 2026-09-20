@@ -157,4 +157,58 @@ describe('describeMoveError', () => {
     const d = describeMoveError(null, 'failed', 'turanga', 'git');
     expect(d.what).toBe('The move failed. It was started elsewhere, so the reason is in that window or in the session timeline.');
   });
+
+  it.each([
+    ['ours', ['src/lib.rs'], 'left behind', 'clean'],
+    ['theirs', ['their_notes.md'], 'work of its own', null],
+    ['unknown', [], 'already has uncommitted', 'retry'],
+  ])('describes E_MOVE_TARGET_DIRTY(%s)', (leftovers, paths, phrase, action) => {
+    const details = leftovers === 'theirs' ? { leftovers, theirs: paths } : { leftovers, ours: paths };
+    const f = describeMoveError(
+      { code: 'E_MOVE_TARGET_DIRTY', message: 'raw', details },
+      'failed',
+      'turanga',
+      'replay',
+    );
+    expect(f.what).toContain(phrase);
+    expect(f.action?.kind ?? null).toBe(action);
+    if (action === 'clean') expect((f.action as { paths: string[] }).paths).toEqual(paths);
+  });
+
+  it('names the paths it would remove, and turanga, for stale leftovers', () => {
+    const f = describeMoveError(
+      {
+        code: 'E_MOVE_TARGET_DIRTY',
+        message: 'raw',
+        details: { leftovers: 'ours', ours: ['a.txt', 'b/c.txt'] },
+      },
+      'failed',
+      'turanga',
+      'replay',
+    );
+    expect(f.what).toContain('turanga');
+    expect(f.what).toContain('a.txt');
+  });
+
+  it('says nothing was overwritten when the target is holding its own work', () => {
+    const f = describeMoveError(
+      { code: 'E_MOVE_TARGET_DIRTY', message: 'raw', details: { leftovers: 'theirs', theirs: ['x'] } },
+      'failed',
+      'turanga',
+      'replay',
+    );
+    expect(f.action).toBeNull();
+    expect(f.standing).toContain('was not touched');
+  });
+
+  it('an undone partial reads as undone, not as a failure', () => {
+    const f = describeMoveError(
+      { code: 'E_MOVE_UNDONE', message: '', details: null },
+      'failed',
+      'turanga',
+      'start',
+    );
+    expect(f.what).toContain('undid');
+    expect(f.action).toBeNull();
+  });
 });
