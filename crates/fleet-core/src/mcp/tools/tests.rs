@@ -2226,3 +2226,32 @@ async fn list_worktrees_limit_zero_returns_every_row() {
         WORKTREES_DEFAULT_LIMIT + 3
     );
 }
+
+/// A confirmation nonce must never outlive the call that is waiting on it.
+/// When it does, you approve inside the TTL and the agent has already been
+/// holding an `E_TIMEOUT` for minutes — the one failure mode a confirmation
+/// dialog must not have. `CONFIRM_TTL` cannot simply be shortened instead:
+/// `set_clipboard` and `cancel_task` are `Deadline::Quick` (60 s), so a TTL
+/// under every cap would be under a minute, which is not a window a human
+/// can answer in.
+#[test]
+fn every_confirmed_tool_outlives_its_confirmation_window() {
+    let confirmed: Vec<&crate::mcp::guard::ToolPolicy> = crate::mcp::guard::TOOL_POLICIES
+        .iter()
+        .filter(|p| p.confirm)
+        .collect();
+    assert!(
+        !confirmed.is_empty(),
+        "the confirmation gate has no tools — this test would pass vacuously"
+    );
+    for p in confirmed {
+        let deadline = super::support::tool_deadline(p.name);
+        assert!(
+            deadline > crate::mcp::guard::CONFIRM_TTL,
+            "{} is confirm-gated but its deadline ({:?}) does not outlast CONFIRM_TTL ({:?})",
+            p.name,
+            deadline,
+            crate::mcp::guard::CONFIRM_TTL,
+        );
+    }
+}
