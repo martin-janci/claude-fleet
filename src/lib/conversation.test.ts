@@ -53,6 +53,7 @@ import {
   type ConvTurn,
   type ConvItem,
 } from './conversation';
+import { notificationTone, notificationMark, notificationLabel } from './conversation';
 import type { SessionRow } from './sessions';
 
 beforeEach(() => {
@@ -624,5 +625,43 @@ describe('hasPendingCall', () => {
     expect(hasPendingCall(c([toolItem(true)]))).toBe(false);
     expect(hasPendingCall(c([toolItem(false), { kind: 'text', text: 'x' }]))).toBe(true);
     expect(hasPendingCall(c([{ kind: 'subagent', id: 's', name: 'Task', agent_type: null, description: null, result: null, error: false, at: null, ended_at: null, done: false }]))).toBe(true);
+  });
+});
+
+describe('notification presentation', () => {
+  it('reads completion as info, failure as error, a stop as a warning', () => {
+    expect(notificationTone('completed')).toBe('info');
+    expect(notificationTone('failed')).toBe('error');
+    expect(notificationTone('killed')).toBe('error');
+    expect(notificationTone('stopped')).toBe('warn');
+  });
+
+  it('treats a mid-stream event, which has no status, as plain progress', () => {
+    expect(notificationTone(null)).toBe('info');
+    expect(notificationMark(null)).toBe('•');
+  });
+
+  it('marks each terminal status distinctly', () => {
+    expect(notificationMark('completed')).toBe('✓');
+    expect(notificationMark('failed')).toBe('✕');
+    expect(notificationMark('killed')).toBe('✕');
+    expect(notificationMark('stopped')).toBe('⏸');
+  });
+
+  it('uses the harness sentence as the label', () => {
+    expect(notificationLabel({ summary: 'Agent "Posúdiť" finished', event: null })).toBe(
+      'Agent "Posúdiť" finished',
+    );
+  });
+
+  it('appends a streamed event as one line', () => {
+    expect(
+      notificationLabel({ summary: 'Monitor event', event: 'frontend: pass\nALL DONE' }),
+    ).toBe('Monitor event: frontend: pass');
+  });
+
+  it('never renders an empty row', () => {
+    expect(notificationLabel({ summary: null, event: null })).toBe('Background task reported');
+    expect(notificationLabel({ summary: '   ', event: null })).toBe('Background task reported');
   });
 });

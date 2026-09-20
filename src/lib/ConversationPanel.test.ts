@@ -1708,6 +1708,42 @@ describe('ConversationPanel conversations', () => {
     expect(screen.getByTestId('conv-interrupt').textContent).toContain('Interrupted during a tool call');
   });
 
+  it('renders a task notification as an event row, never as XML', async () => {
+    // A conversation whose only turn carries one notification item.
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: null,
+              at: '2026-09-18T10:01:00Z',
+              ended_at: null,
+              items: [
+                {
+                  kind: 'notification',
+                  task_id: 'a6',
+                  tool_use_id: 'toolu_1',
+                  status: 'failed',
+                  summary: 'Agent "Posúdiť stratégiu testov" failed',
+                  result: null,
+                  output_file: '/private/tmp/x/tasks/a6.output',
+                  event: null,
+                  at: null,
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const row = screen.getByTestId('conv-notification');
+    expect(row.textContent).toContain('Agent "Posúdiť stratégiu testov" failed');
+    expect(row.getAttribute('data-tone')).toBe('error');
+    expect(document.body.textContent).not.toContain('<task-notification>');
+  });
+
   it('clamps a long command output behind Show more; a compact without summary says so', async () => {
     const long = Array.from({ length: 12 }, (_, i) => `line ${i}`).join('\n');
     mockedConv.mockReturnValue(

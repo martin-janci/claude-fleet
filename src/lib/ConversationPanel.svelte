@@ -45,6 +45,9 @@
     relativeTime,
     groupItems,
     toolGroupLabel,
+    notificationTone,
+    notificationMark,
+    notificationLabel,
     isLongPrompt,
     PROMPT_CLAMP_LINES,
     turnDuration,
@@ -1157,6 +1160,11 @@
                     </div>
                   {:else if g.kind === 'interrupt'}
                     <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
+                  {:else if g.kind === 'notification'}
+                    <div class="notification" data-testid="conv-notification" data-tone={notificationTone(g.status)}>
+                      <span class="note-mark" aria-hidden="true">{notificationMark(g.status)}</span>
+                      <span class="note-label">{notificationLabel(g)}</span>
+                    </div>
                   {:else if g.kind === 'subagent'}
                     <SubagentBlock item={g} {nowMs} live={turnLive} />
                   {/if}
@@ -1944,6 +1952,31 @@
     color: var(--usage-warn);
     font-size: 0.76rem;
     font-style: italic;
+  }
+  .notification {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    margin: 0.3rem 0;
+    padding: 0.2rem 0.5rem;
+    border-left: 3px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.82rem;
+    color: var(--fg-muted);
+    background: var(--bg-pane);
+  }
+  .notification[data-tone='warn'] {
+    border-left-color: var(--usage-warn);
+  }
+  .notification[data-tone='error'] {
+    border-left-color: var(--usage-crit);
+  }
+  .note-mark {
+    flex: 0 0 auto;
+  }
+  .note-label {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .latest {
     position: absolute;

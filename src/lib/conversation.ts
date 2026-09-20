@@ -31,6 +31,17 @@ export type ConvItem =
     }
   | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
   | { kind: 'command'; name: string; args: string | null; output: string | null }
+  | {
+      kind: 'notification';
+      task_id: string | null;
+      tool_use_id: string | null;
+      status: string | null;
+      summary: string | null;
+      result: string | null;
+      output_file: string | null;
+      event: string | null;
+      at: string | null;
+    }
   | { kind: 'interrupt'; during_tool: boolean };
 
 export interface ConvTurn {
@@ -212,6 +223,17 @@ export type ConvGroup =
     }
   | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
   | { kind: 'command'; name: string; args: string | null; output: string | null }
+  | {
+      kind: 'notification';
+      task_id: string | null;
+      tool_use_id: string | null;
+      status: string | null;
+      summary: string | null;
+      result: string | null;
+      output_file: string | null;
+      event: string | null;
+      at: string | null;
+    }
   | { kind: 'interrupt'; during_tool: boolean };
 
 /** Fold consecutive tool one-liners into one group; text items stay apart;
@@ -260,6 +282,38 @@ export function toolGroupLabel(tools: ToolLine[]): string {
   const failed = tools.filter((t) => t.error).length;
   const suffix = failed > 0 ? ` · ${failed} failed` : '';
   return `${tools.length} tool calls · ${shown}${more}${suffix}`;
+}
+
+// ─── Background work: notifications (spec §"Frontend — the thread") ─────────
+
+/** One `<task-notification>` as the backend parsed it. */
+export type NotificationItem = Extract<ConvItem, { kind: 'notification' }>;
+
+export type NotificationTone = 'info' | 'warn' | 'error';
+
+/** A notification's tone, from its status. A mid-stream Monitor event has no
+ *  status at all: it is progress, so it reads as plain info. */
+export function notificationTone(status: string | null): NotificationTone {
+  if (status === 'failed' || status === 'killed') return 'error';
+  if (status === 'stopped') return 'warn';
+  return 'info';
+}
+
+/** The glyph in front of the row. Keyed off the status rather than the tone,
+ *  so a status-less event is a bullet rather than a tick. */
+export function notificationMark(status: string | null): string {
+  if (status === null) return '•';
+  if (status === 'failed' || status === 'killed') return '✕';
+  if (status === 'stopped') return '⏸';
+  return '✓';
+}
+
+/** The row's single line: the harness's own sentence, plus the streamed
+ *  event's first line when there is one. */
+export function notificationLabel(n: { summary: string | null; event: string | null }): string {
+  const head = n.summary?.trim() || 'Background task reported';
+  const tail = n.event?.trim().split('\n')[0].trim();
+  return tail ? `${head}: ${tail}` : head;
 }
 
 // ─── Tool lines / subagents / doing now (phase 3) ───────────────────────────
