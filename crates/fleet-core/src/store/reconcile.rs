@@ -2838,6 +2838,25 @@ mod tests {
     }
 
     #[test]
+    fn a_kill_of_a_row_that_no_longer_exists_records_nothing() {
+        // The other no-op branch: the id is gone entirely (a second kill
+        // after the reap, a stale id from the UI). There is no host/name to
+        // key a memory on, so nothing is recorded — and nothing panics.
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+
+        assert!(store
+            .mark_session_killed(4242, now_unix())
+            .unwrap()
+            .is_none());
+
+        assert!(
+            store.recent_kills("alpha").is_empty(),
+            "a kill of a row that does not exist has no name to remember"
+        );
+    }
+
+    #[test]
     fn a_kill_older_than_the_memory_window_is_forgotten() {
         // The memory is bounded by age alone (no timer, no table): once a
         // kill is further back than any probe could still be in flight, its
