@@ -21,7 +21,7 @@
 - **Contrast floors:** text ≥ 4.5:1, non-text ≥ 3:1, measured against `--bg-pane` (the surface these controls sit on).
 - **Opacity on a disabled control never goes below `0.55`.**
 - **Nothing but `:focus-visible` gets a 2px ring, in any colour, anywhere.**
-- **`--radius-pill` is reserved** for `aria-pressed` toggles and the context meter.
+- **`--radius-pill` is reserved** for chip-shaped controls (`.btn--chip`, and `.btn--toggle` which extends it) and the context meter. It must not reach an ordinary button. A chip's *pressed* state is optional: `.btn--toggle` adds it, `.btn--chip` alone is a one-shot action.
 - Commit per task, Conventional Commits, no attribution trailers.
 
 ---

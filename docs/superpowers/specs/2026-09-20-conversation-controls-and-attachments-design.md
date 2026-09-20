@@ -139,8 +139,10 @@ buttons.
   actions. Keeps `.tb-btn`'s transparent-border trick, which is the one thing
   that rule gets right, but moves the hover signal from a 1.26:1 border to a
   fill.
-- `.btn--toggle` — pill, driven by `aria-pressed`. **The only thing allowed
-  `--radius-pill`.** Selected state is carried by `border-color: var(--accent)`
+- `.btn--chip` — pill, compact, label-only: a chip. One-shot actions live
+  here (the composer presets, `⏎ Press Enter`, `More`). **Together with
+  `.btn--toggle`, which extends it, the only thing allowed `--radius-pill`.**
+- `.btn--toggle` — `.btn--chip` plus a pressed state, driven by `aria-pressed`. Selected state is carried by `border-color: var(--accent)`
   (4.95:1), with `--accent-soft` as reinforcement — today `SegmentedControl`'s
   14% tint is 1.22:1 against its unselected siblings and is decorative, not
   informative.
@@ -373,8 +375,9 @@ in `src/` today, so this is greenfield.
   0.1s on `.copy-slot` opacity, 0.12s on the tools caret, with
   `prefers-reduced-motion` already honoured — is right. Extend the
   reduced-motion block to anything new.
-- **Do not round everything.** `--radius-pill` means "this is a toggle" (plus
-  the meter). Today it is on `.latest`, both `.chip`s, `.host-pick`, `.pill` and
+- **Do not round everything.** `--radius-pill` means "this is a chip" (plus
+  the meter) — a compact, label-only control in a chip row, whether or not it
+  toggles. Today it is on `.latest`, both `.chip`s, `.host-pick`, `.pill` and
   `.ctx`, which is to say it means nothing.
 - **Do not keep the keyboard hints out of sight.** `↵ send · ⇧↵ newline · ↑
   history` and `aria-keyshortcuts` earn their 11px. In this app the hints are
