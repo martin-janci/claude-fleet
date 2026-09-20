@@ -628,7 +628,22 @@
       e.preventDefault();
       turnsOpen = false;
       turnsButton?.focus();
+      return;
     }
+    // Arrow / Home / End walk the list: a long thread must not need one Tab
+    // per turn. The ends hold rather than wrap, so a held arrow stops.
+    const rows = Array.from(turnsList?.querySelectorAll<HTMLButtonElement>('button') ?? []);
+    if (rows.length === 0) return;
+    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const to =
+      e.key === 'ArrowDown' ? at + 1
+      : e.key === 'ArrowUp' ? at - 1
+      : e.key === 'Home' ? 0
+      : e.key === 'End' ? rows.length - 1
+      : null;
+    if (to === null) return;
+    e.preventDefault();
+    rows[Math.max(0, Math.min(to, rows.length - 1))]?.focus();
   }
   $effect(() => {
     if (turnsOpen) turnsList?.querySelector('button')?.focus();

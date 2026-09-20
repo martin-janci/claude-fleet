@@ -2265,6 +2265,29 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(screen.queryByTestId('conv-turn-index')).toBeNull();
   });
 
+  it('the turn index walks with the arrow keys and Home/End', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-turns-button'));
+    await settle();
+    const list = screen.getByTestId('conv-turn-index');
+    const items = screen.getAllByTestId('conv-turn-index-item');
+    expect(document.activeElement).toBe(items[0]);
+
+    await fireEvent.keyDown(list, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[1]);
+    await fireEvent.keyDown(list, { key: 'End' });
+    expect(document.activeElement).toBe(items[2]);
+    // The ends hold rather than wrap.
+    await fireEvent.keyDown(list, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[2]);
+    await fireEvent.keyDown(list, { key: 'Home' });
+    expect(document.activeElement).toBe(items[0]);
+    await fireEvent.keyDown(list, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(items[0]);
+  });
+
   it('an unfinished tool call in an earlier turn shows "no result"; the running turn counts up', async () => {
     const at = new Date(Date.now() - 3_000).toISOString();
     mockedConv.mockReturnValue(
