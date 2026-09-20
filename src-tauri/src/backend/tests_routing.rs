@@ -149,8 +149,8 @@ const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"fro
 /// key — `null` included — and every non-`Option` field is required).
 const REPAIR_PAYLOAD: &str = r#"{"session_id":7,"host_alias":"trn","tmux_name":"demo","project_root":"/p","cwd":"/p","cwd_physical":null,"healthy":true,"actions":[],"warnings":[],"needs_explicit_repair":false,"deferred":[],"branch_source":null,"tmux":null,"tmux_alive":true,"tmux_dead":false,"tmux_cwd_stale":false,"worktree_row_updated":false,"sibling_session_ids":[],"vanished_guard":null}"#;
 
-/// One row of the tables below: what to run, the tool it must name, and the
-/// arguments it must send.
+/// One row of the tables below: the command it drives, the tool that command
+/// must name, and the arguments it must send.
 ///
 /// The closure hands back the command's own `Result`, and `check` requires it
 /// to be `Ok`. It used to be discarded (`let _ = …`), which meant a payload
@@ -158,7 +158,14 @@ const REPAIR_PAYLOAD: &str = r#"{"session_id":7,"host_alias":"trn","tmux_name":"
 /// `move_session`'s case answered `"{}"` for a twelve-field `MoveReport` and
 /// was green. With the result thrown away, "the same shape the local path
 /// returns" was asserted by reading, not by test.
+///
+/// The command name is the first column so that `check` can hold the table's
+/// tool — which is what the request really carried — against the tool
+/// [`VERDICTS`] claims. Without it the table's `tool` field is a literal
+/// nothing compares to a second literal, and a typo in a row would reach the
+/// generated frontend list and the generated docs before it reached a test.
 type Case = (
+    &'static str,
     &'static str,
     Value,
     &'static str,
@@ -166,13 +173,24 @@ type Case = (
 );
 
 fn check(cases: Vec<Case>) {
-    for (tool, want_args, payload, run) in cases {
+    for (command, tool, want_args, payload, run) in cases {
         let fake = Fake::answering(payload);
         let (_dir, st) = store();
         let got = run(&remote_backend(&fake), &st, &ssh());
         let (got_tool, got_args) = fake.only_call();
         assert_eq!(got_tool, tool, "wrong tool for {tool}");
         assert_eq!(got_args, want_args, "wrong arguments for {tool}");
+        // The table's row is a claim about the same call this case just
+        // recorded. `set_session_friendly_name` -> `set_friendly_name` is the
+        // one place the two vocabularies differ, and it is checked here like
+        // any other row rather than excused.
+        assert_eq!(
+            verdicts::verdict(command).and_then(Verdict::tool),
+            Some(got_tool.as_str()),
+            "{command} sent {got_tool}, but its VERDICTS row names {:?} — Task 2 \
+             publishes that row to the frontend and the docs",
+            verdicts::verdict(command).and_then(Verdict::tool),
+        );
         if let Err(e) = got {
             panic!(
                 "{tool}: the hub's answer did not come back as the command's return \
@@ -181,6 +199,54 @@ fn check(cases: Vec<Case>) {
             );
         }
     }
+}
+
+/// Routed commands that no row of the two tables drives, each with the test
+/// that pins its tool and arguments instead. An empty list would be better;
+/// a silent gap would be worse, because a row whose tool nothing exercises is
+/// a row whose tool nothing checks.
+const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[(
+    "health_check",
+    "its tool (fleet_health) and its empty arguments are pinned by \
+     health_is_the_hubs_fleet_not_this_apps_empty_database, which also needs a \
+     seeded local store to prove the answer is not the local one",
+)];
+
+/// The other half of the tool check in [`check`]: a wrong tool must not be
+/// able to hide by having no case at all.
+#[test]
+fn every_routed_row_is_driven_by_a_case() {
+    let driven: BTreeSet<&str> = routed_read_cases()
+        .iter()
+        .chain(routed_mutation_cases().iter())
+        .map(|(command, ..)| *command)
+        .collect();
+    let excused: BTreeSet<&str> = ROUTED_WITHOUT_A_CASE.iter().map(|(n, _)| *n).collect();
+
+    let undriven: Vec<&str> = VERDICTS
+        .iter()
+        .filter(|(_, v)| v.tool().is_some())
+        .map(|(name, _)| *name)
+        .filter(|name| !driven.contains(name) && !excused.contains(name))
+        .collect();
+    assert!(
+        undriven.is_empty(),
+        "these commands route on the backend but no case drives them, so the \
+         tool their VERDICTS row names is a literal nothing checks:\n  {}\n\n\
+         Add a case to routed_read_cases/routed_mutation_cases, or add the \
+         command to ROUTED_WITHOUT_A_CASE with the test that covers it.",
+        undriven.join("\n  ")
+    );
+
+    let stale: Vec<&str> = excused
+        .iter()
+        .copied()
+        .filter(|name| driven.contains(name))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "ROUTED_WITHOUT_A_CASE excuses commands the tables now drive: {stale:?}"
+    );
 }
 
 // ── 1. remote mode calls the right tool with the right arguments ────────────
@@ -206,6 +272,7 @@ fn routed_read_cases() -> Vec<Case> {
     vec![
         (
             "list_sessions",
+            "list_sessions",
             json!({ "summary": false, "force": true, "include_lost": true }),
             "[]",
             Box::new(|b, s, h| {
@@ -220,6 +287,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "related_sessions",
+            "related_sessions",
             json!({ "session_id": 7 }),
             "[]",
             Box::new(|b, s, _| {
@@ -233,17 +301,20 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "list_hosts",
+            "list_hosts",
             json!({}),
             "[]",
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_hosts(b, s)).map(|_| ())),
         ),
         (
             "list_accounts",
+            "list_accounts",
             json!({}),
             "[]",
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_accounts(b, s)).map(|_| ())),
         ),
         (
+            "list_projects",
             "list_projects",
             json!({ "summary": false }),
             "[]",
@@ -253,6 +324,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "refresh_projects",
+            "refresh_projects",
             json!({}),
             "[]",
             Box::new(|b, s, _| {
@@ -260,6 +332,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "list_worktrees",
             "list_worktrees",
             json!({ "project_id": 4 }),
             "[]",
@@ -276,6 +349,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "list_tasks",
+            "list_tasks",
             json!({ "requester_session_id": 2, "state": "running", "limit": 9 }),
             "[]",
             Box::new(|b, s, _| {
@@ -290,6 +364,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "session_history",
             "session_history",
             // The clamp runs on this side, so the hub is asked for the same
             // window the local store would have returned: 10_000 -> 500.
@@ -309,6 +384,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "session_conversation",
+            "session_conversation",
             json!({ "session_id": 7, "turns": 5, "events_limit": 200 }),
             r#"{"turns":[],"truncated":false}"#,
             Box::new(|b, s, h| {
@@ -326,6 +402,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "session_conversation",
             "session_conversation",
             json!({ "session_id": 7, "turns": 5, "claude_session_id": "11111111-1111-1111-1111-111111111111", "events_limit": 200 }),
             r#"{"turns":[],"truncated":false}"#,
@@ -345,6 +422,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "session_conversations",
+            "session_conversations",
             // Clamped on this side, like session_history: 10_000 -> 500.
             json!({ "session_id": 7, "limit": 500 }),
             "[]",
@@ -361,6 +439,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_log",
             "repo_log",
             json!({ "session_id": 7, "all": true, "limit": 25, "skip": 50 }),
             "[]",
@@ -381,6 +460,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "repo_branches",
+            "repo_branches",
             json!({ "session_id": 7 }),
             "[]",
             Box::new(|b, s, h| {
@@ -394,6 +474,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_commit",
             "repo_commit",
             json!({ "session_id": 7, "hash": "abc123" }),
             r#"{"hash":"abc123","subject":"s","body":"","author":"a","date":"d","files":[]}"#,
@@ -411,6 +492,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_commit_diff",
             "repo_commit_diff",
             json!({ "session_id": 7, "hash": "abc123", "path": "src/lib.rs" }),
             r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
@@ -430,6 +512,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "repo_changes",
+            "repo_changes",
             json!({ "session_id": 7 }),
             "[]",
             Box::new(|b, s, h| {
@@ -444,6 +527,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "repo_tree",
+            "repo_tree",
             json!({ "session_id": 7 }),
             r#"{"entries":[],"truncated":false}"#,
             Box::new(|b, s, h| {
@@ -457,6 +541,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_file",
             "repo_file",
             json!({ "session_id": 7, "path": "src/lib.rs" }),
             r#"{"path":"src/lib.rs","content":"","truncated":false,"binary":false,"is_dir":false,"size":0}"#,
@@ -474,6 +559,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_diff",
             "repo_diff",
             json!({ "session_id": 7, "path": "src/lib.rs" }),
             r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
@@ -519,6 +605,7 @@ fn routed_mutation_cases() -> Vec<Case> {
     vec![
         (
             "send_prompt",
+            "send_prompt",
             json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "go", "submit": true }),
             r#"{"delivered":true}"#,
             Box::new(|b, s, h| {
@@ -538,6 +625,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "kill_session",
+            "kill_session",
             json!({ "host_alias": "trn", "name": "demo", "force": true }),
             "7",
             Box::new(|b, s, h| {
@@ -556,6 +644,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "safe_kill_session",
+            "safe_kill_session",
             json!({ "host_alias": "trn", "tmux_name": "demo" }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -572,6 +661,7 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "rename_session",
             "rename_session",
             json!({ "host_alias": "trn", "old_name": "a", "new_name": "b" }),
             SESSION_PAYLOAD,
@@ -590,6 +680,7 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "set_session_friendly_name",
             // The one place the two vocabularies differ: the command is
             // `set_session_friendly_name`, the tool is `set_friendly_name`.
             "set_friendly_name",
@@ -610,6 +701,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "restart_session",
+            "restart_session",
             json!({ "host_alias": "trn", "name": "demo", "force": false }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -627,6 +719,7 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "spawn_review",
             "spawn_review",
             json!({ "source_session_id": 7, "prompt": "review it" }),
             SESSION_PAYLOAD,
@@ -646,6 +739,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "recreate_session",
+            "recreate_session",
             json!({ "session_id": 7, "force": false }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -663,6 +757,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "dismiss_ghost_session",
+            "dismiss_ghost_session",
             json!({ "session_id": 7 }),
             r#"{"dismissed":7}"#,
             Box::new(|b, s, _| {
@@ -675,6 +770,7 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "new_bg_session",
             "new_bg_session",
             json!({ "host_alias": "trn", "name": "worker", "prompt": "go" }),
             r#"{"claude_session_id":"abc"}"#,
@@ -694,6 +790,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "delete_worktree",
+            "delete_worktree",
             json!({ "worktree_id": 3, "force": true }),
             "worktree deleted",
             Box::new(|b, s, h| {
@@ -711,6 +808,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "cancel_task",
+            "cancel_task",
             json!({ "task_id": 11 }),
             TASK_PAYLOAD,
             Box::new(|b, s, _| {
@@ -718,6 +816,7 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "probe_host",
             "probe_host",
             json!({ "alias": "trn" }),
             HOST_PAYLOAD,
@@ -735,6 +834,7 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "move_session",
             "move_session",
             json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true }),
             MOVE_PAYLOAD,
@@ -758,6 +858,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         // routes unconditionally (`call_id` is this process's own
         // cancellation-registry key and has no counterpart — never sent).
         (
+            "new_session",
             "new_session",
             json!({
                 "host_alias": "trn",
@@ -796,6 +897,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         // `explicit: true` — the Repair workspace button — routes to the
         // tool's own (always-explicit) repair.
         (
+            "repair_session",
             "repair_session",
             json!({ "session_id": 7 }),
             REPAIR_PAYLOAD,
@@ -1082,7 +1184,7 @@ fn unavailable_backend() -> FleetBackend {
 #[test]
 fn a_configured_but_unavailable_hub_refuses_every_routed_command() {
     let backend = unavailable_backend();
-    for (tool, _, _, run) in routed_read_cases()
+    for (_, tool, _, _, run) in routed_read_cases()
         .into_iter()
         .chain(routed_mutation_cases())
     {
@@ -1549,6 +1651,53 @@ fn every_command_has_a_verdict() {
     );
 }
 
+/// The text of one command: from its `fn <name>(` to wherever the next
+/// command begins (or the end of the file, for the last one).
+///
+/// It ends at `#[tauri::command`, **not** at `#[tauri::command]`. The closing
+/// bracket is not there: `#[tauri::command(async)]` is the other form Tauri
+/// takes (`pty.rs` uses it four times), and a body that does not stop at one
+/// swallows its neighbour. That is a false PASS in the direction that matters
+/// — a `Routed` row whose command quietly runs the local service call would
+/// still be green if any swallowed neighbour happened to contain `routed::`.
+/// `a_command_body_stops_at_an_async_neighbour` is that case, in miniature.
+fn command_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let start = src.find(&format!("fn {name}("))?;
+    let rest = &src[start..];
+    Some(match rest.find("#[tauri::command") {
+        Some(i) => &rest[..i],
+        None => rest,
+    })
+}
+
+/// [`command_body`]'s one rule, on a source small enough to read.
+///
+/// With the old `"#[tauri::command]"` this fails: `alpha`'s body runs to the
+/// end of the string, so `alpha` — which routes nothing — looks like it
+/// routes, on the strength of `beta`'s call.
+#[test]
+fn a_command_body_stops_at_an_async_neighbour() {
+    const SRC: &str = "\
+#[tauri::command]
+pub fn alpha(backend: State<'_, Arc<FleetBackend>>) -> Result<(), IpcError> {
+    service::alpha()
+}
+
+#[tauri::command(async)]
+pub fn beta(backend: State<'_, Arc<FleetBackend>>) -> Result<(), IpcError> {
+    routed::beta(&backend)
+}
+";
+    let alpha = command_body(SRC, "alpha").expect("alpha is defined");
+    assert!(alpha.contains("service::alpha()"), "{alpha}");
+    assert!(
+        !alpha.contains("routed::"),
+        "alpha's body swallowed its `(async)` neighbour, so a Routed row for a \
+         command that does not route would pass on the neighbour's text:\n{alpha}"
+    );
+    assert!(command_body(SRC, "gamma").is_none());
+}
+
 /// **And the body agrees with the row.**
 ///
 /// [`every_command_has_a_verdict`] proves that every command has an answer;
@@ -1575,15 +1724,8 @@ fn every_commands_body_does_what_its_row_says() {
         let src = sources
             .get(file.as_str())
             .unwrap_or_else(|| panic!("add {file} to SOURCES in tests_routing.rs"));
-        let start = src
-            .find(&format!("fn {name}("))
+        let body = command_body(src, &name)
             .unwrap_or_else(|| panic!("{name} is registered but not defined in {file}"));
-        // This command's body, up to wherever the next one begins.
-        let rest = &src[start..];
-        let body = match rest.find("#[tauri::command]") {
-            Some(i) => &rest[..i],
-            None => rest,
-        };
         let routes = body.contains("routed::");
         let refuses = body.contains(&format!("refuse_local_only(\"{name}\")"));
         let guards_at_all = body.contains("refuse_local_only(");
@@ -1629,12 +1771,12 @@ fn every_commands_body_does_what_its_row_says() {
 #[test]
 fn every_refusal_names_a_command_the_table_can_refuse() {
     const CALL: &str = "refuse_local_only(\"";
-    let mut found = 0;
+    let mut refused = BTreeSet::new();
     for (file, src) in SOURCES {
         for (i, _) in src.match_indices(CALL) {
             let rest = &src[i + CALL.len()..];
             let name = &rest[..rest.find('"').expect("an unterminated command name")];
-            found += 1;
+            refused.insert(name);
             let verdict = verdicts::verdict(name).unwrap_or_else(|| {
                 panic!("{file} refuses {name}, which has no row in VERDICTS at all")
             });
@@ -1645,10 +1787,23 @@ fn every_refusal_names_a_command_the_table_can_refuse() {
             );
         }
     }
-    assert!(
-        found > 70,
-        "only {found} refusals found in the sources — the reader broke, not \
-         the code"
+
+    // Derived, not guessed: the names refused in the sources and the rows that
+    // carry a sentence are the same set. A floor like `found > 70` would not
+    // notice a refusal quietly disappearing, and a sentence nobody refuses
+    // with is a sentence that has stopped being true.
+    let can_refuse: BTreeSet<&str> = VERDICTS
+        .iter()
+        .filter(|(_, v)| v.instead().is_some())
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(
+        refused,
+        can_refuse,
+        "the refusals written in the sources and the rows that carry a sentence \
+         have drifted apart:\n  only in the sources: {:?}\n  only in the table: {:?}",
+        refused.difference(&can_refuse).collect::<Vec<_>>(),
+        can_refuse.difference(&refused).collect::<Vec<_>>(),
     );
 }
 
