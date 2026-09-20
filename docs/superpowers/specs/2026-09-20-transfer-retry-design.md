@@ -299,9 +299,22 @@ The panel shows `Move back to {host}` and, for an unresolved partial,
   non-default args row in `tests_routing.rs`, then
   `REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen` and
   `REGEN_DOCS=1 cargo test -p fleet-core reference_is_current`.
-- New MCP tool: **no**. The served tool surface is byte-budgeted; `move_session`'s
-  description gains only `clean_target` in one clause, and the recovery actions
-  stay in the control skill and this spec.
+- New MCP tool: **yes, and it has to be.** `Verdict::Routed` resolves its hub
+  tool through the MCP table (`backend/remote.rs`, `tool_for`), so a routed
+  command without a tool of that name fails closed — and `LocalOnly` would leave
+  a hub-client desktop unable to recover a partial at all, which is the opposite
+  of this slice's point. So `resolve_move` gets a deliberately slim
+  `#[tool(...)]` in `mcp/tools/lifecycle.rs`: two parameters, one sentence, the
+  reasoning in this spec rather than in the description. That means
+  - a `TOOL_POLICIES` row in `mcp/guard.rs` — `Access::Client`, `readonly:
+    false`, `confirm: true`, `Deadline::Lifecycle`, matching `move_session`'s
+    (classification is mandatory; a tool with no row fails an exhaustiveness
+    test);
+  - `assert_eq!(served, 73)` in `mcp/tools/tests.rs` becomes `74`;
+  - the surface stays under `BUDGET_BYTES = 56_000` — the test prints the
+    number, and the budget is not to be raised for this.
+
+  `move_session`'s own description gains `clean_target` in one clause.
 - `clean_target` on `move_session`: a non-default row in `tests_routing.rs`.
 - `ResolveMoveReport` is a report type, not a stored row, so
   `REGEN_HUB_CONTRACT` is not involved. No migration: every new fact lives in
