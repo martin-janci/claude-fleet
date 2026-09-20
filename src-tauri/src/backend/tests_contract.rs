@@ -401,6 +401,18 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         }),
     );
     put(
+        "ConvItem::Notification",
+        wire_keys(&ConvItem::Notification {
+            task_id: Some("a623962a33b4c9765".into()),
+            tool_use_id: Some("toolu_1".into()),
+            status: Some("completed".into()),
+            summary: Some("Agent finished".into()),
+            result: Some("r".into()),
+            output_file: Some("/private/tmp/x/tasks/a6.output".into()),
+            event: Some("e".into()),
+        }),
+    );
+    put(
         "ConvItem::Interrupt",
         wire_keys(&ConvItem::Interrupt { during_tool: true }),
     );

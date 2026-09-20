@@ -390,6 +390,33 @@ pub enum ConvItem {
         #[serde(default)]
         output: Option<String>,
     },
+    /// A `<task-notification>` user entry: a background agent, command,
+    /// monitor or workflow reporting in. `tool_use_id` names the `tool_use`
+    /// that launched it, which `join_notifications` uses to fill that call's
+    /// block in; it is absent on a mid-stream Monitor event, which reports
+    /// progress rather than completion.
+    Notification {
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        /// `completed` | `failed` | `stopped` | `killed`; `None` on a
+        /// mid-stream event.
+        #[serde(default)]
+        status: Option<String>,
+        /// The harness's own one-line sentence. Always present in practice.
+        #[serde(default)]
+        summary: Option<String>,
+        /// The agent's report, capped at [`NOTIFICATION_RESULT_MAX_CHARS`].
+        #[serde(default)]
+        result: Option<String>,
+        /// Path to the task's full output, on the session's host.
+        #[serde(default)]
+        output_file: Option<String>,
+        /// Monitor's streamed line.
+        #[serde(default)]
+        event: Option<String>,
+    },
     /// `[Request interrupted by user]` (`during_tool`: "… for tool use").
     Interrupt {
         #[serde(default)]
@@ -405,6 +432,11 @@ fn serde_true() -> bool {
 const COMPACT_SUMMARY_MAX_CHARS: usize = 20_000;
 /// Cap on a slash command's carried output text (chars).
 const COMMAND_OUTPUT_MAX_CHARS: usize = 4_000;
+/// Cap on a task notification's carried report (chars). A background
+/// agent's report is routinely several KB, so this is the compaction
+/// summary's budget rather than [`SUBAGENT_RESULT_MAX_CHARS`], which was
+/// sized for a tool one-liner's neighbour.
+const NOTIFICATION_RESULT_MAX_CHARS: usize = 20_000;
 
 /// Text between `<tag>` and `</tag>`, trimmed; `None` when absent or empty.
 fn tag_text(s: &str, tag: &str) -> Option<String> {
@@ -631,6 +663,46 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     // (or its output); a human prompt that merely contains
                     // one (a pasted transcript) stays a prompt.
                     let head = text.trim_start();
+                    // Only an entry that *starts* with the tag is a
+                    // notification — the same rule slash commands follow, so
+                    // a pasted transcript stays a prompt.
+                    if head.starts_with("<task-notification>") {
+                        let item = ConvItem::Notification {
+                            task_id: tag_text(&text, "task-id"),
+                            tool_use_id: tag_text(&text, "tool-use-id"),
+                            status: tag_text(&text, "status"),
+                            summary: tag_text(&text, "summary"),
+                            result: tag_text(&text, "result")
+                                .map(|r| cap_chars(&r, NOTIFICATION_RESULT_MAX_CHARS)),
+                            output_file: tag_text(&text, "output-file"),
+                            event: tag_text(&text, "event"),
+                        };
+                        // Notifications that arrive back to back, with no
+                        // assistant output between them, share one turn: three
+                        // agents finishing together should not make three
+                        // near-empty turns.
+                        let coalesce = current.as_ref().is_some_and(|t| {
+                            t.prompt.is_none()
+                                && !t.items.is_empty()
+                                && t.items
+                                    .iter()
+                                    .all(|i| matches!(i, ConvItem::Notification { .. }))
+                        });
+                        if !coalesce {
+                            push(&mut turns, current.take());
+                            tool_items.clear();
+                            current = Some(ConvTurn {
+                                prompt: None,
+                                at: at(),
+                                ended_at: None,
+                                items: Vec::new(),
+                            });
+                        }
+                        if let Some(t) = current.as_mut() {
+                            t.items.push(item);
+                        }
+                        continue;
+                    }
                     let is_command =
                         head.starts_with("<command-name>") || head.starts_with("<command-message>");
                     let is_output = head.starts_with("<local-command-stdout>")
@@ -803,6 +875,10 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
                         Some(a) => format!("[command] {name} {a}"),
                         None => format!("[command] {name}"),
                     },
+                    ConvItem::Notification { summary, .. } => format!(
+                        "[notification] {}",
+                        one_line(summary.as_deref().unwrap_or(""))
+                    ),
                     ConvItem::Interrupt { .. } => "[interrupted]".to_string(),
                 })
                 .collect::<Vec<_>>()
@@ -832,6 +908,16 @@ fn item_chars(item: &ConvItem) -> usize {
             name.chars().count()
                 + args.as_deref().map_or(0, |s| s.chars().count())
                 + output.as_deref().map_or(0, |s| s.chars().count())
+        }
+        ConvItem::Notification {
+            summary,
+            result,
+            event,
+            ..
+        } => {
+            summary.as_deref().map_or(0, |s| s.chars().count())
+                + result.as_deref().map_or(0, |s| s.chars().count())
+                + event.as_deref().map_or(0, |s| s.chars().count())
         }
         ConvItem::Interrupt { .. } => 0,
     }
@@ -1800,6 +1886,161 @@ mod tests {
         serde_json::json!({"type":"user","timestamp":ts,
             "message":{"content":[{"type":"tool_result","tool_use_id":id,"content":content,"is_error":err}]}})
     }
+    /// The exact shape a background `Agent` reports in with.
+    fn task_notification(ts: &str, body: &str) -> serde_json::Value {
+        serde_json::json!({"type":"user","timestamp":ts,
+            "message":{"content":body}})
+    }
+
+    #[test]
+    fn a_task_notification_becomes_its_own_item_not_a_prompt() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            asst("on it"),
+            task_notification(
+                "2026-09-18T10:01:00Z",
+                "<task-notification>\n\
+                 <task-id>a623962a33b4c9765</task-id>\n\
+                 <tool-use-id>toolu_1</tool-use-id>\n\
+                 <output-file>/private/tmp/x/tasks/a6.output</output-file>\n\
+                 <status>completed</status>\n\
+                 <summary>Agent \"Posúdiť stratégiu testov\" finished</summary>\n\
+                 <note>A task-notification fires each time this agent stops.</note>\n\
+                 <result>Mám naštudované všetky zdroje.</result>\n\
+                 </task-notification>",
+            ),
+        ]));
+        assert_eq!(t.len(), 2, "the notification opens a turn of its own");
+        assert_eq!(t[1].prompt, None, "it is never a prompt");
+        assert_eq!(
+            t[1].items,
+            vec![ConvItem::Notification {
+                task_id: Some("a623962a33b4c9765".into()),
+                tool_use_id: Some("toolu_1".into()),
+                status: Some("completed".into()),
+                summary: Some("Agent \"Posúdiť stratégiu testov\" finished".into()),
+                result: Some("Mám naštudované všetky zdroje.".into()),
+                output_file: Some("/private/tmp/x/tasks/a6.output".into()),
+                event: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_monitor_event_without_a_tool_use_id_still_parses() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            task_notification(
+                "2026-09-18T10:01:00Z",
+                "<task-notification>\n\
+                 <task-id>buzo0s189</task-id>\n\
+                 <summary>Monitor event: \"PR #165 CI checks\"</summary>\n\
+                 <event>frontend (ubuntu-24.04): pass</event>\n\
+                 </task-notification>",
+            ),
+        ]));
+        let ConvItem::Notification {
+            tool_use_id,
+            status,
+            event,
+            ..
+        } = &t[1].items[0]
+        else {
+            panic!("expected a notification, got {:?}", t[1].items[0]);
+        };
+        assert_eq!(*tool_use_id, None);
+        assert_eq!(*status, None, "a mid-stream event reports no completion");
+        assert_eq!(event.as_deref(), Some("frontend (ubuntu-24.04): pass"));
+    }
+
+    #[test]
+    fn a_prompt_that_merely_quotes_the_tag_stays_a_prompt() {
+        let text =
+            "why did this fire?\n<task-notification>\n<task-id>x</task-id>\n</task-notification>";
+        let t = parse_conversation(&jl(&[user(serde_json::json!(text))]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt.as_deref(), Some(text));
+        assert!(t[0].items.is_empty());
+    }
+
+    #[test]
+    fn consecutive_notifications_share_one_prompt_less_turn() {
+        let note = |id: &str| {
+            task_notification(
+                "2026-09-18T10:01:00Z",
+                &format!(
+                    "<task-notification>\n<task-id>{id}</task-id>\n\
+                     <status>completed</status>\n<summary>Agent {id} finished</summary>\n\
+                     </task-notification>"
+                ),
+            )
+        };
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            asst("dispatched three"),
+            note("a1"),
+            note("a2"),
+            note("a3"),
+        ]));
+        assert_eq!(
+            t.len(),
+            2,
+            "three arrivals with no reply between them = one turn"
+        );
+        assert_eq!(t[1].items.len(), 3);
+    }
+
+    #[test]
+    fn a_notification_after_a_reply_opens_a_fresh_turn() {
+        let note = task_notification(
+            "2026-09-18T10:01:00Z",
+            "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n\
+             <summary>Agent a1 finished</summary>\n</task-notification>",
+        );
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            note.clone(),
+            asst("thanks, agent"),
+            note,
+        ]));
+        assert_eq!(
+            t.len(),
+            3,
+            "a reply between two notifications separates them"
+        );
+    }
+
+    #[test]
+    fn a_notification_result_is_capped_on_a_char_boundary() {
+        let long = "é".repeat(NOTIFICATION_RESULT_MAX_CHARS + 500);
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            task_notification(
+                "2026-09-18T10:01:00Z",
+                &format!(
+                    "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n\
+                     <summary>done</summary>\n<result>{long}</result>\n</task-notification>"
+                ),
+            ),
+        ]));
+        let ConvItem::Notification { result, .. } = &t[1].items[0] else {
+            panic!("expected a notification");
+        };
+        let got = result.as_deref().unwrap();
+        assert_eq!(
+            got.chars().count(),
+            NOTIFICATION_RESULT_MAX_CHARS + 1,
+            "capped plus the ellipsis"
+        );
+        assert!(got.ends_with('…'));
+    }
+
+    #[test]
+    fn notification_result_cap_is_the_compaction_budget_not_the_subagent_one() {
+        assert_eq!(NOTIFICATION_RESULT_MAX_CHARS, 20_000);
+        assert_eq!(SUBAGENT_RESULT_MAX_CHARS, 1_500);
+    }
+
     /// A `Tool` item with only `summary`/`error` set, for synthetic
     /// (non-parsed) test turns that don't exercise the new fields.
     fn tool_item(summary: &str, error: bool) -> ConvItem {
