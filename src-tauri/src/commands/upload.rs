@@ -34,12 +34,13 @@ const UPLOAD_TIMEOUT_SECS: u64 = 60;
 /// round-trip and a user who drops, then waits for a session to open.
 pub const UPLOAD_ALLOW_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// How long a *picked* path stays uploadable. A pick fills the composer's
-/// attachment tray, and the upload only happens once the user sends the
-/// prompt they are still writing around it — ordinary minutes, unlike a
-/// drop's immediate upload. A day comfortably covers one sitting (including
-/// a break) without authorising a picked file indefinitely.
-pub const PICKED_ALLOW_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long a *picked* path stays uploadable. A pick has no immediate
+/// upload the way a drop does: the file sits in the composer's attachment
+/// tray while the user keeps writing the prompt around it, and may step
+/// away — a break, a phone call — before sending. Four hours covers a tray
+/// held open through that kind of pause without leaving a picked file
+/// authorised past the sitting it was picked for.
+pub const PICKED_ALLOW_TTL: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// Where an allow-listed path came from — the two origins are authorised
 /// for different lengths of time (see [`UPLOAD_ALLOW_TTL`] /
@@ -653,6 +654,16 @@ mod tests {
             "a picked file must outlive the drop TTL: the composer tray is not a slow IPC round-trip"
         );
         assert!(al.is_allowed_at(&picked, t0 + Duration::from_secs(60 * 60)));
+        // The boundary itself: just inside the window is still allowed,
+        // just outside is refused.
+        assert!(
+            al.is_allowed_at(&picked, t0 + PICKED_ALLOW_TTL - Duration::from_secs(1)),
+            "one second before the TTL, still authorised"
+        );
+        assert!(
+            !al.is_allowed_at(&picked, t0 + PICKED_ALLOW_TTL + Duration::from_secs(1)),
+            "one second past the TTL, no longer authorised"
+        );
         assert!(
             !al.is_allowed_at(&picked, t0 + PICKED_ALLOW_TTL),
             "a pick still expires eventually"

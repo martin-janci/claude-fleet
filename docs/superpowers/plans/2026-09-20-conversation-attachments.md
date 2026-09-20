@@ -390,7 +390,9 @@ mod tests {
         assert!(s.contains("mkdir -p '/w/proj/.claude-fleet-attachments'"));
         // .git/info/exclude, never the tracked .gitignore: an attachment must
         // not show up as a change the user has to explain.
-        assert!(s.contains(".git/info/exclude"));
+        // --git-common-dir, because a linked worktree's .git is a FILE and its
+        // excludes live in the common dir.
+        assert!(s.contains("--git-common-dir"));
         assert!(!s.contains(".gitignore"));
         // Idempotent: appending twice must not double the line.
         assert!(s.contains("grep -qxF"));
@@ -433,14 +435,24 @@ pub fn root_script(tmux_name: &str) -> String {
 
 /// Create the attachment dir and make git ignore it without tracking that
 /// decision. `grep -qxF` keeps a repeated run from doubling the line.
+///
+/// The exclude file is found with `--git-common-dir`, NOT `<root>/.git/info/`.
+/// In a linked worktree `.git` is a FILE containing `gitdir: …`, so that path
+/// does not exist — `mkdir -p` on it fails with "Not a directory" and takes the
+/// whole `&&` chain down. Git also reads a linked worktree's excludes from the
+/// COMMON dir, so writing beside the `.git` file would never take effect even
+/// if it could be created. This repo develops in linked worktrees, so that is
+/// the normal case here, not the exotic one.
 pub fn stage_script(root: &str) -> String {
     let dir = quote(&format!("{root}/{ATTACH_DIR}"));
-    let excl = quote(&format!("{root}/.git/info/exclude"));
+    let root_q = quote(root);
     let line = quote(&format!("/{ATTACH_DIR}/"));
     format!(
         "mkdir -p {dir} && \
-         {{ [ -d {excl} ] || mkdir -p \"$(dirname {excl})\"; }} && \
-         {{ grep -qxF {line} {excl} 2>/dev/null || printf '%s\\n' {line} >> {excl}; }}"
+         g=$(git -C {root_q} rev-parse --path-format=absolute --git-common-dir) && \
+         mkdir -p \"$g/info\" && \
+         {{ grep -qxF {line} \"$g/info/exclude\" 2>/dev/null || \
+            printf '%s\\n' {line} >> \"$g/info/exclude\"; }}"
     )
 }
 ```

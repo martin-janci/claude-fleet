@@ -308,9 +308,13 @@ What gets built:
   `git rev-parse --show-toplevel` (`service/repo.rs:56`) — because `SessionRow`
   carries `worktree_id` and `worktree_key`, an id and a name, **not a path**.
   Files go to `<root>/.claude-fleet-attachments/` with collision-free basenames,
-  and the directory is added to the repo's `.git/info/exclude` rather than its
-  tracked `.gitignore`, so an attachment never shows up as a change the user has
-  to explain. Basenames are validated: a filename containing a newline would
+  and the directory is excluded untracked rather than through the repo's
+  tracked `.gitignore`, so an attachment never shows up as a change the user
+  has to explain. The exclude file is located with `git rev-parse
+  --git-common-dir`, **not** `<root>/.git/info/`: in a linked worktree `.git`
+  is a file, that path does not exist, and git reads the worktree's excludes
+  from the common directory. This repo develops in linked worktrees, so that
+  is the ordinary case, not an edge one. Basenames are validated: a filename containing a newline would
   otherwise travel into the prompt text.
 - **Hub parity.** A verdict row for each new command, `refuse_local_only` **by
   command name**, `REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib
