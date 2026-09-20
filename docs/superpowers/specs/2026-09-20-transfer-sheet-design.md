@@ -110,8 +110,10 @@ must not duplicate a message that may quote stderr.
   `bus_sync_progress` in `store/`.
 - The hub's `GET /events` forwards every `RowChange`, and the desktop bridge
   (`src-tauri/src/backend/events.rs`) re-emits names found in `EVENT_NAMES`,
-  so a hub-routed desktop receives the event with no further change. The hub
-  contract golden is regenerated (`REGEN_HUB_CONTRACT=1`).
+  so a hub-routed desktop receives the event with no further change. The
+  bridge's event table in `src-tauri/src/backend/tests_events.rs` gains the
+  new variant. The hub contract golden pins row types only, not events, so it
+  does not change.
 
 ### Emitting
 
@@ -175,18 +177,28 @@ export function dismissMove(sessionId: number): void;
 export function activeMoveFor(sessionId: number): MoveRun | undefined;   // status === 'running'
 ```
 
-- `MOVE_STEPS` (the nine names in order, with their labels) is a constant in
-  this file. A Rust test — the same trick that pins `EVENT_NAMES` against
-  `src/lib/events.ts` — reads `src/lib/moves.ts` and asserts that the
-  serialized names of `MoveStep::ALL` appear in it, in order, and that no
-  other quoted name sits between the list's markers. A tenth step cannot be
-  added on one side only.
+- The wire types (`MoveStep`, `MoveStepState`, `MoveProgress`), the constant
+  `MOVE_STEPS` (the nine names in order) and `stepLabel(step, toHost)` live in
+  `src/lib/moveProgress.ts`, which both `events.ts` and `moves.ts` import. A
+  Rust test — the same trick that pins `EVENT_NAMES` against
+  `src/lib/events.ts` — reads that file and asserts that the quoted names
+  between its `// move-steps:begin` and `// move-steps:end` markers equal the
+  serialized names of `MoveStep::ALL`, in order. A tenth step cannot be added
+  on one side only.
 - `startMove` creates the run (`origin: 'local'`, all steps `pending`,
   `status: 'running'`), calls `moveSession(...)` **without the caller awaiting
   it**, and settles the run from the result: `Ok` → `done` + `report`;
   `Err` with code `E_MOVE_PARTIAL` → `partial` + `error`; any other `Err` →
   `failed` + `error`. It refuses (returns without invoking) when a run for
   that session is already `running`.
+- When a local run settles: if the source is still the selected session and
+  the move succeeded, selection follows to `report.target` (today's
+  behaviour); and if the sheet is not open on that run, a toast says how it
+  ended ("Moved {name} to {host}" / the error toast "Move of {name} failed"),
+  so a move finished behind a closed sheet is never silent.
+- `dismissMove` removes only a settled run; a running one cannot be dismissed.
+- A `check`/`started` event for a session whose run is already settled starts
+  a fresh observed run in its place (someone moved that session again).
 - `applyMoveProgress` patches the step at `index`. Rules, so out-of-order or
   duplicated events cannot corrupt the list:
   - a step's state only moves forward: `pending → started → done|warned|failed`;
@@ -281,8 +293,8 @@ parts:
 1. *What failed* — a sentence from `src/lib/moveErrors.ts`, which maps the
    error code and `details.step` to text. Codes: `E_MOVE_DIRTY`,
    `E_MOVE_UNPUSHED`, `E_MOVE_MIDOP`, `E_MOVE_TARGET_DIRTY`,
-   `E_MOVE_TOO_LARGE`, `E_MOVE_CARRY` (by `details.step`: `seed`, `snapshot`,
-   `download`, `fetch`, `apply`, `verify`, …), `E_MOVE_PARTIAL`, `E_INVALID_STATE` (the busy /
+   `E_MOVE_TOO_LARGE`, `E_MOVE_CARRY` (by `details.step`: `seed`, `haves`,
+   `snapshot`, `download`, `upload`, `fetch`, `apply`, `verify`, `target`), `E_MOVE_PARTIAL`, `E_INVALID_STATE` (the busy /
    unknown-status refusal and the move already in progress), `E_LOCAL_ONLY`, and a fallback that shows the
    backend's message unchanged. The failed step is highlighted in the step
    list, which stays visible.
@@ -314,7 +326,8 @@ move-local state are deleted; the eligibility deriveds call
   re-created as `observed` on the next event and settles from events.
 - **A result without events** (event stream down, or an old hub that does not
   emit `move:progress`). `startMove` still settles the run; on `Ok` every
-  non-final step is marked `done`. The progress view then simply shows nothing
+  step not already `warned` is marked `done`, and on `Err` with no `failed`
+  step the step that was `started` is marked `failed`. The progress view then simply shows nothing
   moving until the end — today's behaviour, no worse. This is also why the
   hub should be upgraded before the desktops (ADR 0002 already says so).
 - **`detail` from an untrusted hub.** Rendered as text, truncated at 80
@@ -332,8 +345,8 @@ Rust (`fleet-core`):
   completes;
 - a pre-claim refusal emits nothing;
 - `EVENT_NAMES`/`EVENT_KINDS`/`RowChange::name` parity, the `events.ts` name
-  check, the `/events` kind filter accepting `move`, and the regenerated hub
-  contract golden.
+  check, the `moveProgress.ts` step-list check, the `/events` kind filter
+  accepting `move`, and the desktop bridge carrying the new event.
 
 Vitest:
 
@@ -356,14 +369,16 @@ verified by the component tests; the event stream by the Rust tests.
 ## 6. Files
 
 New: `crates/fleet-core/src/service/move_session/progress.rs`,
-`src/lib/moves.ts`, `src/lib/moveEligibility.ts`, `src/lib/moveErrors.ts`,
+`src/lib/moveProgress.ts`, `src/lib/moves.ts`, `src/lib/moveEligibility.ts`, `src/lib/moveErrors.ts`,
 `src/lib/TransferSheet.svelte`, `src/lib/TransferChip.svelte`, and their
 tests.
 
 Changed: `crates/fleet-core/src/events.rs`, `crates/fleet-core/src/store/`
 (one bus method), `crates/fleet-core/src/service/move_session/mod.rs` (the
-nine `start` calls and the `Progress` plumbing), the hub contract golden,
+nine `start` calls and the `Progress` plumbing),
+`crates/fleet-core/src/mcp/events_route.rs` and
+`src-tauri/src/backend/tests_events.rs` (tests only),
 `src/lib/events.ts`, `src/App.svelte`, `src/lib/TerminalView.svelte`,
-`src/lib/SessionDetails.svelte`, `docs/hub.md` (the `/events` kinds list) and
+`src/lib/SessionDetails.svelte`, `docs/control-api.md` (the `/events` names list) and
 `docs/adr/0002-move-carries-work-as-is.md` (a short "what the user sees"
 note).
