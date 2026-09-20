@@ -140,18 +140,50 @@ describe('the terminal tab against a hub', () => {
     expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
   });
 
-  it('never attaches an agent host, and explains instead', async () => {
+  // `transport: 'agent'` says the HUB cannot dial the host. It says nothing
+  // about THIS machine, which may well have a route — an ssh config entry
+  // with a ProxyCommand through a box that can reach it. The pane used to
+  // refuse outright and assert that no route existed anywhere, which is
+  // false for exactly that setup. So it attaches like any other host and
+  // explains only once the attempt has actually failed.
+  it('attaches an agent host rather than refusing on its transport alone', async () => {
     hubStatus.set(remote);
     hosts.set([makeHost({ alias: 'trn', transport: 'agent' })]);
     render(TerminalView);
     selectSession(session);
     await settle();
-    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(false);
-    const hint = screen.getByTestId('terminal-no-attach');
-    expect(hint.textContent).toContain('fleet-agent');
-    expect(hint.textContent).toContain('dev-martin-janci-claude-fleet');
-    // Not even the ssh line, which would be a lie for this host.
-    expect(screen.queryByTestId('terminal-attach-line')).toBeNull();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
+    expect(screen.queryByTestId('terminal-no-attach')).toBeNull();
+  });
+
+  it('explains the agent transport when the attach actually fails', async () => {
+    hubStatus.set(remote);
+    hosts.set([makeHost({ alias: 'trn', transport: 'agent' })]);
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') return { data: '', bytes: 0 };
+      if (cmd === 'pty_open') throw { code: 'E_SSH', message: 'ssh: connect timed out' };
+      return null;
+    });
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    const why = screen.getByTestId('terminal-agent-transport');
+    expect(why.textContent).toContain('fleet-agent');
+    // It must not claim nothing anywhere can reach the host — the whole bug.
+    expect(why.textContent).not.toContain('Nothing can dial');
+  });
+
+  it('keeps a non-agent host on its ordinary error, not the agent sentence', async () => {
+    hosts.set([makeHost({ alias: 'trn', transport: 'ssh' })]);
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') return { data: '', bytes: 0 };
+      if (cmd === 'pty_open') throw { code: 'E_SSH', message: 'ssh: connect timed out' };
+      return null;
+    });
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    expect(screen.queryByTestId('terminal-agent-transport')).toBeNull();
   });
 
   it('offers Transfer from the attached pane', async () => {
