@@ -905,6 +905,27 @@
     if (atBottom) unseen = 0;
   }
 
+  /** Run a mutation that changes the composer's height without moving the
+   *  transcript under the reader. The composer is flex: 0 0 auto at the
+   *  bottom of a column flex, so it grows by taking from the scroller. */
+  export function preserveThread(mutate: () => void): void {
+    const el = scroller;
+    if (!el) {
+      mutate();
+      return;
+    }
+    const wasAtBottom = atBottom;
+    const before = el.clientHeight;
+    mutate();
+    requestAnimationFrame(() => {
+      if (wasAtBottom) {
+        el.scrollTop = el.scrollHeight;
+        return;
+      }
+      el.scrollTop += before - el.clientHeight;
+    });
+  }
+
   /** Open a tool group when it becomes the running turn's last group; never
    *  close one, and never re-open one the user closed while it stays the
    *  running group, so manual toggles survive transcript refreshes. */
@@ -1255,7 +1276,7 @@
           class="btn btn--chip chips-more"
           data-testid="conv-chips-more"
           aria-expanded={chipsExpanded}
-          onclick={() => (chipsExpanded = !chipsExpanded)}>{chipsExpanded ? 'Less' : 'More'} ▾</button>
+          onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : 'More'} ▾</button>
       {/if}
       <div class="composer-shell">
         <textarea

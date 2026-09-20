@@ -887,6 +887,33 @@ describe('ConversationPanel quick actions', () => {
     expect(row.getAttribute('data-expanded')).toBe('true');
   });
 
+  it('preserveThread keeps the viewport on the same content when the composer grows', async () => {
+    await mount();
+    const row = screen.getByTestId('conv-chips');
+    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
+    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+
+    const scroller = screen.getByTestId('conv-scroller');
+    // Expanding the chips row (More) is the composer growing: model that by
+    // tying the scroller's measured height to the row's own expanded state,
+    // the way real layout would shrink the scroller underneath it.
+    Object.defineProperty(scroller, 'clientHeight', {
+      configurable: true,
+      get: () => (row.getAttribute('data-expanded') === 'true' ? 350 : 400),
+    });
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    scroller.scrollTop = 500;
+    // Not pinned to the bottom: the correction must apply.
+    await fireEvent.scroll(scroller);
+
+    const more = screen.getByTestId('conv-chips-more');
+    await fireEvent.click(more);
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    expect(scroller.scrollTop).toBe(550);
+  });
+
   it('re-measures when the preset list changes, not just on resize', async () => {
     await mount();
     const row = screen.getByTestId('conv-chips');
