@@ -2296,6 +2296,24 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(screen.queryByTestId('conv-turn-index')).toBeNull();
   });
 
+  it('the empty state says what to do about it', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    const { unmount } = render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const state = screen.getByTestId('conv-empty-state');
+    expect(within(state).getByTestId('conv-empty').textContent).toBe('No conversation yet');
+    expect(state.textContent).toContain('Send a prompt below');
+    unmount();
+
+    // A session with no pane has no composer to point at.
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    render(ConversationPanel, { session: session({ kind: 'bg' }), visible: true });
+    await settle();
+    const ro = screen.getByTestId('conv-empty-state');
+    expect(ro.textContent).not.toContain('Send a prompt below');
+    expect(ro.textContent).toContain('outside tmux');
+  });
+
   it('the transcript is a named region a keyboard can reach and scroll', async () => {
     mockedConv.mockReturnValue(ok(threeTurns()));
     render(ConversationPanel, { session: session(), visible: true });

@@ -41,6 +41,7 @@
     sameConversation,
     isPinned,
     emptyStateText,
+    emptyStateHint,
     relativeTime,
     groupItems,
     toolGroupLabel,
@@ -740,12 +741,14 @@
     return () => clearInterval(t);
   });
 
-  const empty = $derived(
-    viewing !== null && errorCode === 'E_NO_TRANSCRIPT'
-      ? 'Transcript no longer on host'
-      : emptyStateText(errorCode, !!session.claude_session_id),
-  );
+  const gone = $derived(viewing !== null && errorCode === 'E_NO_TRANSCRIPT');
+  const empty = $derived(gone ? 'Transcript no longer on host' : emptyStateText(errorCode, !!session.claude_session_id));
   const canPrompt = $derived(!hasNoPane(session));
+  const emptyHint = $derived(
+    gone
+      ? 'The host no longer keeps this conversation’s transcript file.'
+      : emptyStateHint(errorCode, !!session.claude_session_id, canPrompt),
+  );
   // The scroller (and so the thread) is on screen: find has something to search.
   const threadShown = $derived(!(empty && !(pending && viewing === null)) && !loading);
 
@@ -1021,7 +1024,10 @@
   {/if}
   <div class="thread-area">
   {#if empty && !(pending && viewing === null)}
-    <p class="muted" data-testid="conv-empty">{empty}</p>
+    <div class="empty-state" data-testid="conv-empty-state">
+      <p class="empty-title" data-testid="conv-empty">{empty}</p>
+      {#if emptyHint}<p class="empty-hint">{emptyHint}</p>{/if}
+    </div>
   {:else if loading}
     <p class="muted">Loading…</p>
   {:else}
@@ -1742,6 +1748,28 @@
     padding: 1rem 1.1rem 2.5rem;
   }
   .muted { color: var(--fg-muted); font-style: italic; font-size: 0.8rem; margin: 0.6rem; }
+  .empty-state {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
+    padding: 1.5rem 1.1rem;
+    text-align: center;
+  }
+  .empty-title {
+    margin: 0;
+    color: var(--fg);
+    font-size: 0.9rem;
+  }
+  .empty-hint {
+    margin: 0;
+    max-width: 44ch;
+    color: var(--fg-muted);
+    font-size: 0.8rem;
+    line-height: 1.5;
+  }
   .truncated { text-align: center; margin: 0 0 1rem; }
   .error-row {
     display: flex;
