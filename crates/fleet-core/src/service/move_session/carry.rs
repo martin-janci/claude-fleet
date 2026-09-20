@@ -85,6 +85,28 @@ pub struct LeftBehind {
     pub reason: LeftReason,
 }
 
+/// What travelled of the per-session directory (`<project dir>/<id>/`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionStateReport {
+    /// Files merged into place on the target (path inside `<id>/`).
+    pub carried: Vec<IgnoredEntry>,
+    /// The target already had an equal or larger copy; it was kept.
+    pub kept_target: Vec<String>,
+    pub left_behind: Vec<LeftBehind>,
+}
+
+/// What travelled of the project's Claude memory (`<repo root>/memory/`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryReport {
+    pub carried: Vec<IgnoredEntry>,
+    /// Same name on both hosts, different contents: the target's file stays.
+    pub kept_target: Vec<String>,
+    pub identical: u32,
+    /// Lines appended to the target's `MEMORY.md`.
+    pub index_lines_added: u32,
+    pub left_behind: Vec<LeftBehind>,
+}
+
 /// What a move carried besides the transcript.
 ///
 /// Read back from a hub in remote mode, so every field is required on the
@@ -99,6 +121,8 @@ pub struct CarryReport {
     pub ignored_carried: Vec<IgnoredEntry>,
     pub ignored_left_behind: Vec<LeftBehind>,
     pub target_seeded: TargetSeed,
+    pub session_state: SessionStateReport,
+    pub memory: MemoryReport,
 }
 
 /// One record of the ignored-list script.
@@ -854,6 +878,28 @@ pub(crate) mod tests {
                 reason: LeftReason::Denylisted,
             }],
             target_seeded: TargetSeed::Initialized,
+            session_state: SessionStateReport {
+                carried: vec![IgnoredEntry {
+                    path: "subagents/agent-ab12.jsonl".into(),
+                    bytes: 2048,
+                }],
+                kept_target: vec!["custom-title.json".into()],
+                left_behind: vec![LeftBehind {
+                    path: "subagents/agent-ff00.jsonl".into(),
+                    bytes: Some(900_000_000),
+                    reason: LeftReason::OverCap,
+                }],
+            },
+            memory: MemoryReport {
+                carried: vec![IgnoredEntry {
+                    path: "build-notes.md".into(),
+                    bytes: 512,
+                }],
+                kept_target: vec!["deploy.md".into()],
+                identical: 3,
+                index_lines_added: 1,
+                left_behind: Vec::new(),
+            },
         };
         let json = serde_json::to_value(&report).unwrap();
         let back: CarryReport = serde_json::from_value(json.clone()).unwrap();
@@ -863,9 +909,18 @@ pub(crate) mod tests {
             "the leading space survives"
         );
 
-        let mut missing = json;
+        let mut missing = json.clone();
         missing.as_object_mut().unwrap().remove("target_seeded");
         assert!(serde_json::from_value::<CarryReport>(missing).is_err());
+
+        for field in ["session_state", "memory"] {
+            let mut missing = serde_json::to_value(&report).unwrap();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<CarryReport>(missing).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

@@ -58,6 +58,7 @@
 //! `&dyn SshExec`, so the whole flow runs end-to-end over `FakeSsh` in tests.
 
 pub mod carry;
+pub mod claude_state;
 
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
