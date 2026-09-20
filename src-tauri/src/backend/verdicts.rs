@@ -507,8 +507,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     (
         "mcp_status",
         Verdict::LocalOnly {
-            instead: "this app runs no embedded control API while a hub owns the fleet (Task \
-                      1 skips it); the hub is the control API",
+            instead: "this app runs no embedded control API while a hub owns the fleet; the \
+                      hub is the control API",
         },
     ),
     (
