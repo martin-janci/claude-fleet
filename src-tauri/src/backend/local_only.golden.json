@@ -49,7 +49,6 @@
   "mcp_status": "mcp_status is not available while this desktop is a window onto https://hub.example.com; this app runs no embedded control API while a hub owns the fleet; the hub is the control API",
   "probe_ssh_alias": "probe_ssh_alias is not available while this desktop is a window onto https://hub.example.com; it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it",
   "provision_hosts": "provision_hosts is not available while this desktop is a window onto https://hub.example.com; it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub`",
-  "pty_open": "pty_open is not available while this desktop is a window onto https://hub.example.com; the terminal attaches over this machine's SSH connection to the session's host; attach from that host, or from a standalone app",
   "purge_project": "purge_project is not available while this desktop is a window onto https://hub.example.com; it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub",
   "refresh_account_usage": "refresh_account_usage is not available while this desktop is a window onto https://hub.example.com; it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub",
   "remove_host": "remove_host is not available while this desktop is a window onto https://hub.example.com; removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub`",
@@ -70,6 +69,5 @@
   "set_account_nickname": "set_account_nickname is not available while this desktop is a window onto https://hub.example.com; the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub",
   "set_fleet_setting": "set_fleet_setting is not available while this desktop is a window onto https://hub.example.com; these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub",
   "set_host_token_mode": "set_host_token_mode is not available while this desktop is a window onto https://hub.example.com; these are this app's own per-host tokens, not the hub's; change the mode on the hub",
-  "tunnel_status": "tunnel_status is not available while this desktop is a window onto https://hub.example.com; the tunnels belong to the process that owns the fleet; check them on the hub",
-  "upload_to_session": "upload_to_session is not available while this desktop is a window onto https://hub.example.com; the file is on this machine and the session's host is the hub's to reach; copy it there yourself, or drop it on a standalone app"
+  "tunnel_status": "tunnel_status is not available while this desktop is a window onto https://hub.example.com; the tunnels belong to the process that owns the fleet; check them on the hub"
 }
