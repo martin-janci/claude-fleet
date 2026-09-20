@@ -26,8 +26,8 @@
 //!
 //! Which one each command gets is written down once, in
 //! [`VERDICTS`](super::verdicts::VERDICTS), and every other place that needs
-//! to know — the refusal sentences, the tests, and (from #157 Task 2) the
-//! frontend and the docs — reads it from there.
+//! to know — the refusal sentences, the tests, the frontend and the docs —
+//! reads it from there.
 //!
 //! The dangerous verdict is the one nobody makes. A mutation left on the local
 //! path in remote mode does not fail — it SSHes into a host with this

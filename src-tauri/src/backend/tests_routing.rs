@@ -187,8 +187,8 @@ fn check(cases: Vec<Case>) {
         assert_eq!(
             verdicts::verdict(command).and_then(Verdict::tool),
             Some(got_tool.as_str()),
-            "{command} sent {got_tool}, but its VERDICTS row names {:?} — Task 2 \
-             publishes that row to the frontend and the docs",
+            "{command} sent {got_tool}, but its VERDICTS row names {:?} — that row is \
+             published to the frontend and the docs",
             verdicts::verdict(command).and_then(Verdict::tool),
         );
         if let Err(e) = got {
@@ -1038,8 +1038,8 @@ fn health_is_the_hubs_fleet_not_this_apps_empty_database() {
     assert_eq!(
         verdicts::verdict("health_check").and_then(Verdict::tool),
         Some(tool.as_str()),
-        "health_check sent {tool}, but its VERDICTS row names {:?} — Task 2 \
-         publishes that row to the frontend and the docs",
+        "health_check sent {tool}, but its VERDICTS row names {:?} — that row is \
+         published to the frontend and the docs",
         verdicts::verdict("health_check").and_then(Verdict::tool),
     );
     assert_eq!(got.stuck, 3, "a zero here is the bug this test exists for");
