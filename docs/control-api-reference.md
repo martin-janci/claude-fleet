@@ -476,6 +476,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::upload::upload_to_session`
 - `commands::upload::pick_attachments`
 - `commands::upload::attachment_preview`
+- `commands::upload::attachment_describe`
 - `commands::upload::upload_attachments`
 - `commands::history::repo_log`
 - `commands::history::repo_branches`
