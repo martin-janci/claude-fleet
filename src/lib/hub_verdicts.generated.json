@@ -48,6 +48,7 @@
     "list_host_tokens",
     "mcp_configure",
     "mcp_status",
+    "pick_attachments",
     "probe_ssh_alias",
     "provision_hosts",
     "pty_open",

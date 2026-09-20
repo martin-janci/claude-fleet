@@ -356,6 +356,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       reach; copy it there yourself, or drop it on a standalone app",
         },
     ),
+    (
+        "pick_attachments",
+        Verdict::LocalOnly {
+            instead: "the picker opens on this machine and the session's host is the hub's \
+                      to reach; pick the files from a standalone app instead",
+        },
+    ),
     ("repo_log", Verdict::Routed { tool: "repo_log" }),
     (
         "repo_branches",

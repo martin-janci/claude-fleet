@@ -967,7 +967,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 123 commands, 36 route to a hub tool, 1 routes except for one argument shape, 72 refuse, and 14 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 124 commands, 36 route to a hub tool, 1 routes except for one argument shape, 73 refuse, and 14 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1019,6 +1019,7 @@ Of the 123 commands, 36 route to a hub tool, 1 routes except for one argument sh
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
+| `pick_attachments` | the picker opens on this machine and the session's host is the hub's to reach; pick the files from a standalone app instead |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
 | `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub` |
 | `pty_open` | the terminal attaches over this machine's SSH connection to the session's host; attach from that host, or from a standalone app |

@@ -474,6 +474,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::files::repo_file`
 - `commands::files::repo_diff`
 - `commands::upload::upload_to_session`
+- `commands::upload::pick_attachments`
 - `commands::history::repo_log`
 - `commands::history::repo_branches`
 - `commands::history::repo_commit`

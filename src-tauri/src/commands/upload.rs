@@ -85,6 +85,108 @@ impl UploadAllowList {
     }
 }
 
+/// How the composer should draw an attachment before it is uploaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachKind {
+    Image,
+    Text,
+    Binary,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PickedFile {
+    /// Absolute local path. Echoed back verbatim by the frontend, and only
+    /// accepted again because THIS process put it on the allow-list.
+    pub path: String,
+    pub name: String,
+    pub size: u64,
+    pub kind: AttachKind,
+}
+
+fn classify(path: &Path) -> AttachKind {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => AttachKind::Image,
+        "txt" | "md" | "log" | "json" | "yaml" | "yml" | "toml" | "csv" | "diff" | "patch"
+        | "rs" | "ts" | "js" | "svelte" | "py" | "sh" => AttachKind::Text,
+        _ => AttachKind::Binary,
+    }
+}
+
+/// Record picked paths on the allow-list and describe them for the composer.
+/// Split out of the command so the authorisation is unit-testable without a
+/// Tauri app handle.
+pub fn record_picked(
+    allow: &UploadAllowList,
+    paths: Vec<PathBuf>,
+) -> Result<Vec<PickedFile>, IpcError> {
+    allow.allow(&paths);
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let size = std::fs::metadata(&p)
+            .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("stat {}: {e}", p.display())))?
+            .len();
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        // A newline in a basename would travel into the prompt text.
+        if name.contains(['\n', '\r']) {
+            return Err(IpcError::new(
+                codes::E_UPLOAD,
+                format!("{name:?} contains a newline in its name"),
+            ));
+        }
+        let kind = classify(&p);
+        out.push(PickedFile {
+            path: p.to_string_lossy().into_owned(),
+            name,
+            size,
+            kind,
+        });
+    }
+    Ok(out)
+}
+
+/// Open the OS file picker and authorise whatever the user chooses. The
+/// picker runs HERE, not in the webview, so the webview still never gets to
+/// name a path (SEC-9).
+#[tauri::command]
+pub async fn pick_attachments(
+    app: tauri::AppHandle,
+    backend: State<'_, Arc<FleetBackend>>,
+    allow: State<'_, Arc<UploadAllowList>>,
+) -> Result<Vec<PickedFile>, IpcError> {
+    // The picker opens on THIS machine's desktop; there is no way to show a
+    // hub's file dialog through the frame this app draws.
+    backend.refuse_local_only("pick_attachments")?;
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Attach files")
+        .pick_files(move |paths| {
+            let _ = tx.send(paths);
+        });
+    let picked = rx
+        .await
+        .map_err(|_| IpcError::new(codes::E_UPLOAD, "the file picker closed unexpectedly"))?;
+    let Some(paths) = picked else {
+        return Ok(vec![]);
+    };
+    let paths: Vec<PathBuf> = paths
+        .into_iter()
+        .filter_map(|p| p.into_path().ok())
+        .collect();
+    record_picked(&allow, paths)
+}
+
 #[derive(Deserialize)]
 pub struct UploadArgs {
     pub host_alias: String,
@@ -277,6 +379,31 @@ mod tests {
         let e = al.entries.lock().unwrap();
         assert!(!e.contains_key(Path::new("/tmp/old.png")));
         assert!(e.contains_key(Path::new("/tmp/new.png")));
+    }
+
+    #[test]
+    fn a_picked_file_is_authorised_and_classified() {
+        let allow = UploadAllowList::new();
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
+
+        let picked = record_picked(&allow, vec![png.clone()]).unwrap();
+
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].name, "shot.png");
+        assert_eq!(picked[0].kind, AttachKind::Image);
+        assert_eq!(picked[0].size, 8);
+        // The gate the whole design turns on.
+        assert!(allow.is_allowed(&png));
+        assert!(check_paths_allowed(&allow, &[png.to_string_lossy().into_owned()]).is_ok());
+    }
+
+    #[test]
+    fn an_unpicked_path_stays_forbidden() {
+        let allow = UploadAllowList::new();
+        let err = check_paths_allowed(&allow, &["/etc/passwd".to_string()]).unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN);
     }
 
     #[test]

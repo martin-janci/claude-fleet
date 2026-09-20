@@ -127,6 +127,10 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
     'catalog_write_layer',
     'catalog_delete_layer',
   ],
+  // pick_attachments (the OS file picker that authorises its own result,
+  // SEC-9) has no caller yet either — the composer's attach button is a
+  // later task of the same plan (`.superpowers/sdd/2026-09-20-conversation-attachments/`).
+  noUiControlYet: ['pick_attachments'],
   // Gated by AssetsPanel.svelte's own `catalog_config` gate: `{#if
   // catalogBlocked}` swaps the ENTIRE panel body (Sync, Secrets, asset
   // list/detail, import, lint, layers-adjacent…) for the remote note, so
