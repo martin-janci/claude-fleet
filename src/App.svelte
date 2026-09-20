@@ -47,6 +47,10 @@
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
   import HintLayer from './lib/HintLayer.svelte';
   import McpConfirmDialog from './lib/McpConfirmDialog.svelte';
+  import AgentFab from './lib/AgentFab.svelte';
+  import AgentPanel from './lib/AgentPanel.svelte';
+  import { openAgent } from './lib/operator';
+  import type { AgentContextInput } from './lib/agent_context';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
@@ -451,6 +455,16 @@
   });
   const usageFooter = $derived(footerUsage($hosts, $accounts, $accountUsage, nowSec));
 
+  // What the agent is told about where the person is standing. `branch` has
+  // no plumbing in App.svelte today (no per-session/current-branch state to
+  // read), so it is left null here rather than adding new state for it.
+  const agentContextInput: AgentContextInput = $derived({
+    view: hostsMode ? 'hosts' : 'terminal',
+    session: $selectedSession,
+    hostAlias: $selectedSession?.host_alias ?? hostsPreselect,
+    branch: null,
+  });
+
   function onHostsFilterSidebar(alias: string) {
     sidebarCollapsed = false;
     hostFilter.set(alias);
@@ -471,7 +485,7 @@
     if (chord === 'hosts') toggleHosts();
     else if (chord === 'session-view') flipSessionView();
     else if (chord === 'settings') settingsOpen.set(true);
-    // 'agent' is not wired up yet — a later task owns opening the agent panel.
+    else if (chord === 'agent') void openAgent();
   }
 
   function onKeydown(e: KeyboardEvent) {
@@ -525,6 +539,8 @@
 <Toasts />
 <TransferSheet />
 <McpConfirmDialog />
+<AgentFab />
+<AgentPanel contextInput={agentContextInput} />
 <!-- Cmd/Ctrl+K / Cmd/Ctrl+P. Its "new session" rows publish a request that
      mounts the dialog here (the Sidebar keeps its own instance for its
      footer button until it adopts the store post-#46). -->

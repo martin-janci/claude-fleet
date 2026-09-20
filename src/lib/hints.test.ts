@@ -32,6 +32,14 @@ describe('pickActiveHint', () => {
   });
 });
 
+describe('HINTS', () => {
+  it('has a hint for the agent FAB, or nobody finds the button', () => {
+    const h = HINTS.find((x) => x.id === 'agent-fab');
+    expect(h).toBeTruthy();
+    expect(h!.text.length).toBeGreaterThan(0);
+  });
+});
+
 describe('hintsGateOpen', () => {
   it('open when welcomed', () => {
     expect(hintsGateOpen(true, 0, 0)).toBe(true);

@@ -12,6 +12,7 @@ import { clearToasts } from './lib/toasts';
 import { clearSelection, selectSession, selectedSession } from './lib/selection';
 import { hostFilter } from './lib/hosts';
 import { hostsViewOpen, settingsOpen } from './lib/app_views';
+import { agentPanelOpen, operatorState } from './lib/operator';
 import type { SessionRow } from './lib/sessions';
 import type { AccountUsageSnapshot } from './lib/account_usage_store';
 import { clock } from './lib/account_usage';
@@ -49,6 +50,8 @@ beforeEach(async () => {
   clearSelection();
   hostFilter.set('all');
   settingsOpen.set(false);
+  agentPanelOpen.set(false);
+  operatorState.set('unknown');
   localStorage.clear();
   rows = [
     session('mefistos', 'dev-mef', { project_id: null }),
@@ -318,12 +321,32 @@ describe('App: the Hosts view', () => {
     expect(within(dialog).getByTestId('settings-hosts-summary').textContent).toBe('5 configured · 1 offline');
   });
 
-  it('⌘E is reserved for the agent (not wired up yet) — it must not fall through to Settings', async () => {
+  it('⌘E is reserved for the agent — it must not fall through to Settings', async () => {
+    const routed = inv.getMockImplementation() as (cmd: string, ...rest: unknown[]) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+      if (cmd === 'operator_status') return { ready: true, session: null, blocked: null };
+      return routed(cmd, ...rest);
+    });
     await mountApp();
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
     await tick();
     expect(get(settingsOpen)).toBe(false);
     expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
+  });
+
+  it('⌘E opens the agent panel', async () => {
+    const routed = inv.getMockImplementation() as (cmd: string, ...rest: unknown[]) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+      if (cmd === 'operator_status') return { ready: true, session: null, blocked: null };
+      return routed(cmd, ...rest);
+    });
+    await mountApp();
+    expect(screen.queryByRole('region', { name: 'Agent' })).toBeNull();
+    await fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    await tick();
+    expect(get(agentPanelOpen)).toBe(true);
+    expect(screen.getByRole('region', { name: 'Agent' })).toBeTruthy();
+    expect(get(settingsOpen)).toBe(false);
   });
 
   it('Settings → Open Hosts closes Settings and opens the view', async () => {
