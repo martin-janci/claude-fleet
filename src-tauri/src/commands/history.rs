@@ -3,7 +3,7 @@
 //! Thin wrappers over `service::repo_read`.
 //!
 //! All four have hub tools of the same name and route there in remote mode.
-//! Their return types gained `Deserialize` in Task 3; because
+//! Their return types carry `Deserialize` for that; because
 //! `mcp::tools::repo` answers through plain `ok_json` rather than the
 //! null-stripping encoder, they carry no `#[serde(default)]` and a renamed
 //! field still fails loudly.

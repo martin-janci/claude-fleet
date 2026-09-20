@@ -92,7 +92,7 @@ pub const ALLOW_PLAINTEXT_KEY: &str = "hub.client_plaintext_token";
 /// as "no risk": a caller that reached here without `normalise_base_url`
 /// would otherwise be cleared for a hop nobody inspected.
 ///
-/// Public because pairing (Task 5) hits `POST /pair` with a URL the user just
+/// Public because pairing hits `POST /pair` with a URL the user just
 /// typed, *before* any token is stored and therefore before [`Backend::resolve`]
 /// has ever seen it. That path must ask the same question, and must ask it
 /// with the same answer.
@@ -820,9 +820,9 @@ mod tests {
         assert!(Probe::<String>(std::marker::PhantomData).is_serialize());
     }
 
-    /// The Task 2 review's finding 3. Loopback is the tunnelled or
-    /// port-forwarded hub and needs no ceremony; anything else on plain http
-    /// puts a fleet-wide credential on the wire in the clear.
+    /// Loopback is the tunnelled or port-forwarded hub and needs no
+    /// ceremony; anything else on plain http puts a fleet-wide credential on
+    /// the wire in the clear.
     #[test]
     fn plaintext_is_a_risk_everywhere_except_loopback() {
         for safe in [

@@ -950,9 +950,9 @@ describe('NewSessionDialog: Enter is gated the same as the Create button', () =>
   });
 });
 
-// #146 finding 4, fix round 2: `list_host_worktrees` refuses with
-// E_LOCAL_ONLY for a hub client (no hub tool over SSH). Fix round 1 read
-// `project.worktrees` as a substitute, on the assumption a remote host's
+// #146: `list_host_worktrees` refuses with
+// E_LOCAL_ONLY for a hub client (no hub tool over SSH). An earlier version
+// read `project.worktrees` as a substitute, on the assumption a remote host's
 // rows land there via the row-event stream — false: `list_projects_joined`
 // only ever joins `host_alias = 'local'` rows, so `project.worktrees` is
 // always the STORE's own local checkout, never a remote host's, and
@@ -1151,9 +1151,9 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
     expect(document.body.textContent).not.toContain('floor');
   });
 
-  // #147 fix round 1, finding 5: `refresh_account_usage` is local-only in
+  // #147: `refresh_account_usage` is local-only in
   // remote mode, and this onMount fetch-trigger is the same shape as
-  // HostsView's (Task 4, Part B) — gated on `ownsTheFleet(...)`.
+  // HostsView's — gated on `ownsTheFleet(...)`.
   const remote: HubStatus = {
     remote: true,
     url: 'https://fleet.example.com',

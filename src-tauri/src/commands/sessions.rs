@@ -24,7 +24,7 @@
 //!
 //! `new_session` used to be refused here too: `NewSessionArgs` carried
 //! `kind`, `start_command` and `friendly_name`, and `NewSessionParams`
-//! carried none of them. Task 1 (#146) added the three fields to the tool's
+//! carried none of them. #146 added the three fields to the tool's
 //! params (optional — absent means today's MCP behaviour), so the desktop's
 //! arguments now map one-to-one and it routes unconditionally.
 

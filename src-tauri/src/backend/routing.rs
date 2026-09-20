@@ -45,8 +45,8 @@
 //! `start_command` and `friendly_name` that `NewSessionParams` carried none
 //! of, and a shell session was a different tool (`new_shell_session`):
 //! routing it would not have failed — it would have **SUCCEEDED**, created a
-//! session, and silently dropped the label the user typed. Task 1 (#146)
-//! closed that gap by adding the three fields to the tool's params (optional
+//! session, and silently dropped the label the user typed. #146 closed that
+//! gap by adding the three fields to the tool's params (optional
 //! — absent means today's MCP behaviour), so `new_session` now routes
 //! unconditionally. `repair_session` is still partly refused, and for the
 //! same shape of reason: the tool always runs the EXPLICIT repair, and the

@@ -958,7 +958,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
-        // Task 1 (#146): `kind`, `start_command` and `friendly_name` now map
+        // #146: `kind`, `start_command` and `friendly_name` now map
         // one-to-one onto the tool's `NewSessionParams`, so `new_session`
         // routes unconditionally (`call_id` is this process's own
         // cancellation-registry key and has no counterpart — never sent).
@@ -1099,9 +1099,9 @@ fn refresh_asks_whoever_owns_the_fleet_to_reconcile() {
     }
 }
 
-/// The Task 3 deferral, closed. `health_check` used to be exempt because it
-/// returned a bare `Health`; in remote mode it therefore read the local
-/// database, which a hub client never fills, and answered a **zeroed fleet**
+/// `health_check` used to be exempt because it returned a bare `Health`; in
+/// remote mode it therefore read the local database, which a hub client
+/// never fills, and answered a **zeroed fleet**
 /// — no stuck sessions, no ghosts, nothing in the red. That is the most
 /// reassuring thing this app can say and it was saying it about a fleet it
 /// was not looking at.
@@ -1410,7 +1410,7 @@ fn a_command_the_table_cannot_answer_is_still_refused() {
     );
 }
 
-/// Task 1 (#146), the controller ruling: `repair_session` routes only
+/// #146: `repair_session` routes only
 /// `explicit: true` (the Repair workspace button, which maps one-to-one onto
 /// the tool's always-explicit repair). `explicit: false` — the automatic
 /// pre-attach check — has no hub counterpart, and must never be silently
@@ -1546,6 +1546,41 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
         said.contains("kill_session"),
         "the routed Kill does this for an inactive agent, and the user should \
          be sent there: {said}"
+    );
+}
+
+/// True if `s` contains a plan-step reference of the form "Task" followed by
+/// a number — the kind of thing that means something to whoever wrote the
+/// implementation plan and nothing to a user reading an error message.
+/// Hand-rolled rather than a `regex` dependency: `src-tauri` does not
+/// otherwise need one.
+fn contains_plan_step_reference(s: &str) -> bool {
+    let mut rest = s;
+    while let Some(idx) = rest.find("Task ") {
+        rest = &rest[idx + "Task ".len()..];
+        if rest.starts_with(|c: char| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A refusal sentence is read by a user who never saw the plan that
+/// introduced the command. It must not lean on plan-step vocabulary to make
+/// its point.
+#[test]
+fn no_refusal_sentence_names_a_plan_step() {
+    let offenders: Vec<&str> = VERDICTS
+        .iter()
+        .filter_map(|(command, verdict)| {
+            let sentence = verdict.instead()?;
+            contains_plan_step_reference(sentence).then_some(*command)
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "these commands' refusal sentences name a plan step a reader cannot \
+         resolve: {offenders:?}"
     );
 }
 

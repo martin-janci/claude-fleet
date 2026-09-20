@@ -474,9 +474,9 @@ describe('HostsView: hub client', () => {
     hubConnection.set({ state: 'standalone' });
   });
 
-  // fix round 1, finding 1: `r` and `u` called `reprobe`/`refreshUsage`
-  // directly, bypassing the buttons' `disabled` — the only non-button path
-  // to a gated action this task found. Gated in the handlers themselves.
+  // `r` and `u` called `reprobe`/`refreshUsage` directly, bypassing the
+  // buttons' `disabled` — the only non-button path to a gated action found.
+  // Gated in the handlers themselves.
   it('r and u do nothing while blocked: no probe_host, no refresh_account_usage', async () => {
     hubStatus.set(remote);
     hubConnection.set({ state: 'offline', attempt: 1, retry_in_secs: 5, reason: 'refused' });
@@ -543,8 +543,8 @@ describe('HostsView: hub client', () => {
     expect(refresh.title).toContain('fleet.example.com');
   });
 
-  // fix round 1, finding 4: `list_host_tokens` is also local-only in remote
-  // mode and was still firing unconditionally on open.
+  // `list_host_tokens` is also local-only in remote mode and was still
+  // firing unconditionally on open.
   it('does not fire list_host_tokens on open', async () => {
     hubStatus.set(remote);
     mount({ preselect: 'mefistos' });

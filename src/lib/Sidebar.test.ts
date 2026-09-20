@@ -77,7 +77,7 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
     // valid array (never null) when Sidebar.svelte does `$hosts.filter(...)`.
     if (cmd === 'list_hosts') return [];
     if (cmd === 'list_accounts') return [];
-    // Iter 4a Task 13: mutation IPCs now return the affected row (or id for
+    // Mutation IPCs now return the affected row (or id for
     // kill). The wrapper then patches the store via mergeSession/removeSession;
     // mergeSession(null) would throw. Return a sentinel that satisfies the
     // patch even though these tests only assert that the IPC was invoked.

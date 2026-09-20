@@ -1,9 +1,9 @@
-//! Tauri IPC wrappers for account usage (Task 4). Logic lives in
+//! Tauri IPC wrappers for account usage. Logic lives in
 //! `service::account_usage_poll`; the fetch itself is
 //! `service::account_usage` (security-reviewed, untouched here).
 //!
 //! Both refuse in remote mode. The cache they read is filled by
-//! `spawn_account_usage_tick`, which a hub client does not start (Task 1), so
+//! `spawn_account_usage_tick`, which a hub client does not start, so
 //! the local answer would be a permanently empty list presented as fact — and
 //! the refresh path SSHes to the host from here. The hub's `usage_report`
 //! tool answers per-session usage, a different shape from

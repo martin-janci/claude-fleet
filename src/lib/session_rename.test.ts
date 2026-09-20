@@ -1,4 +1,4 @@
-// #147 fix round 1, finding 1: the label/tmux-rename editor opens from a
+// #147: the label/tmux-rename editor opens from a
 // button (already disabled up front) AND from a double-click on the row
 // (SessionRowItem) / the title (SessionDetails) — a path that doesn't
 // consult a button's `disabled`. `applySessionRename` is the one place both

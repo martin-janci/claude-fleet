@@ -59,7 +59,7 @@ export type RowEventHandlers = {
   onAccountEvents?: (rows: AccountRow[]) => void;
   onProjectEvents?: (events: ProjectEvent[]) => void;
   onTaskEvents?: (events: TaskEvent[]) => void;
-  /** Task 4: one call per flush with every `account_usage:updated` row. */
+  /** One call per flush with every `account_usage:updated` row. */
   onAccountUsageEvents?: (rows: AccountUsageSnapshot[]) => void;
   /** One call per flush with every `session:event` (timeline push). */
   onTimelineEvents?: (events: TimelineEvent[]) => void;

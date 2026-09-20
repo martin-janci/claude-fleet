@@ -6,7 +6,7 @@
 //! The hub's tools are built from `fleet-core`'s own service layer, so the
 //! JSON they return *is* the row type a local command would have returned.
 //! That makes this a deserialisation rather than a translation, and it is why
-//! Task 3 can swap the backend under a command without changing its
+//! the backend can be swapped under a command without changing its
 //! signature.
 //!
 //! Three things about the wire are easy to get wrong and are handled here

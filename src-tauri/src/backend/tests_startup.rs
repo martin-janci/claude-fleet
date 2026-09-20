@@ -1,7 +1,7 @@
 //! Is the absence of the three background tasks actually observable?
 //!
-//! The Task 2 review's finding 4, in test form. See [`super`] for why the
-//! previous guard was a tautology.
+//! Proven here, in test form — see [`super`] for why the previous guard was
+//! a tautology.
 
 use super::*;
 use crate::backend::RemoteConfig;
@@ -88,8 +88,8 @@ fn a_standalone_app_starts_all_three() {
 /// `bootstrap::tasks`, reached only through [`start_background_tasks`]. This
 /// is a string match rather than a type-level guarantee, which would mean
 /// threading a witness token through `fleet-core`'s public API and
-/// `fleet-hub` with it — a bigger change than this fix round, and noted in
-/// the report as the stronger option still on the table.
+/// `fleet-hub` with it — a bigger change than this, and the stronger option
+/// still on the table.
 #[test]
 fn lib_rs_cannot_start_a_background_task_behind_this_modules_back() {
     let lib = include_str!("../lib.rs");
