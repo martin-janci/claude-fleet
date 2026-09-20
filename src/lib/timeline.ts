@@ -1,6 +1,14 @@
 // Session event timeline (Q9): IPC wrapper plus the pure helpers the
 // Timeline component renders with. The rows come from the append-only
 // `session_events` table (migration 013) via the `session_history` command.
+//
+// `moveOrigin` and `unresolvedPartial` are also pure over that same
+// `SessionEvent[]`: they are what makes "Move back to {host}" and the
+// finish/undo of a partial move available after the app restarts and the
+// in-memory move-run store is gone. The durable record lives on the
+// session's own timeline (the `session_moved` / `session_move_partial` /
+// `session_move_undone` events), not in memory, so reading it back needs no
+// new IPC — hence pure helpers living beside the other timeline helpers.
 
 import { invokeCmd, type Result } from './result';
 
@@ -100,4 +108,72 @@ export function filterEvents(
 ): SessionEvent[] {
   if (active.size === 0) return events;
   return events.filter((e) => active.has(eventCategory(e)));
+}
+
+/** Where a session came from, for a "Move back to {host}" offer. */
+export interface MoveOrigin {
+  fromHost: string;
+  claudeSessionId: string | null;
+}
+
+/** A partial move (both sessions still alive) that nothing has resolved yet. */
+export interface UnresolvedPartial {
+  targetSessionId: number;
+  sourceSessionId: number | null;
+  fromHost: string;
+  toHost: string;
+  step: string | null;
+}
+
+const MOVE_KINDS = new Set(['session_moved', 'session_move_partial', 'session_move_undone']);
+
+/** Parses `detail` defensively: `null`, malformed JSON, or a non-object
+ *  value all mean "no usable record" rather than a thrown error. */
+function detailOf(e: SessionEvent): Record<string, unknown> | null {
+  if (e.detail === null) return null;
+  try {
+    const v: unknown = JSON.parse(e.detail);
+    return typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The most recent host a session was moved from, from its own
+ *  `session_moved` events (newest first, per `sessionHistory`). `null` when
+ *  the session was never moved or the record is unusable. */
+export function moveOrigin(events: SessionEvent[]): MoveOrigin | null {
+  for (const e of events) {
+    if (e.kind !== 'session_moved') continue;
+    const d = detailOf(e);
+    if (!d) continue;
+    const fromHost = d.from_host;
+    if (typeof fromHost !== 'string') continue;
+    const claudeSessionId = typeof d.claude_session_id === 'string' ? d.claude_session_id : null;
+    return { fromHost, claudeSessionId };
+  }
+  return null;
+}
+
+/** The most recent partial move nothing has resolved yet: scans newest-first
+ *  over the move-related kinds only, and stops at the first one that
+ *  decides — a `session_moved`/`session_move_undone` means resolved
+ *  (`null`), a `session_move_partial` is the answer, provided it names a
+ *  target to act on. */
+export function unresolvedPartial(events: SessionEvent[]): UnresolvedPartial | null {
+  for (const e of events) {
+    if (!MOVE_KINDS.has(e.kind)) continue;
+    if (e.kind === 'session_moved' || e.kind === 'session_move_undone') return null;
+    // e.kind === 'session_move_partial'
+    const d = detailOf(e);
+    if (!d) return null;
+    const targetSessionId = d.to_session_id;
+    if (typeof targetSessionId !== 'number') return null;
+    const fromHost = typeof d.from_host === 'string' ? d.from_host : '';
+    const toHost = typeof d.to_host === 'string' ? d.to_host : '';
+    const sourceSessionId = typeof d.from_session_id === 'number' ? d.from_session_id : null;
+    const step = typeof d.step === 'string' ? d.step : null;
+    return { targetSessionId, sourceSessionId, fromHost, toHost, step };
+  }
+  return null;
 }
