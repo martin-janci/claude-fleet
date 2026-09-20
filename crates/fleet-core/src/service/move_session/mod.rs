@@ -1735,7 +1735,29 @@ fn carry_transport(step: &str, e: IpcError) -> IpcError {
     )
 }
 
-fn partial(step: &str, target: &str, name: &str, target_id: Option<i64>, e: &IpcError) -> IpcError {
+/// What a partial move must leave behind so that `resolve_move` can finish or
+/// undo it later — after the window is closed and the run store is gone.
+/// Built once, as soon as the target session exists and the tmux name is
+/// known, and passed to every `partial(…)` call site from there on.
+/// `to_turn_seq` / `to_last_turn_at` start `None` and are filled in as the
+/// target row itself becomes known — never guessed for a call site that
+/// fails before that.
+pub(super) struct PartialCtx {
+    pub from_host: String,
+    pub to_host: String,
+    pub to_tmux_name: String,
+    pub claude_session_id: String,
+    pub branch: String,
+    /// The source transcript as the copy was taken. `None` before the copy.
+    pub source_transcript: Option<Located>,
+    /// The target row's counters as the move last saw them.
+    pub to_turn_seq: Option<i64>,
+    pub to_last_turn_at: Option<i64>,
+}
+
+fn partial(step: &str, ctx: &PartialCtx, target_id: Option<i64>, e: &IpcError) -> IpcError {
+    let target = &ctx.to_host;
+    let name = &ctx.to_tmux_name;
     IpcError::new(
         codes::E_MOVE_PARTIAL,
         format!(
@@ -1745,10 +1767,22 @@ fn partial(step: &str, target: &str, name: &str, target_id: Option<i64>, e: &Ipc
     )
     .with_details(serde_json::json!({
         "step": step,
-        "target_host": target,
-        "target_tmux_name": name,
+        "target_host": ctx.to_host,
+        "target_tmux_name": ctx.to_tmux_name,
         "target_session_id": target_id,
         "cause_code": e.code,
+        // Everything a later `resolve_move` needs and cannot re-derive once
+        // the run store is gone — see `record_partial`, which copies these
+        // straight into the durable `session_move_partial` timeline event.
+        "from_host": ctx.from_host,
+        "to_tmux_name": ctx.to_tmux_name,
+        "claude_session_id": ctx.claude_session_id,
+        "branch": ctx.branch,
+        "source_transcript_size": ctx.source_transcript.as_ref().map(|l| l.size),
+        "source_transcript_mtime": ctx.source_transcript.as_ref().map(|l| l.mtime),
+        "source_transcript_path": ctx.source_transcript.as_ref().map(|l| l.path.clone()),
+        "to_turn_seq": ctx.to_turn_seq,
+        "to_last_turn_at": ctx.to_last_turn_at,
     }))
 }
 
@@ -1798,6 +1832,11 @@ async fn locate_on(
 }
 
 /// Record [`EVENT_MOVE_PARTIAL`] for a partial move. Best effort.
+///
+/// This is the only durable handle a later `resolve_move` will have — the
+/// run store is long gone by then — so every fact `partial(…)` put in
+/// `e.details` travels through here into the event, unchanged, `null` where
+/// the move never reached it.
 fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcError) {
     let d = e.details.clone().unwrap_or_default();
     let target_id = d["target_session_id"].as_i64();
@@ -1807,6 +1846,15 @@ fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcEr
         "from_session_id": source_id,
         "to_session_id": target_id,
         "cause_code": d["cause_code"],
+        "from_host": d["from_host"],
+        "to_tmux_name": d["to_tmux_name"],
+        "claude_session_id": d["claude_session_id"],
+        "branch": d["branch"],
+        "source_transcript_size": d["source_transcript_size"],
+        "source_transcript_mtime": d["source_transcript_mtime"],
+        "source_transcript_path": d["source_transcript_path"],
+        "to_turn_seq": d["to_turn_seq"],
+        "to_last_turn_at": d["to_last_turn_at"],
     })
     .to_string();
     let Ok(s) = store.lock() else { return };
@@ -2534,17 +2582,30 @@ async fn move_session_inner(
     // chose may be a name fleet killed there moments ago; the refresh below
     // has to be free to insert its row.
     crate::service::sessions::record_tmux_created(store, &target, &tmux_name);
+    // Built once the target session exists: every `partial(...)` call site
+    // from here on shares it. The transcript facts are already known (the
+    // copy precedes the start); the target row's counters are filled in as
+    // that row itself becomes known, below.
+    let mut partial_ctx = PartialCtx {
+        from_host: src.clone(),
+        to_host: target.clone(),
+        to_tmux_name: tmux_name.clone(),
+        claude_session_id: id.clone(),
+        branch: snap.branch.clone(),
+        source_transcript: Some(located.clone()),
+        to_turn_seq: None,
+        to_last_turn_at: None,
+    };
     hooks
         .refresh_host(store, &target)
         .await
-        .map_err(|e| partial("reconciling the target host", &target, &tmux_name, None, &e))?;
+        .map_err(|e| partial("reconciling the target host", &partial_ctx, None, &e))?;
     let new_row = {
         let s = lock(store)?;
         let row = s.get_session(&tmux_name, &target)?.ok_or_else(|| {
             partial(
                 "registering the target row",
-                &target,
-                &tmux_name,
+                &partial_ctx,
                 None,
                 &IpcError::new(codes::E_NOTFOUND, "no row after reconcile"),
             )
@@ -2593,6 +2654,9 @@ async fn move_session_inner(
         s.set_parent_session_id(row.id, Some(snap.row.id))?;
         row
     };
+    // The target row exists now: its counters, as this move has seen them.
+    partial_ctx.to_turn_seq = Some(new_row.turn_seq);
+    partial_ctx.to_last_turn_at = new_row.last_turn_at;
 
     // 5. Confirm: the row is running and the transcript is in place.
     let deadline = tokio::time::Instant::now() + opts.confirm_timeout;
@@ -2621,8 +2685,7 @@ async fn move_session_inner(
     let Some(target_row) = confirmed else {
         return Err(partial(
             "confirming the target is running",
-            &target,
-            &tmux_name,
+            &partial_ctx,
             Some(new_row.id),
             &IpcError::new(
                 codes::E_TIMEOUT,
@@ -2633,6 +2696,9 @@ async fn move_session_inner(
             ),
         ));
     };
+    // Confirmed: refresh the counters to what this row now shows.
+    partial_ctx.to_turn_seq = Some(target_row.turn_seq);
+    partial_ctx.to_last_turn_at = target_row.last_turn_at;
 
     progress.start(MoveStep::Handoff);
     // 6. The source: check it wrote nothing since the copy, kill it (unless
@@ -2647,8 +2713,7 @@ async fn move_session_inner(
             .map_err(|e| {
                 partial(
                     "re-checking the source transcript",
-                    &target,
-                    &tmux_name,
+                    &partial_ctx,
                     Some(target_row.id),
                     &e,
                 )
@@ -2656,8 +2721,7 @@ async fn move_session_inner(
         if recheck.size != located.size || recheck.mtime != located.mtime {
             return Err(partial(
                 "source transcript changed after copy",
-                &target,
-                &tmux_name,
+                &partial_ctx,
                 Some(target_row.id),
                 &IpcError::new(
                     codes::E_INVALID_STATE,
@@ -2689,8 +2753,7 @@ async fn move_session_inner(
             .map_err(|e| {
                 partial(
                     &format!("killing the source {} on {src}", snap.row.tmux_name),
-                    &target,
-                    &tmux_name,
+                    &partial_ctx,
                     Some(target_row.id),
                     &e,
                 )
@@ -2946,6 +3009,9 @@ mod tests {
         /// Killing the source makes its transcript grow (a write that
         /// slipped in after the final check).
         grow_source_on_kill: bool,
+        /// `refresh_host` fails when reconciling the target — the earliest
+        /// partial call site, before any target row exists.
+        refresh_target_fails: bool,
         /// Whether `session_moved` was already on the source when the kill
         /// ran (`None` = no kill).
         moved_at_kill: Mutex<Option<bool>>,
@@ -2963,6 +3029,7 @@ mod tests {
                 kill_fails: false,
                 grow_source_on_start: false,
                 grow_source_on_kill: false,
+                refresh_target_fails: false,
                 moved_at_kill: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
@@ -3016,6 +3083,9 @@ mod tests {
             Ok(())
         }
         async fn refresh_host(&self, store: &Mutex<Store>, host: &str) -> Result<(), IpcError> {
+            if self.refresh_target_fails && host != "alpha" {
+                return Err(IpcError::new(codes::E_SSH, "refresh failed"));
+            }
             let started = self.started.lock().unwrap().clone();
             let s = store.lock().unwrap();
             for (h, n) in started.iter().filter(|(h, _)| h == host) {
@@ -4049,6 +4119,68 @@ mod tests {
                 assert_eq!(d["to_host"], "beta");
             }
         }
+    }
+
+    /// Task 4: a partial move's `session_move_partial` detail carries
+    /// everything a later `resolve_move` needs — the target identity, the
+    /// source transcript as the copy was taken (size, mtime and path, so a
+    /// recovery never has to guess the file), and the target's counters.
+    #[tokio::test]
+    async fn a_partial_records_everything_a_later_recovery_needs() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        // The kill fails: the target is up, both rows are alive — a partial.
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.kill_fails = true;
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL);
+
+        let ev = events(&f, f.source_id);
+        let (_, detail) = ev
+            .iter()
+            .find(|(k, _)| k == EVENT_MOVE_PARTIAL)
+            .expect("session_move_partial on the source");
+        let d: serde_json::Value = serde_json::from_str(detail.as_deref().unwrap()).unwrap();
+        assert_eq!(d["from_host"], "alpha");
+        assert_eq!(d["to_host"], "beta");
+        assert_eq!(d["claude_session_id"], SID);
+        assert_eq!(d["branch"], "feat");
+        assert!(d["to_tmux_name"].is_string(), "{d}");
+        assert!(d["source_transcript_size"].is_u64(), "{d}");
+        assert!(d["source_transcript_mtime"].is_i64(), "{d}");
+        assert!(d["source_transcript_path"].is_string(), "{d}");
+        assert!(
+            d["to_turn_seq"].is_i64() || d["to_turn_seq"].is_null(),
+            "{d}"
+        );
+        assert!(d["step"].is_string(), "{d}");
+    }
+
+    /// A partial that fails at the earliest possible call site (reconciling
+    /// the target host, before any target row exists) still has the source
+    /// transcript facts — the copy happens before the target ever starts —
+    /// but must leave the not-yet-known target-row counters `null`, never a
+    /// guessed `0`.
+    #[tokio::test]
+    async fn a_partial_before_any_target_row_records_nulls_rather_than_guesses() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.refresh_target_fails = true;
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL);
+        let ev = events(&f, f.source_id);
+        let (_, detail) = ev.iter().find(|(k, _)| k == EVENT_MOVE_PARTIAL).unwrap();
+        let d: serde_json::Value = serde_json::from_str(detail.as_deref().unwrap()).unwrap();
+        // The transcript facts are known by then (the copy happens before the
+        // start)...
+        assert!(!d["source_transcript_size"].is_null(), "{d}");
+        assert!(!d["source_transcript_mtime"].is_null(), "{d}");
+        assert!(!d["source_transcript_path"].is_null(), "{d}");
+        assert_eq!(d["from_host"], "alpha");
+        // ...but a fact the move never reached must be null, never a guessed 0.
+        assert!(d["to_turn_seq"].is_null(), "{d}");
+        assert!(d["to_last_turn_at"].is_null(), "{d}");
     }
 
     #[tokio::test]
