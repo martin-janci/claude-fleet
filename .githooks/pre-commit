@@ -30,6 +30,18 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# A machine-local guard runs first, if one is installed.
+#
+# With core.hooksPath pointing here, git no longer looks in .git/hooks, so a
+# local hook that used to live there would silently stop running. Anything
+# private — patterns naming real domains or people, which must never be
+# committed to a public repo — belongs in .githooks/pre-commit.local, which
+# .gitignore keeps untracked. A non-zero exit from it aborts the commit,
+# because set -e is in force.
+if [[ -x .githooks/pre-commit.local ]]; then
+  .githooks/pre-commit.local "$@"
+fi
+
 # Keep this tree's build artifacts out of another tree's target directory.
 #
 # A commit made from a linked worktree inherits CARGO_TARGET_DIR from the

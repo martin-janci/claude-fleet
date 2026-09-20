@@ -26,3 +26,8 @@ vite.config.ts.timestamp-*
 
 # reticle's local scratch dir (an MCP tool's, not this project's).
 .reticle/
+
+# Machine-local pre-commit guard, called by .githooks/pre-commit. Kept out of
+# the repo because its patterns name private domains and people — committing
+# them would publish exactly what they exist to keep out.
+/.githooks/pre-commit.local
