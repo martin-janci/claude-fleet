@@ -940,8 +940,8 @@ Drop and paste:
     // The window-level guard must not also see this one.
     e.stopPropagation();
     dragDepth = 0;
-    // The OS drop already put these paths on the Rust allow-list via the
-    // Tauri window event; the webview only echoes them back.
+    // NOTE: this is WRONG and is corrected below — a dropped File in a
+    // WKWebView carries no filesystem path, so there is nothing here to echo.
     void attach(pickedFromDrop(e));
   }
   function onComposerPaste(e: ClipboardEvent) {
@@ -960,6 +960,18 @@ Drop and paste:
     );
   }
 ```
+
+**Where the dropped paths actually come from.** The DOM `drop` event cannot
+supply them: in a WKWebView a dropped `File` has no filesystem path, which is
+exactly why `TerminalView.svelte:325` subscribes to
+`getCurrentWebview().onDragDropEvent` instead — and that is the same event
+`lib.rs` already listens to in order to record those paths on the allow-list.
+So the composer subscribes to it too, hit-tests the drop point against the
+shell's bounding rect the way `pointOverGrid` does for the terminal grid, and
+attaches the paths the event carries. The DOM handlers stay, but only to drive
+the drag veil and to `stopPropagation()` so the window-level `file://` guard
+does not swallow the drop. Without this, the attach button works and dropping
+silently does nothing.
 
 **Note on paste:** a pasted file has no filesystem path, so it cannot go through the allow-list as-is. Until a `record_pasted_bytes` command exists, paste attaches the file for display and Task 7 rejects it at send time with a stated reason. Add that command to the deferred list in the spec rather than half-building it here.
 

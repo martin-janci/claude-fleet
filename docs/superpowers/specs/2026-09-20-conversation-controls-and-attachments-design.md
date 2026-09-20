@@ -347,7 +347,11 @@ in `src/` today, so this is greenfield.
   does the scaling, and a new dependency would mean a `cargo deny` review for a
   thumbnail.
 - **Drop target is the shell, not the panel.** `dragleave` fires for every child
-  element, so nesting is tracked with a depth counter, not a boolean.
+  element, so nesting is tracked with a depth counter, not a boolean. The paths
+  come from Tauri's `onDragDropEvent`, **not** from the DOM event: a dropped
+  `File` in a WKWebView carries no filesystem path, so the DOM handlers can only
+  drive the veil. That is the same event the backend already listens to in order
+  to authorise those paths, and the same one `TerminalView` uses.
 - **Paste**: files win only when `text/plain` is empty, so pasting from a
   rich-text source does not swallow the text half. Screenshots arrive named
   `image.png`; rename to `pasted-<HH.mm.ss>.png` so ten pastes are
