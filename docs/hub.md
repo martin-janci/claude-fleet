@@ -458,6 +458,37 @@ routed to it.
     agent flags the cut, but the hub's command interface has nowhere to
     carry the flag, so a cut answer looks complete.
 
+## Demo rows, for setting a client up
+
+A client paired to a hub that has never run a session shows an empty list, and
+an empty list is indistinguishable from a broken pairing: no sessions, no
+hosts, no error. Somebody setting the app up for the first time — or a script
+doing it unattended — cannot tell "it works and there is nothing here" from "it
+does not work".
+
+```bash
+fleet-hub demo-seed              # two fake hosts, two projects, six sessions
+fleet-hub demo-seed --hosts 4
+fleet-hub demo-seed --clear      # remove them again
+```
+
+Every row is named `demo-…`, and that prefix is the whole mechanism: `--clear`
+removes exactly the rows `demo-seed` wrote and nothing else. There is no
+`is_demo` column and deliberately so — a migration to support a development
+convenience would put the concept in every production database for good.
+
+**It refuses a hub that already has rows of its own.** Seeding a live fleet
+would mix invented sessions into a list an operator makes decisions from, with
+only the names telling them apart. `--force` is there for somebody who
+genuinely wants both. Re-seeding a hub that holds *only* demo rows is the
+ordinary case and needs no flag.
+
+The fake fleet is arranged to be worth looking at rather than merely non-empty:
+one host reachable and one not, and one session in each of `working`, `blocked`
+and `completed` — `blocked` being what a client's "needs attention" filter
+keeps. A client that groups, filters or draws reachability wrongly shows it
+here, instead of the first time something actually goes down.
+
 ## Pair a phone
 
 A *client* is a device that drives the fleet without being a fleet host: a
