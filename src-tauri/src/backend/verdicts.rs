@@ -370,6 +370,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       preview; open it from a standalone app instead",
         },
     ),
+    (
+        "upload_attachments",
+        Verdict::LocalOnly {
+            instead: "the bytes are on this machine and the session's host is the hub's to \
+                      reach; copy them there yourself, or drop them on a standalone app",
+        },
+    ),
     ("repo_log", Verdict::Routed { tool: "repo_log" }),
     (
         "repo_branches",

@@ -967,7 +967,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 125 commands, 36 route to a hub tool, 1 routes except for one argument shape, 74 refuse, and 14 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 126 commands, 36 route to a hub tool, 1 routes except for one argument shape, 75 refuse, and 14 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1045,6 +1045,7 @@ Of the 125 commands, 36 route to a hub tool, 1 routes except for one argument sh
 | `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
+| `upload_attachments` | the bytes are on this machine and the session's host is the hub's to reach; copy them there yourself, or drop them on a standalone app |
 | `upload_to_session` | the file is on this machine and the session's host is the hub's to reach; copy it there yourself, or drop it on a standalone app |
 <!-- END GENERATED: hub-client verdicts -->
 

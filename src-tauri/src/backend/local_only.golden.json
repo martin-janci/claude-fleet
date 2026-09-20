@@ -73,5 +73,6 @@
   "set_fleet_setting": "set_fleet_setting is not available while this desktop is a window onto https://hub.example.com; these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub",
   "set_host_token_mode": "set_host_token_mode is not available while this desktop is a window onto https://hub.example.com; these are this app's own per-host tokens, not the hub's; change the mode on the hub",
   "tunnel_status": "tunnel_status is not available while this desktop is a window onto https://hub.example.com; the tunnels belong to the process that owns the fleet; check them on the hub",
+  "upload_attachments": "upload_attachments is not available while this desktop is a window onto https://hub.example.com; the bytes are on this machine and the session's host is the hub's to reach; copy them there yourself, or drop them on a standalone app",
   "upload_to_session": "upload_to_session is not available while this desktop is a window onto https://hub.example.com; the file is on this machine and the session's host is the hub's to reach; copy it there yourself, or drop it on a standalone app"
 }

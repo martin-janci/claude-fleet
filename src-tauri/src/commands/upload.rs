@@ -216,6 +216,13 @@ pub const PREVIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// [`AttachKind::Image`]. Gated on `classify` first so the two extension
 /// lists cannot drift apart; this only adds the mime string each already
 /// implies.
+///
+/// `.svg` -> `image/svg+xml` is safe ONLY because a preview is rendered
+/// through `<img src="data:...">`: an `<img>` rasterises SVG and cannot
+/// execute the script it may contain. The mime string returned here must
+/// never be used to inline SVG markup into the DOM (innerHTML, an inline
+/// `<svg>`, or anything else that parses it as a document) — that path lets
+/// an attacker-controlled `.svg` run script in the app's origin.
 fn mime_for(path: &Path) -> Option<&'static str> {
     if classify(path) != AttachKind::Image {
         return None;
@@ -338,6 +345,110 @@ pub fn check_paths_allowed(allow: &UploadAllowList, paths: &[String]) -> Result<
     Ok(())
 }
 
+/// Basenames of `paths`, in order — not yet collision-free (see
+/// `dedupe_names`). Shared by `upload_to_session` and `upload_attachments`.
+fn basenames_of(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|p| {
+            Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string()
+        })
+        .collect()
+}
+
+/// Run `script` on `host` (local via `bash -lc`, remote over the
+/// ControlMaster — `fleet_core::ssh::run_shell` picks the branch) and map a
+/// non-zero exit to `E_UPLOAD` with the host's stderr.
+async fn run_script(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<std::process::Output, IpcError> {
+    let out = fleet_core::ssh::run_shell(ssh.as_ref(), host, script, timeout).await?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let detail = if stderr.trim().is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        return Err(IpcError::new(
+            codes::E_UPLOAD,
+            format!("on {host}: {detail}"),
+        ));
+    }
+    Ok(out)
+}
+
+/// Resolve the session's worktree root: ask tmux for the pane's cwd, then
+/// git for the toplevel — the same live resolution every Files-tab read
+/// already does (`fleet_core::service::repo::repo_script`). `SessionRow`
+/// only carries `worktree_id`/`worktree_key` (an id and a name, not a path),
+/// so there is nothing to resolve this from except the live pane.
+async fn resolve_worktree_root(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    session_name: &str,
+    timeout: Duration,
+) -> Result<String, IpcError> {
+    let script = fleet_core::service::attachments::root_script(session_name);
+    let out = run_script(ssh, host, &script, timeout).await?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Copy `local_paths` (named `names`, in order) into `dir` on `host` and
+/// return their absolute destination paths, in order. The one local-vs-remote
+/// branch `upload_to_session` and `upload_attachments` share: a local session
+/// copies with `std::fs`, a remote one streams over the ControlMaster
+/// (`SshClient::upload_file`).
+async fn transfer_all(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    local_paths: &[String],
+    names: &[String],
+    dir: &str,
+    timeout: Duration,
+) -> Result<Vec<String>, IpcError> {
+    let mut remote_paths = Vec::with_capacity(names.len());
+
+    if host == "local" {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("mkdir {dir}: {e}")))?;
+        for (src, name) in local_paths.iter().zip(names) {
+            let dest = format!("{dir}/{name}");
+            std::fs::copy(src, &dest)
+                .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("copy {src}: {e}")))?;
+            remote_paths.push(dest);
+        }
+    } else {
+        let mkdir = ssh
+            .run(host, &["mkdir", "-p", &quote(dir)], timeout)
+            .await?;
+        if !mkdir.status.success() {
+            return Err(IpcError::new(
+                codes::E_UPLOAD,
+                format!(
+                    "mkdir on {host} failed: {}",
+                    String::from_utf8_lossy(&mkdir.stderr).trim()
+                ),
+            ));
+        }
+        for (src, name) in local_paths.iter().zip(names) {
+            let dest = format!("{dir}/{name}");
+            ssh.upload_file(host, Path::new(src), &dest, timeout)
+                .await?;
+            remote_paths.push(dest);
+        }
+    }
+
+    Ok(remote_paths)
+}
+
 /// Stage `local_paths` under `~/.claude-fleet/uploads/<session>/` on the
 /// session's host and return the resulting absolute remote paths, in order.
 #[tauri::command]
@@ -361,19 +472,7 @@ pub async fn upload_to_session(
     // the file again.
     allow.consume(&args.local_paths);
 
-    // Collision-free destination basenames.
-    let basenames: Vec<String> = args
-        .local_paths
-        .iter()
-        .map(|p| {
-            Path::new(p)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file")
-                .to_string()
-        })
-        .collect();
-    let names = dedupe_names(&basenames);
+    let names = dedupe_names(&basenames_of(&args.local_paths));
 
     let timeout = Duration::from_secs(UPLOAD_TIMEOUT_SECS);
     let is_local = args.host_alias == "local";
@@ -386,40 +485,72 @@ pub async fn upload_to_session(
     };
     let dir = format!("{home}/.claude-fleet/uploads/{}", args.session_name);
 
-    let mut remote_paths = Vec::with_capacity(names.len());
+    transfer_all(
+        &ssh,
+        &args.host_alias,
+        &args.local_paths,
+        &names,
+        &dir,
+        timeout,
+    )
+    .await
+}
 
-    if is_local {
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("mkdir {dir}: {e}")))?;
-        for (src, name) in args.local_paths.iter().zip(&names) {
-            let dest = format!("{dir}/{name}");
-            std::fs::copy(src, &dest)
-                .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("copy {src}: {e}")))?;
-            remote_paths.push(dest);
-        }
-    } else {
-        let mkdir = ssh
-            .run(&args.host_alias, &["mkdir", "-p", &quote(&dir)], timeout)
-            .await?;
-        if !mkdir.status.success() {
-            return Err(IpcError::new(
-                codes::E_UPLOAD,
-                format!(
-                    "mkdir on {} failed: {}",
-                    args.host_alias,
-                    String::from_utf8_lossy(&mkdir.stderr).trim()
-                ),
-            ));
-        }
-        for (src, name) in args.local_paths.iter().zip(&names) {
-            let dest = format!("{dir}/{name}");
-            ssh.upload_file(&args.host_alias, Path::new(src), &dest, timeout)
-                .await?;
-            remote_paths.push(dest);
-        }
+#[derive(Deserialize)]
+pub struct AttachArgs {
+    pub host_alias: String,
+    /// The session's tmux name.
+    pub session_name: String,
+    /// Absolute local paths of the attached files.
+    pub local_paths: Vec<String>,
+}
+
+/// Stage attachments under the session's worktree root
+/// (`.claude-fleet-attachments/`, excluded untracked — see
+/// `fleet_core::service::attachments`) and return their absolute remote
+/// paths, in order, so Claude Code can read them without a permission
+/// prompt: an absolute path outside the working directory asks the user to
+/// approve it, and a prompt sent from the composer has nobody there to
+/// answer.
+#[tauri::command]
+pub async fn upload_attachments(
+    args: AttachArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    ssh: State<'_, Arc<SshClient>>,
+    allow: State<'_, Arc<UploadAllowList>>,
+) -> Result<Vec<String>, IpcError> {
+    // Same reason as upload_to_session: the bytes are on THIS machine and the
+    // host is the hub's to reach.
+    backend.refuse_local_only("upload_attachments")?;
+    fleet_core::validate::host_alias(&args.host_alias)?;
+    fleet_core::validate::tmux_name_addressable(&args.session_name)?;
+    if args.local_paths.is_empty() {
+        return Ok(vec![]);
     }
+    check_paths_allowed(&allow, &args.local_paths)?;
+    allow.consume(&args.local_paths);
 
-    Ok(remote_paths)
+    let timeout = Duration::from_secs(UPLOAD_TIMEOUT_SECS);
+    let root = resolve_worktree_root(&ssh, &args.host_alias, &args.session_name, timeout).await?;
+    let dir = format!("{root}/{}", fleet_core::service::attachments::ATTACH_DIR);
+
+    let names = dedupe_names(&basenames_of(&args.local_paths));
+    run_script(
+        &ssh,
+        &args.host_alias,
+        &fleet_core::service::attachments::stage_script(&root),
+        timeout,
+    )
+    .await?;
+    transfer_all(
+        &ssh,
+        &args.host_alias,
+        &args.local_paths,
+        &names,
+        &dir,
+        timeout,
+    )
+    .await
 }
 
 /// Make a batch of basenames collision-free, preserving order. The first

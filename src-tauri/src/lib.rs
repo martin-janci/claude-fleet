@@ -303,6 +303,7 @@ pub fn run() {
             commands::upload::upload_to_session,
             commands::upload::pick_attachments,
             commands::upload::attachment_preview,
+            commands::upload::upload_attachments,
             commands::history::repo_log,
             commands::history::repo_branches,
             commands::history::repo_commit,

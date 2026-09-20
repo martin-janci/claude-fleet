@@ -73,6 +73,7 @@
     "set_fleet_setting",
     "set_host_token_mode",
     "tunnel_status",
+    "upload_attachments",
     "upload_to_session"
   ],
   "routed": [
