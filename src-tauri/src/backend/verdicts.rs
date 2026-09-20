@@ -90,6 +90,7 @@ const NO_GIT_WRITE_TOOL: &str =
 
 /// Every command in `generate_handler!`, in that order, with its verdict.
 pub const VERDICTS: &[(&str, Verdict)] = &[
+    // ── health and this app's own logs ──────────────────────────────────────
     (
         "health_check",
         Verdict::Routed {
@@ -109,6 +110,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "this app's own log folder, which it has either way",
         },
     ),
+    // ── projects ────────────────────────────────────────────────────────────
     (
         "list_projects",
         Verdict::Routed {
@@ -135,6 +137,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       repositories from the hub or a standalone app",
         },
     ),
+    // ── sessions ────────────────────────────────────────────────────────────
     (
         "list_sessions",
         Verdict::Routed {
@@ -179,6 +182,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       step; use safe_kill_session, or do it from the hub",
         },
     ),
+    // ── worktrees ───────────────────────────────────────────────────────────
     (
         "list_worktrees",
         Verdict::Routed {
@@ -329,12 +333,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),
+    // ── tasks ───────────────────────────────────────────────────────────────
     (
         "cancel_task",
         Verdict::Routed {
             tool: "cancel_task",
         },
     ),
+    // ── the Files tab's reads, and the upload that feeds it ─────────────────
     (
         "repo_changes",
         Verdict::Routed {
@@ -370,6 +376,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "repo_commit_diff",
         },
     ),
+    // ── the Files tab's git writes — none of them has a tool ────────────────
     (
         "repo_checkout",
         Verdict::LocalOnly {
@@ -430,6 +437,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: NO_GIT_WRITE_TOOL,
         },
     ),
+    // ── hosts and accounts ──────────────────────────────────────────────────
     (
         "discover_hosts",
         Verdict::LocalOnly {
@@ -480,6 +488,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       it; rename the account on the hub",
         },
     ),
+    // ── account usage ───────────────────────────────────────────────────────
     (
         "list_account_usage",
         Verdict::LocalOnly {
@@ -494,6 +503,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       host; refresh it on the hub",
         },
     ),
+    // ── this app's own control API, and the hooks that report to it ─────────
     (
         "mcp_status",
         Verdict::LocalOnly {
@@ -556,6 +566,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "the same queue, the same reason",
         },
     ),
+    // ── the pairing itself — about THIS process, either way ─────────────────
     (
         "hub_status",
         Verdict::SameInBoth {
@@ -594,6 +605,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                   whole state is that no hub is configured",
         },
     ),
+    // ── onboarding ──────────────────────────────────────────────────────────
     (
         "check_local_prereqs",
         Verdict::LocalOnly {
@@ -608,6 +620,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       the hub",
         },
     ),
+    // ── the asset catalog — a git checkout the hub client does not have ─────
     (
         "catalog_config",
         Verdict::LocalOnly {
@@ -841,6 +854,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: CATALOG_IS_A_CHECKOUT,
         },
     ),
+    // ── the terminal, and this process's cancellation registry ──────────────
     (
         "pty_open",
         Verdict::LocalOnly {
