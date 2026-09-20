@@ -21,7 +21,7 @@
 //!   hold them to it instead. All four lists, not just the two below —
 //!   `hub_verdicts.test.ts` needs `routed`/`routed_unless` too.
 //! - `docs/hub.md`, between `BEGIN_MARKER`/`END_MARKER` — the REFUSAL table:
-//!   one row per command that is `LocalOnly` or `RoutedUnless` (73 of 123
+//!   one row per command that is `LocalOnly` or `RoutedUnless` (74 of 124
 //!   today), with what to do instead. `Routed`/`SameInBoth` rows are left
 //!   out on purpose — `| list_sessions | \`list_sessions\` |` tells an
 //!   operator nothing they came to docs to learn; the full verdict, for

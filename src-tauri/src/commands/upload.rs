@@ -4,10 +4,16 @@
 //! (`SshClient::upload_file`). No cleanup (per the design — files accumulate
 //! under ~/.claude-fleet/uploads/<session>/).
 //!
-//! The webview never gets to name an arbitrary local path: only paths the
-//! user actually dropped onto the window — recorded Rust-side from the Tauri
-//! drag-drop event into [`UploadAllowList`] with a short TTL — are accepted.
-//! Anything else is `E_FORBIDDEN` (SEC-9).
+//! The webview never gets to name an arbitrary local path: only paths this
+//! process itself authorised — a Tauri drag-drop event, or the OS picker in
+//! `pick_attachments` — are accepted, recorded Rust-side into
+//! [`UploadAllowList`]. Anything else is `E_FORBIDDEN` (SEC-9).
+//!
+//! The two origins keep separate TTLs ([`UPLOAD_ALLOW_TTL`] /
+//! [`PICKED_ALLOW_TTL`]): a drop is followed by the upload within
+//! milliseconds, but a picked file sits in the composer's attachment tray
+//! for as long as the user takes to write the prompt around it — ordinary
+//! minutes, not a slow IPC round-trip.
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::{codes, IpcError};
@@ -28,12 +34,38 @@ const UPLOAD_TIMEOUT_SECS: u64 = 60;
 /// round-trip and a user who drops, then waits for a session to open.
 pub const UPLOAD_ALLOW_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// Rust-side record of the paths the OS drag-drop handed the window.
-/// Managed in Tauri state as `Arc<UploadAllowList>`; populated from
-/// `on_window_event` / `on_webview_event` in `lib.rs`.
+/// How long a *picked* path stays uploadable. A pick fills the composer's
+/// attachment tray, and the upload only happens once the user sends the
+/// prompt they are still writing around it — ordinary minutes, unlike a
+/// drop's immediate upload. A day comfortably covers one sitting (including
+/// a break) without authorising a picked file indefinitely.
+pub const PICKED_ALLOW_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Where an allow-listed path came from — the two origins are authorised
+/// for different lengths of time (see [`UPLOAD_ALLOW_TTL`] /
+/// [`PICKED_ALLOW_TTL`]), so each entry remembers which rule it lives by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Dropped,
+    Picked,
+}
+
+impl Origin {
+    fn ttl(self) -> Duration {
+        match self {
+            Origin::Dropped => UPLOAD_ALLOW_TTL,
+            Origin::Picked => PICKED_ALLOW_TTL,
+        }
+    }
+}
+
+/// Rust-side record of the paths this process itself authorised: the OS
+/// drag-drop handed the window, or the OS picker in `pick_attachments`
+/// returned. Managed in Tauri state as `Arc<UploadAllowList>`; the drop half
+/// is populated from `on_window_event` / `on_webview_event` in `lib.rs`.
 #[derive(Default)]
 pub struct UploadAllowList {
-    entries: Mutex<HashMap<PathBuf, Instant>>,
+    entries: Mutex<HashMap<PathBuf, (Instant, Origin)>>,
 }
 
 impl UploadAllowList {
@@ -47,18 +79,33 @@ impl UploadAllowList {
     }
 
     pub fn allow_at(&self, paths: &[PathBuf], now: Instant) {
+        self.insert_at(paths, now, Origin::Dropped);
+    }
+
+    /// Record freshly picked paths — see [`PICKED_ALLOW_TTL`] for why they
+    /// get a longer window than a drop.
+    pub fn allow_picked(&self, paths: &[PathBuf]) {
+        self.allow_picked_at(paths, Instant::now());
+    }
+
+    pub fn allow_picked_at(&self, paths: &[PathBuf], now: Instant) {
+        self.insert_at(paths, now, Origin::Picked);
+    }
+
+    fn insert_at(&self, paths: &[PathBuf], now: Instant, origin: Origin) {
         let mut e = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        e.retain(|_, at| now.saturating_duration_since(*at) < UPLOAD_ALLOW_TTL);
+        e.retain(|_, (at, o)| now.saturating_duration_since(*at) < o.ttl());
         for p in paths {
-            e.insert(p.clone(), now);
+            e.insert(p.clone(), (now, origin));
         }
     }
 
-    /// True if `path` was dropped within the TTL. Paths compare verbatim —
-    /// the frontend echoes back exactly what the drop event delivered.
+    /// True if `path` is still authorised — dropped or picked, each judged
+    /// against its own TTL. Paths compare verbatim — the frontend echoes
+    /// back exactly what the drop event or the picker delivered.
     pub fn is_allowed(&self, path: &Path) -> bool {
         self.is_allowed_at(path, Instant::now())
     }
@@ -69,11 +116,11 @@ impl UploadAllowList {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         e.get(path)
-            .is_some_and(|at| now.saturating_duration_since(*at) < UPLOAD_ALLOW_TTL)
+            .is_some_and(|(at, origin)| now.saturating_duration_since(*at) < origin.ttl())
     }
 
-    /// Remove `paths` from the list once an upload has used them: one drop
-    /// authorises one upload, not a window of re-reads.
+    /// Remove `paths` from the list once an upload has used them: one
+    /// drop or pick authorises one upload, not a window of re-reads.
     pub fn consume(&self, paths: &[String]) {
         let mut e = self
             .entries
@@ -121,16 +168,24 @@ fn classify(path: &Path) -> AttachKind {
 /// Record picked paths on the allow-list and describe them for the composer.
 /// Split out of the command so the authorisation is unit-testable without a
 /// Tauri app handle.
+///
+/// Validates before authorising: a path only reaches `allow_picked` once it
+/// has passed every check, so a bad file in the batch never leaves a stale
+/// authorisation behind for nothing to consume. A bad file is skipped, not
+/// fatal — of five picked files, four with ordinary names come back as
+/// attachments; the fifth is simply left out rather than losing all five.
 pub fn record_picked(
     allow: &UploadAllowList,
     paths: Vec<PathBuf>,
 ) -> Result<Vec<PickedFile>, IpcError> {
-    allow.allow(&paths);
+    let mut good_paths = Vec::with_capacity(paths.len());
     let mut out = Vec::with_capacity(paths.len());
     for p in paths {
-        let size = std::fs::metadata(&p)
-            .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("stat {}: {e}", p.display())))?
-            .len();
+        // Gone or unreadable between the pick and this call: leave it out
+        // rather than failing every other file in the batch.
+        let Ok(meta) = std::fs::metadata(&p) else {
+            continue;
+        };
         let name = p
             .file_name()
             .and_then(|n| n.to_str())
@@ -138,19 +193,18 @@ pub fn record_picked(
             .to_string();
         // A newline in a basename would travel into the prompt text.
         if name.contains(['\n', '\r']) {
-            return Err(IpcError::new(
-                codes::E_UPLOAD,
-                format!("{name:?} contains a newline in its name"),
-            ));
+            continue;
         }
         let kind = classify(&p);
         out.push(PickedFile {
             path: p.to_string_lossy().into_owned(),
             name,
-            size,
+            size: meta.len(),
             kind,
         });
+        good_paths.push(p);
     }
+    allow.allow_picked(&good_paths);
     Ok(out)
 }
 
@@ -265,12 +319,19 @@ pub struct UploadArgs {
 }
 
 /// Pure gate: every requested path must be on the allow-list.
+///
+/// The message must stay true for both allow-list origins — a drop and a
+/// pick are each authorised by the user, and each can simply time out
+/// (`UPLOAD_ALLOW_TTL` / `PICKED_ALLOW_TTL`) before the upload runs.
 pub fn check_paths_allowed(allow: &UploadAllowList, paths: &[String]) -> Result<(), IpcError> {
     for p in paths {
         if !allow.is_allowed(Path::new(p)) {
             return Err(IpcError::new(
                 codes::E_FORBIDDEN,
-                format!("{p} was not dropped onto the window; only dropped files can be uploaded"),
+                format!(
+                    "{p} was not attached by the user, or its authorisation has expired; \
+                     attach it again"
+                ),
             ));
         }
     }
@@ -447,6 +508,73 @@ mod tests {
         let e = al.entries.lock().unwrap();
         assert!(!e.contains_key(Path::new("/tmp/old.png")));
         assert!(e.contains_key(Path::new("/tmp/new.png")));
+    }
+
+    #[test]
+    fn a_picked_path_survives_a_composer_tray_but_still_expires() {
+        let al = UploadAllowList::new();
+        let t0 = Instant::now();
+        let picked = PathBuf::from("/tmp/shot.png");
+        al.allow_picked_at(std::slice::from_ref(&picked), t0);
+        // Ten minutes of typing — long enough to expire a drop, not a pick.
+        assert!(
+            al.is_allowed_at(&picked, t0 + UPLOAD_ALLOW_TTL),
+            "a picked file must outlive the drop TTL: the composer tray is not a slow IPC round-trip"
+        );
+        assert!(al.is_allowed_at(&picked, t0 + Duration::from_secs(60 * 60)));
+        assert!(
+            !al.is_allowed_at(&picked, t0 + PICKED_ALLOW_TTL),
+            "a pick still expires eventually"
+        );
+    }
+
+    #[test]
+    fn an_expired_pick_is_refused_by_check_paths_allowed_with_a_message_true_for_it() {
+        // Back-date the insertion (`Instant` arithmetic, no sleeping) so
+        // real-time `is_allowed`/`check_paths_allowed` — the path
+        // `upload_to_session` actually calls — sees a genuinely expired
+        // pick, not a synthetic one only reachable via `is_allowed_at`.
+        let al = UploadAllowList::new();
+        let picked = PathBuf::from("/tmp/shot.png");
+        let long_ago = Instant::now() - PICKED_ALLOW_TTL - Duration::from_secs(60);
+        al.allow_picked_at(std::slice::from_ref(&picked), long_ago);
+        assert!(!al.is_allowed(&picked), "the pick has expired");
+
+        let err = check_paths_allowed(&al, &["/tmp/shot.png".to_string()]).unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN);
+        assert!(
+            !err.message.contains("dropped onto the window"),
+            "a picked file was never dropped onto anything: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("expired") || err.message.contains("not attached"),
+            "the message must be true for a picked file: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn record_picked_skips_a_bad_name_but_keeps_the_rest_of_the_batch() {
+        let allow = UploadAllowList::new();
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("notes.txt");
+        std::fs::write(&good, b"hello").unwrap();
+        // POSIX allows a literal newline in a filename (only `/` and NUL are
+        // forbidden), so this both exists and stats cleanly — the rejection
+        // must come from the newline check, not a missing file.
+        let bad = dir.path().join("bad\nname.txt");
+        std::fs::write(&bad, b"data").unwrap();
+
+        let picked = record_picked(&allow, vec![good.clone(), bad.clone()]).unwrap();
+
+        assert_eq!(picked.len(), 1, "the bad entry is left out, not fatal");
+        assert_eq!(picked[0].name, "notes.txt");
+        assert!(allow.is_allowed(&good), "the good file is still authorised");
+        assert!(
+            !allow.is_allowed(&bad),
+            "the bad file must not be authorised — validation runs before allow-listing"
+        );
     }
 
     #[test]
