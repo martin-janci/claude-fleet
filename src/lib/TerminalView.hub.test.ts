@@ -143,6 +143,21 @@ describe('the terminal tab against a hub', () => {
     expect(hint.textContent).toContain('fleet.example.com');
   });
 
+  it('still offers Transfer: the move is hub-routed even though the pane is not', async () => {
+    // selectedSession resolves through the `sessions` store by identity, not
+    // the object passed to selectSession — the store must carry the movable
+    // fields, or the lookup resolves to the plain `session` seeded in
+    // beforeEach (worktree_id/claude_session_id: null) and canMoveSession is
+    // false.
+    const movable = makeSession({ kind: 'work', worktree_id: 10, claude_session_id: 'c-1' });
+    sessions.set([movable]);
+    hubStatus.set(remote);
+    render(TerminalView);
+    selectSession(movable);
+    await settle();
+    expect(screen.getByTestId('transfer-chip')).toBeTruthy();
+  });
+
   it('an agent-transport host gets no ssh command, just the explanation', async () => {
     hubStatus.set(remote);
     hosts.set([makeHost({ alias: 'trn', transport: 'agent' })]);

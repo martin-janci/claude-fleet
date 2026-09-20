@@ -152,6 +152,23 @@ describe('TerminalView session identity (FE-1)', () => {
     expect(screen.getByTestId('terminal-header').textContent).toContain('on alpha');
   });
 
+  it('puts the Transfer chip on the host name for a movable session', async () => {
+    const movable = makeSession({
+      id: 1, host_alias: 'alpha', kind: 'work', worktree_id: 10, claude_session_id: 'c-1',
+    });
+    // selectedSession is derived from the `sessions` store by identity, not
+    // from the object passed to selectSession — so the store must carry the
+    // movable fields, or the lookup resolves to the plain `onAlpha` seeded
+    // in beforeEach and canMoveSession sees worktree_id/claude_session_id: null.
+    sessions.set([movable, onBeta]);
+    render(TerminalView);
+    selectSession(movable);
+    await settle();
+    const header = screen.getByTestId('terminal-header');
+    expect(header.textContent?.replace(/\s+/g, ' ')).toContain('on alpha');
+    expect(header.querySelector('[data-testid="transfer-chip"]')).not.toBeNull();
+  });
+
   it("selecting the same-named session on another host reattaches to that host's PTY", async () => {
     render(TerminalView);
     selectSession(onAlpha);

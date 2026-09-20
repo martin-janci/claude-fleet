@@ -95,3 +95,16 @@ The principle stays; the refusal goes.
 - Host-specific notes travel like any other note: the move does not judge
   portability. Transcript content is never rewritten, so a `tool-results`
   path it holds stays the source's absolute path and is stale on the target.
+
+## What the user sees (2026-09-20, slice 3a)
+
+The move is a button on the terminal header's host name (and "Move to
+host…" in the details panel); both open one Transfer sheet. The sheet shows
+the move's nine steps live, from `move:progress` events, and can be closed
+while the move continues — the header then shows `⇄ moving to <host> · n/9`.
+When the move ends the sheet shows what travelled and what did not, each
+warning on its own line, or — on failure — what failed in a sentence and
+whether the source was touched. A hub older than this slice sends no
+progress events: the sheet then shows no live steps and still ends with the
+correct result, which is one more reason to upgrade the hub before the
+desktops.

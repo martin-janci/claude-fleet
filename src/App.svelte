@@ -19,6 +19,8 @@
   import { footerUsage } from './lib/usage_glance';
   import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
+  import TransferSheet from './lib/TransferSheet.svelte';
+  import { applyMoveProgress } from './lib/moves';
   import { dispatchTimelineEvents, dispatchConversationsChanged } from './lib/live_events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -222,6 +224,7 @@
       onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
       onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
       onSyncProgress: (p) => syncProgress.set(p),
+      onMoveProgress: applyMoveProgress,
     });
     // Tasks are secondary to the session list: load after the row
     // subscription is live so no `task:updated` is missed, and never block
@@ -519,6 +522,7 @@
 
 <HintLayer />
 <Toasts />
+<TransferSheet />
 <McpConfirmDialog />
 <!-- Cmd/Ctrl+K / Cmd/Ctrl+P. Its "new session" rows publish a request that
      mounts the dialog here (the Sidebar keeps its own instance for its

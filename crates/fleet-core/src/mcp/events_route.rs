@@ -457,6 +457,15 @@ mod tests {
         assert!(!matches(account.as_ref(), &ev("account_usage:updated")));
     }
 
+    #[test]
+    fn the_move_kind_is_subscribable() {
+        let asked = wanted_kinds(&q(Some("move")));
+        assert!(asked.unknown.is_empty(), "{:?}", asked.unknown);
+        let kinds = asked.accepted;
+        assert!(matches(kinds.as_ref(), &ev("move:progress")));
+        assert!(!matches(kinds.as_ref(), &ev("session:updated")));
+    }
+
     /// A plural typo is the easy mistake, and silently yields a stream that
     /// never carries anything: it must be separated out (so it can be logged)
     /// and must not show up as something the client subscribed to.

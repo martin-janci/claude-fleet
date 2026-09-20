@@ -17,6 +17,7 @@
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
   import { createMouseController } from './terminal_mouse';
   import { hubStatus, hubBlock, ownsTheFleet } from './hub';
+  import TransferChip from './TransferChip.svelte';
   import { fitCells } from './terminal_size';
 
   // ─────────────────────────────────────────────────────────────────────
@@ -1092,6 +1093,9 @@
     </svg>
     <p class="empty-msg">The terminal is local-only.</p>
     <p class="empty-msg remote-why">{hubBlock('terminal', $hubStatus)}</p>
+    {#if $selectedSession}
+      <p class="transfer-row"><TransferChip session={$selectedSession} /></p>
+    {/if}
     {#if $selectedSession && selectedSessionHostTransport === 'agent'}
       <p class="empty-msg" data-testid="terminal-agent-transport">
         {$selectedSession.host_alias} (session {$selectedSession.tmux_name}) is reached through
@@ -1119,7 +1123,7 @@ tmux attach -t {$selectedSession.tmux_name}</pre>
     {/if}
     <div class="header" data-testid="terminal-header" use:hintAnchor={{ id: 'terminal-header' }}>
       <span class="name">{$selectedSession.tmux_name}</span>
-      <span class="host">on {$selectedSession.host_alias}</span>
+      <TransferChip session={$selectedSession} />
       <span class="size" data-testid="terminal-size">
         {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}
       </span>
@@ -1321,7 +1325,6 @@ tmux attach -t {$selectedSession.tmux_name}</pre>
     color: var(--fg);
     font-weight: 600;
   }
-  .host { color: var(--fg-muted); font-size: 0.75rem; }
   .size {
     margin-left: auto;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1521,6 +1524,7 @@ tmux attach -t {$selectedSession.tmux_name}</pre>
     opacity: 0.85;
     text-align: center;
   }
+  .transfer-row { margin: 0 0 0.5rem; }
   .attach-line {
     margin: 0;
     padding: 0.5rem 0.8rem;

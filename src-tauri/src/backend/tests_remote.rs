@@ -914,6 +914,64 @@ fn no_error_and_no_debug_output_ever_carries_the_token() {
     }
 }
 
+// --- how long a call may take ------------------------------------------------
+
+/// F1: one bound for every tool cut a hub-routed `move_session` off after
+/// 30 s and reported a failure while the hub was still moving the session —
+/// a move copies a repository, a transcript and the Claude state between two
+/// hosts (`COPY_TIMEOUT` 120 s, `GIT_TIMEOUT` 40 s per step, a 60 s confirm,
+/// a chunked bundle download), which is minutes, not seconds. Only that one
+/// tool gets the long bound; everything else keeps the short one, so a hub
+/// that has stopped answering is still noticed quickly.
+#[test]
+fn only_move_session_gets_the_long_call_timeout() {
+    assert_eq!(
+        call_timeout("move_session"),
+        std::time::Duration::from_secs(15 * 60)
+    );
+    for tool in [
+        "list_sessions",
+        "kill_session",
+        "session_transcript",
+        "repair_session",
+        "",
+    ] {
+        assert_eq!(
+            call_timeout(tool),
+            std::time::Duration::from_secs(30),
+            "{tool} must keep the ordinary bound"
+        );
+    }
+}
+
+/// The table above says which duration each tool gets; this says the bound is
+/// real. A hub that accepts the request and then says nothing must still end
+/// the call — the timeout moved out of the transport into
+/// [`HubBackend::call_text`] (F1), and a timeout nobody applies is worse than
+/// none, because the window would wait forever.
+///
+/// `start_paused` (the `test-util` feature already in this crate's
+/// dev-dependencies) auto-advances the clock whenever every task is idle, so
+/// this reaches the 30 s deadline without waiting 30 s.
+#[tokio::test(start_paused = true)]
+async fn a_hub_that_accepts_the_request_and_then_says_nothing_still_ends_the_call() {
+    struct Silent;
+    #[async_trait::async_trait]
+    impl HubTransport for Silent {
+        async fn post_json(&self, _: &str, _: &str, _: String) -> Result<HubResponse, String> {
+            std::future::pending().await
+        }
+    }
+    let b = HubBackend::with_transport(cfg(), Arc::new(Silent));
+    let e = b
+        .list_sessions(false)
+        .await
+        .expect_err("a hub that never answers cannot produce rows");
+    assert_eq!(e.code, codes::E_HUB_UNREACHABLE);
+    assert!(e.message.contains("no answer within"), "{}", e.message);
+    assert!(!e.message.contains("cl_s3cret-token"), "{}", e.message);
+}
+
 // --- the raw HTTP transport --------------------------------------------------
 
 /// A hub address is http or https and nothing else. Anything else must be
