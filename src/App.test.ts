@@ -115,11 +115,11 @@ describe('App layout', () => {
     expect(cmds).toEqual(expect.arrayContaining(['list_projects', 'list_sessions']));
   });
 
-  it('marks only the Assets tab active (not Terminal) when Assets is open', async () => {
+  it('marks only the Assets tab active (not Session) when Assets is open', async () => {
     const { getByTestId } = render(App);
     await fireEvent.click(getByTestId('tab-assets'));
-    expect(getByTestId('tab-terminal').classList.contains('active')).toBe(false);
-    expect(getByTestId('tab-terminal').getAttribute('aria-selected')).toBe('false');
+    expect(getByTestId('tab-session').classList.contains('active')).toBe(false);
+    expect(getByTestId('tab-session').getAttribute('aria-selected')).toBe('false');
     expect(getByTestId('tab-assets').classList.contains('active')).toBe(true);
     expect(getByTestId('tab-assets').getAttribute('aria-selected')).toBe('true');
   });
@@ -159,6 +159,9 @@ describe('App: the Conversation tab', () => {
       return original ? original(cmd, ...rest) : null;
     });
     localStorage.removeItem('cf:pref:session.last');
+    localStorage.removeItem('cf:pref:ui.sessionView');
+    const { sessionView } = await import('./lib/prefs');
+    sessionView.set('conversation');
   });
 
   afterEach(async () => {
@@ -187,52 +190,92 @@ describe('App: the Conversation tab', () => {
 
   const tab = (id: string) => screen.getByTestId(id) as HTMLButtonElement;
   const selected = (id: string) => tab(id).getAttribute('aria-selected');
+  const subtab = (id: string) => screen.getByTestId(id) as HTMLButtonElement;
+  const checked = (id: string) => subtab(id).getAttribute('aria-checked');
+  const NO_PANE_TITLE_TEXT = 'Runs outside tmux — no terminal';
 
-  it('the tab is disabled without a claude_session_id and enabled with one', async () => {
+  it('the Conversation sub-view is disabled without a claude_session_id and enabled with one', async () => {
     await mountAndSelect(noId);
-    expect(tab('tab-conversation').disabled).toBe(true);
-    expect(tab('tab-conversation').title).toBe('No Claude session id yet');
+    expect(subtab('subtab-conversation').disabled).toBe(true);
+    expect(subtab('subtab-conversation').title).toBe('No Claude session id yet');
+    // With no transcript the row falls back to the terminal, without
+    // touching the stored preference.
+    expect(checked('subtab-terminal')).toBe('true');
     await select(work);
-    expect(tab('tab-conversation').disabled).toBe(false);
+    expect(subtab('subtab-conversation').disabled).toBe(false);
   });
 
-  it('clicking it shows the panel over the terminal; Terminal hides it; Hosts hides it', async () => {
+  it('defaults to Conversation, and the segment flips between the two views', async () => {
     await mountAndSelect(work);
     const grid = await screen.findByTestId('terminal-host');
-    await fireEvent.click(tab('tab-conversation'));
-    await tick();
+    // Default pref is 'conversation'.
     expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
-    expect(selected('tab-conversation')).toBe('true');
-    expect(selected('tab-terminal')).toBe('false');
-    expect(selected('tab-files')).toBe('false');
-    expect(selected('tab-hosts')).toBe('false');
+    expect(checked('subtab-conversation')).toBe('true');
+    expect(selected('tab-session')).toBe('true');
     // The PTY stays mounted underneath.
     expect(grid.isConnected).toBe(true);
     // The center (Details) pane stays visible, unlike Files/Hosts.
     expect(screen.getByTestId('pane-center')).toBeInTheDocument();
 
-    await fireEvent.click(tab('tab-terminal'));
+    await fireEvent.click(subtab('subtab-terminal'));
     await tick();
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
-    expect(selected('tab-terminal')).toBe('true');
+    expect(checked('subtab-terminal')).toBe('true');
+    expect(selected('tab-session')).toBe('true');
 
-    await fireEvent.click(tab('tab-conversation'));
+    await fireEvent.click(subtab('subtab-conversation'));
     await tick();
     expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
+  });
+
+  it('Files and Hosts take the panel from the Session tab and give it back', async () => {
+    await mountAndSelect(work);
+    expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
+
     await fireEvent.click(tab('tab-files'));
     await tick();
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
     expect(selected('tab-files')).toBe('true');
-    expect(selected('tab-conversation')).toBe('false');
+    expect(selected('tab-session')).toBe('false');
+    // The segment belongs to the Session tab; it is gone while another view
+    // owns the panel. (A session *is* selected here, so this is not passing
+    // for the trivial reason.)
+    expect(screen.queryByTestId('subtab-conversation')).toBeNull();
+    expect(screen.queryByTestId('subtab-terminal')).toBeNull();
 
-    await fireEvent.click(tab('tab-conversation'));
+    await fireEvent.click(tab('tab-session'));
     await tick();
-    expect(selected('tab-files')).toBe('false');
+    // Back to the remembered sub-view, not to the terminal.
+    expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
+
     await fireEvent.click(tab('tab-hosts'));
     await tick();
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
-    expect(selected('tab-conversation')).toBe('false');
     expect(selected('tab-hosts')).toBe('true');
+    expect(selected('tab-session')).toBe('false');
+  });
+
+  it('a pane-less row shows Conversation without overwriting the stored preference', async () => {
+    const { sessionView } = await import('./lib/prefs');
+    const { get } = await import('svelte/store');
+    await mountAndSelect(work);
+    await fireEvent.click(subtab('subtab-terminal'));
+    await tick();
+    expect(get(sessionView)).toBe('terminal');
+
+    await select(bg);
+    await tick();
+    // No PTY on this row, so Conversation regardless of the preference.
+    expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
+    expect(subtab('subtab-terminal').disabled).toBe(true);
+    expect(subtab('subtab-terminal').title).toBe(NO_PANE_TITLE_TEXT);
+    expect(get(sessionView)).toBe('terminal');
+
+    await select(work);
+    await tick();
+    // Back on a tmux row: the preference survived the detour.
+    expect(screen.queryByTestId('conversation-panel')).toBeNull();
+    expect(checked('subtab-terminal')).toBe('true');
   });
 
   it('Esc leaves Files even with focus parked on the terminal input proxy (F9)', async () => {
@@ -257,11 +300,12 @@ describe('App: the Conversation tab', () => {
   ])('a %s row opens Conversation by default with Terminal and Files disabled', async (_k, row) => {
     await mountAndSelect(row);
     expect(await screen.findByTestId('conversation-panel')).toBeInTheDocument();
-    expect(selected('tab-conversation')).toBe('true');
-    for (const id of ['tab-terminal', 'tab-files']) {
-      expect(tab(id).disabled).toBe(true);
-      expect(tab(id).title).toBe('Runs outside tmux — no terminal');
-    }
+    expect(selected('tab-session')).toBe('true');
+    expect(checked('subtab-conversation')).toBe('true');
+    expect(subtab('subtab-terminal').disabled).toBe(true);
+    expect(subtab('subtab-terminal').title).toBe(NO_PANE_TITLE_TEXT);
+    expect(tab('tab-files').disabled).toBe(true);
+    expect(tab('tab-files').title).toBe(NO_PANE_TITLE_TEXT);
     expect(screen.queryByTestId('terminal-host')).toBeNull();
     expect(screen.queryByTestId('bg-panel')).toBeNull();
     expect(inv.mock.calls).toContainEqual(['session_conversation', { args: { session_id: row.id, claude_session_id: row.claude_session_id } }]);
@@ -273,33 +317,22 @@ describe('App: the Conversation tab', () => {
     await fireEvent.click(tab('tab-hosts'));
     await tick();
     expect(selected('tab-hosts')).toBe('true');
-    expect(selected('tab-conversation')).toBe('false');
+    expect(selected('tab-session')).toBe('false');
     expect(screen.getByTestId('hosts-overlay')).toBeInTheDocument();
     await fireEvent.click(tab('tab-hosts'));
     await tick();
     expect(screen.queryByTestId('hosts-overlay')).toBeNull();
-    expect(selected('tab-conversation')).toBe('true');
-    expect(selected('tab-terminal')).toBe('false');
-  });
-
-  it('selecting a tmux row after a bg row returns to the terminal', async () => {
-    await mountAndSelect(bg);
-    expect(await screen.findByTestId('conversation-panel')).toBeInTheDocument();
-    await select(work);
-    expect(await screen.findByTestId('terminal-host')).toBeInTheDocument();
-    expect(screen.queryByTestId('conversation-panel')).toBeNull();
-    expect(selected('tab-terminal')).toBe('true');
-    expect(selected('tab-conversation')).toBe('false');
-    expect(tab('tab-terminal').disabled).toBe(false);
+    expect(selected('tab-session')).toBe('true');
+    expect(checked('subtab-conversation')).toBe('true');
   });
 
   it('selecting a row with no claude_session_id drops conversation mode', async () => {
     await mountAndSelect(work);
-    await fireEvent.click(tab('tab-conversation'));
+    await fireEvent.click(subtab('subtab-conversation'));
     await tick();
     expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
     await select(noId);
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
-    expect(selected('tab-terminal')).toBe('true');
+    expect(checked('subtab-terminal')).toBe('true');
   });
 });

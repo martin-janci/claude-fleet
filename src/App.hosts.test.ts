@@ -125,7 +125,7 @@ describe('App: the Hosts view', () => {
     expect(hostsView()).not.toBeNull();
     expect(get(hostsViewOpen)).toBe(true);
     expect(screen.getByTestId('tab-hosts').getAttribute('aria-selected')).toBe('true');
-    expect(screen.getByTestId('tab-terminal').getAttribute('aria-selected')).toBe('false');
+    expect(screen.getByTestId('tab-session').getAttribute('aria-selected')).toBe('false');
     // ⌘I again, from inside the view.
     await cmdI(screen.getByTestId('hosts-list'));
     await tick();
@@ -182,7 +182,7 @@ describe('App: the Hosts view', () => {
     expect(hostsView()).not.toBeNull();
     // Covered, not removed.
     expect(grid.isConnected).toBe(true);
-    await fireEvent.click(screen.getByTestId('tab-terminal'));
+    await fireEvent.click(screen.getByTestId('tab-session'));
     await tick();
     expect(hostsView()).toBeNull();
     expect(screen.getByTestId('terminal-host')).toBe(grid);
@@ -256,7 +256,7 @@ describe('App: the Hosts view', () => {
     await fireEvent.click(tab);
     await tick();
     expect(hostsView()).not.toBeNull();
-    await fireEvent.click(screen.getByTestId('tab-terminal'));
+    await fireEvent.click(screen.getByTestId('tab-session'));
     await tick();
     expect(hostsView()).toBeNull();
   });
