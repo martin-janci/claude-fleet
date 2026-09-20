@@ -1,8 +1,15 @@
 import { render, screen, fireEvent, within } from '@testing-library/svelte';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import HostsList from './HostsList.svelte';
 import { groupHostsByAccount, sessionCounts, type HostRowInfo } from './hosts_view';
 import { NOW, fleetAccounts, fleetHosts, fleetSessions, fleetUsage, host } from './hosts_fixture';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
+
+beforeEach(() => {
+  hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
+});
 
 function mount(over: Record<string, unknown> = {}) {
   const hosts = (over.hosts as ReturnType<typeof fleetHosts>) ?? fleetHosts();
@@ -76,5 +83,52 @@ describe('HostsList', () => {
         expect(within(row).queryByTestId('host-transport-agent')).toBeNull();
       }
     }
+  });
+});
+
+// #195: the same honest-empty-state fix as Sidebar.svelte — an empty list
+// while the hub's wire contract is skewed must not read as "no hosts".
+describe('HostsList: a hub contract skew', () => {
+  const remote: HubStatus = {
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    client_mode: null,
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+    allow_plaintext: false,
+    warning: null,
+    restart_required: false,
+    unavailable: null,
+  };
+
+  it('shows the connection banner’s sentence instead of "No hosts yet"', () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'hub_too_old', hub_contract: 1, min_contract: 3 });
+    mount({ hosts: [] });
+    const empty = screen.getByTestId('hosts-empty');
+    expect(empty.textContent).not.toContain('No hosts yet');
+    expect(empty.textContent).toContain('fleet.example.com');
+    expect(empty.textContent?.toLowerCase()).toContain('update the hub');
+  });
+
+  it('a search filter still wins over the skew sentence', () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'hub_too_old', hub_contract: 1, min_contract: 3 });
+    mount({ hosts: [], filter: 'nope' });
+    const empty = screen.getByTestId('hosts-empty');
+    expect(empty.textContent).toContain('No host matches');
+  });
+
+  it('a connected hub with no skew renders the ordinary empty state', () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'connected' });
+    mount({ hosts: [] });
+    expect(screen.getByTestId('hosts-empty').textContent).toContain('No hosts yet');
+  });
+
+  it('standalone mode is untouched', () => {
+    mount({ hosts: [] });
+    expect(screen.getByTestId('hosts-empty').textContent).toContain('No hosts yet');
   });
 });

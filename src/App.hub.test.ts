@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { render, screen, waitFor, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
@@ -202,6 +202,73 @@ describe('the disconnected banner', () => {
       await waitFor(() => expect(screen.getByText(/schema/)).toBeInTheDocument());
       expect(inv.mock.calls.some((c) => c[0] === 'hub_connection')).toBe(false);
       expect(screen.queryByTestId('hub-connection-banner')).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  // #195/#166: a skewed hub refuses every bootstrap load (projects, sessions,
+  // hosts, accounts) with the same `E_HUB_CONTRACT`. Each used to toast on
+  // its own — a wall of four near-identical sticky error toasts stacked on
+  // top of the banner and the footer, which already say the same thing.
+  it('does not toast a storm of identical E_HUB_CONTRACT failures at bootstrap', async () => {
+    const skew = { state: 'hub_too_old', hub_contract: 1, min_contract: 3 };
+    const contractError = (cmd: string) =>
+      Object.assign(new Error('contract'), {
+        code: 'E_HUB_CONTRACT',
+        message: `${cmd} was not run: https://fleet.example.com’s wire contract is revision 1, older than the 3 this app requires. Update the hub.`,
+      });
+    const { restore } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return remote;
+      if (cmd === 'hub_connection') return skew;
+      if (['list_sessions', 'list_projects', 'list_hosts', 'list_accounts'].includes(cmd)) {
+        return contractError(cmd);
+      }
+      return undefined;
+    });
+    try {
+      render(App);
+      const failed = await screen.findByTestId('bootstrap-error');
+      expect(failed.textContent).toContain('E_HUB_CONTRACT');
+      // The banner and the footer already say it; no toast repeats it.
+      expect(screen.queryByTestId('toast')).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+});
+
+// #195: the focus-driven catch-up fetch (see App.test.ts for the standalone
+// case) discards its Result like every other failure on that path — but a
+// contract-skewed hub never heals, so it is worth pinning that this stays
+// silent rather than toasting on every alt-tab back into the window.
+describe('the focus-driven refresh under a contract skew', () => {
+  it('raises no toast when the refresh is refused with E_HUB_CONTRACT', async () => {
+    let sessionsCalls = 0;
+    const { restore } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return remote;
+      if (cmd === 'hub_connection') return { state: 'connected' };
+      if (cmd === 'list_sessions') {
+        sessionsCalls += 1;
+        // Bootstrap succeeds; the focus-driven refetch is what fails.
+        if (sessionsCalls === 1) return [];
+        return Object.assign(new Error('contract'), {
+          code: 'E_HUB_CONTRACT',
+          message: 'list_sessions was not run: contract mismatch. Update the hub.',
+        });
+      }
+      if (cmd === 'list_projects') return [];
+      return undefined;
+    });
+    try {
+      render(App);
+      await screen.findByTestId('hub-badge');
+      // Let the post-subscription tail of onMount settle before clearing.
+      await new Promise((r) => setTimeout(r, 0));
+      clearToasts();
+      await fireEvent(window, new FocusEvent('focus'));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(screen.queryByTestId('toast')).toBeNull();
     } finally {
       restore();
     }

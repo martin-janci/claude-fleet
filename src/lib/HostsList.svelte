@@ -8,6 +8,7 @@
   import AccountNickname from './AccountNickname.svelte';
   import UsageBar from './UsageBar.svelte';
   import { hubStatus, hubBlock } from './hub';
+  import { hubConnection, connectionBanner } from './hub_connection';
   import {
     compactWindow,
     freshnessMark,
@@ -16,6 +17,16 @@
   } from './hosts_view';
 
   const nicknameBlocked = $derived(hubBlock('set_account_nickname', $hubStatus));
+
+  // Same honest-empty-state fix as Sidebar.svelte: `E_HUB_CONTRACT` never
+  // heals itself, so an empty list here would otherwise read as "no hosts"
+  // rather than "this couldn't load". Reuses the connection banner's own
+  // sentence.
+  const hubSkewEmptyMessage = $derived(
+    $hubConnection.state === 'hub_too_old' || $hubConnection.state === 'hub_too_new'
+      ? connectionBanner($hubConnection, $hubStatus.url)
+      : null,
+  );
 
   let {
     groups,
@@ -171,7 +182,7 @@
         {/each}
       </div>
     {:else}
-      <p class="empty">{filter ? `No host matches “${filter}”.` : 'No hosts yet.'}</p>
+      <p class="empty" data-testid="hosts-empty">{filter ? `No host matches “${filter}”.` : (hubSkewEmptyMessage ?? 'No hosts yet.')}</p>
     {/each}
   </div>
 </div>
