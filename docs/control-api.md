@@ -270,7 +270,8 @@ Index by area (names only; see the reference for details):
   committed for you (`strict: true` restores the old clean + pushed
   refusals) — then `--resume` on the target and the source killed once the
   target runs; master token only, since the caller must be allowed on both
-  hosts).
+  hosts), `resolve_move` (finish or undo a partial move left with both
+  sessions alive).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
   `repo_commit_diff`.

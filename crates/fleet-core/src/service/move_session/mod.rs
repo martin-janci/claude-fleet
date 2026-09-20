@@ -65,7 +65,9 @@
 
 pub mod carry;
 pub mod claude_state;
+mod finalise;
 mod progress;
+pub mod resolve;
 
 use crate::events::MoveStep;
 use crate::ipc_error::lock;
@@ -85,6 +87,9 @@ pub const DEFAULT_MAX_TRANSCRIPT_MB: u64 = 200;
 
 /// Timeline event recorded on both rows of a completed move.
 pub const EVENT_MOVED: &str = "session_moved";
+/// Timeline event recorded on both rows when `resolve_move` discards a
+/// partial move (Task 6): the target is killed, the source is left as-is.
+pub const EVENT_MOVE_UNDONE: &str = "session_move_undone";
 
 const LOCAL: &str = "local";
 
@@ -118,6 +123,12 @@ pub struct MoveSessionArgs {
     /// (`E_MOVE_UNPUSHED`) instead of carrying them. Default false.
     #[serde(default)]
     pub strict: bool,
+    /// Replace what an unfinished earlier transfer left in the target
+    /// worktree. Refused when the target also holds work of its own, so it
+    /// can never overwrite anything this move did not put there. Default
+    /// false.
+    #[serde(default)]
+    pub clean_target: bool,
 }
 
 /// What a completed move did.
@@ -194,8 +205,10 @@ pub trait MoveHooks: Send + Sync {
     ) -> Result<(), IpcError>;
     /// Reconcile one host so its rows reflect tmux.
     async fn refresh_host(&self, store: &Mutex<Store>, host: &str) -> Result<(), IpcError>;
-    /// The normal kill path for the source.
-    async fn kill_source(
+    /// Kill a tmux session outright: the normal kill path for the source, and
+    /// (Task 6) how Undo retires the target of a partial move it discards.
+    /// Named for what it does, not for the one caller it originally had.
+    async fn kill_tmux_session(
         &self,
         store: &Mutex<Store>,
         host: &str,
@@ -259,7 +272,7 @@ impl MoveHooks for RealHooks<'_> {
         crate::service::sessions::reconcile_one_host(store, self.ssh, host).await
     }
 
-    async fn kill_source(
+    async fn kill_tmux_session(
         &self,
         store: &Mutex<Store>,
         host: &str,
@@ -1485,6 +1498,28 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
             ));
         }
     }
+    // The target must not already be running THIS conversation. After a
+    // `keep_source` move both rows carry the same `claude_session_id` and the
+    // same branch and worktree, so a move "back" to the host the session came
+    // from would aim at that live session's own worktree: the tmux name clash
+    // is stepped around by `pick_target_name`, the dirty target is adopted
+    // when the content matches (or reset by `clean_target`), and the
+    // transcript copy replaces the one it is writing. Two live sessions, one
+    // conversation, one worktree. Refused here rather than in the UI so the
+    // Tauri command, the MCP tool and the hub are all covered.
+    let target_rows = s.list_sessions_for_host(target)?;
+    if let Some(twin) = target_rows
+        .iter()
+        .find(|r| r.status == "running" && r.claude_session_id.as_deref() == Some(&*claude_id))
+    {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "{target} already runs this conversation ({claude_id}) as session {} ({}); moving there would point the transfer at that session's own worktree — kill or resolve it there first",
+                twin.tmux_name, twin.id
+            ),
+        ));
+    }
     if !args.keep_source {
         crate::service::sessions::guard_not_controller(
             s.get_controller()?.as_ref(),
@@ -1533,11 +1568,7 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         claude_state::DEFAULT_MAX_SESSION_STATE_MB,
     )
     .saturating_mul(1024 * 1024);
-    let target_taken = s
-        .list_sessions_for_host(target)?
-        .into_iter()
-        .map(|r| r.tmux_name)
-        .collect();
+    let target_taken = target_rows.into_iter().map(|r| r.tmux_name).collect();
     Ok(Snapshot {
         claude_id,
         branch,
@@ -1587,18 +1618,121 @@ fn bundle_too_large(bytes: u64, cap: u64) -> IpcError {
     .with_details(serde_json::json!({ "bytes": bytes, "cap_bytes": cap, "payload": "bundle" }))
 }
 
-/// The target worktree holds uncommitted changes. Raised from two places —
-/// the prep step (behind the source HEAD and dirty) and the apply — with
-/// one message, because from the user's side it is one situation. The third
-/// case is the common one after this branch: a move leaves its work in the
-/// source worktree, so moving the session BACK finds that copy waiting.
-fn target_dirty(cwd: &str, target: &str) -> IpcError {
-    IpcError::new(
-        codes::E_MOVE_TARGET_DIRTY,
-        format!(
-            "move_session: the target worktree {cwd} on {target} has uncommitted changes — its own, work carried by an earlier move attempt that did not finish, or the copy left behind when this session was moved away from this host; the move never overwrites them, so inspect them there and commit or discard them before retrying (the source session was not touched)"
-        ),
+/// What a dirty target worktree turned out to be.
+#[derive(Debug)]
+enum Adopted {
+    /// Already exactly the snapshot: the porcelain the verify script printed.
+    Yes(String),
+    /// Differs, but only in paths the snapshot itself writes: a cleanup could
+    /// replace them (`clean_target`).
+    Ours(carry::Leftovers),
+    /// Holds at least one path this move would never write: nothing may touch
+    /// it, flag or not.
+    Theirs(carry::Leftovers),
+    /// The check could not answer. Never widen what the move will overwrite
+    /// on the strength of a broken check.
+    Unknown,
+}
+
+/// Ask the target whether its dirty worktree is already the snapshot
+/// (`carry::verify_replayed_script`). Called only after a `TARGET_DIRTY`
+/// refusal, so its own failure simply means "still dirty, reason unknown".
+async fn classify_target(
+    ssh: &dyn SshExec,
+    target: &str,
+    cwd: &str,
+    claude_id: &str,
+    want_head: &str,
+) -> Adopted {
+    let Ok(out) = sh(
+        ssh,
+        target,
+        &carry::verify_replayed_script(cwd, claude_id, want_head),
+        GIT_TIMEOUT,
     )
+    .await
+    else {
+        return Adopted::Unknown;
+    };
+    if out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        return match carry::parse_apply(&stdout) {
+            Ok(p) => Adopted::Yes(p.to_string()),
+            Err(_) => Adopted::Unknown,
+        };
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.contains(carry::LEFTOVERS_DIFFER) {
+        return Adopted::Unknown;
+    }
+    let l = carry::parse_leftovers(&err);
+    if l.theirs.is_empty() && l.more_theirs == 0 {
+        Adopted::Ours(l)
+    } else {
+        Adopted::Theirs(l)
+    }
+}
+
+/// `a, b and 7 more` — the path lists in a refusal's message.
+fn name_paths(paths: &[String], more: u64) -> String {
+    let mut s = paths.join(", ");
+    if more > 0 {
+        if !s.is_empty() {
+            s.push_str(" and ");
+        }
+        s.push_str(&format!("{more} more"));
+    }
+    s
+}
+
+/// The target worktree is dirty. Three refusals, because they ask three
+/// different things of the user: replace the stale leftovers of an attempt
+/// that did not finish (`Ours` — `clean_target` can do it), deal with the
+/// target's own work (`Theirs` — only they can), or look for themselves
+/// (`Unknown`, which is also what this said before slice 3d).
+fn target_dirty(cwd: &str, target: &str, verdict: &Adopted) -> IpcError {
+    let (kind, message) = match verdict {
+        Adopted::Ours(l) => (
+            "ours",
+            format!(
+                "move_session: {cwd} on {target} still holds work an earlier transfer attempt left behind, and it differs from what is being carried now ({}); transfer again with clean_target to replace it, or inspect it there first (the source session was not touched)",
+                name_paths(&l.ours, l.more_ours)
+            ),
+        ),
+        Adopted::Theirs(l) => (
+            "theirs",
+            format!(
+                "move_session: the target worktree {cwd} on {target} has uncommitted work of its own ({}); the move never overwrites it and no cleanup can be safe here, so commit or discard it there before transferring (the source session was not touched)",
+                name_paths(&l.theirs, l.more_theirs)
+            ),
+        ),
+        // Unchanged from before 3d, including for `Yes` — which never reaches
+        // here, but must not silently become a permissive message if it ever
+        // does.
+        _ => (
+            "unknown",
+            format!(
+                "move_session: the target worktree {cwd} on {target} has uncommitted changes — its own, work carried by an earlier move attempt that did not finish, or the copy left behind when this session was moved away from this host; the move never overwrites them, so inspect them there and commit or discard them before retrying (the source session was not touched)"
+            ),
+        ),
+    };
+    let (ours, theirs, more_ours, more_theirs) = match verdict {
+        Adopted::Ours(l) | Adopted::Theirs(l) => {
+            (l.ours.clone(), l.theirs.clone(), l.more_ours, l.more_theirs)
+        }
+        _ => (Vec::new(), Vec::new(), 0, 0),
+    };
+    // `ours`/`theirs` are capped at `carry::LEFTOVER_CAP`; `more_ours`/
+    // `more_theirs` say how many were left out, so a caller offering to
+    // replace "these paths" (a destructive cleanup) can say so honestly
+    // instead of silently acting on more than it showed.
+    IpcError::new(codes::E_MOVE_TARGET_DIRTY, message).with_details(serde_json::json!({
+        "leftovers": kind,
+        "ours": ours,
+        "theirs": theirs,
+        "more_ours": more_ours,
+        "more_theirs": more_theirs,
+    }))
 }
 
 /// A carry step failed before the target started.
@@ -1634,7 +1768,33 @@ fn carry_transport(step: &str, e: IpcError) -> IpcError {
     )
 }
 
-fn partial(step: &str, target: &str, name: &str, target_id: Option<i64>, e: &IpcError) -> IpcError {
+/// What a partial move must leave behind so that `resolve_move` can finish or
+/// undo it later — after the window is closed and the run store is gone.
+/// Built once, as soon as the target session exists and the tmux name is
+/// known, and passed to every `partial(…)` call site from there on.
+/// `to_turn_seq` / `to_last_turn_at` start `None` and are filled in as the
+/// target row itself becomes known — never guessed for a call site that
+/// fails before that.
+pub(super) struct PartialCtx {
+    pub from_host: String,
+    pub to_host: String,
+    pub to_tmux_name: String,
+    pub claude_session_id: String,
+    pub branch: String,
+    /// What this move was asked to do with the source (`keep_source`). A
+    /// recovery rebuilt from the event cannot re-derive it, and guessing
+    /// `false` there means killing a source the transfer was told to keep.
+    pub kept_source: bool,
+    /// The source transcript as the copy was taken. `None` before the copy.
+    pub source_transcript: Option<Located>,
+    /// The target row's counters as the move last saw them.
+    pub to_turn_seq: Option<i64>,
+    pub to_last_turn_at: Option<i64>,
+}
+
+fn partial(step: &str, ctx: &PartialCtx, target_id: Option<i64>, e: &IpcError) -> IpcError {
+    let target = &ctx.to_host;
+    let name = &ctx.to_tmux_name;
     IpcError::new(
         codes::E_MOVE_PARTIAL,
         format!(
@@ -1644,10 +1804,23 @@ fn partial(step: &str, target: &str, name: &str, target_id: Option<i64>, e: &Ipc
     )
     .with_details(serde_json::json!({
         "step": step,
-        "target_host": target,
-        "target_tmux_name": name,
+        "target_host": ctx.to_host,
+        "target_tmux_name": ctx.to_tmux_name,
         "target_session_id": target_id,
         "cause_code": e.code,
+        // Everything a later `resolve_move` needs and cannot re-derive once
+        // the run store is gone — see `record_partial`, which copies these
+        // straight into the durable `session_move_partial` timeline event.
+        "from_host": ctx.from_host,
+        "to_tmux_name": ctx.to_tmux_name,
+        "claude_session_id": ctx.claude_session_id,
+        "branch": ctx.branch,
+        "kept_source": ctx.kept_source,
+        "source_transcript_size": ctx.source_transcript.as_ref().map(|l| l.size),
+        "source_transcript_mtime": ctx.source_transcript.as_ref().map(|l| l.mtime),
+        "source_transcript_path": ctx.source_transcript.as_ref().map(|l| l.path.clone()),
+        "to_turn_seq": ctx.to_turn_seq,
+        "to_last_turn_at": ctx.to_last_turn_at,
     }))
 }
 
@@ -1697,6 +1870,11 @@ async fn locate_on(
 }
 
 /// Record [`EVENT_MOVE_PARTIAL`] for a partial move. Best effort.
+///
+/// This is the only durable handle a later `resolve_move` will have — the
+/// run store is long gone by then — so every fact `partial(…)` put in
+/// `e.details` travels through here into the event, unchanged, `null` where
+/// the move never reached it.
 fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcError) {
     let d = e.details.clone().unwrap_or_default();
     let target_id = d["target_session_id"].as_i64();
@@ -1706,6 +1884,16 @@ fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcEr
         "from_session_id": source_id,
         "to_session_id": target_id,
         "cause_code": d["cause_code"],
+        "from_host": d["from_host"],
+        "to_tmux_name": d["to_tmux_name"],
+        "claude_session_id": d["claude_session_id"],
+        "branch": d["branch"],
+        "kept_source": d["kept_source"],
+        "source_transcript_size": d["source_transcript_size"],
+        "source_transcript_mtime": d["source_transcript_mtime"],
+        "source_transcript_path": d["source_transcript_path"],
+        "to_turn_seq": d["to_turn_seq"],
+        "to_last_turn_at": d["to_last_turn_at"],
     })
     .to_string();
     let Ok(s) = store.lock() else { return };
@@ -2094,24 +2282,32 @@ async fn move_session_inner(
     if !out.status.success() {
         let err = stderr_of(&out);
         // Behind the source HEAD and dirty: the target's own uncommitted
-        // work, not a divergence.
+        // work, not a divergence. This refusal fires only when the target
+        // HEAD is a strict ancestor of `want` (see `target_prep_script`), so
+        // the target cannot hold the snapshot this move is about to replay
+        // — `verify_replayed_script` requires `HEAD == want_head` and would
+        // answer `HEAD_MISMATCH` here (or, in a fast-forward race, land on
+        // an empty prep payload and a confusing parse error). Classifying is
+        // deliberately skipped: it could never come back `Adopted::Yes` from
+        // this site, only add a failure mode.
         if err.contains(carry::TARGET_DIRTY) {
-            return Err(target_dirty(&cwd, &target));
-        }
-        let msg = if err.contains(DIVERGED) {
-            format!(
-                "the target worktree {cwd} on {target} has diverged from the source HEAD {}; reconcile the branch there first",
-                state.head
-            )
-        } else if err.contains(NO_CWD) {
-            format!("the target worktree {cwd} does not exist on {target}")
+            return Err(target_dirty(&cwd, &target, &Adopted::Unknown));
         } else {
-            format!("target preparation failed on {target}: {err}")
-        };
-        return Err(before_target(
-            "verifying the target worktree",
-            IpcError::new(codes::E_GIT, msg),
-        ));
+            let msg = if err.contains(DIVERGED) {
+                format!(
+                    "the target worktree {cwd} on {target} has diverged from the source HEAD {}; reconcile the branch there first",
+                    state.head
+                )
+            } else if err.contains(NO_CWD) {
+                format!("the target worktree {cwd} does not exist on {target}")
+            } else {
+                format!("target preparation failed on {target}: {err}")
+            };
+            return Err(before_target(
+                "verifying the target worktree",
+                IpcError::new(codes::E_GIT, msg),
+            ));
+        }
     }
     let prep = parse_target_prep(&String::from_utf8_lossy(&out.stdout), &id)
         .map_err(|e| before_target("verifying the target worktree", e))?;
@@ -2155,36 +2351,130 @@ async fn move_session_inner(
             ));
         }
     } else {
-        let out = sh(
-            ssh,
-            &target,
-            &carry::apply_script(&cwd, &id, &state.head),
-            GIT_TIMEOUT,
-        )
-        .await
-        .map_err(|e| carry_transport("apply", e))?;
-        if !out.status.success() {
-            let err = stderr_of(&out);
-            if err.contains(carry::TARGET_DIRTY) {
-                return Err(target_dirty(&cwd, &target));
-            }
-            return Err(carry_err(
-                "apply",
-                &format!("replaying the work in {cwd} on {target}"),
-                &err,
-            ));
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let porcelain = carry::parse_apply(&stdout).map_err(|e| {
-            carry_err(
-                "apply",
-                &format!(
-                    "reading the replayed state of {cwd} on {target}: {}",
-                    e.message
-                ),
-                "",
+        // `adopted_detail` is set only when the target turned out to already
+        // hold the snapshot; either way the step is not closed until AFTER
+        // the `want != got` check below passes, so a mismatch leaves it open
+        // for the caller's `progress.fail()` to mark `replay:failed` — same
+        // as every other failure on this path.
+        let mut adopted_detail: Option<String> = None;
+        // Set only when `clean_target` replaced an unfinished earlier
+        // attempt's leftovers before the retried apply below; drives the
+        // `replaced ...` warning and the `Warned` (not `Done`) close of the
+        // `Replay` step. The inner `Option` is the count: `None` there means
+        // the cleanup ran but its reply could not be read, and the warning
+        // then names no number rather than one it does not have.
+        let mut cleaned: Option<Option<u64>> = None;
+        let porcelain_owned = {
+            let out = sh(
+                ssh,
+                &target,
+                &carry::apply_script(&cwd, &id, &state.head),
+                GIT_TIMEOUT,
             )
-        })?;
+            .await
+            .map_err(|e| carry_transport("apply", e))?;
+            if !out.status.success() {
+                let err = stderr_of(&out);
+                if !err.contains(carry::TARGET_DIRTY) {
+                    return Err(carry_err(
+                        "apply",
+                        &format!("replaying the work in {cwd} on {target}"),
+                        &err,
+                    ));
+                }
+                match classify_target(ssh, &target, &cwd, &id, &state.head).await {
+                    Adopted::Yes(porcelain) => {
+                        adopted_detail = Some("already in place".to_string());
+                        warnings.push(format!(
+                            "{cwd} on {target} already held exactly this work; nothing was replayed"
+                        ));
+                        porcelain
+                    }
+                    // A non-empty `ours` is required: an unparseable
+                    // `LEFTOVERS_DIFFER` reply also comes back as `Ours` with
+                    // an empty path list, and running the rollback on the
+                    // strength of a reply nobody could read would delete
+                    // files blind. That case falls through to the plain
+                    // refusal below like any other `Ours` without the flag.
+                    Adopted::Ours(l) if args.clean_target && !l.ours.is_empty() => {
+                        // Safe only because `classify_target` already
+                        // established every dirty tracked path is one the
+                        // snapshot itself writes (`Adopted::Ours`) — see
+                        // `carry::recover_script`'s doc for why the reset to
+                        // `HEAD` this runs would otherwise be able to discard
+                        // the target's own uncommitted work.
+                        let rec_out =
+                            sh(ssh, &target, &carry::recover_script(&cwd, &id), GIT_TIMEOUT)
+                                .await
+                                .map_err(|e| carry_transport("recover", e))?;
+                        if !rec_out.status.success() {
+                            return Err(carry_err(
+                                "recover",
+                                &format!(
+                                    "replacing an unfinished attempt's work in {cwd} on {target}"
+                                ),
+                                &stderr_of(&rec_out),
+                            ));
+                        }
+                        // Never `l.ours.len()` as a fallback: that list is
+                        // capped at `carry::LEFTOVER_CAP`, so 200 leftovers
+                        // with an unreadable count would report 50.
+                        cleaned = Some(
+                            carry::parse_recover(&String::from_utf8_lossy(&rec_out.stdout)).ok(),
+                        );
+                        // The leftovers are gone, so the retried apply lands
+                        // on a clean worktree; classify_target is not called
+                        // again on its failure — a second failure here is
+                        // just a plain carry error.
+                        let retry = sh(
+                            ssh,
+                            &target,
+                            &carry::apply_script(&cwd, &id, &state.head),
+                            GIT_TIMEOUT,
+                        )
+                        .await
+                        .map_err(|e| carry_transport("apply", e))?;
+                        if !retry.status.success() {
+                            return Err(carry_err(
+                                "apply",
+                                &format!(
+                                    "replaying the work in {cwd} on {target} after clearing an earlier attempt's leftovers"
+                                ),
+                                &stderr_of(&retry),
+                            ));
+                        }
+                        let stdout = String::from_utf8_lossy(&retry.stdout);
+                        carry::parse_apply(&stdout)
+                            .map_err(|e| {
+                                carry_err(
+                                    "apply",
+                                    &format!(
+                                        "reading the replayed state of {cwd} on {target}: {}",
+                                        e.message
+                                    ),
+                                    "",
+                                )
+                            })?
+                            .to_string()
+                    }
+                    other => return Err(target_dirty(&cwd, &target, &other)),
+                }
+            } else {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                carry::parse_apply(&stdout)
+                    .map_err(|e| {
+                        carry_err(
+                            "apply",
+                            &format!(
+                                "reading the replayed state of {cwd} on {target}: {}",
+                                e.message
+                            ),
+                            "",
+                        )
+                    })?
+                    .to_string()
+            }
+        };
         // `" M"` (unstaged) and `"M "` (staged) differ only in the two status
         // columns, so they are compared verbatim.
         let line_set = |files: &[DirtyFile]| -> std::collections::BTreeSet<String> {
@@ -2195,7 +2485,7 @@ async fn move_session_inner(
         };
         let (want, got) = (
             line_set(&state.dirty),
-            line_set(&parse_porcelain(porcelain)),
+            line_set(&parse_porcelain(&porcelain_owned)),
         );
         if want != got {
             return Err(IpcError::new(
@@ -2206,6 +2496,21 @@ async fn move_session_inner(
             )
             .with_details(serde_json::json!({ "step": "verify", "source": want, "target": got })));
         }
+        if let Some(removed) = cleaned {
+            // Wording matters here: `recover_script`'s count is paths the
+            // snapshot's tree adds relative to `HEAD` (an `rm -f` that hits a
+            // path `read-tree -u --reset HEAD` already removed still exits
+            // 0), not a count of files this step actually deleted — so this
+            // must never read as "N files deleted".
+            let count = match removed {
+                Some(n) => format!(" ({n} path(s))"),
+                None => String::new(),
+            };
+            warnings.push(format!(
+                "replaced the work an unfinished earlier transfer had left in {cwd} on {target}{count}"
+            ));
+        }
+        progress.end_soft(cleaned.is_some(), adopted_detail);
     }
     if !state.dirty.is_empty() {
         warnings.push(format!(
@@ -2331,17 +2636,31 @@ async fn move_session_inner(
     // chose may be a name fleet killed there moments ago; the refresh below
     // has to be free to insert its row.
     crate::service::sessions::record_tmux_created(store, &target, &tmux_name);
+    // Built once the target session exists: every `partial(...)` call site
+    // from here on shares it. The transcript facts are already known (the
+    // copy precedes the start); the target row's counters are filled in as
+    // that row itself becomes known, below.
+    let mut partial_ctx = PartialCtx {
+        from_host: src.clone(),
+        to_host: target.clone(),
+        to_tmux_name: tmux_name.clone(),
+        claude_session_id: id.clone(),
+        branch: snap.branch.clone(),
+        kept_source: args.keep_source,
+        source_transcript: Some(located.clone()),
+        to_turn_seq: None,
+        to_last_turn_at: None,
+    };
     hooks
         .refresh_host(store, &target)
         .await
-        .map_err(|e| partial("reconciling the target host", &target, &tmux_name, None, &e))?;
+        .map_err(|e| partial("reconciling the target host", &partial_ctx, None, &e))?;
     let new_row = {
         let s = lock(store)?;
         let row = s.get_session(&tmux_name, &target)?.ok_or_else(|| {
             partial(
                 "registering the target row",
-                &target,
-                &tmux_name,
+                &partial_ctx,
                 None,
                 &IpcError::new(codes::E_NOTFOUND, "no row after reconcile"),
             )
@@ -2390,6 +2709,9 @@ async fn move_session_inner(
         s.set_parent_session_id(row.id, Some(snap.row.id))?;
         row
     };
+    // The target row exists now: its counters, as this move has seen them.
+    partial_ctx.to_turn_seq = Some(new_row.turn_seq);
+    partial_ctx.to_last_turn_at = new_row.last_turn_at;
 
     // 5. Confirm: the row is running and the transcript is in place.
     let deadline = tokio::time::Instant::now() + opts.confirm_timeout;
@@ -2418,8 +2740,7 @@ async fn move_session_inner(
     let Some(target_row) = confirmed else {
         return Err(partial(
             "confirming the target is running",
-            &target,
-            &tmux_name,
+            &partial_ctx,
             Some(new_row.id),
             &IpcError::new(
                 codes::E_TIMEOUT,
@@ -2430,135 +2751,52 @@ async fn move_session_inner(
             ),
         ));
     };
+    // Confirmed: refresh the counters to what this row now shows.
+    partial_ctx.to_turn_seq = Some(target_row.turn_seq);
+    partial_ctx.to_last_turn_at = target_row.last_turn_at;
 
     progress.start(MoveStep::Handoff);
-    // 6. The source: check it wrote nothing since the copy, kill it (unless
-    //    keep_source), and only then record the move.
-    let mut source_killed = false;
-    if !args.keep_source {
-        // The source kept running through the copy: if its transcript moved
-        // on since, it took a turn the target does not have. Killing it would
-        // lose that turn, so stop here with both sessions alive.
-        let recheck = locate_on(ssh, &src, snap.stored_transcript.as_deref(), &id)
-            .await
-            .map_err(|e| {
-                partial(
-                    "re-checking the source transcript",
-                    &target,
-                    &tmux_name,
-                    Some(target_row.id),
-                    &e,
-                )
-            })?;
-        if recheck.size != located.size || recheck.mtime != located.mtime {
-            return Err(partial(
-                "source transcript changed after copy",
-                &target,
-                &tmux_name,
-                Some(target_row.id),
-                &IpcError::new(
-                    codes::E_INVALID_STATE,
-                    format!(
-                        "the source transcript went from {} to {} bytes (mtime {} -> {}) after it was copied, so the source took a turn the target does not have; kill the target session {tmux_name} on {target} and retry move_session once the source is idle",
-                        located.size, recheck.size, located.mtime, recheck.mtime
-                    ),
-                ),
-            ));
-        }
-        // Snapshot the source's lifetime usage and usage cursor before the
-        // kill drops its row.
-        let (source_usage, source_cursor) = store
-            .lock()
-            .ok()
-            .map(|s| {
-                (
-                    s.get_session_by_id(snap.row.id)
-                        .ok()
-                        .flatten()
-                        .map(|r| r.usage),
-                    s.usage_cursor(snap.row.id).ok().flatten(),
-                )
-            })
-            .unwrap_or((None, None));
-        hooks
-            .kill_source(store, &src, &snap.row.tmux_name)
-            .await
-            .map_err(|e| {
-                partial(
-                    &format!("killing the source {} on {src}", snap.row.tmux_name),
-                    &target,
-                    &tmux_name,
-                    Some(target_row.id),
-                    &e,
-                )
-            })?;
-        source_killed = true;
-        // One last look: a write between the final check and the kill means
-        // the target may lack the source's last turn. Nothing is left to undo,
-        // so say so in the report.
-        match locate_on(ssh, &src, snap.stored_transcript.as_deref(), &id).await {
-            Ok(after) if after.size != recheck.size || after.mtime != recheck.mtime => {
-                warnings.push(format!(
-                    "the source wrote after the final check and before the kill (transcript {} -> {} bytes, mtime {} -> {}); the target may be missing its last turn — compare the two with session_transcript",
-                    recheck.size, after.size, recheck.mtime, after.mtime
-                ));
-            }
-            Ok(_) => {}
-            Err(e) => warnings.push(format!(
-                "could not re-check the source transcript after the kill ({}: {}); the target may be missing its last turn",
-                e.code, e.message
-            )),
-        }
-        // The spend follows the session. Never under keep_source: both rows
-        // stay live there and would report it twice.
-        if let Ok(s) = store.lock() {
-            if let Some(u) = source_usage.as_ref() {
-                if let Err(e) = s.add_usage_totals(target_row.id, u) {
-                    tracing::warn!(
-                        "move_session: carrying usage totals to {} failed: {e}",
-                        target_row.id
-                    );
-                }
-            }
-            // A source usage pass between the inherit and the kill counted
-            // lines the target's cursor still points before: catch up.
-            if let Some(c) = source_cursor.as_ref() {
-                if let Err(e) = s.raise_usage_cursor(target_row.id, c) {
-                    tracing::warn!(
-                        "move_session: raising the usage cursor on {} failed: {e}",
-                        target_row.id
-                    );
-                }
-            }
-        }
-    }
-
-    // 7. The move is complete: record it on both rows.
-    let detail = serde_json::json!({
-        "from_host": src,
-        "to_host": target,
-        "from_session_id": snap.row.id,
-        "to_session_id": target_row.id,
-        "claude_session_id": id,
-        "branch": snap.branch,
-        "bytes": copied,
-        "kept_source": args.keep_source,
-        "source_killed": source_killed,
-        "carried": &carried,
-    })
-    .to_string();
-    if let Ok(s) = store.lock() {
-        for sid in [snap.row.id, target_row.id] {
-            if let Err(e) = s.insert_session_event(sid, EVENT_MOVED, Some(&detail)) {
-                tracing::warn!(
-                    kind = EVENT_MOVED,
-                    session_id = sid,
-                    error = %e,
-                    "[event] insert failed"
-                );
-            }
-        }
-    }
+    // 6/7. The source: check it wrote nothing since the copy, kill it (unless
+    // keep_source), and only then record the move — see `finalise::finalise_source`.
+    // It returns plain errors; wrapping them as PARTIAL is this call site's
+    // job, not the shared step's, so a later recovery can wrap the same
+    // errors differently.
+    let finalise::FinaliseOutcome {
+        source_killed,
+        warnings: finalise_warnings,
+    } = finalise::finalise_source(
+        finalise::FinaliseArgs {
+            source_row_id: snap.row.id,
+            source_host: &src,
+            source_tmux_name: &snap.row.tmux_name,
+            target_row_id: target_row.id,
+            target_host: &target,
+            target_tmux_name: &tmux_name,
+            claude_id: &id,
+            branch: &snap.branch,
+            stored_transcript: snap.stored_transcript.as_deref(),
+            copied: located.clone(),
+            transcript_bytes: copied,
+            keep_source: args.keep_source,
+            extra_detail: serde_json::json!({}),
+        },
+        store,
+        ssh,
+        hooks,
+        Some(&carried),
+    )
+    .await
+    .map_err(|e| {
+        let step = e
+            .details
+            .as_ref()
+            .and_then(|d| d.get("step"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("finalising the move")
+            .to_string();
+        partial(&step, &partial_ctx, Some(target_row.id), &e)
+    })?;
+    warnings.extend(finalise_warnings);
 
     Ok(MoveReport {
         source_session_id: snap.row.id,
@@ -2735,7 +2973,7 @@ mod tests {
         worktree_id: i64,
         /// Status the target row gets on reconcile.
         target_status: &'static str,
-        /// `kill_source` fails.
+        /// `kill_tmux_session` fails.
         kill_fails: bool,
         /// Starting the target makes the source transcript grow (a turn
         /// taken on the source after the copy).
@@ -2743,6 +2981,9 @@ mod tests {
         /// Killing the source makes its transcript grow (a write that
         /// slipped in after the final check).
         grow_source_on_kill: bool,
+        /// `refresh_host` fails when reconciling the target — the earliest
+        /// partial call site, before any target row exists.
+        refresh_target_fails: bool,
         /// Whether `session_moved` was already on the source when the kill
         /// ran (`None` = no kill).
         moved_at_kill: Mutex<Option<bool>>,
@@ -2760,6 +3001,7 @@ mod tests {
                 kill_fails: false,
                 grow_source_on_start: false,
                 grow_source_on_kill: false,
+                refresh_target_fails: false,
                 moved_at_kill: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
@@ -2813,6 +3055,9 @@ mod tests {
             Ok(())
         }
         async fn refresh_host(&self, store: &Mutex<Store>, host: &str) -> Result<(), IpcError> {
+            if self.refresh_target_fails && host != "alpha" {
+                return Err(IpcError::new(codes::E_SSH, "refresh failed"));
+            }
             let started = self.started.lock().unwrap().clone();
             let s = store.lock().unwrap();
             for (h, n) in started.iter().filter(|(h, _)| h == host) {
@@ -2829,7 +3074,7 @@ mod tests {
             }
             Ok(())
         }
-        async fn kill_source(
+        async fn kill_tmux_session(
             &self,
             store: &Mutex<Store>,
             host: &str,
@@ -3040,7 +3285,20 @@ mod tests {
             target_host_alias: "beta".into(),
             keep_source,
             strict: false,
+            clean_target: false,
         }
+    }
+
+    /// `run`, with the args mutated before the call — for the flags `run`
+    /// does not take.
+    async fn run_with(
+        f: &Fixture,
+        hooks: &FakeHooks,
+        edit: impl FnOnce(&mut MoveSessionArgs),
+    ) -> Result<MoveReport, IpcError> {
+        let mut a = args(f, false);
+        edit(&mut a);
+        move_session_with(a, &f.store, &f.fake, hooks, fast()).await
     }
 
     async fn run(f: &Fixture, hooks: &FakeHooks, keep: bool) -> Result<MoveReport, IpcError> {
@@ -3137,6 +3395,395 @@ mod tests {
             "{seen:?}"
         );
         assert!(seen.contains(&"git:done".to_string()), "{seen:?}");
+    }
+
+    /// The state a move leaves when it fails after the replay: the target
+    /// worktree already holds exactly what this move is carrying.
+    fn target_already_replayed(f: &Fixture, porcelain: &str) {
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::ok(&out(&format!("{porcelain}\n"))),
+            );
+    }
+
+    #[tokio::test]
+    async fn a_target_that_already_holds_this_work_is_adopted_and_the_move_completes() {
+        let (f, bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        target_already_replayed(&f, " M src/lib.rs\n?? notes.txt");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("the move completes");
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("already held exactly this work")),
+            "{:?}",
+            rep.warnings
+        );
+        let seen = progress_of(&f, &bus);
+        assert!(seen.contains(&"replay:done".to_string()), "{seen:?}");
+        assert!(!seen.iter().any(|e| e == "replay:failed"), "{seen:?}");
+    }
+
+    /// An adopted target still has to match the source exactly: the adopt
+    /// only decides not to WRITE, never that the result is correct. When the
+    /// verify script's porcelain differs from the source's own, the move
+    /// must fail like any other replay mismatch — `E_MOVE_CARRY`, and the
+    /// progress stream ending at `replay:failed`, not `replay:done` (closing
+    /// the step early on the strength of the adopt, before this check runs,
+    /// was exactly the bug this test guards against).
+    #[tokio::test]
+    async fn an_adopted_target_whose_porcelain_mismatches_still_fails_the_move() {
+        let (f, bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        // The source's dirty set is " M src/lib.rs\n?? notes.txt"
+        // (`dirty_unpushed_carry`); this verify payload swaps `notes.txt`
+        // for an untracked file the source never had.
+        target_already_replayed(&f, " M src/lib.rs\n?? other.txt");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_CARRY, "{}", err.message);
+        let seen = progress_of(&f, &bus);
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("replay:failed"),
+            "{seen:?}"
+        );
+        assert!(!seen.iter().any(|e| e == "replay:done"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn stale_leftovers_are_ours_and_name_their_paths() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\nours\tsrc/lib.rs\0", carry::LEFTOVERS_DIFFER),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        let d = err.details.clone().unwrap();
+        assert_eq!(d["leftovers"], "ours");
+        assert_eq!(d["ours"][0], "src/lib.rs");
+        assert!(err.message.contains("src/lib.rs"), "{}", err.message);
+    }
+
+    // R-T11-2: `carry::parse_leftovers` already counts what the cap left out
+    // (`Leftovers::more_ours`/`more_theirs`) — `target_dirty` must forward
+    // both into `details`, not just the capped path lists, or a caller
+    // offering to replace "these paths" (a destructive cleanup) understates
+    // how much it is about to touch.
+    #[tokio::test]
+    async fn ours_leftovers_beyond_the_cap_are_counted_in_details() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!(
+                        "{}\nours\tsrc/lib.rs\0more\tours\t200\0",
+                        carry::LEFTOVERS_DIFFER
+                    ),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        let d = err.details.clone().unwrap();
+        assert_eq!(d["leftovers"], "ours");
+        assert_eq!(d["more_ours"], 200);
+        assert_eq!(d["more_theirs"], 0);
+    }
+
+    #[tokio::test]
+    async fn the_targets_own_work_is_theirs_and_is_refused_outright() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!(
+                        "{}\nours\tsrc/lib.rs\0theirs\ttheir_notes.md\0more\ttheirs\t7\0",
+                        carry::LEFTOVERS_DIFFER
+                    ),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        let d = err.details.clone().unwrap();
+        assert_eq!(d["leftovers"], "theirs");
+        assert_eq!(d["theirs"][0], "their_notes.md");
+        assert!(err.message.contains("their_notes.md"), "{}", err.message);
+        assert!(err.message.contains("7 more"), "{}", err.message);
+        // R-T11-2: the count the message already speaks of ("7 more") must
+        // also be machine-readable in `details`, not just prose.
+        assert_eq!(d["more_theirs"], 7);
+        assert_eq!(d["more_ours"], 0);
+    }
+
+    #[tokio::test]
+    async fn a_verify_that_cannot_answer_keeps_todays_refusal() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(5, &format!("{} no-snapshot", carry::FAILED)),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        assert_eq!(err.details.clone().unwrap()["leftovers"], "unknown");
+        assert!(
+            err.message.contains("inspect them there"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_head_mismatch_from_verify_is_never_an_adopt() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(10, &format!("{} deadbeef", carry::HEAD_MISMATCH)),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        assert_eq!(err.details.clone().unwrap()["leftovers"], "unknown");
+    }
+
+    // ── clean_target ──
+
+    /// `dirty_unpushed_carry` leaves a standing `# cf-carry:apply` rule that
+    /// succeeds with the source's own porcelain — exactly the reply a
+    /// retried apply should get once the leftovers are gone. `on_host_once`
+    /// overrides it for the first, failing attempt only: the fake's rules
+    /// are otherwise permanent, so a plain `on_host` fail here would make
+    /// EVERY attempt fail, including the retry — there would be no way to
+    /// tell "dirty first, then clean" apart from "dirty always".
+    #[tokio::test]
+    async fn clean_target_replaces_stale_leftovers_and_then_replays() {
+        let (f, bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\nours\tsrc/lib.rs\0", carry::LEFTOVERS_DIFFER),
+                ),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:recover"),
+                Reply::ok(&out("3\n")),
+            )
+            // Dirty for the first apply only; the standing rule from
+            // `dirty_unpushed_carry` (the source's own porcelain) answers
+            // the retry after the recover.
+            .on_host_once(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run_with(&f, &hooks, |a| a.clean_target = true)
+            .await
+            .expect("the move completes");
+        assert!(
+            rep.warnings.iter().any(|w| w.contains("3 path(s)")),
+            "{:?}",
+            rep.warnings
+        );
+        let seen = progress_of(&f, &bus);
+        assert!(seen.contains(&"replay:warned".to_string()), "{seen:?}");
+        assert_eq!(scripts_with(&f, "beta", "# cf-carry:recover").len(), 1);
+    }
+
+    /// A cleanup whose count could not be read must not borrow one from the
+    /// `ours` list: that list is capped at `carry::LEFTOVER_CAP`, so 200
+    /// leftovers with an unreadable count would report 50. No number is the
+    /// honest answer.
+    #[tokio::test]
+    async fn a_cleanup_with_an_unreadable_count_claims_no_count() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\nours\tsrc/lib.rs\0", carry::LEFTOVERS_DIFFER),
+                ),
+            )
+            // The recover ran, but its payload is not a number.
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:recover"),
+                Reply::ok(&out("who knows\n")),
+            )
+            .on_host_once(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run_with(&f, &hooks, |a| a.clean_target = true)
+            .await
+            .expect("the move completes");
+        let replaced: Vec<&String> = rep
+            .warnings
+            .iter()
+            .filter(|w| w.contains("unfinished earlier transfer had left"))
+            .collect();
+        assert_eq!(replaced.len(), 1, "{:?}", rep.warnings);
+        assert!(
+            !replaced[0].contains("path(s)"),
+            "a count nobody could read must not be invented: {:?}",
+            replaced[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_target_never_touches_the_targets_own_work() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\ntheirs\ttheir_notes.md\0", carry::LEFTOVERS_DIFFER),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run_with(&f, &hooks, |a| a.clean_target = true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        assert_eq!(err.details.clone().unwrap()["leftovers"], "theirs");
+        assert!(
+            scripts_with(&f, "beta", "# cf-carry:recover").is_empty(),
+            "the recover script must never run for the target's own work"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_the_flag_stale_leftovers_are_only_refused() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\nours\tsrc/lib.rs\0", carry::LEFTOVERS_DIFFER),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.details.clone().unwrap()["leftovers"], "ours");
+        assert!(scripts_with(&f, "beta", "# cf-carry:recover").is_empty());
+    }
+
+    /// An unparseable `LEFTOVERS_DIFFER` reply also comes back from
+    /// `classify_target` as `Adopted::Ours` with an EMPTY `ours` list (see
+    /// `parse_leftovers`'s tolerance for a truncated/unknown stream) — so
+    /// `clean_target` must never run the rollback on that verdict: nobody
+    /// could actually read what it would be replacing.
+    #[tokio::test]
+    async fn clean_target_refuses_when_the_leftovers_could_not_be_read() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\ngarbage-with-no-tabs", carry::LEFTOVERS_DIFFER),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run_with(&f, &hooks, |a| a.clean_target = true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        assert_eq!(err.details.clone().unwrap()["leftovers"], "ours");
+        assert!(
+            scripts_with(&f, "beta", "# cf-carry:recover").is_empty(),
+            "an unparseable reply must never drive the rollback"
+        );
     }
 
     /// F8: the confirm wait is inside the `start` step, so a target that
@@ -3528,6 +4175,97 @@ mod tests {
                 assert_eq!(d["to_host"], "beta");
             }
         }
+    }
+
+    /// Task 4: a partial move's `session_move_partial` detail carries
+    /// everything a later `resolve_move` needs — the target identity, the
+    /// source transcript as the copy was taken (size, mtime and path, so a
+    /// recovery never has to guess the file), and the target's counters.
+    #[tokio::test]
+    async fn a_partial_records_everything_a_later_recovery_needs() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        // The kill fails: the target is up, both rows are alive — a partial.
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.kill_fails = true;
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL);
+
+        let ev = events(&f, f.source_id);
+        let (_, detail) = ev
+            .iter()
+            .find(|(k, _)| k == EVENT_MOVE_PARTIAL)
+            .expect("session_move_partial on the source");
+        let d: serde_json::Value = serde_json::from_str(detail.as_deref().unwrap()).unwrap();
+        assert_eq!(d["from_host"], "alpha");
+        assert_eq!(d["to_host"], "beta");
+        assert_eq!(d["claude_session_id"], SID);
+        assert_eq!(d["branch"], "feat");
+        assert!(d["to_tmux_name"].is_string(), "{d}");
+        assert!(d["source_transcript_size"].is_u64(), "{d}");
+        assert!(d["source_transcript_mtime"].is_i64(), "{d}");
+        assert!(d["source_transcript_path"].is_string(), "{d}");
+        assert!(
+            d["to_turn_seq"].is_i64() || d["to_turn_seq"].is_null(),
+            "{d}"
+        );
+        assert!(d["step"].is_string(), "{d}");
+    }
+
+    /// Whether the move was told to KEEP the source is one of the facts a
+    /// later recovery cannot re-derive: the run store is gone, and a retry
+    /// rebuilt from this event would otherwise default to killing a source
+    /// the original transfer was asked to leave running.
+    #[tokio::test]
+    async fn a_partial_records_whether_the_move_was_told_to_keep_the_source() {
+        for keep in [true, false] {
+            let f = fixture();
+            let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            // Never confirmed: the target row exists, both sessions are alive.
+            hooks.target_status = "ghost";
+            let err = run(&f, &hooks, keep).await.unwrap_err();
+            assert_eq!(err.code, codes::E_MOVE_PARTIAL, "{keep}: {}", err.message);
+            let tid = err.details.clone().expect("details")["target_session_id"]
+                .as_i64()
+                .expect("target id");
+            for id in [f.source_id, tid] {
+                let ev = events(&f, id);
+                let (_, detail) = ev
+                    .iter()
+                    .find(|(k, _)| k == EVENT_MOVE_PARTIAL)
+                    .unwrap_or_else(|| panic!("{keep}: session_move_partial on {id}: {ev:?}"));
+                let d: serde_json::Value =
+                    serde_json::from_str(detail.as_deref().unwrap()).unwrap();
+                assert_eq!(d["kept_source"], keep, "on {id}: {d}");
+            }
+        }
+    }
+
+    /// A partial that fails at the earliest possible call site (reconciling
+    /// the target host, before any target row exists) still has the source
+    /// transcript facts — the copy happens before the target ever starts —
+    /// but must leave the not-yet-known target-row counters `null`, never a
+    /// guessed `0`.
+    #[tokio::test]
+    async fn a_partial_before_any_target_row_records_nulls_rather_than_guesses() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.refresh_target_fails = true;
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL);
+        let ev = events(&f, f.source_id);
+        let (_, detail) = ev.iter().find(|(k, _)| k == EVENT_MOVE_PARTIAL).unwrap();
+        let d: serde_json::Value = serde_json::from_str(detail.as_deref().unwrap()).unwrap();
+        // The transcript facts are known by then (the copy happens before the
+        // start)...
+        assert!(!d["source_transcript_size"].is_null(), "{d}");
+        assert!(!d["source_transcript_mtime"].is_null(), "{d}");
+        assert!(!d["source_transcript_path"].is_null(), "{d}");
+        assert_eq!(d["from_host"], "alpha");
+        // ...but a fact the move never reached must be null, never a guessed 0.
+        assert!(d["to_turn_seq"].is_null(), "{d}");
+        assert!(d["to_last_turn_at"].is_null(), "{d}");
     }
 
     #[tokio::test]
@@ -4969,6 +5707,36 @@ mod tests {
         assert!(run(&f, &hooks, true).await.is_ok());
     }
 
+    /// The seam itself: `finalise_source` refuses when the source transcript
+    /// has moved past the copy, and does not kill anything in that case.
+    #[tokio::test]
+    async fn finalise_refuses_a_source_that_wrote_after_the_copy() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        // The re-locate answers a larger transcript than `copied` records.
+        // `on_host_once` so only the FIRST `# cf-move:locate` call (the
+        // initial copy in step 2) sees it; the recheck inside
+        // `finalise_source` falls through to the fixture's standing reply,
+        // which is smaller — the mismatch the seam must refuse on.
+        f.fake.on_host_once(
+            "alpha",
+            Match::script_contains("# cf-move:locate"),
+            Reply::ok("999999\t1700000000\t/home/a/.claude/projects/p/c.jsonl\n"),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL);
+        assert!(
+            err.message.contains("after it was copied"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !hooks.log().iter().any(|l| l.starts_with("kill")),
+            "nothing is killed when the source moved on"
+        );
+    }
+
     #[tokio::test]
     async fn busy_or_unknown_source_status_is_refused_before_anything_runs() {
         for status in ["working", "blocked"] {
@@ -5234,6 +6002,7 @@ mod tests {
             target_host_alias: "alpha".into(),
             keep_source: false,
             strict: false,
+            clean_target: false,
         };
         assert_eq!(
             move_session_with(same, &f.store, &f.fake, &hooks, fast())
@@ -5253,6 +6022,56 @@ mod tests {
             codes::E_INVALID_STATE
         );
         assert!(f.fake.calls().iter().all(|c| c.host != "beta"));
+    }
+
+    /// A `keep_source` move leaves the origin running the SAME conversation in
+    /// the SAME worktree, so a move "back" to that host would point the
+    /// transfer at the live session's own worktree: `pick_target_name` steps
+    /// around the tmux name clash, the dirty target is ADOPTED when the
+    /// content matches (or `clean_target` resets it), and the transcript copy
+    /// replaces the one that session is writing — two live sessions, one
+    /// conversation, one worktree. The refusal lives in the preflight, where
+    /// it covers the Tauri command, the MCP tool and the hub alike, not just
+    /// the button that made it easy to click.
+    #[tokio::test]
+    async fn a_target_already_running_this_conversation_is_refused() {
+        let f = fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let twin = {
+            let s = f.store.lock().unwrap();
+            let twin = s
+                .upsert_session(
+                    "dev-o-r--feat-moved",
+                    "beta",
+                    Some(f.project_id),
+                    Some(f.worktree_id),
+                    1,
+                    1,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            s.set_claude_session_id(twin, SID).unwrap();
+            twin
+        };
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE, "{}", err.message);
+        for want in ["beta", "dev-o-r--feat-moved", SID] {
+            assert!(err.message.contains(want), "{want:?}: {}", err.message);
+        }
+        // Refused before a single command reached either host.
+        assert!(f.fake.calls().is_empty(), "{:?}", f.fake.calls());
+        assert_source_untouched(&f, &hooks);
+        // A row that is no longer alive is not this conversation running
+        // there: a retry after the target session was killed must still work.
+        f.store
+            .lock()
+            .unwrap()
+            .mark_session_killed(twin, 1)
+            .unwrap();
+        run(&f, &hooks, false)
+            .await
+            .expect("move after the twin died");
     }
 
     #[tokio::test]

@@ -7,7 +7,21 @@ import type { IpcError } from './result';
 export interface MoveFailure {
   what: string;
   standing: string;
+  /** What the sheet may offer. `clean` carries the paths a cleanup would
+   *  replace, so the confirmation can name them, and `more` — how many the
+   *  backend's cap (`carry::LEFTOVER_CAP`) left out of `paths` — so a
+   *  truncated confirmation can say so instead of understating what it is
+   *  about to delete; `null` means there is nothing the app can do — only the
+   *  user, on that host. */
+  action: { kind: 'retry' } | { kind: 'clean'; paths: string[]; more: number } | null;
 }
+
+/** A frontend-only marker meaning "this run ended because you undid the
+ *  partial move". It never comes from the backend and never crosses the
+ *  wire, so it deliberately does NOT wear the `E_*` prefix: those codes are
+ *  the backend's namespace (`ipc_error.rs`), and a frontend copy of one
+ *  would collide the day the backend mints its own. */
+export const UNDONE = 'MOVE_UNDONE';
 
 const CARRY_STEP: Record<string, string> = {
   seed: 'The target could not be given a clone of the repository to receive the work into.',
@@ -54,6 +68,59 @@ function field(details: unknown, key: string): string | null {
   return typeof v === 'string' ? v : null;
 }
 
+function stringArrayField(details: unknown, key: string): string[] {
+  if (typeof details !== 'object' || details === null) return [];
+  const v = (details as Record<string, unknown>)[key];
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+function numberField(details: unknown, key: string): number {
+  if (typeof details !== 'object' || details === null) return 0;
+  const v = (details as Record<string, unknown>)[key];
+  return typeof v === 'number' ? v : 0;
+}
+
+/** `a, b and 7 more` — an older backend without `more_*` in `details` simply
+ *  never adds the tail. */
+function withMore(paths: string[], more: number): string {
+  const s = paths.join(', ');
+  return more > 0 ? `${s}${s ? ' and ' : ''}${more} more` : s;
+}
+
+type Action = MoveFailure['action'];
+
+/** `E_MOVE_TARGET_DIRTY`: `details.leftovers` says whose work the target is
+ *  holding. `ours` is a stale attempt's leftovers, safe to replace; `theirs`
+ *  is the target's own uncommitted work, which only a person on that host can
+ *  resolve; anything else means the check itself could not tell. */
+function targetDirtyWhat(details: unknown, toHost: string): { what: string; action: Action } {
+  const leftovers = field(details, 'leftovers');
+  if (leftovers === 'ours') {
+    const paths = stringArrayField(details, 'ours');
+    const more = numberField(details, 'more_ours');
+    return {
+      what:
+        `${toHost} still holds work an earlier transfer attempt left behind, and it differs from ` +
+        `what is being carried now: ${withMore(paths, more)}.`,
+      action: { kind: 'clean', paths, more },
+    };
+  }
+  if (leftovers === 'theirs') {
+    const paths = stringArrayField(details, 'theirs');
+    const more = numberField(details, 'more_theirs');
+    return {
+      what:
+        `${toHost} has uncommitted work of its own in this worktree: ${withMore(paths, more)}. Commit or ` +
+        'discard it there first.',
+      action: null,
+    };
+  }
+  return {
+    what: `${toHost} already has uncommitted work in this worktree. Clean it up there first.`,
+    action: { kind: 'retry' },
+  };
+}
+
 /** A move that stopped after the target session existed. The `step` strings
  *  are the ones `partial(…)` is called with in
  *  `crates/fleet-core/src/service/move_session/mod.rs`; a step this build
@@ -78,39 +145,62 @@ function partialWhat(details: unknown, toHost: string): string {
   return 'The new session started, but the last step of the move failed.';
 }
 
-function what(error: IpcError, toHost: string): string {
+function what(error: IpcError, toHost: string): { what: string; action: Action } {
   switch (error.code) {
     case 'E_MOVE_DIRTY':
-      return 'The source has uncommitted work, and this move was asked to refuse that.';
+      return {
+        what: 'The source has uncommitted work, and this move was asked to refuse that.',
+        action: { kind: 'retry' },
+      };
     case 'E_MOVE_UNPUSHED':
-      return 'The source has commits that are not pushed, and this move was asked to refuse that.';
+      return {
+        what: 'The source has commits that are not pushed, and this move was asked to refuse that.',
+        action: { kind: 'retry' },
+      };
     case 'E_MOVE_MIDOP':
-      return 'The source is in the middle of a merge, rebase or similar. Finish or abort it, then move.';
+      return {
+        what: 'The source is in the middle of a merge, rebase or similar. Finish or abort it, then move.',
+        action: { kind: 'retry' },
+      };
     case 'E_MOVE_TARGET_DIRTY':
-      return `${toHost} already has uncommitted work in this worktree. Clean it up there first.`;
+      return targetDirtyWhat(error.details, toHost);
     case 'E_MOVE_TOO_LARGE':
-      return 'The work to carry is too large for a move.';
+      return { what: 'The work to carry is too large for a move.', action: { kind: 'retry' } };
     case 'E_LOCAL_ONLY':
-      return 'This desktop is a window onto a hub, and the hub refused the move.';
+      return {
+        what: 'This desktop is a window onto a hub, and the hub refused the move.',
+        action: null,
+      };
     case 'E_INVALID_STATE':
-      if (error.message.includes('already in progress')) return 'This session is already being moved.';
+      if (error.message.includes('already in progress')) {
+        return { what: 'This session is already being moved.', action: { kind: 'retry' } };
+      }
       // `require_source_idle`: the one refusal the user can simply wait out.
       if (error.message.includes('is not idle')) {
-        return 'The source Claude is in the middle of a turn. Wait for it to finish, then transfer.';
+        return {
+          what: 'The source Claude is in the middle of a turn. Wait for it to finish, then transfer.',
+          action: { kind: 'retry' },
+        };
       }
-      return error.message;
+      return { what: error.message, action: { kind: 'retry' } };
     case 'E_MOVE_PARTIAL':
-      return partialWhat(error.details, toHost);
+      return { what: partialWhat(error.details, toHost), action: null };
     case 'E_MOVE_CARRY': {
       const step = field(error.details, 'step');
       const sentence = step === null ? undefined : CARRY_STEP[step];
-      if (sentence === undefined) return error.message;
-      return TIMEOUTS.has(field(error.details, 'cause_code') ?? '')
+      if (sentence === undefined) return { what: error.message, action: { kind: 'retry' } };
+      const text = TIMEOUTS.has(field(error.details, 'cause_code') ?? '')
         ? `${sentence} The host timed out.`
         : sentence;
+      return { what: text, action: { kind: 'retry' } };
     }
+    case UNDONE:
+      return {
+        what: `You undid the transfer: the new session on ${toHost} was killed and the source is still running.`,
+        action: null,
+      };
     default:
-      return error.message;
+      return { what: error.message, action: { kind: 'retry' } };
   }
 }
 
@@ -139,7 +229,9 @@ export function describeMoveError(
     return {
       what: 'The move failed. It was started elsewhere, so the reason is in that window or in the session timeline.',
       standing,
+      action: { kind: 'retry' },
     };
   }
-  return { what: what(error, toHost), standing };
+  const { what: text, action } = what(error, toHost);
+  return { what: text, standing, action };
 }

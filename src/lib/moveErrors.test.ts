@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { describeMoveError } from './moveErrors';
+import { describeMoveError, UNDONE } from './moveErrors';
 import type { MoveStep } from './moveProgress';
 
 const err = (code: string, details?: unknown, message = 'raw backend text') => ({ code, message, details });
@@ -156,5 +156,91 @@ describe('describeMoveError', () => {
   it('an observed failure has no error object', () => {
     const d = describeMoveError(null, 'failed', 'turanga', 'git');
     expect(d.what).toBe('The move failed. It was started elsewhere, so the reason is in that window or in the session timeline.');
+  });
+
+  it.each([
+    ['ours', ['src/lib.rs'], 'left behind', 'clean'],
+    ['theirs', ['their_notes.md'], 'work of its own', null],
+    ['unknown', [], 'already has uncommitted', 'retry'],
+  ])('describes E_MOVE_TARGET_DIRTY(%s)', (leftovers, paths, phrase, action) => {
+    const details = leftovers === 'theirs' ? { leftovers, theirs: paths } : { leftovers, ours: paths };
+    const f = describeMoveError(
+      { code: 'E_MOVE_TARGET_DIRTY', message: 'raw', details },
+      'failed',
+      'turanga',
+      'replay',
+    );
+    expect(f.what).toContain(phrase);
+    expect(f.action?.kind ?? null).toBe(action);
+    if (action === 'clean') expect((f.action as { paths: string[] }).paths).toEqual(paths);
+  });
+
+  it('names the paths it would remove, and turanga, for stale leftovers', () => {
+    const f = describeMoveError(
+      {
+        code: 'E_MOVE_TARGET_DIRTY',
+        message: 'raw',
+        details: { leftovers: 'ours', ours: ['a.txt', 'b/c.txt'] },
+      },
+      'failed',
+      'turanga',
+      'replay',
+    );
+    expect(f.what).toContain('turanga');
+    expect(f.what).toContain('a.txt');
+  });
+
+  // Fix round 1, finding 2: the backend caps `ours`/`theirs` at 50 and reports
+  // how many more there were in `more_ours`/`more_theirs`; a cleanup
+  // confirmation that only counts what it was shown would silently understate
+  // what it is about to delete.
+  it('names how many more leftovers were left out when the list was capped', () => {
+    const f = describeMoveError(
+      {
+        code: 'E_MOVE_TARGET_DIRTY',
+        message: 'raw',
+        details: { leftovers: 'ours', ours: ['a.txt'], more_ours: 200 },
+      },
+      'failed',
+      'turanga',
+      'replay',
+    );
+    expect(f.action).toEqual({ kind: 'clean', paths: ['a.txt'], more: 200 });
+    expect(f.what).toContain('200 more');
+  });
+
+  it('reports no more leftovers when the list was not capped', () => {
+    const f = describeMoveError(
+      { code: 'E_MOVE_TARGET_DIRTY', message: 'raw', details: { leftovers: 'ours', ours: ['a.txt'] } },
+      'failed',
+      'turanga',
+      'replay',
+    );
+    expect(f.action).toEqual({ kind: 'clean', paths: ['a.txt'], more: 0 });
+    expect(f.what).not.toContain('more');
+  });
+
+  it('says nothing was overwritten when the target is holding its own work', () => {
+    const f = describeMoveError(
+      { code: 'E_MOVE_TARGET_DIRTY', message: 'raw', details: { leftovers: 'theirs', theirs: ['x'] } },
+      'failed',
+      'turanga',
+      'replay',
+    );
+    expect(f.action).toBeNull();
+    expect(f.standing).toContain('was not touched');
+  });
+
+  it('an undone partial reads as undone, not as a failure', () => {
+    // The marker is frontend-only, so it must not mint a backend `E_*` code.
+    expect(UNDONE.startsWith('E_')).toBe(false);
+    const f = describeMoveError(
+      { code: UNDONE, message: '', details: null },
+      'failed',
+      'turanga',
+      'start',
+    );
+    expect(f.what).toContain('undid');
+    expect(f.action).toBeNull();
   });
 });

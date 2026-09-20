@@ -342,11 +342,16 @@ impl FleetTools {
         and the source worktree is never modified; the target resumes the same \
         conversation and the source is killed only once the target runs \
         (keep_source=true leaves it). strict=true refuses instead of carrying: \
-        E_MOVE_DIRTY, E_MOVE_UNPUSHED. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, \
+        E_MOVE_DIRTY, E_MOVE_UNPUSHED. \
+        Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, \
         E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both \
         sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts \
         (in practice the master). Returns a MoveReport with the new row as target."
     )]
+    // `clean_target`'s prose lives on the parameter itself rather than in the
+    // sentence above: the served tool surface is capped
+    // (`the_served_definition_budget_stays_bounded`), and a flag documented
+    // where the client reads its schema costs the surface once, not twice.
     pub(super) async fn move_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -355,8 +360,8 @@ impl FleetTools {
         audit(
             "move_session",
             &format!(
-                "session_id={} target={} keep_source={} strict={}",
-                p.session_id, p.target_host_alias, p.keep_source, p.strict
+                "session_id={} target={} keep_source={} strict={} clean_target={}",
+                p.session_id, p.target_host_alias, p.keep_source, p.strict, p.clean_target
             ),
         );
         crate::validate::host_alias(&p.target_host_alias).map_err(to_mcp_err)?;
@@ -372,17 +377,64 @@ impl FleetTools {
             "move_session",
             p.confirm_nonce.as_deref(),
             &format!(
-                "session_id={} from={} to={} keep_source={} strict={}",
-                row.id, row.host_alias, p.target_host_alias, p.keep_source, p.strict
+                "session_id={} from={} to={} keep_source={} strict={} clean_target={}",
+                row.id,
+                row.host_alias,
+                p.target_host_alias,
+                p.keep_source,
+                p.strict,
+                p.clean_target
             ),
             &caller,
         )?;
-        let rep = crate::service::move_session::move_session(
-            crate::service::move_session::MoveSessionArgs {
-                session_id: row.id,
-                target_host_alias: p.target_host_alias,
-                keep_source: p.keep_source,
-                strict: p.strict,
+        let rep =
+            crate::service::move_session::move_session(p.into_args(row.id), &self.store, &self.ssh)
+                .await
+                .map_err(to_mcp_err)?;
+        ok_json(&rep)
+    }
+
+    #[tool(
+        description = "Finish or undo a partial move (E_MOVE_PARTIAL). finish kills the \
+        source; undo kills the target and is refused if it took a turn or isn't idle."
+    )]
+    pub(super) async fn resolve_move(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ResolveMoveParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::move_session::resolve::ResolveMoveAction;
+        audit(
+            "resolve_move",
+            &format!("session_id={} action={}", p.session_id, p.action),
+        );
+        let action = match p.action.as_str() {
+            "finish" => ResolveMoveAction::Finish,
+            "undo" => ResolveMoveAction::Undo,
+            other => {
+                return Err(to_mcp_err(IpcError::new(
+                    codes::E_VALIDATE,
+                    format!("action must be \"finish\" or \"undo\", not {other:?}"),
+                )))
+            }
+        };
+        self.resolve_target(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            "the partial move to resolve",
+        )?;
+        self.confirm_gate(
+            "resolve_move",
+            p.confirm_nonce.as_deref(),
+            &format!("session_id={} action={}", p.session_id, p.action),
+            &caller,
+        )?;
+        let rep = crate::service::move_session::resolve::resolve_move(
+            crate::service::move_session::resolve::ResolveMoveArgs {
+                session_id: p.session_id,
+                action,
             },
             &self.store,
             &self.ssh,

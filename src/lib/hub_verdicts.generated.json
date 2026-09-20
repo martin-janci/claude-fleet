@@ -106,6 +106,7 @@
     "repo_file",
     "repo_log",
     "repo_tree",
+    "resolve_move",
     "restart_session",
     "safe_kill_session",
     "send_prompt",

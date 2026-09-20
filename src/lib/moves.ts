@@ -4,11 +4,13 @@
 // window, the MCP API, a hub client) is settled by its events. Nothing here
 // is persisted: the session timeline already records the move.
 import { get, writable, type Readable } from 'svelte/store';
+import { UNDONE } from './moveErrors';
 import { MOVE_STEPS, type MoveProgress, type MoveStep, type MoveStepState } from './moveProgress';
-import { moveSession, type MoveReport } from './moveSession';
+import { moveSession, resolveMove, type MoveReport, type ResolveAction, type ResolveMoveReport } from './moveSession';
 import type { IpcError, Result } from './result';
 import { sessions, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
+import type { UnresolvedPartial } from './timeline';
 import { push, pushError } from './toasts';
 
 export type StepState = 'pending' | MoveStepState;
@@ -37,6 +39,44 @@ export interface MoveRun {
   startedAt: number;
   /** When the command's result settled this run; null while it runs. */
   settledAt: number | null;
+  /** Whether the last (re)try asked to replace a stale attempt's leftovers
+   *  on the target instead of refusing with `E_MOVE_TARGET_DIRTY`. */
+  cleanTarget: boolean;
+  /** 1 for the original attempt; `retryMove` bumps it, on the same run. */
+  attempt: number;
+  /** A refusal from the last Finish/Undo attempt (`resolveMoveRun`), shown in
+   *  the sheet rather than as a toast — the user is looking straight at it
+   *  when the click comes back refused. Cleared on the next `resolveMoveRun`
+   *  call for this run, and whenever the attempt settles either way. */
+  resolveError: IpcError | null;
+  /** True while a `resolve_move` (Finish/Undo) for this run is in flight.
+   *  Finish and Undo each kill a live session, so a second click must not
+   *  fire a second call: the first answer would settle the run and the
+   *  second refusal would land on a run no view renders any more. Cleared
+   *  the moment the call answers, either way. */
+  resolving: boolean;
+  /**
+   * True from the moment `startMove` or `retryMove` (re)sets this run until
+   * its own first `move:progress` event (`check`/`started`) arrives; every
+   * other event is dropped while it is true.
+   *
+   * `move:progress` carries only the session id, not a per-move id, so a
+   * straggler from the attempt this run replaced looks exactly like this
+   * attempt's own next step: `applyMoveProgress` would otherwise apply it
+   * straight onto the fresh (blank) step list, since the (re)start already
+   * put `status: 'running'` and `settledAt: null` — the very shape that lets
+   * ordinary events through. A per-move id on the wire would make this flag
+   * unnecessary; that is backend work tracked separately, not part of this
+   * task.
+   *
+   * `startMove` needs it whenever it REPLACES a settled run under the same
+   * key, for the same reason: a straggler that marks a step `failed` on the
+   * fresh run makes `endedInTheSteps` answer `'failed'`, and an
+   * `E_HUB_UNREACHABLE` answer then settles a move still running on the hub
+   * as a failure. A first move of a session has no earlier attempt to
+   * straggle, so it does not wait.
+   */
+  awaitingStart: boolean;
 }
 
 const DETAIL_MAX = 80;
@@ -142,6 +182,25 @@ export function runForSession(
     ) {
       return run;
     }
+    // A partial's target, which has no report to be found through: a Finish
+    // settles the run with `report: null` (the recovery's own report carries
+    // no tmux name, so synthesising one would mean lying to the guard just
+    // above), and by then the run is keyed to a source id the Finish reaped.
+    // The partial error's details are what is left that names the target.
+    const d = run.error?.details;
+    if (typeof d === 'object' && d !== null) {
+      const details = d as Record<string, unknown>;
+      const name = details.target_tmux_name;
+      if (
+        details.target_session_id === session.id &&
+        run.toHost === session.host_alias &&
+        // A run adopted from a recorded partial has no tmux name to check —
+        // it is held to the id and the host, like an `observed` run.
+        (typeof name !== 'string' || name === session.tmux_name)
+      ) {
+        return run;
+      }
+    }
   }
   return undefined;
 }
@@ -149,6 +208,13 @@ export function runForSession(
 /** Start a move without waiting for it. A no-op while one is running. */
 export function startMove(session: SessionRow, toHost: string, opts: { keepSource: boolean }): void {
   if (activeMoveFor(session.id)) return;
+  // A run already under this key is a settled one this start replaces (a
+  // failed attempt, a done move of a re-discovered row): its last events may
+  // still be on their way, and this run has the very shape that lets them
+  // through. A key nothing has used cannot have stragglers, and waiting for
+  // an event that may never come (an old hub, a dropped stream) would leave
+  // such a run blank — so the flag is only raised where the hazard is real.
+  const replacing = get(store).has(session.id);
   put({
     sessionId: session.id,
     sessionName: session.tmux_name,
@@ -160,8 +226,14 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     status: 'running',
     report: null,
     error: null,
+    resolveError: null,
     startedAt: Date.now(),
     settledAt: null,
+    cleanTarget: false,
+    attempt: 1,
+    resolving: false,
+    // Same mechanism as `retryMove`. See `MoveRun.awaitingStart`.
+    awaitingStart: replacing,
   });
   void moveSession(session.id, toHost, { keepSource: opts.keepSource }).then((r) =>
     settle(session.id, r),
@@ -246,6 +318,171 @@ function settle(sessionId: number, r: Result<MoveReport>): void {
   if (!sheetOpen) pushError(r.error, `Move of ${run.sessionName} failed`);
 }
 
+/**
+ * Run the same move again, on the same run entry. Only for a run that FAILED:
+ * a running one is already going, and a partial needs `resolveMoveRun` — a
+ * second `move_session` there would build a second target.
+ */
+export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {}): void {
+  const run = get(store).get(sessionId);
+  if (!run || run.status !== 'failed' || run.origin !== 'local') return;
+  const cleanTarget = opts.cleanTarget ?? false;
+  put({
+    ...run,
+    steps: blank(),
+    status: 'running',
+    report: null,
+    error: null,
+    resolveError: null,
+    cleanTarget,
+    attempt: run.attempt + 1,
+    resolving: false,
+    startedAt: Date.now(),
+    settledAt: null,
+    // See the field comment on `MoveRun.awaitingStart`: a straggler from the
+    // attempt this run replaces must not land on the fresh step list.
+    awaitingStart: true,
+  });
+  void moveSession(sessionId, run.toHost, {
+    // `null` only for a run this window never started (an `observed` one —
+    // which `retryMove` refuses above) or a recorded partial whose event
+    // predates `kept_source`. Nothing better is knowable there; every run
+    // that does know carries the answer (`adoptPartial`).
+    keepSource: run.keepSource ?? false,
+    cleanTarget,
+  }).then((r) => settle(sessionId, r));
+}
+
+/** The TARGET session's id `resolve_move` needs, from whichever of the run's
+ *  two places still names it: a finished report, or a partial error's
+ *  details. `null` when neither does — there is nothing to act on. */
+function targetIdOf(run: MoveRun): number | null {
+  if (run.report) return run.report.target_session_id;
+  const details = run.error?.details;
+  if (typeof details === 'object' && details !== null) {
+    const v = (details as Record<string, unknown>).target_session_id;
+    if (typeof v === 'number') return v;
+  }
+  return null;
+}
+
+function settleResolve(
+  sessionId: number,
+  sessionName: string,
+  action: ResolveAction,
+  r: Result<ResolveMoveReport>,
+): void {
+  const run = get(store).get(sessionId);
+  if (!run) {
+    // The run is gone — the user closed the sheet and dismissed it (or a
+    // dismissible status raced this call) before Finish/Undo came back. There
+    // is no sheet left to carry `resolveError` on, and Finish/Undo each kill
+    // a live session, so silence here would let the user believe it worked
+    // when it did not: fall back to the toast. Do NOT make this path also
+    // fire when `run` exists (below) — that is the sheet's job now (fix round
+    // 1, finding 1), and doubling up would put the same refusal in both
+    // places.
+    if (!r.ok) pushError(r.error, `Resolving the transfer of ${sessionName}`);
+    return;
+  }
+  if (!r.ok) {
+    // Shown in the sheet, not as a toast (fix round 1, finding 1): the user
+    // is looking straight at it — they just clicked Finish/Undo and are still
+    // on the confirm they clicked through. A toast here would be the wrong
+    // place, and would say nothing the sheet cannot say better in context.
+    // The guard is released with it: a refusal leaves the run `partial`, and
+    // the user may try the other action.
+    put({ ...run, resolveError: r.error, resolving: false });
+    return;
+  }
+  if (action === 'finish') {
+    put({ ...run, status: 'done', resolveError: null, resolving: false, settledAt: Date.now() });
+    return;
+  }
+  put({
+    ...run,
+    status: 'failed',
+    resolving: false,
+    error: {
+      code: UNDONE,
+      message: `The new session on ${run.toHost} was killed; ${run.sessionName} keeps running on ${run.fromHost}.`,
+    },
+    resolveError: null,
+    settledAt: Date.now(),
+  });
+}
+
+/**
+ * Finish or undo a partial move (`E_MOVE_PARTIAL`). `sessionId` is the run's
+ * key — the SOURCE session's id — but `resolve_move` itself takes the
+ * TARGET's id, which `targetIdOf` finds in the run. Nothing to act on is a
+ * toast, not a call.
+ */
+export function resolveMoveRun(sessionId: number, action: ResolveAction): void {
+  const run = get(store).get(sessionId);
+  // Finish/undo only mean something for a partial: on any other status the
+  // backend would answer E_INVALID_STATE, so refuse the round-trip here,
+  // mirroring retryMove's own status guard.
+  if (!run || run.status !== 'partial') return;
+  // One resolve at a time: both actions kill a live session, and the confirm
+  // button stays on screen while the call is out, so a double click would
+  // otherwise send two.
+  if (run.resolving) return;
+  const targetId = targetIdOf(run);
+  if (targetId === null) {
+    push({ kind: 'error', message: `${run.sessionName}: no target session to resolve.` });
+    return;
+  }
+  // A stale refusal from a previous attempt must not linger through this one.
+  put({ ...run, resolveError: null, resolving: true });
+  const sessionName = run.sessionName;
+  void resolveMove(targetId, action).then((r) => settleResolve(sessionId, sessionName, action, r));
+}
+
+/**
+ * Rebuild a `partial` run from a recorded `session_move_partial` event, so
+ * the sheet can offer Finish/Undo for a move this window never saw — usually
+ * because the app was restarted before anyone resolved it. Keyed like a live
+ * partial: the source id when known, the target id otherwise. A no-op when a
+ * run already exists for that key — a live run is always the better picture.
+ */
+export function adoptPartial(p: UnresolvedPartial, sessionName: string): void {
+  const key = p.sourceSessionId ?? p.targetSessionId;
+  if (get(store).has(key)) return;
+  const cutoff = MOVE_STEPS.indexOf('start');
+  const steps: MoveRunStep[] = MOVE_STEPS.map((step, i) => ({
+    step,
+    state: (i <= cutoff ? 'done' : 'pending') as StepState,
+    detail: null,
+  }));
+  put({
+    sessionId: key,
+    sessionName,
+    fromHost: p.fromHost,
+    toHost: p.toHost,
+    // What the transfer was told to do with the source, as the event
+    // recorded it — `null` when it did not say. A retry from this run must
+    // not turn "leave the source running" into "kill it" (see `retryMove`).
+    keepSource: p.keptSource,
+    origin: 'local',
+    steps,
+    status: 'partial',
+    report: null,
+    error: {
+      code: 'E_MOVE_PARTIAL',
+      message: '',
+      details: { step: p.step, target_session_id: p.targetSessionId, target_host: p.toHost },
+    },
+    resolveError: null,
+    cleanTarget: false,
+    attempt: 1,
+    resolving: false,
+    awaitingStart: false,
+    startedAt: Date.now(),
+    settledAt: Date.now(),
+  });
+}
+
 function observed(p: MoveProgress): MoveRun {
   const row = get(sessions).find((s) => s.id === p.session_id);
   return {
@@ -259,8 +496,13 @@ function observed(p: MoveProgress): MoveRun {
     status: 'running',
     report: null,
     error: null,
+    resolveError: null,
     startedAt: Date.now(),
     settledAt: null,
+    cleanTarget: false,
+    attempt: 1,
+    resolving: false,
+    awaitingStart: false,
   };
 }
 
@@ -282,6 +524,18 @@ export function applyMoveProgress(p: MoveProgress): void {
   const detail = typeof p.detail === 'string' ? p.detail.slice(0, DETAIL_MAX) : null;
 
   let run = get(store).get(p.session_id);
+  const isFreshStart = i === 0 && p.state === 'started';
+
+  // See the field comment on `MoveRun.awaitingStart`: `retryMove` reset this
+  // run's steps and put it back to `running` before the retry's own events
+  // exist, so nothing here can tell a straggler from the replaced attempt
+  // apart from the retry's real first step except waiting for that step by
+  // name. Everything else is dropped until it arrives.
+  if (run?.awaitingStart) {
+    if (!isFreshStart) return;
+    run = { ...run, awaitingStart: false };
+  }
+
   let settledLocal = false;
   if (run && run.status !== 'running') {
     if (
@@ -292,7 +546,7 @@ export function applyMoveProgress(p: MoveProgress): void {
       // Its own events, still arriving. They may name the step that failed;
       // they may not touch the outcome the user is already reading.
       settledLocal = true;
-    } else if (i === 0 && p.state === 'started') {
+    } else if (isFreshStart) {
       run = undefined; // a NEW move of this session
     } else {
       return;
@@ -335,4 +589,12 @@ export function dismissMove(sessionId: number): void {
 export function resetMovesForTest(): void {
   store.set(new Map());
   transferSheetFor.set(null);
+}
+
+/** Test-only: inject an arbitrary run directly, bypassing the state machine —
+ *  the Transfer sheet's failure-view tests need a `failed`/`done`/`partial`
+ *  run with a specific error or report in place *before* the first render,
+ *  which the public start/retry/resolve API cannot do synchronously. */
+export function putRunForTest(run: MoveRun): void {
+  put(run);
 }

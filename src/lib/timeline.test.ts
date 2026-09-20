@@ -7,6 +7,8 @@ import {
   kindLabel,
   shortDetail,
   eventTime,
+  moveOrigin,
+  unresolvedPartial,
   type SessionEvent,
   type EventCategory,
 } from './timeline';
@@ -92,6 +94,97 @@ describe('formatting', () => {
     // Today: time only. Another day: the same time with a date prefix.
     expect(eventTime(earlier, now).endsWith(eventTime(today, now))).toBe(true);
     expect(eventTime(earlier, now).length).toBeGreaterThan(eventTime(today, now).length);
+  });
+});
+
+describe('moveOrigin / unresolvedPartial', () => {
+  const ev = (id: number, kind: string, detail: unknown): SessionEvent => ({
+    id,
+    session_id: 8,
+    at: 1700000000 + id,
+    kind,
+    detail: detail === null ? null : JSON.stringify(detail),
+    claude_session_id: null,
+  });
+  // sessionHistory returns newest first.
+  const newestFirst = (...e: SessionEvent[]) => [...e].reverse();
+
+  describe('moveOrigin', () => {
+    it('reads the host a session was moved from', () => {
+      const events = newestFirst(
+        ev(1, 'session_moved', { from_host: 'alpha', to_host: 'beta', claude_session_id: 'c1' }),
+      );
+      expect(moveOrigin(events)).toEqual({ fromHost: 'alpha', claudeSessionId: 'c1' });
+    });
+
+    it('uses the most recent move when a session moved twice', () => {
+      const events = newestFirst(
+        ev(1, 'session_moved', { from_host: 'alpha', to_host: 'beta', claude_session_id: 'c1' }),
+        ev(2, 'session_moved', { from_host: 'beta', to_host: 'gamma', claude_session_id: 'c1' }),
+      );
+      expect(moveOrigin(events)!.fromHost).toBe('beta');
+    });
+
+    it('is null when the session was never moved, and when the detail is unusable', () => {
+      expect(moveOrigin([])).toBeNull();
+      expect(moveOrigin(newestFirst(ev(1, 'session_moved', null)))).toBeNull();
+      expect(moveOrigin(newestFirst(ev(1, 'session_moved', { to_host: 'beta' })))).toBeNull();
+      expect(moveOrigin(newestFirst(ev(1, 'killed', { from_host: 'alpha' })))).toBeNull();
+    });
+  });
+
+  describe('unresolvedPartial', () => {
+    const partial = (id: number) =>
+      ev(id, 'session_move_partial', {
+        step: 'killing the source s on alpha',
+        from_host: 'alpha',
+        to_host: 'beta',
+        from_session_id: 7,
+        to_session_id: 8,
+      });
+
+    it('finds a partial nothing has resolved', () => {
+      expect(unresolvedPartial(newestFirst(partial(1)))).toEqual({
+        targetSessionId: 8,
+        sourceSessionId: 7,
+        fromHost: 'alpha',
+        toHost: 'beta',
+        step: 'killing the source s on alpha',
+        keptSource: null,
+      });
+    });
+
+    // A run rebuilt from this event decides whether a later retry kills the
+    // source, so `kept_source` travels rather than being guessed. An older
+    // event that never recorded it reads as null — unknown, not false.
+    it('carries what the transfer was told to do with the source', () => {
+      const kept = ev(1, 'session_move_partial', {
+        step: 'killing the source s on alpha',
+        from_host: 'alpha',
+        to_host: 'beta',
+        from_session_id: 7,
+        to_session_id: 8,
+        kept_source: true,
+      });
+      expect(unresolvedPartial(newestFirst(kept))!.keptSource).toBe(true);
+      expect(unresolvedPartial(newestFirst(partial(1)))!.keptSource).toBeNull();
+    });
+
+    it('is null once the move was finished or undone', () => {
+      for (const kind of ['session_moved', 'session_move_undone']) {
+        const events = newestFirst(partial(1), ev(2, kind, { from_host: 'alpha', to_host: 'beta' }));
+        expect(unresolvedPartial(events)).toBeNull();
+      }
+    });
+
+    it('finds a NEW partial that followed a resolved one', () => {
+      const events = newestFirst(
+        partial(1),
+        ev(2, 'session_moved', { from_host: 'alpha', to_host: 'beta' }),
+        partial(3),
+      );
+      expect(unresolvedPartial(events)!.targetSessionId).toBe(8);
+    });
   });
 });
 

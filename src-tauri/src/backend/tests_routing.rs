@@ -149,6 +149,9 @@ const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"fro
 /// null-stripping `ok_json_compact`, so every `Option` is present as a real
 /// key — `null` included — and every non-`Option` field is required).
 const REPAIR_PAYLOAD: &str = r#"{"session_id":7,"host_alias":"trn","tmux_name":"demo","project_root":"/p","cwd":"/p","cwd_physical":null,"healthy":true,"actions":[],"warnings":[],"needs_explicit_repair":false,"deferred":[],"branch_source":null,"tmux":null,"tmux_alive":true,"tmux_dead":false,"tmux_cwd_stale":false,"worktree_row_updated":false,"sibling_session_ids":[],"vanished_guard":null}"#;
+/// A complete `ResolveMoveReport`: every field is required (no `Option`), so
+/// this is the whole shape, not a null-stripped subset.
+const RESOLVE_MOVE_PAYLOAD: &str = r#"{"action":"finish","source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","source_killed":true,"target_killed":false,"warnings":[]}"#;
 /// A complete `OperatorStatus`: both `Option` fields are required on the
 /// wire (no `#[serde(default)]`), so `session` and `blocked` are spelled out
 /// as `null` rather than omitted.
@@ -690,6 +693,7 @@ fn routed_mutation_cases() -> Vec<Case> {
     use commands::sessions::RepairSessionArgs;
     use fleet_core::service::bg_sessions::NewBgSessionArgs;
     use fleet_core::service::hosts::HostAliasArgs;
+    use fleet_core::service::move_session::resolve::{ResolveMoveAction, ResolveMoveArgs};
     use fleet_core::service::move_session::MoveSessionArgs;
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
@@ -957,7 +961,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "move_session",
             "move_session",
-            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true }),
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true, "clean_target": false }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::move_session::routed::move_session(
@@ -967,6 +971,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         target_host_alias: "hetzner".into(),
                         keep_source: false,
                         strict: true,
+                        clean_target: false,
                     },
                     s,
                     h,
@@ -981,7 +986,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "move_session",
             "move_session",
-            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": true, "strict": false }),
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": true, "strict": false, "clean_target": true }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::move_session::routed::move_session(
@@ -991,6 +996,27 @@ fn routed_mutation_cases() -> Vec<Case> {
                         target_host_alias: "hetzner".into(),
                         keep_source: true,
                         strict: false,
+                        clean_target: true,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // The target session of a resolved partial move — the id a
+        // `session_move_partial` timeline event names, not the source's.
+        (
+            "resolve_move",
+            "resolve_move",
+            json!({ "session_id": 43, "action": "finish" }),
+            RESOLVE_MOVE_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::resolve_move::routed::resolve_move(
+                    b,
+                    ResolveMoveArgs {
+                        session_id: 43,
+                        action: ResolveMoveAction::Finish,
                     },
                     s,
                     h,
@@ -2323,6 +2349,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/projects.rs",
         include_str!("../commands/projects.rs"),
+    ),
+    (
+        "commands/resolve_move.rs",
+        include_str!("../commands/resolve_move.rs"),
     ),
     (
         "commands/sessions.rs",

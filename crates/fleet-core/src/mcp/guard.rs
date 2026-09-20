@@ -370,6 +370,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: true,
         deadline: Deadline::Lifecycle,
     },
+    // Finishes or undoes a partial move: kills one of the two sessions.
+    ToolPolicy {
+        name: "resolve_move",
+        access: Access::Client,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Lifecycle,
+    },
     // messaging.rs
     ToolPolicy {
         name: "send_prompt",
@@ -1311,11 +1319,12 @@ mod tests {
             "repair_session",
             "cancel_task",
             "move_session",
+            "resolve_move",
             "apply_sync",
         ] {
             assert!(needs_confirmation(t), "{t} must be confirm-gated");
         }
-        assert_eq!(CONFIRM_TOOLS.len(), 8);
+        assert_eq!(CONFIRM_TOOLS.len(), 9);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
     }

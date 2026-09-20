@@ -19,7 +19,8 @@
     discardKillSession,
   } from './sessions';
   import { canMoveSession, moveBlockedReason } from './moveEligibility';
-  import { transferSheetFor } from './moves';
+  import { transferSheetFor, startMove, adoptPartial } from './moves';
+  import { moveOrigin, unresolvedPartial, type SessionEvent } from './timeline';
   import { projectById } from './projects';
   import { selectSession, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
@@ -336,6 +337,55 @@
     transferSheetFor.set(session.id);
   }
 
+  // Recovery, long after the transfer: the durable record is the session's
+  // own timeline, handed up from Timeline's onEvents rather than fetched a
+  // second time here (see Timeline.svelte). `moveOrigin`/`unresolvedPartial`
+  // are pure over that same event list.
+  let timelineEvents = $state<SessionEvent[]>([]);
+  /**
+   * Where this session came from — unless that host is still running this
+   * very conversation, in which case there is no trip back to offer.
+   *
+   * Two shapes, one check. A `keep_source` move leaves the origin running
+   * the same `claude_session_id` in the same worktree, so a move "back"
+   * would aim the transfer at that live session's own worktree (the engine
+   * refuses it with `E_INVALID_STATE`; the panel does not offer it). And
+   * `session_moved` is recorded on BOTH rows, so the SOURCE row's own panel
+   * reads an event naming the host it is already on — that row is itself the
+   * live session the search finds, which is why nothing here excludes it.
+   */
+  const moveBackOrigin = $derived.by(() => {
+    const origin = moveOrigin(timelineEvents);
+    if (!origin) return null;
+    const conversation = origin.claudeSessionId ?? session.claude_session_id;
+    if (conversation === null) return origin;
+    const stillThere = $sessions.some(
+      (s) =>
+        s.host_alias === origin.fromHost &&
+        s.status === 'running' &&
+        s.claude_session_id === conversation,
+    );
+    return stillThere ? null : origin;
+  });
+  const unresolvedMove = $derived(unresolvedPartial(timelineEvents));
+
+  function openMoveBack() {
+    if (!moveBackOrigin) return;
+    startMove(session, moveBackOrigin.fromHost, { keepSource: false });
+  }
+
+  // Finish/Undo are destructive (they kill the source or the new session) and
+  // their confirmations + refusal text live in the Transfer sheet alone — this
+  // panel only opens it, never calls resolveMoveRun itself. After a restart
+  // there is no in-memory run to render, so adoptPartial rebuilds one from the
+  // recorded event before the sheet opens, keyed the same way it is (source
+  // id when known, else target id) so the sheet opens on the run it just made.
+  function openFinishOrUndo() {
+    if (!unresolvedMove) return;
+    adoptPartial(unresolvedMove, session.tmux_name);
+    transferSheetFor.set(unresolvedMove.sourceSessionId ?? session.id);
+  }
+
   async function doRecreate() {
     confirmingRecreate = false;
     const r = await recreateSession(session.id);
@@ -530,6 +580,7 @@
   <Timeline
     sessionId={session.id}
     refreshKey={`${session.turn_seq}|${session.status}|${session.claude_status}|${session.stuck_kind}|${session.last_prompt}|${session.safe_kill_state}`}
+    onEvents={(e) => (timelineEvents = e)}
   />
 
   {#if !hasNoPane(session)}
@@ -612,6 +663,19 @@
           data-testid="move-from-details"
         >
           ⇄ Move to host…
+        </button>
+      {/if}
+      {#if moveBackOrigin}
+        <button class="ghost" onclick={openMoveBack} data-testid="details-move-back">
+          ⇄ Move back to {moveBackOrigin.fromHost}
+        </button>
+      {/if}
+      {#if unresolvedMove}
+        <button class="ghost" onclick={openFinishOrUndo} data-testid="details-finish-move">
+          Finish the move to {unresolvedMove.toHost}
+        </button>
+        <button class="ghost" onclick={openFinishOrUndo} data-testid="details-undo-move">
+          Undo the move
         </button>
       {/if}
       {#if isInactiveAgent(session)}

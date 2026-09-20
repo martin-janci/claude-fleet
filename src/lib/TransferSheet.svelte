@@ -5,8 +5,9 @@
   import { hubConnection } from './hub_connection';
   import { moveBlockedReason, moveTargetsFor } from './moveEligibility';
   import { describeMoveError } from './moveErrors';
+  import type { ResolveAction } from './moveSession';
   import { stepLabel } from './moveProgress';
-  import { dismissMove, displaySteps, moves, startMove, transferSheetFor } from './moves';
+  import { dismissMove, displaySteps, moves, resolveMoveRun, retryMove, startMove, transferSheetFor } from './moves';
   import { selectSession } from './selection';
   import { sessions } from './sessions';
 
@@ -17,10 +18,18 @@
   const session = $derived(id === null ? undefined : $sessions.find((s) => s.id === id));
   const targets = $derived(session ? moveTargetsFor(session, $hosts) : []);
   const blocked = $derived(moveBlockedReason($hubStatus, $hubConnection));
+  /** A refusal from the last Finish/Undo attempt, carried on the run itself
+   *  (`moves.ts`'s `settleResolve`) rather than local component state, so it
+   *  is naturally per-session: switching the sheet to another run's `id`
+   *  reads that run's own `resolveError`, never a leftover from this one. */
+  const resolveError = $derived(run?.resolveError ?? null);
 
   let target = $state('');
   let keepSource = $state(false);
   let showDetails = $state(false);
+  // Which destructive action is one click from happening. Cleared whenever the
+  // sheet's session changes, like `showDetails`.
+  let confirming = $state<'clean' | 'finish' | 'undo' | null>(null);
 
   // A fresh setup each time the sheet opens on a session.
   $effect(() => {
@@ -32,6 +41,7 @@
     void id;
     keepSource = false;
     showDetails = false;
+    confirming = null;
   });
   // Nothing to show: the row is gone and no run remembers it.
   $effect(() => {
@@ -49,6 +59,25 @@
       : null,
   );
   const carried = $derived(run?.report?.carried ?? null);
+  /** Narrows `failure.action` for the template, which otherwise cannot keep
+   *  `.paths` in scope across the `{#if}` that tests `.kind`. */
+  const cleanAction = $derived(failure?.action?.kind === 'clean' ? failure.action : null);
+
+  /** Whether this partial names a target `resolve_move` could act on. The two
+   *  earliest partial steps record no target id at all (the row does not
+   *  exist yet), so Finish and Undo have nothing to kill and the backend
+   *  refuses both — offering a red "Kill the new session on {host}" that can
+   *  only answer "no target session to resolve" is worse than offering
+   *  nothing. Read the same way `moves.ts`'s own `targetIdOf` reads it. */
+  const resolvableTargetId = $derived.by(() => {
+    if (run?.report) return run.report.target_session_id;
+    const details = run?.error?.details;
+    if (typeof details === 'object' && details !== null) {
+      const v = (details as Record<string, unknown>).target_session_id;
+      if (typeof v === 'number') return v;
+    }
+    return null;
+  });
 
   /** Everything the move left behind, from all three lists, keyed by both —
    *  the same path can be left behind by two of them. */
@@ -75,6 +104,22 @@
     return $sessions.find((s) => s.parent_session_id === run.sessionId && s.host_alias === run.toHost);
   });
 
+  /** The CURRENT row for a finished move's target, read fresh from `$sessions`
+   *  by `report.target_session_id` — never the snapshot embedded in the
+   *  report, which can be stale by the time "Move back" is clicked. The
+   *  source row is gone by now, so this is what a move back actually moves;
+   *  no row here means nothing left to move back.
+   *
+   *  `source_killed` is the gate: a `keep_source` move left the ORIGIN
+   *  running this very conversation, in the same worktree, so a move "back"
+   *  there would aim the transfer at that live session's own worktree. The
+   *  engine refuses it (`E_INVALID_STATE`); the sheet does not offer it. */
+  const moveBackTarget = $derived.by(() => {
+    if (!run?.report?.source_killed) return undefined;
+    const targetId = run.report.target_session_id;
+    return $sessions.find((s) => s.id === targetId);
+  });
+
   const n = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
   const REASON = {
     denylisted: 'never carried (secrets, caches, build output)',
@@ -96,6 +141,22 @@
   function openTarget() {
     if (newSession) selectSession(newSession);
     done();
+  }
+  function moveBack(): void {
+    if (!moveBackTarget || !run) return;
+    startMove(moveBackTarget, run.fromHost, { keepSource: false });
+  }
+  function retry(cleanTarget: boolean): void {
+    if (id === null) return;
+    confirming = null;
+    retryMove(id, { cleanTarget });
+  }
+  function resolve(action: ResolveAction): void {
+    if (id === null) return;
+    confirming = null;
+    // `resolveMoveRun` clears any stale `resolveError` on the run itself
+    // before making a fresh attempt.
+    resolveMoveRun(id, action);
   }
 
   const title = $derived(
@@ -255,6 +316,9 @@
         {#if newSession}
           <button onclick={openTarget} data-testid="transfer-open-target">Open on {run.toHost}</button>
         {/if}
+        {#if run.fromHost && moveBackTarget}
+          <button onclick={moveBack} data-testid="transfer-move-back">Move back to {run.fromHost}</button>
+        {/if}
         <button onclick={done} data-testid="transfer-done">Done</button>
       </div>
     {:else if run && failure}
@@ -271,10 +335,63 @@
 {(run.error.details as Record<string, unknown>).stderr}{/if}</pre>
           </details>
         {/if}
+        {#if resolveError}
+          <p class="note" data-testid="transfer-resolve-error">{resolveError.message}</p>
+        {/if}
+        {#if confirming === 'clean' && cleanAction}
+          <ul class="clean-paths">
+            {#each cleanAction.paths as p (p)}
+              <li><code>{p}</code></li>
+            {/each}
+            {#if cleanAction.more > 0}
+              <li class="muted">+{cleanAction.more} more</li>
+            {/if}
+          </ul>
+        {/if}
       </div>
       <div class="buttons">
-        {#if run.status === 'partial' && newSession}
-          <button onclick={openTarget} data-testid="transfer-open-target">Open on {run.toHost}</button>
+        {#if run.status === 'partial'}
+          {#if newSession}
+            <button onclick={openTarget} data-testid="transfer-open-target">Open on {run.toHost}</button>
+          {/if}
+          {#if resolvableTargetId !== null}
+            {#if confirming === 'finish'}
+              <button
+                class="danger"
+                onclick={() => resolve('finish')}
+                disabled={run.resolving}
+                data-testid="transfer-finish-confirm"
+              >
+                Kill {run.sessionName} on {run.fromHost}
+              </button>
+            {:else}
+              <button onclick={() => (confirming = 'finish')} data-testid="transfer-finish">Finish the move</button>
+            {/if}
+            {#if confirming === 'undo'}
+              <button
+                class="danger"
+                onclick={() => resolve('undo')}
+                disabled={run.resolving}
+                data-testid="transfer-undo-confirm"
+              >
+                Kill the new session on {run.toHost}
+              </button>
+            {:else}
+              <button onclick={() => (confirming = 'undo')} data-testid="transfer-undo">Undo</button>
+            {/if}
+          {/if}
+        {:else if cleanAction}
+          {#if confirming === 'clean'}
+            <button class="danger" onclick={() => retry(true)} data-testid="transfer-clean-confirm">
+              Replace {cleanAction.paths.length + cleanAction.more} file(s) on {run.toHost} and retry
+            </button>
+          {:else}
+            <button onclick={() => (confirming = 'clean')} data-testid="transfer-clean">
+              Clean up {run.toHost} and retry
+            </button>
+          {/if}
+        {:else if failure.action?.kind === 'retry'}
+          <button onclick={() => retry(false)} data-testid="transfer-retry">Retry</button>
         {/if}
         <button onclick={done} data-testid="transfer-done">Done</button>
       </div>
@@ -306,5 +423,9 @@
   .warn, .details p { font-size: 0.8rem; color: var(--fg-muted); margin: 0.15rem 0; }
   .details { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.4rem; }
   pre { white-space: pre-wrap; font-size: 0.75rem; }
+  .clean-paths { list-style: none; margin: 0.4rem 0; padding: 0; font-size: 0.8rem; max-height: 8rem; overflow-y: auto; }
+  .clean-paths li { padding: 0.1rem 0; }
+  .clean-paths code { font-size: 0.75rem; }
   .buttons { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.75rem; }
+  .buttons .danger { color: #e64a4a; }
 </style>

@@ -1212,7 +1212,7 @@ fn capture_default_cap_matches_docs() {
 /// session_conversation/pair_client/list_clients/revoke_client, 72 with
 /// agent_status, 73 with session_conversations; bump it when adding a tool.
 /// (`peek_session` came out again with the token-efficiency work, so the
-/// count is 73 with `list_host_worktrees`.)
+/// count is 73 with `list_host_worktrees`, 74 with `resolve_move`.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1232,7 +1232,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 75);
+    assert_eq!(served, 76);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2165,6 +2165,16 @@ fn the_served_definition_budget_stays_bounded() {
     /// the 121 needed, and would cost every client the one line that says
     /// what those tools do. The headroom is deliberately small so the next
     /// addition trips this again.
+    ///
+    /// `resolve_move` then landed on top of that, a three-field tool
+    /// (`session_id`, `action`, `confirm_nonce`) whose per-field descriptions
+    /// `every_tool_parameter_is_documented` makes mandatory. Its own branch
+    /// had measured the pre-`resolve_move` surface at 55,755 with 245 bytes
+    /// of headroom, and a degenerate version of it — empty tool description,
+    /// single-character field docs — still measured 56,026, so trimming text
+    /// could never have paid for it. `clean_target` is documented on the
+    /// parameter rather than in `move_session`'s description for the same
+    /// reason.
     const BUDGET_BYTES: usize = 57_000;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
@@ -2265,6 +2275,60 @@ async fn list_worktrees_limit_zero_returns_every_row() {
     assert_eq!(
         v["worktrees"].as_array().unwrap().len(),
         WORKTREES_DEFAULT_LIMIT + 3
+    );
+}
+
+/// `clean_target` must reach the engine, not just the schema.
+///
+/// The flag is the whole of "Clean up {host} and retry": a hub-paired desktop
+/// routes `move_session` through this very tool, so a `clean_target: true`
+/// that stops at the tool boundary turns that button into a plain retry the
+/// engine refuses again, with nothing to tell the user why. The mapping is
+/// therefore one function — `MoveSessionParams::into_args` — and this test
+/// pins both halves of it: the wire name deserialises, and the value arrives
+/// in the `MoveSessionArgs` the service is called with.
+#[test]
+fn move_session_params_carry_clean_target_into_the_service_args() {
+    let p: super::params::MoveSessionParams = serde_json::from_value(serde_json::json!({
+        "session_id": 1,
+        "target_host_alias": "beta",
+        "clean_target": true,
+    }))
+    .unwrap();
+    let args = p.into_args(41);
+    assert_eq!(
+        args.session_id, 41,
+        "the resolved row id wins over the param"
+    );
+    assert_eq!(args.target_host_alias, "beta");
+    assert!(
+        args.clean_target,
+        "a clean_target=true arriving at the tool must reach the service args"
+    );
+    // The default stays false: nothing implies a cleanup.
+    let p: super::params::MoveSessionParams =
+        serde_json::from_value(serde_json::json!({ "session_id": 1, "target_host_alias": "beta" }))
+            .unwrap();
+    assert!(!p.into_args(41).clean_target);
+}
+
+/// …and the handler must be the mapping's only caller. `into_args` being
+/// correct is worth nothing if `move_session` builds its own args literal
+/// beside it — which is exactly how `clean_target: false` came to be
+/// hardcoded there in the first place. Pinned against the source because the
+/// alternative (driving the tool end to end) needs two reachable hosts.
+#[test]
+fn the_move_session_handler_builds_its_args_through_into_args() {
+    let src = include_str!("lifecycle.rs");
+    assert!(
+        src.contains("p.into_args(row.id)"),
+        "move_session's handler must map its parameters through \
+         MoveSessionParams::into_args, so a new flag cannot reach the schema \
+         and stop short of the engine"
+    );
+    assert!(
+        !src.contains("clean_target:"),
+        "no args literal in lifecycle.rs may set clean_target itself"
     );
 }
 

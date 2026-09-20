@@ -1,20 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
-import { invoke } from '@tauri-apps/api/core';
+vi.mock('./result', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./result')>();
+  return { ...actual, invokeCmd: vi.fn() };
+});
+import { invokeCmd, type Result } from './result';
 import {
   moves, transferSheetFor, startMove, applyMoveProgress, dismissMove,
   activeMoveFor, stepNumber, displaySteps, runForSession, resetMovesForTest,
-  SETTLE_GRACE_MS,
+  SETTLE_GRACE_MS, retryMove, resolveMoveRun, adoptPartial,
 } from './moves';
+import { UNDONE } from './moveErrors';
 import type { MoveProgress, MoveStep, MoveStepState } from './moveProgress';
 import { MOVE_STEPS } from './moveProgress';
+import type { MoveReport } from './moveSession';
 import { sessions, type SessionRow } from './sessions';
 import { selectSession, selectedSession } from './selection';
 import { toasts, clearToasts } from './toasts';
 
-const mockInvoke = invoke as ReturnType<typeof vi.fn>;
+const invoked = invokeCmd as ReturnType<typeof vi.fn>;
 
 const row = (over: Partial<SessionRow>): SessionRow =>
   ({
@@ -35,19 +40,34 @@ const row = (over: Partial<SessionRow>): SessionRow =>
 const source = row({});
 const target = row({ id: 6, host_alias: 'turanga', parent_session_id: 5 });
 
-const report = {
-  source_session_id: 5, target_session_id: 6, from_host: 'mefistos', to_host: 'turanga',
-  tmux_name: 'dev-foo', claude_session_id: source.claude_session_id, branch: 'feat',
-  target_cwd: '/r/.claude/worktrees/feat', transcript_bytes: 10, source_killed: true,
-  warnings: [],
-  carried: {
-    commits: 0, bundle_bytes: 0, dirty_entries: [], ignored_carried: [],
-    ignored_left_behind: [], target_seeded: 'existing',
-    session_state: { carried: [], kept_target: [], left_behind: [] },
-    memory: { carried: [], kept_target: [], identical: 0, index_lines_added: 0, left_behind: [] },
-  },
-  target,
-};
+/** The report a completed `move_session` (or `retryMove`) settles the run
+ *  with. A function, like `row`, so a test can override just what it cares
+ *  about. */
+function report(over: Partial<MoveReport> = {}): MoveReport {
+  return {
+    source_session_id: 5, target_session_id: 6, from_host: 'mefistos', to_host: 'turanga',
+    tmux_name: 'dev-foo', claude_session_id: source.claude_session_id!, branch: 'feat',
+    target_cwd: '/r/.claude/worktrees/feat', transcript_bytes: 10, source_killed: true,
+    warnings: [],
+    carried: {
+      commits: 0, bundle_bytes: 0, dirty_entries: [], ignored_carried: [],
+      ignored_left_behind: [], target_seeded: 'existing',
+      session_state: { carried: [], kept_target: [], left_behind: [] },
+      memory: { carried: [], kept_target: [], identical: 0, index_lines_added: 0, left_behind: [] },
+    },
+    target,
+    ...over,
+  };
+}
+
+/** What `invokeCmd` resolves to on success / on failure — it never rejects,
+ *  it always answers with a `Result`. */
+function ok<T>(value: T): Result<T> {
+  return { ok: true, value };
+}
+function err<T = never>(code: string, message: string, details?: unknown): Result<T> {
+  return { ok: false, error: { code, message, details } };
+}
 
 const ev = (step: MoveStep, state: MoveStepState, over: Partial<MoveProgress> = {}): MoveProgress => ({
   session_id: 5, to_host: 'turanga', step, index: MOVE_STEPS.indexOf(step) + 1,
@@ -56,22 +76,25 @@ const ev = (step: MoveStep, state: MoveStepState, over: Partial<MoveProgress> = 
 
 const states = (id = 5) => get(moves).get(id)!.steps.map((s) => s.state);
 
-/** A `moveSession` call the test resolves by hand. */
+/** A `move_session` call the test resolves by hand. */
 function pending() {
-  let resolve!: (v: unknown) => void;
-  let reject!: (e: unknown) => void;
-  mockInvoke.mockImplementation(
+  let doResolve!: (v: unknown) => void;
+  invoked.mockImplementation(
     (cmd: string) =>
       cmd === 'move_session'
-        ? new Promise((res, rej) => { resolve = res; reject = rej; })
-        : Promise.resolve(undefined),
+        ? new Promise((res) => { doResolve = res; })
+        : Promise.resolve(ok(undefined)),
   );
-  return { resolve: (v: unknown) => resolve(v), reject: (e: unknown) => reject(e) };
+  return {
+    resolve: (v: unknown) => doResolve(ok(v)),
+    reject: (e: { code: string; message: string; details?: unknown }) =>
+      doResolve(err(e.code, e.message, e.details)),
+  };
 }
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
-  mockInvoke.mockReset();
+  invoked.mockReset();
   resetMovesForTest();
   sessions.set([source]);
   selectSession(null);
@@ -86,12 +109,16 @@ describe('startMove', () => {
     expect(run).toMatchObject({
       sessionId: 5, sessionName: 'dev-foo', fromHost: 'mefistos', toHost: 'turanga',
       keepSource: false, origin: 'local', status: 'running', report: null, error: null,
+      cleanTarget: false, attempt: 1,
     });
     expect(run.steps.map((s) => s.step)).toEqual([...MOVE_STEPS]);
     expect(states()).toEqual(Array(9).fill('pending'));
     expect(activeMoveFor(5)).toBe(run);
-    expect(mockInvoke).toHaveBeenCalledWith('move_session', {
-      args: { session_id: 5, target_host_alias: 'turanga', keep_source: false, strict: false },
+    expect(invoked).toHaveBeenCalledWith('move_session', {
+      args: {
+        session_id: 5, target_host_alias: 'turanga', keep_source: false, strict: false,
+        clean_target: false,
+      },
     });
   });
 
@@ -99,7 +126,7 @@ describe('startMove', () => {
     pending();
     startMove(source, 'turanga', { keepSource: false });
     startMove(source, 'turanga', { keepSource: true });
-    expect(mockInvoke.mock.calls.filter((c) => c[0] === 'move_session')).toHaveLength(1);
+    expect(invoked.mock.calls.filter((c) => c[0] === 'move_session')).toHaveLength(1);
     expect(get(moves).get(5)!.keepSource).toBe(false);
   });
 
@@ -109,7 +136,7 @@ describe('startMove', () => {
     transferSheetFor.set(5);
     startMove(source, 'turanga', { keepSource: false });
     applyMoveProgress(ev('ignored', 'warned', { detail: '0 files' }));
-    p.resolve(report);
+    p.resolve(report());
     await flush();
     const run = get(moves).get(5)!;
     expect(run.status).toBe('done');
@@ -127,7 +154,7 @@ describe('startMove', () => {
     sessions.set([source, other]);
     selectSession(other);
     startMove(source, 'turanga', { keepSource: false });
-    p.resolve(report);
+    p.resolve(report());
     await flush();
     expect(get(selectedSession)?.id).toBe(9);
     expect(get(toasts).some((t) => t.kind === 'success' && t.message === 'Moved dev-foo to turanga')).toBe(true);
@@ -343,7 +370,7 @@ describe('displaySteps and the settle grace', () => {
     const p = pending();
     startMove(source, 'turanga', { keepSource: false });
     applyMoveProgress(ev('ignored', 'warned', { detail: '0 files' }));
-    p.resolve(report);
+    p.resolve(report());
     await flush();
     const run = get(moves).get(5)!;
     // The stored steps are left alone; only what the sheet renders is filled in.
@@ -358,7 +385,7 @@ describe('displaySteps and the settle grace', () => {
     try {
       const p = pending();
       startMove(source, 'turanga', { keepSource: false });
-      p.resolve(report);
+      p.resolve(report());
       await vi.advanceTimersByTimeAsync(0);
       expect(get(moves).get(5)!.status).toBe('done');
       vi.setSystemTime(Date.now() + SETTLE_GRACE_MS + 1000);
@@ -507,7 +534,7 @@ describe('what a finished move leaves behind', () => {
     startMove(source, 'turanga', { keepSource: false });
     sessions.set([]); // the kill removed the row, which clears the selection
     expect(get(selectedSession)).toBeNull();
-    p.resolve(report);
+    p.resolve(report());
     await flush();
     expect(get(selectedSession)?.id).toBe(6);
   });
@@ -515,7 +542,7 @@ describe('what a finished move leaves behind', () => {
   it('toasts a result with a View action, sticky only when there are warnings', async () => {
     const p = pending();
     startMove(source, 'turanga', { keepSource: false });
-    p.resolve({ ...report, warnings: ['one thing'], source_killed: false });
+    p.resolve(report({ warnings: ['one thing'], source_killed: false }));
     await flush();
     const t = get(toasts).find((x) => x.kind === 'success')!;
     expect(t.message).toBe('Moved dev-foo to turanga · 1 warning · the source keeps running');
@@ -528,7 +555,7 @@ describe('what a finished move leaves behind', () => {
   it('does not stick a clean result, and says nothing about the source', async () => {
     const p = pending();
     startMove(source, 'turanga', { keepSource: false });
-    p.resolve(report);
+    p.resolve(report());
     await flush();
     const t = get(toasts).find((x) => x.kind === 'success')!;
     expect(t.message).toBe('Moved dev-foo to turanga');
@@ -545,7 +572,7 @@ describe('runForSession', () => {
     expect(runForSession(get(moves), source)?.sessionId).toBe(5);
     expect(runForSession(get(moves), row({ id: 5, tmux_name: 'something-else' }))).toBeUndefined();
     expect(runForSession(get(moves), row({ id: 5, host_alias: 'elsewhere' }))).toBeUndefined();
-    p.resolve(report);
+    p.resolve(report());
     await flush();
     // The session the move produced finds the source's run.
     expect(runForSession(get(moves), target)?.sessionId).toBe(5);
@@ -555,7 +582,7 @@ describe('runForSession', () => {
   it('holds the target branch to the same guard as the source branch', async () => {
     const p = pending();
     startMove(source, 'turanga', { keepSource: false });
-    p.resolve(report);
+    p.resolve(report());
     await flush();
     expect(runForSession(get(moves), row({ id: 6, tmux_name: 'someone-else', host_alias: 'turanga' })))
       .toBeUndefined();
@@ -570,5 +597,320 @@ describe('runForSession', () => {
     expect(get(moves).get(77)).toMatchObject({ sessionName: 'session 77', fromHost: '' });
     expect(runForSession(get(moves), row({ id: 77, tmux_name: 'late-row', host_alias: 'alpha' }))?.sessionId)
       .toBe(77);
+  });
+});
+
+// Task 8: retrying a failed transfer re-runs move_session on the SAME run
+// entry; resolving a partial calls resolve_move with the TARGET session's id
+// (the run is keyed by the source's id) and settles the run as done/undone.
+describe('retryMove', () => {
+  it('retries the same target and options, on the same run', async () => {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(err('E_MOVE_TARGET_DIRTY', 'dirty', { leftovers: 'ours', ours: ['a.txt'] }));
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('failed');
+
+    invoked.mockResolvedValueOnce(ok(report({ target_session_id: 8 })));
+    retryMove(7);
+    await flush();
+    const run = get(moves).get(7)!;
+    expect(run.status).toBe('done');
+    expect(run.attempt).toBe(2);
+    expect(run.toHost).toBe('beta');
+    // The second call carried the same options and no cleanup.
+    expect(invoked.mock.calls.at(-1)![1].args).toMatchObject({
+      session_id: 7,
+      target_host_alias: 'beta',
+      keep_source: false,
+      clean_target: false,
+    });
+  });
+
+  it('retries with clean_target when asked, and records it on the run', async () => {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(err('E_MOVE_TARGET_DIRTY', 'dirty', { leftovers: 'ours', ours: ['a.txt'] }));
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    invoked.mockResolvedValueOnce(ok(report({ target_session_id: 8 })));
+    retryMove(7, { cleanTarget: true });
+    await flush();
+    expect(invoked.mock.calls.at(-1)![1].args).toMatchObject({ clean_target: true });
+    expect(get(moves).get(7)!.cleanTarget).toBe(true);
+  });
+
+  it('refuses to retry a run that is running or partial', async () => {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    let resolveIt: (v: unknown) => void = () => {};
+    invoked.mockReturnValueOnce(new Promise((r) => (resolveIt = r)));
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    const calls = invoked.mock.calls.length;
+    retryMove(7);
+    expect(invoked.mock.calls.length).toBe(calls);
+    resolveIt(err('E_MOVE_PARTIAL', 'partial', { step: 'killing the source s on alpha', target_session_id: 8 }));
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('partial');
+    retryMove(7);
+    expect(invoked.mock.calls.length).toBe(calls); // unchanged
+  });
+
+  // Fix round 1, Finding 1: `move:progress` carries only the session id, so
+  // once `retryMove` puts the run back to `running` with blank steps, a
+  // straggler from the FIRST attempt (still in flight when the retry began)
+  // looks exactly like the retry's own next step to `applyMoveProgress`.
+  it("drops a late event from the attempt it replaced, and applies its own from the first step", async () => {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(err('E_MOVE_CARRY', 'x', { step: 'fetch' }));
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('failed');
+
+    invoked.mockReturnValueOnce(new Promise(() => {})); // the retry's own call never settles here
+    retryMove(7);
+    // A straggler from the FIRST attempt, naming the LAST step failed.
+    applyMoveProgress(ev('handoff', 'failed', { session_id: 7, to_host: 'beta' }));
+    let run = get(moves).get(7)!;
+    expect(run.status).toBe('running');
+    expect(run.steps.map((s) => s.state)).toEqual(Array(9).fill('pending'));
+
+    // The retry's own first event is accepted, from its own first step.
+    applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: 'beta' }));
+    run = get(moves).get(7)!;
+    expect(run.steps[0].state).toBe('started');
+    expect(run.steps.slice(1).every((s) => s.state === 'pending')).toBe(true);
+  });
+});
+
+describe('resolveMoveRun and adoptPartial', () => {
+  it('finishing a partial settles the run as done', async () => {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(
+      err('E_MOVE_PARTIAL', 'partial', { step: 'killing the source s on alpha', target_session_id: 8 }),
+    );
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    invoked.mockResolvedValueOnce(
+      ok({
+        action: 'finish',
+        source_session_id: 7,
+        target_session_id: 8,
+        from_host: 'alpha',
+        to_host: 'beta',
+        source_killed: true,
+        target_killed: false,
+        warnings: [],
+      }),
+    );
+    resolveMoveRun(7, 'finish');
+    await flush();
+    expect(invoked.mock.calls.at(-1)![0]).toBe('resolve_move');
+    expect(invoked.mock.calls.at(-1)![1].args).toEqual({ session_id: 8, action: 'finish' });
+    expect(get(moves).get(7)!.status).toBe('done');
+  });
+
+  it('adopts a recorded partial so the sheet can act on it after a restart', () => {
+    adoptPartial(
+      { targetSessionId: 8, sourceSessionId: 7, fromHost: 'alpha', toHost: 'beta', step: 'killing the source s on alpha', keptSource: null },
+      's',
+    );
+    const run = get(moves).get(7)!;
+    expect(run.status).toBe('partial');
+    expect(run.toHost).toBe('beta');
+    expect(run.error?.details).toMatchObject({ target_session_id: 8 });
+  });
+
+  it('undoing a partial leaves the run failed and says so', async () => {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(
+      err('E_MOVE_PARTIAL', 'partial', { step: 'killing the source s on alpha', target_session_id: 8 }),
+    );
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    invoked.mockResolvedValueOnce(
+      ok({
+        action: 'undo',
+        source_session_id: 7,
+        target_session_id: 8,
+        from_host: 'alpha',
+        to_host: 'beta',
+        source_killed: false,
+        target_killed: true,
+        warnings: [],
+      }),
+    );
+    resolveMoveRun(7, 'undo');
+    await flush();
+    const run = get(moves).get(7)!;
+    expect(run.status).toBe('failed');
+    expect(run.error?.code).toBe(UNDONE);
+    // …and that marker is frontend-only: it must not mint an `E_*` code.
+    expect(UNDONE.startsWith('E_')).toBe(false);
+  });
+
+  // Fix round 1, Finding 2: the backend really can answer E_MOVE_PARTIAL
+  // with `target_session_id: null` (crates/fleet-core/.../move_session/mod.rs
+  // :2609, :2693). This is the guard that stops the SOURCE id ever reaching
+  // `resolve_move`, so it gets its own test.
+  it('refuses to resolve when the partial names no target, and toasts instead', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    p.reject({ code: 'E_MOVE_PARTIAL', message: 'partial', details: { step: 'x', target_session_id: null } });
+    await flush();
+    expect(get(moves).get(5)!.status).toBe('partial');
+    const calls = invoked.mock.calls.length;
+    resolveMoveRun(5, 'finish');
+    await flush();
+    expect(invoked.mock.calls.length).toBe(calls);
+    expect(get(toasts).some((t) => t.kind === 'error')).toBe(true);
+  });
+
+  // Fix round 1, Finding 3: called on anything but a partial, `resolveMoveRun`
+  // would fire `resolve_move` at a move that is not partial (e.g. `report`'s
+  // target on a DONE run) and the backend would answer E_INVALID_STATE — a
+  // wasted round-trip and a confusing toast. Mirrors `retryMove`'s own guard.
+  it('refuses to resolve a run that is not partial', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    p.resolve(report());
+    await flush();
+    expect(get(moves).get(5)!.status).toBe('done');
+    const calls = invoked.mock.calls.length;
+    resolveMoveRun(5, 'finish');
+    await flush();
+    expect(invoked.mock.calls.length).toBe(calls);
+  });
+});
+
+// Whole-branch review, findings 3, 4, 5 and 8: what the run store still got
+// wrong once retry, resolve and the recorded-partial path were all in place.
+describe('a run that outlives the ids it started with', () => {
+  /** A local run left `partial` by a move of session 7 onto `beta`. */
+  async function partialRun(over: Record<string, unknown> = {}) {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(
+      err('E_MOVE_PARTIAL', 'partial', {
+        step: 'killing the source s on alpha',
+        target_session_id: 8,
+        target_host: 'beta',
+        target_tmux_name: 's',
+        ...over,
+      }),
+    );
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('partial');
+    return session;
+  }
+
+  const resolved = (action: string, over: Record<string, unknown> = {}) =>
+    ok({
+      action,
+      source_session_id: 7,
+      target_session_id: 8,
+      from_host: 'alpha',
+      to_host: 'beta',
+      source_killed: action === 'finish',
+      target_killed: action === 'undo',
+      warnings: [],
+      ...over,
+    });
+
+  // Finding 3: Finish settles with `report: null` and the run stays keyed to
+  // a source id it just reaped, so the only row left that could render it —
+  // the target — has to be able to find it through the partial's details.
+  it("a finished partial's target row finds the run", async () => {
+    await partialRun();
+    invoked.mockResolvedValueOnce(resolved('finish'));
+    resolveMoveRun(7, 'finish');
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('done');
+    const targetRow = row({ id: 8, tmux_name: 's', host_alias: 'beta' });
+    expect(runForSession(get(moves), targetRow)?.sessionId).toBe(7);
+    // The same id-reuse guard as the report branch: a different session that
+    // inherited the id must not wear this run.
+    expect(runForSession(get(moves), row({ id: 8, tmux_name: 'other', host_alias: 'beta' })))
+      .toBeUndefined();
+    expect(runForSession(get(moves), row({ id: 8, tmux_name: 's', host_alias: 'gamma' })))
+      .toBeUndefined();
+  });
+
+  // Finding 4: after an Undo the run is `failed`, so Retry is offered — and
+  // a run rebuilt from a recorded partial must not coerce an unknown
+  // `keep_source` into "kill the source".
+  it('a retry after an undo keeps a source the transfer was told to keep', async () => {
+    adoptPartial(
+      {
+        targetSessionId: 8,
+        sourceSessionId: 7,
+        fromHost: 'alpha',
+        toHost: 'beta',
+        step: 'killing the source s on alpha',
+        keptSource: true,
+      },
+      's',
+    );
+    expect(get(moves).get(7)!.keepSource).toBe(true);
+    invoked.mockResolvedValueOnce(resolved('undo'));
+    resolveMoveRun(7, 'undo');
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('failed');
+    invoked.mockResolvedValueOnce(ok(report({ target_session_id: 9 })));
+    retryMove(7);
+    await flush();
+    expect(invoked.mock.calls.at(-1)![1].args).toMatchObject({ keep_source: true });
+  });
+
+  // Finding 5: `startMove` reuses the map key of a stale failed run, so a
+  // straggler from the attempt before it lands on the fresh step list —
+  // and a stale `failed` step then settles an E_HUB_UNREACHABLE run as
+  // failed, though the move is still running on the hub.
+  it('a straggler from the previous attempt cannot settle a fresh start', async () => {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(err('E_MOVE_CARRY', 'x', { step: 'fetch' }));
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    expect(get(moves).get(7)!.status).toBe('failed');
+
+    let settle!: (v: unknown) => void;
+    invoked.mockReturnValueOnce(new Promise((r) => (settle = r)));
+    startMove(session, 'beta', { keepSource: false });
+    // The previous attempt's last event, arriving after the fresh start.
+    applyMoveProgress(ev('handoff', 'failed', { session_id: 7, to_host: 'beta' }));
+    expect(get(moves).get(7)!.steps.every((s) => s.state === 'pending')).toBe(true);
+
+    // The hub never answered, so the move is most likely still running there.
+    settle(err('E_HUB_UNREACHABLE', 'no answer'));
+    await flush();
+    const run = get(moves).get(7)!;
+    expect(run.status).toBe('running');
+    expect(run.origin).toBe('observed');
+
+    // This attempt's own first event is still accepted.
+    applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: 'beta' }));
+    expect(get(moves).get(7)!.steps[0].state).toBe('started');
+  });
+
+  // Finding 8: Finish and Undo each kill a live session. A double click must
+  // not fire two of them — the second refusal would land on a run that is
+  // already `done`, where no view renders it.
+  it('fires one resolve_move for a double click, and allows a retry after a refusal', async () => {
+    await partialRun();
+    let settle!: (v: unknown) => void;
+    invoked.mockReturnValueOnce(new Promise((r) => (settle = r)));
+    resolveMoveRun(7, 'finish');
+    resolveMoveRun(7, 'finish');
+    const resolves = () => invoked.mock.calls.filter((c) => c[0] === 'resolve_move').length;
+    expect(resolves()).toBe(1);
+
+    settle(err('E_INVALID_STATE', 'the target took a turn'));
+    await flush();
+    expect(get(moves).get(7)!.resolveError?.code).toBe('E_INVALID_STATE');
+    // The refusal released the guard: the user may try the other action.
+    invoked.mockResolvedValueOnce(resolved('undo'));
+    resolveMoveRun(7, 'undo');
+    await flush();
+    expect(resolves()).toBe(2);
+    expect(get(moves).get(7)!.status).toBe('failed');
   });
 });

@@ -235,6 +235,10 @@ pub const FAILED: &str = "__CF_CARRY_FAILED__";
 pub const BUNDLE_TOO_LARGE: &str = "__CF_BUNDLE_TOO_LARGE__";
 pub const TARGET_DIRTY: &str = "__CF_TARGET_DIRTY__";
 pub const HEAD_MISMATCH: &str = "__CF_HEAD_MISMATCH__";
+/// The target worktree is dirty and what it holds is NOT the snapshot: the
+/// stderr records that follow say which paths are the snapshot's (`ours`) and
+/// which the target's own (`theirs`).
+pub const LEFTOVERS_DIFFER: &str = "__CF_LEFTOVERS_DIFFER__";
 /// Printed on its own line immediately before a script's real payload, with
 /// nothing else reaching stdout after it. `ssh.rs` runs every carry script
 /// as `bash -lc` — a LOGIN shell that sources `/etc/profile` and
@@ -600,15 +604,7 @@ cd -- "$cwd" 2>/dev/null || fail cd
 if [ -n "$(git {status} 2>/dev/null)" ]; then printf '{TARGET_DIRTY}\n' >&2; exit 9; fi
 h=$(git rev-parse HEAD 2>/dev/null)
 if [ "$h" != "$want" ]; then printf '{HEAD_MISMATCH} %s\n' "$h" >&2; exit 10; fi
-recover() {{
-  git read-tree -u --reset HEAD >/dev/null 2>&1
-  git diff-tree -r -z --name-only --diff-filter=A HEAD "refs/fleet/transfer/$id/wt" 2>/dev/null |
-    while IFS= read -r -d '' p; do
-      rm -f -- "$p"
-      d=$(dirname -- "$p")
-      [ "$d" = . ] || rmdir -p -- "$d" 2>/dev/null
-    done
-}}
+{recover}
 git read-tree -u --reset "refs/fleet/transfer/$id/wt^{{tree}}" >/dev/null 2>&1 || {{ recover; fail read-tree-worktree; }}
 git read-tree "refs/fleet/transfer/$id/ix^{{tree}}" >/dev/null 2>&1 || {{ recover; fail read-tree-index; }}
 printf '\n{OUT_MARKER}\n'
@@ -619,12 +615,211 @@ git {status}
         want = quote(want_head),
         id_guard = id_guard(),
         status = STATUS_PORCELAIN,
+        recover = recover_body(),
     )
 }
 
 /// The `git status --porcelain=v1` text [`apply_script`] printed.
 pub fn parse_apply(stdout: &str) -> Result<&str, IpcError> {
     payload_str(stdout).ok_or_else(|| parse_err("apply", stdout))
+}
+
+/// How a dirty target's contents differ from the snapshot about to be
+/// replayed. `ours` are paths the snapshot writes (so a cleanup could replace
+/// them); `theirs` are paths it does not hold at all (so nothing may touch
+/// them). The lists are capped; `more_*` counts what was left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Leftovers {
+    pub ours: Vec<String>,
+    pub theirs: Vec<String>,
+    pub more_ours: u64,
+    pub more_theirs: u64,
+}
+
+/// Longest path list either side of [`Leftovers`] carries.
+const LEFTOVER_CAP: usize = 50;
+
+/// The rollback shared by [`apply_script`] and [`recover_script`]: reset the
+/// worktree and index to `HEAD` via `git read-tree -u --reset HEAD`, then
+/// remove EXACTLY the paths the snapshot tree adds relative to `HEAD` — never
+/// `git clean`, which would also take the target's own untracked files and
+/// empty directories. Requires `$id` to be set and guarded.
+///
+/// `n` counts the paths it WENT THROUGH, not files it deleted: `rm -f` exits
+/// 0 on a path the preceding `read-tree -u --reset HEAD` already removed (or
+/// that was never written), so `n` ends up equal to the number of paths the
+/// snapshot tree adds relative to `HEAD`. Callers must word it that way —
+/// never as "N files deleted".
+///
+/// `read-tree -u --reset HEAD` is a hard reset of every TRACKED path: it
+/// discards any uncommitted modification to a tracked file, whoever made it
+/// — the snapshot's or the target's own. What it does NOT touch is anything
+/// untracked: a git-ignored file, or an untracked path the snapshot does not
+/// add. So this body is only safe to run once the caller already knows every
+/// dirty tracked path in the worktree belongs to the snapshot — see
+/// [`recover_script`]'s doc for the required gate.
+fn recover_body() -> String {
+    r#"n=0
+recover() {
+  git read-tree -u --reset HEAD >/dev/null 2>&1
+  while IFS= read -r -d '' p; do
+    rm -f -- "$p" && n=$((n+1))
+    d=$(dirname -- "$p")
+    [ "$d" = . ] || rmdir -p -- "$d" 2>/dev/null
+  done < <(git diff-tree -r -z --name-only --diff-filter=A HEAD "refs/fleet/transfer/$id/wt" 2>/dev/null)
+}"#
+    .to_string()
+}
+
+/// Undo what an unfinished earlier attempt replayed into `cwd`: [`recover_body`],
+/// then [`OUT_MARKER`] and its `n` — the number of paths the snapshot adds
+/// relative to `HEAD`, which is what was reset and removed, not a count of
+/// files that were actually there (see [`recover_body`]). Parse with
+/// [`parse_recover`]. It never touches a git-ignored file, an untracked path
+/// the snapshot does not add, or any path outside the snapshot's additions —
+/// but [`recover_body`]'s `read-tree -u --reset HEAD` DOES discard any
+/// uncommitted change to a TRACKED file in that worktree, including the
+/// target's own, with no way to tell whose it was after the fact.
+///
+/// So this must only be called once the caller has already established that
+/// every dirty tracked path in the worktree is one the snapshot itself
+/// writes — never on a target that might hold its own genuine work. That is
+/// exactly what [`verify_replayed_script`]'s `ours`/`theirs` split exists to
+/// answer first: a non-empty `theirs` means real target work is present, and
+/// `recover_script` must not run.
+pub fn recover_script(cwd: &str, claude_id: &str) -> String {
+    format!(
+        r#"# cf-carry:recover
+set +e
+cwd={cwd}
+id={id}
+fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
+{id_guard}
+cd -- "$cwd" 2>/dev/null || fail cd
+git rev-parse --verify -q "refs/fleet/transfer/$id/wt" >/dev/null 2>&1 || fail no-snapshot
+{recover}
+recover
+printf '\n{OUT_MARKER}\n'
+printf '%s\n' "$n"
+"#,
+        cwd = quote(cwd),
+        id = quote(claude_id),
+        id_guard = id_guard(),
+        recover = recover_body(),
+    )
+}
+
+/// The count [`recover_script`] printed.
+pub fn parse_recover(stdout: &str) -> Result<u64, IpcError> {
+    payload_str(stdout)
+        .map(str::trim)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| parse_err("recover", stdout))
+}
+
+/// Is this dirty target worktree already EXACTLY the snapshot we were about
+/// to replay? Run only after [`apply_script`] refused with [`TARGET_DIRTY`].
+///
+/// Three questions, all answered by git itself over a throwaway
+/// `GIT_INDEX_FILE` so the target's real index is never written:
+/// the worktree's content against `wt` (paths the snapshot holds), the paths
+/// it does NOT hold (`ls-files --others`, ignored files excluded — those are
+/// the ignored-carry step's business), and the real index against `ix`.
+/// `update-index --refresh` is what forces content hashing: a
+/// `read-tree`-seeded index has no stat data, so every file is re-read rather
+/// than trusted.
+///
+/// All three empty ⇒ prints [`OUT_MARKER`] then [`STATUS_PORCELAIN`], exactly
+/// as [`apply_script`] does on success, so the move's own verification runs
+/// over the adopted state unchanged. Otherwise exits 11 with
+/// [`LEFTOVERS_DIFFER`] first, then `<tag>\t<path>\0` records — parse with
+/// [`parse_leftovers`]. A `want_head` mismatch is [`HEAD_MISMATCH`] and never
+/// an adopt.
+pub fn verify_replayed_script(cwd: &str, claude_id: &str, want_head: &str) -> String {
+    format!(
+        r#"# cf-carry:verify
+set +e
+cwd={cwd}
+id={id}
+want={want}
+fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
+{id_guard}
+{home_guard}
+cd -- "$cwd" 2>/dev/null || fail cd
+ref="refs/fleet/transfer/$id"
+git rev-parse --verify -q "$ref/wt" >/dev/null 2>&1 || fail no-snapshot
+h=$(git rev-parse HEAD 2>/dev/null)
+if [ "$h" != "$want" ]; then printf '{HEAD_MISMATCH} %s\n' "$h" >&2; exit 10; fi
+dir="$HOME/.cache/claude-fleet/transfer/$id"
+umask 077
+mkdir -p -- "$dir" || fail mkdir
+tmp="$dir/verify.ix"
+ours="$dir/verify.ours"
+theirs="$dir/verify.theirs"
+rm -f -- "$tmp" "$ours" "$theirs"
+clean() {{ rm -f -- "$tmp" "$ours" "$theirs"; }}
+GIT_INDEX_FILE="$tmp" git read-tree "$ref/wt^{{tree}}" >/dev/null 2>&1 || {{ clean; fail read-tree; }}
+GIT_INDEX_FILE="$tmp" git update-index -q --refresh >/dev/null 2>&1
+GIT_INDEX_FILE="$tmp" git diff-index -z --name-only "$ref/wt^{{tree}}" -- > "$ours" 2>/dev/null || {{ clean; fail diff-worktree; }}
+GIT_INDEX_FILE="$tmp" git ls-files -z --others --exclude-standard > "$theirs" 2>/dev/null || {{ clean; fail ls-others; }}
+git diff-index -z --name-only --cached "$ref/ix^{{tree}}" -- >> "$ours" 2>/dev/null || {{ clean; fail diff-index; }}
+rm -f -- "$tmp"
+if [ -s "$ours" ] || [ -s "$theirs" ]; then
+  printf '{LEFTOVERS_DIFFER}\n' >&2
+  for t in ours theirs; do
+    n=0
+    while IFS= read -r -d '' p; do
+      n=$((n+1))
+      [ "$n" -le {cap} ] && printf '%s\t%s\0' "$t" "$p" >&2
+    done < "$dir/verify.$t"
+    if [ "$n" -gt {cap} ]; then printf 'more\t%s\t%s\0' "$t" "$((n-{cap}))" >&2; fi
+  done
+  clean
+  exit 11
+fi
+clean
+printf '\n{OUT_MARKER}\n'
+git {status}
+"#,
+        cwd = quote(cwd),
+        id = quote(claude_id),
+        want = quote(want_head),
+        id_guard = id_guard(),
+        home_guard = home_guard(),
+        status = STATUS_PORCELAIN,
+        cap = LEFTOVER_CAP,
+    )
+}
+
+/// The `<tag>\t<path>\0` records [`verify_replayed_script`] wrote to stderr.
+/// Tolerant by design: unknown tags, a truncated stream and duplicate paths
+/// (a path can differ in both the worktree and the index) are all fine — the
+/// lists only ever drive a message and a cleanup confirmation, never a
+/// decision about whether to overwrite. Both lists come out sorted and
+/// deduplicated.
+pub fn parse_leftovers(stderr: &str) -> Leftovers {
+    let mut out = Leftovers::default();
+    for rec in stderr.split('\0') {
+        let mut it = rec.splitn(3, '\t');
+        match (it.next(), it.next(), it.next()) {
+            (Some(t), Some(p), None) if t.ends_with("ours") => out.ours.push(p.to_string()),
+            (Some(t), Some(p), None) if t.ends_with("theirs") => out.theirs.push(p.to_string()),
+            (Some(t), Some(side), Some(n)) if t.ends_with("more") => {
+                let n = n.trim().parse().unwrap_or(0);
+                if side == "ours" {
+                    out.more_ours = n;
+                } else if side == "theirs" {
+                    out.more_theirs = n;
+                }
+            }
+            _ => {}
+        }
+    }
+    for v in [&mut out.ours, &mut out.theirs] {
+        v.sort();
+        v.dedup();
+    }
+    out
 }
 
 /// Best effort: drop the private refs and the transfer dir. Always exits 0
@@ -2862,5 +3057,200 @@ pub(crate) mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(parse_ignored_list(&out.stdout), Vec::new());
+    }
+
+    /// A target clone at the source HEAD, with the transfer refs fetched, and
+    /// the snapshot already replayed into it — i.e. exactly the state a move
+    /// leaves behind when it fails after the replay.
+    fn replayed_target(root: &Path, src: &Path, home: &Path) -> std::path::PathBuf {
+        let head = git(src, &["rev-parse", "HEAD"]).trim().to_string();
+        let out = bash(
+            &snapshot_script(src.to_str().unwrap(), ID, &[], 10_000_000),
+            home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let tgt = root.join("target");
+        git(
+            root,
+            &["clone", "-q", src.to_str().unwrap(), tgt.to_str().unwrap()],
+        );
+        git(&tgt, &["checkout", "-q", &head]);
+        git(
+            &tgt,
+            &[
+                "fetch",
+                "-q",
+                src.to_str().unwrap(),
+                "+refs/fleet/transfer/*:refs/fleet/transfer/*",
+            ],
+        );
+        let out = bash(&apply_script(tgt.to_str().unwrap(), ID, &head), home);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        tgt
+    }
+
+    #[test]
+    fn verify_adopts_a_target_that_already_holds_exactly_the_snapshot() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (src, _) = dirty_source(tmp.path());
+        let head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+        let tgt = replayed_target(tmp.path(), &src, &home);
+
+        let out = bash(
+            &verify_replayed_script(tgt.to_str().unwrap(), ID, &head),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The payload is the same porcelain `apply_script` prints, so the
+        // move's own verification can run over it unchanged.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let porcelain = parse_apply(&stdout).unwrap();
+        assert!(porcelain.contains("staged new.txt"), "{porcelain}");
+        assert!(
+            !porcelain.contains(".env"),
+            "ignored files never appear: {porcelain}"
+        );
+    }
+
+    #[test]
+    fn verify_calls_a_changed_snapshot_path_ours_and_a_new_one_theirs() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (src, _) = dirty_source(tmp.path());
+        let head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+        let tgt = replayed_target(tmp.path(), &src, &home);
+
+        // A path the snapshot writes, with different content: OURS.
+        std::fs::write(tgt.join("mod.txt"), "v3-stale\n").unwrap();
+        let out = bash(
+            &verify_replayed_script(tgt.to_str().unwrap(), ID, &head),
+            &home,
+        );
+        assert!(!out.status.success());
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(LEFTOVERS_DIFFER), "{err}");
+        let l = parse_leftovers(&err);
+        assert_eq!(l.ours, vec!["mod.txt".to_string()], "{l:?}");
+        assert!(l.theirs.is_empty(), "{l:?}");
+
+        // A path the snapshot does not hold at all: THEIRS.
+        std::fs::write(tgt.join("mod.txt"), "v2\n").unwrap();
+        std::fs::write(tgt.join("their-own.txt"), "mine\n").unwrap();
+        let out = bash(
+            &verify_replayed_script(tgt.to_str().unwrap(), ID, &head),
+            &home,
+        );
+        assert!(!out.status.success());
+        let l = parse_leftovers(&String::from_utf8_lossy(&out.stderr));
+        assert_eq!(l.theirs, vec!["their-own.txt".to_string()], "{l:?}");
+        assert!(l.ours.is_empty(), "{l:?}");
+    }
+
+    #[test]
+    fn verify_ignores_ignored_files_and_refuses_another_head() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (src, _) = dirty_source(tmp.path());
+        let head = git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+        let tgt = replayed_target(tmp.path(), &src, &home);
+
+        // An ignored file the snapshot never carried is not the target's work.
+        std::fs::write(tgt.join(".env"), "SECRET=different\n").unwrap();
+        let out = bash(
+            &verify_replayed_script(tgt.to_str().unwrap(), ID, &head),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // A head mismatch is never an adopt.
+        let out = bash(
+            &verify_replayed_script(tgt.to_str().unwrap(), ID, &"0".repeat(40)),
+            &home,
+        );
+        assert!(!out.status.success());
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(HEAD_MISMATCH), "{err}");
+        assert!(!err.contains(LEFTOVERS_DIFFER), "{err}");
+    }
+
+    #[test]
+    fn recover_removes_only_what_the_snapshot_added() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (src, _) = dirty_source(tmp.path());
+        let tgt = replayed_target(tmp.path(), &src, &home);
+        // The target's own ignored file and its own untracked file survive.
+        std::fs::write(tgt.join(".env"), "SECRET=theirs\n").unwrap();
+        std::fs::write(tgt.join("their-own.txt"), "mine\n").unwrap();
+
+        let out = bash(&recover_script(tgt.to_str().unwrap(), ID), &home);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let removed = parse_recover(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert!(
+            removed >= 2,
+            "the snapshot's added files were removed: {removed}"
+        );
+        assert!(
+            !tgt.join("staged new.txt").exists(),
+            "a snapshot addition is gone"
+        );
+        assert!(!tgt.join("sub").exists(), "its new directory is gone too");
+        assert!(
+            tgt.join(".env").exists(),
+            "an ignored file is never touched"
+        );
+        assert!(
+            tgt.join("their-own.txt").exists(),
+            "nor is the target's own file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tgt.join("mod.txt")).unwrap(),
+            "v1\n"
+        );
+        assert!(tgt.join("del.txt").exists(), "a deletion was rolled back");
+        // And the worktree is clean again but for what was never ours.
+        let porcelain = git(
+            &tgt,
+            &["-c", "core.quotePath=true", "status", "--porcelain"],
+        );
+        assert!(porcelain.contains("their-own.txt"), "{porcelain}");
+        assert!(!porcelain.contains("mod.txt"), "{porcelain}");
     }
 }
