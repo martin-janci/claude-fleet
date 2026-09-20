@@ -409,6 +409,14 @@ pub struct ListWorktreesParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListHostWorktreesParams {
+    /// Host alias to scan (see list_hosts).
+    pub host_alias: String,
+    /// Project id whose worktrees to list (see list_projects).
+    pub project_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct PeerStatusParams {
     /// Peer's fleet session id (from list_sessions).
     pub session_id: i64,

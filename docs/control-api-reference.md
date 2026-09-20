@@ -111,6 +111,12 @@ List the paired client devices and what each one's token may do. The stored toke
 
 Parameters: `include_revoked`
 
+### `list_host_worktrees`
+
+Scan one host over SSH for a project's git worktrees and cache them as that host's rows. Returns {host_alias, project_id, cloned, worktrees}; cloned=false means the repo is not checked out there yet. Prefer list_worktrees, a store read, unless you need a REMOTE host's worktrees — the stored rows cover the local host only. Errors: E_NOTFOUND (no such project), E_GIT_SETUP, E_SSH.
+
+Parameters: `host_alias`, `project_id`
+
 ### `list_hosts`
 
 List all registered hosts with their reachability, claude/tmux versions, and linked account. Returns JSON.
