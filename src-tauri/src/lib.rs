@@ -165,7 +165,7 @@ pub fn run() {
             app.manage(std::sync::Arc::clone(&store));
             app.manage(Mutex::new(fleet_core::mcp::McpRuntime::default()));
             app.manage(std::sync::Arc::clone(&bus_for_usage));
-            // Task 4: one in-memory usage cache for the app's lifetime,
+            // One in-memory usage cache for the app's lifetime,
             // shared by the background poller (below) and the
             // `list_account_usage` / `refresh_account_usage` commands.
             let usage_cache = std::sync::Arc::new(Mutex::new(
@@ -211,10 +211,10 @@ pub fn run() {
             // Which background tasks this process may run is decided in
             // `backend::startup`, not here, and the real spawns live in
             // `bootstrap::tasks`. Both moved out of this closure because
-            // nothing can test it — it needs a live `tauri::App` — and the
-            // Task 2 review showed what an untestable guard was worth: it
-            // hoisted `spawn_reconcile_tick` out of the old `else` so both
-            // modes started it, and all 91 tests still passed.
+            // nothing can test it — it needs a live `tauri::App` — and that
+            // untestable guard was a tautology in disguise: it hoisted
+            // `spawn_reconcile_tick` out of the old `else` so both modes
+            // started it, and all 91 tests still passed.
             //
             // `lib.rs` may no longer name any of the three; a test asserts
             // that, which is what makes that exact refactor fail now.

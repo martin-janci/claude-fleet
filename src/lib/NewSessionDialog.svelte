@@ -193,9 +193,10 @@
     }
     if (!ownsTheFleet($hubStatus)) {
       // `list_host_worktrees` scans THIS host over its own SSH and refuses
-      // with E_LOCAL_ONLY for a hub client (no hub tool for it). Fix round 1
-      // here read `project.worktrees` as a substitute, on the assumption a
-      // remote host's rows land there via the row-event stream — false:
+      // with E_LOCAL_ONLY for a hub client (no hub tool for it). An earlier
+      // version here read `project.worktrees` as a substitute, on the
+      // assumption a remote host's rows land there via the row-event
+      // stream — false:
       // `list_projects_joined` LEFT JOINs worktrees on `host_alias = 'local'`
       // only, `upsert_worktree_on` fires `worktree:updated` for local rows
       // only, and the `list_worktrees` tool goes through

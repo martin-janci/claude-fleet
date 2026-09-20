@@ -608,11 +608,10 @@ fn no_error_and_no_debug_output_ever_carries_the_token() {
                 "content": [{ "type": "text", "text": "leaked cl_s3cret-token" }],
             },
         }))),
-        // The Task 2 review found these two, and both were real leaks: every
-        // other external-text path here was scrubbed and these were not, so
-        // the claim that "every scrap of text that originates outside this
-        // process is now scrubbed" was false. A JSON-RPC protocol error's
-        // message…
+        // These two were real leaks: every other external-text path here was
+        // scrubbed and these were not, so the claim that "every scrap of
+        // text that originates outside this process is now scrubbed" was
+        // false. A JSON-RPC protocol error's message…
         Ok(sse(json!({
             "jsonrpc": "2.0", "id": 1,
             "error": { "code": -32602, "message": "bad request: Bearer cl_s3cret-token" },
@@ -737,10 +736,10 @@ fn a_raw_http_response_is_split_into_its_status_and_body() {
 
 // --- a peer that half-closes -------------------------------------------------
 //
-// The Task 2 review's finding 6. rustls 0.23 reports a TCP close with no
-// `close_notify` as `UnexpectedEof`, and `speak` used to `?` that — discarding
-// a body that had already arrived. Nothing exercised it, because the one live
-// test points at crates.io, which does send `close_notify`.
+// rustls 0.23 reports a TCP close with no `close_notify` as
+// `UnexpectedEof`, and `speak` used to `?` that — discarding a body that had
+// already arrived. Nothing exercised it, because the one live test points at
+// crates.io, which does send `close_notify`.
 
 /// Hands back `body` (in whatever chunks the reader's buffer allows), then
 /// fails with `kind` instead of reporting a clean end of stream — which is

@@ -1,6 +1,6 @@
 <script lang="ts">
   // Sticky bar above the Conversations tab thread: conversation switcher,
-  // context meter, model, status and last notable event (spec §6 / Task 3).
+  // context meter, model, status and last notable event (spec §6).
   import type { SessionRow } from './sessions';
   import {
     contextMeter,

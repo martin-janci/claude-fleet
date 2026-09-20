@@ -10,11 +10,11 @@
 //!
 //! Until this module, that rule lived as an `if backend.owns_the_fleet()` in
 //! `lib.rs`'s setup closure, guarded by a test asserting
-//! `matches!(self, Backend::Local)`. The Task 2 review showed what that was
-//! worth: it hoisted `spawn_reconcile_tick` out of the `else` so **both**
-//! modes started it, and all 91 tests still passed. The test observed the
-//! predicate's *definition*, which is a tautology — not its *use*, which is
-//! the only thing that could go wrong.
+//! `matches!(self, Backend::Local)`. That guard is a tautology in disguise:
+//! hoisting `spawn_reconcile_tick` out of the `else` so **both** modes
+//! started it left all 91 tests passing. The test observed the predicate's
+//! *definition* — not its *use*, which is the only thing that could go
+//! wrong.
 //!
 //! So the decision moved out of `lib.rs`'s setup closure, which no test can
 //! run (it needs a live `tauri::App`), into [`start_background_tasks`], which

@@ -595,7 +595,7 @@ export function promptHistory(conv: Conversation | null, pending: PendingPrompt 
   return out;
 }
 
-// ─── Header / thread helpers (Task 2) ───────────────────────────────────────
+// ─── Header / thread helpers ────────────────────────────────────────────────
 
 export function formatTokens(n: number): string {
   if (n < 1000) return String(n);
