@@ -646,7 +646,7 @@ fn a_hub_that_has_never_been_judged_is_called_in_every_state() {
 /// (the open failed) or `Reconnecting` (a stream that ended before its `ready`
 /// frame) — neither of which has re-judged anything. A gate that read the
 /// CURRENT state would open there, and reads would come back from a hub still
-/// known to be incompatible: exactly the case this task exists to prevent, and
+/// known to be incompatible: exactly the case this gate exists to prevent, and
 /// a likely one, since a hub whose event stream is down or behind a flapping
 /// proxy can still answer `/mcp`.
 #[test]
