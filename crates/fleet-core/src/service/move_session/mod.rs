@@ -2171,7 +2171,6 @@ async fn move_session_inner(
         .await
         .map_err(|e| before_target("preparing the target worktree", e))?;
 
-    let mut adopted: Option<String> = None;
     let out = sh(
         ssh,
         &target,
@@ -2183,12 +2182,16 @@ async fn move_session_inner(
     if !out.status.success() {
         let err = stderr_of(&out);
         // Behind the source HEAD and dirty: the target's own uncommitted
-        // work, not a divergence.
+        // work, not a divergence. This refusal fires only when the target
+        // HEAD is a strict ancestor of `want` (see `target_prep_script`), so
+        // the target cannot hold the snapshot this move is about to replay
+        // — `verify_replayed_script` requires `HEAD == want_head` and would
+        // answer `HEAD_MISMATCH` here (or, in a fast-forward race, land on
+        // an empty prep payload and a confusing parse error). Classifying is
+        // deliberately skipped: it could never come back `Adopted::Yes` from
+        // this site, only add a failure mode.
         if err.contains(carry::TARGET_DIRTY) {
-            match classify_target(ssh, &target, &cwd, &id, &state.head).await {
-                Adopted::Yes(porcelain) => adopted = Some(porcelain),
-                other => return Err(target_dirty(&cwd, &target, &other)),
-            }
+            return Err(target_dirty(&cwd, &target, &Adopted::Unknown));
         } else {
             let msg = if err.contains(DIVERGED) {
                 format!(
@@ -2248,57 +2251,54 @@ async fn move_session_inner(
             ));
         }
     } else {
-        let porcelain_owned = match adopted.take() {
-            Some(p) => {
-                progress.done(Some("already in place".to_string()));
-                warnings.push(format!(
-                    "{cwd} on {target} already held exactly this work; nothing was replayed"
-                ));
-                p
-            }
-            None => {
-                let out = sh(
-                    ssh,
-                    &target,
-                    &carry::apply_script(&cwd, &id, &state.head),
-                    GIT_TIMEOUT,
-                )
-                .await
-                .map_err(|e| carry_transport("apply", e))?;
-                if !out.status.success() {
-                    let err = stderr_of(&out);
-                    if !err.contains(carry::TARGET_DIRTY) {
-                        return Err(carry_err(
-                            "apply",
-                            &format!("replaying the work in {cwd} on {target}"),
-                            &err,
-                        ));
-                    }
-                    match classify_target(ssh, &target, &cwd, &id, &state.head).await {
-                        Adopted::Yes(porcelain) => {
-                            progress.done(Some("already in place".to_string()));
-                            warnings.push(format!(
-                                "{cwd} on {target} already held exactly this work; nothing was replayed"
-                            ));
-                            porcelain
-                        }
-                        other => return Err(target_dirty(&cwd, &target, &other)),
-                    }
-                } else {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    carry::parse_apply(&stdout)
-                        .map_err(|e| {
-                            carry_err(
-                                "apply",
-                                &format!(
-                                    "reading the replayed state of {cwd} on {target}: {}",
-                                    e.message
-                                ),
-                                "",
-                            )
-                        })?
-                        .to_string()
+        // `adopted_detail` is set only when the target turned out to already
+        // hold the snapshot; either way the step is not closed until AFTER
+        // the `want != got` check below passes, so a mismatch leaves it open
+        // for the caller's `progress.fail()` to mark `replay:failed` — same
+        // as every other failure on this path.
+        let mut adopted_detail: Option<String> = None;
+        let porcelain_owned = {
+            let out = sh(
+                ssh,
+                &target,
+                &carry::apply_script(&cwd, &id, &state.head),
+                GIT_TIMEOUT,
+            )
+            .await
+            .map_err(|e| carry_transport("apply", e))?;
+            if !out.status.success() {
+                let err = stderr_of(&out);
+                if !err.contains(carry::TARGET_DIRTY) {
+                    return Err(carry_err(
+                        "apply",
+                        &format!("replaying the work in {cwd} on {target}"),
+                        &err,
+                    ));
                 }
+                match classify_target(ssh, &target, &cwd, &id, &state.head).await {
+                    Adopted::Yes(porcelain) => {
+                        adopted_detail = Some("already in place".to_string());
+                        warnings.push(format!(
+                            "{cwd} on {target} already held exactly this work; nothing was replayed"
+                        ));
+                        porcelain
+                    }
+                    other => return Err(target_dirty(&cwd, &target, &other)),
+                }
+            } else {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                carry::parse_apply(&stdout)
+                    .map_err(|e| {
+                        carry_err(
+                            "apply",
+                            &format!(
+                                "reading the replayed state of {cwd} on {target}: {}",
+                                e.message
+                            ),
+                            "",
+                        )
+                    })?
+                    .to_string()
             }
         };
         // `" M"` (unstaged) and `"M "` (staged) differ only in the two status
@@ -2322,6 +2322,7 @@ async fn move_session_inner(
             )
             .with_details(serde_json::json!({ "step": "verify", "source": want, "target": got })));
         }
+        progress.done(adopted_detail);
     }
     if !state.dirty.is_empty() {
         warnings.push(format!(
@@ -3288,6 +3289,33 @@ mod tests {
         let seen = progress_of(&f, &bus);
         assert!(seen.contains(&"replay:done".to_string()), "{seen:?}");
         assert!(!seen.iter().any(|e| e == "replay:failed"), "{seen:?}");
+    }
+
+    /// An adopted target still has to match the source exactly: the adopt
+    /// only decides not to WRITE, never that the result is correct. When the
+    /// verify script's porcelain differs from the source's own, the move
+    /// must fail like any other replay mismatch — `E_MOVE_CARRY`, and the
+    /// progress stream ending at `replay:failed`, not `replay:done` (closing
+    /// the step early on the strength of the adopt, before this check runs,
+    /// was exactly the bug this test guards against).
+    #[tokio::test]
+    async fn an_adopted_target_whose_porcelain_mismatches_still_fails_the_move() {
+        let (f, bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        // The source's dirty set is " M src/lib.rs\n?? notes.txt"
+        // (`dirty_unpushed_carry`); this verify payload swaps `notes.txt`
+        // for an untracked file the source never had.
+        target_already_replayed(&f, " M src/lib.rs\n?? other.txt");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_CARRY, "{}", err.message);
+        let seen = progress_of(&f, &bus);
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("replay:failed"),
+            "{seen:?}"
+        );
+        assert!(!seen.iter().any(|e| e == "replay:done"), "{seen:?}");
     }
 
     #[tokio::test]
