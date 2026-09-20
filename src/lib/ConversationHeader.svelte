@@ -326,7 +326,7 @@
     gap: var(--control-gap);
     min-height: 32px;
     /* One inset expression, shared with .thread and .composer (Task 8). */
-    padding: 4px max(1.1rem, calc((100% - var(--chat-col)) / 2 + 1.1rem));
+    padding: 4px var(--chat-inset);
     background: var(--bg-pane);
     border-bottom: 1px solid var(--border);
   }

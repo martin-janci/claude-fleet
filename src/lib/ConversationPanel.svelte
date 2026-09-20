@@ -1250,6 +1250,10 @@
     /* The reading column every part of the thread lines up with: the turns,
        the sticky header, the chips, the slash menu and the composer. */
     --chat-col: 80ch;
+    /* The one horizontal inset: the header, the turns and the composer all
+       start on this edge. Before this existed, the textarea sat 15px left
+       of the bubbles it produced. */
+    --chat-inset: max(1.1rem, calc((100% - var(--chat-col)) / 2 + 1.1rem));
     /* The tab is a resizable pane, not the window: what adapts below has to
        ask this element's width, so the whole chat is one query container. */
     container-type: inline-size;
@@ -1317,14 +1321,13 @@
     flex: 0 0 auto;
     border-top: 1px solid var(--border);
     background: var(--bg-pane);
-    padding: 0.55rem 1.1rem 0.6rem;
+    padding: 0.55rem var(--chat-inset) 0.6rem;
   }
   .chips {
     display: flex;
     flex-wrap: wrap;
     gap: 0.35rem;
-    max-width: var(--chat-col);
-    margin: 0 auto 0.4rem;
+    margin: 0 0 0.4rem;
   }
   .chip {
     padding: 0.15rem 0.6rem;
@@ -1351,8 +1354,6 @@
     display: flex;
     align-items: flex-end;
     gap: 0.5rem;
-    max-width: var(--chat-col);
-    margin: 0 auto;
   }
   .composer textarea {
     flex: 1 1 auto;
@@ -1391,11 +1392,10 @@
   }
   .slash-menu {
     list-style: none;
-    max-width: var(--chat-col);
     max-height: 14rem;
     overflow: auto;
     overscroll-behavior: contain;
-    margin: 0 auto 0.4rem;
+    margin: 0 0 0.4rem;
     padding: 0.25rem 0;
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -1432,14 +1432,12 @@
     white-space: nowrap;
   }
   .composer-error {
-    max-width: var(--chat-col);
-    margin: 0 auto 0.35rem;
+    margin: 0 0 0.35rem;
     color: var(--usage-crit);
     font-size: 0.75rem;
   }
   .composer-status {
-    max-width: var(--chat-col);
-    margin: 0.35rem auto 0;
+    margin: 0.35rem 0 0;
     color: var(--fg-muted);
     font-size: 0.75rem;
   }
@@ -1536,9 +1534,13 @@
     background: color-mix(in srgb, var(--usage-warn) 20%, var(--bg-pane));
   }
   .thread {
-    max-width: var(--chat-col);
-    margin: 0 auto;
-    padding: 1rem 1.1rem 2.5rem;
+    /* No max-width/margin centering here: a centered chat-col box plus a
+       --chat-inset padding would double-count the outer margin on wide
+       panes. A full-width box with only the inset padding gives the same
+       effective column (chat-col minus the gutters) and, critically, the
+       same left edge as the header and the composer, which use the same
+       recipe. */
+    padding: 1rem var(--chat-inset) 2.5rem;
   }
   .muted { color: var(--fg-muted); font-style: italic; font-size: 0.8rem; margin: 0.6rem; }
   .empty-state {

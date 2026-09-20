@@ -39,13 +39,19 @@ describe('chat column width', () => {
     // toolbar all have to agree; seven copies of `80ch` is how they drift.
     expect(panel.match(/80ch/g) ?? []).toHaveLength(1);
     expect(panel).toContain('--chat-col: 80ch');
-    expect(panel.match(/max-width: var\(--chat-col\)/g)?.length ?? 0).toBeGreaterThanOrEqual(6);
+    // Task 8: the chips/composer-row/slash-menu/composer-error/composer-status
+    // max-width copies are gone — they inherit the column from the
+    // composer's --chat-inset padding instead of repeating it themselves.
+    expect(panel).toContain('--chat-inset:');
+    expect(panel.match(/var\(--chat-inset\)/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
   });
 
   it('centres the sticky bar over the reading column', () => {
     // Full-bleed background and border, but the controls track the text.
     // The one bar is the header now: the toolbar was folded into it.
-    expect(header).toContain('max(1.1rem, calc((100% - var(--chat-col)) / 2 + 1.1rem))');
+    // Task 8: the literal inset expression became the shared --chat-inset
+    // token, defined once on .conversation-panel.
+    expect(header).toContain('var(--chat-inset)');
   });
 });
 
