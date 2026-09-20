@@ -92,6 +92,30 @@ impl FleetTools {
         ok_json_compact(&serde_json::json!({ "total": total, "worktrees": worktrees }))
     }
 
+    #[tool(description = "Scan one host over SSH for a project's git worktrees \
+        and cache them as that host's rows. Returns {host_alias, project_id, \
+        cloned, worktrees}; cloned=false means the repo is not checked out \
+        there yet. Prefer list_worktrees, a store read, unless you need a \
+        REMOTE host's worktrees — the stored rows cover the local host only. \
+        Errors: E_NOTFOUND (no such project), E_GIT_SETUP, E_SSH.")]
+    pub(super) async fn list_host_worktrees(
+        &self,
+        Parameters(p): Parameters<ListHostWorktreesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "list_host_worktrees",
+            &format!("host={} project_id={}", p.host_alias, p.project_id),
+        );
+        let args = worktrees::ListHostWorktreesArgs {
+            host_alias: p.host_alias,
+            project_id: p.project_id,
+        };
+        let out = worktrees::list_host_worktrees(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json_compact(&out)
+    }
+
     #[tool(description = "Delete a git worktree on its host (no --force) and \
         drop fleet's row. Refuses if an alive session points at it (override \
         with force=true). Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, \

@@ -13,7 +13,7 @@ const RESET_WEEK = NOW + 2 * 86400 + 18 * HOUR + 28 * MIN; // Thu 09:00
 
 const account: AccountRow = {
   uuid: 'acct-1',
-  email: 'admin@32bit.sk',
+  email: 'admin-janci@users.noreply.github.com',
   display_name: null,
   organization_name: null,
   organization_uuid: null,
@@ -89,7 +89,7 @@ describe('UsageBlock — fresh', () => {
     expect(norm(screen.getByTestId('usage-block').querySelector('header'))).toContain(
       'USAGE work · max · shared with claude-fleet-oci',
     );
-    expect(screen.getByTestId('usage-account')).toHaveAttribute('title', 'admin@32bit.sk');
+    expect(screen.getByTestId('usage-account')).toHaveAttribute('title', 'admin-janci@users.noreply.github.com');
     expect(leftOf('5h')).toBe('91% left');
     expect(norm(within(row('5h')).getByTestId('usage-used'))).toBe('9% used');
     expect(norm(within(row('5h')).getByTestId('usage-reset'))).toBe('resets in 38 min (15:10)');

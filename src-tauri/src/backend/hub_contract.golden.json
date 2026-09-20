@@ -168,6 +168,12 @@
       "tmux_version",
       "transport"
     ],
+    "HostWorktrees": [
+      "cloned",
+      "host_alias",
+      "project_id",
+      "worktrees"
+    ],
     "ProjectRow": [
       "adopted",
       "base_path",

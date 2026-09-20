@@ -9,7 +9,7 @@ use fleet_core::service::repo_read::{
 use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversation};
 use fleet_core::service::tunnel::TunnelHealth;
 use fleet_core::service::usage::DayUsage;
-use fleet_core::service::worktrees::{WorktreeOccupancy, WorktreeOccupant};
+use fleet_core::service::worktrees::{HostWorktrees, WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
     AccountRow, ConversationRow, HostRow, ProjectRow, SessionContext, SessionEvent, SessionRow,
     SessionUsage, TaskRow, UsageTotals, WorktreeRow,
@@ -185,6 +185,15 @@ fn sample_occupancy() -> WorktreeOccupancy {
     }
 }
 
+fn sample_host_worktrees() -> HostWorktrees {
+    HostWorktrees {
+        host_alias: "trn".into(),
+        project_id: 2,
+        cloned: true,
+        worktrees: vec![sample_worktree_row()],
+    }
+}
+
 fn sample_totals() -> UsageTotals {
     UsageTotals {
         input_tokens: 1,
@@ -334,6 +343,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("ProjectRow", wire_keys(&sample_project_row()));
     put("WorktreeRow", wire_keys(&sample_worktree_row()));
     put("WorktreeOccupancy", wire_keys(&sample_occupancy()));
+    put("HostWorktrees", wire_keys(&sample_host_worktrees()));
     put(
         "WorktreeOccupant",
         wire_keys(&WorktreeOccupant {

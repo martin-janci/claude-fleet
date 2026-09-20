@@ -76,7 +76,7 @@ describe('hostChipUsage', () => {
 describe('selectedUsageLine', () => {
   it('names the account and both windows with the 5-hour reset and the age', () => {
     expect(selectedUsageLine(hostBy('mefistos'), ADMIN, snapshot(ADMIN.uuid), NOW, L, TZ)).toBe(
-      'admin@32bit.sk · 5h 91% left, resets 15:10 · weekly 58% left · 2 min ago',
+      'admin-janci@users.noreply.github.com · 5h 91% left, resets 15:10 · weekly 58% left · 2 min ago',
     );
   });
 
@@ -91,7 +91,7 @@ describe('selectedUsageLine', () => {
   });
 
   it('before the first fetch, and for a host with no account', () => {
-    expect(selectedUsageLine(hostBy('mefistos'), ADMIN, null, NOW)).toBe('admin@32bit.sk · checking usage…');
+    expect(selectedUsageLine(hostBy('mefistos'), ADMIN, null, NOW)).toBe('admin-janci@users.noreply.github.com · checking usage…');
     expect(selectedUsageLine(host('nas'), null, null, NOW)).toBe('Not logged in to Claude on this host — no usage to show.');
   });
 });
@@ -99,14 +99,14 @@ describe('selectedUsageLine', () => {
 describe('lowHeadroomWarning', () => {
   it('names the account and the other hosts that share it', () => {
     expect(lowHeadroomWarning(hostBy('mefistos'), hostsAll, ADMIN, fiveLeft(ADMIN.uuid, 8), NOW, L, TZ)).toBe(
-      '▲ admin@32bit.sk has 8% of its 5-hour window left (resets 15:10). Also used by claude-fleet-oci.',
+      '▲ admin-janci@users.noreply.github.com has 8% of its 5-hour window left (resets 15:10). Also used by claude-fleet-oci.',
     );
   });
 
   it('a limit says so, with the extra-usage consequence when it applies', () => {
     const extra = { ...ADMIN, has_extra_usage: true };
     expect(lowHeadroomWarning(hostBy('claude-fleet-oci'), hostsAll, extra, fiveLeft(ADMIN.uuid, 0), NOW, L, TZ)).toBe(
-      '■ admin@32bit.sk is at its 5-hour limit (resets 15:10). Further use spends extra usage. Also used by mefistos.',
+      '■ admin-janci@users.noreply.github.com is at its 5-hour limit (resets 15:10). Further use spends extra usage. Also used by mefistos.',
     );
   });
 
@@ -119,7 +119,7 @@ describe('lowHeadroomWarning', () => {
 
   it('no "Also used by" for an account on one host', () => {
     expect(lowHeadroomWarning(hostBy('claude-fleet-htz'), hostsAll, WORK, fiveLeft(WORK.uuid, 8), NOW, L, TZ)).toBe(
-      '▲ m.janci@32bit.sk has 8% of its 5-hour window left (resets 15:10).',
+      '▲ m-janci@users.noreply.github.com has 8% of its 5-hour window left (resets 15:10).',
     );
   });
 });
@@ -156,11 +156,11 @@ describe('footerUsage', () => {
     };
     const f = run(snaps);
     expect(f.state).toBe('attention');
-    expect(f.text).toBe('usage ▲ mj.janci@gmail.com 5h 8% left · resets 15:10');
+    expect(f.text).toBe('usage ▲ mj-janci@users.noreply.github.com 5h 8% left · resets 15:10');
     expect(f.tone).toBe('alarm');
     expect(f.host).toBe('claude-fleet-trn');
     expect(f.ariaLabel).toBe(
-      'Account usage: mj.janci@gmail.com has 8% of its 5-hour window left, resets in 38 min (15:10). Open Hosts on claude-fleet-trn.',
+      'Account usage: mj-janci@users.noreply.github.com has 8% of its 5-hour window left, resets in 38 min (15:10). Open Hosts on claude-fleet-trn.',
     );
   });
 
@@ -178,10 +178,10 @@ describe('footerUsage', () => {
     expect(calm.state).not.toBe('unavailable');
     expect(calm.tone).toBe('normal');
     expect(calm.text).not.toMatch(/[▲■△]/);
-    expect(calm.text).not.toContain('m.janci@32bit.sk');
+    expect(calm.text).not.toContain('m-janci@users.noreply.github.com');
     // A real low account elsewhere is what the footer names.
     const low = run({ ...fresh(), [WORK.uuid]: offline, [ADMIN.uuid]: fiveLeft(ADMIN.uuid, 8, { source_host: 'mefistos' }) });
-    expect(low.text).toBe('usage ▲ admin@32bit.sk 5h 8% left · resets 15:10');
+    expect(low.text).toBe('usage ▲ admin-janci@users.noreply.github.com 5h 8% left · resets 15:10');
     expect(low.host).toBe('mefistos');
   });
 
@@ -195,7 +195,7 @@ describe('footerUsage', () => {
 
   it('unavailable everywhere, but a still-showable low number is named rather than hidden', () => {
     const snaps = { ...outageUsage(), [ADMIN.uuid]: fiveLeft(ADMIN.uuid, 8, { status: 'unavailable', fetched_at: NOW - 14 * MIN }) };
-    expect(run(snaps).text).toBe('usage ▲ admin@32bit.sk 5h ~8% left · resets 15:10');
+    expect(run(snaps).text).toBe('usage ▲ admin-janci@users.noreply.github.com 5h ~8% left · resets 15:10');
   });
 
   it('collapses to a muted `usage off` after 24 hours unavailable', () => {

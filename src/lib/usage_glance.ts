@@ -138,7 +138,7 @@ export function selectedUsageLine(
 /**
  * The inline warning when the chosen host's account is at low or limit
  * severity, naming the account and the other hosts that share it:
- * `▲ admin@32bit.sk has 8% of its 5-hour window left (resets 15:10). Also
+ * `▲ admin-janci@users.noreply.github.com has 8% of its 5-hour window left (resets 15:10). Also
  * used by claude-fleet-oci.` `null` otherwise. It never changes the host.
  */
 export function lowHeadroomWarning(

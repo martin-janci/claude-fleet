@@ -1,5 +1,5 @@
 -- User-set short display name for an account (the Hosts view design:
--- `m.janci@32bit.sk` and `mj.janci@gmail.com` are easy to confuse in narrow
+-- `m-janci@users.noreply.github.com` and `mj-janci@users.noreply.github.com` are easy to confuse in narrow
 -- labels). This is user data: `upsert_account` (the probe path) must never
 -- overwrite it — only `Store::set_account_nickname` does.
 ALTER TABLE accounts ADD COLUMN nickname TEXT;

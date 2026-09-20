@@ -98,14 +98,14 @@ const key = async (el: Element, k: string) => {
 };
 
 describe('HostsView: list', () => {
-  it('groups by account in a stable order with local under mj.janci@gmail.com', async () => {
+  it('groups by account in a stable order with local under mj-janci@users.noreply.github.com', async () => {
     mount();
     await tick();
     const groups = screen.getAllByTestId('hosts-group');
     expect(groups.map((g) => within(g).getByTestId('group-label').textContent)).toEqual([
-      'admin@32bit.sk',
-      'm.janci@32bit.sk',
-      'mj.janci@gmail.com',
+      'admin-janci@users.noreply.github.com',
+      'm-janci@users.noreply.github.com',
+      'mj-janci@users.noreply.github.com',
     ]);
     expect(within(groups[2]).getAllByTestId('host-row').map((r) => r.dataset.alias)).toEqual([
       'claude-fleet-trn',
@@ -113,7 +113,7 @@ describe('HostsView: list', () => {
     ]);
     expect(rowAliases()).toEqual(['claude-fleet-oci', 'mefistos', 'claude-fleet-htz', 'claude-fleet-trn', 'local']);
     // The account no host is logged in to gets no group.
-    expect(list().textContent).not.toContain('spare@32bit.sk');
+    expect(list().textContent).not.toContain('spare-janci@users.noreply.github.com');
   });
 
   it('puts hosts without an account in a last "No Claude account" group, and headroom never reorders', async () => {
@@ -132,7 +132,7 @@ describe('HostsView: list', () => {
     mount();
     await tick();
     const labels = screen.getAllByTestId('hosts-group').map((g) => within(g).getByTestId('group-label').textContent);
-    expect(labels).toEqual(['admin@32bit.sk', 'm.janci@32bit.sk', 'mj.janci@gmail.com', 'No Claude account']);
+    expect(labels).toEqual(['admin-janci@users.noreply.github.com', 'm-janci@users.noreply.github.com', 'mj-janci@users.noreply.github.com', 'No Claude account']);
     expect(rowAliases().at(-1)).toBe('aaa-nas');
   });
 
@@ -394,7 +394,7 @@ describe('HostsView: nicknames', () => {
     await key(input, 'Enter');
     expect(calls('set_account_nickname').at(-1)?.[1]).toEqual({ args: { uuid: WORK.uuid, nickname: null } });
     await waitFor(() =>
-      expect(screen.getAllByTestId('group-label').map((l) => l.textContent)).toContain('m.janci@32bit.sk'),
+      expect(screen.getAllByTestId('group-label').map((l) => l.textContent)).toContain('m-janci@users.noreply.github.com'),
     );
   });
 
@@ -736,8 +736,8 @@ describe('HostsView: what the former Settings hosts table covered', () => {
     accounts.set(fleetAccounts().map((a) => (a.uuid === WORK.uuid ? { ...a, seat_tier: 'max' } : a)));
     mount({ preselect: 'claude-fleet-htz' });
     await tick();
-    expect(within(detail()).getByTestId('detail-account').textContent).toContain('m.janci@32bit.sk');
-    const header = screen.getAllByTestId('hosts-group-header').find((g) => g.textContent?.includes('m.janci@32bit.sk'))!;
+    expect(within(detail()).getByTestId('detail-account').textContent).toContain('m-janci@users.noreply.github.com');
+    const header = screen.getAllByTestId('hosts-group-header').find((g) => g.textContent?.includes('m-janci@users.noreply.github.com'))!;
     expect(within(header).getByTestId('group-tier').textContent).toBe('max');
   });
 

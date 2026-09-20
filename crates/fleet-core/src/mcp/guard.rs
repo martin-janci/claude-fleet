@@ -496,6 +496,18 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // One SSH round trip to a single host, like the `repo_*` reads — the
+    // quick cap, not `probe_host`'s lifecycle one, which is for the tools
+    // that compose several. Readonly for the same reason `refresh_projects`
+    // is: it re-reads external state and writes back the rows it found,
+    // without touching a session.
+    ToolPolicy {
+        name: "list_host_worktrees",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "delete_worktree",
         access: Access::Client,

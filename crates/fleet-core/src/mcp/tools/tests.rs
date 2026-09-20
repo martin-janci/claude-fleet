@@ -1210,6 +1210,8 @@ fn capture_default_cap_matches_docs() {
 /// with list_layers/resolve_preview/propose_layers/set_host_layers, 71 with
 /// session_conversation/pair_client/list_clients/revoke_client, 72 with
 /// agent_status, 73 with session_conversations; bump it when adding a tool.
+/// (`peek_session` came out again with the token-efficiency work, so the
+/// count is 73 with `list_host_worktrees`.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1229,7 +1231,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 72);
+    assert_eq!(served, 73);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1376,6 +1378,34 @@ fn enforce_admin_fails_closed_for_an_unclassified_tool_name() {
         );
     }
     assert!(enforce_admin(&Caller::master(), made_up).is_ok());
+}
+
+/// What an OLDER hub answers a paired client that calls a tool that hub has
+/// never heard of — the shape the desktop has to recognise (#168).
+///
+/// The gates run before rmcp dispatches, and both fail closed on the tool
+/// NAME, so the call never reaches the "no such tool" path: a `full` client
+/// is refused by `enforce_admin` and a `readonly` one by `enforce_mode`, both
+/// with `E_FORBIDDEN`. And because that error carries a code,
+/// `tool_error_result` sends it as an `isError` tool RESULT with
+/// `structuredContent`, not as a JSON-RPC protocol error — so the desktop
+/// rebuilds `E_FORBIDDEN` and never sees `E_HUB_PROTOCOL`.
+#[test]
+fn a_tool_name_an_old_hub_does_not_know_refuses_a_client_with_e_forbidden() {
+    let unknown = "a_tool_this_hub_has_never_heard_of";
+    for mode in [TokenMode::Full, TokenMode::Readonly] {
+        let caller = client_caller("laptop", mode);
+        let refused = enforce_mode(&caller, unknown)
+            .and_then(|()| enforce_admin(&caller, unknown))
+            .expect_err("an unclassified name is refused, not dispatched");
+        let result = tool_error_result(refused).expect("a coded error is a tool result");
+        assert_eq!(result.is_error, Some(true), "{mode:?}");
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "E_FORBIDDEN",
+            "{mode:?}: this is the code the desktop rebuilds from the wire"
+        );
+    }
 }
 
 #[test]
@@ -1992,6 +2022,95 @@ async fn list_worktrees_defaults_to_slim_capped_rows_with_a_total() {
     })
     .await;
     assert_eq!(capped["total"], 0, "the host filter applies before the cap");
+}
+
+// ---- list_host_worktrees (#168) ----
+
+/// The whole point of the tool: a desktop paired to a hub has no SSH route
+/// to a host, so the hub scans for it. `local` answers from the store, which
+/// is the one path a test can drive without a host to reach.
+#[tokio::test]
+async fn list_host_worktrees_answers_the_hosts_rows() {
+    let s = Store::open_in_memory().unwrap();
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    s.upsert_worktree(pid, "main", "/p", Some("main")).unwrap();
+    s.upsert_worktree(pid, "feat", "/p/.worktrees/feat", None)
+        .unwrap();
+    let t = test_tools(s);
+    let r = t
+        .list_host_worktrees(Parameters(ListHostWorktreesParams {
+            host_alias: "local".into(),
+            project_id: pid,
+        }))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(text_of(&r.content[0])).unwrap();
+    assert_eq!(v["host_alias"], "local");
+    assert_eq!(v["project_id"], pid);
+    assert_eq!(v["cloned"], true);
+    let names: Vec<&str> = v["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["main", "feat"], "main first, then by name");
+    // The row the desktop needs to submit a `worktree_id` and draw a path:
+    // no slimming, because the whole row is already five small columns.
+    assert!(v["worktrees"][1]["path"].is_string());
+    assert!(v["worktrees"][1]["id"].is_i64());
+    // Null-stripped (`branch` is None on `feat`), which the desktop's own
+    // `HostWorktrees` still parses.
+    let back: crate::service::worktrees::HostWorktrees =
+        serde_json::from_str(text_of(&r.content[0])).unwrap();
+    assert_eq!(back.worktrees.len(), 2);
+    assert!(back.worktrees[1].branch.is_none());
+}
+
+/// The caller names a project id, never a path, so the answer can only ever
+/// be a checkout fleet already knows about — and an id that is not one is a
+/// not-found, resolved before anything is run on the host.
+#[tokio::test]
+async fn list_host_worktrees_rejects_an_unknown_project_before_it_reaches_a_host() {
+    let t = test_tools(Store::open_in_memory().unwrap());
+    let e = t
+        .list_host_worktrees(Parameters(ListHostWorktreesParams {
+            host_alias: "vps".into(),
+            project_id: 4242,
+        }))
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
+}
+
+/// An alias is a host name, not an ssh option: the same validation every
+/// other entry point that names a target host applies.
+#[tokio::test]
+async fn list_host_worktrees_rejects_a_crafted_host_alias() {
+    let t = test_tools(Store::open_in_memory().unwrap());
+    let e = t
+        .list_host_worktrees(Parameters(ListHostWorktreesParams {
+            host_alias: "-oProxyCommand=touch /tmp/pwned".into(),
+            project_id: 1,
+        }))
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
+}
+
+/// The policy row, stated as the behaviour it buys: a paired client — full
+/// or readonly — may call it, and it is served to both.
+#[test]
+fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
+    for mode in [TokenMode::Full, TokenMode::Readonly] {
+        let c = client_caller("phone", mode);
+        assert!(enforce_mode(&c, "list_host_worktrees").is_ok(), "{mode:?}");
+        assert!(enforce_admin(&c, "list_host_worktrees").is_ok(), "{mode:?}");
+        assert!(present::visible_to(&c, "list_host_worktrees"), "{mode:?}");
+    }
+    assert!(guard::is_readonly_tool("list_host_worktrees"));
+    assert!(!guard::needs_confirmation("list_host_worktrees"));
+    assert_eq!(tool_deadline("list_host_worktrees"), QUICK_CAP);
 }
 
 /// The definition budget, guarded. Every byte here is paid for by every

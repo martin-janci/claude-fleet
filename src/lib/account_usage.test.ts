@@ -64,7 +64,7 @@ function snap(over: Partial<AccountUsageSnapshot> = {}): AccountUsageSnapshot {
 
 const account: AccountRow = {
   uuid: 'acct-1',
-  email: 'admin@32bit.sk',
+  email: 'admin-janci@users.noreply.github.com',
   display_name: null,
   organization_name: null,
   organization_uuid: null,
