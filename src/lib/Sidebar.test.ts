@@ -801,7 +801,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       if (cmd === 'list_accounts') return [
         {
           uuid: 'u1',
-          email: 'm.janci@32bit.sk',
+          email: 'm-janci@users.noreply.github.com',
           display_name: 'Martin Janci',
           organization_name: '32bit',
           organization_uuid: 'org-1',
@@ -817,7 +817,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const pills = document.querySelectorAll('.hosts .pill');
     const mef = Array.from(pills).find((p) => p.textContent?.includes('mefistos'));
     expect(mef).toBeDefined();
-    expect(mef!.getAttribute('title')).toContain('m.janci@32bit.sk');
+    expect(mef!.getAttribute('title')).toContain('m-janci@users.noreply.github.com');
     expect(mef!.getAttribute('title')).toContain('max');
   });
 

@@ -39,7 +39,7 @@ describe('AddHostPicker', () => {
         reachable: true,
         claude_version: '2.1.144',
         tmux_version: '3.6a',
-        account: { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max' },
+        account: { uuid: 'u1', email: 'm-janci@users.noreply.github.com', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max' },
       };
       return null;
     });
@@ -63,7 +63,7 @@ describe('AddHostPicker', () => {
         reachable: true,
         claude_version: '2.1.144',
         tmux_version: '3.6a',
-        account: { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max' },
+        account: { uuid: 'u1', email: 'm-janci@users.noreply.github.com', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max' },
       };
       return null;
     });
@@ -72,7 +72,7 @@ describe('AddHostPicker', () => {
     await fireEvent.click(await screen.findByTestId('picker-row'));
     for (let i = 0; i < 8; i++) await tick();
     const accountCell = screen.getByTestId('preview-account');
-    expect(accountCell.textContent).toContain('m.janci@32bit.sk');
+    expect(accountCell.textContent).toContain('m-janci@users.noreply.github.com');
     expect(accountCell.textContent).toContain('max');
   });
 

@@ -1149,7 +1149,7 @@ In the existing `describe('Sidebar (sessions-grouped view)')` block, append:
       if (cmd === 'list_accounts') return [
         {
           uuid: 'u1',
-          email: 'm.janci@32bit.sk',
+          email: 'm-janci@users.noreply.github.com',
           display_name: 'Martin Janci',
           organization_name: '32bit',
           organization_uuid: 'org-1',
@@ -1164,7 +1164,7 @@ In the existing `describe('Sidebar (sessions-grouped view)')` block, append:
     const pills = document.querySelectorAll('.hosts .pill');
     const mef = Array.from(pills).find((p) => p.textContent?.includes('mefistos'));
     expect(mef).toBeDefined();
-    expect(mef!.getAttribute('title')).toContain('m.janci@32bit.sk');
+    expect(mef!.getAttribute('title')).toContain('m-janci@users.noreply.github.com');
     expect(mef!.getAttribute('title')).toContain('max');
   });
 
@@ -1310,12 +1310,12 @@ Inside the existing `describe('SettingsDialog')` block, append:
       { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: 'u1' },
     ]);
     accountsStore.set([
-      { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'Martin', organization_name: '32bit', organization_uuid: 'org-1', seat_tier: 'max', last_seen_at: 1 },
+      { uuid: 'u1', email: 'm-janci@users.noreply.github.com', display_name: 'Martin', organization_name: '32bit', organization_uuid: 'org-1', seat_tier: 'max', last_seen_at: 1 },
     ]);
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();
     const cell = await screen.findByTestId('account-cell');
-    expect(cell.textContent).toContain('m.janci@32bit.sk');
+    expect(cell.textContent).toContain('m-janci@users.noreply.github.com');
     expect(cell.textContent).toContain('max');
   });
 
@@ -1567,7 +1567,7 @@ describe('AddHostPicker', () => {
         reachable: true,
         claude_version: '2.1.144',
         tmux_version: '3.6a',
-        account: { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max' },
+        account: { uuid: 'u1', email: 'm-janci@users.noreply.github.com', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max' },
       };
       return null;
     });
@@ -1591,7 +1591,7 @@ describe('AddHostPicker', () => {
         reachable: true,
         claude_version: '2.1.144',
         tmux_version: '3.6a',
-        account: { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max' },
+        account: { uuid: 'u1', email: 'm-janci@users.noreply.github.com', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max' },
       };
       return null;
     });
@@ -1600,7 +1600,7 @@ describe('AddHostPicker', () => {
     await fireEvent.click(await screen.findByTestId('picker-row'));
     for (let i = 0; i < 8; i++) await tick();
     const accountCell = screen.getByTestId('preview-account');
-    expect(accountCell.textContent).toContain('m.janci@32bit.sk');
+    expect(accountCell.textContent).toContain('m-janci@users.noreply.github.com');
     expect(accountCell.textContent).toContain('max');
   });
 
@@ -1774,12 +1774,12 @@ describe('SessionDetails', () => {
       { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: 'u1' },
     ]);
     accounts.set([
-      { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max', last_seen_at: 1 },
+      { uuid: 'u1', email: 'm-janci@users.noreply.github.com', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max', last_seen_at: 1 },
     ]);
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
     const cell = await screen.findByTestId('session-account');
-    expect(cell.textContent).toContain('m.janci@32bit.sk');
+    expect(cell.textContent).toContain('m-janci@users.noreply.github.com');
     expect(cell.textContent).toContain('max');
   });
 
@@ -1847,7 +1847,7 @@ open -a /Users/martinjanci/projects/github.com/martin-janci/claude-fleet/src-tau
 In the UI:
 1. Open Settings (`⚙`)
 2. Click `↻ Re-probe` next to the `local` row
-3. Verify the Account column now shows `m.janci@32bit.sk (max)` (or whatever the user's logged-in account is)
+3. Verify the Account column now shows `m-janci@users.noreply.github.com (max)` (or whatever the user's logged-in account is)
 
 If still `—`: check `~/.claude.json` has `oauthAccount` populated:
 

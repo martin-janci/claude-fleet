@@ -410,9 +410,9 @@ describe('App: the footer usage segment', () => {
   it('names the worst account, and clicking it opens Hosts on that account’s host', async () => {
     const seg = await withUsage({ ...fresh(), [ADMIN.uuid]: lowAdmin() });
     await waitFor(() => expect(seg.dataset.state).toBe('attention'));
-    expect(seg.textContent).toBe(`usage ▲ admin@32bit.sk 5h 8% left · resets ${clock(RESET_5H)}`);
+    expect(seg.textContent).toBe(`usage ▲ admin-janci@users.noreply.github.com 5h 8% left · resets ${clock(RESET_5H)}`);
     expect(seg.classList.contains('tone-alarm')).toBe(true);
-    expect(seg.getAttribute('aria-label')).toMatch(/^Account usage: admin@32bit\.sk has 8% of its 5-hour window left, resets in 38 min/);
+    expect(seg.getAttribute('aria-label')).toMatch(/^Account usage: admin-janci@users\.noreply\.github\.com has 8% of its 5-hour window left, resets in 38 min/);
     await fireEvent.click(seg);
     await waitFor(() => expect(hostsView()).not.toBeNull());
     expect(screen.getByTestId('host-detail').dataset.alias).toBe('mefistos');

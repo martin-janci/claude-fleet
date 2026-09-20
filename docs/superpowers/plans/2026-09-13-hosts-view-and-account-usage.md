@@ -26,7 +26,7 @@
 
 **Files:** `src-tauri/src/service/hosts.rs` (+ tests).
 
-`local` is logged in (`~/.claude.json` → `oauthAccount` for `mj.janci@gmail.com`) but `hosts.account_uuid` for `local` is empty. `probe_local` (~line 311) reads the file, and the `OauthAccount` field types already match the JSON (`seatTier: null` deserializes into `Option<String>` fine), so the defect is in how the local probe's account reaches `set_host_account` — or `probe_local` is never used for `local` on the path that runs (re-probe, add, the tick), or `HOME` differs in the GUI process.
+`local` is logged in (`~/.claude.json` → `oauthAccount` for `mj-janci@users.noreply.github.com`) but `hosts.account_uuid` for `local` is empty. `probe_local` (~line 311) reads the file, and the `OauthAccount` field types already match the JSON (`seatTier: null` deserializes into `Option<String>` fine), so the defect is in how the local probe's account reaches `set_host_account` — or `probe_local` is never used for `local` on the path that runs (re-probe, add, the tick), or `HOME` differs in the GUI process.
 
 - [ ] Reproduce with a test that drives the real local-probe path used for `host_alias == "local"` and asserts the account is set. Make `probe_local` take the home directory as a parameter so a test can point it at a temp `~/.claude.json` without touching the user's.
 - [ ] Find the root cause (trace every call site of `probe_local` and `set_host_account`), fix it at the source, and state the cause in the commit body.
@@ -109,7 +109,7 @@ Pure, fully unit-tested functions implementing the spec exactly:
 - [ ] Action safety exactly as specified: Hide with an Undo toast; Rotate token and Remove host behind a `ConfirmDialog` with Cancel focused and consequence copy verified against `store.delete_host` (say what happens to that host's session rows); no shortcut for either.
 - [ ] Keyboard table from the spec; no type-ahead; `?` legend.
 - [ ] The endpoint-unavailable banner, shown once at the top when every account is `unavailable`, with `[Copy details]` (copies status and snippet, never a token) and `[Retry <time>]`.
-- [ ] Tests: grouping and order with the real 4-account/5-host shape (including two hosts sharing an account and `local` on `mj.janci@gmail.com`); keyboard navigation; nickname edit; destructive confirms with Cancel focused and no shortcut; the banner.
+- [ ] Tests: grouping and order with the real 4-account/5-host shape (including two hosts sharing an account and `local` on `mj-janci@users.noreply.github.com`); keyboard navigation; nickname edit; destructive confirms with Cancel focused and no shortcut; the banner.
 - [ ] Commit: `feat(hosts): the Hosts view`.
 
 ## Task 8 — App integration and Settings
