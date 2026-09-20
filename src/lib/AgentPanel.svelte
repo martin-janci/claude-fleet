@@ -1,0 +1,159 @@
+<script lang="ts">
+  // The agent's sheet: a compact conversation over the operator session, a
+  // composer, and the removable context chip. Everything that renders turns
+  // is ConversationPanel's job; what lives here is the frame, the chip, and
+  // the three states where the agent cannot simply be talked to.
+  //
+  // Only two of the four blocked states get a button (`blockedCopy`'s own
+  // rule): `absent` -> openAgent() wakes it, `lost` -> restartOperator()
+  // brings the session back. `no_mcp` / `token_revoked` are explanatory
+  // only — their fixes live outside this panel (Settings, the sidebar), so
+  // there is nothing here to wire a click to.
+  import ConversationPanel from './ConversationPanel.svelte';
+  import {
+    agentPanelOpen,
+    operatorState,
+    operatorSession,
+    blockedCopy,
+    openAgent,
+    restartOperator,
+    type OperatorBlocked,
+  } from './operator';
+  import { agentContext, type AgentContextInput } from './agent_context';
+  import { sendPrompt } from './sessions';
+  import { stuckKindLabel } from './attention';
+
+  let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
+
+  let draft = $state('');
+  let chipDropped = $state(false);
+  let sending = $state(false);
+
+  const session = $derived($operatorSession);
+  const working = $derived(session?.claude_status === 'working');
+  const stuckLabel = $derived(stuckKindLabel(session?.stuck_kind ?? null));
+  const ctx = $derived(contextInput && !chipDropped ? agentContext(contextInput) : null);
+
+  const blocked = $derived(
+    $operatorState !== 'ready' && $operatorState !== 'waking' && $operatorState !== 'unknown'
+      ? blockedCopy($operatorState as OperatorBlocked)
+      : null,
+  );
+  // Which function a blocked-state button runs, keyed on the actual state
+  // rather than matching the copy string — `absent` wakes, `lost` restarts,
+  // everything else has no button at all (`blocked.action` is null there).
+  const blockedAction = $derived(
+    $operatorState === 'absent'
+      ? () => void openAgent()
+      : $operatorState === 'lost'
+        ? () => void restartOperator()
+        : null,
+  );
+
+  async function send() {
+    if (!session || working || sending || !draft.trim()) return;
+    sending = true;
+    const body = ctx ? `${ctx.prefix}\n\n${draft}` : draft;
+    await sendPrompt(session.host_alias, session.tmux_name, body);
+    draft = '';
+    sending = false;
+  }
+</script>
+
+{#if $agentPanelOpen}
+  <section class="agent-panel" aria-label="Agent">
+    {#if blocked}
+      <p class="blocked">{blocked.title}</p>
+      {#if blocked.action && blockedAction}
+        <button onclick={blockedAction}>{blocked.action}</button>
+      {/if}
+    {:else}
+      {#if session}
+        <ConversationPanel {session} visible={true} />
+      {/if}
+      {#if stuckLabel}
+        <p class="stuck">{stuckLabel}</p>
+      {/if}
+      {#if ctx}
+        <button
+          class="chip"
+          data-testid="agent-context-chip"
+          onclick={() => (chipDropped = true)}
+          title="Send without this context"
+        >
+          {ctx.chipLabel} ✕
+        </button>
+      {/if}
+      <div class="composer">
+        <textarea bind:value={draft} placeholder="Ask the agent…" rows="2"></textarea>
+        <button onclick={() => void send()} disabled={working || sending || !session}>Send</button>
+      </div>
+      {#if working}
+        <p class="busy">The agent is working — wait for it to finish.</p>
+      {/if}
+    {/if}
+  </section>
+{/if}
+
+<style>
+  .agent-panel {
+    position: fixed;
+    right: 20px;
+    bottom: 80px;
+    width: 360px;
+    max-height: 60vh;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-pane);
+    color: var(--fg);
+    box-shadow: 0 4px 20px rgb(0 0 0 / 35%);
+    z-index: 39;
+  }
+  .blocked {
+    margin: 0;
+    color: var(--fg-muted);
+  }
+  .stuck {
+    margin: 0;
+    color: var(--usage-crit);
+    font-size: 0.85rem;
+  }
+  .busy {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.8rem;
+  }
+  .chip {
+    align-self: flex-start;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+    padding: 0.15rem 0.6rem;
+    cursor: pointer;
+  }
+  .chip:hover {
+    color: var(--fg);
+    border-color: var(--accent);
+  }
+  .composer {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-end;
+  }
+  .composer textarea {
+    flex: 1;
+    resize: vertical;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font: inherit;
+    padding: 0.4rem;
+  }
+</style>
