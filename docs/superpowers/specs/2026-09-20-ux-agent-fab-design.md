@@ -34,10 +34,18 @@ happened.
 - **The context chip is visible and removable.** The composer shows what it is
   about to send (`blue-sirius · mefistos · feature/x`); one click drops it.
   No invisible prefixes.
-- **FAB plus a keyboard twin (⌘J), one panel.** The button is the discoverable
-  affordance and the thing that carries over to a phone; the shortcut is for
-  hands already on the keyboard.
-- **No new MCP tools.** The agent uses the 74 that exist.
+- **FAB plus a keyboard twin (⌘E / Ctrl+Shift+E), one panel.** The button is
+  the discoverable affordance and the thing that carries over to a phone; the
+  shortcut is for hands already on the keyboard. Not ⌘J: `app_views.ts`'s
+  `appChord` already gives that to the Session view.
+- **The agent's own tool surface does not grow.** It drives the fleet with the
+  74 tools in `TOOL_POLICIES` as they are. The router itself gains exactly
+  two, `ensure_operator` and `operator_status`, which exist so the desktop can
+  reach them in hub mode — a `Verdict::Routed` command routes to a hub *tool*,
+  so a UI-only Tauri command would have had to be `LocalOnly`, which this
+  design forbids. Both are `Access::Client` (the desktop pairs as an ordinary
+  client and never holds the master token), `confirm: false`, and
+  `Deadline::Lifecycle`, since `ensure_operator` spawns a session.
 
 ## Non-goals
 
@@ -81,7 +89,8 @@ broadcast rate limiter makes slow enough to look mysterious.
 | File | What it does |
 |---|---|
 | `crates/fleet-core/migrations/038_project_system_flag.sql` + a row in `schema.rs::MIGRATIONS` | `system BOOLEAN NOT NULL DEFAULT 0` on `projects`; `ProjectRow.system`. The stale-row sweep in `service/projects.rs` skips system rows, for the same reason it already skips `adopted`. |
-| `crates/fleet-core/src/service/operator.rs` | The only new service module, and the only place that knows the operator is special: `ensure_operator`, `operator_session`, `operator_token`, `refuse_if_operator`. |
+| `crates/fleet-core/src/service/operator.rs` | The only new service module, and the only place that knows the operator is special: `ensure_operator`, `operator_ref`, `operator_status`, `refuse_if_operator`. |
+| `crates/fleet-core/src/mcp/tools/` + `guard.rs` | Two router tools, `ensure_operator` and `operator_status`, with their `TOOL_POLICIES` rows. |
 | session-addressed ops | Call `refuse_if_operator`. A few lines, not a new layer. |
 | `src-tauri/src/commands/operator.rs` | `ensure_operator` and `operator_status`, both `Routed`. Each needs a `backend/verdicts.rs` row, a `route` by command name, a non-default row in `tests_routing.rs`, a `generate_handler!` entry, then `REGEN_HUB_VERDICTS=1` and `REGEN_DOCS=1`. |
 
@@ -137,15 +146,25 @@ always know an instruction came from an agent rather than from you.
 ## Error handling
 
 **The confirmation window is currently wrong, and this slice fixes it.**
-`CONFIRM_TTL` is 600 s (`guard.rs`) while `kill_session` is
-`Deadline::Lifecycle`, capped at 300 s (`tools/support.rs`). A nonce outlives
-the call waiting on it: approve after six minutes and the agent has been
-holding an error for five. Cut `CONFIRM_TTL` to 240 s rather than lengthening
-deadlines, and assert the invariant — *a nonce never outlives the call waiting
-on it* — with a test that walks `TOOL_POLICIES`, takes the shortest deadline
-cap among `confirm: true` rows, and compares. The cost is four minutes to
-approve instead of ten. What it buys is that "I confirmed and it failed
-anyway" stops existing.
+`CONFIRM_TTL` is 600 s (`guard.rs`), but `tool_deadline` bounds a call by its
+`Deadline` class alone — 300 s for `kill_session`. The nonce outlives the call
+waiting on it: approve after six minutes and the agent has been holding a
+deadline error for five.
+
+The fix is not a shorter TTL. Eight tools carry `confirm: true`, and two of
+them — `set_clipboard` and `cancel_task` — are `Deadline::Quick` at 60 s, so a
+TTL that fits under every confirmed tool's cap would have to be under a
+minute, which is not a confirmation window. Instead, **a confirm-gated tool's
+deadline includes the confirmation window**: `tool_deadline` returns
+`cap_for(class) + CONFIRM_TTL` when the policy row says `confirm`. The cap
+then bounds the work, as it was always meant to, and the waiting is accounted
+for separately. Nothing is reclassified, the human keeps ten minutes, and the
+invariant — *a nonce never outlives the call waiting on it* — is asserted by a
+test walking `TOOL_POLICIES`.
+
+The one cost: with the global toggle off, a genuinely hung `kill_session`
+now fails after 900 s instead of 300 s. It still fails, and no call that a
+human did approve fails for having been approved.
 
 **The agent is dead, or was never born.** `ensure_operator` finds a row with
 `lost_at`, or none. The panel says so and offers `restart_session`. It is
@@ -197,8 +216,9 @@ guard rails, not the agent.**
   `E_FORBIDDEN`; aimed elsewhere they pass.
 - `broadcast_prompt` never has the operator among its targets.
 - The confirmation invariant above, walking `TOOL_POLICIES` in the manner of
-  `every_router_tool_has_exactly_one_policy_row` — so that whoever later adds
-  a confirmed tool to the `Quick` class is told why it cannot be.
+  `every_router_tool_has_exactly_one_policy_row`: every `confirm: true` tool's
+  `tool_deadline` exceeds `CONFIRM_TTL`. It fails the moment someone drops the
+  confirmation window back out of the deadline.
 - Migration 038: `system` arrives defaulted to 0, existing rows untouched, and
   the sweep in `service/projects.rs` leaves system rows alone.
 - `backend/tests_routing.rs`: both new commands are `Routed`, each with a
