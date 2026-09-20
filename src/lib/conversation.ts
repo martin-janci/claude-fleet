@@ -3,6 +3,7 @@ import { invokeCmd, type Result } from './result';
 import type { ClaudeStatus, StuckKind, SessionRow } from './sessions';
 import { stuckKindLabel, contextLevel, type ContextLevel } from './attention';
 import type { SessionEvent } from './timeline';
+import { promptFirstLine, type TaskRow } from './tasks';
 
 export type ConvItem =
   | { kind: 'text'; text: string }
@@ -314,6 +315,198 @@ export function notificationLabel(n: { summary: string | null; event: string | n
   const head = n.summary?.trim() || 'Background task reported';
   const tail = n.event?.trim().split('\n')[0].trim();
   return tail ? `${head}: ${tail}` : head;
+}
+
+// ─── Background work: the session's own list (task 4) ───────────────────────
+
+/** How a background entry currently stands. `running` covers "launched and
+ *  has not reported back" as well as a queued fleet task. */
+export type BackgroundStatus = 'running' | 'done' | 'failed' | 'stopped';
+
+/** One report a background task filed. A resumed agent files several. */
+export interface BackgroundReport {
+  at: string | null;
+  status: string | null;
+  summary: string | null;
+  result: string | null;
+}
+
+/** One background thing that belongs to a session: something this
+ *  conversation launched, or a fleet row/task spawned from it. */
+export interface BackgroundEntry {
+  /** Stable across renders: `task:<task-id>` or `tool:<tool_use id>` for a
+   *  transcript entry, `session:<id>` / `fleettask:<id>` for a fleet one. */
+  key: string;
+  source: 'transcript' | 'fleet_task' | 'fleet_session';
+  /** `Agent` | `Bash` | `Monitor` | … for a transcript entry; the session
+   *  row's `kind`, or `task`, for a fleet one. */
+  kind: string;
+  label: string;
+  status: BackgroundStatus;
+  /** When it was launched; ISO for a transcript entry, null for fleet rows
+   *  whose own list already shows their age. */
+  at: string | null;
+  result: string | null;
+  error: string | null;
+  outputFile: string | null;
+  /** The fleet session to switch to, when there is one. */
+  sessionId: number | null;
+  taskId: number | null;
+  history: BackgroundReport[];
+}
+
+/** Tools whose calls can be backgrounded and then report in. A foreground
+ *  call of the same tool never gets a notification, which is exactly how the
+ *  two are told apart — the launch input carries no flag to read. */
+const BACKGROUND_TOOLS = new Set(['Bash', 'Monitor', 'Workflow', 'SendMessage']);
+
+function statusFromReports(reports: BackgroundReport[]): BackgroundStatus {
+  const last = [...reports].reverse().find((r) => r.status !== null);
+  if (!last) return 'running';
+  if (last.status === 'completed') return 'done';
+  if (last.status === 'stopped') return 'stopped';
+  return 'failed';
+}
+
+/** Running first, then newest launch first. */
+function byRunningThenNewest(a: BackgroundEntry, b: BackgroundEntry): number {
+  const run = (e: BackgroundEntry) => (e.status === 'running' ? 0 : 1);
+  if (run(a) !== run(b)) return run(a) - run(b);
+  return (b.at ?? '').localeCompare(a.at ?? '');
+}
+
+/** The last report to carry a non-null value for `k`, or null. */
+function lastNonNull<K extends keyof BackgroundReport>(rs: BackgroundReport[], k: K): BackgroundReport[K] | null {
+  for (let i = rs.length - 1; i >= 0; i--) {
+    const v = rs[i][k];
+    if (v !== null) return v;
+  }
+  return null;
+}
+
+/** The background work this conversation launched, from its own turns.
+ *
+ *  A subagent block is listed when a notification named it, or while it is
+ *  still open — a finished call with no notification was a foreground one.
+ *  A tool line is listed only when a notification named it.
+ *
+ *  Notifications that arrive back to back are coalesced into one turn, so
+ *  the turn's own `at` is only the first one's — each report's finish time
+ *  (and the task's output file) is read from the notification item's own
+ *  `at`/`output_file`, captured once while walking the turns, not re-derived
+ *  per entry afterwards. */
+export function transcriptBackground(turns: ConvTurn[]): BackgroundEntry[] {
+  const reports = new Map<string, BackgroundReport[]>();
+  const taskIds = new Map<string, string>();
+  const outputFiles = new Map<string, string>();
+  for (const t of turns) {
+    for (const item of t.items) {
+      if (item.kind !== 'notification' || item.tool_use_id === null) continue;
+      const list = reports.get(item.tool_use_id) ?? [];
+      list.push({ at: item.at ?? t.at, status: item.status, summary: item.summary, result: item.result });
+      reports.set(item.tool_use_id, list);
+      if (item.task_id !== null) taskIds.set(item.tool_use_id, item.task_id);
+      if (item.output_file !== null) outputFiles.set(item.tool_use_id, item.output_file);
+    }
+  }
+
+  const out: BackgroundEntry[] = [];
+  for (const t of turns) {
+    for (const item of t.items) {
+      if (item.kind === 'subagent') {
+        const rs = (item.id !== null && reports.get(item.id)) || [];
+        if (rs.length === 0 && item.done) continue;
+        out.push({
+          key: item.id !== null && taskIds.has(item.id) ? `task:${taskIds.get(item.id)}` : `tool:${item.id ?? ''}`,
+          source: 'transcript',
+          kind: item.name || 'Agent',
+          label: item.description ?? item.agent_type ?? 'subagent',
+          status: statusFromReports(rs),
+          at: item.at,
+          result: lastNonNull(rs, 'result') ?? item.result,
+          error: null,
+          outputFile: (item.id !== null && outputFiles.get(item.id)) || null,
+          sessionId: null,
+          taskId: null,
+          history: rs,
+        });
+      } else if (item.kind === 'tool' && item.id !== null && BACKGROUND_TOOLS.has(item.name)) {
+        const rs = reports.get(item.id) ?? [];
+        if (rs.length === 0) continue;
+        out.push({
+          key: taskIds.has(item.id) ? `task:${taskIds.get(item.id)}` : `tool:${item.id}`,
+          source: 'transcript',
+          kind: item.name,
+          label: item.target ?? item.summary,
+          status: statusFromReports(rs),
+          at: item.at,
+          result: lastNonNull(rs, 'result'),
+          error: null,
+          outputFile: outputFiles.get(item.id) ?? null,
+          sessionId: null,
+          taskId: null,
+          history: rs,
+        });
+      }
+    }
+  }
+  return out.sort(byRunningThenNewest);
+}
+
+/** The fleet rows and tasks this session spawned. A worker session appears
+ *  both as a session and as its task: they are different things — one is a
+ *  place to go, the other a unit of work with a result. */
+export function fleetBackground(sessions: SessionRow[], tasks: TaskRow[], sessionId: number): BackgroundEntry[] {
+  const out: BackgroundEntry[] = [];
+  for (const s of sessions) {
+    if (s.parent_session_id !== sessionId) continue;
+    out.push({
+      key: `session:${s.id}`,
+      source: 'fleet_session',
+      kind: s.kind,
+      label: s.friendly_name || s.tmux_name,
+      status:
+        s.claude_status === 'working'
+          ? 'running'
+          : s.claude_status === 'failed'
+            ? 'failed'
+            : s.claude_status === 'stopped'
+              ? 'stopped'
+              : 'done',
+      at: null,
+      result: null,
+      error: null,
+      outputFile: null,
+      sessionId: s.id,
+      taskId: null,
+      history: [],
+    });
+  }
+  for (const t of tasks) {
+    if (t.requester_session_id !== sessionId) continue;
+    out.push({
+      key: `fleettask:${t.id}`,
+      source: 'fleet_task',
+      kind: 'task',
+      label: promptFirstLine(t.prompt) || `task #${t.id}`,
+      status:
+        t.state === 'queued' || t.state === 'running'
+          ? 'running'
+          : t.state === 'done'
+            ? 'done'
+            : t.state === 'cancelled'
+              ? 'stopped'
+              : 'failed',
+      at: null,
+      result: t.result,
+      error: t.error,
+      outputFile: null,
+      sessionId: t.worker_session_id,
+      taskId: t.id,
+      history: [],
+    });
+  }
+  return out;
 }
 
 // ─── Tool lines / subagents / doing now (phase 3) ───────────────────────────
