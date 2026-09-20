@@ -18,7 +18,7 @@ pub use crate::claude_cli::PurgeReport;
 // `-` would be read as a flag). `claude_cli` re-checks the same rules when it
 // builds the script, so DevTools / MCP callers cannot bypass them.
 
-#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "NewBgSessionParams")]
 pub struct NewBgSessionArgs {
     /// Host alias to launch the background session on.

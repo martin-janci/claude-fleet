@@ -133,6 +133,9 @@ pub(crate) mod routed {
         }
     }
 
+    /// Re-probing a host is a read of the fleet's state, not fleet
+    /// administration, so a paired client may do it (`add_host` /
+    /// `remove_host` / `hide_host` are the master-only ones).
     pub async fn probe_host(
         backend: &FleetBackend,
         args: HostAliasArgs,
@@ -141,7 +144,7 @@ pub(crate) mod routed {
         reg: &Arc<CancellationRegistry>,
     ) -> Result<HostRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.probe_host(&args.alias).await,
+            Some(hub) => hub.route("probe_host", &args).await,
             None => hosts::probe_host(args, store, &**ssh, reg).await,
         }
     }

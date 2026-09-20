@@ -57,7 +57,7 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
     ) -> Result<Vec<WorktreeOccupancy>, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.list_worktrees(args.project_id).await,
+            Some(hub) => hub.route("list_worktrees", &args).await,
             None => worktrees::list_worktrees(args, store),
         }
     }
@@ -69,7 +69,9 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<(), IpcError> {
         match backend.hub() {
-            Some(hub) => hub.delete_worktree(&args).await,
+            // The tool answers prose, so the text is read — which is what
+            // surfaces a tool error — and discarded.
+            Some(hub) => hub.route_text("delete_worktree", &args).await.map(|_| ()),
             None => worktrees::delete_worktree(args, store, ssh).await,
         }
     }

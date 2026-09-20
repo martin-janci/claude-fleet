@@ -27,7 +27,7 @@ pub struct WorktreeOccupant {
     pub tmux_name: String,
 }
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "ListWorktreesParams")]
 pub struct ListWorktreesArgs {
     /// Restrict to one project; omit for every worktree across the fleet.
@@ -323,7 +323,7 @@ fn sort_main_first(mut rows: Vec<WorktreeRow>) -> Vec<WorktreeRow> {
     rows
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct DeleteWorktreeArgs {
     pub worktree_id: i64,
     /// Bypass the alive-session occupant guard. The git-level dirty/conflict

@@ -161,9 +161,11 @@ const REPAIR_PAYLOAD: &str = r#"{"session_id":7,"host_alias":"trn","tmux_name":"
 ///
 /// The command name is the first column so that `check` can hold the table's
 /// tool — which is what the request really carried — against the tool
-/// [`VERDICTS`] claims. Without it the table's `tool` field is a literal
-/// nothing compares to a second literal, and a typo in a row would reach the
-/// generated frontend list and the generated docs before it reached a test.
+/// [`VERDICTS`] claims. The row is now what *drives* the tool
+/// (`HubBackend::route` looks it up), so what this catches is a command
+/// routing under somebody else's name: a copy-pasted `route("repo_file", …)`
+/// inside `repo_diff` would send the wrong tool and nothing else would say
+/// so, because both names are in the table.
 type Case = (
     &'static str,
     &'static str,
@@ -181,9 +183,10 @@ fn check(cases: Vec<Case>) {
         assert_eq!(got_tool, tool, "wrong tool for {tool}");
         assert_eq!(got_args, want_args, "wrong arguments for {tool}");
         // The table's row is a claim about the same call this case just
-        // recorded. `set_session_friendly_name` -> `set_friendly_name` is the
-        // one place the two vocabularies differ, and it is checked here like
-        // any other row rather than excused.
+        // recorded. `set_session_friendly_name` -> `set_friendly_name` is one
+        // of the two places the two vocabularies differ (`health_check` ->
+        // `fleet_health` is the other), and it is checked here like any other
+        // row rather than excused.
         assert_eq!(
             verdicts::verdict(command).and_then(Verdict::tool),
             Some(got_tool.as_str()),
@@ -1918,8 +1921,64 @@ fn every_refusal_names_a_command_the_table_can_refuse() {
     );
 }
 
-/// Every source file the two scanners above need to read.
+/// The routing counterpart of
+/// [`every_refusal_names_a_command_the_table_can_refuse`], and for the same
+/// reason: a command routes by NAME — `HubBackend::route` looks the tool up
+/// in [`VERDICTS`] — so a name the table cannot route is a call with no tool
+/// to make. That miss fails closed (`HubBackend::tool_for`); this is what
+/// makes it unshippable.
+///
+/// The two sets are asserted equal, not merely one-way. A routed row that
+/// nothing routes by name would be a command still naming its tool in a
+/// second literal, which is the drift the table exists to end.
+///
+/// The name is read across whatever whitespace rustfmt put between the paren
+/// and the literal. A call whose name is not a literal at all is skipped and
+/// would be invisible here — there is none today, and a command name is not
+/// the sort of thing that should ever be computed.
+#[test]
+fn every_route_names_a_command_the_table_can_route() {
+    let mut routed_by_name = BTreeSet::new();
+    for (file, src) in SOURCES {
+        for call in ["route(", "route_text("] {
+            for (i, _) in src.match_indices(call) {
+                let Some(rest) = src[i + call.len()..].trim_start().strip_prefix('"') else {
+                    continue;
+                };
+                let name = &rest[..rest.find('"').expect("an unterminated command name")];
+                routed_by_name.insert(name);
+                let verdict = verdicts::verdict(name).unwrap_or_else(|| {
+                    panic!("{file} routes {name}, which has no row in VERDICTS at all")
+                });
+                assert!(
+                    verdict.tool().is_some(),
+                    "{file} routes {name}, whose row names no tool ({verdict:?}) — the \
+                     call would fail closed instead of reaching the hub"
+                );
+            }
+        }
+    }
+
+    let can_route: BTreeSet<&str> = VERDICTS
+        .iter()
+        .filter(|(_, v)| v.tool().is_some())
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(
+        routed_by_name,
+        can_route,
+        "the routing calls written in the sources and the rows that name a tool \
+         have drifted apart:\n  only in the sources: {:?}\n  only in the table: {:?}",
+        routed_by_name.difference(&can_route).collect::<Vec<_>>(),
+        can_route.difference(&routed_by_name).collect::<Vec<_>>(),
+    );
+}
+
+/// Every source file the scanners above need to read.
 const SOURCES: &[(&str, &str)] = &[
+    // The routing calls themselves: the four reads the event bridge shares
+    // with their commands live here rather than in a `routed::` function.
+    ("backend/remote.rs", include_str!("remote.rs")),
     (
         "commands/account_usage.rs",
         include_str!("../commands/account_usage.rs"),

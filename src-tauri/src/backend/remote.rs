@@ -26,7 +26,7 @@
 use super::{RemoteConfig, UnavailableHub};
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::transcript::Conversation;
-use fleet_core::service::{bg_sessions, move_session, repair, safe_kill, sessions, worktrees};
+use fleet_core::service::{repair, sessions};
 use fleet_core::store::{AccountRow, ConversationRow, HostRow, SessionEvent, SessionRow, TaskRow};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -473,57 +473,56 @@ fn summarise_body(body: &str) -> Option<String> {
     })
 }
 
-// --- the typed calls ---------------------------------------------------------
+// --- the calls that are more than their command's arguments ------------------
 //
-// One method per read command that has a remote counterpart. Each names the
-// tool and the arguments explicitly rather than forwarding the command's own
-// argument struct: the two vocabularies are close but not identical (the
-// desktop's `force` is the tool's `force`, but the desktop always wants
-// `summary: false`), and a silent mismatch here would be invisible.
+// [`HubBackend::route`] covers the ordinary case: the command's own argument
+// struct, serialised whole. What stays here is everything that is not that —
+// a value the desktop insists on rather than letting the tool default, a key
+// sent only when it is set, a clamp applied on this side, an answer that
+// needs shaping before the UI sees it — and the four reads the event bridge's
+// resync (`super::events`) shares with their commands, which therefore need a
+// name of their own.
+//
+// The two vocabularies are close but not identical (the desktop's `force` is
+// the tool's `force`, but the desktop always wants `summary: false`), and a
+// silent mismatch would be invisible. So these spell the ARGUMENTS out; the
+// tool is still the one the command's `VERDICTS` row names.
 
 impl HubBackend {
     /// `commands::sessions::list_sessions`. `summary: false` because the
     /// desktop renders full rows; the tool's slim default exists for token
     /// caps an IPC caller does not have.
     pub async fn list_sessions(&self, force: bool) -> Result<Vec<SessionRow>, IpcError> {
-        self.call(
+        self.route(
             "list_sessions",
-            json!({ "summary": false, "force": force, "include_lost": true }),
+            &json!({ "summary": false, "force": force, "include_lost": true }),
         )
         .await
     }
 
-    /// `commands::sessions::related_sessions`.
-    pub async fn related_sessions(&self, session_id: i64) -> Result<Vec<SessionRow>, IpcError> {
-        self.call("related_sessions", json!({ "session_id": session_id }))
-            .await
-    }
-
     /// `commands::hosts::list_hosts`.
     pub async fn list_hosts(&self) -> Result<Vec<HostRow>, IpcError> {
-        self.call("list_hosts", json!({})).await
+        self.route("list_hosts", &json!({})).await
     }
 
     /// `commands::hosts::list_accounts`.
     pub async fn list_accounts(&self) -> Result<Vec<AccountRow>, IpcError> {
-        self.call("list_accounts", json!({})).await
+        self.route("list_accounts", &json!({})).await
     }
 
     /// `commands::projects::list_projects`.
     pub async fn list_projects(
         &self,
     ) -> Result<Vec<fleet_core::service::projects::ProjectTreeRow>, IpcError> {
-        self.call("list_projects", json!({ "summary": false }))
+        self.route("list_projects", &json!({ "summary": false }))
             .await
     }
 
-    /// `commands::worktrees::list_worktrees`.
-    pub async fn list_worktrees(
+    /// `commands::projects::refresh_projects`.
+    pub async fn refresh_projects(
         &self,
-        project_id: Option<i64>,
-    ) -> Result<Vec<fleet_core::service::worktrees::WorktreeOccupancy>, IpcError> {
-        self.call("list_worktrees", json!({ "project_id": project_id }))
-            .await
+    ) -> Result<Vec<fleet_core::service::projects::ProjectTreeRow>, IpcError> {
+        self.route("refresh_projects", &json!({})).await
     }
 
     /// `commands::tasks::list_tasks`.
@@ -534,9 +533,9 @@ impl HubBackend {
         limit: Option<i64>,
     ) -> Result<Vec<TaskRow>, IpcError> {
         let mut rows: Vec<TaskRow> = self
-            .call(
+            .route(
                 "list_tasks",
-                json!({
+                &json!({
                     "requester_session_id": requester_session_id,
                     "state": state,
                     "limit": limit,
@@ -557,15 +556,16 @@ impl HubBackend {
         Ok(rows)
     }
 
-    /// `commands::sessions::session_history`.
+    /// `commands::sessions::session_history`. `limit` is the clamp the
+    /// command applied, not the number the frontend asked for.
     pub async fn session_history(
         &self,
         session_id: i64,
         limit: Option<i64>,
     ) -> Result<Vec<SessionEvent>, IpcError> {
-        self.call(
+        self.route(
             "session_history",
-            json!({ "session_id": session_id, "limit": limit }),
+            &json!({ "session_id": session_id, "limit": limit }),
         )
         .await
     }
@@ -590,76 +590,64 @@ impl HubBackend {
         if let Some(id) = claude_session_id {
             args["claude_session_id"] = json!(id);
         }
-        self.call("session_conversation", args).await
+        self.route("session_conversation", &args).await
     }
 
-    /// `commands::sessions::session_conversations`.
+    /// `commands::sessions::session_conversations`. `limit` is the clamp the
+    /// command applied.
     pub async fn session_conversations(
         &self,
         session_id: i64,
         limit: i64,
     ) -> Result<Vec<ConversationRow>, IpcError> {
-        self.call(
+        self.route(
             "session_conversations",
-            json!({ "session_id": session_id, "limit": limit }),
+            &json!({ "session_id": session_id, "limit": limit }),
         )
         .await
     }
 
-    /// `commands::health::health_check`.
+    /// `commands::health::health_check` — the second place the two
+    /// vocabularies differ, and the row is what resolves it: the command is
+    /// `health_check`, the tool is `fleet_health`.
     pub async fn fleet_health(&self) -> Result<fleet_core::service::health::Health, IpcError> {
-        self.call("fleet_health", json!({})).await
+        self.route("health_check", &json!({})).await
+    }
+
+    /// `commands::tasks::cancel_task`, whose one argument arrives as a bare
+    /// `i64` rather than a struct.
+    pub async fn cancel_task(&self, task_id: i64) -> Result<TaskRow, IpcError> {
+        self.route("cancel_task", &json!({ "task_id": task_id }))
+            .await
     }
 }
 
-// --- the mutations -----------------------------------------------------------
+// --- the mutations that are more than their arguments ------------------------
 //
-// Only the ones whose desktop arguments map **one to one** onto the tool's
-// parameters. Where they do not, the command refuses with `E_LOCAL_ONLY`
-// rather than calling a tool that would drop a field or mean something else:
-// `repair_session` with `explicit: false` is the case that matters (the tool
-// always runs the EXPLICIT repair; the desktop's automatic pre-attach check
-// has no counterpart, so only `explicit: true` gets a method here). A silent
-// argument mismatch on a *mutation* is the worst failure this module can
-// have, so the rule is parity or refusal.
+// A mutation routes only where the desktop's arguments map **one to one**
+// onto the tool's parameters; where they do not, the command refuses with
+// `E_LOCAL_ONLY` rather than calling a tool that would drop a field or mean
+// something else. A silent argument mismatch on a *mutation* is the worst
+// failure this module can have, so the rule is parity or refusal.
 //
-// Every one of these tools answers with `ok_json` of the same type the local
-// service call returns, so the mapping stays a deserialisation.
+// The two below are the ones whose argument struct carries a field the tool
+// must NOT see, so they cannot go over whole: the rest route through
+// [`HubBackend::route`] from their `routed::` function. Every one of these
+// tools answers with `ok_json` of the same type the local service call
+// returns, so the mapping stays a deserialisation.
 
 impl HubBackend {
-    /// `commands::sessions::send_prompt`.
-    ///
-    /// **The prompt arrives marked.** `apply_marker` wraps every prompt from a
-    /// non-master caller in the untrusted-input marker, and a paired client is
-    /// never the master (`mcp::tools::support::apply_marker`, whose own doc
-    /// comment says "text typed on a phone always reaches an agent marked").
-    /// That is the hub's client model working as designed, not a defect here —
-    /// but it is a visible difference from standalone and belongs in the docs.
-    pub async fn send_prompt(&self, args: &sessions::SendPromptArgs) -> Result<(), IpcError> {
-        let _: Value = self
-            .call(
-                "send_prompt",
-                json!({
-                    "host_alias": args.host_alias,
-                    "tmux_name": args.tmux_name,
-                    "prompt": args.prompt,
-                    "submit": args.submit,
-                }),
-            )
-            .await?;
-        Ok(())
-    }
-
     /// `commands::sessions::new_session`. `call_id` is this process's own
     /// cancellation-registry key (`cancel_command`) and has no hub
-    /// counterpart, so it is never sent.
+    /// counterpart, so it is never sent — which is why this spells the
+    /// arguments out rather than serialising `NewSessionArgs`.
     pub async fn new_session(
         &self,
         args: &sessions::NewSessionArgs,
     ) -> Result<SessionRow, IpcError> {
-        self.call(
+        self.route(
             "new_session",
-            json!({
+            &json!({
                 "host_alias": args.host_alias,
                 "project_id": args.project_id,
                 "worktree_id": args.worktree_id,
@@ -674,191 +662,13 @@ impl HubBackend {
         .await
     }
 
-    /// `commands::sessions::kill_session`. Answers the killed session's id.
-    pub async fn kill_session(&self, args: &sessions::KillSessionArgs) -> Result<i64, IpcError> {
-        self.call(
-            "kill_session",
-            json!({
-                "host_alias": args.host_alias,
-                "name": args.name,
-                "force": args.force,
-            }),
-        )
-        .await
-    }
-
-    /// `commands::sessions::safe_kill_session`.
-    pub async fn safe_kill_session(
-        &self,
-        args: &safe_kill::SafeKillSessionArgs,
-    ) -> Result<SessionRow, IpcError> {
-        self.call(
-            "safe_kill_session",
-            json!({ "host_alias": args.host_alias, "tmux_name": args.tmux_name }),
-        )
-        .await
-    }
-
-    /// `commands::sessions::rename_session`.
-    pub async fn rename_session(
-        &self,
-        args: &sessions::RenameSessionArgs,
-    ) -> Result<SessionRow, IpcError> {
-        self.call(
-            "rename_session",
-            json!({
-                "host_alias": args.host_alias,
-                "old_name": args.old_name,
-                "new_name": args.new_name,
-            }),
-        )
-        .await
-    }
-
-    /// `commands::sessions::set_session_friendly_name` — the tool is called
-    /// `set_friendly_name`, one of the two places the vocabularies differ.
-    pub async fn set_session_friendly_name(
-        &self,
-        args: &sessions::SetFriendlyNameArgs,
-    ) -> Result<SessionRow, IpcError> {
-        self.call(
-            "set_friendly_name",
-            json!({
-                "host_alias": args.host_alias,
-                "tmux_name": args.tmux_name,
-                "friendly_name": args.friendly_name,
-            }),
-        )
-        .await
-    }
-
-    /// `commands::sessions::restart_session`.
-    pub async fn restart_session(
-        &self,
-        args: &sessions::RestartSessionArgs,
-    ) -> Result<SessionRow, IpcError> {
-        self.call(
-            "restart_session",
-            json!({
-                "host_alias": args.host_alias,
-                "name": args.name,
-                "force": args.force,
-            }),
-        )
-        .await
-    }
-
-    /// `commands::sessions::spawn_review`.
-    pub async fn spawn_review(
-        &self,
-        args: &sessions::SpawnReviewArgs,
-    ) -> Result<SessionRow, IpcError> {
-        self.call(
-            "spawn_review",
-            json!({
-                "source_session_id": args.source_session_id,
-                "prompt": args.prompt,
-            }),
-        )
-        .await
-    }
-
-    /// `commands::sessions::recreate_session`.
-    pub async fn recreate_session(
-        &self,
-        args: &sessions::RecreateSessionArgs,
-    ) -> Result<SessionRow, IpcError> {
-        self.call(
-            "recreate_session",
-            json!({ "session_id": args.session_id, "force": args.force }),
-        )
-        .await
-    }
-
-    /// `commands::sessions::dismiss_ghost_session`. The tool answers
-    /// `{"dismissed": id}` where the command answers `()`; the body is read
-    /// and discarded so a tool error still surfaces.
-    pub async fn dismiss_ghost_session(&self, session_id: i64) -> Result<(), IpcError> {
-        let _: Value = self
-            .call("dismiss_ghost_session", json!({ "session_id": session_id }))
-            .await?;
-        Ok(())
-    }
-
     /// `commands::sessions::repair_session` with `explicit: true` only — the
     /// tool's own repair is always explicit, so `explicit` itself is not a
     /// parameter (`routed::repair_session` guards `explicit: false` before
     /// this is ever called).
     pub async fn repair_session(&self, session_id: i64) -> Result<repair::RepairReport, IpcError> {
-        self.call("repair_session", json!({ "session_id": session_id }))
+        self.route("repair_session", &json!({ "session_id": session_id }))
             .await
-    }
-
-    /// `commands::sessions::new_bg_session`.
-    pub async fn new_bg_session(
-        &self,
-        args: &bg_sessions::NewBgSessionArgs,
-    ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
-        self.call(
-            "new_bg_session",
-            json!({
-                "host_alias": args.host_alias,
-                "name": args.name,
-                "prompt": args.prompt,
-            }),
-        )
-        .await
-    }
-
-    /// `commands::move_session::move_session`.
-    pub async fn move_session(
-        &self,
-        args: &move_session::MoveSessionArgs,
-    ) -> Result<move_session::MoveReport, IpcError> {
-        self.call(
-            "move_session",
-            json!({
-                "session_id": args.session_id,
-                "target_host_alias": args.target_host_alias,
-                "keep_source": args.keep_source,
-                "strict": args.strict,
-            }),
-        )
-        .await
-    }
-
-    /// `commands::worktrees::delete_worktree`. The tool answers prose, so the
-    /// text is read (which is what surfaces a tool error) and discarded.
-    pub async fn delete_worktree(
-        &self,
-        args: &worktrees::DeleteWorktreeArgs,
-    ) -> Result<(), IpcError> {
-        self.call_text(
-            "delete_worktree",
-            json!({ "worktree_id": args.worktree_id, "force": args.force }),
-        )
-        .await
-        .map(|_| ())
-    }
-
-    /// `commands::tasks::cancel_task`.
-    pub async fn cancel_task(&self, task_id: i64) -> Result<TaskRow, IpcError> {
-        self.call("cancel_task", json!({ "task_id": task_id }))
-            .await
-    }
-
-    /// `commands::projects::refresh_projects`.
-    pub async fn refresh_projects(
-        &self,
-    ) -> Result<Vec<fleet_core::service::projects::ProjectTreeRow>, IpcError> {
-        self.call("refresh_projects", json!({})).await
-    }
-
-    /// `commands::hosts::probe_host`. Re-probing a host is a read of the
-    /// fleet's state, not fleet administration, so a paired client may do it
-    /// (`add_host` / `remove_host` / `hide_host` are the master-only ones).
-    pub async fn probe_host(&self, alias: &str) -> Result<HostRow, IpcError> {
-        self.call("probe_host", json!({ "alias": alias })).await
     }
 }
 

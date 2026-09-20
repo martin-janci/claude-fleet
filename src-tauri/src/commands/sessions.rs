@@ -476,7 +476,7 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
     ) -> Result<Vec<SessionRow>, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.related_sessions(args.session_id).await,
+            Some(hub) => hub.route("related_sessions", &args).await,
             None => sessions::related_sessions(args, store),
         }
     }
@@ -501,7 +501,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<i64, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.kill_session(&args).await,
+            Some(hub) => hub.route("kill_session", &args).await,
             None => sessions::kill_session(args, store, ssh).await,
         }
     }
@@ -513,7 +513,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.safe_kill_session(&args).await,
+            Some(hub) => hub.route("safe_kill_session", &args).await,
             None => safe_kill::safe_kill_session(args, store, ssh).await,
         }
     }
@@ -525,18 +525,21 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.rename_session(&args).await,
+            Some(hub) => hub.route("rename_session", &args).await,
             None => sessions::rename_session(args, store, ssh).await,
         }
     }
 
+    /// The command is `set_session_friendly_name` and the tool is
+    /// `set_friendly_name`: one of the two places the two vocabularies
+    /// differ, and the row is what resolves it.
     pub async fn set_session_friendly_name(
         backend: &FleetBackend,
         args: SetFriendlyNameArgs,
         store: &Mutex<Store>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.set_session_friendly_name(&args).await,
+            Some(hub) => hub.route("set_session_friendly_name", &args).await,
             None => sessions::set_session_friendly_name(args, store),
         }
     }
@@ -548,11 +551,18 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.restart_session(&args).await,
+            Some(hub) => hub.route("restart_session", &args).await,
             None => sessions::restart_session(args, store, ssh).await,
         }
     }
 
+    /// **Pointed at a hub, the prompt arrives marked.** `apply_marker` wraps
+    /// every prompt from a non-master caller in the untrusted-input marker,
+    /// and a paired client is never the master
+    /// (`mcp::tools::support::apply_marker`, whose own doc comment says "text
+    /// typed on a phone always reaches an agent marked"). That is the hub's
+    /// client model working as designed, not a defect here — but it is a
+    /// visible difference from standalone and belongs in the docs.
     pub async fn send_prompt(
         backend: &FleetBackend,
         args: SendPromptArgs,
@@ -560,7 +570,13 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<(), IpcError> {
         match backend.hub() {
-            Some(hub) => hub.send_prompt(&args).await,
+            Some(hub) => {
+                // The tool answers `{"delivered": …}` where the command
+                // answers `()`; the body is read and discarded so a tool
+                // error still surfaces.
+                let _: serde_json::Value = hub.route("send_prompt", &args).await?;
+                Ok(())
+            }
             None => sessions::send_prompt(args, store, ssh).await,
         }
     }
@@ -572,7 +588,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.spawn_review(&args).await,
+            Some(hub) => hub.route("spawn_review", &args).await,
             None => sessions::spawn_review(args, store, ssh).await,
         }
     }
@@ -584,7 +600,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.recreate_session(&args).await,
+            Some(hub) => hub.route("recreate_session", &args).await,
             None => sessions::recreate_session(args, store, ssh).await,
         }
     }
@@ -595,7 +611,13 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
     ) -> Result<(), IpcError> {
         match backend.hub() {
-            Some(hub) => hub.dismiss_ghost_session(args.session_id).await,
+            Some(hub) => {
+                // The tool answers `{"dismissed": id}` where the command
+                // answers `()`; the body is read and discarded so a tool
+                // error still surfaces.
+                let _: serde_json::Value = hub.route("dismiss_ghost_session", &args).await?;
+                Ok(())
+            }
             None => sessions::dismiss_ghost_session(args, store),
         }
     }
@@ -627,7 +649,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.new_bg_session(&args).await,
+            Some(hub) => hub.route("new_bg_session", &args).await,
             None => bg_sessions::new_bg_session_tracked(args, store, ssh).await,
         }
     }
