@@ -24,7 +24,7 @@ pub(super) const PANE_TAIL_LINES: u32 = 8;
 /// round-trip) never false-trips; on a real wedge the ssh-layer wall clock
 /// (`SshClient::run` → `E_SSH_TIMEOUT`) usually fires first and resets the
 /// master.
-pub(super) const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Default cadence (seconds) for the background reconcile tick, and the
 /// freshness window `list_sessions` serves cached rows within when the tick
@@ -163,7 +163,7 @@ pub(crate) async fn run_host_script(
 /// session, sequential). Runs AFTER the reachability probe, outside
 /// `HOST_PROBE_TIMEOUT`, so a slow GitHub API can never flip a host to
 /// unreachable.
-pub(super) const PR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+pub(crate) const PR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Most sessions probed for a PR per host per pass. Bounds the script's
 /// worst case (`PR_PROBE_BATCH` sequential `gh` calls); the rest are picked
@@ -789,6 +789,7 @@ pub(super) fn reconcile_write_one_host(
                 agent_rows,
                 probe.agent_mtimes.as_ref(),
                 now,
+                probe.started_at,
             )?;
             // Task H: stamp freshness on every session this pass observed live,
             // so a proactive (background) reconcile keeps `last_reconciled_at`
@@ -978,6 +979,11 @@ pub(super) fn agent_is_inactive(
 /// transiently-failed agents probe — which comes back as an empty list — only
 /// ghosts rows for one cycle instead of deleting them. Per-agent write
 /// failures are logged and skipped so one bad row can't abort the others.
+///
+/// `probe_started_at` is this pass's `HostProbe::started_at`, threaded
+/// through to `upsert_bg_session`'s staleness guard so a pass that listed the
+/// agents before a row was lost cannot revive it on the way out.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reconcile_agent_rows(
     s: &Store,
     host_alias: &str,
@@ -986,6 +992,7 @@ pub(super) fn reconcile_agent_rows(
     agents: &[crate::claude_agents::ClaudeAgentRow],
     mtimes: Option<&std::collections::HashMap<String, i64>>,
     now: i64,
+    probe_started_at: i64,
 ) -> Result<(), IpcError> {
     let mut keep: Vec<String> = Vec::new();
     let paths = HostPaths::for_host(s, host_alias);
@@ -1054,6 +1061,7 @@ pub(super) fn reconcile_agent_rows(
             status.as_deref(),
             now,
             kind,
+            probe_started_at,
         ) {
             tracing::warn!(
                 host = %host_alias,

@@ -600,6 +600,9 @@ pub(super) async fn new_session_inner(
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.new_session(&args.name, &path, &pane_cmd).await?;
 
+    // The name is live again — a kill of it moments ago must not make the
+    // reconcile below refuse to insert the row this function returns.
+    record_tmux_created(store, &args.host_alias, &args.name);
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     if let Some(rep) = &repaired {
         // Same detail as every other workspace_repaired event (branch_source
@@ -822,6 +825,21 @@ pub(super) fn bg_kill_action(
 /// Record a kill: the `killed` timeline event and the end of the row's
 /// current conversation (`end_reason = killed`). Best-effort, like every
 /// timeline write; the rows go with the session row (`ON DELETE CASCADE`).
+/// Announce to the store that `tmux_name` is alive on `host_alias` again,
+/// because fleet has just created (or renamed into) that tmux session. Every
+/// path that does so and then leans on its own reconcile to INSERT the row
+/// must call this first: a kill of the same name in the same second would
+/// otherwise make the reconcile refuse the insert, and the caller would be
+/// left with a live tmux session and no row to return.
+///
+/// Best-effort and lock-safe: the guard is taken and dropped inside, never
+/// held across an await, and a poisoned lock only costs one refused cycle.
+pub(crate) fn record_tmux_created(store: &Mutex<Store>, host_alias: &str, tmux_name: &str) {
+    if let Ok(s) = store.lock() {
+        s.forget_kill(host_alias, tmux_name);
+    }
+}
+
 pub(crate) fn record_kill(s: &Store, id: i64, claude_session_id: Option<&str>) {
     if let Err(e) = s.insert_session_event(id, "killed", None) {
         tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
@@ -948,6 +966,9 @@ pub async fn rename_session(
     crate::validate::tmux_name(&args.new_name)?;
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
+    // The session now answers to `new_name`, which may be a name fleet killed
+    // a moment ago; the reconcile below must be free to insert it.
+    record_tmux_created(store, &args.host_alias, &args.new_name);
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = lock(store)?;
     // `new_name` is validated verbatim (no padding), so look it up as-is —
@@ -1071,6 +1092,9 @@ pub async fn restart_session(
         }
         None => tmux.restart_session(&args.name, &pane_cmd).await?,
     }
+    // Any of the three branches leaves a live tmux session under this name,
+    // and the create branch may even have rebuilt it from nothing.
+    record_tmux_created(store, &args.host_alias, &args.name);
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = lock(store)?;
     s.get_session(&args.name, &args.host_alias)?.ok_or_else(|| {
@@ -1192,6 +1216,10 @@ pub async fn recreate_session(
     // same primitive new_session() uses.
     tmux.new_session(&sess.tmux_name, std::path::Path::new(&cwd), &pane_cmd)
         .await?;
+    // `restore_session` below keeps the row, so nothing here needs an INSERT
+    // — but every `tmux new-session` this service runs ends with the name
+    // alive, and saying so uniformly is what keeps the invariant checkable.
+    record_tmux_created(store, &sess.host_alias, &sess.tmux_name);
 
     // Mark the row live again and return it.
     let row = {

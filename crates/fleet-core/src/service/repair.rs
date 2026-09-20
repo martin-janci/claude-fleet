@@ -4020,10 +4020,10 @@ mod tests {
         let orphan = s
             .upsert_session("orphan", "local", None, None, 1, 1, "running", None)
             .unwrap();
-        s.upsert_bg_session("local", "bg:abc", None, "abc", None, 1, "bg")
+        s.upsert_bg_session("local", "bg:abc", None, "abc", None, 1, "bg", 1)
             .unwrap();
         let bg = s.get_session("bg:abc", "local").unwrap().unwrap().id;
-        s.upsert_bg_session("local", "bg:ext", None, "ext", None, 1, "external")
+        s.upsert_bg_session("local", "bg:ext", None, "ext", None, 1, "external", 1)
             .unwrap();
         let ext = s.get_session("bg:ext", "local").unwrap().unwrap().id;
         let pa = s.upsert_project("o", "a", "/a").unwrap();
@@ -4873,7 +4873,7 @@ mod tests {
             let s = store.lock().unwrap();
             for (name, kind) in [("bg:u-bg", "bg"), ("bg:u-ext", "external")] {
                 let id = s
-                    .upsert_bg_session("local", name, Some(pid), &name[3..], None, 1, kind)
+                    .upsert_bg_session("local", name, Some(pid), &name[3..], None, 1, kind, 1)
                     .unwrap();
                 // Both keys: our workspace's and the adopt target's.
                 s.set_worktree_key(id, Some(if kind == "bg" { "feat" } else { "other" }))
@@ -4881,7 +4881,7 @@ mod tests {
             }
             for (name, kind) in [("bg:u-bg2", "bg"), ("bg:u-ext2", "external")] {
                 let id = s
-                    .upsert_bg_session("local", name, Some(pid), &name[3..], None, 1, kind)
+                    .upsert_bg_session("local", name, Some(pid), &name[3..], None, 1, kind, 1)
                     .unwrap();
                 s.set_worktree_key(id, Some(if kind == "bg" { "other" } else { "feat" }))
                     .unwrap();

@@ -93,7 +93,10 @@ impl Store {
     /// against the `claude agents --json` result by
     /// `ghost_and_clean_bg_sessions`. A row that was ghosted by that pruner
     /// and whose agent reappears is resurrected here (`status='running'`,
-    /// `lost_at=NULL`), mirroring the tmux upsert's ghost revival.
+    /// `lost_at=NULL`), mirroring the tmux upsert's ghost revival — including
+    /// its staleness guard: `probe_started_at` is when this pass's probe
+    /// began, and a lost row is rewritten only by an observation newer than
+    /// the loss (see the `WHERE` on the `DO UPDATE` below).
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_bg_session(
         &self,
@@ -104,6 +107,7 @@ impl Store {
         claude_status: Option<&str>,
         last_activity_at: i64,
         kind: &str,
+        probe_started_at: i64,
     ) -> Result<i64, rusqlite::Error> {
         debug_assert!(
             kind == "bg" || kind == "external",
@@ -134,23 +138,42 @@ impl Store {
                claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
                claude_status=COALESCE(excluded.claude_status, claude_status),
                idle_since={idle}
+             WHERE lost_at IS NULL OR (?9 > 0 AND ?9 > lost_at)
              RETURNING id",
             idle = idle_since_sql("COALESCE(excluded.claude_status, claude_status)", "?7"),
         );
-        let id: i64 = self.conn.query_row(
-            &sql,
-            rusqlite::params![
-                tmux_name,
-                host_alias,
-                project_id,
-                last_activity_at,
-                claude_session_id,
-                claude_status,
-                now_unix(),
-                kind
-            ],
-            |row| row.get(0),
-        )?;
+        // A lost row (ghosted by `ghost_and_clean_bg_sessions` after an empty
+        // `claude agents` list, or marked by a `host_reboot` verdict) is
+        // rewritten only by an observation NEWER than the loss — the same
+        // guard, in the same unix seconds off the same clock, as the tmux
+        // upsert's. A pass whose probe listed the agents before the loss can
+        // otherwise land afterwards and resurrect a row that is really gone,
+        // costing another ghost/reap cycle. Same two conventions: the losing
+        // second is not newer, and `?9 <= 0` ("probe time unknown", only
+        // store tests) never revives.
+        let id: Option<i64> = self
+            .conn
+            .query_row(
+                &sql,
+                rusqlite::params![
+                    tmux_name,
+                    host_alias,
+                    project_id,
+                    last_activity_at,
+                    claude_session_id,
+                    claude_status,
+                    now_unix(),
+                    kind,
+                    probe_started_at
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // No row back ⇒ the guard refused this observation; the row is
+        // untouched, so there is nothing to announce either.
+        let Some(id) = id else {
+            return existing_id.ok_or(rusqlite::Error::QueryReturnedNoRows);
+        };
         if let Some(row) = self.get_session(tmux_name, host_alias)? {
             if existing_id.is_none() {
                 self.bus.session_created(&row);
@@ -368,10 +391,27 @@ impl Store {
              WHERE id=?2 AND status!='ghost'",
             rusqlite::params![now, id],
         )?;
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(row) = &row {
+            // Remember the kill by name: the reconcile the caller runs next
+            // hard-deletes this (already ghost) row in its own pass, after
+            // which a fleet-wide pass still carrying the name from a probe
+            // that ran BEFORE the kill would find nothing to conflict with
+            // and insert the dead session again.
+            //
+            // Recorded even when the UPDATE matched nothing, i.e. the user
+            // killed a row reconcile had ALREADY ghosted: `tmux kill-session`
+            // ran all the same, and such a row is reaped by the kill's own
+            // pass even sooner (it was ghost before that pass began), so it
+            // is the same window with a shorter fuse.
+            self.note_kill(&row.host_alias, &row.tmux_name, now);
+        }
+        // Nothing was written — the row is gone, or was already a ghost — so
+        // nothing is logged or announced. `None` is the caller's "no change
+        // to report" signal.
         if changed == 0 {
             return Ok(None);
         }
-        let row = fetch_session_by_id(&self.conn, id)?;
         if let Some(row) = &row {
             tracing::info!(
                 lifecycle = "lost",
@@ -1246,9 +1286,9 @@ mod tests {
     #[test]
     fn upsert_bg_session_writes_kind_and_flips_a_misfiled_row() {
         let s = store();
-        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("idle"), 1, "bg")
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("idle"), 1, "bg", 1)
             .unwrap();
-        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("idle"), 2, "external")
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("idle"), 2, "external", 2)
             .unwrap();
         assert_eq!(
             s.get_session("bg:u1", "local").unwrap().unwrap().kind,
@@ -1259,7 +1299,7 @@ mod tests {
     #[test]
     fn cleanup_ghosts_external_rows_too() {
         let s = store();
-        s.upsert_bg_session("local", "bg:e1", None, "e1", Some("idle"), 1, "external")
+        s.upsert_bg_session("local", "bg:e1", None, "e1", Some("idle"), 1, "external", 1)
             .unwrap();
         s.ghost_and_clean_bg_sessions("local", &[], 10, None)
             .unwrap();
@@ -1334,7 +1374,7 @@ mod tests {
             .upsert_session("work-a", "h", None, None, 1, 1, "running", None)
             .unwrap();
         let bg_id = s
-            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
+            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg", 1)
             .unwrap();
 
         s.mark_host_sessions_lost("h", "tmux_server_gone", &[], 500, 0)
@@ -1462,7 +1502,7 @@ mod tests {
             .unwrap();
         set_ghost(&s, t, 400, "missing");
         let bg = s
-            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
+            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg", 1)
             .unwrap();
         set_ghost(&s, bg, 400, "missing");
 
@@ -1528,7 +1568,7 @@ mod tests {
             .upsert_session("work-a", "h", None, None, 1, 1, "running", None)
             .unwrap();
         let bg_id = s
-            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
+            .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg", 1)
             .unwrap();
 
         s.mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
@@ -1585,7 +1625,7 @@ mod tests {
     #[test]
     fn dismiss_agent_records_and_deletes_the_row() {
         let s = store();
-        s.upsert_bg_session("local", "bg:u2", None, "u2", Some("stopped"), 1, "bg")
+        s.upsert_bg_session("local", "bg:u2", None, "u2", Some("stopped"), 1, "bg", 1)
             .unwrap();
         s.dismiss_agent("local", "u2", 100).unwrap();
         assert!(s.get_session("bg:u2", "local").unwrap().is_none());
@@ -1602,14 +1642,23 @@ mod tests {
         store.upsert_host("beta").unwrap();
         bus.take();
         let id = store
-            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100, "bg")
+            .upsert_bg_session(
+                "alpha",
+                "bg:u1",
+                None,
+                "u1",
+                Some("working"),
+                100,
+                "bg",
+                100,
+            )
             .unwrap();
         store
             .insert_session_event(id, "status_change", None)
             .unwrap();
         // A bg row on ANOTHER host must never be touched.
         let other = store
-            .upsert_bg_session("beta", "bg:u9", None, "u9", Some("working"), 100, "bg")
+            .upsert_bg_session("beta", "bg:u9", None, "u9", Some("working"), 100, "bg", 100)
             .unwrap();
         bus.take();
 
@@ -1648,7 +1697,16 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         store.upsert_host("alpha").unwrap();
         let kept = store
-            .upsert_bg_session("alpha", "bg:live", None, "live", Some("working"), 100, "bg")
+            .upsert_bg_session(
+                "alpha",
+                "bg:live",
+                None,
+                "live",
+                Some("working"),
+                100,
+                "bg",
+                100,
+            )
             .unwrap();
         // A normal tmux-backed row — ghosted or not, the bg pruner must skip it.
         store
@@ -1680,7 +1738,16 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("alpha").unwrap();
         let id = s
-            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100, "bg")
+            .upsert_bg_session(
+                "alpha",
+                "bg:u1",
+                None,
+                "u1",
+                Some("working"),
+                100,
+                "bg",
+                100,
+            )
             .unwrap();
         s.ghost_and_clean_bg_sessions("alpha", &[], 200, None)
             .unwrap();
@@ -1688,12 +1755,139 @@ mod tests {
 
         // Agent reappears (e.g. the previous probe transiently failed).
         let id2 = s
-            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 300, "bg")
+            .upsert_bg_session(
+                "alpha",
+                "bg:u1",
+                None,
+                "u1",
+                Some("working"),
+                300,
+                "bg",
+                300,
+            )
             .unwrap();
         assert_eq!(id2, id, "same row, not a new one");
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert_eq!(row.status, "running");
         assert_eq!(row.lost_at, None);
+    }
+
+    // ── #172: a lost bg row is revived only by an observation newer than the
+    // loss, as the tmux upsert's rows already were (#170) ────────────────────
+
+    /// A `bg:u1` row on `alpha` ghosted at `lost_at` by the pane-less pruner
+    /// (`lost_reason='missing'`), ready for a stale observation.
+    fn ghosted_bg_row(s: &Store, lost_at: i64) -> i64 {
+        let id = s
+            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 1, "bg", 1)
+            .unwrap();
+        s.ghost_and_clean_bg_sessions("alpha", &[], lost_at, None)
+            .unwrap();
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().status,
+            "ghost",
+            "precondition: the row is lost"
+        );
+        id
+    }
+
+    /// One `upsert_bg_session` that saw `bg:u1` live and `working`, as a
+    /// probe that STARTED at `probe_started_at`.
+    fn observe_bg_live(s: &Store, probe_started_at: i64) {
+        s.upsert_bg_session(
+            "alpha",
+            "bg:u1",
+            None,
+            "u1",
+            Some("working"),
+            probe_started_at,
+            "bg",
+            probe_started_at,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_bg_probe_older_than_the_loss_does_not_resurrect_the_row() {
+        // The pass listed `claude agents` BEFORE the row was ghosted (or
+        // before the reboot verdict) and only wrote afterwards. It cannot
+        // show the agent alive after the loss, so it must leave the ghost —
+        // and its `lost_reason` — exactly as it found them.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        let id = ghosted_bg_row(&s, 200);
+
+        observe_bg_live(&s, 199);
+
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "ghost", "a stale probe must not revive");
+        assert_eq!(row.lost_at, Some(200), "lost_at must be left alone");
+        assert_eq!(lost_reason_of(&s, id), Some("missing".to_string()));
+        assert_eq!(
+            row.last_activity_at, 1,
+            "nor may it move the activity stamp"
+        );
+    }
+
+    #[test]
+    fn a_bg_probe_newer_than_the_loss_resurrects_the_row() {
+        // The transient-empty-listing case the one-cycle grace exists for:
+        // the agent is really back, so the row comes back with it.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        let id = ghosted_bg_row(&s, 200);
+
+        observe_bg_live(&s, 201);
+
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "running", "a newer probe revives");
+        assert_eq!(row.lost_at, None);
+        assert_eq!(lost_reason_of(&s, id), None);
+    }
+
+    #[test]
+    fn a_bg_probe_started_in_the_same_second_as_the_loss_does_not_resurrect() {
+        // Both stamps are unix SECONDS off one clock, so same-instant is not
+        // newer — the same choice the tmux upsert makes.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        let id = ghosted_bg_row(&s, 200);
+
+        observe_bg_live(&s, 200);
+
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "ghost", "same second is not newer");
+        assert_eq!(row.lost_at, Some(200));
+    }
+
+    #[test]
+    fn a_bg_row_kept_over_a_reboot_is_revived_by_a_fresh_probe_only() {
+        // A `host_reboot` verdict marks bg rows lost too (only
+        // `tmux_server_gone` is tmux-only), and such rows are kept as ghosts
+        // so the agent can be picked up again. A probe from before the
+        // verdict must not clear it; one from after must.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        let id = s
+            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 1, "bg", 1)
+            .unwrap();
+        s.mark_host_sessions_lost("alpha", "host_reboot", &[], 200, 0)
+            .unwrap();
+        assert_eq!(lost_reason_of(&s, id), Some("host_reboot".to_string()));
+
+        observe_bg_live(&s, 199);
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().status,
+            "ghost",
+            "a probe older than the verdict must not revive the row"
+        );
+        assert_eq!(lost_reason_of(&s, id), Some("host_reboot".to_string()));
+
+        observe_bg_live(&s, 201);
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "running", "the host came back: revive");
+        assert_eq!(row.lost_at, None);
+        assert_eq!(row.claude_session_id.as_deref(), Some("u1"));
     }
 
     #[test]
@@ -1706,7 +1900,16 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("alpha").unwrap();
         let id = s
-            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100, "bg")
+            .upsert_bg_session(
+                "alpha",
+                "bg:u1",
+                None,
+                "u1",
+                Some("working"),
+                100,
+                "bg",
+                100,
+            )
             .unwrap();
         s.ghost_and_clean_bg_sessions("alpha", &[], 200, None)
             .unwrap();
@@ -1716,8 +1919,17 @@ mod tests {
             "precondition: the ghost carries a reason"
         );
 
-        s.upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 300, "bg")
-            .unwrap();
+        s.upsert_bg_session(
+            "alpha",
+            "bg:u1",
+            None,
+            "u1",
+            Some("working"),
+            300,
+            "bg",
+            300,
+        )
+        .unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert_eq!(row.status, "running");
         assert_eq!(
@@ -1732,7 +1944,16 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         store.upsert_host("alpha").unwrap();
         let bg = store
-            .upsert_bg_session("alpha", "bg:gone", None, "uuid-gone", Some("idle"), 1, "bg")
+            .upsert_bg_session(
+                "alpha",
+                "bg:gone",
+                None,
+                "uuid-gone",
+                Some("idle"),
+                1,
+                "bg",
+                1,
+            )
             .unwrap();
         let peer = store
             .upsert_session("peer", "alpha", None, None, 1, 1, "running", None)
@@ -2200,7 +2421,7 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         for (name, kind) in [("bg:u-bg", "bg"), ("bg:u-ext", "external")] {
-            s.upsert_bg_session("local", name, None, &name[3..], Some("idle"), 1, kind)
+            s.upsert_bg_session("local", name, None, &name[3..], Some("idle"), 1, kind, 1)
                 .unwrap();
         }
         assert_eq!(s.backfill_friendly_names().unwrap(), 0);
@@ -2374,13 +2595,13 @@ mod tests {
     fn bg_upsert_maintains_idle_since_from_agent_status() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
-        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 1, "bg")
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 1, "bg", 1)
             .unwrap();
         assert_eq!(
             s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
             None
         );
-        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 2, "bg")
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 2, "bg", 2)
             .unwrap();
         let stamp = s
             .get_session("bg:u1", "local")
@@ -2388,13 +2609,13 @@ mod tests {
             .unwrap()
             .idle_since
             .expect("stamped");
-        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 3, "bg")
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 3, "bg", 3)
             .unwrap();
         assert_eq!(
             s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
             Some(stamp)
         );
-        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 4, "bg")
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 4, "bg", 4)
             .unwrap();
         assert_eq!(
             s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
