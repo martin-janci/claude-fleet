@@ -105,6 +105,11 @@ pub const OPERATOR_HOST: &str = "local";
 /// never the master token: the agent is a paired client like any other, and
 /// revoking it by name is how the operator is disarmed.
 pub const OPERATOR_CLIENT_NAME: &str = "ux-agent";
+/// The file Claude Code reads a PROJECT's MCP servers from. Not
+/// `.claude/settings.json`, which is where `provision.rs` installs hooks and
+/// where an `mcpServers` block would be silently ignored. Nothing else in
+/// the fleet writes this path, so there is no merge race with provisioning.
+pub const OPERATOR_MCP_FILE: &str = ".mcp.json";
 /// `settings` key holding the SHA-256 of the operator's client token, so
 /// `operator_status` can tell a revoked token from a healthy one without
 /// reading the secret back off the host.
@@ -134,9 +139,20 @@ pub fn claude_md() -> &'static str {
      a report: the sidebar already shows what changed.\n"
 }
 
-/// PURE: the operator's `.claude/settings.json`, pointing its MCP client at
-/// this fleet with its own bearer token.
-pub fn settings_json(endpoint: &str, token: &str) -> String {
+/// PURE: the operator's `.mcp.json`, pointing its MCP client at this fleet
+/// with its own bearer token.
+///
+/// `.mcp.json` and not `.claude/settings.json`: settings.json is where
+/// `provision.rs` installs HOOKS, while MCP servers are read from
+/// `~/.claude.json` globally or from a project's `.mcp.json`. Writing
+/// `mcpServers` into settings.json would be silently ignored and the
+/// operator would fall back to the host token already in `~/.claude.json` —
+/// which is bound to its own host and refuses other hosts' sessions,
+/// defeating the point of the agent having a fleet-wide, independently
+/// revocable identity. Project-scoped rather than a merge into
+/// `~/.claude.json` so the token is the operator's alone and not handed to
+/// every session on the machine.
+pub fn mcp_json(endpoint: &str, token: &str) -> String {
     serde_json::json!({
         "mcpServers": {
             "claude-fleet": {
@@ -171,8 +187,8 @@ pub(crate) trait OperatorHost: Send + Sync {
     /// stored on the project row has to be resolved here first.
     async fn resolve_dir(&self) -> Result<String, IpcError>;
 
-    /// Write `CLAUDE.md` and `.claude/settings.json` under `dir`.
-    async fn write_files(&self, dir: &str, claude_md: &str, settings: &str)
+    /// Write `CLAUDE.md` and [`OPERATOR_MCP_FILE`] under `dir`.
+    async fn write_files(&self, dir: &str, claude_md: &str, mcp_json: &str)
         -> Result<(), IpcError>;
 
     /// Start the operator's session and return its row.
@@ -197,9 +213,8 @@ impl OperatorHost for LiveHost {
         &self,
         dir: &str,
         claude_md: &str,
-        settings: &str,
+        mcp_json: &str,
     ) -> Result<(), IpcError> {
-        let claude_dir = format!("{dir}/.claude");
         crate::service::provision::write_host_file(
             self.ssh.as_ref(),
             OPERATOR_HOST,
@@ -208,15 +223,15 @@ impl OperatorHost for LiveHost {
             claude_md,
         )
         .await?;
-        // `settings.json` carries the bearer token, so it goes through the
+        // `.mcp.json` carries the bearer token, so it goes through the
         // secret path: never in an argv, never a truncated file on a failed
         // write, and 0600 on disk.
         crate::service::provision::write_host_file_secret(
             self.ssh.as_ref(),
             OPERATOR_HOST,
-            &claude_dir,
-            &format!("{claude_dir}/settings.json"),
-            settings,
+            dir,
+            &format!("{dir}/{OPERATOR_MCP_FILE}"),
+            mcp_json,
         )
         .await
     }
@@ -265,7 +280,7 @@ pub async fn ensure_operator(
 }
 
 /// [`ensure_operator`] with the host side injected. The store guard is taken
-/// in three short scoped blocks below and dropped before every `.await`:
+/// in four short scoped blocks below and dropped before every `.await`:
 /// this function interleaves database work with SSH and tmux work, and
 /// holding the mutex across either would block every other command in the
 /// app for the length of a network round trip.
@@ -288,19 +303,37 @@ pub(crate) async fn ensure_operator_on(
         }
     }
 
+    // 2. The endpoint, BEFORE anything is mutated anywhere. (guard #2)
+    //    `configured_port` refuses when the control API has never been
+    //    enabled, and that refusal has to be the first thing that can
+    //    happen: with it below the token work, every press on such a fleet
+    //    would revoke the live token, insert an undeliverable replacement
+    //    and record its hash, and only then fail. Loopback in both modes —
+    //    the operator runs on the machine that serves the control API, so no
+    //    public URL is ever baked into the file it is about to be handed.
+    //    The control API is NOT enabled here: that is the user's decision,
+    //    not something to do behind their back.
+    let endpoint = {
+        let s = lock(store)?;
+        format!(
+            "http://127.0.0.1:{}/mcp",
+            crate::mcp::settings::configured_port(&s)?
+        )
+    };
+
     // The absolute directory has to be known before the project row is
     // written, because `base_path` is what the session's pane starts in —
     // see [`OperatorHost::resolve_dir`].
     let dir = host.resolve_dir().await?;
 
-    // 2. The project row, the token and the endpoint, under one guard. (#2)
-    let (project_id, token, endpoint) = {
+    // 3. The project row and the token, under one guard. (#3)
+    let (project_id, token) = {
         let s = lock(store)?;
         let project_id = s
             .upsert_system_project(OPERATOR_OWNER, OPERATOR_REPO, &dir)
             .map_err(|e| IpcError::new(codes::E_SQLITE, format!("operator project row: {e}")))?;
-        // Only the hash is ever stored; the plaintext lives in the operator's
-        // settings.json on the host and nowhere else.
+        // Only the hash is ever stored; the plaintext lives in the
+        // operator's `.mcp.json` on the host and nowhere else.
         let token = crate::mcp::generate_token();
         let sha = crate::mcp::auth::sha256_hex(&token);
         // A previous token by this name may still be live (a half-finished
@@ -313,23 +346,16 @@ pub(crate) async fn ensure_operator_on(
             .map_err(|e| {
                 IpcError::new(codes::E_SQLITE, format!("record the operator token: {e}"))
             })?;
-        // Loopback in both modes: the operator runs on the machine that
-        // serves the control API, so no public URL is ever baked into the
-        // file it is about to be handed.
-        let endpoint = format!(
-            "http://127.0.0.1:{}/mcp",
-            crate::mcp::settings::configured_port(&s)?
-        );
-        (project_id, token, endpoint)
+        (project_id, token)
     };
 
-    // 3. The files on the host, then the session itself.
-    host.write_files(&dir, claude_md(), &settings_json(&endpoint, &token))
+    // 4. The files on the host, then the session itself.
+    host.write_files(&dir, claude_md(), &mcp_json(&endpoint, &token))
         .await?;
     let row = host.start_session(project_id).await?;
 
-    // 4. Record where it lives, so the self-guard and the next press can
-    //    find it. (guard #3)
+    // 5. Record where it lives, so the self-guard and the next press can
+    //    find it. (guard #4)
     {
         let s = lock(store)?;
         set_operator_ref(
@@ -400,8 +426,8 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_file_points_at_the_endpoint_and_carries_the_token() {
-        let j = settings_json("http://127.0.0.1:4180/mcp", "deadbeef");
+    fn the_mcp_file_points_at_the_endpoint_and_carries_the_token() {
+        let j = mcp_json("http://127.0.0.1:4180/mcp", "deadbeef");
         let v: serde_json::Value = serde_json::from_str(&j).expect("valid JSON");
         let srv = &v["mcpServers"]["claude-fleet"];
         assert_eq!(srv["type"], "http");
@@ -476,11 +502,11 @@ mod tests {
             &self,
             dir: &str,
             claude_md: &str,
-            settings: &str,
+            mcp_json: &str,
         ) -> Result<(), IpcError> {
             let mut f = self.files.lock().unwrap();
             f.push((format!("{dir}/CLAUDE.md"), claude_md.to_string()));
-            f.push((format!("{dir}/.claude/settings.json"), settings.to_string()));
+            f.push((format!("{dir}/{OPERATOR_MCP_FILE}"), mcp_json.to_string()));
             Ok(())
         }
         async fn start_session(&self, project_id: i64) -> Result<SessionRow, IpcError> {
@@ -504,6 +530,17 @@ mod tests {
         }
     }
 
+    /// Every LIVE client-token row the operator owns. A helper because both
+    /// the count assertion and the "same token on both sides" assertion want
+    /// it, and the name is the literal the brief pins.
+    fn tokens_named_ux_agent(s: &Store) -> Vec<crate::store::ClientTokenRow> {
+        s.list_client_tokens(false)
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name == "ux-agent")
+            .collect()
+    }
+
     /// `ensure_operator` runs on every press of the button. Twice over it
     /// must leave one project, one session and one token — not three.
     #[tokio::test]
@@ -519,6 +556,42 @@ mod tests {
             "the second call must not start a second session"
         );
 
+        // The file on the host and the hash in the database must be the
+        // SAME token. Nothing else checks this: `insert_client_token` stores
+        // only a hash, so a bug that wrote the wrong secret into `.mcp.json`
+        // would leave both sides individually well-formed and the agent
+        // permanently unauthorised.
+        let files = host.files.lock().unwrap();
+        let (path, body) = files
+            .iter()
+            .find(|(p, _)| p.ends_with(OPERATOR_MCP_FILE))
+            .expect("the operator's MCP config is written");
+        assert_eq!(path, &format!("{}/{OPERATOR_MCP_FILE}", host.dir));
+        let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+        let auth = v["mcpServers"]["claude-fleet"]["headers"]["Authorization"]
+            .as_str()
+            .expect("a bearer header");
+        let written = auth
+            .strip_prefix("Bearer ")
+            .expect("the header is a bearer token");
+        assert_eq!(
+            crate::mcp::auth::sha256_hex(written),
+            store
+                .lock()
+                .unwrap()
+                .get_setting(SETTING_OPERATOR_TOKEN_SHA)
+                .unwrap()
+                .expect("the operator token hash is recorded"),
+            "the token handed to the host must be the one the database vouches for"
+        );
+        // It is also the token the client-token row carries, so revoking
+        // `ux-agent` really does disarm the file on the host.
+        assert_eq!(
+            crate::mcp::auth::sha256_hex(written),
+            tokens_named_ux_agent(&store.lock().unwrap())[0].token_sha256,
+        );
+        drop(files);
+
         let s = store.lock().unwrap();
         let projects: Vec<_> = s
             .list_projects()
@@ -527,13 +600,11 @@ mod tests {
             .filter(|p| p.system)
             .collect();
         assert_eq!(projects.len(), 1, "one operator project, not two");
-        let tokens: Vec<_> = s
-            .list_client_tokens(false)
-            .unwrap()
-            .into_iter()
-            .filter(|t| t.name == "ux-agent")
-            .collect();
-        assert_eq!(tokens.len(), 1, "one operator token, not two");
+        assert_eq!(
+            tokens_named_ux_agent(&s).len(),
+            1,
+            "one operator token, not two"
+        );
         assert_eq!(
             operator_ref(&s),
             Some(OperatorRef {
@@ -541,5 +612,46 @@ mod tests {
                 tmux_name: OPERATOR_TMUX_NAME.into(),
             })
         );
+    }
+
+    /// The ordering guard for `configured_port`. A fleet whose control API
+    /// has never been enabled must be refused BEFORE anything is written:
+    /// with the port lookup below the token work, every press revoked the
+    /// live token, inserted a replacement that could never be delivered and
+    /// recorded its hash, and only then returned the refusal.
+    #[tokio::test]
+    async fn a_fleet_with_no_control_api_is_refused_before_anything_is_mutated() {
+        let (store, _ssh, _reg) = fixture();
+        // A token the operator already holds, to prove it survives.
+        {
+            let s = lock(&store).unwrap();
+            s.set_setting(crate::mcp::SETTING_TOKEN, "").unwrap();
+            s.insert_client_token(OPERATOR_CLIENT_NAME, "the-old-sha", "full")
+                .unwrap();
+        }
+        let host = FakeHost::new(&store);
+
+        let err = ensure_operator_on(&store, &host)
+            .await
+            .expect_err("no control API, no operator");
+        assert_eq!(err.code, codes::E_PROVISION);
+
+        let s = lock(&store).unwrap();
+        assert_eq!(
+            tokens_named_ux_agent(&s)[0].token_sha256,
+            "the-old-sha",
+            "the live token must not be revoked by a press that cannot succeed"
+        );
+        assert_eq!(tokens_named_ux_agent(&s).len(), 1);
+        assert!(
+            s.get_setting(SETTING_OPERATOR_TOKEN_SHA).unwrap().is_none(),
+            "no hash is recorded for a token that was never minted"
+        );
+        assert!(
+            s.list_projects().unwrap().iter().all(|p| !p.system),
+            "no operator project row either"
+        );
+        assert_eq!(host.starts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(host.files.lock().unwrap().is_empty());
     }
 }
