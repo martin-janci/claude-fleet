@@ -6,8 +6,17 @@
   // The button itself never disables: for `no_mcp` / `token_revoked` the
   // title carries the explanation, but opening the panel is how the person
   // reads the full story (blockedCopy's title text, and for those two
-  // states no action button under it).
-  import { openAgent, operatorState, blockedCopy, type OperatorBlocked } from './operator';
+  // states no action button under it). It does not disable while waking
+  // either — a press then is a press to CLOSE, and disabling the only way
+  // out of a sheet that is busy being born is the wound this button already
+  // had once.
+  import {
+    toggleAgent,
+    agentPanelOpen,
+    operatorState,
+    blockedCopy,
+    type OperatorBlocked,
+  } from './operator';
   import { agentChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
   import { hintAnchor } from './hints';
@@ -18,14 +27,19 @@
       ? blockedCopy($operatorState as OperatorBlocked)
       : null,
   );
-  const title = $derived(blocked ? blocked.title : `Ask the agent (${agentChordLabel(isMac)})`);
+  const title = $derived(
+    blocked
+      ? blocked.title
+      : `${$agentPanelOpen ? 'Close the agent' : 'Ask the agent'} (${agentChordLabel(isMac)})`,
+  );
 </script>
 
 <button
   class="agent-fab"
   {title}
   aria-label="Agent"
-  onclick={() => void openAgent()}
+  aria-expanded={$agentPanelOpen}
+  onclick={() => void toggleAgent()}
   use:hintAnchor={{ id: 'agent-fab', when: !blocked }}
 >
   <span aria-hidden="true">✦</span>

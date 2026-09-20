@@ -49,7 +49,7 @@
   import McpConfirmDialog from './lib/McpConfirmDialog.svelte';
   import AgentFab from './lib/AgentFab.svelte';
   import AgentPanel from './lib/AgentPanel.svelte';
-  import { openAgent } from './lib/operator';
+  import { agentPanelOpen, closeAgent, toggleAgent } from './lib/operator';
   import type { AgentContextInput } from './lib/agent_context';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
   import { hubStatus, loadHubStatus } from './lib/hub';
@@ -485,12 +485,26 @@
     if (chord === 'hosts') toggleHosts();
     else if (chord === 'session-view') flipSessionView();
     else if (chord === 'settings') settingsOpen.set(true);
-    else if (chord === 'agent') void openAgent();
+    else if (chord === 'agent') void toggleAgent();
   }
 
   function onKeydown(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     const target = e.target as HTMLElement | null;
+    // The agent panel is a fixed sheet over every view, so it takes Esc
+    // before Files / Assets / Hosts do. AgentPanel handles the key itself
+    // when focus is inside it (including in its composer, where the rule
+    // below would otherwise leave the person stuck); this branch is for an
+    // Esc with focus left on the page behind it. A modal <dialog> above the
+    // sheet still owns its own Esc, and an editable outside the panel keeps
+    // Esc for itself, exactly as Files and Assets do.
+    if ($agentPanelOpen && !e.defaultPrevented) {
+      if (target?.closest?.('dialog')) return;
+      if (!isEditable(target)) {
+        closeAgent();
+        return;
+      }
+    }
     // Esc leaves files mode (the terminal is covered while it's open, so Esc
     // can't be meant for the terminal here) — but not while the user is
     // typing in a field such as the file filter, where Esc belongs to that

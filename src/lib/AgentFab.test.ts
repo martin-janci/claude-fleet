@@ -5,6 +5,7 @@ const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 
 import AgentFab from './AgentFab.svelte';
+import { get } from 'svelte/store';
 import { agentPanelOpen, operatorState } from './operator';
 
 beforeEach(() => {
@@ -20,6 +21,32 @@ describe('AgentFab', () => {
     const btn = screen.getByRole('button', { name: /agent/i });
     await fireEvent.click(btn);
     expect(invoke).toHaveBeenCalledWith('operator_status', undefined);
+  });
+
+  it('TOGGLES: a second press closes the panel it opened', async () => {
+    invoke.mockResolvedValue({ ready: true, session: null, blocked: null });
+    render(AgentFab);
+    const btn = screen.getByRole('button', { name: /agent/i });
+    await fireEvent.click(btn);
+    expect(get(agentPanelOpen)).toBe(true);
+    expect(btn).toHaveAttribute('aria-expanded', 'true');
+
+    // The sheet is fixed over the bottom-right corner of every view; a
+    // button that only ever opens leaves no way back.
+    const before = invoke.mock.calls.length;
+    await fireEvent.click(btn);
+    expect(get(agentPanelOpen)).toBe(false);
+    expect(btn).toHaveAttribute('aria-expanded', 'false');
+    expect(invoke.mock.calls.length).toBe(before);
+  });
+
+  it('says it will close while the panel is open', async () => {
+    agentPanelOpen.set(true);
+    render(AgentFab);
+    expect(screen.getByRole('button', { name: /agent/i })).toHaveAttribute(
+      'title',
+      expect.stringContaining('Close'),
+    );
   });
 
   it('says why it is unavailable when the control API is off', async () => {

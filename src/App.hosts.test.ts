@@ -35,7 +35,7 @@ import {
 } from './lib/hosts_fixture';
 
 const project = {
-  project: { id: 7, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 1, adopted: false },
+  project: { id: 7, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 1, adopted: false, system: false },
   worktrees: [{ id: 71, project_id: 7, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' }],
 };
 
@@ -334,19 +334,42 @@ describe('App: the Hosts view', () => {
     expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
   });
 
-  it('⌘E opens the agent panel', async () => {
+  it('⌘E TOGGLES the agent panel — the sheet covers every view, so it must close', async () => {
     const routed = inv.getMockImplementation() as (cmd: string, ...rest: unknown[]) => Promise<unknown>;
     inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
       if (cmd === 'operator_status') return { ready: true, session: null, blocked: null };
       return routed(cmd, ...rest);
     });
     await mountApp();
-    expect(screen.queryByRole('region', { name: 'Agent' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Agent' })).toBeNull();
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
     await tick();
     expect(get(agentPanelOpen)).toBe(true);
-    expect(screen.getByRole('region', { name: 'Agent' })).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: 'Agent' })).toBeTruthy();
     expect(get(settingsOpen)).toBe(false);
+
+    // Press again: closed. Before this, `agentPanelOpen` was written `false`
+    // nowhere in production code and the sheet stayed pinned over the
+    // bottom-right corner of every view for the life of the process.
+    await fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    await tick();
+    expect(get(agentPanelOpen)).toBe(false);
+    expect(screen.queryByRole('dialog', { name: 'Agent' })).toBeNull();
+  });
+
+  it('Escape closes the agent panel from the page behind it', async () => {
+    const routed = inv.getMockImplementation() as (cmd: string, ...rest: unknown[]) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+      if (cmd === 'operator_status') return { ready: true, session: null, blocked: null };
+      return routed(cmd, ...rest);
+    });
+    await mountApp();
+    await fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    await tick();
+    expect(get(agentPanelOpen)).toBe(true);
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    await tick();
+    expect(get(agentPanelOpen)).toBe(false);
   });
 
   it('Settings → Open Hosts closes Settings and opens the view', async () => {
