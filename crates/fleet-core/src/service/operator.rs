@@ -260,6 +260,73 @@ impl OperatorHost for LiveHost {
     }
 }
 
+/// What the FAB needs to know before it opens a panel.
+///
+/// Deliberately plain fields, always serialised (no `#[serde(default)]`, no
+/// `skip_serializing_if`): a hub-read result must deserialise without serde
+/// defaults, so both `Option` fields have to be present on the wire even
+/// when `null`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OperatorStatus {
+    pub ready: bool,
+    pub session: Option<SessionRow>,
+    /// `null`, or one of `"absent"`, `"lost"`, `"no_mcp"`, `"token_revoked"`.
+    pub blocked: Option<String>,
+}
+
+/// Why the agent can or cannot work right now.
+///
+/// Checked in the order the panel needs it: whether the agent has ever been
+/// created comes first, because "press the button to create it" and "the
+/// control API is off" are different messages, and a fleet that has never
+/// seen the operator must say so regardless of its MCP settings. Only once
+/// a reference is on record does whether the control API is enabled matter
+/// — an agent with no tools is a chatbot, and the panel must say so rather
+/// than let it apologise. The control-API check is computed HERE, inside
+/// the authoritative backend, rather than from the desktop's `mcp_status` —
+/// that command is `LocalOnly`, and a hub's API is always on. Asking the
+/// backend that would actually serve the agent is the same question in both
+/// modes.
+pub fn operator_status(store: &Mutex<Store>) -> Result<OperatorStatus, IpcError> {
+    let s = lock(store)?;
+    let blocked = |why: &str, session: Option<SessionRow>| OperatorStatus {
+        ready: false,
+        session,
+        blocked: Some(why.to_string()),
+    };
+
+    let Some(r) = operator_ref(&s) else {
+        return Ok(blocked("absent", None));
+    };
+    if !crate::mcp::settings::McpSettings::read(&s)?.enabled {
+        return Ok(blocked("no_mcp", None));
+    }
+    let row = s
+        .get_session(&r.tmux_name, &r.host_alias)
+        .map_err(|e| IpcError::new(codes::E_SQLITE, format!("find operator: {e}")))?;
+    let Some(row) = row else {
+        return Ok(blocked("absent", None));
+    };
+    if row.lost_at.is_some() {
+        return Ok(blocked("lost", Some(row)));
+    }
+    // A revoked token is a deliberate act, so nothing re-mints itself — the
+    // panel offers a button and the person presses it.
+    let sha = s.get_setting(SETTING_OPERATOR_TOKEN_SHA).ok().flatten();
+    let live = s
+        .active_client_tokens()
+        .map(|rows| rows.iter().any(|t| Some(&t.token_sha256) == sha.as_ref()))
+        .unwrap_or(false);
+    if !live {
+        return Ok(blocked("token_revoked", Some(row)));
+    }
+    Ok(OperatorStatus {
+        ready: true,
+        session: Some(row),
+        blocked: None,
+    })
+}
+
 /// Make sure the operator session exists, and return its row.
 ///
 /// Idempotent by design — this runs on every press of the FAB. When a live
@@ -653,5 +720,37 @@ mod tests {
         );
         assert_eq!(host.starts.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(host.files.lock().unwrap().is_empty());
+    }
+
+    // ------------------------------------------------------- operator_status
+
+    #[test]
+    fn status_names_why_the_agent_cannot_work() {
+        let (store, _ssh, _reg) = fixture();
+
+        // Never born.
+        let st = operator_status(&store).unwrap();
+        assert!(!st.ready);
+        assert_eq!(st.blocked.as_deref(), Some("absent"));
+        assert!(st.session.is_none());
+
+        // Born, but the control API is off: an agent with no tools is a
+        // chatbot, and the panel must say so rather than let it apologise.
+        {
+            let s = store.lock().unwrap();
+            s.set_setting("mcp.enabled", "false").unwrap();
+            set_operator_ref(
+                &s,
+                &OperatorRef {
+                    host_alias: "local".into(),
+                    tmux_name: OPERATOR_TMUX_NAME.into(),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            operator_status(&store).unwrap().blocked.as_deref(),
+            Some("no_mcp")
+        );
     }
 }
