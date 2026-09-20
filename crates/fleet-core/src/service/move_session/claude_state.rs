@@ -212,11 +212,37 @@ pub struct MemoryDecision {
     pub left: Vec<LeftBehind>,
 }
 
+/// Whether `target` already has a file named `name`, deterministic even when
+/// `target` itself holds two entries that differ only by ASCII case (a
+/// case-sensitive Linux target can have both `note.md` and `Note.md`):
+/// an EXACT name match is authoritative and decides alone — `Some(true)` if
+/// its hash agrees with `hash`, `Some(false)` otherwise — regardless of any
+/// other case-variant entry's hash. Only when there is no exact match do ALL
+/// case-insensitive matches count: `Some(true)` if any of them has `hash`,
+/// else `Some(false)`. `None` when nothing in `target` matches at all.
+fn target_has(target: &[ListedMemory], name: &str, hash: &str) -> Option<bool> {
+    if let Some(t) = target.iter().find(|t| t.name == name) {
+        return Some(t.hash == hash);
+    }
+    let mut any_case_insensitive = false;
+    for t in target {
+        if t.name.eq_ignore_ascii_case(name) {
+            any_case_insensitive = true;
+            if t.hash == hash {
+                return Some(true);
+            }
+        }
+    }
+    any_case_insensitive.then_some(false)
+}
+
 /// Memory only ever adds: a name the target has is never carried, and the
 /// index is merged line-wise elsewhere, never copied. Names are compared
 /// ASCII-case-insensitively throughout — the index filter, the target match,
 /// and source-vs-source collisions — because a case-insensitive target
-/// volume (macOS default) treats `Note.md` and `note.md` as one file.
+/// volume (macOS default) treats `Note.md` and `note.md` as one file. The
+/// target match is resolved deterministically by `target_has`: an exact name
+/// match decides outright, ahead of any case-variant entry.
 pub fn decide_memory(source: &[ListedMemory], target: &[ListedMemory]) -> MemoryDecision {
     let mut d = MemoryDecision::default();
     let mut src: Vec<&ListedMemory> = source
@@ -239,8 +265,8 @@ pub fn decide_memory(source: &[ListedMemory], target: &[ListedMemory]) -> Memory
             // names that only exist as distinct files on a case-sensitive
             // source): only the first in name order is a candidate to carry.
             d.left.push(left(LeftReason::UnsupportedName));
-        } else if let Some(t) = target.iter().find(|t| t.name.eq_ignore_ascii_case(&f.name)) {
-            if t.hash == f.hash {
+        } else if let Some(identical) = target_has(target, &f.name, &f.hash) {
+            if identical {
                 d.identical += 1
             } else {
                 d.kept_target.push(f.name.clone())
@@ -1701,6 +1727,39 @@ with tarfile.open(out, "w:gz") as tar:
         let sel = select_session_files(vec![f("a", big), f("b", big), f("c", big)], 1);
         assert!(sel.carry.is_empty(), "{:?}", sel.carry);
         assert_eq!(sel.exclude.len(), 3);
+    }
+
+    // --- Fix round 2 ---
+
+    #[test]
+    fn decide_memory_prefers_the_exact_target_name_over_a_case_variant() {
+        let order_a = [m("note.md", "h1", 10), m("Note.md", "h2", 10)];
+        let order_b = [m("Note.md", "h2", 10), m("note.md", "h1", 10)];
+        for target in [order_a.as_slice(), order_b.as_slice()] {
+            // the exact name wins even though `note.md` may come first
+            let d = decide_memory(&[m("Note.md", "h2", 10)], target);
+            assert_eq!(d.identical, 1, "{:?}", d);
+            assert!(d.kept_target.is_empty() && d.carry.is_empty(), "{:?}", d);
+
+            // the exact `Note.md` entry has h2, not h1 -- the OTHER entry's
+            // hash must not make this identical
+            let d = decide_memory(&[m("Note.md", "h1", 10)], target);
+            assert_eq!(d.kept_target, vec!["Note.md"], "{:?}", d);
+            assert_eq!(d.identical, 0);
+            assert!(d.carry.is_empty());
+
+            // no exact match: ANY case-insensitive entry with the matching
+            // hash makes it identical
+            let d = decide_memory(&[m("NOTE.md", "h2", 10)], target);
+            assert_eq!(d.identical, 1, "{:?}", d);
+            assert!(d.kept_target.is_empty() && d.carry.is_empty());
+
+            // no exact match, and no case-insensitive entry's hash matches
+            let d = decide_memory(&[m("NOTE.md", "h9", 10)], target);
+            assert_eq!(d.kept_target, vec!["NOTE.md"], "{:?}", d);
+            assert_eq!(d.identical, 0);
+            assert!(d.carry.is_empty());
+        }
     }
 
     // --- Fix round 1 (session-directory scripts) ---
