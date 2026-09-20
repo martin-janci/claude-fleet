@@ -5,9 +5,36 @@ import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
+
+// Only `retryMove`, `resolveMoveRun` and `startMove` are replaced: `startMove`
+// keeps its real behaviour (wrapped so its calls can still be asserted on) —
+// the pre-existing tests below drive it for real through the mocked `invoke` —
+// while `retryMove`/`resolveMoveRun` become bare spies, since the failure-view
+// tests only need to see how they were called, never a real round trip.
+vi.mock('./moves', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./moves')>();
+  return {
+    ...actual,
+    retryMove: vi.fn(),
+    resolveMoveRun: vi.fn(),
+    startMove: vi.fn(actual.startMove),
+  };
+});
 import TransferSheet from './TransferSheet.svelte';
-import { moves, transferSheetFor, startMove, applyMoveProgress, resetMovesForTest } from './moves';
+import {
+  moves,
+  transferSheetFor,
+  startMove,
+  retryMove,
+  resolveMoveRun,
+  putRunForTest,
+  applyMoveProgress,
+  resetMovesForTest,
+  type MoveRun,
+} from './moves';
 import { MOVE_STEPS, type MoveProgress, type MoveStep, type MoveStepState } from './moveProgress';
+import type { MoveReport } from './moveSession';
+import type { IpcError } from './result';
 import { sessions, type SessionRow } from './sessions';
 import { hosts, type HostRow } from './hosts';
 import { selectedSession, selectSession } from './selection';
@@ -320,5 +347,188 @@ describe('TransferSheet', () => {
     render(TransferSheet);
     await tick();
     expect(get(transferSheetFor)).toBeNull();
+  });
+});
+
+// Task 11: the four recovery actions in the failure/result views. These
+// fixtures build a `MoveRun` directly and seed it with `putRunForTest` — the
+// public start/retry/resolve API cannot produce an arbitrary failed/done/
+// partial run synchronously, and the assertions below need the button to
+// already be in the DOM the moment `renderSheet` returns, with no `await` in
+// between.
+describe('TransferSheet: recovery actions', () => {
+  function blankSteps() {
+    return MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null }));
+  }
+
+  function renderSheet(run: MoveRun) {
+    putRunForTest(run);
+    transferSheetFor.set(run.sessionId);
+    return render(TransferSheet);
+  }
+
+  function failedRun(err: { code: string; message?: string; details?: unknown }): MoveRun {
+    return {
+      sessionId: 7,
+      sessionName: 'sess7',
+      fromHost: 'alpha',
+      toHost: 'beta',
+      keepSource: false,
+      origin: 'local',
+      steps: blankSteps(),
+      status: 'failed',
+      report: null,
+      error: { code: err.code, message: err.message ?? 'x', details: err.details ?? null },
+      startedAt: Date.now(),
+      settledAt: Date.now(),
+      cleanTarget: false,
+      attempt: 1,
+      awaitingStart: false,
+    };
+  }
+
+  function doneRun(opts: { fromHost: string; toHost: string }): MoveRun {
+    const targetRow = {
+      ...source, id: 8, tmux_name: 'sess7', host_alias: opts.toHost, parent_session_id: 7,
+    } as SessionRow;
+    sessions.set([targetRow]);
+    return {
+      sessionId: 7,
+      sessionName: 'sess7',
+      fromHost: opts.fromHost,
+      toHost: opts.toHost,
+      keepSource: false,
+      origin: 'local',
+      steps: blankSteps(),
+      status: 'done',
+      report: {
+        ...report,
+        source_session_id: 7,
+        target_session_id: 8,
+        from_host: opts.fromHost,
+        to_host: opts.toHost,
+        target: targetRow,
+      } as MoveReport,
+      error: null,
+      startedAt: Date.now(),
+      settledAt: Date.now(),
+      cleanTarget: false,
+      attempt: 1,
+      awaitingStart: false,
+    };
+  }
+
+  function partialRun(opts: { resolveError?: IpcError } = {}): MoveRun {
+    return {
+      sessionId: 7,
+      sessionName: 'sess7',
+      fromHost: 'alpha',
+      toHost: 'beta',
+      keepSource: null,
+      origin: 'local',
+      steps: blankSteps(),
+      status: 'partial',
+      report: null,
+      error: opts.resolveError ?? {
+        code: 'E_MOVE_PARTIAL',
+        message: '',
+        details: { step: 'confirming the target is running', target_session_id: 8 },
+      },
+      startedAt: Date.now(),
+      settledAt: Date.now(),
+      cleanTarget: false,
+      attempt: 1,
+      awaitingStart: false,
+    };
+  }
+
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    vi.mocked(retryMove).mockClear();
+    vi.mocked(resolveMoveRun).mockClear();
+    vi.mocked(startMove).mockClear();
+    resetMovesForTest();
+    sessions.set([source]);
+    hosts.set([host('alpha'), host('beta')]);
+    selectSession(null);
+  });
+
+  it('offers Retry on a plain failure and re-runs the same move', async () => {
+    const { getByTestId } = renderSheet(
+      failedRun({ code: 'E_MOVE_CARRY', details: { step: 'apply' } }),
+    );
+    await fireEvent.click(getByTestId('transfer-retry'));
+    expect(retryMove).toHaveBeenCalledWith(7, { cleanTarget: false });
+  });
+
+  it('offers a cleanup that names what it would replace, and needs two clicks', async () => {
+    const { getByTestId, queryByTestId } = renderSheet(
+      failedRun({
+        code: 'E_MOVE_TARGET_DIRTY',
+        details: { leftovers: 'ours', ours: ['src/lib.rs', 'notes.txt'] },
+      }),
+    );
+    await fireEvent.click(getByTestId('transfer-clean'));
+    // Nothing has run yet: the first click only reveals what it would remove.
+    // (The sentence above the buttons already names the same paths, so scope
+    // the check to the failure body rather than matching text anywhere.)
+    expect(retryMove).not.toHaveBeenCalled();
+    expect(getByTestId('transfer-failure').textContent).toContain('src/lib.rs');
+    await fireEvent.click(getByTestId('transfer-clean-confirm'));
+    expect(retryMove).toHaveBeenCalledWith(7, { cleanTarget: true });
+    expect(queryByTestId('transfer-clean-confirm')).toBeNull();
+  });
+
+  it('never offers a cleanup for the target own work', () => {
+    const { queryByTestId } = renderSheet(
+      failedRun({ code: 'E_MOVE_TARGET_DIRTY', details: { leftovers: 'theirs', theirs: ['x.md'] } }),
+    );
+    expect(queryByTestId('transfer-clean')).toBeNull();
+    expect(queryByTestId('transfer-retry')).toBeNull();
+  });
+
+  it('offers Move back on a finished move', async () => {
+    // Clicking "Move back" starts a genuine (mocked-invoke) move of session 8:
+    // give it something to resolve with so that real flow does not throw.
+    mockInvoke.mockImplementation(() => Promise.resolve(report));
+    const { getByTestId } = renderSheet(doneRun({ fromHost: 'alpha', toHost: 'beta' }));
+    const back = getByTestId('transfer-move-back');
+    expect(back.textContent).toContain('alpha');
+    await fireEvent.click(back);
+    expect(startMove).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 8 }),
+      'alpha',
+      { keepSource: false },
+    );
+  });
+
+  it('offers Finish and Undo on a partial, each behind its own confirm', async () => {
+    const { getByTestId } = renderSheet(partialRun());
+    await fireEvent.click(getByTestId('transfer-finish'));
+    expect(resolveMoveRun).not.toHaveBeenCalled();
+    await fireEvent.click(getByTestId('transfer-finish-confirm'));
+    expect(resolveMoveRun).toHaveBeenCalledWith(7, 'finish');
+
+    await fireEvent.click(getByTestId('transfer-undo'));
+    await fireEvent.click(getByTestId('transfer-undo-confirm'));
+    expect(resolveMoveRun).toHaveBeenCalledWith(7, 'undo');
+  });
+
+  it('shows a refusal from Finish in place, not as a toast', async () => {
+    const { getByTestId } = renderSheet(
+      partialRun({ resolveError: { code: 'E_INVALID_STATE', message: 'the target took a turn', details: null } }),
+    );
+    // The raw-details `<pre>` repeats the same message, so scope the check to
+    // the failure body rather than matching text anywhere in the document.
+    expect(getByTestId('transfer-failure').textContent).toContain('took a turn');
+    expect(getByTestId('transfer-finish')).toBeTruthy();
+  });
+
+  it('an undone run reads as undone', () => {
+    const { getByText, queryByTestId } = renderSheet(
+      failedRun({ code: 'E_MOVE_UNDONE', details: null }),
+    );
+    expect(getByText(/undid/)).toBeTruthy();
+    expect(queryByTestId('transfer-retry')).toBeNull();
   });
 });

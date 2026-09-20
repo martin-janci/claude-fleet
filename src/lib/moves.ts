@@ -499,3 +499,11 @@ export function resetMovesForTest(): void {
   store.set(new Map());
   transferSheetFor.set(null);
 }
+
+/** Test-only: inject an arbitrary run directly, bypassing the state machine —
+ *  the Transfer sheet's failure-view tests need a `failed`/`done`/`partial`
+ *  run with a specific error or report in place *before* the first render,
+ *  which the public start/retry/resolve API cannot do synchronously. */
+export function putRunForTest(run: MoveRun): void {
+  put(run);
+}
