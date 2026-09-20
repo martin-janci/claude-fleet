@@ -150,7 +150,8 @@ impl HubBackend {
 
     /// The refusal for a call made while the last thing this window learned
     /// about the hub is that its wire contract is outside the range this
-    /// build reads, or `None` in every other state. `what` names the tool.
+    /// build reads, or `None` when nothing has been learned or the last hub
+    /// judged was in range. `what` names the tool.
     ///
     /// # Why a call is refused and not merely distrusted
     ///
@@ -163,27 +164,27 @@ impl HubBackend {
     /// different — its return value is a row too, and the frontend merges it
     /// optimistically.
     ///
-    /// # Which states gate
+    /// # What it reads, and what it deliberately does not
     ///
-    /// Only a KNOWN skew.
+    /// The last contract VERDICT
+    /// ([`ConnectionView::contract_verdict`](super::connection::ConnectionView::contract_verdict)),
+    /// not where the connection stands now. Only a `ready` frame judges a
+    /// hub's wire contract, so only a `ready` frame may change the answer:
     ///
-    /// - `connecting` does not: no handshake has completed on this launch, so
-    ///   nothing is known yet, and gating it would make every startup list
-    ///   wait on `GET /events`.
-    /// - `reconnecting` / `offline` do not either: they say the stream is
-    ///   down, not that the hub's rows are unreadable. A call then fails, or
-    ///   succeeds, exactly as it did before this gate existed — the transport
-    ///   reports it in its own words.
-    /// - `standalone` cannot occur on a hub client, and would not gate.
-    ///
-    /// Once a later `ready` frame classifies the hub in range, the bridge
-    /// reports `Connected` into the same status and the gate opens again
-    /// without a restart.
+    /// - a window that has never completed a handshake on this launch
+    ///   (`connecting`) calls, or every startup list would wait on
+    ///   `GET /events`;
+    /// - `reconnecting` / `offline` change nothing either way. Reading the
+    ///   *state* would open the gate there, and since `GET /events` and
+    ///   `POST /mcp` are separate sockets, a hub whose stream is merely down
+    ///   would become readable again while still known to be incompatible;
+    /// - a later `ready` frame in range makes the bridge report `Connected`,
+    ///   which clears the verdict, and the gate opens without a restart.
     fn contract_error(&self, what: &str) -> Option<IpcError> {
-        // The numbers come from the reported state rather than from this
+        // The numbers come from the recorded verdict rather than from this
         // build's constants, so the message and `details` cannot disagree
         // with the banner that is on screen for the same connection.
-        let (message, details) = match self.link.as_ref()?.current() {
+        let (message, details) = match self.link.as_ref()?.contract_verdict()? {
             HubConnection::HubTooOld {
                 hub_contract,
                 min_contract,
@@ -206,6 +207,9 @@ impl HubBackend {
                 ),
                 json!({ "hub_contract": hub_contract, "max_contract": max_contract }),
             ),
+            // Only a skew is ever recorded as a verdict; anything else here
+            // would be a bug in `HubConnectionStatus::report`, and inventing
+            // a refusal for it would be worse than letting the call run.
             _ => return None,
         };
         Some(IpcError::new(codes::E_HUB_CONTRACT, message).with_details(details))

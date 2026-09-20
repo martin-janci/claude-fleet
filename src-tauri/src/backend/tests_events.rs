@@ -895,6 +895,77 @@ async fn recovery_when_a_later_reconnect_is_back_in_range() {
     );
 }
 
+/// The resync runs through a `HubBackend` that consults the same status this
+/// loop reports into (`bootstrap/tasks.rs`), so the backfill is refused with
+/// `E_HUB_CONTRACT` unless the contract verdict is already cleared when
+/// `resync()` is awaited. That is true today only because `pump` reports the
+/// in-range `ready` frame BEFORE it awaits the resync — swap those two
+/// statements, a plausible tidy-up ("re-list, then say we are up"), and every
+/// backfill after a skewed connection silently refuses inside the bridge
+/// while the banner says Connected and the rows quietly rot.
+///
+/// So this pins the ordering from the only direction that can catch it: what
+/// the status says at the moment the backfill starts.
+#[tokio::test]
+async fn the_backfill_runs_with_the_contract_verdict_already_cleared() {
+    use crate::backend::connection::{HubConnection as C, HubConnectionStatus};
+
+    /// Reads the shared status on entry to `resync`, the way the real
+    /// [`HubResync`]'s `HubBackend` does.
+    struct WatchingResync {
+        status: Arc<HubConnectionStatus>,
+        seen: StdMutex<Vec<(C, Option<C>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl FleetResync for WatchingResync {
+        async fn resync(&self) {
+            let seen = (self.status.current(), self.status.contract_verdict());
+            self.seen.lock().unwrap().push(seen);
+        }
+        fn observe(&self, _name: &'static str, _payload: &Value) {}
+    }
+
+    let too_new = crate::backend::contract::MAX_HUB_CONTRACT + 1;
+    let cancel = CancellationToken::new();
+    let stream = ScriptedStream::new(
+        vec![
+            // A skew first, so the verdict is set and something has to clear
+            // it — a run that only ever saw an in-range hub would pass even
+            // with the clearing removed altogether.
+            Connection::Delivers(vec![ready_with_contract(too_new)]),
+            Connection::Delivers(vec![ready()]),
+        ],
+        cancel.clone(),
+    );
+    let status = Arc::new(HubConnectionStatus::remote(
+        Arc::new(Recorder::default()),
+        "cl_t",
+    ));
+    let resync = Arc::new(WatchingResync {
+        status: Arc::clone(&status),
+        seen: StdMutex::new(Vec::new()),
+    });
+    EventBridge::new(
+        stream,
+        Arc::new(Recorder::default()),
+        Arc::clone(&resync) as Arc<dyn FleetResync>,
+        Arc::new(FakeDelay::default()),
+        cancel,
+    )
+    .reporting_to(Arc::clone(&status) as Arc<dyn crate::backend::connection::ConnectionReporter>)
+    .run()
+    .await;
+
+    assert_eq!(
+        resync.seen.lock().unwrap().clone(),
+        vec![(C::Connected, None)],
+        "the backfill must run once, after the in-range hello has been \
+         reported and the skew verdict cleared — otherwise it is refused by \
+         the gate and nothing says so"
+    );
+}
+
 /// The gate must hold for EVERY frame ahead of `ready`, not only the ones
 /// this suite's other scripts happen to send. A row frame that somehow beat
 /// `ready` to the wire — unreachable against a real hub today (`events_route`'s

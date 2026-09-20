@@ -1401,6 +1401,22 @@ fn a_hub_with_a_skewed_wire_contract_refuses_every_routed_command() {
             );
             fake.was_not_called();
         }
+        // `health_check` is the one routed command the case tables do not
+        // drive (`ROUTED_WITHOUT_A_CASE`), so the sweep above cannot reach
+        // it. It goes through the same `route` → `call` → `call_text`, and
+        // the footer reading a skewed hub's fleet is as wrong as the sidebar
+        // doing it, so it is driven here by hand.
+        let fake = Fake::answering("{}");
+        let (_dir, st) = store();
+        let err = block_on(commands::health::routed::health_check(
+            &skewed_backend(&fake, state.clone()),
+            &st,
+        ))
+        // `Health` is not `Debug`, so `expect_err` is not available.
+        .err()
+        .expect("the footer must not show a skewed hub's fleet either");
+        assert_eq!(err.code, codes::E_HUB_CONTRACT, "health_check: {err:?}");
+        fake.was_not_called();
     }
 }
 

@@ -1064,16 +1064,21 @@ its own without restarting the app.
 
 Every **call** to that hub is refused too, for as long as its revision is the
 last thing this window learned: the routed reads (`list_sessions`,
-`list_hosts`, `session_conversations`, the repo reads, the focus-refresh
-path) and the routed mutations alike, since a mutation's answer is a row the
-window merges like any other. They answer `E_HUB_CONTRACT` with the banner's
-own sentence — which side is behind and what to do — and nothing is sent, so
-there is nothing to read with a renamed field silently defaulted. A desktop
-that has not finished a handshake yet (`connecting`) still calls, or the
-startup lists would wait on `GET /events`; a stream that is merely down
-(`reconnecting`, `offline`) still calls too, and fails the way it always did.
-The first `ready` frame that classifies the hub back in range opens all of it
-again, with no restart.
+`list_hosts`, `session_conversations`, the repo reads, the health check, the
+focus-refresh path) and the routed mutations alike, since a mutation's answer
+is a row the window merges like any other. They answer `E_HUB_CONTRACT` with
+the banner's own sentence — which side is behind and what to do — and nothing
+is sent, so there is nothing to read with a renamed field silently defaulted.
+
+"The last thing this window learned" is exactly that, and not "how the
+connection is doing right now". `GET /events` and `POST /mcp` are separate
+sockets: a hub whose event stream is down, or behind a flapping proxy, can
+still answer calls, and its row shapes have not changed because a socket
+dropped. So only a hello frame moves the verdict — a desktop that has not
+finished a handshake yet (`connecting`) calls, because nothing has been
+learned; a stream that is merely down (`reconnecting`, `offline`) changes
+nothing either way; and the first `ready` frame that classifies the hub back
+in range opens all of it again, with no restart.
 
 ### Parity or refusal
 

@@ -507,6 +507,10 @@ fn a_jsonrpc_protocol_error_is_reported_as_one() {
 // The state is the REAL [`HubConnectionStatus`], reported into exactly as the
 // bridge reports into it. One value plays both parts on purpose: a second
 // copy of "where the connection stands" is a copy that can drift.
+//
+// What the gate reads is the last CONTRACT VERDICT, not the current state —
+// see [`a_dropped_socket_after_a_skew_does_not_reopen_the_gate`] for why the
+// difference is the whole point.
 
 /// A sink that throws the event away — these are about what the status
 /// REMEMBERS, which is what the gate reads.
@@ -603,13 +607,15 @@ fn a_mutation_is_gated_too() {
     nothing_was_sent(&fake);
 }
 
-/// `connecting` is not a skew: no handshake has completed on this launch, and
-/// gating it would make every startup list wait on `GET /events`. The two
-/// down states are not a skew either — they say the connection is gone, not
-/// that the hub's rows are unreadable — and they keep the behaviour they had
+/// A window that has never been told a hub's revision calls in every state.
+///
+/// `connecting` is the case that matters: no handshake has completed on this
+/// launch, so nothing is known, and gating it would make every startup list
+/// wait on `GET /events`. The two down states say the connection is gone, not
+/// that the hub's rows are unreadable, and they keep the behaviour they had
 /// before this gate existed.
 #[test]
-fn only_a_known_skew_gates_a_call() {
+fn a_hub_that_has_never_been_judged_is_called_in_every_state() {
     for state in [
         HubConnection::Connecting,
         HubConnection::Connected,
@@ -630,6 +636,59 @@ fn only_a_known_skew_gates_a_call() {
             .unwrap_or_else(|e| panic!("{state:?} must still reach the hub: {e:?}"));
         assert!(rows.is_empty());
         assert_eq!(fake.seen.lock().unwrap().len(), 1, "{state:?}");
+    }
+}
+
+/// The verdict outlives the connection state that carried it.
+///
+/// `/events` and `POST /mcp` are separate sockets. After a skew the bridge
+/// ends that connection and loops, and its next iteration reports `Offline`
+/// (the open failed) or `Reconnecting` (a stream that ended before its `ready`
+/// frame) — neither of which has re-judged anything. A gate that read the
+/// CURRENT state would open there, and reads would come back from a hub still
+/// known to be incompatible: exactly the case this task exists to prevent, and
+/// a likely one, since a hub whose event stream is down or behind a flapping
+/// proxy can still answer `/mcp`.
+#[test]
+fn a_dropped_socket_after_a_skew_does_not_reopen_the_gate() {
+    for skew in [
+        HubConnection::HubTooOld {
+            hub_contract: 1,
+            min_contract: 3,
+        },
+        HubConnection::HubTooNew {
+            hub_contract: 9,
+            max_contract: 1,
+        },
+    ] {
+        for after in [
+            HubConnection::Offline {
+                attempt: 1,
+                retry_in_secs: 1,
+                reason: "connection refused".into(),
+            },
+            HubConnection::Reconnecting {
+                attempt: 2,
+                retry_in_secs: 4,
+                reason: "the hub closed the event stream".into(),
+            },
+        ] {
+            let fake = Fake::answering(Ok(ok("[]")));
+            let status = link(skew.clone());
+            status.report(after.clone());
+            let err = block_on(watched(&fake, &status).list_sessions(false)).expect_err(
+                "a dropped socket re-judges nothing, so the hub is still the one \
+                 this build cannot read",
+            );
+            assert_eq!(err.code, codes::E_HUB_CONTRACT, "{skew:?} then {after:?}");
+            // And the numbers are still the skew's, not the reconnect's.
+            assert!(
+                err.message.contains("wire contract is revision"),
+                "{skew:?} then {after:?}: {}",
+                err.message
+            );
+            nothing_was_sent(&fake);
+        }
     }
 }
 
