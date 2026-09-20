@@ -10,6 +10,7 @@
   import { openAgent, operatorState, blockedCopy, type OperatorBlocked } from './operator';
   import { agentChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
+  import { hintAnchor } from './hints';
 
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   const blocked = $derived(
@@ -20,7 +21,13 @@
   const title = $derived(blocked ? blocked.title : `Ask the agent (${agentChordLabel(isMac)})`);
 </script>
 
-<button class="agent-fab" {title} aria-label="Agent" onclick={() => void openAgent()}>
+<button
+  class="agent-fab"
+  {title}
+  aria-label="Agent"
+  onclick={() => void openAgent()}
+  use:hintAnchor={{ id: 'agent-fab', when: !blocked }}
+>
   <span aria-hidden="true">✦</span>
 </button>
 

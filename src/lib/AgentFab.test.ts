@@ -28,4 +28,18 @@ describe('AgentFab', () => {
     const btn = screen.getByRole('button', { name: /agent/i });
     expect(btn).toHaveAttribute('title', expect.stringContaining('control API'));
   });
+
+  it('registers the agent-fab hint anchor when the button is actionable', async () => {
+    const { anchorEl } = await import('./hints');
+    operatorState.set('ready');
+    render(AgentFab);
+    expect(anchorEl('agent-fab')).toBeDefined();
+  });
+
+  it('does not anchor the hint while the button only explains why the agent is unavailable', async () => {
+    const { anchorEl } = await import('./hints');
+    operatorState.set('no_mcp');
+    render(AgentFab);
+    expect(anchorEl('agent-fab')).toBeUndefined();
+  });
 });
