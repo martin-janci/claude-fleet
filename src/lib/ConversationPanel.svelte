@@ -1249,6 +1249,7 @@
       <div class="composer-row">
         <textarea
           data-testid="conv-composer-input"
+          aria-label="Prompt"
           bind:this={box}
           bind:value={draft}
           oninput={onComposerInput}
@@ -1257,7 +1258,7 @@
           placeholder="Send a prompt to this session (Enter to send, Shift+Enter for a new line, ↑ recalls earlier prompts)"
           disabled={sending || viewing !== null}
         ></textarea>
-        <button type="submit" data-testid="conv-composer-send" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>
+        <button type="submit" data-testid="conv-composer-send" aria-keyshortcuts="Enter" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>
       </div>
       {#if statusNote}
         <div class="composer-foot">

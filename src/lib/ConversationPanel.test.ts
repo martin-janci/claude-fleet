@@ -2383,4 +2383,16 @@ describe('ConversationPanel detail UX fixes', () => {
       g.Highlight = savedHl;
     }
   });
+  it('the composer textarea and Send button carry accessible names and the Enter shortcut', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const box = screen.getByTestId('conv-composer-input');
+    // A placeholder is not an accessible name: it disappears as soon as the
+    // user types, so the field must carry its own label.
+    expect(box.getAttribute('aria-label')).toBe('Prompt');
+    expect(screen.getByTestId('conv-composer-send').getAttribute('aria-keyshortcuts')).toBe('Enter');
+  });
 });
