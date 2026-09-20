@@ -2422,6 +2422,7 @@ mod tests {
                     None,
                     1,
                     "external",
+                    1,
                 )
                 .unwrap();
             (tmux_id, bg_id)

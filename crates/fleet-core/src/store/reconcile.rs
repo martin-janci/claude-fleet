@@ -1368,6 +1368,7 @@ mod tests {
                 Some("idle"),
                 100,
                 "external",
+                100,
             )
             .unwrap();
         for pass in 1..=3 {
@@ -1400,6 +1401,7 @@ mod tests {
                 Some("working"),
                 100,
                 "bg",
+                100,
             )
             .unwrap();
         store
