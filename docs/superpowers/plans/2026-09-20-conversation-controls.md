@@ -1020,7 +1020,7 @@ git commit -m "refactor(ui): bordered pill means clickable, everywhere"
 
 ### Task 8: One inset, so the box lines up with the bubbles it makes
 
-`.thread` applies `padding: 1rem 1.1rem` **inside** its 80ch box while `.composer-row` spans the full 80ch. The composer textarea's left edge therefore sits 15.4px to the left of every prompt bubble it produces.
+`.thread` applies `padding: 1rem 1.1rem` **inside** its 80ch box while `.composer-row` spans the full 80ch, and three different inset rules are in play across the header, the thread and the composer. (An earlier draft of this task claimed the two edges were 15.4px apart. They were not — that arithmetic assumes `border-box`, and this app has no global `box-sizing` reset. The task is a single-token cleanup, not a bug fix.)
 
 **Files:**
 - Modify: `src/lib/ConversationPanel.svelte` (`<style>`: `.thread`, `.composer`, `.chips`, `.composer-row`, `.slash-menu`, `.composer-error`, `.composer-status`)

@@ -213,8 +213,17 @@ goes: three meters drawn two ways is a worse outcome than the wash it replaces.
 One inset expression — `max(1.1rem, calc((100% - var(--chat-col)) / 2 + 1.1rem))`
 — is shared by `.conv-header`, `.thread` and `.composer`. Today `.thread`
 applies `padding: 1rem 1.1rem` *inside* its 80ch box while the composer spans
-the full 80ch, so **the textarea's left edge sits 15px to the left of every
-prompt bubble it produces**.
+the full 80ch.
+
+**Correction, made during implementation.** This was written as a 15px
+misalignment between the textarea and the bubbles it produces. That is wrong:
+the claim assumes `border-box`, and this app has no global `box-sizing` reset,
+so `.thread` is `content-box` and both edges already landed on `(W - 80ch) / 2`.
+There was no misalignment to fix. The single `--chat-inset` token is still
+worth having — it replaces three divergent inset rules with one, which is what
+lets the header, the turns and the composer stay aligned as any of them
+changes — but it is a cleanup, not a bug fix, and it narrows the wide-pane
+reading column from 80ch to 80ch minus 2.2rem.
 
 Delete `.toolbar` and `.find` from `ConversationPanel.svelte`.
 
