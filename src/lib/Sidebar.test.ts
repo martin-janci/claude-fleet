@@ -649,7 +649,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     await fireEvent.click(screen.getByTestId('add-create'));
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
     expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('me/thing');
-    expect(document.querySelector('.host-pick.active')?.getAttribute('data-alias')).toBe('local');
+    expect(document.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias')).toBe('local');
   });
 
   it('a native <dialog> close on NewSessionDialog still closes it (Modal reopen only when the parent declines)', async () => {

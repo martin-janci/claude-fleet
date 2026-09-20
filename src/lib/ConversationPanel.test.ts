@@ -2364,7 +2364,7 @@ describe('ConversationPanel find, copy and turn index', () => {
     await fireEvent.click(btn);
     await settle();
     expect(mockedCopy).toHaveBeenCalledWith('and the lexer');
-    expect(btn.textContent).toContain('Copied');
+    expect(btn.getAttribute('aria-label')).toBe('Copied');
   });
 
   it('copy on a text group copies its markdown source', async () => {

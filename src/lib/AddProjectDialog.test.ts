@@ -237,7 +237,7 @@ describe('AddProjectDialog', () => {
       expect(chip('mefistos').disabled).toBe(true);
       expect(chip('mefistos').title).toMatch(/local/);
       expect(chip('local').disabled).toBe(false);
-      expect(chip('local').classList.contains('active')).toBe(true);
+      expect(chip('local').getAttribute('aria-pressed')).toBe('true');
     });
 
     it('sends the chosen path as {kind:folder, path} on local', async () => {

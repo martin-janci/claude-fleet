@@ -1036,7 +1036,7 @@
         {#if errorMsg && !empty}
           <div class="error-row">
             <span class="err" data-testid="conv-error">{errorMsg}</span>
-            <button type="button" class="retry-btn" data-testid="conv-retry" onclick={() => void load()}>Retry</button>
+            <button type="button" class="btn btn--quiet is-bounded" data-testid="conv-retry" onclick={() => void load()}>Retry</button>
           </div>
         {/if}
         {#if conv?.truncated}
@@ -1362,16 +1362,6 @@
   [data-current-match] {
     outline: 2px solid var(--accent);
   }
-  .copy-slot {
-    opacity: 0;
-    transition: opacity 0.1s ease;
-  }
-  .prompt:hover .copy-slot,
-  .prompt:focus-within .copy-slot,
-  .text:hover > .copy-slot,
-  .text:focus-within > .copy-slot {
-    opacity: 1;
-  }
   .head-right {
     display: inline-flex;
     align-items: baseline;
@@ -1558,7 +1548,6 @@
       animation: none;
       opacity: 0.7;
     }
-    .copy-slot,
     .tools summary::before {
       transition: none;
     }
@@ -1639,17 +1628,6 @@
     gap: 0.5rem;
     margin-bottom: 0.75rem;
   }
-  .retry-btn {
-    padding: 0.1rem 0.45rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--fg);
-    font: inherit;
-    font-size: 0.74rem;
-    cursor: pointer;
-  }
-  .retry-btn:hover { border-color: var(--accent); }
   .err { color: var(--usage-crit); font-size: 0.8rem; }
   .turn {
     padding: 0.2rem 0 1.1rem;

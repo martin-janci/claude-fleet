@@ -80,7 +80,7 @@
     <div class="modal-actions">
       <button onclick={() => onClose()}>Cancel</button>
       <button
-        class="btn-primary"
+        class="btn btn--primary"
         onclick={doNewBgSession}
         disabled={bgModalLoading || !bgModalName.trim() || !bgModalPrompt.trim() || bgSessionBlocked !== null}
         title={bgSessionBlocked ?? ''}
@@ -123,7 +123,13 @@
     gap: 8px;
     margin-top: 4px;
   }
-  .modal-actions button {
+  /* :not(.btn) — a bare `button` type selector here has the same
+     specificity trap that used to need a priority escape hatch:
+     `.modal-actions button` (0,1,1) otherwise beats a primitive class like
+     `.btn--primary` (0,1,0) on every shared property (padding, border,
+     background, color). Cancel stays plain; Launch carries the primitives
+     instead. */
+  .modal-actions button:not(.btn) {
     font-size: 0.85rem;
     padding: 0.3rem 0.8rem;
     border: 1px solid var(--border);
@@ -132,10 +138,4 @@
     border-radius: 4px;
     cursor: pointer;
   }
-  .btn-primary {
-    color: var(--accent) !important;
-    border-color: var(--accent) !important;
-  }
-  .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 14%, transparent) !important; }
-  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

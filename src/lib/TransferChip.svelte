@@ -26,7 +26,7 @@
 <span class="host">
   {#if run}
     <button
-      class="chip live"
+      class="btn btn--quiet is-bounded chip live"
       data-state={run.status}
       onclick={open}
       title="Show the transfer to {run.toHost}"
@@ -48,7 +48,7 @@
   {:else if canMoveSession(session)}
     on
     <button
-      class="chip"
+      class="btn btn--quiet is-bounded chip"
       onclick={open}
       disabled={blocked !== null}
       title={blocked ?? 'Transfer this session to another host'}
@@ -63,16 +63,6 @@
 
 <style>
   .host { color: var(--fg-muted); font-size: 0.75rem; }
-  .chip {
-    font: inherit;
-    color: inherit;
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0 0.35rem;
-    cursor: pointer;
-  }
-  .chip:disabled { cursor: default; opacity: 0.6; }
   .chip.live { color: var(--accent, inherit); border-color: currentColor; }
   .chip.live[data-state='failed'], .chip.live[data-state='partial'] { color: #e64a4a; }
 </style>

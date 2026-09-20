@@ -102,7 +102,12 @@
   background: var(--control-bg);
   color: var(--control-fg-quiet);
 }
-.btn--chip:hover:not(:disabled) {
+/* :not([aria-pressed='true']):not(.is-active) — otherwise this rule's
+   (0,3,0) beats the pressed rule below's (0,2,0) and hovering a SELECTED
+   chip silently drops the accent border back to --control-border-strong.
+   See the pressed-hover rule below for the feedback a hover still owes a
+   pressed control. */
+.btn--chip:hover:not(:disabled):not([aria-pressed='true']):not(.is-active) {
   border-color: var(--control-border-strong);
   color: var(--control-fg);
 }
@@ -117,6 +122,15 @@
   background: var(--accent-soft);
   color: var(--control-fg);
   font-weight: 500;
+}
+/* A pressed control still owes hover feedback — just not by losing its
+   selected-state border, which is what the excluded chip hover rule above
+   would otherwise do. */
+.btn--toggle[aria-pressed='true']:hover:not(:disabled),
+.btn--toggle.is-active:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, #000 10%, var(--accent-soft));
+  color: var(--control-fg);
 }
 
 /* Square by construction, so a close button cannot end up 13×13px. */

@@ -305,7 +305,7 @@ describe('App: the Hosts view', () => {
     await fireEvent.click(pick);
     const dialog = await screen.findByRole('dialog', { name: 'New session' });
     await waitFor(() =>
-      expect(dialog.querySelector('.host-pick.active')?.getAttribute('data-alias')).toBe('mefistos'),
+      expect(dialog.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias')).toBe('mefistos'),
     );
   });
 

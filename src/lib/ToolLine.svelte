@@ -331,16 +331,12 @@
   .result-wrap {
     position: relative;
   }
+  /* Task 14: CopyButton is a 24px target now, always visible — no more
+     opacity: 0 hover-reveal to find it through first. */
   .copy-slot {
     position: absolute;
     top: 0.25rem;
     right: 0.35rem;
-    opacity: 0;
-    transition: opacity 0.1s ease;
-  }
-  .result-wrap:hover .copy-slot,
-  .result-wrap:focus-within .copy-slot {
-    opacity: 1;
   }
   .result[data-error] {
     color: var(--usage-crit);
@@ -363,8 +359,7 @@
     cursor: pointer;
   }
   @media (prefers-reduced-motion: reduce) {
-    .chev,
-    .copy-slot {
+    .chev {
       transition: none;
     }
   }

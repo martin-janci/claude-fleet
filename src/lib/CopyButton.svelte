@@ -27,30 +27,15 @@
 
 <button
   type="button"
-  class="conv-copy"
+  class="btn btn--icon btn--quiet conv-copy"
   class:copied
   data-testid="conv-copy"
   aria-label={copied ? 'Copied' : label}
   title={copied ? (copiedNote ? `Copied (${copiedNote})` : 'Copied') : label}
-  onclick={() => void copy()}>{copied ? 'Copied' : 'Copy'}</button
+  onclick={() => void copy()}>⧉</button
 >
 
 <style>
-  .conv-copy {
-    padding: 0.05rem 0.4rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--fg-muted);
-    font-size: 0.68rem;
-    line-height: 1.4;
-    cursor: pointer;
-  }
-  .conv-copy:hover,
-  .conv-copy:focus-visible {
-    border-color: var(--accent);
-    color: var(--fg);
-  }
   .conv-copy.copied {
     color: var(--accent);
   }
