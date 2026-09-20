@@ -1,5 +1,7 @@
-//! `HubBackend`: every read this app does, expressed as a call to the MCP
-//! tool the hub already serves.
+//! `HubBackend`: every call this app makes to the hub — reads and mutations
+//! alike — as the MCP tool the command's
+//! [`VERDICTS`](super::verdicts::VERDICTS) row names. [`Self::route`] is the
+//! way in; the tool name is never written twice.
 //!
 //! The hub's tools are built from `fleet-core`'s own service layer, so the
 //! JSON they return *is* the row type a local command would have returned.
@@ -171,7 +173,16 @@ impl HubBackend {
     }
 
     /// Call one tool and deserialise its result into `T`.
-    pub async fn call<T: DeserializeOwned>(&self, tool: &str, args: Value) -> Result<T, IpcError> {
+    ///
+    /// Not `pub`: [`Self::route`] is the only way in from outside this
+    /// module, so a command can never reach the hub with a hand-written tool
+    /// literal behind [`VERDICTS`](super::verdicts::VERDICTS)'s back — the
+    /// tool always comes from the row.
+    pub(super) async fn call<T: DeserializeOwned>(
+        &self,
+        tool: &str,
+        args: Value,
+    ) -> Result<T, IpcError> {
         let text = self.call_text(tool, args).await?;
         serde_json::from_str(&text).map_err(|e| {
             IpcError::new(
@@ -186,7 +197,10 @@ impl HubBackend {
 
     /// Call one tool and return its result text unparsed — for the tools that
     /// answer prose rather than JSON (`session_transcript`, `capture_session`).
-    pub async fn call_text(&self, tool: &str, args: Value) -> Result<String, IpcError> {
+    ///
+    /// Not `pub`, for the same reason as [`Self::call`]: only
+    /// [`Self::route_text`] calls it from outside this module.
+    pub(super) async fn call_text(&self, tool: &str, args: Value) -> Result<String, IpcError> {
         if let Some(refused) = self.unavailable_error(tool) {
             return Err(refused);
         }
