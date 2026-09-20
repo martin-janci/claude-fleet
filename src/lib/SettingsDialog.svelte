@@ -33,6 +33,7 @@
     MOVE_MAX_BUNDLE_MB_MAX,
     MOVE_IGNORED_ENTRY_KB_MAX,
     MOVE_IGNORED_TOTAL_MB_MAX,
+    MOVE_MAX_SESSION_STATE_MB_MAX,
     PROJECTS_LOCAL_ENV_KEY,
     settingPathMap,
     settingLayout,
@@ -925,6 +926,16 @@
           data-testid="move-ignored-total-mb"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.moveIgnoredTotalMb, 'Move ignored total', e)} />
         <span class="hook-desc" id="limit-move-ignored-total-desc">total git-ignored payload (MiB, 1–{MOVE_IGNORED_TOTAL_MB_MAX}) Move to host… carries</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="limit-move-session-state-mb">carry session</label>
+        <input class="port" id="limit-move-session-state-mb" type="number" min="1" max={MOVE_MAX_SESSION_STATE_MB_MAX} step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.moveMaxSessionStateMb)}
+          disabled={limitsBusy}
+          aria-describedby="limit-move-session-state-desc"
+          data-testid="move-session-state-mb"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveMaxSessionStateMb, 'Move session state', e)} />
+        <span class="hook-desc" id="limit-move-session-state-desc">largest per-session Claude directory (MiB, 1–{MOVE_MAX_SESSION_STATE_MB_MAX}: subagent transcripts, tool results) Move to host… carries; above it the biggest files stay behind</span>
       </div>
       <div class="mcp-field">
         <label class="lbl" for="usage-enabled">usage</label>

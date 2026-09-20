@@ -67,7 +67,11 @@ pub enum TargetSeed {
 pub enum LeftReason {
     Denylisted,
     OverCap,
-    /// The path is not valid UTF-8.
+    /// The name is one the carry will not handle: not valid UTF-8 (the
+    /// git-ignored files), a character outside the half's safe charset or a
+    /// `..` segment (the session directory), or a name that only differs
+    /// from one already carried by ASCII case (the project memory, since a
+    /// case-insensitive target volume would make the two one file).
     UnsupportedName,
 }
 
@@ -85,6 +89,28 @@ pub struct LeftBehind {
     pub reason: LeftReason,
 }
 
+/// What travelled of the per-session directory (`<project dir>/<id>/`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionStateReport {
+    /// Files merged into place on the target (path inside `<id>/`).
+    pub carried: Vec<IgnoredEntry>,
+    /// The target already had an equal or larger copy; it was kept.
+    pub kept_target: Vec<String>,
+    pub left_behind: Vec<LeftBehind>,
+}
+
+/// What travelled of the project's Claude memory (`<repo root>/memory/`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryReport {
+    pub carried: Vec<IgnoredEntry>,
+    /// Same name on both hosts, different contents: the target's file stays.
+    pub kept_target: Vec<String>,
+    pub identical: u32,
+    /// Lines appended to the target's `MEMORY.md`.
+    pub index_lines_added: u32,
+    pub left_behind: Vec<LeftBehind>,
+}
+
 /// What a move carried besides the transcript.
 ///
 /// Read back from a hub in remote mode, so every field is required on the
@@ -99,6 +125,8 @@ pub struct CarryReport {
     pub ignored_carried: Vec<IgnoredEntry>,
     pub ignored_left_behind: Vec<LeftBehind>,
     pub target_seeded: TargetSeed,
+    pub session_state: SessionStateReport,
+    pub memory: MemoryReport,
 }
 
 /// One record of the ignored-list script.
@@ -231,7 +259,7 @@ fn is_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn parse_err(what: &str, got: &str) -> IpcError {
+pub(super) fn parse_err(what: &str, got: &str) -> IpcError {
     IpcError::new(codes::E_PARSE, format!("unexpected {what} output: {got:?}"))
 }
 
@@ -268,7 +296,7 @@ pub fn payload(stdout: &[u8]) -> Option<&[u8]> {
     None
 }
 
-fn payload_str(stdout: &str) -> Option<&str> {
+pub(super) fn payload_str(stdout: &str) -> Option<&str> {
     std::str::from_utf8(payload(stdout.as_bytes())?).ok()
 }
 
@@ -276,13 +304,13 @@ fn payload_str(stdout: &str) -> Option<&str> {
 /// `..`, before it reaches a path (`$HOME/.cache/claude-fleet/transfer/$id`)
 /// or a ref name (`refs/fleet/transfer/$id`). Interpolated right after
 /// `id=...` in every script that builds one of those.
-fn id_guard() -> String {
+pub(super) fn id_guard() -> String {
     format!(r#"case "$id" in ''|*/*|*..*) printf '{FAILED} id\n' >&2; exit 5;; esac"#)
 }
 
 /// Guard for scripts that build `$HOME/.cache/claude-fleet/transfer/...`: an
 /// empty `$HOME` would otherwise silently resolve to a repo-relative path.
-fn home_guard() -> String {
+pub(super) fn home_guard() -> String {
     format!(r#"[ -n "$HOME" ] || {{ printf '{FAILED} HOME\n' >&2; exit 5; }}"#)
 }
 
@@ -661,14 +689,24 @@ exit 0
     )
 }
 
-/// Tar the chosen entries into the transfer dir. Each path is a quoted argv
-/// word prefixed with `./` (so a leading `-` is never an option);
+/// Shared body of [`ignored_pack_script`] and [`pack_script`]: tar the
+/// chosen entries into the transfer dir. Each path is a quoted argv word
+/// prefixed with `./` (so a leading `-` is never an option);
 /// `COPYFILE_DISABLE` keeps macOS `._*` files out. Prints [`OUT_MARKER`]
-/// then `<bytes>\t<path>`.
-pub fn ignored_pack_script(worktree: &str, claude_id: &str, paths: &[String]) -> String {
+/// then `<bytes>\t<path>`. `marker` is only ever `"ignored-pack"` or
+/// `"pack"` — the two call sites below — and picks the `# cf-carry:` comment
+/// a `FakeSsh` test rule matches on.
+fn pack_script_as(
+    marker: &str,
+    dir: &str,
+    claude_id: &str,
+    archive_name: &str,
+    paths: &[String],
+) -> String {
     let argv: Vec<String> = paths.iter().map(|p| quote(&format!("./{p}"))).collect();
+    let archive = quote(archive_name);
     format!(
-        r#"# cf-carry:ignored-pack
+        r#"# cf-carry:{marker}
 set +e
 wt={wt}
 id={id}
@@ -678,18 +716,30 @@ umask 077
 cd -- "$wt" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
 dir="$HOME/.cache/claude-fleet/transfer/$id"
 mkdir -p -- "$dir" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
-COPYFILE_DISABLE=1 tar -czf "$dir/ignored.tgz" {argv} >/dev/null 2>&1 || {{ printf '{FAILED} tar\n' >&2; exit 5; }}
-n=$(wc -c < "$dir/ignored.tgz" | tr -d ' ')
+COPYFILE_DISABLE=1 tar -czf "$dir/"{archive} {argv} >/dev/null 2>&1 || {{ printf '{FAILED} tar\n' >&2; exit 5; }}
+n=$(wc -c < "$dir/"{archive} | tr -d ' ')
 [ -n "$n" ] || {{ printf '{FAILED} size\n' >&2; exit 5; }}
 printf '\n{OUT_MARKER}\n'
-printf '%s\t%s\n' "$n" "$dir/ignored.tgz"
+printf '%s\t%s\n' "$n" "$dir/"{archive}
 "#,
-        wt = quote(worktree),
+        wt = quote(dir),
         id = quote(claude_id),
         argv = argv.join(" "),
         id_guard = id_guard(),
         home_guard = home_guard(),
+        marker = marker,
+        archive = archive,
     )
+}
+
+/// Tar the worktree's chosen git-ignored entries into `ignored.tgz`.
+pub fn ignored_pack_script(worktree: &str, claude_id: &str, paths: &[String]) -> String {
+    pack_script_as("ignored-pack", worktree, claude_id, "ignored.tgz", paths)
+}
+
+/// [`ignored_pack_script`] for any directory and archive name.
+pub fn pack_script(dir: &str, claude_id: &str, archive_name: &str, paths: &[String]) -> String {
+    pack_script_as("pack", dir, claude_id, archive_name, paths)
 }
 
 pub fn parse_pack(stdout: &str) -> Result<(u64, String), IpcError> {
@@ -708,24 +758,73 @@ pub fn parse_pack(stdout: &str) -> Result<(u64, String), IpcError> {
     Ok((bytes, path.to_string()))
 }
 
-/// Extract in the target worktree; a file already there wins
-/// (`--skip-old-files` on GNU tar, `-k` on BSD tar — GNU's `-k` reports
-/// existing files as errors).
-pub fn ignored_extract_script(cwd: &str, archive: &str) -> String {
+/// The two lines that extract `"$a"` into the current directory while
+/// keeping any file already there (`--skip-old-files` on GNU tar, `-k` on
+/// BSD tar — GNU's `-k` reports existing files as errors). Factored out so
+/// that `claude_state::memory_extract_script`, which validates the member
+/// list before extracting, runs byte for byte the same extraction as
+/// [`extract_keep_existing_script`] does. Assumes `$a` is set and a `cd`
+/// into the destination has already happened.
+pub(super) fn keep_existing_extract() -> String {
     format!(
-        r#"# cf-carry:ignored-extract
+        r#"if tar --version 2>/dev/null | grep -q 'GNU tar'; then k=--skip-old-files; else k=-k; fi
+tar -xzf "$a" $k >/dev/null 2>&1 || {{ printf '{FAILED} extract\n' >&2; exit 5; }}"#
+    )
+}
+
+/// Shared body of [`ignored_extract_script`] and [`extract_keep_existing_script`]:
+/// extract into `dir`; a file already there wins (see [`keep_existing_extract`]).
+/// `create_dir`: `mkdir -p -- "$cwd"` (private, `umask 077`) before the `cd`,
+/// for a target whose memory directory may not exist yet — the ignored-file
+/// extract never needs this, since the worktree it extracts into already
+/// exists. `marker` is only ever `"ignored-extract"` or `"extract"`.
+fn extract_script_as(marker: &str, dir: &str, archive: &str, create_dir: bool) -> String {
+    let mkdir = if create_dir {
+        format!(
+            r#"umask 077; mkdir -p -- "$cwd" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
+"#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"# cf-carry:{marker}
 set +e
 cwd={cwd}
 a={a}
-cd -- "$cwd" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
+{mkdir}cd -- "$cwd" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
 tar -tzf "$a" >/dev/null 2>&1 || {{ printf '{FAILED} corrupt archive\n' >&2; exit 5; }}
-if tar --version 2>/dev/null | grep -q 'GNU tar'; then k=--skip-old-files; else k=-k; fi
-tar -xzf "$a" $k >/dev/null 2>&1 || {{ printf '{FAILED} extract\n' >&2; exit 5; }}
+{extract}
 printf 'ok\n'
 "#,
-        cwd = quote(cwd),
+        cwd = quote(dir),
         a = quote(archive),
+        mkdir = mkdir,
+        marker = marker,
+        extract = keep_existing_extract(),
     )
+}
+
+/// Extract `archive` in the target worktree.
+pub fn ignored_extract_script(cwd: &str, archive: &str) -> String {
+    extract_script_as("ignored-extract", cwd, archive, false)
+}
+
+/// [`ignored_extract_script`] for any directory and archive, optionally
+/// creating `dir` first (`create_dir`) for a target that may not have it yet.
+///
+/// This builder TRUSTS its archive: beyond "keep what is already there" it
+/// relies on `tar`'s own defaults for containment, so a crafted (or
+/// tampered-with) archive can still plant a symlink, a subdirectory or a
+/// name the caller never chose. That is acceptable for the git-ignored
+/// files, whose archive is built from the same worktree the extraction
+/// target is. It is NOT acceptable for the project's Claude memory, which
+/// extracts straight into a directory of the user's own notes: the memory
+/// half therefore uses `claude_state::memory_extract_script`, which
+/// validates every member before extracting and only then runs the same
+/// [`keep_existing_extract`] lines.
+pub fn extract_keep_existing_script(dir: &str, archive: &str, create_dir: bool) -> String {
+    extract_script_as("extract", dir, archive, create_dir)
 }
 
 /// The real-script tests of both this module and `mod.rs` share the
@@ -854,6 +953,28 @@ pub(crate) mod tests {
                 reason: LeftReason::Denylisted,
             }],
             target_seeded: TargetSeed::Initialized,
+            session_state: SessionStateReport {
+                carried: vec![IgnoredEntry {
+                    path: "subagents/agent-ab12.jsonl".into(),
+                    bytes: 2048,
+                }],
+                kept_target: vec!["custom-title.json".into()],
+                left_behind: vec![LeftBehind {
+                    path: "subagents/agent-ff00.jsonl".into(),
+                    bytes: Some(900_000_000),
+                    reason: LeftReason::OverCap,
+                }],
+            },
+            memory: MemoryReport {
+                carried: vec![IgnoredEntry {
+                    path: "build-notes.md".into(),
+                    bytes: 512,
+                }],
+                kept_target: vec!["deploy.md".into()],
+                identical: 3,
+                index_lines_added: 1,
+                left_behind: Vec::new(),
+            },
         };
         let json = serde_json::to_value(&report).unwrap();
         let back: CarryReport = serde_json::from_value(json.clone()).unwrap();
@@ -863,9 +984,18 @@ pub(crate) mod tests {
             "the leading space survives"
         );
 
-        let mut missing = json;
+        let mut missing = json.clone();
         missing.as_object_mut().unwrap().remove("target_seeded");
         assert!(serde_json::from_value::<CarryReport>(missing).is_err());
+
+        for field in ["session_state", "memory"] {
+            let mut missing = serde_json::to_value(&report).unwrap();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<CarryReport>(missing).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]
@@ -891,7 +1021,7 @@ pub(crate) mod tests {
     /// Run a generated script the way a host would, with an isolated `$HOME`
     /// (so `~/.cache/claude-fleet/transfer` lands in the temp dir) and no
     /// user/system git config.
-    fn bash(script: &str, home: &Path) -> Output {
+    pub(crate) fn bash(script: &str, home: &Path) -> Output {
         Command::new("bash")
             .args(["-c", script])
             .env("HOME", home)
@@ -901,7 +1031,7 @@ pub(crate) mod tests {
             .expect("bash")
     }
 
-    fn git(dir: &Path, args: &[&str]) -> String {
+    pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .arg("-C")
             .arg(dir)

@@ -192,6 +192,8 @@ describe('SessionDetails', () => {
             carried: {
               commits: 0, bundle_bytes: 0, dirty_entries: [], ignored_carried: [],
               ignored_left_behind: [], target_seeded: 'existing',
+              session_state: { carried: [], kept_target: [], left_behind: [] },
+              memory: { carried: [], kept_target: [], identical: 0, index_lines_added: 0, left_behind: [] },
             },
             target,
           }
