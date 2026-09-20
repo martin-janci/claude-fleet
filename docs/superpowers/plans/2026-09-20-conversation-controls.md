@@ -339,7 +339,7 @@ Expected: FAIL — `expected false to be true`
 
 - [ ] **Step 3: Install the guard**
 
-In `src/App.svelte`, inside the synchronous `onMount(() => {…})` that already returns a cleanup function, add:
+In `src/App.svelte`, inside the synchronous `onMount(() => {…})` (it has a bare void body — the listeners it registers are torn down by the paired `onDestroy` a few lines below, not by a returned cleanup), add:
 
 ```ts
     // A drop that reaches the window navigates a WKWebView to file://… and
@@ -350,7 +350,7 @@ In `src/App.svelte`, inside the synchronous `onMount(() => {…})` that already 
     window.addEventListener('drop', swallowDrag);
 ```
 
-and in that handler's existing cleanup return:
+and in that paired `onDestroy`, alongside the other teardowns already there:
 
 ```ts
       window.removeEventListener('dragover', swallowDrag);
