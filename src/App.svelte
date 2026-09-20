@@ -35,11 +35,13 @@
     hostsViewRequest,
     openPathRequest,
     requestNewSessionOnHost,
+    sessionViewChordLabel,
     settingsOpen,
   } from './lib/app_views';
   import { detectMac, isEditable } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
-  import { readPref, writePref } from './lib/prefs';
+  import { readPref, writePref, sessionView } from './lib/prefs';
+  import { resolveSessionView, otherSessionView, type SessionView } from './lib/session_view';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
   import HintLayer from './lib/HintLayer.svelte';
   import McpConfirmDialog from './lib/McpConfirmDialog.svelte';
@@ -282,43 +284,29 @@
     if (selId === null || selNoPane) filesMode = false;
   });
 
-  // Conversation mode shows the transcript-backed Conversation panel (spec
-  // §6). For a tmux row it reuses the Files overlay, so the PTY stays mounted
-  // underneath; Files, Hosts and Conversation are mutually exclusive. Unlike
-  // Files/Hosts it keeps the center (Details) pane — it is a view of the
-  // session, like the terminal. A row with no pane (bg / external) has no
-  // terminal to show, so selecting one opens Conversation by default, and
-  // moving from such a row to a tmux row drops back to the terminal.
-  let conversationMode = $state(false);
-  let prevNoPane = false;
-  $effect(() => {
-    void selId;
-    const noPane = selNoPane;
-    const hasId = selHasClaudeId;
-    untrack(() => {
-      if (noPane) {
-        conversationMode = true;
-        filesMode = false;
-      } else if (prevNoPane) {
-        conversationMode = false;
-      }
-      if (!noPane && !hasId) conversationMode = false;
-    });
-    prevNoPane = noPane;
-  });
-
   // Hosts mode reuses the Files-mode mechanism: the center pane collapses and
   // an opaque overlay covers the terminal, which stays mounted so its PTY
   // survives the round trip. Hosts is fleet-scoped, so unlike Files it never
   // needs a selected session. Files and Hosts are mutually exclusive.
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   const hostsChord = hostsChordLabel(isMac);
+  const sessionViewChord = sessionViewChordLabel(isMac);
   let hostsMode = $state(false);
   let hostsPreselect = $state<string | null>(null);
   // Assets mode shows the asset catalog. Like Hosts it is fleet-scoped (no
   // selected session needed) and renders as an opaque overlay over the
   // terminal, which stays mounted so its PTY survives the round trip.
   let assetsMode = $state(false);
+
+  // Conversation and Terminal are two views of one session under a single
+  // Session tab, so neither is "no mode set": which one shows is the stored
+  // preference, narrowed by what this row can actually offer. Conversation
+  // reuses the Files overlay for a tmux row, so the PTY stays mounted
+  // underneath. Unlike Files/Hosts the Session tab keeps the center
+  // (Details) pane — both its views are views *of* the session.
+  const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode);
+  const effectiveView = $derived(resolveSessionView($sessionView, selNoPane, selHasClaudeId));
+  const conversationMode = $derived(sessionTabActive && effectiveView === 'conversation');
   // Bumped to remount the view when a request names a host while it is open.
   let hostsViewKey = $state(0);
   /** Last host shown in the Hosts view, for this app session only. */
@@ -344,9 +332,6 @@
     hostsPreselect = preselect;
     filesMode = false;
     assetsMode = false;
-    // A no-pane row has nothing but the Conversation under the Hosts overlay,
-    // so it stays the view to return to; a tmux row returns to the terminal.
-    if (!selNoPane) conversationMode = false;
     hostsMode = true;
   }
 
@@ -387,30 +372,47 @@
     });
   });
 
-  function showTerminal() {
+  function showSession() {
     filesMode = false;
-    conversationMode = false;
     assetsMode = false;
     closeHosts();
   }
   function showFiles() {
     if (!$selectedSession) return;
     closeHosts(false);
-    conversationMode = false;
     assetsMode = false;
     filesMode = true;
-  }
-  function showConversation() {
-    if (!$selectedSession?.claude_session_id) return;
-    closeHosts(false);
-    filesMode = false;
-    assetsMode = false;
-    conversationMode = true;
   }
   function showAssets() {
     closeHosts(false);
     filesMode = false;
     assetsMode = true;
+  }
+  /**
+   * Pick a sub-view. A row that cannot show it is left alone. The pref is
+   * written only when the row can genuinely offer both views: on a row that
+   * forces one of them, that view is already showing and already checked, so
+   * a click is a no-op that must not silently overwrite the preference a
+   * different row is relying on. showSession() still runs unconditionally —
+   * the click should always leave whatever overlay was open.
+   */
+  function setSessionView(v: SessionView) {
+    if (resolveSessionView(v, selNoPane, selHasClaudeId) !== v) return;
+    if (!selNoPane && selHasClaudeId) sessionView.set(v);
+    showSession();
+  }
+  /**
+   * ⌘J. Leaving an overlay (Files/Assets/Hosts) returns you to the view you
+   * left, not somewhere else — it should feel like closing a window, not
+   * navigating. The flip is reserved for the second press, once the Session
+   * tab is already showing.
+   */
+  function flipSessionView() {
+    if (!sessionTabActive) {
+      showSession();
+      return;
+    }
+    setSessionView(otherSessionView(effectiveView));
   }
   const NO_PANE_TITLE = 'Runs outside tmux — no terminal';
 
@@ -441,6 +443,7 @@
     e.preventDefault();
     e.stopPropagation();
     if (chord === 'hosts') toggleHosts();
+    else if (chord === 'session-view') flipSessionView();
     else settingsOpen.set(true);
   }
 
@@ -590,13 +593,12 @@
     <div class="view-tabs" role="tablist">
       <button
         class="view-tab"
-        class:active={!filesMode && !hostsMode && !conversationMode && !assetsMode}
+        class:active={sessionTabActive}
         role="tab"
-        aria-selected={!filesMode && !hostsMode && !conversationMode && !assetsMode}
-        disabled={selNoPane}
-        title={selNoPane ? NO_PANE_TITLE : undefined}
-        onclick={showTerminal}
-        data-testid="tab-terminal">Terminal</button
+        aria-selected={sessionTabActive}
+        title={!$selectedSession ? 'No session selected' : 'The running session — its conversation and its terminal'}
+        onclick={showSession}
+        data-testid="tab-session">Session</button
       >
       <button
         class="view-tab"
@@ -612,16 +614,6 @@
         onclick={showFiles}
         data-testid="tab-files">Files</button
       >
-      <button
-        class="view-tab"
-        class:active={conversationMode && !hostsMode && !assetsMode}
-        role="tab"
-        aria-selected={conversationMode && !hostsMode && !assetsMode}
-        disabled={!selHasClaudeId}
-        title={!selHasClaudeId ? 'No Claude session id yet' : 'Claude conversation from the transcript'}
-        onclick={showConversation}
-        data-testid="tab-conversation">Conversation</button
-      >
       <!-- Fleet-scoped like Hosts: never disabled, no selected session needed. -->
       <button
         class="view-tab"
@@ -632,6 +624,42 @@
         onclick={showAssets}
         data-testid="tab-assets">Assets</button
       >
+      <!-- Always present so Hosts keeps its place; the segment inside it
+           appears only while the Session tab owns the panel. Not a nested
+           tablist — two tablists in one strip would have a screen reader
+           announce two independent tab positions for one place. -->
+      <div class="tab-tail">
+        {#if sessionTabActive && $selectedSession}
+          <div class="subtabs" role="radiogroup" aria-label="Session view">
+            <button
+              class="subtab"
+              class:active={effectiveView === 'conversation'}
+              role="radio"
+              aria-checked={effectiveView === 'conversation'}
+              aria-keyshortcuts={isMac ? 'Meta+J' : 'Control+Shift+J'}
+              disabled={!selHasClaudeId && !selNoPane}
+              title={!selHasClaudeId
+                ? selNoPane
+                  ? 'No transcript yet — nothing to show'
+                  : 'No Claude session id yet'
+                : `Claude conversation from the transcript (${sessionViewChord})`}
+              onclick={() => setSessionView('conversation')}
+              data-testid="subtab-conversation">Conversation</button
+            >
+            <button
+              class="subtab"
+              class:active={effectiveView === 'terminal'}
+              role="radio"
+              aria-checked={effectiveView === 'terminal'}
+              aria-keyshortcuts={isMac ? 'Meta+J' : 'Control+Shift+J'}
+              disabled={selNoPane}
+              title={selNoPane ? NO_PANE_TITLE : `The tmux pane (${sessionViewChord})`}
+              onclick={() => setSessionView('terminal')}
+              data-testid="subtab-terminal">Terminal</button
+            >
+          </div>
+        {/if}
+      </div>
       <!-- Fleet-scoped, so set apart on the right and never disabled. -->
       <button
         class="view-tab hosts-tab"
@@ -669,7 +697,7 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} onOpenTerminal={showTerminal} />
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} onOpenTerminal={() => setSessionView('terminal')} />
           </div>
         {/if}
       {/if}
@@ -896,8 +924,40 @@
     padding-bottom: calc(0.25rem + 1px);
   }
   .view-tab:disabled { opacity: 0.4; cursor: not-allowed; }
-  .hosts-tab {
+  /* Claims the free space so Hosts stays pinned right whether or not the
+     segment is showing. */
+  .tab-tail {
     margin-left: auto;
+    display: flex;
+    align-items: center;
+  }
+  /* A pill, deliberately unlike the tabs above it: this is a switch within
+     the active tab, not a sibling of it. */
+  .subtabs {
+    display: flex;
+    gap: 1px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 1px;
+    margin-bottom: 0.2rem;
+  }
+  .subtab {
+    background: transparent;
+    border: none;
+    border-radius: 999px;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 0.7rem;
+    padding: 0.1rem 0.6rem;
+  }
+  .subtab:hover:not(:disabled) { color: var(--fg); }
+  .subtab.active {
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .subtab:disabled { opacity: 0.4; cursor: not-allowed; }
+  .hosts-tab {
+    margin-left: 0.75rem;
     position: relative;
   }
   /* A thin rule sets the fleet-scoped tab apart from the session tabs. */

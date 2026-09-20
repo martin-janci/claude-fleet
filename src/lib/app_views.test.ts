@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { appChord, hostsChordLabel } from './app_views';
+import { appChord, hostsChordLabel, sessionViewChordLabel } from './app_views';
 
 const ev = (key: string, mods: Partial<{ metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) => ({
   key,
@@ -36,5 +36,23 @@ describe('appChord', () => {
   it('labels the Hosts chord per platform', () => {
     expect(hostsChordLabel(true)).toBe('⌘I');
     expect(hostsChordLabel(false)).toBe('Ctrl+Shift+H');
+  });
+
+  it('⌘J / Ctrl+Shift+J flips the Session view; plain Ctrl+J stays with the terminal', () => {
+    expect(appChord(ev('j', { metaKey: true }), true)).toBe('session-view');
+    expect(appChord(ev('J', { metaKey: true }), true)).toBe('session-view');
+    expect(appChord(ev('J', { ctrlKey: true, shiftKey: true }), false)).toBe('session-view');
+    // Plain Ctrl+J is line-feed in a terminal — it must reach the PTY.
+    expect(appChord(ev('j', { ctrlKey: true }), false)).toBeNull();
+    expect(appChord(ev('j', { ctrlKey: true }), true)).toBeNull();
+    expect(appChord(ev('j'), true)).toBeNull();
+    // Modifier variants are not the chord, same rule as ⌘I.
+    expect(appChord(ev('j', { metaKey: true, altKey: true }), true)).toBeNull();
+    expect(appChord(ev('j', { metaKey: true, shiftKey: true }), true)).toBeNull();
+  });
+
+  it('labels the Session-view chord per platform', () => {
+    expect(sessionViewChordLabel(true)).toBe('⌘J');
+    expect(sessionViewChordLabel(false)).toBe('Ctrl+Shift+J');
   });
 });
