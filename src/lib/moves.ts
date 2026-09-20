@@ -320,9 +320,25 @@ function targetIdOf(run: MoveRun): number | null {
   return null;
 }
 
-function settleResolve(sessionId: number, action: ResolveAction, r: Result<ResolveMoveReport>): void {
+function settleResolve(
+  sessionId: number,
+  sessionName: string,
+  action: ResolveAction,
+  r: Result<ResolveMoveReport>,
+): void {
   const run = get(store).get(sessionId);
-  if (!run) return;
+  if (!run) {
+    // The run is gone — the user closed the sheet and dismissed it (or a
+    // dismissible status raced this call) before Finish/Undo came back. There
+    // is no sheet left to carry `resolveError` on, and Finish/Undo each kill
+    // a live session, so silence here would let the user believe it worked
+    // when it did not: fall back to the toast. Do NOT make this path also
+    // fire when `run` exists (below) — that is the sheet's job now (fix round
+    // 1, finding 1), and doubling up would put the same refusal in both
+    // places.
+    if (!r.ok) pushError(r.error, `Resolving the transfer of ${sessionName}`);
+    return;
+  }
   if (!r.ok) {
     // Shown in the sheet, not as a toast (fix round 1, finding 1): the user
     // is looking straight at it — they just clicked Finish/Undo and are still
@@ -366,7 +382,8 @@ export function resolveMoveRun(sessionId: number, action: ResolveAction): void {
   }
   // A stale refusal from a previous attempt must not linger through this one.
   if (run.resolveError) put({ ...run, resolveError: null });
-  void resolveMove(targetId, action).then((r) => settleResolve(sessionId, action, r));
+  const sessionName = run.sessionName;
+  void resolveMove(targetId, action).then((r) => settleResolve(sessionId, sessionName, action, r));
 }
 
 /**

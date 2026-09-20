@@ -563,6 +563,37 @@ describe('TransferSheet: recovery actions', () => {
     expect(get(toasts)).toHaveLength(0);
   });
 
+  // Fix round 2: the asymmetry is the point. When the run is still present
+  // (above) the sheet carries the refusal and no toast fires; when the sheet
+  // is closed and its run dismissed before the call settles, there is no
+  // sheet left to show anything, so the refusal must fall back to a toast
+  // instead of vanishing — Finish/Undo each kill a live session, so "clicked
+  // it, saw nothing" must never mean "it worked".
+  it('a refusal after the sheet is dismissed becomes a toast instead of vanishing', async () => {
+    clearToasts();
+    const real = await vi.importActual<typeof import('./moves')>('./moves');
+    vi.mocked(resolveMoveRun).mockImplementationOnce(real.resolveMoveRun);
+    let reject!: (e: unknown) => void;
+    mockInvoke.mockImplementation((cmd: string) =>
+      cmd === 'resolve_move'
+        ? new Promise((_res, rej) => {
+            reject = rej;
+          })
+        : Promise.resolve(undefined),
+    );
+    const { getByTestId } = renderSheet(partialRun());
+    await fireEvent.click(getByTestId('transfer-finish'));
+    await fireEvent.click(getByTestId('transfer-finish-confirm'));
+    // Close the sheet — and dismiss its run — before the call settles.
+    await fireEvent.click(getByTestId('transfer-done'));
+    expect(get(moves).has(7)).toBe(false);
+    reject({ code: 'E_INVALID_STATE', message: 'the target took a turn', details: null });
+    await flush();
+    const errorToasts = get(toasts).filter((t) => t.kind === 'error');
+    expect(errorToasts).toHaveLength(1);
+    expect(errorToasts[0].message).toContain('took a turn');
+  });
+
   it('an undone run reads as undone', () => {
     const { getByText, queryByTestId } = renderSheet(
       failedRun({ code: 'E_MOVE_UNDONE', details: null }),
