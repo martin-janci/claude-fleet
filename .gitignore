@@ -34,3 +34,14 @@ vite.config.ts.timestamp-*
 
 # reticle's local scratch dir (an MCP tool's, not this project's).
 .reticle/
+
+# Per-worktree cargo target dir, used when building inside a git worktree so a
+# build here cannot collide with the main checkout's cache (the pre-commit hook
+# runs under bash and bypasses the shell wrapper that would otherwise redirect it).
+/target-worktree/
+
+# Machine-local pre-commit guard, called by .githooks/pre-commit. Kept out of
+# the repo because its patterns name private domains and people — committing
+# them would publish exactly what they exist to keep out.
+/.githooks/pre-commit.local
+

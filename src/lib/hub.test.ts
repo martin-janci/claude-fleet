@@ -100,10 +100,14 @@ describe('hubBlock', () => {
     }
   });
 
-  // The terminal is the spec's named non-goal, and the hint has to be more
-  // than "no".
-  it('the terminal reason offers the shell command instead', () => {
-    expect(hubBlock('terminal', remote)!.toLowerCase()).toContain('tmux attach');
+  // The terminal used to be the spec's named non-goal, with a reason that
+  // offered the shell command instead. It is not blocked any more: `pty_open`
+  // is this machine's own ssh/tmux either way, so a paired desktop attaches.
+  // The key is gone, and nothing may quietly reintroduce it — a reason ending
+  // "Do it on the hub" would be false for the only case left (an agent host,
+  // which the hub cannot attach either).
+  it('has no terminal reason: a hub client attaches its own PTY', () => {
+    expect(HUB_ACTIONS as readonly string[]).not.toContain('terminal');
   });
 
   // The audit's finding H, the frontend half: the hub DOES serve the asset

@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -11,6 +11,8 @@ import PromptComposer from './PromptComposer.svelte';
 import { sessions, type SessionRow } from './sessions';
 import { hosts } from './hosts';
 import { accounts } from './accounts';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 
 const source: SessionRow = {
   id: 1,
@@ -86,7 +88,37 @@ beforeEach(() => {
   sessions.set([source, sibling, unrelated]);
   hosts.set([]);
   accounts.set([]);
+  hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
 });
+
+afterEach(() => {
+  hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
+});
+
+// send_prompt is a ROUTED_ACTION (hub.ts): a hub client with the live link
+// down is blocked the same way NewSessionDialog's Create is (see
+// NewSessionDialog.test.ts "Enter is gated the same as the Create button").
+const REMOTE_DISCONNECTED: HubStatus = {
+  remote: true,
+  url: null,
+  client_name: 'laptop',
+  client_mode: null,
+  configured_url: null,
+  configured_client_name: 'laptop',
+  allow_plaintext: false,
+  warning: null,
+  restart_required: false,
+  unavailable: null,
+};
+
+async function renderBlocked() {
+  hubStatus.set(REMOTE_DISCONNECTED);
+  hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
+  render(PromptComposer, { props: { source, onClose: () => {} } });
+  await tick();
+}
 
 describe('PromptComposer', () => {
   it('defaults to showing related targets only', async () => {
@@ -110,12 +142,14 @@ describe('PromptComposer', () => {
     render(PromptComposer, { props: { source, onClose: () => {} } });
     await tick();
     const send = screen.getByTestId('composer-send') as HTMLButtonElement;
-    expect(send.disabled).toBe(true); // prompt is empty
+    // aria-disabled, not the disabled attribute: the button stays focusable
+    // so a keyboard/screen-reader user can still reach the blocking reason.
+    expect(send.getAttribute('aria-disabled')).toBe('true'); // prompt is empty
     const textarea = screen.getByTestId('composer-textarea') as HTMLTextAreaElement;
     await fireEvent.input(textarea, { target: { value: 'hello' } });
     await tick();
     // sibling is auto-checked by default → send is now enabled
-    expect((screen.getByTestId('composer-send') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId('composer-send') as HTMLButtonElement).getAttribute('aria-disabled')).toBe('false');
   });
 
   it('clicking Send calls send_prompt for each checked target', async () => {
@@ -184,5 +218,16 @@ describe('PromptComposer', () => {
     // All three should have fired within a small window of each other (parallel).
     const span = Math.max(...callTimes) - Math.min(...callTimes);
     expect(span).toBeLessThan(20);
+  });
+
+  it('states why send is blocked, in text, not only in a tooltip', async () => {
+    // Render with a hub status that blocks send_prompt, the way the file's
+    // other hub-blocked case does.
+    await renderBlocked();
+    const send = screen.getByTestId('composer-send');
+    expect(send.getAttribute('aria-disabled')).toBe('true');
+    const id = send.getAttribute('aria-describedby');
+    expect(id).toBeTruthy();
+    expect(document.getElementById(id!)?.textContent).toContain('hub');
   });
 });

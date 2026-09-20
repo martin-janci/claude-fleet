@@ -199,7 +199,7 @@ describe('ToolLine', () => {
     await fireEvent.click(btn);
     await settle();
     expect(mockedCopy).toHaveBeenCalledWith(long);
-    expect(screen.getByTestId('conv-copy').textContent).toContain('Copied');
+    expect(screen.getByTestId('conv-copy').getAttribute('aria-label')).toBe('Copied');
     expect(screen.getByTestId('conv-copy').getAttribute('title')).toBe('Copied');
   });
 

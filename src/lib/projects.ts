@@ -10,6 +10,15 @@ export interface ProjectRow {
   /** Registered by adopting an existing checkout already on disk (possibly
    * outside the projects root) rather than by the scan or a clone. */
   adopted: boolean;
+  /** Fleet's own, not one of yours: today only the UX agent's working
+   * directory (`fleet/operator`). Hidden from every "pick a project" surface
+   * — the New session picker and the quick switcher — because starting an
+   * ordinary session in the agent's directory is never what anyone means.
+   * The sidebar TREE still shows it when the operator session is running,
+   * which is the design's "visible in the sidebar, attachable, restartable".
+   * The backend's stale-row sweep skips these rows for the same reason it
+   * skips `adopted` ones. */
+  system: boolean;
 }
 
 export interface WorktreeRow {

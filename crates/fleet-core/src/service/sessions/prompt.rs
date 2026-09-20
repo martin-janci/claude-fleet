@@ -277,10 +277,13 @@ pub struct BroadcastFilter {
 ///     (status compares against `claude_status`);
 ///   - the controller `(host_alias, tmux_name)`, when known, is excluded so a
 ///     broadcast never fans back into the session driving it.
+///   - the operator session `(host_alias, tmux_name)`, when recorded, is
+///     excluded so a fan-out never prompts the UX agent that may have sent it.
 pub fn select_targets(
     sessions: &[SessionRow],
     f: &BroadcastFilter,
     controller: Option<&(String, String)>,
+    operator: Option<&(String, String)>,
 ) -> Vec<i64> {
     sessions
         .iter()
@@ -298,6 +301,10 @@ pub fn select_targets(
             None => true,
         })
         .filter(|s| match controller {
+            Some((host, tmux)) => !(&s.host_alias == host && &s.tmux_name == tmux),
+            None => true,
+        })
+        .filter(|s| match operator {
             Some((host, tmux)) => !(&s.host_alias == host && &s.tmux_name == tmux),
             None => true,
         })
@@ -339,9 +346,10 @@ pub async fn broadcast_prompt(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<BroadcastSummary, IpcError> {
-    // Snapshot sessions + resolve the controller while holding the guard, then
-    // drop it before any `.await` (never hold the mutex across await).
-    let (sessions, controller) = {
+    // Snapshot sessions + resolve the controller and the operator while
+    // holding the guard, then drop it before any `.await` (never hold the
+    // mutex across await).
+    let (sessions, controller, operator) = {
         let s = lock(store)?;
         let sessions = s.list_all_sessions().map_err(|e| {
             IpcError::new(codes::E_SQLITE, format!("list sessions for broadcast: {e}"))
@@ -349,10 +357,14 @@ pub async fn broadcast_prompt(
         // The controller concept is resolved from the store when available.
         // Until a controller is recorded, no session is excluded on that basis.
         let controller = resolve_controller(&s);
-        (sessions, controller)
+        // Likewise the operator: absent a recorded UX-agent session, nothing
+        // is excluded on that basis.
+        let operator =
+            crate::service::operator::operator_ref(&s).map(|r| (r.host_alias, r.tmux_name));
+        (sessions, controller, operator)
     };
 
-    let targets = select_targets(&sessions, &filter, controller.as_ref());
+    let targets = select_targets(&sessions, &filter, controller.as_ref(), operator.as_ref());
 
     // Map session id -> (host_alias, tmux_name) for delivery.
     let mut results: Vec<BroadcastResult> = Vec::with_capacity(targets.len());

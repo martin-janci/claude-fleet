@@ -11,6 +11,7 @@
 pub mod account_usage;
 pub mod account_usage_poll;
 pub mod add_project;
+pub mod attachments;
 pub mod bg_sessions;
 pub mod catalog;
 pub mod clipboard;
@@ -26,6 +27,7 @@ pub mod messages;
 pub mod move_session;
 pub mod names;
 pub mod onboarding;
+pub mod operator;
 pub mod outcome;
 pub mod pane_intel;
 pub mod playbooks;

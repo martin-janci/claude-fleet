@@ -200,7 +200,7 @@ fn select_targets_filters_by_host() {
         host: Some("mac".into()),
         ..Default::default()
     };
-    assert_eq!(select_targets(&s, &f, None), vec![1, 2]);
+    assert_eq!(select_targets(&s, &f, None, None), vec![1, 2]);
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn select_targets_filters_by_status() {
         ..Default::default()
     };
     // session 4 is idle but kind=review, so excluded.
-    assert_eq!(select_targets(&s, &f, None), vec![1, 3]);
+    assert_eq!(select_targets(&s, &f, None, None), vec![1, 3]);
 }
 
 #[test]
@@ -221,7 +221,7 @@ fn select_targets_filters_by_project() {
         project_id: Some(20),
         ..Default::default()
     };
-    assert_eq!(select_targets(&s, &f, None), vec![3]);
+    assert_eq!(select_targets(&s, &f, None, None), vec![3]);
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn select_targets_filters_combined() {
         project_id: Some(10),
         status: Some("running".into()),
     };
-    assert_eq!(select_targets(&s, &f, None), vec![2]);
+    assert_eq!(select_targets(&s, &f, None, None), vec![2]);
 }
 
 #[test]
@@ -240,7 +240,7 @@ fn select_targets_excludes_non_work() {
     let s = sample_sessions();
     // No filters: every work session, never the review one (id 4).
     let f = BroadcastFilter::default();
-    assert_eq!(select_targets(&s, &f, None), vec![1, 2, 3]);
+    assert_eq!(select_targets(&s, &f, None, None), vec![1, 2, 3]);
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn select_targets_excludes_controller() {
     let f = BroadcastFilter::default();
     let controller = ("mac".to_string(), "work-a".to_string());
     // session 1 is the controller and must be dropped.
-    assert_eq!(select_targets(&s, &f, Some(&controller)), vec![2, 3]);
+    assert_eq!(select_targets(&s, &f, Some(&controller), None), vec![2, 3]);
 }
 
 #[test]
@@ -258,7 +258,42 @@ fn select_targets_controller_only_matches_on_both_host_and_tmux() {
     let f = BroadcastFilter::default();
     // Same tmux name on a different host must NOT be excluded.
     let controller = ("mefistos".to_string(), "work-a".to_string());
-    assert_eq!(select_targets(&s, &f, Some(&controller)), vec![1, 2, 3]);
+    assert_eq!(
+        select_targets(&s, &f, Some(&controller), None),
+        vec![1, 2, 3]
+    );
+}
+
+/// A broadcast that reaches the UX agent makes it prompt itself: it answers,
+/// which is activity, which is another broadcast candidate. The existing rate
+/// limiter makes that loop slow rather than absent — slow enough to look like
+/// a mystery and fast enough to eat the agent's context.
+#[test]
+fn select_targets_excludes_the_operator_as_well_as_the_controller() {
+    let sessions = vec![
+        row(1, "local", "blue-sirius", "work", None, None),
+        row(2, "local", "fleet-operator", "work", None, None),
+        row(3, "mefistos", "controller", "work", None, None),
+    ];
+    let controller = ("mefistos".to_string(), "controller".to_string());
+    let operator = ("local".to_string(), "fleet-operator".to_string());
+    let ids = select_targets(
+        &sessions,
+        &BroadcastFilter::default(),
+        Some(&controller),
+        Some(&operator),
+    );
+    assert_eq!(ids, vec![1], "only the ordinary work session is a target");
+
+    // Same name on a different host is an ordinary session.
+    let elsewhere = ("hetzner".to_string(), "fleet-operator".to_string());
+    let ids = select_targets(
+        &sessions,
+        &BroadcastFilter::default(),
+        None,
+        Some(&elsewhere),
+    );
+    assert_eq!(ids, vec![1, 2, 3]);
 }
 
 #[test]

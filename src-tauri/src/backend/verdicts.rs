@@ -351,9 +351,39 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("repo_diff", Verdict::Routed { tool: "repo_diff" }),
     (
         "upload_to_session",
+        Verdict::SameInBoth {
+            why: "the same story as `pty_open`: the bytes are on this machine and so is the \
+                  `ssh` that carries them, addressed by the alias passed in, reading no \
+                  state.db. It is the drop handler behind the terminal pane, so it has to \
+                  work wherever that pane attaches",
+        },
+    ),
+    (
+        "pick_attachments",
         Verdict::LocalOnly {
-            instead: "the file is on this machine and the session's host is the hub's to \
-                      reach; copy it there yourself, or drop it on a standalone app",
+            instead: "the picker opens on this machine and the session's host is the hub's \
+                      to reach; pick the files from a standalone app instead",
+        },
+    ),
+    (
+        "attachment_preview",
+        Verdict::LocalOnly {
+            instead: "the file is on this machine and a hub client has nothing local to \
+                      preview; open it from a standalone app instead",
+        },
+    ),
+    (
+        "attachment_describe",
+        Verdict::LocalOnly {
+            instead: "the file is on this machine and a hub client has nothing local to \
+                      measure; drop it on a standalone app instead",
+        },
+    ),
+    (
+        "upload_attachments",
+        Verdict::LocalOnly {
+            instead: "the bytes are on this machine and the session's host is the hub's to \
+                      reach; copy them there yourself, or drop them on a standalone app",
         },
     ),
     ("repo_log", Verdict::Routed { tool: "repo_log" }),
@@ -563,6 +593,28 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "mcp_pending_confirms",
         Verdict::SameInBoth {
             why: "the same queue, the same reason",
+        },
+    ),
+    // ── the UX agent's operator session ─────────────────────────────────────
+    //
+    // Both route unconditionally. The operator panel is the same panel on a
+    // hub-backed desktop, and the phone slice inherits these tools
+    // unchanged — a `LocalOnly` verdict here would have closed that door.
+    // It is also the only correct answer: `service::operator`'s file writes
+    // go through `provision::write_host_file*`, which calls
+    // `ensure_local_allowed`, so in hub-client mode the desktop must never
+    // run this against ITS OWN "local" — the hub's "local" is the one that
+    // matters.
+    (
+        "ensure_operator",
+        Verdict::Routed {
+            tool: "ensure_operator",
+        },
+    ),
+    (
+        "operator_status",
+        Verdict::Routed {
+            tool: "operator_status",
         },
     ),
     // ── the pairing itself — about THIS process, either way ─────────────────
@@ -856,9 +908,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── the terminal, and this process's cancellation registry ──────────────
     (
         "pty_open",
-        Verdict::LocalOnly {
-            instead: "the terminal attaches over this machine's SSH connection to the \
-                      session's host; attach from that host, or from a standalone app",
+        Verdict::SameInBoth {
+            why: "the attach is this machine's own `ssh … tmux attach`, built from the alias \
+                  and tmux name passed in; it reads no state.db and the hub is not in the \
+                  path, so a paired client attaches exactly as a standalone app does. The \
+                  session it cannot attach is one on an AGENT host, which has no SSH route \
+                  from anywhere — the terminal pane declines that one itself",
         },
     ),
     (

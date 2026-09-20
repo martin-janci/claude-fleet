@@ -41,7 +41,7 @@
     <div class="actions">
       <button onclick={onclose}>Close</button>
       <button onclick={() => run(true)} disabled={busy} data-testid="import-dry-run">Dry run</button>
-      <button class="primary" onclick={() => run(false)} disabled={busy || !report?.dry_run} data-testid="import-confirm" title={report?.dry_run ? '' : 'Run a dry run first'}>Import</button>
+      <button class="btn btn--primary" onclick={() => run(false)} disabled={busy || !report?.dry_run} data-testid="import-confirm" title={report?.dry_run ? '' : 'Run a dry run first'}>Import</button>
     </div>
   </div>
 </Modal>
@@ -52,5 +52,4 @@
   .muted { color: var(--fg-muted); font-size: 12px; } .error { color: #dc2626; }
   .list { margin: 0; padding-left: 18px; font-size: 12px; max-height: 200px; overflow: auto; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
-  .primary { background: var(--accent); color: white; border: 0; border-radius: 4px; padding: 4px 10px; }
 </style>

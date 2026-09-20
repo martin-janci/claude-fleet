@@ -62,9 +62,6 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
 // REASONS (a typo, or a command that got renamed on one side and not the
 // other) — see the "every other REASONS key is a command name" test below.
 //
-//   terminal    -> pty_open (TerminalView.svelte gates the whole pane on
-//                  `ownsTheFleet`, before either pty_open or the
-//                  upload-to-session drop handler can fire)
 //   repo_write  -> the ten git-write commands FilesPanel.svelte fans
 //                  `hubBlock('repo_write', …)` out to (FileList,
 //                  RemoteToolbar, BranchList, CommitGraph)
@@ -76,7 +73,6 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
 //                  catalog_config, group B below)
 //   set_secret  -> catalog_set_secret — same as apply_sync
 const REASONS_KEYS_THAT_ARE_NOT_COMMANDS: ReadonlySet<string> = new Set([
-  'terminal',
   'repo_write',
   'host_tokens',
   'apply_sync',
@@ -108,8 +104,8 @@ describe('REASONS against the generated local_only commands', () => {
 
 // Coverage the other way: a `local_only` command the UI can reach with no
 // `REASONS` entry at all would fail open (or, worse, open a dialog whose
-// click then dies with a raw `E_LOCAL_ONLY`). Every one of the 53 commands
-// below is `local_only` today, is not a `REASONS` key (checked below), and
+// click then dies with a raw `E_LOCAL_ONLY`). Every command listed below is
+// `local_only` today, is not a `REASONS` key (checked below), and
 // falls into one of these groups. Seeded from today's truth
 // (generated `local_only` minus the `REASONS` keys that are command names);
 // each group below names the component whose own gate covers it, which is
@@ -162,11 +158,12 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // Gated by SettingsDialog.svelte's own `get_fleet_settings` gate: `{#if
   // !ownsFleet}` swaps the whole Projects section for the remote note.
   gatedBySettingsDialog: ['set_fleet_setting'],
-  // Gated by TerminalView.svelte's own `ownsTheFleet` gate: `{#if
-  // !ownsTheFleet(...)}` swaps the whole pane for the remote note, so
-  // neither the attach nor the file-drop handler (which requires
-  // `ptyOpen`) ever runs.
-  gatedByTerminalView: ['pty_open', 'upload_to_session'],
+  // (`pty_open` and `upload_to_session` used to be listed here, gated by
+  // TerminalView's `ownsTheFleet` check. They are `same_in_both` now: both
+  // are this machine's own `ssh`, addressed by the alias passed in, reading
+  // no state.db — so the pane attaches for a paired client exactly as it does
+  // standalone. TerminalView still declines an AGENT host, which has no SSH
+  // route from anywhere, but that is not a local-only refusal.)
   // Gated by FilesPanel.svelte's own `repo_write` gate (see the
   // REASONS_KEYS_THAT_ARE_NOT_COMMANDS comment above).
   gatedByFilesPanel: [

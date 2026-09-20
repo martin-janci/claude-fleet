@@ -6,15 +6,15 @@ import { tick } from 'svelte';
 // the new "hide projects without sessions" behavior.
 const fakeProjects = [
   {
-    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: Math.floor(Date.now() / 1000) - 60, adopted: false },
+    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: Math.floor(Date.now() / 1000) - 60, adopted: false, system: false },
     worktrees: [{ id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' }],
   },
   {
-    project: { id: 2, owner: 'papayapos', repo: 'pos-frontend', base_path: '/r/pf', last_session_at: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14, adopted: false },
+    project: { id: 2, owner: 'papayapos', repo: 'pos-frontend', base_path: '/r/pf', last_session_at: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14, adopted: false, system: false },
     worktrees: [{ id: 21, project_id: 2, host_alias: 'local', name: 'main', path: '/r/pf', branch: 'main' }],
   },
   {
-    project: { id: 3, owner: 'martin-janci', repo: 'phone-manager', base_path: '/r/pm', last_session_at: null, adopted: false },
+    project: { id: 3, owner: 'martin-janci', repo: 'phone-manager', base_path: '/r/pm', last_session_at: null, adopted: false, system: false },
     worktrees: [{ id: 31, project_id: 3, host_alias: 'local', name: 'main', path: '/r/pm', branch: 'main' }],
   },
 ];
@@ -163,7 +163,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     // Even if a project has multiple worktrees, the sidebar must not show them.
     const multi = [
       {
-        project: { id: 1, owner: 'o', repo: 'r', base_path: '/x', last_session_at: 0, adopted: false },
+        project: { id: 1, owner: 'o', repo: 'r', base_path: '/x', last_session_at: 0, adopted: false, system: false },
         worktrees: [
           { id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/x', branch: 'main' },
           { id: 12, project_id: 1, host_alias: 'local', name: 'feature-x', path: '/x/.worktrees/feature-x', branch: 'feature-x' },
@@ -522,7 +522,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const colliding = [
       ...fakeProjects,
       {
-        project: { id: 4, owner: 'otherperson', repo: 'claude-fleet', base_path: '/x/cf', last_session_at: null, adopted: false },
+        project: { id: 4, owner: 'otherperson', repo: 'claude-fleet', base_path: '/x/cf', last_session_at: null, adopted: false, system: false },
         worktrees: [{ id: 41, project_id: 4, host_alias: 'local', name: 'main', path: '/x/cf', branch: 'main' }],
       },
     ];
@@ -569,6 +569,36 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(listbox.textContent).toContain('phone-manager');
   });
 
+  it('the project picker hides the UX agent\'s system project, but the tree still shows its session', async () => {
+    // The design: "flagged `system` and hidden from the project picker".
+    // Starting an ordinary session in `~/.claude-fleet/operator` — not a
+    // repository, and the agent's own working directory — is never what
+    // "+ New session" means. The tree is a different question: the operator
+    // session is meant to be visible, attachable and restartable there.
+    const operatorProject = {
+      project: {
+        id: 9,
+        owner: 'fleet',
+        repo: 'operator',
+        base_path: '/home/u/.claude-fleet/operator',
+        last_session_at: Math.floor(Date.now() / 1000),
+        adopted: false,
+        system: true,
+      },
+      worktrees: [],
+    };
+    mockBackend([...fakeProjects, operatorProject], [sessionFor(9, 'fleet-operator')]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByText('fleet-operator')).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    const listbox = screen.getByRole('listbox');
+    expect(listbox.textContent).toContain('claude-fleet');
+    expect(listbox.textContent).not.toContain('operator');
+  });
+
   it('the project picker offers Add project, which opens the dialog', async () => {
     mockBackend(fakeProjects, [sessionFor(1)]);
     render(Sidebar);
@@ -598,7 +628,7 @@ describe('Sidebar (sessions-grouped view)', () => {
 
   it('after a successful add, NewSessionDialog opens on the returned project', async () => {
     const added = {
-      project: { id: 42, owner: 'newowner', repo: 'fresh-repo', base_path: '/r/fresh', last_session_at: null, adopted: false },
+      project: { id: 42, owner: 'newowner', repo: 'fresh-repo', base_path: '/r/fresh', last_session_at: null, adopted: false, system: false },
       worktrees: [],
     };
     mockBackend(fakeProjects, []);
@@ -621,7 +651,7 @@ describe('Sidebar (sessions-grouped view)', () => {
 
   it('adopting a folder while a remote host is chosen opens NewSessionDialog on local', async () => {
     const added = {
-      project: { id: 43, owner: 'me', repo: 'thing', base_path: '/Users/me/code/thing', last_session_at: null, adopted: true },
+      project: { id: 43, owner: 'me', repo: 'thing', base_path: '/Users/me/code/thing', last_session_at: null, adopted: true, system: false },
       worktrees: [],
     };
     mockBackend(fakeProjects, []);
@@ -649,7 +679,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     await fireEvent.click(screen.getByTestId('add-create'));
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
     expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('me/thing');
-    expect(document.querySelector('.host-pick.active')?.getAttribute('data-alias')).toBe('local');
+    expect(document.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias')).toBe('local');
   });
 
   it('a native <dialog> close on NewSessionDialog still closes it (Modal reopen only when the parent declines)', async () => {
@@ -924,7 +954,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const projs: typeof fakeProjects = [];
     for (let p = 1; p <= 25; p++) {
       projs.push({
-        project: { id: p, owner: 'o', repo: `r${p}`, base_path: `/r/${p}`, last_session_at: Date.now() / 1000, adopted: false },
+        project: { id: p, owner: 'o', repo: `r${p}`, base_path: `/r/${p}`, last_session_at: Date.now() / 1000, adopted: false, system: false },
         worktrees: [{ id: p * 10, project_id: p, host_alias: 'local', name: 'main', path: `/r/${p}`, branch: 'main' }],
       });
       for (let i = 0; i < 20; i++) {

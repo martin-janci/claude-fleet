@@ -1,6 +1,6 @@
 [package]
 name = "claude-fleet"
-version = "0.2.26"
+version = "0.2.27"
 description = "Desktop app for managing Claude Code sessions across hosts"
 authors = ["martin-janci"]
 edition = "2021"
@@ -59,6 +59,9 @@ rustls-native-certs = "0.8"
 # Object-safe async trait for the hub transport seam (already in the tree
 # via fleet-core).
 async-trait = "0.1"
+# Already in the lockfile via fleet-core (the agent transport) and used again
+# here for the attachment thumbnail data URL.
+base64 = "0.22"
 
 # The macOS keychain, so the client token never touches a child process's
 # argv (which EDR/EndpointSecurity capture and retain). macOS-only: Linux's

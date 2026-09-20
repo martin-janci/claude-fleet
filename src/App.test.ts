@@ -123,6 +123,18 @@ describe('App layout', () => {
     expect(getByTestId('tab-assets').classList.contains('active')).toBe(true);
     expect(getByTestId('tab-assets').getAttribute('aria-selected')).toBe('true');
   });
+
+  it('swallows a drop outside a drop target so the webview cannot navigate', async () => {
+    render(App);
+    await tick();
+    const ev = new Event('drop', { bubbles: true, cancelable: true });
+    window.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+
+    const over = new Event('dragover', { bubbles: true, cancelable: true });
+    window.dispatchEvent(over);
+    expect(over.defaultPrevented).toBe(true);
+  });
 });
 
 // Spec §6: the Conversation tab. Reuses the Files-overlay mechanism for tmux

@@ -937,11 +937,18 @@ standalone exactly as before.
   administrator, so those controls are disabled in the interface with the
   reason rather than failing at the click. *What a hub client refuses* below
   lists exactly which ones.
-- **The terminal is local-only.** The PTY attaches a local `ssh`/`tmux`
-  process and the hub streams no pane. The terminal tab shows the
-  `ssh <host>` / `tmux attach -t <session>` line for the selected session
-  instead of a dead pane — or, for a session on an agent-host (no SSH route
-  from here at all), a line saying so instead.
+- **The terminal attaches, the same as standalone.** The PTY is a local
+  `ssh <host>` / `tmux attach` from this machine, built from the alias and
+  tmux name of the selected session; it reads no `state.db` and the hub is
+  not in that path, so being a paired client changes nothing about it. The
+  hub still streams no pane — it does not need to. Two things follow. A host
+  this machine has no `Host` block for fails in `ssh`, with ssh's own message,
+  in the pane: the fleet's aliases come from the *hub's* `ssh/config`, and
+  where the two disagree that is what you see. And a session on an
+  **agent host** is not offered an attach at all — nothing anywhere can dial
+  such a host, which is the whole reason it dials the hub instead — so the tab
+  says that rather than showing a command that cannot work. Dropping files on
+  the pane (`upload_to_session`) follows the same rule, for the same reason.
 - **The asset catalog and the setup checklist** are about the machine that
   owns the fleet, so they show the reason instead of their panels. (The hub
   does serve the catalog's asset list, `list_assets`, to any paired client;
@@ -967,7 +974,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 123 commands, 36 route to a hub tool, 1 routes except for one argument shape, 72 refuse, and 14 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 129 commands, 38 route to a hub tool, 1 routes except for one argument shape, 74 refuse, and 16 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -975,6 +982,8 @@ Of the 123 commands, 36 route to a hub tool, 1 routes except for one argument sh
 | `add_project` | it clones or adopts a checkout using this machine's SSH and GitHub credentials; add the project on the hub, then it appears here |
 | `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `assets_scan_hosts` | the hub has this as its scan_assets tool, but its result feeds an inventory panel built on the catalog checkout, which only the machine that owns the fleet has; call scan_assets on the hub, or scan from that machine |
+| `attachment_describe` | the file is on this machine and a hub client has nothing local to measure; drop it on a standalone app instead |
+| `attachment_preview` | the file is on this machine and a hub client has nothing local to preview; open it from a standalone app instead |
 | `catalog_add_resource` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_apply_sync` | the hub's apply_sync is master-only: a paired client is never the fleet's administrator, and a sync writes to every host over SSH; run the sync on the hub |
 | `catalog_commit_pending` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
@@ -1019,9 +1028,9 @@ Of the 123 commands, 36 route to a hub tool, 1 routes except for one argument sh
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
+| `pick_attachments` | the picker opens on this machine and the session's host is the hub's to reach; pick the files from a standalone app instead |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
 | `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub` |
-| `pty_open` | the terminal attaches over this machine's SSH connection to the session's host; attach from that host, or from a standalone app |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
 | `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |
@@ -1043,7 +1052,7 @@ Of the 123 commands, 36 route to a hub tool, 1 routes except for one argument sh
 | `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
-| `upload_to_session` | the file is on this machine and the session's host is the hub's to reach; copy it there yourself, or drop it on a standalone app |
+| `upload_attachments` | the bytes are on this machine and the session's host is the hub's to reach; copy them there yourself, or drop them on a standalone app |
 <!-- END GENERATED: hub-client verdicts -->
 
 ### Version skew
@@ -1107,8 +1116,9 @@ the missing parameters, route it then.
 
 ### Known limitations
 
-- **The terminal.** See *The terminal is local-only* under *What is different
-  from standalone* above.
+- **The terminal, for an agent host only.** A session on an agent host cannot
+  be attached from anywhere; see *The terminal attaches, the same as
+  standalone* under *What is different from standalone* above.
 - **Projects and worktrees are not re-listed on reconnect**, because their
   list tools answer a different shape from their events. They refresh when
   the window regains focus.

@@ -63,6 +63,10 @@ Dispatch a unit of work to a worker session and track it as a task. Pass worker_
 
 Parameters: `new_worker`, `prompt`, `raw`, `requester_session_id`, `worker_session_id`
 
+### `ensure_operator`
+
+Ensure the UX agent's operator session exists; returns its row.
+
 ### `fleet_health`
 
 Report claude-fleet backend health: application version, SQLite schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels, plus tunnels_flapping for those supervised but crash-looping, which means the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and per UTC day for the last 7 days. For a per-host token the usage fields cover only its own host. Returns JSON.
@@ -172,6 +176,10 @@ Parameters: `base_branch`, `friendly_name`, `host_alias`, `kind`, `name`, `new_w
 Create a plain-shell tmux session on a host (no Claude Code in the pane — an interactive login shell). Same project/worktree plumbing as new_session, plus an optional start_command that runs once before the shell drops to an interactive prompt; the pane stays alive after it exits so you can attach or send-keys to it. Steer it with send_prompt (typed text + Enter) and read it with capture_session.
 
 Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
+
+### `operator_status`
+
+Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked.
 
 ### `pair_client`
 
@@ -474,6 +482,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::files::repo_file`
 - `commands::files::repo_diff`
 - `commands::upload::upload_to_session`
+- `commands::upload::pick_attachments`
+- `commands::upload::attachment_preview`
+- `commands::upload::attachment_describe`
+- `commands::upload::upload_attachments`
 - `commands::history::repo_log`
 - `commands::history::repo_branches`
 - `commands::history::repo_commit`
@@ -508,6 +520,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::rotate_host_token`
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
+- `commands::operator::ensure_operator`
+- `commands::operator::operator_status`
 - `commands::hub::hub_status`
 - `commands::hub::hub_pair`
 - `commands::hub::hub_disconnect`
