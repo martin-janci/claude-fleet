@@ -48,6 +48,12 @@ const SUBAGENT_RESULT_MAX_CHARS: usize = 1_500;
 /// of a plain [`ConvItem::Tool`].
 const SUBAGENT_TOOLS: [&str; 2] = ["Task", "Agent"];
 
+/// The `tool_result` of a backgrounded `Agent` call is an acknowledgement
+/// that the agent was launched, not its report — the report arrives later in
+/// a `<task-notification>`. Recognising it keeps the block reading as running
+/// until the real one lands.
+const AGENT_LAUNCH_ACK: &str = "Async agent launched successfully";
+
 /// Encode a working directory the way Claude Code names its per-project
 /// transcript directory: every char outside `[A-Za-z0-9]` becomes `-`.
 /// The read script does this on the host (after `pwd -P`) with an
@@ -390,6 +396,38 @@ pub enum ConvItem {
         #[serde(default)]
         output: Option<String>,
     },
+    /// A `<task-notification>` user entry: a background agent, command,
+    /// monitor or workflow reporting in. `tool_use_id` names the `tool_use`
+    /// that launched it, which `join_notifications` uses to fill that call's
+    /// block in; it is absent on a mid-stream Monitor event, which reports
+    /// progress rather than completion.
+    Notification {
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        /// `completed` | `failed` | `stopped` | `killed`; `None` on a
+        /// mid-stream event.
+        #[serde(default)]
+        status: Option<String>,
+        /// The harness's own one-line sentence. Always present in practice.
+        #[serde(default)]
+        summary: Option<String>,
+        /// The agent's report, capped at [`NOTIFICATION_RESULT_MAX_CHARS`].
+        #[serde(default)]
+        result: Option<String>,
+        /// Path to the task's full output, on the session's host.
+        #[serde(default)]
+        output_file: Option<String>,
+        /// Monitor's streamed line.
+        #[serde(default)]
+        event: Option<String>,
+        /// ISO timestamp of the notification's own entry. Coalesced
+        /// notifications share a turn, so the turn's `at` is the first
+        /// one's — a joined block must take its finish time from here.
+        #[serde(default)]
+        at: Option<String>,
+    },
     /// `[Request interrupted by user]` (`during_tool`: "… for tool use").
     Interrupt {
         #[serde(default)]
@@ -405,6 +443,11 @@ fn serde_true() -> bool {
 const COMPACT_SUMMARY_MAX_CHARS: usize = 20_000;
 /// Cap on a slash command's carried output text (chars).
 const COMMAND_OUTPUT_MAX_CHARS: usize = 4_000;
+/// Cap on a task notification's carried report (chars). A background
+/// agent's report is routinely several KB, so this is the compaction
+/// summary's budget rather than [`SUBAGENT_RESULT_MAX_CHARS`], which was
+/// sized for a tool one-liner's neighbour.
+const NOTIFICATION_RESULT_MAX_CHARS: usize = 20_000;
 
 /// Text between `<tag>` and `</tag>`, trimmed; `None` when absent or empty.
 fn tag_text(s: &str, tag: &str) -> Option<String> {
@@ -601,11 +644,24 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                     ..
                                 }) => {
                                     *error |= is_err;
-                                    *done = true;
-                                    *ended_at = ended;
-                                    if let Some(t) = tool_result_text(b) {
-                                        *result =
-                                            Some(cap_chars(t.trim(), SUBAGENT_RESULT_MAX_CHARS));
+                                    let ack = tool_result_text(b)
+                                        .map(|t| t.trim().starts_with(AGENT_LAUNCH_ACK))
+                                        .unwrap_or(false);
+                                    if ack {
+                                        // Backgrounded: this result only says
+                                        // the agent started. Leave the block
+                                        // open for its notification to fill.
+                                        *done = false;
+                                        *ended_at = None;
+                                    } else {
+                                        *done = true;
+                                        *ended_at = ended;
+                                        if let Some(t) = tool_result_text(b) {
+                                            *result = Some(cap_chars(
+                                                t.trim(),
+                                                SUBAGENT_RESULT_MAX_CHARS,
+                                            ));
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -631,6 +687,47 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     // (or its output); a human prompt that merely contains
                     // one (a pasted transcript) stays a prompt.
                     let head = text.trim_start();
+                    // Only an entry that *starts* with the tag is a
+                    // notification — the same rule slash commands follow, so
+                    // a pasted transcript stays a prompt.
+                    if head.starts_with("<task-notification>") {
+                        let item = ConvItem::Notification {
+                            task_id: tag_text(&text, "task-id"),
+                            tool_use_id: tag_text(&text, "tool-use-id"),
+                            status: tag_text(&text, "status"),
+                            summary: tag_text(&text, "summary"),
+                            result: tag_text(&text, "result")
+                                .map(|r| cap_chars(&r, NOTIFICATION_RESULT_MAX_CHARS)),
+                            output_file: tag_text(&text, "output-file"),
+                            event: tag_text(&text, "event"),
+                            at: at(),
+                        };
+                        // Notifications that arrive back to back, with no
+                        // assistant output between them, share one turn: three
+                        // agents finishing together should not make three
+                        // near-empty turns.
+                        let coalesce = current.as_ref().is_some_and(|t| {
+                            t.prompt.is_none()
+                                && !t.items.is_empty()
+                                && t.items
+                                    .iter()
+                                    .all(|i| matches!(i, ConvItem::Notification { .. }))
+                        });
+                        if !coalesce {
+                            push(&mut turns, current.take());
+                            tool_items.clear();
+                            current = Some(ConvTurn {
+                                prompt: None,
+                                at: at(),
+                                ended_at: None,
+                                items: Vec::new(),
+                            });
+                        }
+                        if let Some(t) = current.as_mut() {
+                            t.items.push(item);
+                        }
+                        continue;
+                    }
                     let is_command =
                         head.starts_with("<command-name>") || head.starts_with("<command-message>");
                     let is_output = head.starts_with("<local-command-stdout>")
@@ -773,7 +870,101 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
         }
     }
     push(&mut turns, current);
+    join_notifications(&mut turns);
     turns
+}
+
+/// Fill each launching call's block from the notification that reports on
+/// it. A notification always lands in a later turn than its call (it is a
+/// user entry, which closes the turn in progress), so the map is built over
+/// the finished turns and applied in a second walk — the notification and
+/// its target are in different turns and cannot both be borrowed mutably.
+///
+/// A notification with no `tool_use_id`, or one naming a call outside the
+/// loaded window, is left standing on its own. So is a mid-stream event:
+/// no `status` means progress, not completion.
+///
+/// `((turn index, item index), report, failed, arrived_at)` for one join.
+type NotificationJoin = ((usize, usize), Option<String>, bool, Option<String>);
+
+fn join_notifications(turns: &mut [ConvTurn]) {
+    let mut launched: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
+    for (ti, turn) in turns.iter().enumerate() {
+        for (ii, item) in turn.items.iter().enumerate() {
+            let id = match item {
+                ConvItem::Tool { id, .. } | ConvItem::Subagent { id, .. } => id.as_deref(),
+                _ => None,
+            };
+            if let Some(id) = id {
+                launched.insert(id.to_string(), (ti, ii));
+            }
+        }
+    }
+    // In transcript order, so a resumed agent's later notification
+    // overwrites its earlier one.
+    let mut updates: Vec<NotificationJoin> = Vec::new();
+    for turn in turns.iter() {
+        for item in turn.items.iter() {
+            let ConvItem::Notification {
+                tool_use_id,
+                status,
+                result,
+                at,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            let Some(status) = status.as_deref() else {
+                continue;
+            };
+            let Some(target) = tool_use_id
+                .as_deref()
+                .and_then(|i| launched.get(i))
+                .copied()
+            else {
+                continue;
+            };
+            // Coalesced notifications share a turn, whose `at` is the
+            // first one's — take the finish time from the notification's
+            // own timestamp, falling back to the turn's for a hub that
+            // predates the field.
+            let ended = at.clone().or_else(|| turn.at.clone());
+            updates.push((target, result.clone(), status != "completed", ended));
+        }
+    }
+    for ((ti, ii), report, failed, ended) in updates {
+        match turns[ti].items.get_mut(ii) {
+            Some(ConvItem::Subagent {
+                result,
+                error,
+                ended_at,
+                done,
+                ..
+            }) => {
+                if report.is_some() {
+                    *result = report;
+                }
+                *error |= failed;
+                *done = true;
+                *ended_at = ended;
+            }
+            // A tool line keeps its own summary — `Bash(command=…)` is the
+            // useful text, and the notification's sentence has its own row.
+            Some(ConvItem::Tool {
+                error,
+                ended_at,
+                done,
+                ..
+            }) => {
+                *error |= failed;
+                *done = true;
+                *ended_at = ended;
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Split a transcript into assistant turns rendered as plain text: each
@@ -803,6 +994,10 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
                         Some(a) => format!("[command] {name} {a}"),
                         None => format!("[command] {name}"),
                     },
+                    ConvItem::Notification { summary, .. } => format!(
+                        "[notification] {}",
+                        one_line(summary.as_deref().unwrap_or(""))
+                    ),
                     ConvItem::Interrupt { .. } => "[interrupted]".to_string(),
                 })
                 .collect::<Vec<_>>()
@@ -832,6 +1027,16 @@ fn item_chars(item: &ConvItem) -> usize {
             name.chars().count()
                 + args.as_deref().map_or(0, |s| s.chars().count())
                 + output.as_deref().map_or(0, |s| s.chars().count())
+        }
+        ConvItem::Notification {
+            summary,
+            result,
+            event,
+            ..
+        } => {
+            summary.as_deref().map_or(0, |s| s.chars().count())
+                + result.as_deref().map_or(0, |s| s.chars().count())
+                + event.as_deref().map_or(0, |s| s.chars().count())
         }
         ConvItem::Interrupt { .. } => 0,
     }
@@ -1800,6 +2005,403 @@ mod tests {
         serde_json::json!({"type":"user","timestamp":ts,
             "message":{"content":[{"type":"tool_result","tool_use_id":id,"content":content,"is_error":err}]}})
     }
+    /// The exact shape a background `Agent` reports in with.
+    fn task_notification(ts: &str, body: &str) -> serde_json::Value {
+        serde_json::json!({"type":"user","timestamp":ts,
+            "message":{"content":body}})
+    }
+
+    #[test]
+    fn a_task_notification_becomes_its_own_item_not_a_prompt() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            asst("on it"),
+            task_notification(
+                "2026-09-18T10:01:00Z",
+                "<task-notification>\n\
+                 <task-id>a623962a33b4c9765</task-id>\n\
+                 <tool-use-id>toolu_1</tool-use-id>\n\
+                 <output-file>/private/tmp/x/tasks/a6.output</output-file>\n\
+                 <status>completed</status>\n\
+                 <summary>Agent \"Posúdiť stratégiu testov\" finished</summary>\n\
+                 <note>A task-notification fires each time this agent stops.</note>\n\
+                 <result>Mám naštudované všetky zdroje.</result>\n\
+                 </task-notification>",
+            ),
+        ]));
+        assert_eq!(t.len(), 2, "the notification opens a turn of its own");
+        assert_eq!(t[1].prompt, None, "it is never a prompt");
+        assert_eq!(
+            t[1].items,
+            vec![ConvItem::Notification {
+                task_id: Some("a623962a33b4c9765".into()),
+                tool_use_id: Some("toolu_1".into()),
+                status: Some("completed".into()),
+                summary: Some("Agent \"Posúdiť stratégiu testov\" finished".into()),
+                result: Some("Mám naštudované všetky zdroje.".into()),
+                output_file: Some("/private/tmp/x/tasks/a6.output".into()),
+                event: None,
+                at: Some("2026-09-18T10:01:00Z".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_monitor_event_without_a_tool_use_id_still_parses() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            task_notification(
+                "2026-09-18T10:01:00Z",
+                "<task-notification>\n\
+                 <task-id>buzo0s189</task-id>\n\
+                 <summary>Monitor event: \"PR #165 CI checks\"</summary>\n\
+                 <event>frontend (ubuntu-24.04): pass</event>\n\
+                 </task-notification>",
+            ),
+        ]));
+        let ConvItem::Notification {
+            tool_use_id,
+            status,
+            event,
+            ..
+        } = &t[1].items[0]
+        else {
+            panic!("expected a notification, got {:?}", t[1].items[0]);
+        };
+        assert_eq!(*tool_use_id, None);
+        assert_eq!(*status, None, "a mid-stream event reports no completion");
+        assert_eq!(event.as_deref(), Some("frontend (ubuntu-24.04): pass"));
+    }
+
+    #[test]
+    fn a_prompt_that_merely_quotes_the_tag_stays_a_prompt() {
+        let text =
+            "why did this fire?\n<task-notification>\n<task-id>x</task-id>\n</task-notification>";
+        let t = parse_conversation(&jl(&[user(serde_json::json!(text))]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt.as_deref(), Some(text));
+        assert!(t[0].items.is_empty());
+    }
+
+    #[test]
+    fn consecutive_notifications_share_one_prompt_less_turn() {
+        let note = |id: &str| {
+            task_notification(
+                "2026-09-18T10:01:00Z",
+                &format!(
+                    "<task-notification>\n<task-id>{id}</task-id>\n\
+                     <status>completed</status>\n<summary>Agent {id} finished</summary>\n\
+                     </task-notification>"
+                ),
+            )
+        };
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            asst("dispatched three"),
+            note("a1"),
+            note("a2"),
+            note("a3"),
+        ]));
+        assert_eq!(
+            t.len(),
+            2,
+            "three arrivals with no reply between them = one turn"
+        );
+        assert_eq!(t[1].items.len(), 3);
+    }
+
+    #[test]
+    fn a_notification_after_a_reply_opens_a_fresh_turn() {
+        let note = task_notification(
+            "2026-09-18T10:01:00Z",
+            "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n\
+             <summary>Agent a1 finished</summary>\n</task-notification>",
+        );
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            note.clone(),
+            asst("thanks, agent"),
+            note,
+        ]));
+        assert_eq!(
+            t.len(),
+            3,
+            "a reply between two notifications separates them"
+        );
+    }
+
+    #[test]
+    fn a_notification_result_is_capped_on_a_char_boundary() {
+        let long = "é".repeat(NOTIFICATION_RESULT_MAX_CHARS + 500);
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            task_notification(
+                "2026-09-18T10:01:00Z",
+                &format!(
+                    "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n\
+                     <summary>done</summary>\n<result>{long}</result>\n</task-notification>"
+                ),
+            ),
+        ]));
+        let ConvItem::Notification { result, .. } = &t[1].items[0] else {
+            panic!("expected a notification");
+        };
+        let got = result.as_deref().unwrap();
+        assert_eq!(
+            got.chars().count(),
+            NOTIFICATION_RESULT_MAX_CHARS + 1,
+            "capped plus the ellipsis"
+        );
+        assert!(got.ends_with('…'));
+    }
+
+    #[test]
+    fn notification_result_cap_is_the_compaction_budget_not_the_subagent_one() {
+        assert_eq!(NOTIFICATION_RESULT_MAX_CHARS, 20_000);
+        assert_eq!(SUBAGENT_RESULT_MAX_CHARS, 1_500);
+    }
+
+    #[test]
+    fn a_backgrounded_agents_launch_ack_is_not_its_report() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Agent",
+                serde_json::json!({"description":"Posúdiť stratégiu testov","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            tool_result(
+                "2026-09-18T10:00:02Z",
+                "toolu_1",
+                serde_json::json!("Async agent launched successfully. (This tool result is internal metadata.)\nagentId: a623962a33b4c9765"),
+                false,
+            ),
+        ]));
+        let ConvItem::Subagent { result, done, .. } = &t[0].items[0] else {
+            panic!("expected a subagent, got {:?}", t[0].items[0]);
+        };
+        assert_eq!(*result, None, "the ack is metadata, not a report");
+        assert!(!*done, "the agent is still running until it notifies");
+    }
+
+    #[test]
+    fn a_notification_fills_in_the_agent_block_it_names() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Agent",
+                serde_json::json!({"description":"Posúdiť stratégiu testov","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            tool_result(
+                "2026-09-18T10:00:02Z",
+                "toolu_1",
+                serde_json::json!("Async agent launched successfully.\nagentId: a6"),
+                false,
+            ),
+            task_notification(
+                "2026-09-18T10:12:00Z",
+                "<task-notification>\n<task-id>a6</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n\
+                 <status>completed</status>\n<summary>Agent finished</summary>\n\
+                 <result># Posudok\n\nVšetko overené.</result>\n</task-notification>",
+            ),
+        ]));
+        let ConvItem::Subagent {
+            result,
+            done,
+            error,
+            ended_at,
+            ..
+        } = &t[0].items[0]
+        else {
+            panic!("expected a subagent");
+        };
+        assert_eq!(result.as_deref(), Some("# Posudok\n\nVšetko overené."));
+        assert!(*done);
+        assert!(!*error);
+        assert_eq!(ended_at.as_deref(), Some("2026-09-18T10:12:00Z"));
+    }
+
+    #[test]
+    fn a_failed_notification_flags_the_block_it_names() {
+        for status in ["failed", "killed", "stopped"] {
+            let t = parse_conversation(&jl(&[
+                user(serde_json::json!("go")),
+                tool_use(
+                    "2026-09-18T10:00:01Z",
+                    "toolu_1",
+                    "Agent",
+                    serde_json::json!({"description":"d","subagent_type":"general-purpose","prompt":"p"}),
+                ),
+                task_notification(
+                    "2026-09-18T10:12:00Z",
+                    &format!(
+                        "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n\
+                         <status>{status}</status>\n<summary>s</summary>\n</task-notification>"
+                    ),
+                ),
+            ]));
+            let ConvItem::Subagent { error, done, .. } = &t[0].items[0] else {
+                panic!("expected a subagent");
+            };
+            assert!(*error, "{status} is not a success");
+            assert!(*done, "{status} closes the call");
+        }
+    }
+
+    #[test]
+    fn a_notification_closes_a_background_bash_without_rewriting_its_summary() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_9",
+                "Bash",
+                serde_json::json!({"command":"gh run watch","description":"Watch Docker build CI"}),
+            ),
+            task_notification(
+                "2026-09-18T10:05:00Z",
+                "<task-notification>\n<task-id>bk9</task-id>\n<tool-use-id>toolu_9</tool-use-id>\n\
+                 <status>completed</status>\n\
+                 <summary>Background command \"Watch Docker build CI\" completed (exit code 0)</summary>\n\
+                 </task-notification>",
+            ),
+        ]));
+        let ConvItem::Tool {
+            summary,
+            done,
+            error,
+            ended_at,
+            ..
+        } = &t[0].items[0]
+        else {
+            panic!("expected a tool line");
+        };
+        assert!(
+            summary.contains("gh run watch"),
+            "the command stays the line's text"
+        );
+        assert!(*done);
+        assert!(!*error);
+        assert_eq!(ended_at.as_deref(), Some("2026-09-18T10:05:00Z"));
+    }
+
+    #[test]
+    fn a_mid_stream_event_closes_nothing() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_5",
+                "Monitor",
+                serde_json::json!({"description":"PR #165 CI checks"}),
+            ),
+            task_notification(
+                "2026-09-18T10:02:00Z",
+                "<task-notification>\n<task-id>bu1</task-id>\n<tool-use-id>toolu_5</tool-use-id>\n\
+                 <summary>Monitor event</summary>\n<event>frontend: pass</event>\n</task-notification>",
+            ),
+        ]));
+        let ConvItem::Tool { done, .. } = &t[0].items[0] else {
+            panic!("expected a tool line");
+        };
+        assert!(
+            !*done,
+            "an event with no status is progress, not completion"
+        );
+    }
+
+    #[test]
+    fn an_unmatched_notification_is_left_standing_alone() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            task_notification(
+                "2026-09-18T10:12:00Z",
+                "<task-notification>\n<tool-use-id>toolu_gone</tool-use-id>\n\
+                 <status>completed</status>\n<summary>s</summary>\n</task-notification>",
+            ),
+        ]));
+        assert!(matches!(t[1].items[0], ConvItem::Notification { .. }));
+    }
+
+    #[test]
+    fn the_last_notification_wins_when_an_agent_is_resumed() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Agent",
+                serde_json::json!({"description":"d","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            task_notification(
+                "2026-09-18T10:05:00Z",
+                "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n\
+                 <summary>s</summary>\n<result>first pass</result>\n</task-notification>",
+            ),
+            asst("keep going"),
+            task_notification(
+                "2026-09-18T10:20:00Z",
+                "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n\
+                 <summary>s</summary>\n<result>second pass</result>\n</task-notification>",
+            ),
+        ]));
+        let ConvItem::Subagent {
+            result, ended_at, ..
+        } = &t[0].items[0]
+        else {
+            panic!("expected a subagent");
+        };
+        assert_eq!(result.as_deref(), Some("second pass"));
+        assert_eq!(ended_at.as_deref(), Some("2026-09-18T10:20:00Z"));
+    }
+
+    #[test]
+    fn coalesced_notifications_each_close_their_own_call_at_their_own_time() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Agent",
+                serde_json::json!({"description":"first","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            tool_use(
+                "2026-09-18T10:00:02Z",
+                "toolu_2",
+                "Agent",
+                serde_json::json!({"description":"second","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            task_notification(
+                "2026-09-18T10:10:00Z",
+                "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n\
+                 <summary>first finished</summary>\n</task-notification>",
+            ),
+            task_notification(
+                "2026-09-18T10:25:00Z",
+                "<task-notification>\n<tool-use-id>toolu_2</tool-use-id>\n<status>completed</status>\n\
+                 <summary>second finished</summary>\n</task-notification>",
+            ),
+        ]));
+        // Both notifications share one coalesced turn.
+        assert_eq!(t[1].items.len(), 2, "the two notifications coalesce");
+        let ends: Vec<Option<&str>> = t[0]
+            .items
+            .iter()
+            .map(|i| match i {
+                ConvItem::Subagent { ended_at, .. } => ended_at.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            vec![Some("2026-09-18T10:10:00Z"), Some("2026-09-18T10:25:00Z")],
+            "each block takes its own notification's time, not the turn's"
+        );
+    }
+
     /// A `Tool` item with only `summary`/`error` set, for synthetic
     /// (non-parsed) test turns that don't exercise the new fields.
     fn tool_item(summary: &str, error: bool) -> ConvItem {

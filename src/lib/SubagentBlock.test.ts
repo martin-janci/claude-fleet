@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import SubagentBlock from './SubagentBlock.svelte';
 import type { ConvGroup } from './conversation';
@@ -48,6 +48,9 @@ describe('SubagentBlock', () => {
     const head = screen.getByTestId('conv-subagent-head');
     expect(head.textContent).toContain('no result');
     expect(head.textContent).not.toContain('running');
+    // It is neither running (nothing is driving it) nor done, so the header
+    // names no status rather than guessing one.
+    expect(screen.queryByTestId('conv-subagent-status')).toBeNull();
   });
 
   it('error is marked', () => {
@@ -55,6 +58,31 @@ describe('SubagentBlock', () => {
     const block = screen.getByTestId('conv-subagent');
     expect(block.getAttribute('data-error')).toBe('true');
     expect(block.querySelector('.sub-err')).toBeTruthy();
+  });
+
+  it('shows a status word in the header', () => {
+    const { unmount } = render(SubagentBlock, { item: item(), nowMs: 0, live: false });
+    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('done');
+    unmount();
+    render(SubagentBlock, { item: item({ error: true }), nowMs: 0, live: false });
+    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('failed');
+  });
+
+  it('a subagent that has not reported reads as running', () => {
+    render(SubagentBlock, { item: item({ done: false, ended_at: null, result: null }), nowMs: 0, live: true });
+    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('running');
+  });
+
+  it('offers an open affordance only when one is wired, and it is a real button', async () => {
+    const { unmount } = render(SubagentBlock, { item: item(), nowMs: 0, live: false });
+    expect(screen.queryByTestId('conv-subagent-open')).toBeNull();
+    unmount();
+    const onOpen = vi.fn();
+    render(SubagentBlock, { item: item(), nowMs: 0, live: false, onOpen });
+    const btn = screen.getByTestId('conv-subagent-open');
+    expect(btn.tagName).toBe('BUTTON');
+    await fireEvent.click(btn);
+    expect(onOpen).toHaveBeenCalledOnce();
   });
 
   it('the result renders as markdown, clamped with Show more', async () => {
