@@ -24,7 +24,7 @@ pub(super) const PANE_TAIL_LINES: u32 = 8;
 /// round-trip) never false-trips; on a real wedge the ssh-layer wall clock
 /// (`SshClient::run` → `E_SSH_TIMEOUT`) usually fires first and resets the
 /// master.
-pub(super) const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Default cadence (seconds) for the background reconcile tick, and the
 /// freshness window `list_sessions` serves cached rows within when the tick
@@ -163,7 +163,7 @@ pub(crate) async fn run_host_script(
 /// session, sequential). Runs AFTER the reachability probe, outside
 /// `HOST_PROBE_TIMEOUT`, so a slow GitHub API can never flip a host to
 /// unreachable.
-pub(super) const PR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+pub(crate) const PR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Most sessions probed for a PR per host per pass. Bounds the script's
 /// worst case (`PR_PROBE_BATCH` sequential `gh` calls); the rest are picked

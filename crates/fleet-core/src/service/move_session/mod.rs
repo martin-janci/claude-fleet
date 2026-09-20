@@ -1889,6 +1889,10 @@ async fn move_session_inner(
         })?;
 
     // From here on the target session exists: every failure is PARTIAL.
+    // `pick_target_name` only avoids names live on the target, so the one it
+    // chose may be a name fleet killed there moments ago; the refresh below
+    // has to be free to insert its row.
+    crate::service::sessions::record_tmux_created(store, &target, &tmux_name);
     hooks
         .refresh_host(store, &target)
         .await

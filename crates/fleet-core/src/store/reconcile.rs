@@ -17,16 +17,23 @@ pub(super) fn ghost_cutoff(probe_started_at: i64) -> i64 {
     }
 }
 
-/// How long (seconds) a kill stays in [`KillMemory`]. One probe can be in
-/// flight for `HOST_PROBE_TIMEOUT` (30 s) plus the `PR_PROBE_TIMEOUT` (20 s)
-/// step that runs after it, and its write then queues behind the other hosts'
-/// writes, so 50 s is the floor rather than a bound; this is double that,
-/// rounded. Over-keeping an entry costs only the few bytes it occupies — the
-/// strict `probe_started_at > killed_at` comparison, not the age of the
-/// entry, decides what may be inserted, so a stale entry can never block a
-/// pass that probed after the kill. Under-keeping one reopens the race, so
-/// the bound is deliberately generous.
-const KILL_MEMORY_SECS: i64 = 120;
+/// How long (seconds) a kill stays in [`KillMemory`]: double the longest a
+/// probe's view of a host can be in flight, DERIVED from the two timeouts
+/// that bound it so raising either cannot silently under-size this window.
+/// A probe stamps `started_at` before its first await, then spends up to
+/// `HOST_PROBE_TIMEOUT` on the host and up to `PR_PROBE_TIMEOUT` on the
+/// sequential PR step that follows, and its write still has to queue behind
+/// the other hosts' writes — so their sum is the floor, not the bound, and
+/// this is twice it.
+///
+/// Over-keeping an entry costs only the few bytes it occupies: the strict
+/// `probe_started_at > killed_at` comparison, not the age of the entry,
+/// decides what may be inserted, so a stale entry can never block a pass that
+/// probed after the kill. Under-keeping one reopens the race, hence the
+/// doubling.
+const KILL_MEMORY_SECS: i64 = 2
+    * (crate::service::sessions::HOST_PROBE_TIMEOUT.as_secs()
+        + crate::service::sessions::PR_PROBE_TIMEOUT.as_secs()) as i64;
 
 type KillMap = std::collections::HashMap<(String, String), i64>;
 
@@ -149,6 +156,19 @@ impl Store {
         self.kills
             .pruned()
             .insert((host_alias.to_string(), tmux_name.to_string()), at);
+    }
+
+    /// Forget the kill of `tmux_name` on `host_alias`. Called by every path
+    /// that CREATES (or renames into) that tmux session and then relies on
+    /// its own reconcile to insert the row: fleet having just brought the
+    /// name back to life is definitive evidence that it is no longer killed,
+    /// and outranks any comparison of stamps. Without this, a kill and a
+    /// re-create inside one second would leave the create's reconcile
+    /// refusing the INSERT and the caller with no row to return.
+    pub fn forget_kill(&self, host_alias: &str, tmux_name: &str) {
+        self.kills
+            .pruned()
+            .remove(&(host_alias.to_string(), tmux_name.to_string()));
     }
 
     /// The still-remembered kills on `host_alias`, as `tmux_name → killed_at`.
@@ -2705,6 +2725,116 @@ mod tests {
         pass_observing(&mut store, &bus, "alpha", "s1", 0);
 
         assert!(store.get_session("s1", "alpha").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_name_fleet_creates_again_is_admitted_in_the_killing_second() {
+        // Fleet creating a tmux session under a name is proof the name is
+        // alive again, so the create path forgets the kill before running its
+        // own reconcile. Without that, a kill and a re-create landing in the
+        // SAME second leave `new_session` with no row to return — it does not
+        // insert one itself — and it fails with "vanished after creation"
+        // while the tmux session really exists on the host.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let killed_at = now_unix();
+        create_kill_and_reap(&mut store, "dev-o-r", killed_at);
+
+        // What the create path does: tmux session created, kill forgotten,
+        // then its own reconcile — whose probe can start in the killing
+        // second on a local host.
+        store.forget_kill("alpha", "dev-o-r");
+        let evts = pass_observing(&mut store, &bus, "alpha", "dev-o-r", killed_at);
+
+        let row = store
+            .get_session("dev-o-r", "alpha")
+            .unwrap()
+            .expect("the re-created session must be listed");
+        assert_eq!(row.status, "running");
+        assert!(
+            evts.contains(&format!("session:created:{}", row.id)),
+            "and announce itself; got {evts:?}"
+        );
+    }
+
+    #[test]
+    fn a_rename_into_a_just_killed_name_is_admitted_in_the_killing_second() {
+        // Same shape through `rename_session`: the name it renames INTO may
+        // be one fleet killed a moment ago, and the rename's own reconcile
+        // must be allowed to insert the row under the new name.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let killed_at = now_unix();
+        create_kill_and_reap(&mut store, "dev-o-r", killed_at);
+
+        store.forget_kill("alpha", "dev-o-r");
+        pass_observing(&mut store, &bus, "alpha", "dev-o-r", killed_at);
+
+        assert!(
+            store.get_session("dev-o-r", "alpha").unwrap().is_some(),
+            "the renamed session must be listed under its new name"
+        );
+    }
+
+    #[test]
+    fn a_kill_of_an_already_ghost_row_is_remembered_too() {
+        // `kill_session` is reachable on a row reconcile has ALREADY ghosted
+        // (the user kills the session that shows as lost). `tmux kill-session`
+        // still runs, and the kill's own pass reaps the row immediately —
+        // sooner than for a freshly ghosted one, since it was ghost before the
+        // pass began. So the kill must be remembered even though the ghosting
+        // UPDATE matched nothing.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let live = vec![live_unbound("s1")];
+        store
+            .apply_host_reconcile(HostReconcile {
+                probe_started_at: 1,
+                sessions: &live,
+                keep: &["s1".to_string()],
+                ..empty_probe("alpha", 1)
+            })
+            .unwrap();
+        let id = store.get_session("s1", "alpha").unwrap().unwrap().id;
+        // A pass that no longer sees it ghosts the row.
+        store
+            .apply_host_reconcile(HostReconcile {
+                probe_started_at: 2,
+                keep: &[],
+                ..empty_probe("alpha", 2)
+            })
+            .unwrap();
+        assert_eq!(
+            store.get_session_by_id(id).unwrap().unwrap().status,
+            "ghost",
+            "precondition: the row is already a ghost when the user kills it"
+        );
+
+        let killed_at = now_unix();
+        assert!(
+            store.mark_session_killed(id, killed_at).unwrap().is_none(),
+            "an already-ghost row reports nothing to announce"
+        );
+        // The kill's own pass: the row was ghost before it, so Phase 2 reaps.
+        store
+            .apply_host_reconcile(HostReconcile {
+                probe_started_at: killed_at + 1,
+                keep: &[],
+                ..empty_probe("alpha", killed_at + 1)
+            })
+            .unwrap();
+        assert!(store.get_session_by_id(id).unwrap().is_none());
+
+        let evts = pass_observing(&mut store, &bus, "alpha", "s1", killed_at - 50);
+
+        assert!(
+            store.get_session("s1", "alpha").unwrap().is_none(),
+            "a pass older than the kill must not resurrect it"
+        );
+        assert!(
+            evts.iter().all(|e| e == "host:probed:alpha"),
+            "nothing inserted ⇒ nothing to announce; got {evts:?}"
+        );
     }
 
     #[test]

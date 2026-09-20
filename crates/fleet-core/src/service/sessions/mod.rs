@@ -41,6 +41,10 @@ pub use self::lifecycle::*;
 pub(crate) use self::paths::*;
 pub use self::prompt::*;
 pub use self::reconcile::*;
+// The two probe timeouts by name: a `pub` glob does not carry
+// `pub(crate)` items, and `store::reconcile` derives its kill-memory
+// window from them.
+pub(crate) use self::reconcile::{HOST_PROBE_TIMEOUT, PR_PROBE_TIMEOUT};
 pub use self::review::*;
 pub use self::targeting::*;
 

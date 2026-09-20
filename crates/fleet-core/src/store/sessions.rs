@@ -391,9 +391,6 @@ impl Store {
              WHERE id=?2 AND status!='ghost'",
             rusqlite::params![now, id],
         )?;
-        if changed == 0 {
-            return Ok(None);
-        }
         let row = fetch_session_by_id(&self.conn, id)?;
         if let Some(row) = &row {
             // Remember the kill by name: the reconcile the caller runs next
@@ -401,7 +398,21 @@ impl Store {
             // which a fleet-wide pass still carrying the name from a probe
             // that ran BEFORE the kill would find nothing to conflict with
             // and insert the dead session again.
+            //
+            // Recorded even when the UPDATE matched nothing, i.e. the user
+            // killed a row reconcile had ALREADY ghosted: `tmux kill-session`
+            // ran all the same, and such a row is reaped by the kill's own
+            // pass even sooner (it was ghost before that pass began), so it
+            // is the same window with a shorter fuse.
             self.note_kill(&row.host_alias, &row.tmux_name, now);
+        }
+        // Nothing was written — the row is gone, or was already a ghost — so
+        // nothing is logged or announced. `None` is the caller's "no change
+        // to report" signal.
+        if changed == 0 {
+            return Ok(None);
+        }
+        if let Some(row) = &row {
             tracing::info!(
                 lifecycle = "lost",
                 session_id = row.id,
