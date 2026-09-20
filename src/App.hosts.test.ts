@@ -318,6 +318,14 @@ describe('App: the Hosts view', () => {
     expect(within(dialog).getByTestId('settings-hosts-summary').textContent).toBe('5 configured · 1 offline');
   });
 
+  it('⌘E is reserved for the agent (not wired up yet) — it must not fall through to Settings', async () => {
+    await mountApp();
+    await fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    await tick();
+    expect(get(settingsOpen)).toBe(false);
+    expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
+  });
+
   it('Settings → Open Hosts closes Settings and opens the view', async () => {
     await mountApp();
     settingsOpen.set(true);

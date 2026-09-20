@@ -60,10 +60,11 @@ export type AppChord = 'hosts' | 'settings' | 'session-view' | 'agent';
 
 /**
  * The app-level chords, platform-correct like the quick switcher's:
- * ⌘I toggles Hosts, ⌘J flips the Session view and ⌘, opens Settings (Cmd
- * never reaches the PTY); on non-mac Ctrl+Shift+H and Ctrl+Shift+J do the
- * same two views (Ctrl+Shift+I is the devtools chord). Plain Ctrl chords
- * stay with the terminal — Ctrl+J is line-feed there.
+ * ⌘I toggles Hosts, ⌘J flips the Session view, ⌘E opens the agent and ⌘,
+ * opens Settings (Cmd never reaches the PTY); on non-mac Ctrl+Shift+H,
+ * Ctrl+Shift+J and Ctrl+Shift+E do the same (Ctrl+Shift+I is the devtools
+ * chord). Plain Ctrl chords stay with the terminal — Ctrl+J is line-feed
+ * there.
  */
 export function appChord(
   e: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean },

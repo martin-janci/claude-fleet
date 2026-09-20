@@ -470,7 +470,8 @@
     e.stopPropagation();
     if (chord === 'hosts') toggleHosts();
     else if (chord === 'session-view') flipSessionView();
-    else settingsOpen.set(true);
+    else if (chord === 'settings') settingsOpen.set(true);
+    // 'agent' is not wired up yet — a later task owns opening the agent panel.
   }
 
   function onKeydown(e: KeyboardEvent) {
