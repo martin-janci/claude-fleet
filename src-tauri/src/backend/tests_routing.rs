@@ -256,9 +256,12 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            // The tool's own defaults (slim rows, one page, a {total,
+            // worktrees} envelope) are shaped for an agent; the desktop draws
+            // the whole tree, so it asks for full rows and limit 0 (no cap).
             "list_worktrees",
-            json!({ "project_id": 4 }),
-            "[]",
+            json!({ "project_id": 4, "summary": false, "limit": 0 }),
+            r#"{"total":0,"worktrees":[]}"#,
             Box::new(|b, s, _| {
                 block_on(commands::worktrees::routed::list_worktrees(
                     b,

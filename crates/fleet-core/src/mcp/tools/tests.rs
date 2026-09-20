@@ -667,20 +667,17 @@ fn kill_session_description_covers_external_and_inactive_agent_rows() {
 const CONTROL_API_GUIDE: &str = include_str!("../../../../../docs/control-api.md");
 
 #[test]
-fn docs_track_background_runs_with_session_transcript_not_peek_session() {
+fn docs_track_background_runs_with_session_transcript() {
     for (name, text) in [
         ("SKILL.md", CONTROL_SKILL),
         ("docs/control-api.md", CONTROL_API_GUIDE),
     ] {
+        // `peek_session` was removed once `new_bg_session` started returning
+        // the fleet row (the gap it filled): a doc that still names it points
+        // at a tool the router no longer serves.
         assert!(
-            !text.contains("Track\n  with `peek_session`")
-                && !text.contains("Track with `peek_session`")
-                && !text.contains("next call can be `peek_session"),
-            "{name} still points at peek_session for tracking bg runs"
-        );
-        assert!(
-            text.contains("`peek_session` is deprecated"),
-            "{name} must note that peek_session is deprecated"
+            !text.contains("peek_session"),
+            "{name} still names the removed peek_session tool"
         );
         assert!(
             text.contains("`kind: external`"),
@@ -915,12 +912,12 @@ async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
 }
 
 #[tokio::test]
-async fn per_host_callers_cannot_capture_or_peek_another_hosts_session() {
+async fn per_host_callers_cannot_capture_or_read_another_hosts_session() {
     let (s, _pid, on_b) = two_host_store();
     s.set_claude_session_id(on_b, "0f8fad5b-d9cb-469f-a165-70867728950e")
         .unwrap();
-    // No Claude id yet: peek must still refuse rather than say "nothing
-    // to peek" about another host's session.
+    // No Claude id yet: the transcript read must still refuse rather than
+    // report "no claude_session_id" about another host's session.
     let bare_b = s
         .upsert_session("bare-b", "hostb", None, None, 1, 1, "running", None)
         .unwrap();
@@ -940,22 +937,14 @@ async fn per_host_callers_cannot_capture_or_peek_another_hosts_session() {
             .await
             .unwrap_err(),
         );
-        for (session_id, claude_session_id) in [
-            (Some(on_b), None),
-            (Some(bare_b), None),
-            // A bare Claude id resolves to the tracked row's host.
-            (
-                None,
-                Some("0f8fad5b-d9cb-469f-a165-70867728950e".to_string()),
-            ),
-        ] {
+        for session_id in [on_b, bare_b] {
             forbidden(
-                t.peek_session(
+                t.session_transcript(
                     Extension(a.clone()),
-                    Parameters(PeekSessionParams {
+                    Parameters(SessionTranscriptParams {
                         session_id,
-                        claude_session_id,
-                        host_alias: None,
+                        since_turn: None,
+                        max_chars: None,
                     }),
                 )
                 .await
@@ -963,18 +952,24 @@ async fn per_host_callers_cannot_capture_or_peek_another_hosts_session() {
             );
         }
     }
-    // The master token is unbound: its peek at the id-less session gets
-    // the friendly answer, not E_FORBIDDEN.
-    t.peek_session(
-        Extension(Caller::master()),
-        Parameters(PeekSessionParams {
-            session_id: Some(bare_b),
-            claude_session_id: None,
-            host_alias: None,
-        }),
-    )
-    .await
-    .unwrap();
+    // The master token is unbound: its read of the id-less session fails on
+    // the session's own state, not on the host binding.
+    let e = t
+        .session_transcript(
+            Extension(Caller::master()),
+            Parameters(SessionTranscriptParams {
+                session_id: bare_b,
+                since_turn: None,
+                max_chars: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.starts_with("E_INVALID_STATE"),
+        "master must get the state error, not a host refusal: {}",
+        e.message
+    );
 }
 
 #[tokio::test]
@@ -1234,7 +1229,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 73);
+    assert_eq!(served, 72);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1765,5 +1760,350 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
     assert!(
         !origin.chars().any(crate::store::breaks_a_line),
         "{origin:?}"
+    );
+}
+
+// ---- what the router SERVES (scope, slimming, hints) ----
+
+/// The five caller shapes the server actually sees.
+fn every_caller_kind() -> Vec<(&'static str, Caller)> {
+    vec![
+        ("master", Caller::master()),
+        ("host full", host_caller("hosta", TokenMode::Full)),
+        ("host readonly", host_caller("hosta", TokenMode::Readonly)),
+        ("client full", client_caller("phone", TokenMode::Full)),
+        (
+            "client readonly",
+            client_caller("phone", TokenMode::Readonly),
+        ),
+    ]
+}
+
+/// The served list and the call gate must answer the same question: a tool a
+/// caller can see is a tool it can call, and vice versa. Anything else spends
+/// the caller's context on `E_FORBIDDEN` (or hides a tool it may use).
+#[test]
+fn the_served_tool_list_matches_the_call_gates() {
+    for tool in FleetTools::tool_router_for_doc().list_all() {
+        for (label, caller) in every_caller_kind() {
+            let callable = enforce_mode(&caller, &tool.name).is_ok()
+                && enforce_admin(&caller, &tool.name).is_ok();
+            assert_eq!(
+                present::visible_to(&caller, &tool.name),
+                callable,
+                "{} must be {} to a {label} caller",
+                tool.name,
+                if callable { "listed" } else { "hidden" }
+            );
+        }
+    }
+}
+
+#[test]
+fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
+    let all = FleetTools::tool_router_for_doc().list_all();
+    let served = |caller: &Caller| -> Vec<String> {
+        all.iter()
+            .filter(|t| present::visible_to(caller, &t.name))
+            .map(|t| t.name.to_string())
+            .collect()
+    };
+    let master = served(&Caller::master());
+    assert_eq!(master.len(), all.len(), "the master token sees everything");
+
+    let readonly = served(&host_caller("hosta", TokenMode::Readonly));
+    assert!(
+        readonly.len() < master.len(),
+        "a readonly token must be served fewer tools than the master"
+    );
+    for name in &readonly {
+        assert!(
+            guard::is_readonly_tool(name),
+            "{name} mutates and must not be served to a readonly token"
+        );
+    }
+    assert!(readonly.iter().any(|n| n == "list_sessions"));
+    assert!(!readonly.iter().any(|n| n == "send_prompt"));
+
+    let client = served(&client_caller("phone", TokenMode::Full));
+    assert!(
+        !client.iter().any(|n| guard::is_admin_tool(n)),
+        "a paired client must not be served the fleet-admin tools"
+    );
+    assert!(!client.iter().any(|n| n == "provision_hosts"));
+}
+
+#[test]
+fn presented_tools_drop_schema_noise_and_keep_the_contract() {
+    let tool = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .find(|t| t.name == "list_sessions")
+        .map(present::present)
+        .expect("list_sessions");
+    let schema = serde_json::to_string(&*tool.input_schema).unwrap();
+    for noise in ["$schema", "\"title\"", "\"format\"", "\"default\":null"] {
+        assert!(
+            !schema.contains(noise),
+            "{noise} survived slimming: {schema}"
+        );
+    }
+    // The contract itself is untouched: the filters are still described.
+    let props = tool.input_schema["properties"].as_object().unwrap();
+    for p in ["summary", "limit", "host_alias", "claude_status"] {
+        assert!(props.contains_key(p), "{p} must survive slimming");
+    }
+    let doc = props["claude_status"]["description"].as_str().unwrap();
+    assert!(doc.contains(&ClaudeStatus::vocabulary_doc()));
+    assert!(
+        !doc.contains('\n'),
+        "hard-wrapped doc comments must be collapsed: {doc:?}"
+    );
+    assert!(
+        !tool.description.as_deref().unwrap().contains('\n'),
+        "tool descriptions must be collapsed too"
+    );
+}
+
+/// The keyword strip must not touch a PROPERTY that happens to be named
+/// `title`, `format` or `default` — those are the caller's arguments.
+#[test]
+fn slimming_never_eats_a_property_named_like_a_keyword() {
+    let mut schema: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_value(serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "Params",
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "title": "Title", "description": "a\n  b" },
+                "format": { "type": ["string", "null"], "default": null },
+                "nested": { "items": { "$schema": "x", "format": "int64", "type": "integer" } }
+            },
+            "required": ["title"]
+        }))
+        .unwrap();
+    present::slim_schema(&mut schema);
+    let props = schema["properties"].as_object().unwrap();
+    assert!(props.contains_key("title") && props.contains_key("format"));
+    assert_eq!(props["title"]["description"], "a b");
+    assert!(props["title"].get("title").is_none());
+    assert!(props["format"].get("default").is_none());
+    assert!(props["nested"]["items"].get("format").is_none());
+    assert!(schema.get("$schema").is_none() && schema.get("title").is_none());
+    assert_eq!(schema["required"], serde_json::json!(["title"]));
+}
+
+#[test]
+fn annotations_follow_the_policy_table() {
+    for tool in FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .map(present::present)
+    {
+        let a = tool.annotations;
+        if guard::is_readonly_tool(&tool.name) {
+            assert_eq!(
+                a.and_then(|a| a.read_only_hint),
+                Some(true),
+                "{} is a read and must say so",
+                tool.name
+            );
+        } else if guard::needs_confirmation(&tool.name) {
+            assert_eq!(
+                a.and_then(|a| a.destructive_hint),
+                Some(true),
+                "{} is confirmation-gated and must be marked destructive",
+                tool.name
+            );
+        } else {
+            assert!(
+                a.is_none(),
+                "{} carries annotations that say nothing",
+                tool.name
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn list_worktrees_defaults_to_slim_capped_rows_with_a_total() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let other = s.upsert_project("o", "r2", "/p2").unwrap();
+    for i in 0..(WORKTREES_DEFAULT_LIMIT + 5) {
+        s.upsert_worktree(
+            pid,
+            &format!("w{i}"),
+            &format!("/p/.worktrees/w{i}"),
+            Some("b"),
+        )
+        .unwrap();
+    }
+    s.upsert_worktree(other, "only", "/p2/.worktrees/only", None)
+        .unwrap();
+    let t = test_tools(s);
+    let call = |p: ListWorktreesParams| {
+        let t = t.clone();
+        async move {
+            let r = t.list_worktrees(Parameters(p)).await.unwrap();
+            serde_json::from_str::<serde_json::Value>(text_of(&r.content[0])).unwrap()
+        }
+    };
+
+    let all = call(ListWorktreesParams {
+        project_id: None,
+        host_alias: None,
+        summary: true,
+        limit: None,
+    })
+    .await;
+    assert_eq!(all["total"], (WORKTREES_DEFAULT_LIMIT + 6) as i64);
+    let rows = all["worktrees"].as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        WORKTREES_DEFAULT_LIMIT,
+        "the default caps the page"
+    );
+    // Slim rows: a count, not the occupant rows, and no path.
+    assert_eq!(rows[0]["occupants"], 0);
+    assert!(rows[0].get("path").is_none(), "{:?}", rows[0]);
+    assert!(rows[0]["name"].is_string() && rows[0]["branch"] == "b");
+
+    let filtered = call(ListWorktreesParams {
+        project_id: Some(other),
+        host_alias: None,
+        summary: false,
+        limit: None,
+    })
+    .await;
+    assert_eq!(filtered["total"], 1);
+    let full = &filtered["worktrees"][0];
+    assert!(
+        full["worktree"]["path"].is_string(),
+        "summary=false keeps the full row: {full:?}"
+    );
+
+    let capped = call(ListWorktreesParams {
+        project_id: Some(pid),
+        host_alias: Some("nosuchhost".into()),
+        summary: true,
+        limit: Some(2),
+    })
+    .await;
+    assert_eq!(capped["total"], 0, "the host filter applies before the cap");
+}
+
+/// The definition budget, guarded. Every byte here is paid for by every
+/// request a connected client makes, so a tool added or a description grown
+/// is a cost the repo should see in a diff, not in a bill. Update the
+/// constant deliberately — with the numbers the failure prints.
+#[test]
+fn the_served_definition_budget_stays_bounded() {
+    /// Definition bytes served to the master token (the widest surface),
+    /// counted the way a model pays for them: name + description + schema,
+    /// summed over the tools. ~3.7 chars per token, so this caps the surface
+    /// at roughly 15k tokens. It was 64,265 bytes before scoping, slimming
+    /// and the description diet.
+    const BUDGET_BYTES: usize = 56_000;
+    fn definition_bytes(caller: &Caller) -> (usize, usize) {
+        let tools: Vec<_> = FleetTools::tool_router_for_doc()
+            .list_all()
+            .into_iter()
+            .filter(|t| present::visible_to(caller, &t.name))
+            .map(present::present)
+            .collect();
+        let bytes = tools
+            .iter()
+            .map(|t| {
+                t.name.len()
+                    + t.description.as_deref().map_or(0, str::len)
+                    + serde_json::to_string(&*t.input_schema).unwrap().len()
+            })
+            .sum();
+        (tools.len(), bytes)
+    }
+    let (served, bytes) = definition_bytes(&Caller::master());
+    let (ro_served, ro_bytes) = definition_bytes(&host_caller("h", TokenMode::Readonly));
+    for (label, (n, b)) in [
+        ("master", (served, bytes)),
+        (
+            "host full",
+            definition_bytes(&host_caller("h", TokenMode::Full)),
+        ),
+        ("host readonly", (ro_served, ro_bytes)),
+        (
+            "client full",
+            definition_bytes(&client_caller("phone", TokenMode::Full)),
+        ),
+    ] {
+        println!("{label}: {n} tools / {b} bytes (~{} tokens)", b * 10 / 37);
+    }
+    assert!(
+        bytes <= BUDGET_BYTES,
+        "the tool surface grew to {bytes} bytes, over the {BUDGET_BYTES} budget: \
+         trim a description, or raise the constant on purpose"
+    );
+    assert!(
+        ro_bytes < bytes / 2,
+        "a readonly token must be served a much smaller surface: {ro_bytes} of {bytes}"
+    );
+}
+
+/// Null-stripping is only safe because a missing field deserializes back to
+/// `None`: the desktop in hub-client mode parses these same payloads into the
+/// service structs (`remote.rs`), so the round trip has to survive the strip.
+#[test]
+fn null_stripped_results_still_deserialize() {
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct Row {
+        id: i64,
+        name: Option<String>,
+        nested: Option<Inner>,
+        rows: Vec<Inner>,
+    }
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct Inner {
+        a: Option<i64>,
+        b: bool,
+    }
+    let row = Row {
+        id: 7,
+        name: None,
+        nested: None,
+        rows: vec![Inner { a: None, b: true }],
+    };
+    let r = ok_json_compact(&row).unwrap();
+    let json = text_of(&r.content[0]);
+    assert_eq!(json, r#"{"id":7,"rows":[{"b":true}]}"#);
+    assert_eq!(serde_json::from_str::<Row>(json).unwrap(), row);
+}
+
+/// `limit: 0` is the desktop's escape hatch (`remote.rs::list_worktrees`):
+/// the page cap is for agents, the tree view needs every row.
+#[tokio::test]
+async fn list_worktrees_limit_zero_returns_every_row() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    for i in 0..(WORKTREES_DEFAULT_LIMIT + 3) {
+        s.upsert_worktree(pid, &format!("w{i}"), &format!("/p/.worktrees/w{i}"), None)
+            .unwrap();
+    }
+    let t = test_tools(s);
+    let r = t
+        .list_worktrees(Parameters(ListWorktreesParams {
+            project_id: None,
+            host_alias: None,
+            summary: false,
+            limit: Some(0),
+        }))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(text_of(&r.content[0])).unwrap();
+    assert_eq!(v["total"], (WORKTREES_DEFAULT_LIMIT + 3) as i64);
+    assert_eq!(
+        v["worktrees"].as_array().unwrap().len(),
+        WORKTREES_DEFAULT_LIMIT + 3
     );
 }

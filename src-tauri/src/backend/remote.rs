@@ -444,12 +444,25 @@ impl HubBackend {
     }
 
     /// `commands::worktrees::list_worktrees`.
+    ///
+    /// The tool is shaped for agents: slim rows, capped at a page, wrapped in
+    /// `{total, worktrees}`. The desktop renders the whole project tree, so it
+    /// asks for full rows and `limit: 0` (no cap) and unwraps the envelope.
     pub async fn list_worktrees(
         &self,
         project_id: Option<i64>,
     ) -> Result<Vec<fleet_core::service::worktrees::WorktreeOccupancy>, IpcError> {
-        self.call("list_worktrees", json!({ "project_id": project_id }))
-            .await
+        #[derive(serde::Deserialize)]
+        struct Page {
+            worktrees: Vec<fleet_core::service::worktrees::WorktreeOccupancy>,
+        }
+        let page: Page = self
+            .call(
+                "list_worktrees",
+                json!({ "project_id": project_id, "summary": false, "limit": 0 }),
+            )
+            .await?;
+        Ok(page.worktrees)
     }
 
     /// `commands::tasks::list_tasks`.

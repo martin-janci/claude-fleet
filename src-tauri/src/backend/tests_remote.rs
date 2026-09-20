@@ -196,11 +196,17 @@ fn each_typed_read_names_its_tool_and_arguments() {
     let _ = block_on(backend(&fake).list_hosts());
     assert_eq!(fake.only_call().0, "list_hosts");
 
-    let fake = Fake::answering(Ok(ok("[]")));
-    let _ = block_on(backend(&fake).list_worktrees(Some(7)));
+    // Full rows and no cap: the desktop draws the whole tree, where the
+    // tool's own defaults (slim, one page) are shaped for an agent.
+    let fake = Fake::answering(Ok(ok(r#"{"total":0,"worktrees":[]}"#)));
+    let worktrees = block_on(backend(&fake).list_worktrees(Some(7))).expect("worktrees");
+    assert!(worktrees.is_empty());
     assert_eq!(
         fake.only_call(),
-        ("list_worktrees".into(), json!({"project_id": 7}))
+        (
+            "list_worktrees".into(),
+            json!({"project_id": 7, "summary": false, "limit": 0})
+        )
     );
 
     let fake = Fake::answering(Ok(ok("[]")));
