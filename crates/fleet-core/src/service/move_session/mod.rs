@@ -31,9 +31,15 @@
 //!    target worktree that already has uncommitted changes — its own, or an
 //!    unfinished earlier attempt's — is `E_MOVE_TARGET_DIRTY`), and
 //!    the small git-ignored files are carried over (never a failure, only a
-//!    warning). Then tmux starts `cl --resume <id>` there (the recreate pane
-//!    command). The move waits, bounded, for the row to be `running` and the
-//!    transcript to be in place. The carry itself lives in [`carry`]; see
+//!    warning). The Claude-side state follows them, on the same terms: the
+//!    session's own directory (subagent transcripts, tool results, the
+//!    title) is merged beside the target's transcript, and the project's
+//!    Claude memory gains the files the target lacks plus their `MEMORY.md`
+//!    lines — both halves only ever ADD on the target, each can only warn,
+//!    and a failure in one does not stop the other. Then tmux starts
+//!    `cl --resume <id>` there (the recreate pane command). The move waits,
+//!    bounded, for the row to be `running` and the transcript to be in
+//!    place. The carry itself lives in [`carry`] and [`claude_state`]; see
 //!    `docs/adr/0002-move-carries-work-as-is.md`.
 //! 4. **Source** — only once the target is confirmed (the new row's
 //!    `parent_session_id` is the source): unless `keep_source`, and only if
@@ -1051,6 +1057,264 @@ async fn carry_ignored(
     Ok((sel.carry, sel.left))
 }
 
+/// Pull `archive` (`bytes` long) off `src` and put it at `to` on `target`.
+async fn relay(
+    ssh: &dyn SshExec,
+    src: &str,
+    archive: &str,
+    bytes: u64,
+    target: &str,
+    to: &str,
+) -> Result<(), String> {
+    let local = download(ssh, src, archive, bytes, "tgz")
+        .await
+        .map_err(|e| e.message)?;
+    put_file(ssh, target, &local.0, to)
+        .await
+        .map_err(|e| e.message)
+}
+
+/// Run a script whose failure is only ever a warning: `Err(why)`.
+async fn sh_soft(
+    ssh: &dyn SshExec,
+    host: &str,
+    script: &str,
+    what: &str,
+) -> Result<std::process::Output, String> {
+    let out = sh(ssh, host, script, COPY_TIMEOUT)
+        .await
+        .map_err(|e| format!("{what} on {host}: {}", e.message))?;
+    if out.status.success() {
+        Ok(out)
+    } else {
+        Err(format!("{what} on {host} failed: {}", stderr_of(&out)))
+    }
+}
+
+/// List, select, pack, relay and merge the session's own Claude directory
+/// (`<project dir>/<id>/`: subagent transcripts, tool results, the title).
+/// Every `Err` carries the best report built so far — `left_behind` above
+/// all — plus the reason, for a report warning: this half never fails a move.
+#[allow(clippy::too_many_arguments)]
+async fn carry_session_state(
+    ssh: &dyn SshExec,
+    src: &str,
+    target: &str,
+    src_project_dir: &str,
+    tgt_project_dir: &str,
+    target_dir: &str,
+    id: &str,
+    cap: u64,
+) -> Result<carry::SessionStateReport, (carry::SessionStateReport, String)> {
+    let so_far = |left: &[carry::LeftBehind]| carry::SessionStateReport {
+        left_behind: left.to_vec(),
+        ..Default::default()
+    };
+    // The listing streams, so its own `find` can fail once records are
+    // already flowing (see `session_list_script`): a non-zero exit means the
+    // listing is not to be trusted, whatever reached stdout before it.
+    let out = sh_soft(
+        ssh,
+        src,
+        &claude_state::session_list_script(src_project_dir, id),
+        "listing the session directory",
+    )
+    .await
+    .map_err(|why| (so_far(&[]), why))?;
+    let listed = claude_state::parse_file_list(&out.stdout);
+    if listed.is_empty() {
+        // No such directory, or an empty one: nothing to do, nothing to say.
+        return Ok(carry::SessionStateReport::default());
+    }
+    let sel = claude_state::select_session_files(listed, cap);
+    if let Some(why) = sel.skip {
+        return Err((so_far(&sel.left), why));
+    }
+    if sel.carry.is_empty() {
+        return Ok(so_far(&sel.left));
+    }
+    let out = sh_soft(
+        ssh,
+        src,
+        &claude_state::session_pack_script(src_project_dir, id, &sel.exclude),
+        "packing the session directory",
+    )
+    .await
+    .map_err(|why| (so_far(&sel.left), why))?;
+    let (bytes, archive) = carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|e| (so_far(&sel.left), e.message))?;
+    let staged = format!("{target_dir}/state.tgz");
+    relay(ssh, src, &archive, bytes, target, &staged)
+        .await
+        .map_err(|why| (so_far(&sel.left), why))?;
+    let out = sh_soft(
+        ssh,
+        target,
+        &claude_state::session_merge_script(tgt_project_dir, id, &staged),
+        "merging the session directory",
+    )
+    .await
+    .map_err(|why| (so_far(&sel.left), why))?;
+    let merged =
+        claude_state::parse_merge(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| {
+            (
+                so_far(&sel.left),
+                format!("the merge on {target} said nothing"),
+            )
+        })?;
+    let report = carry::SessionStateReport {
+        carried: merged.carried,
+        kept_target: merged.kept,
+        left_behind: sel.left,
+    };
+    if !merged.failed.is_empty() {
+        let first: Vec<&str> = merged.failed.iter().take(3).map(String::as_str).collect();
+        let why = format!(
+            "{} file(s) could not be placed on {target}: {}",
+            merged.failed.len(),
+            first.join(", ")
+        );
+        return Err((report, why));
+    }
+    Ok(report)
+}
+
+/// List both sides' memory, decide what the target lacks, carry it and merge
+/// the index lines that describe it. Like [`carry_session_state`], every
+/// `Err` carries the report built so far: this half never fails a move
+/// either, and files already extracted on the target stay reported as
+/// carried even when the index step goes on to fail.
+async fn carry_memory(
+    ssh: &dyn SshExec,
+    src: &str,
+    target: &str,
+    src_worktree: &str,
+    tgt_project_root: &str,
+    target_dir: &str,
+    id: &str,
+) -> Result<carry::MemoryReport, (carry::MemoryReport, String)> {
+    let nothing = carry::MemoryReport::default;
+    // The source is keyed by the worktree's repo root, with the worktree
+    // itself as the fallback; the target by its project root.
+    let out = sh_soft(
+        ssh,
+        src,
+        &claude_state::memory_list_script(src_worktree, Some(src_worktree)),
+        "listing the memory",
+    )
+    .await
+    .map_err(|why| (nothing(), why))?;
+    let source = claude_state::parse_memory_list(&out.stdout).ok_or_else(|| {
+        (
+            nothing(),
+            format!("the memory listing on {src} was unreadable"),
+        )
+    })?;
+    if !source.exists || source.files.is_empty() {
+        return Ok(nothing());
+    }
+    let out = sh_soft(
+        ssh,
+        target,
+        &claude_state::memory_list_script(tgt_project_root, None),
+        "listing the memory",
+    )
+    .await
+    .map_err(|why| (nothing(), why))?;
+    let tgt = claude_state::parse_memory_list(&out.stdout).ok_or_else(|| {
+        (
+            nothing(),
+            format!("the memory listing on {target} was unreadable"),
+        )
+    })?;
+    let decided = claude_state::decide_memory(&source.files, &tgt.files);
+    let mut report = carry::MemoryReport {
+        kept_target: decided.kept_target,
+        identical: decided.identical,
+        left_behind: decided.left,
+        ..Default::default()
+    };
+    if decided.carry.is_empty() {
+        return Ok(report);
+    }
+    let names: Vec<String> = decided.carry.iter().map(|e| e.path.clone()).collect();
+    let out = sh_soft(
+        ssh,
+        src,
+        &carry::pack_script(&source.dir, id, claude_state::MEMORY_ARCHIVE, &names),
+        "packing the memory",
+    )
+    .await
+    .map_err(|why| (report.clone(), why))?;
+    let (bytes, archive) = carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|e| (report.clone(), e.message))?;
+    let staged = format!("{target_dir}/{}", claude_state::MEMORY_ARCHIVE);
+    relay(ssh, src, &archive, bytes, target, &staged)
+        .await
+        .map_err(|why| (report.clone(), why))?;
+    sh_soft(
+        ssh,
+        target,
+        &carry::extract_keep_existing_script(&tgt.dir, &staged, true),
+        "extracting the memory",
+    )
+    .await
+    .map_err(|why| (report.clone(), why))?;
+    // The files are on the target from here on: whatever the index does, they
+    // travelled.
+    report.carried = decided.carry;
+
+    let index = |out: &std::process::Output, host: &str| -> Result<Option<String>, String> {
+        match claude_state::parse_index(&String::from_utf8_lossy(&out.stdout)) {
+            None => Err(format!(
+                "the files travelled, but the index on {host} was unreadable and was left alone"
+            )),
+            Some(Some(text)) if text.len() as u64 > claude_state::INDEX_READ_MAX_BYTES => {
+                Err(format!(
+                    "the files travelled, but the index on {host} is over {} KiB and was left alone",
+                    claude_state::INDEX_READ_MAX_BYTES / 1024
+                ))
+            }
+            Some(text) => Ok(text),
+        }
+    };
+    let out = sh_soft(
+        ssh,
+        src,
+        &claude_state::memory_read_index_script(&source.dir),
+        "reading the index",
+    )
+    .await
+    .map_err(|why| (report.clone(), why))?;
+    let Some(source_index) = index(&out, src).map_err(|why| (report.clone(), why))? else {
+        // No index on the source: the files travel without one.
+        return Ok(report);
+    };
+    let out = sh_soft(
+        ssh,
+        target,
+        &claude_state::memory_read_index_script(&tgt.dir),
+        "reading the index",
+    )
+    .await
+    .map_err(|why| (report.clone(), why))?;
+    let target_index = index(&out, target).map_err(|why| (report.clone(), why))?;
+    let merged = claude_state::merge_index(&source_index, target_index.as_deref(), &names);
+    if merged.lines == 0 {
+        return Ok(report);
+    }
+    sh_soft(
+        ssh,
+        target,
+        &claude_state::memory_append_index_script(&tgt.dir, &merged.append),
+        "appending to the index",
+    )
+    .await
+    .map_err(|why| (report.clone(), why))?;
+    report.index_lines_added = merged.lines;
+    Ok(report)
+}
+
 // ── the move ────────────────────────────────────────────────────────────────
 
 /// Everything the move reads from the store, taken under one lock.
@@ -1070,6 +1334,7 @@ struct Snapshot {
     bundle_cap: u64,
     ignored_entry_kb: u64,
     ignored_total_kb: u64,
+    session_state_cap: u64,
     target_projects_root: String,
     layout: crate::projects::Layout,
     target_taken: Vec<String>,
@@ -1193,6 +1458,11 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         carry::DEFAULT_IGNORED_TOTAL_MB,
     )
     .saturating_mul(1024);
+    let session_state_cap = setting(
+        claude_state::SETTING_MAX_SESSION_STATE_MB,
+        claude_state::DEFAULT_MAX_SESSION_STATE_MB,
+    )
+    .saturating_mul(1024 * 1024);
     let target_taken = s
         .list_sessions_for_host(target)?
         .into_iter()
@@ -1213,6 +1483,7 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         bundle_cap,
         ignored_entry_kb,
         ignored_total_kb,
+        session_state_cap,
         target_projects_root: crate::service::projects::project_base_for(s, target),
         layout: crate::service::projects::layout(s),
         target_taken,
@@ -1871,6 +2142,56 @@ async fn move_session_inner(
         }
     }
 
+    // 3e. The Claude-side state: the per-session directory and the project's
+    //     memory. Both only ever add on the target, and neither can fail the
+    //     move — the transcript alone is all `--resume` needs.
+    let parent = |p: &str| {
+        std::path::Path::new(p)
+            .parent()
+            .map(|d| d.to_string_lossy().into_owned())
+    };
+    match (parent(&located.path), parent(&prep.path)) {
+        (Some(src_dir), Some(tgt_dir)) => {
+            match carry_session_state(
+                ssh,
+                &src,
+                &target,
+                &src_dir,
+                &tgt_dir,
+                &target_dir,
+                &id,
+                snap.session_state_cap,
+            )
+            .await
+            {
+                Ok(r) => carried.session_state = r,
+                Err((r, why)) => {
+                    carried.session_state = r;
+                    warnings.push(format!("session state was not carried: {why}"));
+                }
+            }
+        }
+        _ => warnings
+            .push("session state was not carried: the transcript has no parent directory".into()),
+    }
+    match carry_memory(
+        ssh,
+        &src,
+        &target,
+        &state.worktree,
+        &project_root,
+        &target_dir,
+        &id,
+    )
+    .await
+    {
+        Ok(r) => carried.memory = r,
+        Err((r, why)) => {
+            carried.memory = r;
+            warnings.push(format!("project memory was not carried: {why}"));
+        }
+    }
+
     put(ssh, &target, &prep.path, &bytes)
         .await
         .map_err(|e| before_target("copying the transcript", e))?;
@@ -2154,9 +2475,121 @@ mod tests {
         "/home/a/.cache/claude-fleet/transfer/550e8400-e29b-41d4-a716-446655440000";
     const TGT_DIR: &str =
         "/home/b/.cache/claude-fleet/transfer/550e8400-e29b-41d4-a716-446655440000";
+    /// The source's Claude project directory: the parent of [`SRC_PATH`], and
+    /// so the directory the per-session state is packed from.
+    const SRC_PROJECT_DIR: &str = "/home/a/.claude/projects/-home-a-p-o-r--claude-worktrees-feat";
+    /// The target project root the memory listing is keyed by (the parent of
+    /// [`TGT_CWD`]'s `.claude/worktrees/`).
+    const TGT_ROOT: &str = "/home/b/p/o/r";
+    const SRC_MEMORY: &str = "/home/a/.claude/projects/-home-a-p-o-r/memory";
+    const TGT_MEMORY: &str = "/home/b/.claude/projects/-home-b-p-o-r/memory";
+    /// The source's `MEMORY.md`: one line per memory file.
+    const SRC_INDEX: &str =
+        "- [New thing](new.md) - what it is\n- [Differs](differs.md) - theirs\n";
 
     fn tgt_path() -> String {
         format!("/home/b/.claude/projects/{TGT_ENC}/{SID}.jsonl")
+    }
+
+    /// The target's Claude project directory: the parent of [`tgt_path`], and
+    /// so the directory the per-session state is merged into.
+    fn tgt_project_dir() -> String {
+        format!("/home/b/.claude/projects/{TGT_ENC}")
+    }
+
+    /// A listing script's stdout: the marker, then NUL-terminated records.
+    fn records_out(records: &[String]) -> Reply {
+        let mut stdout = out("").into_bytes();
+        for r in records {
+            stdout.extend_from_slice(r.as_bytes());
+            stdout.push(0);
+        }
+        Reply::Exit {
+            code: 0,
+            stdout,
+            stderr: Vec::new(),
+        }
+    }
+
+    /// Both halves of the Claude-side state answering as a real pair of hosts
+    /// would: a session directory with two files (one of which the target
+    /// already has a bigger copy of), and a memory directory with one file
+    /// the target lacks, one it has in another version, and an index.
+    fn with_claude_state(f: &Fixture) {
+        f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:state-list"),
+                records_out(&[
+                    "550\tsubagents/agent-aa.jsonl".into(),
+                    "12\ttool-results/out1.txt".into(),
+                ]),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:state-pack"),
+                Reply::ok(&out(&format!("{}\t{SRC_DIR}/state.tgz\n", BUNDLE.len()))),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:state-merge"),
+                Reply::ok(&out(
+                    "carried\t550\tsubagents/agent-aa.jsonl\nkept\ttool-results/out1.txt\n",
+                )),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:memory-list"),
+                records_out(&[
+                    format!("dir\t{SRC_MEMORY}\t1"),
+                    "h-new\t20\tnew.md".into(),
+                    "h-source\t30\tdiffers.md".into(),
+                    "h-index\t40\tMEMORY.md".into(),
+                ]),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:memory-list"),
+                records_out(&[
+                    format!("dir\t{TGT_MEMORY}\t1"),
+                    "h-target\t31\tdiffers.md".into(),
+                ]),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:pack"),
+                Reply::ok(&out(&format!("{}\t{SRC_DIR}/memory.tgz\n", BUNDLE.len()))),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:extract"),
+                Reply::ok("ok\n"),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:memory-index"),
+                Reply::ok(&out(&format!("present\n{SRC_INDEX}"))),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:memory-index"),
+                Reply::ok(&out("absent\n")),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:memory-append"),
+                Reply::ok("ok\n"),
+            );
+    }
+
+    /// Every `bash -lc` script `host` was sent that carries `marker`.
+    fn scripts_with(f: &Fixture, host: &str, marker: &str) -> Vec<String> {
+        f.fake
+            .calls_for(host)
+            .into_iter()
+            .filter_map(|c| c.script())
+            .filter(|s| s.contains(marker))
+            .collect()
     }
 
     /// A carry script's stdout as the real scripts print it: marker line,
@@ -2427,6 +2860,18 @@ mod tests {
             "alpha",
             Match::script_contains("# cf-carry:ignored-list"),
             Reply::ok(&out("")),
+        )
+        // …and no Claude-side state either: no per-session directory, and a
+        // project whose memory directory does not exist.
+        .on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:state-list"),
+            Reply::ok(&out("")),
+        )
+        .on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:memory-list"),
+            records_out(&[format!("dir\t{SRC_MEMORY}\t0")]),
         );
         Fixture {
             store: Mutex::new(s),
@@ -3185,6 +3630,23 @@ mod tests {
                     c.cleaned.contains(&host),
                     "{name}: cleanup on {host}"
                 );
+                // The Claude-side state comes after every step in this table,
+                // so none of its scripts may have gone out either.
+                for marker in [
+                    "# cf-carry:state-list",
+                    "# cf-carry:state-pack",
+                    "# cf-carry:state-merge",
+                    "# cf-carry:memory-list",
+                    "# cf-carry:pack",
+                    "# cf-carry:extract",
+                    "# cf-carry:memory-index",
+                    "# cf-carry:memory-append",
+                ] {
+                    assert!(
+                        scripts_with(&f, host, marker).is_empty(),
+                        "{name}: {marker} must not run on {host}"
+                    );
+                }
             }
         }
     }
@@ -3257,6 +3719,349 @@ mod tests {
                 .any(|w| w.contains("ignored files were not carried")),
             "{:?}",
             rep.warnings
+        );
+    }
+
+    /// Both halves of the Claude-side state, end to end: the per-session
+    /// directory is packed from the source's Claude project dir and merged
+    /// into the target's, and the memory adds only the file the target lacks
+    /// — together with that file's index line, and no other.
+    #[tokio::test]
+    async fn the_claude_side_state_travels_and_is_reported() {
+        let f = fixture();
+        with_claude_state(&f);
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+
+        let st = &rep.carried.session_state;
+        assert_eq!(
+            st.carried,
+            vec![carry::IgnoredEntry {
+                path: "subagents/agent-aa.jsonl".into(),
+                bytes: 550
+            }]
+        );
+        assert_eq!(st.kept_target, vec!["tool-results/out1.txt".to_string()]);
+        assert!(st.left_behind.is_empty(), "{:?}", st.left_behind);
+
+        let mem = &rep.carried.memory;
+        assert_eq!(
+            mem.carried,
+            vec![carry::IgnoredEntry {
+                path: "new.md".into(),
+                bytes: 20
+            }]
+        );
+        assert_eq!(mem.kept_target, vec!["differs.md".to_string()]);
+        assert_eq!(mem.identical, 0);
+        assert_eq!(mem.index_lines_added, 1);
+
+        // The session directory is read where the transcript lives and merged
+        // beside the target's copy of it.
+        let packs = scripts_with(&f, "alpha", "# cf-carry:state-pack");
+        assert_eq!(packs.len(), 1, "one pack of the session directory");
+        assert!(
+            packs[0].contains(&format!("d={}", quote(SRC_PROJECT_DIR))),
+            "{}",
+            packs[0]
+        );
+        let merges = scripts_with(&f, "beta", "# cf-carry:state-merge");
+        assert_eq!(merges.len(), 1, "one merge on the target");
+        assert!(
+            merges[0].contains(&format!("d={}", quote(&tgt_project_dir()))),
+            "{}",
+            merges[0]
+        );
+        // The target's memory is keyed by the target project root.
+        let listings = scripts_with(&f, "beta", "# cf-carry:memory-list");
+        assert_eq!(listings.len(), 1, "one memory listing on the target");
+        assert!(
+            listings[0].contains(&format!("r={}", quote(TGT_ROOT))),
+            "{}",
+            listings[0]
+        );
+        // Exactly one append, carrying the carried file's line and no other.
+        let appends = scripts_with(&f, "beta", "# cf-carry:memory-append");
+        assert_eq!(appends.len(), 1, "exactly one index append");
+        assert!(appends[0].contains("(new.md)"), "{}", appends[0]);
+        assert!(!appends[0].contains("differs.md"), "{}", appends[0]);
+
+        // Both reports travel on the timeline with the move.
+        let ev = events(&f, f.source_id);
+        let (_, detail) = ev
+            .iter()
+            .find(|(k, _)| k == EVENT_MOVED)
+            .expect("session_moved");
+        let d: serde_json::Value = serde_json::from_str(detail.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            d["carried"]["session_state"]["carried"][0]["path"],
+            "subagents/agent-aa.jsonl"
+        );
+        assert_eq!(
+            d["carried"]["session_state"]["kept_target"][0],
+            "tool-results/out1.txt"
+        );
+        assert_eq!(d["carried"]["memory"]["carried"][0]["path"], "new.md");
+        assert_eq!(d["carried"]["memory"]["index_lines_added"], 1);
+    }
+
+    /// Neither half may fail a move, and neither may take the other down
+    /// with it: whatever breaks, the move completes with exactly one warning
+    /// and the other half's report is whole.
+    #[tokio::test]
+    async fn each_half_failing_is_a_warning_and_the_other_half_still_runs() {
+        const STATE: &str = "session state was not carried:";
+        const MEMORY: &str = "project memory was not carried:";
+        struct Case {
+            host: &'static str,
+            /// The Claude-state script whose reply is replaced.
+            marker: &'static str,
+            /// What distinguishes this case when the marker repeats.
+            what: &'static str,
+            reply: Reply,
+            /// The warning this row must produce — and the only one.
+            half: &'static str,
+        }
+        let case = |host, marker, what, reply, half| Case {
+            host,
+            marker,
+            what,
+            reply,
+            half,
+        };
+        let failed = |what: &str| format!("{} {what}", carry::FAILED);
+        let cases = vec![
+            case(
+                "alpha",
+                "# cf-carry:state-list",
+                "exit",
+                Reply::fail(5, &failed("cd")),
+                STATE,
+            ),
+            // The transport itself: still only a warning.
+            case(
+                "alpha",
+                "# cf-carry:state-list",
+                "unreachable",
+                Reply::Unreachable,
+                STATE,
+            ),
+            case(
+                "alpha",
+                "# cf-carry:state-pack",
+                "exit",
+                Reply::fail(5, &failed("tar")),
+                STATE,
+            ),
+            case(
+                "beta",
+                "# cf-carry:state-merge",
+                "exit",
+                Reply::fail(5, &failed("extract")),
+                STATE,
+            ),
+            case(
+                "beta",
+                "# cf-carry:state-merge",
+                "no marker",
+                Reply::ok("carried\t550\tsubagents/agent-aa.jsonl\n"),
+                STATE,
+            ),
+            // A file the merge could not place is a warning of its own, even
+            // though the script itself succeeded.
+            case(
+                "beta",
+                "# cf-carry:state-merge",
+                "a file could not be placed",
+                Reply::ok(&out(
+                    "carried\t550\tsubagents/agent-aa.jsonl\nfailed\ttool-results/out1.txt\n",
+                )),
+                STATE,
+            ),
+            case(
+                "alpha",
+                "# cf-carry:memory-list",
+                "exit",
+                Reply::fail(5, &failed("not-a-repo")),
+                MEMORY,
+            ),
+            case(
+                "beta",
+                "# cf-carry:memory-list",
+                "exit",
+                Reply::fail(5, &failed("cd")),
+                MEMORY,
+            ),
+            case(
+                "alpha",
+                "# cf-carry:pack",
+                "exit",
+                Reply::fail(5, &failed("tar")),
+                MEMORY,
+            ),
+            case(
+                "beta",
+                "# cf-carry:extract",
+                "exit",
+                Reply::fail(5, &failed("corrupt archive")),
+                MEMORY,
+            ),
+            case(
+                "beta",
+                "# cf-carry:memory-append",
+                "exit",
+                Reply::fail(5, &failed("append")),
+                MEMORY,
+            ),
+        ];
+        for c in cases {
+            let name = format!("{} ({})", c.marker, c.what);
+            let f = fixture();
+            with_claude_state(&f);
+            f.fake
+                .on_host(c.host, Match::script_contains(c.marker), c.reply);
+            let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            let rep = run(&f, &hooks, false)
+                .await
+                .unwrap_or_else(|e| panic!("{name}: the move must still succeed: {}", e.message));
+            let other = if c.half == STATE { MEMORY } else { STATE };
+            assert_eq!(
+                rep.warnings
+                    .iter()
+                    .filter(|w| w.starts_with(c.half))
+                    .count(),
+                1,
+                "{name}: {:?}",
+                rep.warnings
+            );
+            assert!(
+                !rep.warnings.iter().any(|w| w.starts_with(other)),
+                "{name}: {:?}",
+                rep.warnings
+            );
+            if c.half == STATE {
+                assert_eq!(rep.carried.memory.carried.len(), 1, "{name}");
+                assert_eq!(rep.carried.memory.kept_target.len(), 1, "{name}");
+                assert_eq!(rep.carried.memory.index_lines_added, 1, "{name}");
+            } else {
+                assert_eq!(rep.carried.session_state.carried.len(), 1, "{name}");
+                assert_eq!(rep.carried.session_state.kept_target.len(), 1, "{name}");
+            }
+        }
+    }
+
+    /// The common case: no per-session directory and no project memory is not
+    /// a problem to report, and nothing is packed or relayed for it.
+    #[tokio::test]
+    async fn a_source_with_no_claude_state_sends_no_pack_and_warns_nothing() {
+        let f = fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+        assert_eq!(
+            rep.carried.session_state,
+            carry::SessionStateReport::default()
+        );
+        assert_eq!(rep.carried.memory, carry::MemoryReport::default());
+        for marker in [
+            "# cf-carry:state-pack",
+            "# cf-carry:state-merge",
+            "# cf-carry:pack",
+            "# cf-carry:extract",
+            "# cf-carry:memory-index",
+            "# cf-carry:memory-append",
+        ] {
+            for host in ["alpha", "beta"] {
+                assert!(
+                    scripts_with(&f, host, marker).is_empty(),
+                    "{marker} must not run on {host}"
+                );
+            }
+        }
+    }
+
+    /// An index too large to read is left alone — but the files it describes
+    /// have already travelled, and stay reported as carried.
+    #[tokio::test]
+    async fn an_index_over_the_read_bound_is_left_alone_with_a_warning() {
+        let f = fixture();
+        with_claude_state(&f);
+        let huge = "x".repeat(claude_state::INDEX_READ_MAX_BYTES as usize + 1);
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-carry:memory-index"),
+            Reply::ok(&out(&format!("present\n{huge}"))),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false)
+            .await
+            .expect("the move still succeeds");
+        assert_eq!(rep.carried.memory.carried.len(), 1);
+        assert_eq!(rep.carried.memory.index_lines_added, 0);
+        assert!(
+            scripts_with(&f, "beta", "# cf-carry:memory-append").is_empty(),
+            "the index is left alone"
+        );
+        let warned: Vec<&String> = rep
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("project memory was not carried:"))
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", rep.warnings);
+        assert!(warned[0].contains("index"), "{}", warned[0]);
+    }
+
+    /// The cap is the setting, in MiB: over it, the largest files stay behind
+    /// as `--exclude`s and are reported.
+    #[tokio::test]
+    async fn the_session_state_cap_comes_from_the_setting() {
+        const BIG: u64 = 2 * 1024 * 1024;
+        let f = fixture();
+        with_claude_state(&f);
+        f.store
+            .lock()
+            .unwrap()
+            .set_setting(claude_state::SETTING_MAX_SESSION_STATE_MB, "1")
+            .unwrap();
+        f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:state-list"),
+                records_out(&[
+                    format!("{BIG}\tsubagents/big.jsonl"),
+                    "10240\tcustom-title.json".into(),
+                ]),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:state-merge"),
+                Reply::ok(&out("carried\t10240\tcustom-title.json\n")),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        let packs = scripts_with(&f, "alpha", "# cf-carry:state-pack");
+        assert_eq!(packs.len(), 1);
+        assert!(
+            packs[0].contains(&quote(&format!("--exclude=./{SID}/subagents/big.jsonl"))),
+            "{}",
+            packs[0]
+        );
+        assert!(!packs[0].contains("custom-title.json"), "{}", packs[0]);
+        assert_eq!(
+            rep.carried.session_state.left_behind,
+            vec![carry::LeftBehind {
+                path: "subagents/big.jsonl".into(),
+                bytes: Some(BIG),
+                reason: carry::LeftReason::OverCap,
+            }]
+        );
+        assert_eq!(
+            rep.carried.session_state.carried,
+            vec![carry::IgnoredEntry {
+                path: "custom-title.json".into(),
+                bytes: 10240
+            }]
         );
     }
 
