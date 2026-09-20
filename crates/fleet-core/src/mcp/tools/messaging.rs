@@ -101,7 +101,7 @@ impl FleetTools {
         let summary = sessions::broadcast_prompt(filter, prompt, submit, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
-        ok_json(&summary)
+        ok_json_compact(&summary)
     }
 
     #[tool(
@@ -122,7 +122,7 @@ impl FleetTools {
             s.list_session_events(p.session_id, limit)
                 .map_err(to_mcp_err)?
         };
-        ok_json(&events)
+        ok_json_compact(&events)
     }
 
     #[tool(
@@ -149,7 +149,7 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             s.list_conversations(row.id, limit).map_err(to_mcp_err)?
         };
-        ok_json(&rows)
+        ok_json_compact(&rows)
     }
 
     #[tool(

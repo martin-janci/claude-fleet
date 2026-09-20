@@ -10,6 +10,7 @@ import {
   sameConversation,
   isPinned,
   emptyStateText,
+  emptyStateHint,
   relativeTime,
   groupItems,
   toolName,
@@ -161,6 +162,28 @@ describe('isPinned', () => {
   it('is false one pixel beyond the threshold (41px from bottom)', () => {
     expect(isPinned(59, 50, 150)).toBe(false);
     expect(150 - 59 - 50).toBe(41);
+  });
+});
+
+describe('emptyStateHint', () => {
+  it('says what starts a conversation when the session has none yet', () => {
+    expect(emptyStateHint(null, false, true)).toContain('starts one');
+    expect(emptyStateHint('E_NO_TRANSCRIPT', false, false)).toContain('starts one');
+  });
+
+  it('points a promptable session at the composer', () => {
+    expect(emptyStateHint('E_NO_TRANSCRIPT', true, true)).toContain('Send a prompt');
+  });
+
+  it('does not point a read-only session at a composer it does not have', () => {
+    const hint = emptyStateHint('E_NO_TRANSCRIPT', true, false);
+    expect(hint).toBeTruthy();
+    expect(hint).not.toContain('Send a prompt');
+  });
+
+  it('has nothing to add when the panel is not in an empty state', () => {
+    expect(emptyStateHint(null, true, true)).toBeNull();
+    expect(emptyStateHint('E_SSH', true, true)).toBeNull();
   });
 });
 

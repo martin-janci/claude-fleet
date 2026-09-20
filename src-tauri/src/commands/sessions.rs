@@ -19,7 +19,7 @@
 //!   pre-attach check has no counterpart, and turning it into an explicit
 //!   repair would be destructive by surprise, so only `explicit: true` (the
 //!   Repair workspace button) routes.
-//! - `session_activity` — `peek_session` reads a pane, but it answers a
+//! - `session_activity` — the hub's pane and transcript reads answer a
 //!   different shape than `ActivityProbe`.
 //!
 //! `new_session` used to be refused here too: `NewSessionArgs` carried

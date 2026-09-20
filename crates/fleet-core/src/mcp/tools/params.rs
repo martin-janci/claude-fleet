@@ -381,6 +381,31 @@ pub struct ListProjectsParams {
     /// the full nested worktree tree.
     #[serde(default = "default_true")]
     pub summary: bool,
+    /// Maximum rows to return, newest-registered first. Omit for every
+    /// project. Pair it with summary=false, whose nested worktree tree costs
+    /// roughly ten times a summary row.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListWorktreesParams {
+    /// Only worktrees of this project id (see list_projects).
+    #[serde(default)]
+    pub project_id: Option<i64>,
+    /// Only worktrees on this host alias.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// Return slim rows (id, project_id, host_alias, name, branch, and
+    /// occupants as a COUNT — 0 = free to delete). Default true to keep
+    /// responses inside MCP token caps; set false for full rows with the
+    /// worktree path and the occupant sessions.
+    #[serde(default = "default_true")]
+    pub summary: bool,
+    /// Maximum rows to return, applied after the filters. Omit for the
+    /// default page of 100; 0 means no cap (every matching row).
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -402,22 +427,6 @@ pub struct RegisterSelfParams {
     /// `host_alias`).
     #[serde(default)]
     pub tmux_name: Option<String>,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct PeekSessionParams {
-    /// Fleet session id (from list_sessions). Alternative to
-    /// claude_session_id.
-    #[serde(default)]
-    pub session_id: Option<i64>,
-    /// The Claude session id returned by new_bg_session — usable before the
-    /// fleet row exists. Pass host_alias with it unless the row is already
-    /// tracked.
-    #[serde(default)]
-    pub claude_session_id: Option<String>,
-    /// Host the background session runs on (with `claude_session_id`).
-    #[serde(default)]
-    pub host_alias: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

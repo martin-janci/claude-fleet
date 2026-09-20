@@ -106,7 +106,7 @@ impl FleetTools {
             "related_sessions",
             &format!("session_id={}", args.session_id),
         );
-        ok_json(&sessions::related_sessions(args, &self.store).map_err(to_mcp_err)?)
+        ok_json_compact(&sessions::related_sessions(args, &self.store).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Mark the calling session as the fleet controller; \
@@ -288,81 +288,6 @@ impl FleetTools {
         Ok(CallToolResult::success(vec![text_content(
             capture_response(&text, max),
         )]))
-    }
-
-    #[tool(
-        description = "Deprecated: use session_transcript. Returns the session's last assistant turn from its transcript. Address it with session_id OR claude_session_id (+ host_alias while the fleet row does not exist yet)."
-    )]
-    pub(super) async fn peek_session(
-        &self,
-        Extension(caller): Extension<Caller>,
-        Parameters(p): Parameters<PeekSessionParams>,
-    ) -> Result<CallToolResult, McpError> {
-        audit(
-            "peek_session",
-            &format!(
-                "session_id={:?} claude_session_id={:?} host={:?}",
-                p.session_id, p.claude_session_id, p.host_alias
-            ),
-        );
-        // Gate a fleet id up front, so even the "no Claude id yet" answer
-        // is not given for another host's session.
-        if let Some(id) = p.session_id {
-            self.resolve_target(&caller, Some(id), None, None, "the session to peek")?;
-        }
-        let resolved = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            crate::service::bg_sessions::resolve_peek_target(
-                &s,
-                p.session_id,
-                p.host_alias.as_deref(),
-                p.claude_session_id.as_deref(),
-            )
-            .and_then(|(host_alias, claude_id)| {
-                // The fleet row, when there is one, supplies the pane, cwd and
-                // stored transcript path that locate the file precisely.
-                let row = match p.session_id {
-                    Some(id) => s.get_session_by_id(id)?,
-                    None => s
-                        .get_session_by_claude_id(&claude_id)?
-                        .filter(|r| r.host_alias == host_alias),
-                };
-                Ok((host_alias, claude_id, row))
-            })
-        };
-        let (host_alias, claude_id, row) = match resolved {
-            Ok(target) => target,
-            // A tracked interactive session with no Claude id is not an
-            // error for the caller — say so instead of failing.
-            Err(e) if e.code == "E_INVALID_STATE" => {
-                return ok_json(
-                    &"This session has no Claude session id yet — nothing to peek.".to_string(),
-                );
-            }
-            Err(e) => return Err(to_mcp_err(e)),
-        };
-        // The claude_session_id path resolves its host here.
-        require_host(&caller, &host_alias, "the session to peek")?;
-        let text = match row {
-            Some(row) => self.transcript_for(&row, None, None).await?,
-            // Untracked (a new_bg_session id before reconcile): the read
-            // script finds the file by session id alone.
-            None => crate::service::transcript::fetch_transcript(
-                crate::service::transcript::TranscriptArgs {
-                    host_alias,
-                    tmux_name: None,
-                    transcript_path: None,
-                    cwd: None,
-                    claude_session_id: claude_id,
-                    turns: 1,
-                    max_chars: crate::service::transcript::DEFAULT_MAX_CHARS,
-                },
-                &self.ssh,
-            )
-            .await
-            .map_err(to_mcp_err)?,
-        };
-        ok_json(&text)
     }
 
     #[tool(description = "Recreate a session: kill its tmux session and rebuild \

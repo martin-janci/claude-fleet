@@ -260,13 +260,6 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
-        name: "peek_session",
-        access: Access::Client,
-        readonly: true,
-        confirm: false,
-        deadline: Deadline::Quick,
-    },
-    ToolPolicy {
         name: "recreate_session",
         access: Access::Client,
         readonly: false,
