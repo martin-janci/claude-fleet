@@ -7,6 +7,7 @@ use fleet_core::service::repo_read::{
     Branch, ChangedFile, Commit, CommitDetail, FileContent, FileDiff, GitRef, RepoTree,
 };
 use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversation};
+use fleet_core::service::tunnel::TunnelHealth;
 use fleet_core::service::usage::DayUsage;
 use fleet_core::service::worktrees::{WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
@@ -211,6 +212,22 @@ fn sample_health() -> Health {
             day: "2026-09-18".into(),
             totals: sample_totals(),
         }],
+        // A flapping tunnel is the case worth pinning on the wire: it is how a
+        // remote operator learns the Control API is unreachable from a host.
+        tunnels: BTreeMap::from([(
+            "trn".to_string(),
+            TunnelHealth {
+                supervised: true,
+                connected: false,
+                consecutive_failures: 412,
+                restarts: 412,
+                last_exit_code: Some(255),
+                last_error: Some("bind [127.0.0.1]:4180: Address already in use".into()),
+                last_connected_unix: None,
+                backoff_ms: 30_000,
+            },
+        )]),
+        tunnels_flapping: 1,
     }
 }
 
@@ -565,9 +582,10 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
         complaints.is_empty(),
         "the hub's wire names no longer match what the desktop expects.\n\n{}\n\n\
          A field that is no longer sent under the name above does NOT fail to \
-         parse: Task 2 put #[serde(default)] on every optional field, because \
-         the hub's ok_json_compact strips nulls. It silently becomes None, and \
-         the desktop renders plausible wrong data with nothing in the log. If \
+         parse: this struct puts #[serde(default)] on every optional field, \
+         because the hub's ok_json_compact strips nulls. It silently becomes \
+         None, and the desktop renders plausible wrong data with nothing in \
+         the log. If \
          the rename is deliberate, regenerate with \
          `{REGEN_ENV}=1 cargo test -p claude-fleet --lib contract` and read the \
          diff.",
@@ -673,9 +691,8 @@ fn the_three_fields_where_absent_means_fine_keep_their_names() {
     }
 }
 
-/// The Task 2 review's NIT 10: `#[serde(default)]` on a **`Vec`** is the same
-/// falsely-reassuring shape as the three `Option`s above, and the report's
-/// blast-radius list missed it.
+/// `#[serde(default)]` on a **`Vec`** is the same falsely-reassuring shape as
+/// the three `Option`s above.
 ///
 /// `WorktreeOccupancy::occupants` is the one that bites: empty means "no live
 /// session is using this worktree", which the UI reads as *free to delete*. A

@@ -166,9 +166,8 @@ impl TokenStore for OsTokenStore {
 
 /// The file-backed fallback, which is what this Linux box actually runs.
 ///
-/// These are the tests the review asked for: nothing exercised `set` or
-/// `clear` before, which is exactly why the world-readable creation window
-/// survived Task 1.
+/// These tests close a real gap: nothing exercised `set` or `clear` before,
+/// which is exactly why the world-readable creation window went unnoticed.
 #[cfg(all(test, not(target_os = "macos")))]
 mod fallback_tests {
     use super::*;

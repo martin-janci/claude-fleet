@@ -414,7 +414,7 @@ pub async fn repo_tree(
     Ok(RepoTree { entries, truncated })
 }
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "RepoPathParams")]
 pub struct RepoFileArgs {
     /// Fleet session id (from list_sessions).
@@ -530,7 +530,7 @@ pub async fn repo_diff(
 
 // ─── log / branches / commit ─────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RepoLogArgs {
     pub session_id: i64,
     /// Show all branches/refs (`--all`) instead of just current HEAD.
@@ -589,7 +589,7 @@ pub async fn repo_branches(
     Ok(parse_branches(&out.stdout))
 }
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "RepoCommitParams")]
 pub struct RepoCommitArgs {
     /// Fleet session id.
@@ -634,7 +634,7 @@ pub async fn repo_commit(
     Ok(detail)
 }
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "RepoCommitDiffParams")]
 pub struct RepoCommitDiffArgs {
     /// Fleet session id.

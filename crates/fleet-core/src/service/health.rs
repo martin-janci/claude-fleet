@@ -44,6 +44,16 @@ pub struct Health {
     /// sessions currently in the store. Hosts with nothing counted are
     /// omitted.
     pub usage_by_host: BTreeMap<String, UsageTotals>,
+    /// Per-host reverse-tunnel health, when a supervisor is wired in (the
+    /// desktop app and the hub; empty otherwise). Populated via
+    /// [`Health::set_tunnels`], not by the pure roll-up.
+    #[serde(default)]
+    pub tunnels: BTreeMap<String, crate::service::tunnel::TunnelHealth>,
+    /// How many of `tunnels` are supervised but crash-looping. The one number
+    /// worth alerting on: a flapping tunnel means the Control API is not
+    /// reachable from that host, however healthy everything else looks.
+    #[serde(default)]
+    pub tunnels_flapping: u32,
     /// Estimated usage per UTC day (`day` = `YYYY-MM-DD`), all hosts, over
     /// the last `usage::HEALTH_DAYS` days — from the durable daily roll-up,
     /// so killed sessions still count.
@@ -61,6 +71,17 @@ pub struct FleetSummary {
     pub context_red: u32,
     pub stuck: u32,
     pub usage_by_host: BTreeMap<String, UsageTotals>,
+}
+
+impl Health {
+    /// Attach the tunnel supervisor's view and recompute `tunnels_flapping`.
+    pub fn set_tunnels(
+        &mut self,
+        tunnels: std::collections::HashMap<String, crate::service::tunnel::TunnelHealth>,
+    ) {
+        self.tunnels_flapping = tunnels.values().filter(|t| t.is_flapping()).count() as u32;
+        self.tunnels = tunnels.into_iter().collect();
+    }
 }
 
 /// Threshold (percent) at or above which a session's context window counts as
@@ -116,6 +137,8 @@ pub fn health_from_store(s: &Store) -> Health {
     let summary = summarize(&sessions, &hosts);
     Health {
         version: crate::app_version::get().to_string(),
+        tunnels: Default::default(),
+        tunnels_flapping: 0,
         db_ready: schema_version >= 1,
         schema_version,
         hosts_reachable: summary.hosts_reachable,
@@ -152,6 +175,8 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
         Ok(s) => health_from_store(&s),
         Err(_) => Health {
             version: crate::app_version::get().to_string(),
+            tunnels: Default::default(),
+            tunnels_flapping: 0,
             db_ready: false,
             schema_version: 0,
             hosts_reachable: 0,
@@ -170,6 +195,8 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::tunnel::TunnelHealth;
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     fn session(
@@ -484,6 +511,8 @@ mod tests {
         // the missing field and not about the shape in general.
         let whole = serde_json::to_string(&Health {
             version: "1".into(),
+            tunnels: Default::default(),
+            tunnels_flapping: 0,
             db_ready: true,
             schema_version: 32,
             hosts_reachable: 1,
@@ -499,5 +528,39 @@ mod tests {
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");
         assert_eq!(back.stuck, 6);
+    }
+
+    #[test]
+    fn health_carries_tunnel_health_and_flags_the_flapping_ones() {
+        // A flapping tunnel is invisible over MCP unless the roll-up carries
+        // it: the operator drives this fleet remotely and cannot read the
+        // desktop app's onboarding card.
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let mut h = health_check(&store);
+        assert!(h.tunnels.is_empty(), "no supervisor wired in: no rows");
+        assert_eq!(h.tunnels_flapping, 0);
+
+        h.set_tunnels(HashMap::from([
+            (
+                "ok".to_string(),
+                TunnelHealth {
+                    supervised: true,
+                    connected: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "trn".to_string(),
+                TunnelHealth {
+                    supervised: true,
+                    consecutive_failures: 412,
+                    last_error: Some("bind: Address already in use".into()),
+                    ..Default::default()
+                },
+            ),
+        ]));
+        assert_eq!(h.tunnels_flapping, 1);
+        assert_eq!(h.tunnels["trn"].consecutive_failures, 412);
+        assert!(!h.tunnels["ok"].is_flapping());
     }
 }

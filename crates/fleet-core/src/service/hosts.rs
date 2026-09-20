@@ -9,7 +9,7 @@ use crate::shell::quote;
 use crate::ssh::SshExec;
 use crate::ssh_config::{self, SshHost};
 use crate::store::{HostRow, Store};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -226,7 +226,7 @@ pub async fn probe_ssh_alias(
     })
 }
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "HostAliasParams")]
 pub struct HostAliasArgs {
     /// The claude-fleet host alias (e.g. "local", "mefistos").

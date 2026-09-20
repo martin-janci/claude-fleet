@@ -118,11 +118,7 @@ pub async fn upload_to_session(
 ) -> Result<Vec<String>, IpcError> {
     // The bytes are on THIS machine and the destination is a host only the
     // hub can reach; there is no tool that would carry a file across.
-    backend.local_only(
-        "upload_to_session",
-        "the file is on this machine and the session's host is the hub's to \
-         reach; copy it there yourself, or drop it on a standalone app",
-    )?;
+    backend.refuse_local_only("upload_to_session")?;
     fleet_core::validate::host_alias(&args.host_alias)?;
     fleet_core::validate::tmux_name_addressable(&args.session_name)?;
     if args.local_paths.is_empty() {

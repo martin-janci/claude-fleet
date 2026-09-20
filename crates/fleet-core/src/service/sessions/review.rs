@@ -4,7 +4,7 @@ use super::*;
 use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "SpawnReviewParams")]
 pub struct SpawnReviewArgs {
     /// Id of the session whose work should be reviewed.

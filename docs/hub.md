@@ -933,10 +933,10 @@ standalone exactly as before.
   this mode. Approve it on the hub — this window will follow: the approved
   change arrives over the hub's event stream like any other, so there is
   nothing to refresh.
-- **Fleet administration is refused.** Adding, removing and hiding hosts,
-  provisioning, per-host tokens, asset sync and sync secrets: a client is not
-  the fleet's administrator. Those controls are disabled in the interface with
-  the reason rather than failing at the click.
+- **Fleet administration is refused.** A client is not the fleet's
+  administrator, so those controls are disabled in the interface with the
+  reason rather than failing at the click. *What a hub client refuses* below
+  lists exactly which ones.
 - **The terminal is local-only.** The PTY attaches a local `ssh`/`tmux`
   process and the hub streams no pane. The terminal tab shows the
   `ssh <host>` / `tmux attach -t <session>` line for the selected session
@@ -949,6 +949,103 @@ standalone exactly as before.
   panel is built on.)
 - **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
   the error says to pair again in Settings → Hub.
+
+### What a hub client refuses
+
+What a hub client cannot do from here, and what to do instead: every command
+that is local-only outright, plus `repair_session`, which routes for one
+argument shape and refuses for the other. Generated from the same table the
+backend enforces from (`src-tauri/src/backend/verdicts.rs`) — that file also
+has the full verdict for every command, including the ones that route
+normally or run the same in both modes, which this table leaves out because
+they tell an operator nothing they came to docs to learn. Regenerate with:
+
+```text
+REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
+```
+
+<!-- BEGIN GENERATED: hub-client verdicts -->
+<!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
+
+Of the 123 commands, 35 route to a hub tool, 1 routes except for one argument shape, 73 refuse, and 14 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+
+| Command | What to do instead |
+| --- | --- |
+| `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
+| `add_project` | it clones or adopts a checkout using this machine's SSH and GitHub credentials; add the project on the hub, then it appears here |
+| `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `assets_scan_hosts` | the hub has this as its scan_assets tool, but its result feeds an inventory panel built on the catalog checkout, which only the machine that owns the fleet has; call scan_assets on the hub, or scan from that machine |
+| `catalog_add_resource` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_apply_sync` | the hub's apply_sync is master-only: a paired client is never the fleet's administrator, and a sync writes to every host over SSH; run the sync on the hub |
+| `catalog_commit_pending` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_config` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_configure` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_create_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_delete_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_delete_layer` | deleting a layer removes a file from the catalog's git checkout, which only the machine that owns the fleet has, and the hub exposes no layer-authoring tool; author on that machine |
+| `catalog_delete_secret` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_get_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_import_host` | the hub has this as its import_assets tool, but the import lands in the catalog's git checkout, which only the machine that owns the fleet has; call import_assets on the hub, or import on that machine |
+| `catalog_last_sync` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_layer_template` | a template is the first step of authoring a layer into the catalog's git checkout, and catalog_write_layer refuses here for want of that checkout; the hub exposes no layer-authoring tool, so author on the machine that owns the fleet |
+| `catalog_lint_all` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_lint_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_list_assets` | the hub does serve this list (its read-only list_assets tool, open to any paired client), but the Assets panel is built on the catalog's configuration and git checkout, which only the machine that owns the fleet has; call list_assets on the hub, or browse the catalog on that machine |
+| `catalog_list_layers` | the hub does serve this (its read-only list_layers tool), but the layer definitions live in the catalog's git checkout, which only the machine that owns the fleet has; call list_layers on the hub, or work on the catalog there |
+| `catalog_list_secrets` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_load` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_plan_sync` | the hub has this as its plan_sync tool, but the plan is shown in a sync panel built on the catalog checkout, which only the machine that owns the fleet has; call plan_sync on the hub, or plan on that machine |
+| `catalog_propose_layers` | the hub does serve this (its read-only propose_layers tool), but a proposal is only useful where the layers can then be written — the catalog's git checkout, which only the machine that owns the fleet has; call propose_layers on the hub, or propose on that machine |
+| `catalog_push` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_remove_resource` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_repo_status` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_resolve_preview` | the hub has a resolve_preview tool, but it answers a summary — kind, name and version per asset — while this command returns the full Resolution the UI renders, so routing it would silently drop every asset body; call resolve_preview on the hub for the summary, or resolve on the machine that owns the fleet |
+| `catalog_set_host_layers` | the hub has a set_host_layers tool, but it is master-only — a host's layer assignment decides what the next apply_sync writes to its filesystem — and a paired client is never the master; set layers on the machine that owns the fleet |
+| `catalog_set_secret` | the hub's set_secret is master-only: a paired client is never the fleet's administrator, and the sync secrets belong to the machine that runs the sync; set it on the hub |
+| `catalog_spawn_author_session` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_template` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_update_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
+| `catalog_write_layer` | writing a layer edits a file in the catalog's git checkout, which only the machine that owns the fleet has, and the hub exposes no layer-authoring tool; author on that machine |
+| `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
+| `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
+| `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
+| `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
+| `get_fleet_settings` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; read and change them on the hub |
+| `hide_host` | hiding a host is fleet administration, which the hub reserves for its own operator — hide it there with `fleet-hub` |
+| `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
+| `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
+| `list_account_usage` | this app does not poll account usage while a hub owns the fleet, so the cache is empty; read usage on the hub |
+| `list_github_repos` | it runs `gh` over this machine's SSH connection to the host; browse repositories from the hub or a standalone app |
+| `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
+| `list_host_worktrees` | it scans the host over this machine's SSH connection and caches what it finds; use list_worktrees, which the hub answers |
+| `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
+| `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
+| `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
+| `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub` |
+| `pty_open` | the terminal attaches over this machine's SSH connection to the session's host; attach from that host, or from a standalone app |
+| `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
+| `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
+| `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |
+| `repair_session` | Refuses when explicit: false, the automatic pre-attach check (otherwise routes to `repair_session`): the hub's repair_session always runs the EXPLICIT repair, which may unregister a stale worktree entry, adopt a moved checkout and recreate a branch — this app will not turn an automatic pre-attach check into that; repair explicitly, or from the hub |
+| `repo_checkout` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `repo_checkout_commit` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `repo_commit_create` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `repo_create_branch` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `repo_delete_branch` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `repo_fetch` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `repo_pull` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `repo_push` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `repo_stage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `repo_unstage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
+| `session_activity` | it captures the session's pane over this machine's SSH connection; the hub's pane reads answer a different shape, so the live indicator is off in remote mode |
+| `session_tool_detail` | the hub exposes no tool for one tool call's input and result; the Conversation tab's tool lines still come from session_conversation |
+| `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
+| `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub |
+| `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
+| `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
+| `upload_to_session` | the file is on this machine and the session's host is the hub's to reach; copy it there yourself, or drop it on a standalone app |
+<!-- END GENERATED: hub-client verdicts -->
 
 ### Version skew
 

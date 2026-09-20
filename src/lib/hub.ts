@@ -243,14 +243,21 @@ export function hubBlock(action: HubAction, status: HubStatus = get(hubStatus)):
 
 /**
  * Action keys for the mutations that ROUTE to the hub — the ones a paired
- * client can still send, as long as the live connection to it is up. Kept
- * aligned with the routed-mutation case names in
- * `src-tauri/src/backend/tests_routing.rs` (`routed_mutation_cases`) so a
- * later refactor that generates this list from that table is a rename, not a
- * redesign. Those case names usually match the `#[tauri::command]` fn name;
+ * client can still send, as long as the live connection to it is up. This is
+ * a SUBSET of the backend's routed commands (`src-tauri/src/backend/
+ * verdicts.rs`): the mutations the UI actually gates on the connection
+ * state, not every routed command — a routed read like `list_sessions` has
+ * no control to disable and so is not here.
+ *
+ * `hub_verdicts.test.ts` holds this list (and `REASONS` below) accountable
+ * to `hub_verdicts.generated.json`, the JSON generated straight from
+ * `VERDICTS`, rather than this file importing that JSON and deriving from
+ * it: keeping the literal here lets `RoutedAction` stay exactly the union
+ * type it is today. The names usually match the `#[tauri::command]` fn name;
  * the one place they don't is `set_friendly_name`, whose command is
  * `set_session_friendly_name` (the tool it routes to is `set_friendly_name`,
- * which is what the test names the case after).
+ * which is what `tests_routing.rs` names the case after, and what the
+ * cross-check test maps through too).
  */
 export const ROUTED_ACTIONS = [
   'send_prompt',

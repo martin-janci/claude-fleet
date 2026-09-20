@@ -19,12 +19,12 @@
 //!   pre-attach check has no counterpart, and turning it into an explicit
 //!   repair would be destructive by surprise, so only `explicit: true` (the
 //!   Repair workspace button) routes.
-//! - `session_activity` — `peek_session` reads a pane, but it answers a
+//! - `session_activity` — the hub's pane and transcript reads answer a
 //!   different shape than `ActivityProbe`.
 //!
 //! `new_session` used to be refused here too: `NewSessionArgs` carried
 //! `kind`, `start_command` and `friendly_name`, and `NewSessionParams`
-//! carried none of them. Task 1 (#146) added the three fields to the tool's
+//! carried none of them. #146 added the three fields to the tool's
 //! params (optional — absent means today's MCP behaviour), so the desktop's
 //! arguments now map one-to-one and it routes unconditionally.
 
@@ -112,11 +112,7 @@ pub async fn inspect_safe_kill(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SafeKillInspection, IpcError> {
-    backend.local_only(
-        "inspect_safe_kill",
-        "it inspects the worktree over this machine's SSH connection and the \
-         hub exposes no tool for it; retire the session from the hub",
-    )?;
+    backend.refuse_local_only("inspect_safe_kill")?;
     safe_kill::inspect_safe_kill(args, &store, &ssh).await
 }
 
@@ -132,11 +128,7 @@ pub async fn discard_kill_session(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<i64, IpcError> {
-    backend.local_only(
-        "discard_kill_session",
-        "the hub exposes no tool that discards a worktree and kills in one \
-         step; use safe_kill_session, or do it from the hub",
-    )?;
+    backend.refuse_local_only("discard_kill_session")?;
     safe_kill::discard_kill_session(args, force, &store, &ssh).await
 }
 
@@ -216,13 +208,7 @@ pub fn dismiss_agent_session(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
-    backend.local_only(
-        "dismiss_agent_session",
-        "use Kill instead: the hub's kill_session removes an inactive \
-         agent from the list exactly as this would. It is not routed here \
-         because the two differ on a WORKING agent, which this refuses and \
-         kill_session stops",
-    )?;
+    backend.refuse_local_only("dismiss_agent_session")?;
     bg_sessions::dismiss_agent_session(args, &store)
 }
 
@@ -270,11 +256,7 @@ pub async fn purge_project(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<bg_sessions::PurgeReport>, IpcError> {
-    backend.local_only(
-        "purge_project",
-        "it deletes Claude Code state on every host over this machine's SSH \
-         connections and the hub exposes no tool for it; purge from the hub",
-    )?;
+    backend.refuse_local_only("purge_project")?;
     bg_sessions::purge_project(args, &store, &ssh).await
 }
 
@@ -297,12 +279,7 @@ pub fn get_fleet_settings(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    backend.local_only(
-        "get_fleet_settings",
-        "these settings drive the reconcile tick, the GC sweeper and the \
-         playbooks, which the hub runs and this app does not; read and change \
-         them on the hub",
-    )?;
+    backend.refuse_local_only("get_fleet_settings")?;
     let s = lock(&store)?;
     Ok(fleet_core::service::settings::read_all(&s))
 }
@@ -317,12 +294,7 @@ pub fn set_fleet_setting(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    backend.local_only(
-        "set_fleet_setting",
-        "these settings drive the reconcile tick, the GC sweeper and the \
-         playbooks, which the hub runs and this app does not; change them on \
-         the hub",
-    )?;
+    backend.refuse_local_only("set_fleet_setting")?;
     let s = lock(&store)?;
     fleet_core::service::settings::set(&s, &key, &value)?;
     Ok(fleet_core::service::settings::read_all(&s))
@@ -437,11 +409,7 @@ pub async fn session_tool_detail(
     // The session id is the hub's and the transcript lives on the hub's
     // hosts; with no hub tool to ask, a local read would look up the wrong
     // row over this machine's SSH keys.
-    backend.local_only(
-        "session_tool_detail",
-        "the hub exposes no tool for one tool call's input and result; the \
-         Conversation tab's tool lines still come from session_conversation",
-    )?;
+    backend.refuse_local_only("session_tool_detail")?;
     let row = {
         let s = lock(&store)?;
         s.get_session_by_id(args.session_id)?.ok_or_else(|| {
@@ -478,12 +446,7 @@ pub async fn session_activity(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<sessions::ActivityProbe, IpcError> {
-    backend.local_only(
-        "session_activity",
-        "it captures the session's pane over this machine's SSH connection; \
-         the hub's peek_session answers a different shape, so the live \
-         indicator is off in remote mode",
-    )?;
+    backend.refuse_local_only("session_activity")?;
     sessions::session_activity(&store, &ssh, args.session_id).await
 }
 
@@ -513,7 +476,7 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
     ) -> Result<Vec<SessionRow>, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.related_sessions(args.session_id).await,
+            Some(hub) => hub.route("related_sessions", &args).await,
             None => sessions::related_sessions(args, store),
         }
     }
@@ -538,7 +501,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<i64, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.kill_session(&args).await,
+            Some(hub) => hub.route("kill_session", &args).await,
             None => sessions::kill_session(args, store, ssh).await,
         }
     }
@@ -550,7 +513,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.safe_kill_session(&args).await,
+            Some(hub) => hub.route("safe_kill_session", &args).await,
             None => safe_kill::safe_kill_session(args, store, ssh).await,
         }
     }
@@ -562,18 +525,21 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.rename_session(&args).await,
+            Some(hub) => hub.route("rename_session", &args).await,
             None => sessions::rename_session(args, store, ssh).await,
         }
     }
 
+    /// The command is `set_session_friendly_name` and the tool is
+    /// `set_friendly_name`: one of the two places the two vocabularies
+    /// differ, and the row is what resolves it.
     pub async fn set_session_friendly_name(
         backend: &FleetBackend,
         args: SetFriendlyNameArgs,
         store: &Mutex<Store>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.set_session_friendly_name(&args).await,
+            Some(hub) => hub.route("set_session_friendly_name", &args).await,
             None => sessions::set_session_friendly_name(args, store),
         }
     }
@@ -585,11 +551,18 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.restart_session(&args).await,
+            Some(hub) => hub.route("restart_session", &args).await,
             None => sessions::restart_session(args, store, ssh).await,
         }
     }
 
+    /// **Pointed at a hub, the prompt arrives marked.** `apply_marker` wraps
+    /// every prompt from a non-master caller in the untrusted-input marker,
+    /// and a paired client is never the master
+    /// (`mcp::tools::support::apply_marker`, whose own doc comment says "text
+    /// typed on a phone always reaches an agent marked"). That is the hub's
+    /// client model working as designed, not a defect here — but it is a
+    /// visible difference from standalone and belongs in the docs.
     pub async fn send_prompt(
         backend: &FleetBackend,
         args: SendPromptArgs,
@@ -597,7 +570,13 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<(), IpcError> {
         match backend.hub() {
-            Some(hub) => hub.send_prompt(&args).await,
+            Some(hub) => {
+                // The tool answers `{"delivered": …}` where the command
+                // answers `()`; the body is read and discarded so a tool
+                // error still surfaces.
+                let _: serde_json::Value = hub.route("send_prompt", &args).await?;
+                Ok(())
+            }
             None => sessions::send_prompt(args, store, ssh).await,
         }
     }
@@ -609,7 +588,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.spawn_review(&args).await,
+            Some(hub) => hub.route("spawn_review", &args).await,
             None => sessions::spawn_review(args, store, ssh).await,
         }
     }
@@ -621,7 +600,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.recreate_session(&args).await,
+            Some(hub) => hub.route("recreate_session", &args).await,
             None => sessions::recreate_session(args, store, ssh).await,
         }
     }
@@ -632,7 +611,13 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
     ) -> Result<(), IpcError> {
         match backend.hub() {
-            Some(hub) => hub.dismiss_ghost_session(args.session_id).await,
+            Some(hub) => {
+                // The tool answers `{"dismissed": id}` where the command
+                // answers `()`; the body is read and discarded so a tool
+                // error still surfaces.
+                let _: serde_json::Value = hub.route("dismiss_ghost_session", &args).await?;
+                Ok(())
+            }
             None => sessions::dismiss_ghost_session(args, store),
         }
     }
@@ -652,13 +637,7 @@ pub(crate) mod routed {
             if args.explicit {
                 return hub.repair_session(args.session_id).await;
             }
-            backend.local_only(
-                "repair_session",
-                "the hub's repair_session always runs the EXPLICIT repair, which \
-                 may unregister a stale worktree entry, adopt a moved checkout and \
-                 recreate a branch — this app will not turn an automatic pre-attach \
-                 check into that; repair explicitly, or from the hub",
-            )?;
+            backend.refuse_local_only("repair_session")?;
         }
         repair::repair_session(args.session_id, args.explicit, store, ssh).await
     }
@@ -670,7 +649,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.new_bg_session(&args).await,
+            Some(hub) => hub.route("new_bg_session", &args).await,
             None => bg_sessions::new_bg_session_tracked(args, store, ssh).await,
         }
     }

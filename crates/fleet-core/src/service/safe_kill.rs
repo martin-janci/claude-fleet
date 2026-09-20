@@ -28,7 +28,7 @@ const FAILED_PREFIX: &str = "SAFE_REMOVE_FAILED_";
 /// history.
 const MARKER_SCAN_LINES: u32 = 3000;
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SafeKillSessionArgs {
     pub host_alias: String,
     pub tmux_name: String,

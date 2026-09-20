@@ -180,7 +180,7 @@ check "MCP initialize over the public Host" 'echo "$init" | grep -q serverInfo' 
 list=$(rpc "$PA" "$PUB" "$TOKA" tools/list '{}')
 check "tools/list returns the fleet tools" 'echo "$list" | grep -q list_sessions' "${list:0:300}"
 h=$(tool "$PA" "$PUB" "$TOKA" fleet_health '{}')
-check "fleet_health reports the app version, not 0.1.0" 'echo "$h" | grep -q "\\\\\"version\\\\\": \\\\\"0.2" ' "${h:0:300}"
+check "fleet_health reports the app version, not 0.1.0" 'echo "$h" | grep -qE "\\\\\"version\\\\\": ?\\\\\"0.2" ' "${h:0:300}"
 hosts=$(tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}')
 check "list_sessions (forced reconcile of local) succeeds" 'echo "$hosts" | grep -q "\"isError\":false"' "${hosts:0:400}"
 NAME="hube2e$RANDOM"
@@ -332,7 +332,7 @@ echo "== Hub B (local host off)"
 TOKB=$("$BIN" init --data-dir "$ROOT/b" --public-url "https://$PUB" --port "$PB" 2>&1 | grep -E '^[0-9a-f]{64}$')
 start_hub b "$PB" --public-url "https://$PUB" || bad "hub B starts" "$(tail -5 "$ROOT/b.log")"
 lh=$(tool "$PB" "$PUB" "$TOKB" list_hosts '{}')
-check "no local host is listed" '! echo "$lh" | grep -q "\\\\\"alias\\\\\": \\\\\"local\\\\\""' "${lh:0:400}"
+check "no local host is listed" '! echo "$lh" | grep -qE "\\\\\"alias\\\\\": ?\\\\\"local\\\\\""' "${lh:0:400}"
 NAME2="hube2eB$RANDOM"
 r=$(tool "$PB" "$PUB" "$TOKB" new_shell_session "{\"host_alias\":\"local\",\"project_id\":1,\"name\":\"$NAME2\"}")
 check "new_shell_session on local is refused with E_NOTFOUND" 'echo "$r" | grep -q E_NOTFOUND && echo "$r" | grep -q "hub.local_host"' "${r:0:400}"
@@ -359,7 +359,7 @@ start_agent() { # name token: `run`, never `install`; the token goes in on stdin
 stop_agent() { local pid; pid=$(cat "$ROOT/$1.pid"); kill -TERM "$pid"
   until_ok 75 '! kill -0 "$pid" 2>/dev/null' || kill -KILL "$pid" 2>/dev/null
   wait "$pid"; STOP_RC=$?; rm -f "$ROOT/$1.pid"; }
-connected() { tool "$PC" "$PUB" "$TOKC" agent_status '{}' | grep -q '\\"connected\\": true'; }
+connected() { tool "$PC" "$PUB" "$TOKC" agent_status '{}' | grep -qE '\\"connected\\": ?true'; }
 AH=e2eagent
 check "fleet-agent binary is there" '[ -x "$ABIN" ] && "$ABIN" --version | grep -q fleet-agent' "ABIN=$ABIN"
 out=$(aenv "$ABIN" run --hub http://fleet.example.com --insecure --token-file - <<<"$(printf 'a%.0s' $(seq 64))" 2>&1); rc=$?
@@ -371,9 +371,9 @@ start_hub c "$PC" --public-url "https://$PUB" || bad "hub C starts" "$(tail -5 "
 out=$("$BIN" agent-token "$AH" --data-dir "$ROOT/c" 2>&1); rc=$?
 check "agent-token for a host that is not registered fails" '[ $rc -ne 0 ] && echo "$out" | grep -q "no host named"' "$out"
 ah=$(tool "$PC" "$PUB" "$TOKC" add_host "{\"alias\":\"$AH\",\"ssh_alias\":\"$AH\",\"transport\":\"agent\"}")
-check "add_host transport=agent saves it unprobed and unreachable" 'echo "$ah" | grep -q "\"isError\":false" && echo "$ah" | grep -q "\\\\\"transport\\\\\": \\\\\"agent\\\\\"" && echo "$ah" | grep -q "\\\\\"reachable\\\\\": false"' "${ah:0:400}"
+check "add_host transport=agent saves it unprobed and unreachable" 'echo "$ah" | grep -qE "\"isError\":false" && echo "$ah" | grep -qE "\\\\\"transport\\\\\": ?\\\\\"agent\\\\\"" && echo "$ah" | grep -qE "\\\\\"reachable\\\\\": ?false"' "${ah:0:400}"
 st=$(tool "$PC" "$PUB" "$TOKC" agent_status '{}')
-check "agent_status lists the host as not connected before any agent" 'echo "$st" | grep -q "\\\\\"alias\\\\\": \\\\\"$AH\\\\\"" && echo "$st" | grep -q "\\\\\"connected\\\\\": false"' "${st:0:400}"
+check "agent_status lists the host as not connected before any agent" 'echo "$st" | grep -qE "\\\\\"alias\\\\\": ?\\\\\"$AH\\\\\"" && echo "$st" | grep -qE "\\\\\"connected\\\\\": ?false"' "${st:0:400}"
 # The first token reaches the host out of band, the way an operator does it.
 ATOK=$("$BIN" agent-token "$AH" --data-dir "$ROOT/c" 2>"$ROOT/atok.err"); rc=$?
 check "agent-token mints the host's first token (only the token on stdout)" '[ $rc -eq 0 ] && echo "$ATOK" | grep -qxE "[0-9a-f]{64}"' "rc=$rc stdout='${ATOK:0:80}' stderr=$(cat "$ROOT/atok.err")"
@@ -384,7 +384,7 @@ start_agent agent1 "$ATOK"
 until_ok 50 connected
 # A digit, not a literal 0: release.sh bumps fleet-agent with the app, so this
 # would start failing at 1.0.0.
-check "agent_status shows the agent connected, with its version" 'tool "$PC" "$PUB" "$TOKC" agent_status "{}" | grep -q "\\\\\"agent_version\\\\\": \\\\\"[0-9]\."' "$(tool "$PC" "$PUB" "$TOKC" agent_status '{}' | head -c 400) / agent: $(tail -3 "$ROOT/agent1.log")"
+check "agent_status shows the agent connected, with its version" 'tool "$PC" "$PUB" "$TOKC" agent_status "{}" | grep -qE "\\\\\"agent_version\\\\\": ?\\\\\"[0-9]\."' "$(tool "$PC" "$PUB" "$TOKC" agent_status '{}' | head -c 400) / agent: $(tail -3 "$ROOT/agent1.log")"
 # The #151 handshake, asserted from the AGENT's side: being connected only
 # says the hub registered the hello. The agent refuses to act on anything
 # until a compatible `welcome` arrives, but it waits a whole heartbeat (30 s)
@@ -395,7 +395,7 @@ check "agent_status shows the agent connected, with its version" 'tool "$PC" "$P
 until_ok 50 'grep -q "hub protocol compatible" "$ROOT/agent1.log"'
 check "the agent was welcomed and judged the hub's protocol compatible" 'grep -q "hub protocol compatible" "$ROOT/agent1.log"' "$(tail -20 "$ROOT/agent1.log")"
 pr=$(tool "$PC" "$PUB" "$TOKC" probe_host "{\"alias\":\"$AH\"}")
-check "probe_host over the agent: reachable, tmux version read" 'echo "$pr" | grep -q "\\\\\"reachable\\\\\": true" && echo "$pr" | grep -q "\\\\\"tmux_version\\\\\": \\\\\""' "${pr:0:400}"
+check "probe_host over the agent: reachable, tmux version read" 'echo "$pr" | grep -qE "\\\\\"reachable\\\\\": ?true" && echo "$pr" | grep -qE "\\\\\"tmux_version\\\\\": ?\\\\\""' "${pr:0:400}"
 # A session on the agent's own tmux server; everything after this goes through
 # the agent: the reconcile that finds it, send-keys, capture-pane, kill-session.
 aenv tmux new-session -d -s agt1 -c "$AHOME" "echo agent-e2e-marker; exec bash --noprofile --norc"

@@ -272,24 +272,19 @@ impl FleetTools {
         )]))
     }
 
-    #[tool(description = "Explicitly repair a session's workspace (the same \
-        action as the Repair workspace button): make its directory a healthy \
-        git worktree on its branch and its tmux session run there. Unlike the \
-        automatic checks on create/restart/recreate/attach (which re-add a \
-        missing worktree from its existing branch, dropping its own stale git \
-        entry first only when the parent directory's dev:inode matches the one \
-        recorded while the worktree was healthy), \
-        this may unregister this worktree's own stale git entry \
-        (git worktree remove --force; never a blanket prune), adopt its \
-        branch's checkout elsewhere (refused when \
-        another fleet workspace uses it), recreate the branch from the base \
-        branch once origin confirms it is gone, run git worktree repair, and \
-        respawn a live pane whose directory vanished. No-op on a healthy \
-        session. Gated by mcp.confirm_destructive (retry with confirm_nonce). \
-        Returns a JSON RepairReport: cwd, healthy, actions (in order), \
-        warnings, branch_source, tmux (created|respawned), sibling_session_ids. \
-        Errors: E_REPO_MISSING (never faked with mkdir), E_BRANCH_CHECKED_OUT, \
-        E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED.")]
+    #[tool(
+        description = "Repair a session workspace (the Repair workspace button): make its \
+        directory a healthy git worktree on its branch and its tmux session run \
+        there. Goes past the automatic create/restart/attach checks — may \
+        unregister this worktree stale git entry, adopt its branch checkout \
+        elsewhere, recreate the branch from base once origin confirms it is gone, \
+        and respawn a pane whose directory vanished. No-op on a healthy session. \
+        Call it after any tool answers E_REPAIR_REQUIRED, then retry that tool. \
+        Gated by mcp.confirm_destructive. Returns a RepairReport (cwd, healthy, \
+        actions, warnings, branch_source, tmux, sibling_session_ids). Errors: \
+        E_REPO_MISSING, E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, \
+        E_HOST_OFFLINE, E_CONFIRM_REQUIRED."
+    )]
     pub(super) async fn repair_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -337,35 +332,21 @@ impl FleetTools {
         ok_json(&rep)
     }
 
-    #[tool(description = "Move a work session to another host with its work as \
-        it is: copy the Claude transcript, carry the git state through the \
-        fleet (unpushed commits, staged, modified and untracked files, plus \
-        small git-ignored files such as .env — no origin needed, nothing is \
-        pushed, committed or stashed, the source worktree is never modified), \
-        create the worktree on the target, start it with --resume so the same \
-        conversation continues, and only once the target is confirmed running \
-        kill the source (keep_source=true leaves it running). It also carries \
-        the session's Claude directory (subagent transcripts, tool results, \
-        title; up to move.max_session_state_mb, biggest files stay behind \
-        above it) and the project's Claude memory — adding files the target \
-        lacks and appending their MEMORY.md lines, never replacing anything \
-        there; neither can fail the move (warnings). strict=true \
-        refuses a dirty worktree (E_MOVE_DIRTY) or an unpushed branch \
-        (E_MOVE_UNPUSHED) instead of carrying them. Refused when the source is \
-        mid merge/rebase (E_MOVE_MIDOP), when an existing target worktree has \
-        its own uncommitted changes (E_MOVE_TARGET_DIRTY), when the transcript \
-        is over move.max_transcript_mb or the bundle over move.max_bundle_mb \
-        (E_MOVE_TOO_LARGE, details.payload), or when a carry step fails \
-        (E_MOVE_CARRY, details.step). Nothing on the source changes before the \
-        target is confirmed; a failure after the target started returns \
-        E_MOVE_PARTIAL and leaves both sessions. Needs a token allowed on BOTH \
-        hosts (in practice the master token). Gated by \
-        mcp.confirm_destructive (retry with confirm_nonce). Returns a JSON \
-        MoveReport: source_session_id, target_session_id, from_host, to_host, \
-        tmux_name, transcript_bytes, source_killed, warnings, carried (commits, \
-        bundle_bytes, dirty_entries, ignored_carried, ignored_left_behind, \
-        target_seeded, session_state, memory), target (the new row, \
-        parent_session_id = source).")]
+    #[tool(
+        description = "Move a work session to another host, carrying its work as it is: the \
+        Claude transcript, unpushed commits, staged/modified/untracked files and \
+        small git-ignored files (.env); also the session's Claude directory \
+        (subagent transcripts, tool results) and the project's Claude memory, \
+        added to the target without replacing anything there (these two only \
+        warn). Nothing is pushed, committed or stashed \
+        and the source worktree is never modified; the target resumes the same \
+        conversation and the source is killed only once the target runs \
+        (keep_source=true leaves it). strict=true refuses instead of carrying: \
+        E_MOVE_DIRTY, E_MOVE_UNPUSHED. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, \
+        E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both \
+        sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts \
+        (in practice the master). Returns a MoveReport with the new row as target."
+    )]
     pub(super) async fn move_session(
         &self,
         Extension(caller): Extension<Caller>,

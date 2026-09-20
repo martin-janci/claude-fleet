@@ -28,6 +28,14 @@ pub mod remote;
 pub mod routing;
 pub mod startup;
 pub mod token_store;
+// Generator for `src/lib/hub_verdicts.generated.json` and the refusal table
+// in `docs/hub.md`. Test-only, like `fleet_core::mcp::doc_gen` (the
+// identical pattern for `REGEN_DOCS`): nothing outside
+// `tests_verdict_gen.rs` calls it, so it must not compile into the release
+// binary.
+#[cfg(test)]
+mod verdict_gen;
+pub mod verdicts;
 
 use fleet_core::store::Store;
 pub use routing::FleetBackend;
@@ -84,7 +92,7 @@ pub const ALLOW_PLAINTEXT_KEY: &str = "hub.client_plaintext_token";
 /// as "no risk": a caller that reached here without `normalise_base_url`
 /// would otherwise be cleared for a hop nobody inspected.
 ///
-/// Public because pairing (Task 5) hits `POST /pair` with a URL the user just
+/// Public because pairing hits `POST /pair` with a URL the user just
 /// typed, *before* any token is stored and therefore before [`Backend::resolve`]
 /// has ever seen it. That path must ask the same question, and must ask it
 /// with the same answer.
@@ -812,9 +820,9 @@ mod tests {
         assert!(Probe::<String>(std::marker::PhantomData).is_serialize());
     }
 
-    /// The Task 2 review's finding 3. Loopback is the tunnelled or
-    /// port-forwarded hub and needs no ceremony; anything else on plain http
-    /// puts a fleet-wide credential on the wire in the clear.
+    /// Loopback is the tunnelled or port-forwarded hub and needs no
+    /// ceremony; anything else on plain http puts a fleet-wide credential on
+    /// the wire in the clear.
     #[test]
     fn plaintext_is_a_risk_everywhere_except_loopback() {
         for safe in [

@@ -7,13 +7,13 @@
 //! serialised it from. That symmetry is what makes [`super::remote`] a
 //! deserialisation rather than a translation — and it is also the hole.
 //!
-//! Task 2 had to put `#[serde(default)]` on roughly forty-six `Option` and
+//! Remote mode puts `#[serde(default)]` on roughly forty-six `Option` and
 //! `Vec` fields, because the hub's list tools run results through
 //! `ok_json_compact`, which strips every null key recursively; without the
 //! attribute a row with any null column fails to parse. The cost is that
 //! **a renamed optional field stops being an error and becomes a default**.
 //!
-//! The round-trip test Task 2 wrote (`a_null_stripped_session_row_survives_
+//! The round-trip test (`a_null_stripped_session_row_survives_
 //! the_round_trip`) cannot see that. It serialises with the struct and
 //! deserialises with the same struct, so a rename moves both ends together
 //! and the test stays green while the desktop shows wrong data. Every

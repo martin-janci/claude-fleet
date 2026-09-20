@@ -84,11 +84,7 @@ pub fn mcp_status(
     store: State<'_, Arc<Mutex<Store>>>,
     runtime: State<'_, Mutex<McpRuntime>>,
 ) -> Result<McpStatus, IpcError> {
-    backend.local_only(
-        "mcp_status",
-        "this app runs no embedded control API while a hub owns the fleet \
-         (Task 1 skips it); the hub is the control API",
-    )?;
+    backend.refuse_local_only("mcp_status")?;
     status(&store, &runtime)
 }
 
@@ -108,11 +104,7 @@ pub async fn mcp_configure(
     tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
     guards: State<'_, McpGuards>,
 ) -> Result<McpStatus, IpcError> {
-    backend.local_only(
-        "mcp_configure",
-        "starting a second control API against a fleet the hub already owns \
-         is the failure remote mode exists to prevent; configure the hub's",
-    )?;
+    backend.refuse_local_only("mcp_configure")?;
     // 1. Persist the requested settings.
     {
         let s = lock(&store)?;
@@ -209,11 +201,7 @@ pub async fn provision_hosts(
 ) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
     // Master-only on the hub too (`enforce_admin`), and provisioning from
     // here would point every host's hooks at THIS app instead of the hub.
-    backend.local_only(
-        "provision_hosts",
-        "it rewrites every host's hook block to report to this app; provision \
-         from the hub with `fleet-hub`",
-    )?;
+    backend.refuse_local_only("provision_hosts")?;
     let base = HubBase::read(&*lock(&store)?)?;
     fleet_core::service::provision::provision_hosts(
         &store,
@@ -254,11 +242,7 @@ pub fn list_host_tokens(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<HostTokenInfo>, IpcError> {
-    backend.local_only(
-        "list_host_tokens",
-        "these are this app's own per-host tokens, not the hub's; list them \
-         on the hub",
-    )?;
+    backend.refuse_local_only("list_host_tokens")?;
     let s = lock(&store)?;
     Ok(s.list_host_tokens()?
         .into_iter()
@@ -285,11 +269,7 @@ pub fn set_host_token_mode(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<HostTokenInfo, IpcError> {
-    backend.local_only(
-        "set_host_token_mode",
-        "these are this app's own per-host tokens, not the hub's; change the \
-         mode on the hub",
-    )?;
+    backend.refuse_local_only("set_host_token_mode")?;
     fleet_core::validate::host_alias(&host_alias)?;
     let mode = parse_mode(&mode)?;
     let s = lock(&store)?;
@@ -310,11 +290,7 @@ pub async fn rotate_host_token(
     ssh: State<'_, Arc<SshClient>>,
     tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
 ) -> Result<HostTokenInfo, IpcError> {
-    backend.local_only(
-        "rotate_host_token",
-        "it re-provisions the host to report to this app; rotate the token on \
-         the hub",
-    )?;
+    backend.refuse_local_only("rotate_host_token")?;
     fleet_core::validate::host_alias(&host_alias)?;
     let base = HubBase::read(&*lock(&store)?)?;
     fleet_core::service::provision::provision_host_with_token(
@@ -385,11 +361,7 @@ pub fn install_fleet_hook(
     store: State<'_, Arc<Mutex<Store>>>,
     runtime: State<'_, Mutex<McpRuntime>>,
 ) -> Result<String, IpcError> {
-    backend.local_only(
-        "install_fleet_hook",
-        "the hook it installs points at this app's control API, which is not \
-         running; install it from the hub",
-    )?;
+    backend.refuse_local_only("install_fleet_hook")?;
     if host_alias != "local" {
         return Err(IpcError::new(
             codes::E_UNSUPPORTED,

@@ -60,6 +60,14 @@ regenerate it or CI fails:
 REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
 ```
 
+`src/lib/hub_verdicts.generated.json` and the refusal table in `docs/hub.md`
+are generated from `src-tauri/src/backend/verdicts.rs`. After editing any row,
+regenerate them or CI fails:
+
+```bash
+REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
+```
+
 ## Architecture
 
 - **Frontend stores** (`src/lib/*.ts`) hold app state as Svelte 5 runes. Backend
@@ -97,9 +105,17 @@ REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
   settings, `HubBase` in `service/hub.rs`.
 - **Hub client mode** (`src-tauri/src/backend/`): a desktop paired with a hub
   (Settings → Hub) resolves once at startup to a window onto that hub; every
-  command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is listed as
-  the same in both modes (`backend/tests_routing.rs`), under the rule *parity
-  or refusal* in `docs/hub.md`.
+  command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
+  both modes, under the rule *parity or refusal* in `docs/hub.md`. That
+  verdict is written down once, in `backend/verdicts.rs`, for all 123
+  commands; `backend/tests_routing.rs` holds the handler list, each command's
+  body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
+  publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
+  in `docs/hub.md`. Adding a command means: a row, then `route`/
+  `refuse_local_only` **by command name** (never a second tool literal or a
+  pasted sentence), then `REGEN_HUB_VERDICTS=1`, then — for a `LocalOnly`
+  command the UI can reach — a `REASONS` entry or an allowlist line in
+  `src/lib/hub_verdicts.test.ts`.
 
 ## Conventions
 

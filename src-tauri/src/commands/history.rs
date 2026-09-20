@@ -3,7 +3,7 @@
 //! Thin wrappers over `service::repo_read`.
 //!
 //! All four have hub tools of the same name and route there in remote mode.
-//! Their return types gained `Deserialize` in Task 3; because
+//! Their return types carry `Deserialize` for that; because
 //! `mcp::tools::repo` answers through plain `ok_json` rather than the
 //! null-stripping encoder, they carry no `#[serde(default)]` and a renamed
 //! field still fails loudly.
@@ -67,6 +67,11 @@ pub async fn repo_commit_diff(
 pub(crate) mod routed {
     use super::*;
 
+    /// The whole `RepoLogArgs` goes over, zeroes included: the desktop's
+    /// `all`/`limit`/`skip` are concrete where the tool's are optional, and
+    /// its own defaults (`all: true`, `limit: 50`) differ from this view's.
+    /// Omitting a field the user left at its default would quietly change
+    /// what the History view shows.
     pub async fn repo_log(
         backend: &FleetBackend,
         args: RepoLogArgs,
@@ -74,7 +79,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<Vec<Commit>, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.repo_log(&args).await,
+            Some(hub) => hub.route("repo_log", &args).await,
             None => repo_read::repo_log(args, store, ssh).await,
         }
     }
@@ -86,7 +91,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<Vec<Branch>, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.repo_branches(args.session_id).await,
+            Some(hub) => hub.route("repo_branches", &args).await,
             None => repo_read::repo_branches(args, store, ssh).await,
         }
     }
@@ -98,7 +103,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<CommitDetail, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.repo_commit(args.session_id, &args.hash).await,
+            Some(hub) => hub.route("repo_commit", &args).await,
             None => repo_read::repo_commit(args, store, ssh).await,
         }
     }
@@ -110,10 +115,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<FileDiff, IpcError> {
         match backend.hub() {
-            Some(hub) => {
-                hub.repo_commit_diff(args.session_id, &args.hash, &args.path)
-                    .await
-            }
+            Some(hub) => hub.route("repo_commit_diff", &args).await,
             None => repo_read::repo_commit_diff(args, store, ssh).await,
         }
     }

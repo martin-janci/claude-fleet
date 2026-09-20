@@ -43,8 +43,8 @@ host — `register_self`, `send_message` (`from_session_id`) and `inbox` refuse
 sessions on any other host with `E_FORBIDDEN`, so a token lifted from one
 machine cannot impersonate another. The same binding applies to the tools that
 change a session (`recreate_session`, `dismiss_ghost_session`, …) and to the
-pane / transcript reads (`capture_session`, `peek_session`,
-`session_transcript`), checked against the stored row's host.
+pane / transcript reads (`capture_session`, `session_transcript`), checked
+against the stored row's host.
 
 Each host's token has a **mode**, shown and changed under **Integration** in
 the host's detail in the **Hosts** view (⌘I):
@@ -56,7 +56,7 @@ the host's detail in the **Hosts** view (⌘I):
   host.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
   `session_history`, `session_conversations`, `inbox`, `peer_status`,
-  `session_transcript`, `peek_session` (deprecated), `repo_*`,
+  `session_transcript`, `repo_*`,
   `get_clipboard`, `wait_for_session`, `wait_for_task`, `list_tasks`, …).
   Anything that sends, kills, deletes, provisions, dispatches, writes the
   clipboard, or writes a session row (including `set_friendly_name`, so an
@@ -250,7 +250,6 @@ Index by area (names only; see the reference for details):
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),
-  `peek_session` (`peek_session` is deprecated: use `session_transcript`),
   `peer_status`, `session_history`, `session_conversations` (the Claude
   conversations a session has run — `/clear`, `/resume`, compaction; pass a
   `claude_session_id` from it to `session_conversation` to read an earlier
@@ -360,12 +359,37 @@ skill quote them, and a test fails if any of those drift.
 
 ### Response caps
 
-Responses are sized for MCP token limits: `list_sessions` returns slim summary
-rows by default and accepts `limit`; `capture_session` returns plain text
+Responses are sized for MCP token limits: `list_sessions` and `list_projects`
+return slim summary rows by default and accept `limit`; `list_worktrees`
+answers `{total, worktrees}` with slim rows, at most 100 of them (`limit`,
+0 = no cap — what the desktop asks for in hub-client mode), filtered by
+`project_id` / `host_alias`; `capture_session` returns plain text
 capped to the last 200 lines (`max_lines`, 0 = no cap); `repo_log` returns 50
 commits by default (`limit`, `skip`); `session_history`, `inbox` and
 `list_tasks` default to 50 rows; `session_transcript` / `run_prompt` return at
 most `max_chars` characters (default 8000, max 64000).
+
+Every result is compact JSON (no pretty-printing), and the list/report tools
+drop `null` fields — an absent field reads the same as a null one to a model,
+and the indentation and `"field": null` repetitions measured ~25% of those
+payloads.
+
+### The served tool surface
+
+`tools/list` is scoped to the caller: the list is filtered by the same
+predicates that gate the call (`readonly` mode, fleet-admin access), so a
+token is never offered a tool it would be refused. The master token sees all
+72 tools (~14.8k tokens of definitions), a per-host `full` token 62 (~12.9k),
+a `readonly` token 36 (~5.6k). Definitions are also slimmed on the way out —
+`$schema`, `title`, numeric `format`s and `"default": null` carry no meaning
+for a caller — and each tool carries the MCP hints from its policy row
+(`readOnlyHint` on reads, `destructiveHint` on the confirmation-gated
+mutations). `mcp::tools::tests::the_served_definition_budget_stays_bounded`
+holds the surface to a byte budget so a new tool or a grown description shows
+up as a deliberate change.
+
+For the measured audit behind these defaults, see
+[`specs/2026-09-20-mcp-token-efficiency.md`](specs/2026-09-20-mcp-token-efficiency.md).
 
 ### Orchestration
 

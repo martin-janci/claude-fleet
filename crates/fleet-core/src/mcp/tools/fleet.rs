@@ -6,7 +6,7 @@ use crate::ipc_error::lock;
 #[tool_router(router = fleet_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(
-        description = "Report claude-fleet backend health: application version, SQLite schema version, database readiness, the cached fleet roll-up, and ESTIMATED token usage and cost (micro-USD) per host and per UTC day for the last 7 days. For a per-host token the usage fields cover only its own host. Returns JSON."
+        description = "Report claude-fleet backend health: application version, SQLite schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels, plus tunnels_flapping for those supervised but crash-looping, which means the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and per UTC day for the last 7 days. For a per-host token the usage fields cover only its own host. Returns JSON."
     )]
     pub(super) async fn fleet_health(
         &self,
@@ -14,12 +14,13 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("fleet_health", "");
         let mut h = health::health_check(&self.store);
+        h.set_tunnels(self.tunnels.health());
         if let Some(host) = caller.host_alias.as_deref() {
             if let Ok(s) = self.store.lock() {
                 health::scope_usage_to_host(&mut h, &s, host);
             }
         }
-        ok_json(&h)
+        ok_json_compact(&h)
     }
 
     #[tool(description = "Report ESTIMATED token usage and cost per session, \
@@ -51,7 +52,7 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             usage::report(&s, host.as_deref(), p.since_secs, now).map_err(to_mcp_err)?
         };
-        ok_json(&report)
+        ok_json_compact(&report)
     }
 
     // ---- hosts ----
@@ -60,7 +61,7 @@ impl FleetTools {
         claude/tmux versions, and linked account. Returns JSON.")]
     pub(super) async fn list_hosts(&self) -> Result<CallToolResult, McpError> {
         audit("list_hosts", "");
-        ok_json(&hosts::list_hosts(&self.store).map_err(to_mcp_err)?)
+        ok_json_compact(&hosts::list_hosts(&self.store).map_err(to_mcp_err)?)
     }
 
     #[tool(
@@ -73,21 +74,21 @@ impl FleetTools {
     pub(super) async fn agent_status(&self) -> Result<CallToolResult, McpError> {
         audit("agent_status", "");
         let registry = self.ssh.agent_registry().map(|r| r.as_ref());
-        ok_json(&hosts::agent_status(&self.store, registry).map_err(to_mcp_err)?)
+        ok_json_compact(&hosts::agent_status(&self.store, registry).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Discover SSH hosts from the user's ~/.ssh/config. \
         These are candidates for add_host. Returns JSON.")]
     pub(super) async fn discover_hosts(&self) -> Result<CallToolResult, McpError> {
         audit("discover_hosts", "");
-        ok_json(&hosts::discover_hosts().map_err(to_mcp_err)?)
+        ok_json_compact(&hosts::discover_hosts().map_err(to_mcp_err)?)
     }
 
     #[tool(description = "List the cached Claude accounts seen across hosts. \
         Returns JSON.")]
     pub(super) async fn list_accounts(&self) -> Result<CallToolResult, McpError> {
         audit("list_accounts", "");
-        ok_json(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
+        ok_json_compact(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
     }
 
     #[tool(
@@ -171,7 +172,7 @@ impl FleetTools {
         )
         .await
         .map_err(to_mcp_err)?;
-        ok_json(&res)
+        ok_json_compact(&res)
     }
 
     // ---- paired clients ----
@@ -259,7 +260,7 @@ impl FleetTools {
                 .map_err(to_mcp_err)?
         };
         let out: Vec<ClientSummary> = rows.into_iter().map(ClientSummary::from).collect();
-        ok_json(&out)
+        ok_json_compact(&out)
     }
 
     #[tool(description = "Revoke a paired client's token by name. Its next \

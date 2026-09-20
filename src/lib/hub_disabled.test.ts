@@ -218,7 +218,7 @@ describe('adding a host on a hub client', () => {
   });
 });
 
-// Task 1 (#146): `new_session` and `repair_session` (explicit, the only mode
+// #146: `new_session` and `repair_session` (explicit, the only mode
 // the desktop's buttons ever send) now map one-to-one onto their hub tools
 // and route, so — unlike the fleet-administration and this-machine-only
 // controls above — these two stay enabled on a hub client.

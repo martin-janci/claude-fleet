@@ -89,7 +89,7 @@ impl FleetTasks for RealFleetTasks {
         );
     }
 
-    /// Task 4: independent 60s account-usage poll loop. Deliberately separate
+    /// Independent 60s account-usage poll loop. Deliberately separate
     /// from the reconcile tick above (which `reconcile.interval_secs=0` can
     /// disable entirely) so usage keeps polling on its own cadence;
     /// `service::account_usage`'s 5-minute floor still caps real requests to
@@ -112,7 +112,7 @@ impl FleetTasks for RealFleetTasks {
         ));
     }
 
-    /// Task 4: follow the hub's `GET /events` and re-emit every frame as the
+    /// Follow the hub's `GET /events` and re-emit every frame as the
     /// frontend event a local `RowChange` would have produced.
     ///
     /// The only background task a hub client runs, and the reason it is not

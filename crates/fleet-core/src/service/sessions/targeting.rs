@@ -5,7 +5,7 @@ use super::*;
 use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
-#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "RelatedSessionsParams")]
 pub struct RelatedSessionsArgs {
     /// The session id to find siblings of (same project + worktree).

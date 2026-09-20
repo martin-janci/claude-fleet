@@ -33,7 +33,7 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<MoveReport, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.move_session(&args).await,
+            Some(hub) => hub.route("move_session", &args).await,
             None => move_session::move_session(args, store, ssh).await,
         }
     }

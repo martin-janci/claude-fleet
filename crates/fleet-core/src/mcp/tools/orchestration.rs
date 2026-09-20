@@ -75,27 +75,16 @@ impl FleetTools {
     }
 
     #[tool(
-        description = "Read a session's recent conversation as structured turns: \
-        each turn carries the human prompt, its timestamp, the turn's end \
-        timestamp, and items tagged by kind: text (assistant text), tool (a \
-        one-line summary plus the tool_use id, name, target, start/end \
-        timestamps and done; flagged when the call failed), subagent (a \
-        Task/Agent call: its agent type, description, the start of its final \
-        report, timestamps, done and error), compact (a context compaction \
-        with its trigger, pre-compaction tokens and summary), command (a slash \
-        command with its args and output) or interrupt (the user interrupted \
-        the turn). Tool inputs and results are not included. The response \
-        also carries events (this conversation's timeline events, oldest \
-        first, the newest events_limit of them: default 50, at most 200) and \
-        context (the conversation's context-window usage, or null). turns \
-        defaults to 10 and is capped at 100; the character budget \
-        scales with it. Prefer this over \
-        session_transcript when you want the shape of the exchange rather than \
-        one flat blob. Pass claude_session_id (from session_conversations) to \
-        read an earlier conversation of the session instead of the current one. \
-        Read-only. Errors: E_INVALID (claude_session_id is not one of the \
-        session's conversations), E_INVALID_STATE (no claude_session_id yet), \
-        E_NO_TRANSCRIPT (nothing written yet)."
+        description = "Read a session conversation as structured turns — the shape of the \
+        exchange, where session_transcript gives one flat blob. Each turn carries \
+        the prompt, its timestamps, and items by kind: text, tool, subagent, \
+        compact, command, interrupt (tool inputs and results are never included). \
+        Also returns events (this conversation timeline, newest events_limit: \
+        default 50, max 200) and context (context-window usage, or null). turns \
+        defaults to 10, max 100; the character budget scales with it. Pass \
+        claude_session_id (from session_conversations) for an earlier \
+        conversation. Read-only. Errors: E_INVALID, E_INVALID_STATE, \
+        E_NO_TRANSCRIPT."
     )]
     pub(super) async fn session_conversation(
         &self,
@@ -123,7 +112,7 @@ impl FleetTools {
         )
         .await
         .map_err(to_mcp_err)?;
-        ok_json(&conv)
+        ok_json_compact(&conv)
     }
 
     #[tool(description = "send_prompt + wait_for_session(turn_gt) + \

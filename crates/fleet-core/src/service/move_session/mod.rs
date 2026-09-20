@@ -105,7 +105,7 @@ const NO_WORKTREE: &str = "__CF_NO_WORKTREE__";
 const NO_CWD: &str = "__CF_NO_CWD__";
 const DIVERGED: &str = "__CF_DIVERGED__";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveSessionArgs {
     pub session_id: i64,
     pub target_host_alias: String,

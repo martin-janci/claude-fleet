@@ -12,12 +12,15 @@
 //! 3. **A local-only command refuses with `E_LOCAL_ONLY`** and names where to
 //!    go instead.
 //! 4. **Nothing falls through unclassified.** `every_command_has_a_verdict`
-//!    reads `lib.rs`'s `generate_handler!` list and fails on any command that
-//!    neither routes nor guards nor is on an explicit exception list. That is
-//!    the test that matters six months from now: a command quietly left on
-//!    the local path in remote mode does not fail — it SSHes into a host with
-//!    this machine's keys and mutates a fleet the hub also manages.
+//!    reads `lib.rs`'s `generate_handler!` list and holds it to exactly the
+//!    set of names in [`VERDICTS`](super::verdicts::VERDICTS), and
+//!    `every_commands_body_does_what_its_row_says` holds each command's body
+//!    to the row it has. That is the pair that matters six months from now: a
+//!    command quietly left on the local path in remote mode does not fail —
+//!    it SSHes into a host with this machine's keys and mutates a fleet the
+//!    hub also manages.
 
+use super::verdicts::{self, Verdict, VERDICTS};
 use super::*;
 use crate::backend::remote;
 use crate::commands;
@@ -26,6 +29,7 @@ use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::ssh::SshClient;
 use fleet_core::store::Store;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 // ── the doubles ─────────────────────────────────────────────────────────────
@@ -145,8 +149,8 @@ const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"fro
 /// key — `null` included — and every non-`Option` field is required).
 const REPAIR_PAYLOAD: &str = r#"{"session_id":7,"host_alias":"trn","tmux_name":"demo","project_root":"/p","cwd":"/p","cwd_physical":null,"healthy":true,"actions":[],"warnings":[],"needs_explicit_repair":false,"deferred":[],"branch_source":null,"tmux":null,"tmux_alive":true,"tmux_dead":false,"tmux_cwd_stale":false,"worktree_row_updated":false,"sibling_session_ids":[],"vanished_guard":null}"#;
 
-/// One row of the tables below: what to run, the tool it must name, and the
-/// arguments it must send.
+/// One row of the tables below: the command it drives, the tool that command
+/// must name, and the arguments it must send.
 ///
 /// The closure hands back the command's own `Result`, and `check` requires it
 /// to be `Ok`. It used to be discarded (`let _ = …`), which meant a payload
@@ -154,7 +158,16 @@ const REPAIR_PAYLOAD: &str = r#"{"session_id":7,"host_alias":"trn","tmux_name":"
 /// `move_session`'s case answered `"{}"` for a twelve-field `MoveReport` and
 /// was green. With the result thrown away, "the same shape the local path
 /// returns" was asserted by reading, not by test.
+///
+/// The command name is the first column so that `check` can hold the table's
+/// tool — which is what the request really carried — against the tool
+/// [`VERDICTS`] claims. The row is now what *drives* the tool
+/// (`HubBackend::route` looks it up), so what this catches is a command
+/// routing under somebody else's name: a copy-pasted `route("repo_file", …)`
+/// inside `repo_diff` would send the wrong tool and nothing else would say
+/// so, because both names are in the table.
 type Case = (
+    &'static str,
     &'static str,
     Value,
     &'static str,
@@ -162,13 +175,25 @@ type Case = (
 );
 
 fn check(cases: Vec<Case>) {
-    for (tool, want_args, payload, run) in cases {
+    for (command, tool, want_args, payload, run) in cases {
         let fake = Fake::answering(payload);
         let (_dir, st) = store();
         let got = run(&remote_backend(&fake), &st, &ssh());
         let (got_tool, got_args) = fake.only_call();
         assert_eq!(got_tool, tool, "wrong tool for {tool}");
         assert_eq!(got_args, want_args, "wrong arguments for {tool}");
+        // The table's row is a claim about the same call this case just
+        // recorded. `set_session_friendly_name` -> `set_friendly_name` is one
+        // of the two places the two vocabularies differ (`health_check` ->
+        // `fleet_health` is the other), and it is checked here like any other
+        // row rather than excused.
+        assert_eq!(
+            verdicts::verdict(command).and_then(Verdict::tool),
+            Some(got_tool.as_str()),
+            "{command} sent {got_tool}, but its VERDICTS row names {:?} — that row is \
+             published to the frontend and the docs",
+            verdicts::verdict(command).and_then(Verdict::tool),
+        );
         if let Err(e) = got {
             panic!(
                 "{tool}: the hub's answer did not come back as the command's return \
@@ -177,6 +202,61 @@ fn check(cases: Vec<Case>) {
             );
         }
     }
+}
+
+/// Routed commands that no row of the two tables drives, each with the test
+/// that does [`check`]'s job for it instead. An empty list would be better; a
+/// silent gap would be worse, because a row whose tool nothing exercises is a
+/// row whose tool nothing checks.
+///
+/// The named test must do what `check` does — hold the row's `tool` against
+/// the tool the recorded request carried. "It asserts the tool" is not
+/// enough: asserting a wire value against a second hand-typed literal leaves
+/// the row itself unchecked, which is how the first version of this list was
+/// wrong.
+const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[(
+    "health_check",
+    "health_is_the_hubs_fleet_not_this_apps_empty_database asserts its empty \
+     arguments and cross-checks its VERDICTS row against the tool the request \
+     carried, the same way check does; it is not a case because it also needs \
+     a seeded local store to prove the answer is not the local one",
+)];
+
+/// The other half of the tool check in [`check`]: a wrong tool must not be
+/// able to hide by having no case at all.
+#[test]
+fn every_routed_row_is_driven_by_a_case() {
+    let driven: BTreeSet<&str> = routed_read_cases()
+        .iter()
+        .chain(routed_mutation_cases().iter())
+        .map(|(command, ..)| *command)
+        .collect();
+    let excused: BTreeSet<&str> = ROUTED_WITHOUT_A_CASE.iter().map(|(n, _)| *n).collect();
+
+    let undriven: Vec<&str> = VERDICTS
+        .iter()
+        .filter(|(_, v)| v.tool().is_some())
+        .map(|(name, _)| *name)
+        .filter(|name| !driven.contains(name) && !excused.contains(name))
+        .collect();
+    assert!(
+        undriven.is_empty(),
+        "these commands route on the backend but no case drives them, so the \
+         tool their VERDICTS row names is a literal nothing checks:\n  {}\n\n\
+         Add a case to routed_read_cases/routed_mutation_cases, or add the \
+         command to ROUTED_WITHOUT_A_CASE with the test that covers it.",
+        undriven.join("\n  ")
+    );
+
+    let stale: Vec<&str> = excused
+        .iter()
+        .copied()
+        .filter(|name| driven.contains(name))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "ROUTED_WITHOUT_A_CASE excuses commands the tables now drive: {stale:?}"
+    );
 }
 
 // ── 1. remote mode calls the right tool with the right arguments ────────────
@@ -202,6 +282,7 @@ fn routed_read_cases() -> Vec<Case> {
     vec![
         (
             "list_sessions",
+            "list_sessions",
             json!({ "summary": false, "force": true, "include_lost": true }),
             "[]",
             Box::new(|b, s, h| {
@@ -216,6 +297,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "related_sessions",
+            "related_sessions",
             json!({ "session_id": 7 }),
             "[]",
             Box::new(|b, s, _| {
@@ -229,17 +311,20 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "list_hosts",
+            "list_hosts",
             json!({}),
             "[]",
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_hosts(b, s)).map(|_| ())),
         ),
         (
             "list_accounts",
+            "list_accounts",
             json!({}),
             "[]",
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_accounts(b, s)).map(|_| ())),
         ),
         (
+            "list_projects",
             "list_projects",
             json!({ "summary": false }),
             "[]",
@@ -249,6 +334,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "refresh_projects",
+            "refresh_projects",
             json!({}),
             "[]",
             Box::new(|b, s, _| {
@@ -256,9 +342,13 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            // The tool's own defaults (slim rows, one page, a {total,
+            // worktrees} envelope) are shaped for an agent; the desktop draws
+            // the whole tree, so it asks for full rows and limit 0 (no cap).
             "list_worktrees",
-            json!({ "project_id": 4 }),
-            "[]",
+            "list_worktrees",
+            json!({ "project_id": 4, "summary": false, "limit": 0 }),
+            r#"{"total":0,"worktrees":[]}"#,
             Box::new(|b, s, _| {
                 block_on(commands::worktrees::routed::list_worktrees(
                     b,
@@ -270,7 +360,27 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // The other shape of the same argument: an omitted project filter is
+        // sent as an explicit `null`, not left off the object. Which of the
+        // two the hub sees is the difference between "every worktree" and a
+        // parameter it never bound, so both shapes are pinned rather than
+        // one.
         (
+            "list_worktrees",
+            "list_worktrees",
+            json!({ "project_id": null, "summary": false, "limit": 0 }),
+            r#"{"total":0,"worktrees":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::worktrees::routed::list_worktrees(
+                    b,
+                    ListWorktreesArgs { project_id: None },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_tasks",
             "list_tasks",
             json!({ "requester_session_id": 2, "state": "running", "limit": 9 }),
             "[]",
@@ -286,6 +396,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "session_history",
             "session_history",
             // The clamp runs on this side, so the hub is asked for the same
             // window the local store would have returned: 10_000 -> 500.
@@ -305,6 +416,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "session_conversation",
+            "session_conversation",
             json!({ "session_id": 7, "turns": 5, "events_limit": 200 }),
             r#"{"turns":[],"truncated":false}"#,
             Box::new(|b, s, h| {
@@ -322,6 +434,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "session_conversation",
             "session_conversation",
             json!({ "session_id": 7, "turns": 5, "claude_session_id": "11111111-1111-1111-1111-111111111111", "events_limit": 200 }),
             r#"{"turns":[],"truncated":false}"#,
@@ -341,6 +454,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "session_conversations",
+            "session_conversations",
             // Clamped on this side, like session_history: 10_000 -> 500.
             json!({ "session_id": 7, "limit": 500 }),
             "[]",
@@ -357,6 +471,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_log",
             "repo_log",
             json!({ "session_id": 7, "all": true, "limit": 25, "skip": 50 }),
             "[]",
@@ -375,7 +490,34 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // `all`/`limit`/`skip` carry `#[serde(default)]` for the webview, so
+        // the History view can leave them out — and the desktop still SENDS
+        // the zeroes it defaulted them to, because the tool's own defaults
+        // (`all: true`, `limit: 50`) are not the desktop's. An argument
+        // quietly omitted here would change what the History view shows, so
+        // the zero shape is pinned beside the populated one.
         (
+            "repo_log",
+            "repo_log",
+            json!({ "session_id": 7, "all": false, "limit": 0, "skip": 0 }),
+            "[]",
+            Box::new(|b, s, h| {
+                block_on(commands::history::routed::repo_log(
+                    b,
+                    RepoLogArgs {
+                        session_id: 7,
+                        all: false,
+                        limit: 0,
+                        skip: 0,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "repo_branches",
             "repo_branches",
             json!({ "session_id": 7 }),
             "[]",
@@ -390,6 +532,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_commit",
             "repo_commit",
             json!({ "session_id": 7, "hash": "abc123" }),
             r#"{"hash":"abc123","subject":"s","body":"","author":"a","date":"d","files":[]}"#,
@@ -407,6 +550,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_commit_diff",
             "repo_commit_diff",
             json!({ "session_id": 7, "hash": "abc123", "path": "src/lib.rs" }),
             r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
@@ -426,6 +570,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "repo_changes",
+            "repo_changes",
             json!({ "session_id": 7 }),
             "[]",
             Box::new(|b, s, h| {
@@ -440,6 +585,7 @@ fn routed_read_cases() -> Vec<Case> {
         ),
         (
             "repo_tree",
+            "repo_tree",
             json!({ "session_id": 7 }),
             r#"{"entries":[],"truncated":false}"#,
             Box::new(|b, s, h| {
@@ -453,6 +599,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_file",
             "repo_file",
             json!({ "session_id": 7, "path": "src/lib.rs" }),
             r#"{"path":"src/lib.rs","content":"","truncated":false,"binary":false,"is_dir":false,"size":0}"#,
@@ -470,6 +617,7 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "repo_diff",
             "repo_diff",
             json!({ "session_id": 7, "path": "src/lib.rs" }),
             r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
@@ -515,6 +663,7 @@ fn routed_mutation_cases() -> Vec<Case> {
     vec![
         (
             "send_prompt",
+            "send_prompt",
             json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "go", "submit": true }),
             r#"{"delivered":true}"#,
             Box::new(|b, s, h| {
@@ -534,6 +683,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "kill_session",
+            "kill_session",
             json!({ "host_alias": "trn", "name": "demo", "force": true }),
             "7",
             Box::new(|b, s, h| {
@@ -552,6 +702,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "safe_kill_session",
+            "safe_kill_session",
             json!({ "host_alias": "trn", "tmux_name": "demo" }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -568,6 +719,7 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "rename_session",
             "rename_session",
             json!({ "host_alias": "trn", "old_name": "a", "new_name": "b" }),
             SESSION_PAYLOAD,
@@ -586,6 +738,7 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "set_session_friendly_name",
             // The one place the two vocabularies differ: the command is
             // `set_session_friendly_name`, the tool is `set_friendly_name`.
             "set_friendly_name",
@@ -606,6 +759,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "restart_session",
+            "restart_session",
             json!({ "host_alias": "trn", "name": "demo", "force": false }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -624,6 +778,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "spawn_review",
+            "spawn_review",
             json!({ "source_session_id": 7, "prompt": "review it" }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -640,7 +795,31 @@ fn routed_mutation_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // `call_id` is this process's own cancellation-registry key and has no
+        // hub counterpart, so the tool must never see it — not as a value and
+        // not as a `null`. The case above passes `None`, which proves nothing
+        // about a key that would only appear when it is set; this one sets it.
         (
+            "spawn_review",
+            "spawn_review",
+            json!({ "source_session_id": 7, "prompt": "review it" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::spawn_review(
+                    b,
+                    SpawnReviewArgs {
+                        source_session_id: 7,
+                        prompt: "review it".into(),
+                        call_id: Some(123),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "recreate_session",
             "recreate_session",
             json!({ "session_id": 7, "force": false }),
             SESSION_PAYLOAD,
@@ -659,6 +838,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "dismiss_ghost_session",
+            "dismiss_ghost_session",
             json!({ "session_id": 7 }),
             r#"{"dismissed":7}"#,
             Box::new(|b, s, _| {
@@ -671,6 +851,7 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "new_bg_session",
             "new_bg_session",
             json!({ "host_alias": "trn", "name": "worker", "prompt": "go" }),
             r#"{"claude_session_id":"abc"}"#,
@@ -690,6 +871,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "delete_worktree",
+            "delete_worktree",
             json!({ "worktree_id": 3, "force": true }),
             "worktree deleted",
             Box::new(|b, s, h| {
@@ -707,6 +889,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "cancel_task",
+            "cancel_task",
             json!({ "task_id": 11 }),
             TASK_PAYLOAD,
             Box::new(|b, s, _| {
@@ -714,6 +897,7 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "probe_host",
             "probe_host",
             json!({ "alias": "trn" }),
             HOST_PAYLOAD,
@@ -732,6 +916,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         ),
         (
             "move_session",
+            "move_session",
             json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
@@ -749,11 +934,36 @@ fn routed_mutation_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
-        // Task 1 (#146): `kind`, `start_command` and `friendly_name` now map
+        // The other side of both move flags. `strict` in particular decides
+        // whether a dirty worktree or an unpushed branch is refused or
+        // carried, so "the desktop sent the flag the user chose" is pinned
+        // for each value rather than for one of them.
+        (
+            "move_session",
+            "move_session",
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": true, "strict": false }),
+            MOVE_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::move_session::routed::move_session(
+                    b,
+                    MoveSessionArgs {
+                        session_id: 7,
+                        target_host_alias: "hetzner".into(),
+                        keep_source: true,
+                        strict: false,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // #146: `kind`, `start_command` and `friendly_name` now map
         // one-to-one onto the tool's `NewSessionParams`, so `new_session`
         // routes unconditionally (`call_id` is this process's own
         // cancellation-registry key and has no counterpart — never sent).
         (
+            "new_session",
             "new_session",
             json!({
                 "host_alias": "trn",
@@ -792,6 +1002,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         // `explicit: true` — the Repair workspace button — routes to the
         // tool's own (always-explicit) repair.
         (
+            "repair_session",
             "repair_session",
             json!({ "session_id": 7 }),
             REPAIR_PAYLOAD,
@@ -888,9 +1099,9 @@ fn refresh_asks_whoever_owns_the_fleet_to_reconcile() {
     }
 }
 
-/// The Task 3 deferral, closed. `health_check` used to be exempt because it
-/// returned a bare `Health`; in remote mode it therefore read the local
-/// database, which a hub client never fills, and answered a **zeroed fleet**
+/// `health_check` used to be exempt because it returned a bare `Health`; in
+/// remote mode it therefore read the local database, which a hub client
+/// never fills, and answered a **zeroed fleet**
 /// — no stuck sessions, no ghosts, nothing in the red. That is the most
 /// reassuring thing this app can say and it was saying it about a fleet it
 /// was not looking at.
@@ -917,6 +1128,18 @@ fn health_is_the_hubs_fleet_not_this_apps_empty_database() {
     let (tool, args) = fake.only_call();
     assert_eq!(tool, "fleet_health");
     assert_eq!(args, json!({}));
+    // `health_check` is the one routed command the two case tables do not
+    // drive, so this is where its VERDICTS row gets the cross-check `check`
+    // does for the other 35: the row's tool against the tool the request
+    // actually carried, not against a second hand-typed literal.
+    // ROUTED_WITHOUT_A_CASE names this test for exactly this line.
+    assert_eq!(
+        verdicts::verdict("health_check").and_then(Verdict::tool),
+        Some(tool.as_str()),
+        "health_check sent {tool}, but its VERDICTS row names {:?} — that row is \
+         published to the frontend and the docs",
+        verdicts::verdict("health_check").and_then(Verdict::tool),
+    );
     assert_eq!(got.stuck, 3, "a zero here is the bug this test exists for");
     assert_eq!(got.ghosts, 2);
     assert_eq!(got.sessions_total, 12);
@@ -1078,7 +1301,7 @@ fn unavailable_backend() -> FleetBackend {
 #[test]
 fn a_configured_but_unavailable_hub_refuses_every_routed_command() {
     let backend = unavailable_backend();
-    for (tool, _, _, run) in routed_read_cases()
+    for (_, tool, _, _, run) in routed_read_cases()
         .into_iter()
         .chain(routed_mutation_cases())
     {
@@ -1106,7 +1329,7 @@ fn a_configured_but_unavailable_hub_refuses_every_routed_command() {
 #[test]
 fn a_configured_but_unavailable_hub_refuses_local_only_commands_with_the_reason() {
     let err = unavailable_backend()
-        .local_only("provision_hosts", "provision from the hub with `fleet-hub`")
+        .refuse_local_only("provision_hosts")
         .expect_err("nothing may run against the hub's fleet from here");
     assert_eq!(err.code, codes::E_HUB_UNAVAILABLE);
     assert!(err.message.contains("provision_hosts"), "{}", err.message);
@@ -1123,7 +1346,7 @@ fn a_configured_but_unavailable_hub_refuses_local_only_commands_with_the_reason(
 #[test]
 fn a_local_only_command_is_a_no_op_when_standalone() {
     assert!(FleetBackend::local()
-        .local_only("catalog_push", "do it there")
+        .refuse_local_only("catalog_push")
         .is_ok());
 }
 
@@ -1131,7 +1354,7 @@ fn a_local_only_command_is_a_no_op_when_standalone() {
 fn a_local_only_command_refuses_in_remote_mode_and_says_where_to_go() {
     let fake = Fake::answering("[]");
     let err = remote_backend(&fake)
-        .local_only("provision_hosts", "provision from the hub with `fleet-hub`")
+        .refuse_local_only("provision_hosts")
         .expect_err("a local-only command must refuse");
     assert_eq!(err.code, codes::E_LOCAL_ONLY);
     assert!(err.message.contains("provision_hosts"), "{}", err.message);
@@ -1148,7 +1371,46 @@ fn a_local_only_command_refuses_in_remote_mode_and_says_where_to_go() {
     fake.was_not_called();
 }
 
-/// Task 1 (#146), the controller ruling: `repair_session` routes only
+/// The fail-closed arm of [`FleetBackend::refuse_local_only`]: a command the
+/// table cannot answer is refused anyway, never allowed.
+///
+/// It cannot be *called* with such a name from here — the `debug_assert!`
+/// fires first in a test build, which is the point of it. What is checkable is
+/// everything around that assert: that the lookup really does miss (both ways
+/// it can miss), that the fallback sentence still makes a whole refusing
+/// message, and that a miss does not turn a standalone app's command into an
+/// error. `every_refusal_names_a_command_the_table_can_refuse` is what makes
+/// the miss unshippable in the first place.
+#[test]
+fn a_command_the_table_cannot_answer_is_still_refused() {
+    assert!(verdicts::verdict("no_such_command").is_none());
+    assert!(
+        verdicts::verdict("probe_host").unwrap().instead().is_none(),
+        "a routed command has no sentence either, and that is the other miss"
+    );
+
+    let fake = Fake::answering("[]");
+    let err = remote_backend(&fake)
+        .local_only("no_such_command", NO_SENTENCE)
+        .expect_err("a miss must never be a silent allow");
+    assert_eq!(err.code, codes::E_LOCAL_ONLY);
+    assert!(err.message.contains("no_such_command"), "{}", err.message);
+    assert!(
+        err.message.contains("a bug in the app"),
+        "and it must say whose fault it is: {}",
+        err.message
+    );
+    fake.was_not_called();
+
+    assert!(
+        FleetBackend::local()
+            .local_only("no_such_command", NO_SENTENCE)
+            .is_ok(),
+        "standalone owns its own fleet; a missing row is not its problem"
+    );
+}
+
+/// #146: `repair_session` routes only
 /// `explicit: true` (the Repair workspace button, which maps one-to-one onto
 /// the tool's always-explicit repair). `explicit: false` — the automatic
 /// pre-attach check — has no hub counterpart, and must never be silently
@@ -1207,7 +1469,7 @@ fn repair_session_explicit_false_stays_local_only_in_remote_mode() {
 fn a_refusal_never_carries_the_token() {
     let fake = Fake::answering("[]");
     let err = remote_backend(&fake)
-        .local_only("catalog_push", "push from the hub")
+        .refuse_local_only("catalog_push")
         .unwrap_err();
     assert!(!format!("{err:?}").contains("cl_s3cret-token"), "{err:?}");
     assert!(!format!("{:?}", remote_backend(&fake)).contains("cl_s3cret-token"));
@@ -1229,27 +1491,16 @@ fn a_refusal_never_carries_the_token() {
 /// `set_host_layers` is master-only — which is the real reason THAT one
 /// refuses, the same shape as `apply_sync` and `set_secret`.
 ///
-/// Read from source, like `every_command_has_a_verdict`, because a
-/// `#[tauri::command]` cannot be called without a live `tauri::App`.
+/// The sentences used to be read back out of the source, because a
+/// `#[tauri::command]` cannot be called without a live `tauri::App`. They are
+/// in [`VERDICTS`] now, so this asks the table.
 #[test]
 fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
-    fn reason(file: &str, name: &str) -> String {
-        let src = SOURCES
-            .iter()
-            .find(|(f, _)| *f == file)
-            .unwrap_or_else(|| panic!("{file} is not in SOURCES"))
-            .1;
-        let start = src
-            .find(&format!("fn {name}("))
-            .unwrap_or_else(|| panic!("no fn {name} in {file}"));
-        let rest = &src[start..];
-        let body = &rest[..rest.find("#[tauri::command]").unwrap_or(rest.len())];
-        let call = &body[body.find("local_only(").expect("a local_only guard")..];
-        let call = &call[..call.find(")?").expect("the guard's end")];
-        call.replace("\\\n", " ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+    fn reason(command: &str) -> &'static str {
+        verdicts::verdict(command)
+            .unwrap_or_else(|| panic!("no verdict for {command}"))
+            .instead()
+            .unwrap_or_else(|| panic!("{command} no longer refuses"))
     }
     const DENIALS: [&str; 2] = ["exposes no authoring tool", "exposes no tool"];
 
@@ -1265,7 +1516,7 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
         ("catalog_propose_layers", "propose_layers"),
         ("catalog_set_host_layers", "set_host_layers"),
     ] {
-        let said = reason("commands/assets.rs", command);
+        let said = reason(command);
         for d in DENIALS {
             assert!(
                 !said.contains(d),
@@ -1283,11 +1534,11 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
         "catalog_set_secret",
         "catalog_set_host_layers",
     ] {
-        let said = reason("commands/assets.rs", command);
+        let said = reason(command);
         assert!(said.contains("master"), "{command}: {said}");
     }
 
-    let said = reason("commands/sessions.rs", "dismiss_agent_session");
+    let said = reason("dismiss_agent_session");
     for d in DENIALS {
         assert!(!said.contains(d), "dismiss_agent_session: {said}");
     }
@@ -1298,87 +1549,163 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
     );
 }
 
+/// True if `s` contains a plan-step reference of the form "Task" followed by
+/// a number — the kind of thing that means something to whoever wrote the
+/// implementation plan and nothing to a user reading an error message.
+/// Hand-rolled rather than a `regex` dependency: `src-tauri` does not
+/// otherwise need one.
+fn contains_plan_step_reference(s: &str) -> bool {
+    let mut rest = s;
+    while let Some(idx) = rest.find("Task ") {
+        rest = &rest[idx + "Task ".len()..];
+        if rest.starts_with(|c: char| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A refusal sentence is read by a user who never saw the plan that
+/// introduced the command. It must not lean on plan-step vocabulary to make
+/// its point.
+#[test]
+fn no_refusal_sentence_names_a_plan_step() {
+    let offenders: Vec<&str> = VERDICTS
+        .iter()
+        .filter_map(|(command, verdict)| {
+            let sentence = verdict.instead()?;
+            contains_plan_step_reference(sentence).then_some(*command)
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "these commands' refusal sentences name a plan step a reader cannot \
+         resolve: {offenders:?}"
+    );
+}
+
+// ── 3b. the refusal messages, byte for byte ─────────────────────────────────
+
+/// The recorded messages, relative to `src-tauri/` (`CARGO_MANIFEST_DIR`).
+const LOCAL_ONLY_GOLDEN_PATH: &str = "src/backend/local_only.golden.json";
+/// Set to rewrite the fixture. Regenerating it is never part of a refactor:
+/// the whole point of the file is that a message which changed shows up as a
+/// diff someone has to read.
+const REGEN_LOCAL_ONLY: &str = "REGEN_LOCAL_ONLY";
+
+/// `command -> the whole E_LOCAL_ONLY message`, rendered from the table
+/// through the refusal a command actually calls, for the fixed hub of [`cfg`].
+///
+/// The fixture this feeds was generated the same way from the *pasted*
+/// sentences, before they moved into [`VERDICTS`] (commit "pin every
+/// E_LOCAL_ONLY message in a fixture"). So a green run here is the statement
+/// that the table says, word for word, what the ~74 call sites used to say.
+fn local_only_messages() -> String {
+    let fake = Fake::answering("[]");
+    let backend = remote_backend(&fake);
+    let rendered: BTreeMap<&str, String> = VERDICTS
+        .iter()
+        .filter(|(_, v)| v.instead().is_some())
+        .map(|(command, _)| {
+            let err = backend
+                .refuse_local_only(command)
+                .expect_err("a local-only command must refuse in remote mode");
+            assert_eq!(err.code, codes::E_LOCAL_ONLY, "{command}: {err:?}");
+            (*command, err.message)
+        })
+        .collect();
+    fake.was_not_called();
+    let mut json = serde_json::to_string_pretty(&rendered).expect("serialisable");
+    json.push('\n');
+    json
+}
+
+/// **The message the user reads, pinned.**
+///
+/// A refusal's sentence is the whole of what a hub-client desktop tells
+/// someone who clicked a button that will not work here. Moving those
+/// sentences out of the call sites is only safe if "the same sentence" can be
+/// checked rather than eyeballed, so every one of them is recorded — rendered,
+/// not as a fragment — in a committed fixture, generated from the call sites
+/// before they moved. Nothing in this task may change that file.
+#[test]
+fn every_local_only_message_is_the_one_the_fixture_records() {
+    let actual = local_only_messages();
+    assert!(
+        actual.lines().count() > 70,
+        "only {} lines of refusal — the table lost rows, or this stopped \
+         rendering them",
+        actual.lines().count()
+    );
+
+    if std::env::var(REGEN_LOCAL_ONLY).is_ok() {
+        let abs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(LOCAL_ONLY_GOLDEN_PATH);
+        std::fs::write(abs, &actual).expect("write the fixture");
+        panic!(
+            "{LOCAL_ONLY_GOLDEN_PATH} was rewritten. Read `git diff -- \
+             src-tauri/{LOCAL_ONLY_GOLDEN_PATH}`: every line that changed is a \
+             sentence a user reads. Then unset {REGEN_LOCAL_ONLY} and run again."
+        );
+    }
+
+    let golden = include_str!("local_only.golden.json");
+    if golden != actual {
+        let want: BTreeMap<String, String> =
+            serde_json::from_str(golden).expect("the fixture must be command -> message");
+        let got: BTreeMap<String, String> = serde_json::from_str(&actual).unwrap();
+        let mut complaints = Vec::new();
+        for (name, msg) in &want {
+            match got.get(name) {
+                None => complaints.push(format!("{name} no longer refuses")),
+                Some(now) if now != msg => {
+                    complaints.push(format!("{name}:\n  was: {msg}\n  now: {now}"))
+                }
+                Some(_) => {}
+            }
+        }
+        for name in got.keys() {
+            if !want.contains_key(name) {
+                complaints.push(format!("{name} refuses and did not before"));
+            }
+        }
+        panic!(
+            "the E_LOCAL_ONLY messages are not the ones \
+             {LOCAL_ONLY_GOLDEN_PATH} records:\n\n{}",
+            complaints.join("\n")
+        );
+    }
+}
+
 // ── 4. nothing falls through unclassified ───────────────────────────────────
 
-/// Commands that are deliberately the same in both modes, each with its
-/// reason. Anything not routed, not guarded and not on this list fails
-/// [`every_command_has_a_verdict`].
-const SAME_IN_BOTH_MODES: &[(&str, &str)] = &[
-    (
-        "collect_diagnostics",
-        "describes THIS process — its log tail, its tunnels, its SSH counters \
-         — and is the first thing asked for when remote mode misbehaves",
-    ),
-    (
-        "open_log_folder",
-        "this app's own log folder, which it has either way",
-    ),
-    (
-        "cancel_command",
-        "the cancellation registry is this process's, and the call it cancels \
-         is one this process started",
-    ),
-    (
-        "mcp_confirm",
-        "answers this process's own confirm queue, which is empty in remote \
-         mode — answering nothing is correct",
-    ),
-    ("mcp_pending_confirms", "the same queue, the same reason"),
-    (
-        "hub_status",
-        "reports which fleet THIS window is onto. Asking a hub would be \
-         circular, and Settings needs the answer most when the hub is \
-         unreachable",
-    ),
-    (
-        "hub_pair",
-        "points this process at a hub. It talks to POST /pair — the one \
-         unauthenticated route, and not an MCP tool at all",
-    ),
-    (
-        "hub_connection",
-        "reports whether THIS process's event stream to the hub is up. \
-         Asking the hub would be circular, and the answer matters most \
-         exactly when the hub cannot be reached",
-    ),
-    (
-        "hub_stranded_token",
-        "asks THIS machine's own token store whether a pairing that crashed \
-         before writing its URL left a credential behind. There is no hub to \
-         ask — the whole state is that no hub is configured",
-    ),
-    (
-        "hub_disconnect",
-        "forgets this machine's own token and setting. It revokes nothing on \
-         the hub: only an operator can, and a paired client is refused \
-         revoke_client by design",
-    ),
-    (
-        "pty_write",
-        "acts on whatever is attached; with pty_open refused nothing ever is, \
-         so E_PTY_CLOSED is the true answer",
-    ),
-    ("pty_resize", "the same as pty_write"),
-    ("pty_drain", "the same as pty_write"),
-    (
-        "pty_close",
-        "the same as pty_write — guarding it would make closing fail",
-    ),
-];
+/// `lib.rs`'s `generate_handler!` list, as `(file, command)`.
+///
+/// `commands::sessions::list_sessions` -> ("commands/sessions.rs", "list_sessions")
+/// `pty::pty_open`                     -> ("pty.rs", "pty_open")
+/// `cancel_command`                    -> ("commands/cancel.rs", "cancel_command")
+///
+/// A bare entry is registered under a `use` at the top of `lib.rs`, so the
+/// file it lives in is that import's, not `lib.rs`. This used to answer
+/// `lib.rs` and nobody noticed, because the only bare entry was on the
+/// exception list and the lookup never ran.
+fn registered_commands() -> Vec<(String, String)> {
+    /// `use commands::cancel::cancel_command;` -> "commands/cancel.rs".
+    fn imported_from(lib: &str, name: &str) -> String {
+        let want = format!("::{name};");
+        for line in lib.lines() {
+            let line = line.trim();
+            if let Some(path) = line.strip_prefix("use ") {
+                if path.ends_with(&want) {
+                    let parts: Vec<&str> = path.trim_end_matches(';').split("::").collect();
+                    if let ["commands", module, _] = parts.as_slice() {
+                        return format!("commands/{module}.rs");
+                    }
+                }
+            }
+        }
+        "lib.rs".to_string()
+    }
 
-/// **The test that matters six months from now.**
-///
-/// Reads the `generate_handler!` list out of `lib.rs` and checks that every
-/// command in it has a verdict: it either routes on the backend, refuses with
-/// `local_only`, or is named in [`SAME_IN_BOTH_MODES`] with a reason.
-///
-/// Source-scanning is a blunt instrument, and this is the one place it earns
-/// its keep. What it guards against is not a wrong answer but a *missing
-/// decision*: a command added later, wired into the handler list, and left
-/// running the local service path — which in remote mode means SSHing into
-/// hosts with this machine's keys and mutating a fleet the hub also manages.
-#[test]
-fn every_command_has_a_verdict() {
     let lib = include_str!("../lib.rs");
     let handlers = lib
         .split_once("generate_handler![")
@@ -1388,9 +1715,6 @@ fn every_command_has_a_verdict() {
         .expect("an unterminated generate_handler! list")
         .0;
 
-    // `commands::sessions::list_sessions` -> ("commands/sessions.rs", "list_sessions")
-    // `pty::pty_open`                     -> ("pty.rs", "pty_open")
-    // `cancel_command`                    -> ("lib.rs", "cancel_command")
     let mut entries: Vec<(String, String)> = Vec::new();
     for raw in handlers.split(',') {
         let path = raw.trim();
@@ -1402,7 +1726,7 @@ fn every_command_has_a_verdict() {
         let file = match parts.as_slice() {
             ["commands", module, _] => format!("commands/{module}.rs"),
             ["pty", _] => "pty.rs".to_string(),
-            [_] => "lib.rs".to_string(),
+            [_] => imported_from(lib, &name),
             other => panic!("unexpected handler entry {other:?}"),
         };
         entries.push((file, name));
@@ -1412,49 +1736,386 @@ fn every_command_has_a_verdict() {
         "only {} handlers parsed — the parser broke, not the code",
         entries.len()
     );
+    entries
+}
 
-    let sources: std::collections::BTreeMap<&str, &str> = SOURCES.iter().copied().collect();
-    let mut unclassified = Vec::new();
-    for (file, name) in &entries {
-        if SAME_IN_BOTH_MODES.iter().any(|(n, _)| n == name) {
-            continue;
+/// **The test that matters six months from now.**
+///
+/// Reads the `generate_handler!` list out of `lib.rs` and holds it to exactly
+/// the set of names in [`VERDICTS`] — no command without a verdict, no verdict
+/// for a command that no longer exists, no name twice.
+///
+/// What it guards against is not a wrong answer but a *missing decision*: a
+/// command added later, wired into the handler list, and left running the
+/// local service path — which in remote mode means SSHing into hosts with
+/// this machine's keys and mutating a fleet the hub also manages.
+///
+/// This replaces the old `SAME_IN_BOTH_MODES` exception list: "deliberately
+/// the same in both modes" is now a verdict like the other two, with its
+/// reason in the same row, so a deliberate decision and a forgotten one still
+/// cannot look alike.
+#[test]
+fn every_command_has_a_verdict() {
+    let registered: BTreeSet<String> = registered_commands()
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+
+    let mut seen = BTreeSet::new();
+    let mut twice = Vec::new();
+    for (name, _) in VERDICTS {
+        if !seen.insert((*name).to_string()) {
+            twice.push(*name);
         }
+    }
+    assert!(
+        twice.is_empty(),
+        "VERDICTS names these commands more than once, so which row wins is \
+         whichever comes first: {twice:?}"
+    );
+
+    let missing: Vec<&String> = registered.difference(&seen).collect();
+    assert!(
+        missing.is_empty(),
+        "these commands are registered in generate_handler! but have no row in \
+         VERDICTS, so in remote mode they silently run against THIS machine's \
+         database and SSH keys, on a fleet the hub also manages:\n  {}\n\n\
+         Give each one a row: Routed with the hub tool it calls, LocalOnly \
+         with the sentence it refuses with, or SameInBoth with the reason.",
+        missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    let stale: Vec<&String> = seen.difference(&registered).collect();
+    assert!(
+        stale.is_empty(),
+        "VERDICTS has rows for commands that generate_handler! no longer \
+         registers — a verdict about nothing reads like a verdict about \
+         something:\n  {}",
+        stale
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+/// The text of one command: from its `fn <name>(` to wherever the next
+/// command begins (or the end of the file, for the last one).
+///
+/// It ends at `#[tauri::command`, **not** at `#[tauri::command]`. The closing
+/// bracket is not there: `#[tauri::command(async)]` is the other form Tauri
+/// takes (`pty.rs` uses it four times), and a body that does not stop at one
+/// swallows its neighbour. That is a false PASS in the direction that matters
+/// — a `Routed` row whose command quietly runs the local service call would
+/// still be green if any swallowed neighbour happened to contain `routed::`.
+/// `a_command_body_stops_at_an_async_neighbour` is that case, in miniature.
+fn command_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let start = src.find(&format!("fn {name}("))?;
+    let rest = &src[start..];
+    Some(match rest.find("#[tauri::command") {
+        Some(i) => &rest[..i],
+        None => rest,
+    })
+}
+
+/// [`command_body`]'s one rule, on a source small enough to read.
+///
+/// With the old `"#[tauri::command]"` this fails: `alpha`'s body runs to the
+/// end of the string, so `alpha` — which routes nothing — looks like it
+/// routes, on the strength of `beta`'s call.
+#[test]
+fn a_command_body_stops_at_an_async_neighbour() {
+    const SRC: &str = "\
+#[tauri::command]
+pub fn alpha(backend: State<'_, Arc<FleetBackend>>) -> Result<(), IpcError> {
+    service::alpha()
+}
+
+#[tauri::command(async)]
+pub fn beta(backend: State<'_, Arc<FleetBackend>>) -> Result<(), IpcError> {
+    routed::beta(&backend)
+}
+";
+    let alpha = command_body(SRC, "alpha").expect("alpha is defined");
+    assert!(alpha.contains("service::alpha()"), "{alpha}");
+    assert!(
+        !alpha.contains("routed::"),
+        "alpha's body swallowed its `(async)` neighbour, so a Routed row for a \
+         command that does not route would pass on the neighbour's text:\n{alpha}"
+    );
+    assert!(command_body(SRC, "gamma").is_none());
+}
+
+/// **And the body agrees with the row.**
+///
+/// [`every_command_has_a_verdict`] proves that every command has an answer;
+/// this proves the answer is the one its code gives. A row is a claim about
+/// what happens at runtime, and a table nobody checks against the code is a
+/// second place to be wrong.
+///
+/// All it needs from the source is the shape of the command's body, which is
+/// why the scanner survives the table in this reduced form: three substrings
+/// per command instead of a free-text search for any guard at all. A
+/// `#[tauri::command]` cannot be *called* from here — it wants a live
+/// `tauri::App` — so its body is read instead.
+///
+/// `RoutedUnless` asks for the routing call only: its refusal lives inside the
+/// `routed::` function, one layer down, and is proven by
+/// `repair_session_explicit_false_stays_local_only_in_remote_mode` and by the
+/// message fixture.
+#[test]
+fn every_commands_body_does_what_its_row_says() {
+    let sources: BTreeMap<&str, &str> = SOURCES.iter().copied().collect();
+    let mut complaints = Vec::new();
+
+    for (file, name) in registered_commands() {
         let src = sources
             .get(file.as_str())
             .unwrap_or_else(|| panic!("add {file} to SOURCES in tests_routing.rs"));
-        let start = src
-            .find(&format!("fn {name}("))
+        let body = command_body(src, &name)
             .unwrap_or_else(|| panic!("{name} is registered but not defined in {file}"));
-        // This command's body, up to wherever the next one begins.
-        let rest = &src[start..];
-        let body = match rest.find("#[tauri::command]") {
-            Some(i) => &rest[..i],
-            None => rest,
+        let routes = body.contains("routed::");
+        let refuses = body.contains(&format!("refuse_local_only(\"{name}\")"));
+        let guards_at_all = body.contains("refuse_local_only(");
+
+        let verdict = verdicts::verdict(&name)
+            .unwrap_or_else(|| panic!("{name} has no row — every_command_has_a_verdict first"));
+        let wrong = match verdict {
+            Verdict::Routed { .. } | Verdict::RoutedUnless { .. } if !routes => {
+                Some("its row routes it, but its body never reaches a `routed::` function")
+            }
+            Verdict::LocalOnly { .. } if !refuses => Some(
+                "its row refuses it, but its body never calls \
+                 `backend.refuse_local_only(\"<its own name>\")`",
+            ),
+            Verdict::SameInBoth { .. } if routes || guards_at_all => Some(
+                "its row says it is the same in both modes, but its body routes \
+                 or refuses",
+            ),
+            _ => None,
         };
-        if !body.contains("routed::") && !body.contains("local_only(") {
-            unclassified.push(format!("{file}::{name}"));
+        if let Some(why) = wrong {
+            complaints.push(format!("{file}::{name}: {why}"));
         }
     }
 
     assert!(
-        unclassified.is_empty(),
-        "these commands neither route on the backend nor refuse with \
-         E_LOCAL_ONLY, so in remote mode they silently run against THIS \
-         machine's database and SSH keys, on a fleet the hub also \
-         manages:\n  {}\n\nGive each one a verdict: route it through a \
-         `routed::` function, guard it with `backend.local_only(...)`, or add \
-         it to SAME_IN_BOTH_MODES with the reason.",
-        unclassified.join("\n  ")
+        complaints.is_empty(),
+        "these commands do not do what VERDICTS says they do:\n  {}\n\n\
+         Fix the body, or fix the row — but they are one decision and must \
+         read as one.",
+        complaints.join("\n  ")
     );
 }
 
-/// Every source file [`every_command_has_a_verdict`] needs to read.
+/// A refusal is by name, so a name that the table cannot answer is a refusal
+/// with the fail-closed apology in it. This makes shipping one impossible:
+/// every `refuse_local_only("…")` written anywhere in the command sources must
+/// name a row that has a sentence.
+///
+/// It covers the call sites [`every_commands_body_does_what_its_row_says`]
+/// cannot see — `routed::repair_session`'s, which is not in any
+/// `#[tauri::command]` body.
+#[test]
+fn every_refusal_names_a_command_the_table_can_refuse() {
+    const CALL: &str = "refuse_local_only(\"";
+    let mut refused = BTreeSet::new();
+    for (file, src) in SOURCES {
+        for (i, _) in src.match_indices(CALL) {
+            let rest = &src[i + CALL.len()..];
+            let name = &rest[..rest.find('"').expect("an unterminated command name")];
+            refused.insert(name);
+            let verdict = verdicts::verdict(name).unwrap_or_else(|| {
+                panic!("{file} refuses {name}, which has no row in VERDICTS at all")
+            });
+            assert!(
+                verdict.instead().is_some(),
+                "{file} refuses {name}, whose row carries no sentence ({verdict:?}) — \
+                 the user would get the fail-closed apology instead of a reason"
+            );
+        }
+    }
+
+    // Derived, not guessed: the names refused in the sources and the rows that
+    // carry a sentence are the same set. A floor like `found > 70` would not
+    // notice a refusal quietly disappearing, and a sentence nobody refuses
+    // with is a sentence that has stopped being true.
+    let can_refuse: BTreeSet<&str> = VERDICTS
+        .iter()
+        .filter(|(_, v)| v.instead().is_some())
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(
+        refused,
+        can_refuse,
+        "the refusals written in the sources and the rows that carry a sentence \
+         have drifted apart:\n  only in the sources: {:?}\n  only in the table: {:?}",
+        refused.difference(&can_refuse).collect::<Vec<_>>(),
+        can_refuse.difference(&refused).collect::<Vec<_>>(),
+    );
+}
+
+/// The routing counterpart of
+/// [`every_refusal_names_a_command_the_table_can_refuse`], and for the same
+/// reason: a command routes by NAME — `HubBackend::route` looks the tool up
+/// in [`VERDICTS`] — so a name the table cannot route is a call with no tool
+/// to make. That miss fails closed (`HubBackend::tool_for`); this is what
+/// makes it unshippable.
+///
+/// The two sets are asserted equal, not merely one-way. A routed row that
+/// nothing routes by name would be a command still naming its tool in a
+/// second literal, which is the drift the table exists to end.
+///
+/// The name is read across whatever whitespace rustfmt put between the paren
+/// and the literal. A call whose name is not a literal at all is skipped and
+/// would be invisible here — there is none today, and a command name is not
+/// the sort of thing that should ever be computed.
+///
+/// Comment lines are blanked out first ([`strip_line_comments`]), so a
+/// `route("…")` example inside a `//`/`///`/`//!` comment cannot stand in for
+/// a real call the scanner should have seen deleted.
+#[test]
+fn every_route_names_a_command_the_table_can_route() {
+    let mut routed_by_name = BTreeSet::new();
+    // Stripped once per file and kept alive for the whole function: the
+    // names borrowed below point into these owned strings, not into
+    // `SOURCES`'s `'static` ones (stripping a `'static &str` yields an
+    // owned `String` with a shorter lifetime).
+    let stripped: Vec<(&str, String)> = SOURCES
+        .iter()
+        .map(|(file, src)| (*file, strip_line_comments(src)))
+        .collect();
+    for (file, src) in &stripped {
+        let src = src.as_str();
+        for call in ["route(", "route_text("] {
+            for (i, _) in src.match_indices(call) {
+                let Some(rest) = src[i + call.len()..].trim_start().strip_prefix('"') else {
+                    continue;
+                };
+                let name = &rest[..rest.find('"').expect("an unterminated command name")];
+                routed_by_name.insert(name);
+                let verdict = verdicts::verdict(name).unwrap_or_else(|| {
+                    panic!("{file} routes {name}, which has no row in VERDICTS at all")
+                });
+                assert!(
+                    verdict.tool().is_some(),
+                    "{file} routes {name}, whose row names no tool ({verdict:?}) — the \
+                     call would fail closed instead of reaching the hub"
+                );
+            }
+        }
+    }
+
+    let can_route: BTreeSet<&str> = VERDICTS
+        .iter()
+        .filter(|(_, v)| v.tool().is_some())
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(
+        routed_by_name,
+        can_route,
+        "the routing calls written in the sources and the rows that name a tool \
+         have drifted apart:\n  only in the sources: {:?}\n  only in the table: {:?}",
+        routed_by_name.difference(&can_route).collect::<Vec<_>>(),
+        can_route.difference(&routed_by_name).collect::<Vec<_>>(),
+    );
+}
+
+/// Every `Verdict::tool()` in [`VERDICTS`] names a tool the hub actually
+/// serves.
+///
+/// Two literals have to agree for a routed row to be right at all: the tool
+/// name in the row, and the tool name in the case table that `check`'s
+/// cross-check holds against the wire. Both are hand-typed, so a typo
+/// repeated in both the same way is invisible to either — it would only
+/// surface at runtime, when the desktop asks the hub for a tool that does
+/// not exist and gets back `E_INTERNAL` ("the hub refused the … call").
+/// `fleet_core::mcp::guard::TOOL_POLICIES` is an independent third anchor:
+/// the real list of tools the router serves. This makes that class of typo a
+/// red test instead of a runtime surprise.
+#[test]
+fn every_routed_tool_is_a_tool_the_hub_serves() {
+    let served: BTreeSet<&str> = fleet_core::mcp::guard::TOOL_POLICIES
+        .iter()
+        .map(|policy| policy.name)
+        .collect();
+    let missing: Vec<(&str, &str)> = VERDICTS
+        .iter()
+        .filter_map(|(name, v)| v.tool().map(|tool| (*name, tool)))
+        .filter(|(_, tool)| !served.contains(tool))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these VERDICTS rows name a tool that TOOL_POLICIES does not list — \
+         the hub has no such tool to call:\n  {}",
+        missing
+            .iter()
+            .map(|(name, tool)| format!("{name} -> {tool}"))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+/// Blank out every line whose trimmed form starts with `//` — an ordinary
+/// comment, a doc comment (`///`), or a module doc comment (`//!`) — so a
+/// `route("…")` written as a comment's example cannot be mistaken by
+/// [`every_route_names_a_command_the_table_can_route`] for the real call it
+/// is documenting. Line-based rather than a full comment parser: every real
+/// call in this codebase is `self.route(` / `hub.route(`, never split across
+/// a `//` prefix, so nothing live is lost.
+fn strip_line_comments(src: &str) -> String {
+    src.lines()
+        .map(|line| {
+            if line.trim_start().starts_with("//") {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn strip_line_comments_blanks_a_route_example_in_a_doc_comment() {
+    // A doc-comment example that quotes a real call, next to the call it
+    // once documented having since been deleted. Before the fix, the bare
+    // substring scan would still find `route("delete_worktree", …)` inside
+    // the comment and count `delete_worktree` as routed, masking the
+    // deletion of the real call below it.
+    let src = "\
+/// Example: `self.route(\"delete_worktree\", &args).await?`
+//! same trick, module-doc flavour: route(\"delete_worktree\", &x)
+// and a plain comment: route(\"delete_worktree\", &y)
+pub async fn delete_worktree(&self) -> Result<(), IpcError> {
+    // the real call used to be here; it is gone now
+    Ok(())
+}
+";
+    let stripped = strip_line_comments(src);
+    assert!(
+        !stripped.contains("route(\"delete_worktree\""),
+        "a route(...) call inside a comment must not survive stripping:\n{stripped}"
+    );
+    // The real (non-comment) code is untouched.
+    assert!(stripped.contains("pub async fn delete_worktree"));
+}
+
+/// Every source file the scanners above need to read.
 const SOURCES: &[(&str, &str)] = &[
+    // The routing calls themselves: the four reads the event bridge shares
+    // with their commands live here rather than in a `routed::` function.
+    ("backend/remote.rs", include_str!("remote.rs")),
     (
         "commands/account_usage.rs",
         include_str!("../commands/account_usage.rs"),
     ),
     ("commands/assets.rs", include_str!("../commands/assets.rs")),
+    ("commands/cancel.rs", include_str!("../commands/cancel.rs")),
     (
         "commands/diagnostics.rs",
         include_str!("../commands/diagnostics.rs"),

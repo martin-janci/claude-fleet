@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.24] - 2026-09-20
+
+### Changed
+- **desktop:** name hyper and reqwest precisely in remote.rs's comment
+- **hub:** keep pair::exchange strict; probe keeps its own tolerance
+- **desktop:** share HTTP/1.1 head parsing and de-chunking via http1
+- **hub:** share pair's HTTP exchange with the healthcheck probe
+- **desktop:** one hub-URL parser and one backoff curve, both from fleet-proto
+- **hub:** the bind check asks fleet-proto whether the address is loopback
+- **core:** share the loopback rule and the tunnel restart curve
+- **agent:** take the loopback rule, the URL parser and the backoff from fleet-proto
+- **proto:** one loopback rule, one hub-URL parser and one backoff curve
+
+### Fixed
+- **tunnel:** stop the reverse-tunnel restart loop and surface why it fails
+- **provision:** write through a bind-mounted target when the rename fails
+- **desktop:** plaintext_risk reads the host with the parser the socket is opened from
+- **proto:** keep the agent's Host header byte-identical, and tighten is_loopback and port parsing
+- **desktop:** separate the client's plaintext opt-in from the daemon's, and share the loopback rule
 ## [0.2.23] - 2026-09-20
 
 ### Added
@@ -776,6 +795,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.24]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.24
 [0.2.23]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.23
 [0.2.22]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.22
 [0.2.21]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.21

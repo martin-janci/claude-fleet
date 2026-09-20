@@ -166,6 +166,16 @@ export function emptyStateText(code: string | null, hasId: boolean): string | nu
   return null;
 }
 
+/** The second line of an empty state: what the user can do about it. Null
+ *  wherever `emptyStateText` is null, so the two stay in step. */
+export function emptyStateHint(code: string | null, hasId: boolean, canPrompt: boolean): string | null {
+  if (!hasId) return 'It starts one as soon as Claude runs in this session.';
+  if (code !== 'E_NO_TRANSCRIPT') return null;
+  return canPrompt
+    ? 'Send a prompt below to start it.'
+    : 'This agent runs outside tmux, so it can only be prompted where it was started.';
+}
+
 /** Pure relative-time formatter for an ISO timestamp against a reference clock. */
 export function relativeTime(iso: string, nowMs: number): string {
   return timeAgo(new Date(iso).getTime() / 1000, nowMs);
@@ -595,7 +605,7 @@ export function promptHistory(conv: Conversation | null, pending: PendingPrompt 
   return out;
 }
 
-// ─── Header / thread helpers (Task 2) ───────────────────────────────────────
+// ─── Header / thread helpers ────────────────────────────────────────────────
 
 export function formatTokens(n: number): string {
   if (n < 1000) return String(n);

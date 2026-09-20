@@ -1,7 +1,7 @@
 //! Tauri IPC wrapper for the health-check command. The logic lives in
 //! `service::health`; this file only adapts `tauri::State` to plain references.
 //!
-//! # Now routed — the Task 3 deferral, closed
+//! # Now routed
 //!
 //! This used to return a bare `Health` rather than a `Result`, so it had
 //! nowhere to put `E_HUB_UNREACHABLE` and could not be routed: in remote mode
@@ -10,9 +10,9 @@
 //! nothing fills it. A zeroed health panel is the most reassuring thing this
 //! app can say, and it was saying it about a fleet it was not looking at.
 //!
-//! Giving it a `Result` changes what `App.svelte` can receive, which is why
-//! Task 3 could not do it and Task 5 — which owns the frontend — does. The
-//! frontend half is `src/lib/ipc.ts`'s `healthCheck(): Promise<Result<Health>>`
+//! Giving it a `Result` changes what `App.svelte` can receive, so the
+//! frontend needed to change too. The frontend half is
+//! `src/lib/ipc.ts`'s `healthCheck(): Promise<Result<Health>>`
 //! and the footer, which now shows the hub's own error rather than a fleet of
 //! zeroes.
 //!

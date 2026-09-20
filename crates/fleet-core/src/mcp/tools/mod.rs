@@ -42,6 +42,7 @@ mod lifecycle;
 mod messaging;
 mod orchestration;
 mod params;
+mod present;
 mod repo;
 mod session_ops;
 mod support;
@@ -162,20 +163,37 @@ impl ServerHandler for FleetTools {
         }
     }
 
+    /// The tools this caller may actually call, slimmed and annotated —
+    /// see `present`. Fails closed like `call_tool`: a request that reached
+    /// here without a caller identity is served nothing.
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        let Some(caller) = caller_from_context(&context) else {
+            return Ok(ListToolsResult {
+                tools: Vec::new(),
+                meta: None,
+                next_cursor: None,
+            });
+        };
+        let tools = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .filter(|t| present::visible_to(&caller, &t.name))
+            .map(present::present)
+            .collect();
         Ok(ListToolsResult {
-            tools: self.tool_router.list_all(),
+            tools,
             meta: None,
             next_cursor: None,
         })
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.tool_router.get(name).cloned()
+        self.tool_router.get(name).cloned().map(present::present)
     }
 
     fn get_info(&self) -> ServerInfo {
