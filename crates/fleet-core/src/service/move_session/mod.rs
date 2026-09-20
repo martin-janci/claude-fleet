@@ -118,6 +118,12 @@ pub struct MoveSessionArgs {
     /// (`E_MOVE_UNPUSHED`) instead of carrying them. Default false.
     #[serde(default)]
     pub strict: bool,
+    /// Replace what an unfinished earlier transfer left in the target
+    /// worktree. Refused when the target also holds work of its own, so it
+    /// can never overwrite anything this move did not put there. Default
+    /// false.
+    #[serde(default)]
+    pub clean_target: bool,
 }
 
 /// What a completed move did.
@@ -2257,6 +2263,11 @@ async fn move_session_inner(
         // for the caller's `progress.fail()` to mark `replay:failed` — same
         // as every other failure on this path.
         let mut adopted_detail: Option<String> = None;
+        // Set only when `clean_target` replaced an unfinished earlier
+        // attempt's leftovers before the retried apply below; drives the
+        // `replaced ... path(s)` warning and the `Warned` (not `Done`) close
+        // of the `Replay` step.
+        let mut cleaned: Option<u64> = None;
         let porcelain_owned = {
             let out = sh(
                 ssh,
@@ -2282,6 +2293,71 @@ async fn move_session_inner(
                             "{cwd} on {target} already held exactly this work; nothing was replayed"
                         ));
                         porcelain
+                    }
+                    // A non-empty `ours` is required: an unparseable
+                    // `LEFTOVERS_DIFFER` reply also comes back as `Ours` with
+                    // an empty path list, and running the rollback on the
+                    // strength of a reply nobody could read would delete
+                    // files blind. That case falls through to the plain
+                    // refusal below like any other `Ours` without the flag.
+                    Adopted::Ours(l) if args.clean_target && !l.ours.is_empty() => {
+                        // Safe only because `classify_target` already
+                        // established every dirty tracked path is one the
+                        // snapshot itself writes (`Adopted::Ours`) — see
+                        // `carry::recover_script`'s doc for why the reset to
+                        // `HEAD` this runs would otherwise be able to discard
+                        // the target's own uncommitted work.
+                        let rec_out =
+                            sh(ssh, &target, &carry::recover_script(&cwd, &id), GIT_TIMEOUT)
+                                .await
+                                .map_err(|e| carry_transport("recover", e))?;
+                        if !rec_out.status.success() {
+                            return Err(carry_err(
+                                "recover",
+                                &format!(
+                                    "replacing an unfinished attempt's work in {cwd} on {target}"
+                                ),
+                                &stderr_of(&rec_out),
+                            ));
+                        }
+                        let removed =
+                            carry::parse_recover(&String::from_utf8_lossy(&rec_out.stdout))
+                                .unwrap_or(l.ours.len() as u64);
+                        cleaned = Some(removed);
+                        // The leftovers are gone, so the retried apply lands
+                        // on a clean worktree; classify_target is not called
+                        // again on its failure — a second failure here is
+                        // just a plain carry error.
+                        let retry = sh(
+                            ssh,
+                            &target,
+                            &carry::apply_script(&cwd, &id, &state.head),
+                            GIT_TIMEOUT,
+                        )
+                        .await
+                        .map_err(|e| carry_transport("apply", e))?;
+                        if !retry.status.success() {
+                            return Err(carry_err(
+                                "apply",
+                                &format!(
+                                    "replaying the work in {cwd} on {target} after clearing an earlier attempt's leftovers"
+                                ),
+                                &stderr_of(&retry),
+                            ));
+                        }
+                        let stdout = String::from_utf8_lossy(&retry.stdout);
+                        carry::parse_apply(&stdout)
+                            .map_err(|e| {
+                                carry_err(
+                                    "apply",
+                                    &format!(
+                                        "reading the replayed state of {cwd} on {target}: {}",
+                                        e.message
+                                    ),
+                                    "",
+                                )
+                            })?
+                            .to_string()
                     }
                     other => return Err(target_dirty(&cwd, &target, &other)),
                 }
@@ -2322,7 +2398,17 @@ async fn move_session_inner(
             )
             .with_details(serde_json::json!({ "step": "verify", "source": want, "target": got })));
         }
-        progress.done(adopted_detail);
+        if let Some(removed) = cleaned {
+            // Wording matters here: `recover_script`'s count is paths the
+            // snapshot's tree adds relative to `HEAD` (an `rm -f` that hits a
+            // path `read-tree -u --reset HEAD` already removed still exits
+            // 0), not a count of files this step actually deleted — so this
+            // must never read as "N files deleted".
+            warnings.push(format!(
+                "replaced the work an unfinished earlier transfer had left in {cwd} on {target} ({removed} path(s))"
+            ));
+        }
+        progress.end_soft(cleaned.is_some(), adopted_detail);
     }
     if !state.dirty.is_empty() {
         warnings.push(format!(
@@ -3157,7 +3243,20 @@ mod tests {
             target_host_alias: "beta".into(),
             keep_source,
             strict: false,
+            clean_target: false,
         }
+    }
+
+    /// `run`, with the args mutated before the call — for the flags `run`
+    /// does not take.
+    async fn run_with(
+        f: &Fixture,
+        hooks: &FakeHooks,
+        edit: impl FnOnce(&mut MoveSessionArgs),
+    ) -> Result<MoveReport, IpcError> {
+        let mut a = args(f, false);
+        edit(&mut a);
+        move_session_with(a, &f.store, &f.fake, hooks, fast()).await
     }
 
     async fn run(f: &Fixture, hooks: &FakeHooks, keep: bool) -> Result<MoveReport, IpcError> {
@@ -3421,6 +3520,144 @@ mod tests {
         let err = run(&f, &hooks, false).await.unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
         assert_eq!(err.details.clone().unwrap()["leftovers"], "unknown");
+    }
+
+    // ── clean_target ──
+
+    /// `dirty_unpushed_carry` leaves a standing `# cf-carry:apply` rule that
+    /// succeeds with the source's own porcelain — exactly the reply a
+    /// retried apply should get once the leftovers are gone. `on_host_once`
+    /// overrides it for the first, failing attempt only: the fake's rules
+    /// are otherwise permanent, so a plain `on_host` fail here would make
+    /// EVERY attempt fail, including the retry — there would be no way to
+    /// tell "dirty first, then clean" apart from "dirty always".
+    #[tokio::test]
+    async fn clean_target_replaces_stale_leftovers_and_then_replays() {
+        let (f, bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\nours\tsrc/lib.rs\0", carry::LEFTOVERS_DIFFER),
+                ),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:recover"),
+                Reply::ok(&out("3\n")),
+            )
+            // Dirty for the first apply only; the standing rule from
+            // `dirty_unpushed_carry` (the source's own porcelain) answers
+            // the retry after the recover.
+            .on_host_once(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run_with(&f, &hooks, |a| a.clean_target = true)
+            .await
+            .expect("the move completes");
+        assert!(
+            rep.warnings.iter().any(|w| w.contains("3 path(s)")),
+            "{:?}",
+            rep.warnings
+        );
+        let seen = progress_of(&f, &bus);
+        assert!(seen.contains(&"replay:warned".to_string()), "{seen:?}");
+        assert_eq!(scripts_with(&f, "beta", "# cf-carry:recover").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn clean_target_never_touches_the_targets_own_work() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\ntheirs\ttheir_notes.md\0", carry::LEFTOVERS_DIFFER),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run_with(&f, &hooks, |a| a.clean_target = true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        assert_eq!(err.details.clone().unwrap()["leftovers"], "theirs");
+        assert!(
+            scripts_with(&f, "beta", "# cf-carry:recover").is_empty(),
+            "the recover script must never run for the target's own work"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_the_flag_stale_leftovers_are_only_refused() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\nours\tsrc/lib.rs\0", carry::LEFTOVERS_DIFFER),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.details.clone().unwrap()["leftovers"], "ours");
+        assert!(scripts_with(&f, "beta", "# cf-carry:recover").is_empty());
+    }
+
+    /// An unparseable `LEFTOVERS_DIFFER` reply also comes back from
+    /// `classify_target` as `Adopted::Ours` with an EMPTY `ours` list (see
+    /// `parse_leftovers`'s tolerance for a truncated/unknown stream) — so
+    /// `clean_target` must never run the rollback on that verdict: nobody
+    /// could actually read what it would be replacing.
+    #[tokio::test]
+    async fn clean_target_refuses_when_the_leftovers_could_not_be_read() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        f.fake
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:apply"),
+                Reply::fail(9, carry::TARGET_DIRTY),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-carry:verify"),
+                Reply::fail(
+                    11,
+                    &format!("{}\ngarbage-with-no-tabs", carry::LEFTOVERS_DIFFER),
+                ),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run_with(&f, &hooks, |a| a.clean_target = true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_TARGET_DIRTY);
+        assert_eq!(err.details.clone().unwrap()["leftovers"], "ours");
+        assert!(
+            scripts_with(&f, "beta", "# cf-carry:recover").is_empty(),
+            "an unparseable reply must never drive the rollback"
+        );
     }
 
     /// F8: the confirm wait is inside the `start` step, so a target that
@@ -5518,6 +5755,7 @@ mod tests {
             target_host_alias: "alpha".into(),
             keep_source: false,
             strict: false,
+            clean_target: false,
         };
         assert_eq!(
             move_session_with(same, &f.store, &f.fake, &hooks, fast())

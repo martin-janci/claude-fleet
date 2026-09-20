@@ -166,6 +166,10 @@ struct Rule {
     host: Option<String>,
     matcher: Match,
     reply: Reply,
+    /// Answers at most one matching call (see [`FakeSsh::on_host_once`]),
+    /// then `spent` makes the matcher skip it for good.
+    once: bool,
+    spent: bool,
 }
 
 #[derive(Default)]
@@ -203,6 +207,8 @@ impl FakeSsh {
             host: None,
             matcher,
             reply,
+            once: false,
+            spent: false,
         });
         self
     }
@@ -213,6 +219,22 @@ impl FakeSsh {
             host: Some(host.to_string()),
             matcher,
             reply,
+            once: false,
+            spent: false,
+        });
+        self
+    }
+
+    /// Answer `matcher` on `host` with `reply` for ONE matching call, then fall
+    /// through to the other rules. Later rules still win, so register the
+    /// once-rule AFTER the standing one it overrides.
+    pub fn on_host_once(&self, host: &str, matcher: Match, reply: Reply) -> &Self {
+        self.lock().rules.push(Rule {
+            host: Some(host.to_string()),
+            matcher,
+            reply,
+            once: true,
+            spent: false,
         });
         self
     }
@@ -284,14 +306,27 @@ impl FakeSsh {
             stdin,
         };
         let mut st = self.lock();
-        let reply = st
+        let hit = st
             .rules
             .iter()
+            .enumerate()
             .rev()
-            .find(|r| r.host.as_deref().is_none_or(|h| h == host) && r.matcher.matches(&call))
-            .map(|r| r.reply.clone())
-            .or_else(|| st.default.clone())
-            .unwrap_or_else(|| Reply::ok(""));
+            .find(|(_, r)| {
+                !(r.once && r.spent)
+                    && r.host.as_deref().is_none_or(|h| h == host)
+                    && r.matcher.matches(&call)
+            })
+            .map(|(i, _)| i);
+        let reply = match hit {
+            Some(i) => {
+                let r = &mut st.rules[i];
+                if r.once {
+                    r.spent = true;
+                }
+                r.reply.clone()
+            }
+            None => st.default.clone().unwrap_or_else(|| Reply::ok("")),
+        };
         st.calls.push(call);
         reply
     }
@@ -534,6 +569,37 @@ mod tests {
         assert_eq!(fake.calls_for("beta").len(), 1);
         assert_eq!(fake.calls()[0].script().as_deref(), Some("tmux -V"));
         assert!(fake.calls()[3].script().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_once_rule_answers_the_first_matching_call_then_the_standing_rule_answers_the_rest() {
+        let fake = FakeSsh::new();
+        // The gap this closes: "this script fails the first time and
+        // succeeds the next" could not be said with `on_host` alone, since
+        // later rules are permanent and would answer every call. Registering
+        // the once-rule (the override) after the standing one (the eventual
+        // fallback) lets it win exactly once before falling through.
+        fake.on_host("h", Match::contains("probe"), Reply::ok("standing\n"))
+            .on_host_once("h", Match::contains("probe"), Reply::fail(1, "first only"));
+        let a = fake
+            .run("h", &["probe"], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(a.status.code(), Some(1));
+        assert_eq!(String::from_utf8_lossy(&a.stderr), "first only");
+        let b = fake
+            .run("h", &["probe"], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(b.status.success());
+        assert_eq!(String::from_utf8_lossy(&b.stdout), "standing\n");
+        // The once-rule stays spent — the standing rule keeps answering.
+        let c = fake
+            .run("h", &["probe"], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(c.status.success());
+        assert_eq!(String::from_utf8_lossy(&c.stdout), "standing\n");
     }
 
     #[tokio::test]

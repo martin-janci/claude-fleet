@@ -941,7 +941,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "move_session",
             "move_session",
-            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true }),
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true, "clean_target": false }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::move_session::routed::move_session(
@@ -951,6 +951,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         target_host_alias: "hetzner".into(),
                         keep_source: false,
                         strict: true,
+                        clean_target: false,
                     },
                     s,
                     h,
@@ -965,7 +966,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "move_session",
             "move_session",
-            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": true, "strict": false }),
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": true, "strict": false, "clean_target": false }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::move_session::routed::move_session(
@@ -975,6 +976,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         target_host_alias: "hetzner".into(),
                         keep_source: true,
                         strict: false,
+                        clean_target: false,
                     },
                     s,
                     h,

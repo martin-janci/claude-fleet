@@ -383,6 +383,7 @@ impl FleetTools {
                 target_host_alias: p.target_host_alias,
                 keep_source: p.keep_source,
                 strict: p.strict,
+                clean_target: false,
             },
             &self.store,
             &self.ssh,
