@@ -872,6 +872,15 @@ pub(super) async fn kill_session_with(
     // Lookup form: synthetic `bg:<uuid>` rows are killable too (via
     // `claude stop`, below) — only real tmux rows go through tmux.
     crate::validate::tmux_name_lookup(&args.name)?;
+    {
+        let s = lock(store)?;
+        crate::service::operator::refuse_if_operator(
+            &s,
+            &args.host_alias,
+            &args.name,
+            "kill_session",
+        )?;
+    }
     // Look up id BEFORE killing so we can return it after. Read the controller
     // under the same lock and refuse to nuke ourselves unless forced.
     let (id, kind, claude_sid, claude_status) = {
@@ -964,6 +973,18 @@ pub async fn rename_session(
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name_addressable(&args.old_name)?;
     crate::validate::tmux_name(&args.new_name)?;
+    // The operator's identity IS `(host, tmux name)`, so a rename does not
+    // dodge the self-guard once — it destroys it for good. See
+    // `service::operator::refuse_if_operator`.
+    {
+        let s = lock(store)?;
+        crate::service::operator::refuse_if_operator(
+            &s,
+            &args.host_alias,
+            &args.old_name,
+            "rename_session",
+        )?;
+    }
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
     // The session now answers to `new_name`, which may be a name fleet killed
@@ -1041,6 +1062,17 @@ pub async fn restart_session(
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name_addressable(&args.name)?;
+    // EXEMPT from `service::operator::refuse_if_operator`, deliberately, and
+    // alone among the session-addressed operations. This IS the agent
+    // panel's `lost` recovery — `restartOperator()` in `src/lib/operator.ts`
+    // calls straight through here — so a guard would make the agent refuse
+    // the one button that brings it back. It is also not destructive: the
+    // row, the transcript and the conversation all survive a restart, which
+    // is what separates it from kill / move / rename / recreate. If this
+    // ever does need guarding, give the operator path a bypass FIRST.
+    // Pinned by `service::operator::tests::
+    // restart_session_is_deliberately_exempt_from_the_guard`.
+    //
     // Respawn the pane with the command matching the session's kind so a
     // restarted shell session comes back as a shell, not a Claude pane. Read
     // the controller under the same lock and refuse to restart ourselves
@@ -1170,6 +1202,17 @@ pub async fn recreate_session(
             &sess.host_alias,
             &sess.tmux_name,
             args.force,
+        )?;
+        // Addressed by `session_id` rather than `(host, name)`, and
+        // `confirm: false` — which is exactly the shape the self-guard
+        // exists for: without this the agent can end its own conversation
+        // with no dialog in the way. Resolved from the row that was just
+        // read, so the identifier used to reach the session does not matter.
+        crate::service::operator::refuse_if_operator(
+            &s,
+            &sess.host_alias,
+            &sess.tmux_name,
+            "recreate_session",
         )?;
         let host = s
             .get_host_row(&sess.host_alias)?

@@ -335,6 +335,8 @@ pub fn run() {
             commands::mcp::rotate_host_token,
             commands::mcp::mcp_confirm,
             commands::mcp::mcp_pending_confirms,
+            commands::operator::ensure_operator,
+            commands::operator::operator_status,
             commands::hub::hub_status,
             commands::hub::hub_pair,
             commands::hub::hub_disconnect,

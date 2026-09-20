@@ -191,7 +191,8 @@
       "id",
       "last_session_at",
       "owner",
-      "repo"
+      "repo",
+      "system"
     ],
     "ProjectTreeRow": [
       "project",

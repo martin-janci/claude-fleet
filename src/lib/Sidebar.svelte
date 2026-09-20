@@ -344,7 +344,11 @@
   // sessions tree; when starting a new session the user shouldn't be
   // restricted to projects with recent activity.
   const allProjectsSorted = $derived(
-    [...$projects].sort((a, b) => {
+    // System projects are filtered out: `fleet/operator` is the UX agent's
+    // own working directory, not a repository, and starting an ordinary
+    // session in it is never what "+ New session" means. The tree above
+    // still shows it while the agent is running. See `ProjectRow.system`.
+    [...$projects.filter((p) => !p.project.system)].sort((a, b) => {
       const aLabel = (a.project.owner + '/' + a.project.repo).toLowerCase();
       const bLabel = (b.project.owner + '/' + b.project.repo).toLowerCase();
       return aLabel.localeCompare(bLabel);

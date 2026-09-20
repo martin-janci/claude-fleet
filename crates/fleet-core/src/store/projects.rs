@@ -37,7 +37,7 @@ impl Store {
         repo: &str,
         base_path: &str,
     ) -> Result<i64, rusqlite::Error> {
-        self.upsert_project_impl(owner, repo, base_path, false)
+        self.upsert_project_impl(owner, repo, base_path, false, false)
     }
 
     /// Upsert a project row registered by `service::add_project`'s `folder`
@@ -50,7 +50,22 @@ impl Store {
         repo: &str,
         base_path: &str,
     ) -> Result<i64, rusqlite::Error> {
-        self.upsert_project_impl(owner, repo, base_path, true)
+        self.upsert_project_impl(owner, repo, base_path, true, false)
+    }
+
+    /// Upsert the project row that backs a fleet-internal working directory —
+    /// today only the UX agent's (`service::operator`). `adopted` is left
+    /// clear: this row was not registered from a folder by
+    /// `service::add_project`, which is what `adopted` records. `system`
+    /// alone is what `refresh_projects`'s stale-rows sweep must honour to
+    /// leave it alone — see [`ProjectRow::system`].
+    pub fn upsert_system_project(
+        &self,
+        owner: &str,
+        repo: &str,
+        base_path: &str,
+    ) -> Result<i64, rusqlite::Error> {
+        self.upsert_project_impl(owner, repo, base_path, false, true)
     }
 
     fn upsert_project_impl(
@@ -59,12 +74,13 @@ impl Store {
         repo: &str,
         base_path: &str,
         adopted: bool,
+        system: bool,
     ) -> Result<i64, rusqlite::Error> {
         let id: i64 = self.conn.query_row(
-            "INSERT INTO projects (owner, repo, base_path, adopted) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(owner, repo) DO UPDATE SET base_path=excluded.base_path, adopted=excluded.adopted
+            "INSERT INTO projects (owner, repo, base_path, adopted, system) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(owner, repo) DO UPDATE SET base_path=excluded.base_path, adopted=excluded.adopted, system=excluded.system
              RETURNING id",
-            rusqlite::params![owner, repo, base_path, adopted as i64],
+            rusqlite::params![owner, repo, base_path, adopted as i64, system as i64],
             |row| row.get(0),
         )?;
         if let Some(row) = self.get_project(id)? {
@@ -108,10 +124,10 @@ impl Store {
         let rows = stmt.query_map([], |row| {
             Ok((
                 map_project_row(row)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<i64>>(7)?,
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?;
         let mut out: Vec<crate::service::projects::ProjectTreeRow> = Vec::new();

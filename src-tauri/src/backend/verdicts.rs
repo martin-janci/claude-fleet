@@ -567,6 +567,28 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "the same queue, the same reason",
         },
     ),
+    // ── the UX agent's operator session ─────────────────────────────────────
+    //
+    // Both route unconditionally. The operator panel is the same panel on a
+    // hub-backed desktop, and the phone slice inherits these tools
+    // unchanged — a `LocalOnly` verdict here would have closed that door.
+    // It is also the only correct answer: `service::operator`'s file writes
+    // go through `provision::write_host_file*`, which calls
+    // `ensure_local_allowed`, so in hub-client mode the desktop must never
+    // run this against ITS OWN "local" — the hub's "local" is the one that
+    // matters.
+    (
+        "ensure_operator",
+        Verdict::Routed {
+            tool: "ensure_operator",
+        },
+    ),
+    (
+        "operator_status",
+        Verdict::Routed {
+            tool: "operator_status",
+        },
+    ),
     // ── the pairing itself — about THIS process, either way ─────────────────
     (
         "hub_status",

@@ -93,7 +93,19 @@
     onOpenTerminal,
     // Find is Cmd+F on macOS (Ctrl+F moves the caret there), Ctrl+F elsewhere.
     isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator),
-  }: { session: SessionRow; visible: boolean; onOpenTerminal?: () => void; isMac?: boolean } = $props();
+    // Opt-out for a host that brings its own composer over this same
+    // session (AgentPanel: the context chip's prefix has to go through a
+    // composer that knows about it). Two composers sending independently
+    // into one tmux REPL is the interleaved-paste failure this flag exists
+    // to prevent — a host that sets this false owns being the only sender.
+    showComposer = true,
+  }: {
+    session: SessionRow;
+    visible: boolean;
+    onOpenTerminal?: () => void;
+    isMac?: boolean;
+    showComposer?: boolean;
+  } = $props();
 
   let conv = $state<Conversation | null>(null);
   // The conversation `conv` was read from (the id the fetch named). Tool
@@ -1330,7 +1342,7 @@
     {/if}
   {/if}
   </div>
-  {#if canPrompt && bgEntry === null}
+  {#if showComposer && canPrompt && bgEntry === null}
     <form
       class="composer"
       data-testid="conv-composer"
@@ -1417,7 +1429,7 @@
         <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
       {/if}
     </form>
-  {:else if !canPrompt}
+  {:else if showComposer && !canPrompt}
     <p class="muted readonly" data-testid="conv-readonly">Read-only: this agent runs outside tmux, so there is no terminal to prompt.</p>
   {/if}
 </div>

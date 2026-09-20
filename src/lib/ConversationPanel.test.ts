@@ -2614,6 +2614,30 @@ describe('ConversationPanel detail UX fixes', () => {
     expect(box.getAttribute('aria-label')).toBe('Prompt');
     expect(screen.getByTestId('conv-composer-send').getAttribute('aria-keyshortcuts')).toBe('Enter');
   });
+
+  it('renders its own composer by default (showComposer defaults to true)', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.getByTestId('conv-composer')).toBeTruthy();
+    expect(screen.getByTestId('conv-composer-send')).toBeTruthy();
+  });
+
+  it('renders no composer, and no read-only fallback either, when showComposer is false', async () => {
+    // AgentPanel's case: a promptable (tmux-backed) session, but a host
+    // that brings its own composer over this same session and does not
+    // want ConversationPanel's send path active alongside its own.
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true, showComposer: false });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.queryByTestId('conv-composer')).toBeNull();
+    expect(screen.queryByTestId('conv-composer-send')).toBeNull();
+    expect(screen.queryByTestId('conv-readonly')).toBeNull();
+  });
 });
 
 // ─── Background switcher (task 6) ────────────────────────────────────────

@@ -1232,7 +1232,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 73);
+    assert_eq!(served, 75);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1329,6 +1329,36 @@ fn every_router_tool_has_exactly_one_tool_policy_row() {
             row.name
         );
     }
+}
+
+/// The operator's lifecycle must be reachable by the desktop, which pairs as
+/// an ORDINARY CLIENT and never holds the master token — so these two are
+/// `Access::Client`. They are not confirm-gated (creating the agent is what
+/// the person just asked for by pressing the button) and `ensure_operator`
+/// spawns a session, so it is `Deadline::Lifecycle`.
+#[test]
+fn the_operator_tools_are_client_reachable_and_not_admin() {
+    for name in ["ensure_operator", "operator_status"] {
+        let p = crate::mcp::guard::policy(name)
+            .unwrap_or_else(|| panic!("{name} has no TOOL_POLICIES row"));
+        assert!(
+            !crate::mcp::guard::is_admin_tool(name),
+            "{name} is not fleet admin"
+        );
+        assert!(
+            crate::mcp::guard::is_client_tool(name),
+            "{name} is client-reachable"
+        );
+        assert!(!p.confirm, "{name} is not confirm-gated");
+    }
+    assert!(
+        crate::mcp::guard::is_readonly_tool("operator_status"),
+        "reading the agent's readiness observes, it does not change"
+    );
+    assert!(
+        !crate::mcp::guard::is_readonly_tool("ensure_operator"),
+        "creating the agent is a write"
+    );
 }
 
 #[test]
@@ -2125,7 +2155,17 @@ fn the_served_definition_budget_stays_bounded() {
     /// summed over the tools. ~3.7 chars per token, so this caps the surface
     /// at roughly 15k tokens. It was 64,265 bytes before scoping, slimming
     /// and the description diet.
-    const BUDGET_BYTES: usize = 56_000;
+    ///
+    /// Raised from 56,000 to 57,000 when the operator tools
+    /// (`ensure_operator` / `operator_status`) met the Conversations
+    /// background work on main: two branches each added to the surface
+    /// independently, and together they landed at 56,121. Trimming was tried
+    /// first and is not available — the two operator descriptions are 139
+    /// bytes between them, so cutting them to nothing would still not free
+    /// the 121 needed, and would cost every client the one line that says
+    /// what those tools do. The headroom is deliberately small so the next
+    /// addition trips this again.
+    const BUDGET_BYTES: usize = 57_000;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -2226,4 +2266,33 @@ async fn list_worktrees_limit_zero_returns_every_row() {
         v["worktrees"].as_array().unwrap().len(),
         WORKTREES_DEFAULT_LIMIT + 3
     );
+}
+
+/// A confirmation nonce must never outlive the call that is waiting on it.
+/// When it does, you approve inside the TTL and the agent has already been
+/// holding an `E_TIMEOUT` for minutes — the one failure mode a confirmation
+/// dialog must not have. `CONFIRM_TTL` cannot simply be shortened instead:
+/// `set_clipboard` and `cancel_task` are `Deadline::Quick` (60 s), so a TTL
+/// under every cap would be under a minute, which is not a window a human
+/// can answer in.
+#[test]
+fn every_confirmed_tool_outlives_its_confirmation_window() {
+    let confirmed: Vec<&crate::mcp::guard::ToolPolicy> = crate::mcp::guard::TOOL_POLICIES
+        .iter()
+        .filter(|p| p.confirm)
+        .collect();
+    assert!(
+        !confirmed.is_empty(),
+        "the confirmation gate has no tools — this test would pass vacuously"
+    );
+    for p in confirmed {
+        let deadline = super::support::tool_deadline(p.name);
+        assert!(
+            deadline > crate::mcp::guard::CONFIRM_TTL,
+            "{} is confirm-gated but its deadline ({:?}) does not outlast CONFIRM_TTL ({:?})",
+            p.name,
+            deadline,
+            crate::mcp::guard::CONFIRM_TTL,
+        );
+    }
 }
