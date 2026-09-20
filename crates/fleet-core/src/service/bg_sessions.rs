@@ -27,6 +27,9 @@ pub struct NewBgSessionArgs {
     pub name: String,
     /// Initial prompt for the headless Claude session.
     pub prompt: String,
+    /// The session asking for this one; becomes the new row's parent.
+    #[serde(default)]
+    pub requester_session_id: Option<i64>,
 }
 
 impl NewBgSessionArgs {
@@ -150,6 +153,7 @@ pub async fn new_bg_session_tracked(
     let host_alias = args.host_alias.clone();
     let name = args.name.clone();
     let prompt = args.prompt.clone();
+    let requester = args.requester_session_id;
     // Recorded before `claude --bg` runs so the by-name fallback can tell
     // this launch apart from an older agent listed under the same name.
     let launch_started = now_unix();
@@ -173,7 +177,7 @@ pub async fn new_bg_session_tracked(
         );
         return Ok(res);
     }
-    res.session = stamp_bg_row(store, claude_id, &prompt);
+    res.session = stamp_bg_row(store, claude_id, &prompt, requester);
     Ok(res)
 }
 
@@ -251,6 +255,7 @@ fn stamp_bg_row(
     store: &Mutex<Store>,
     claude_id: &str,
     prompt: &str,
+    requester: Option<i64>,
 ) -> Option<crate::store::SessionRow> {
     let s = store.lock().ok()?;
     let row = s.get_session_by_claude_id(claude_id).ok().flatten()?;
@@ -267,6 +272,11 @@ fn stamp_bg_row(
         "prompt_sent",
         Some(&prompt.chars().take(120).collect::<String>()),
     );
+    // Parentage is how the requester's Conversations tab finds this row
+    // again; `dispatch_task` stamps its worker the same way.
+    if requester.is_some() {
+        let _ = s.set_parent_session_id(row.id, requester);
+    }
     s.get_session_by_id(row.id).ok().flatten()
 }
 
@@ -382,6 +392,7 @@ mod tests {
             host_alias: "local".into(),
             name: "test-session".into(),
             prompt: "".into(),
+            requester_session_id: None,
         };
         assert!(args.validate().is_err());
     }
@@ -392,6 +403,7 @@ mod tests {
             host_alias: "local".into(),
             name: "".into(),
             prompt: "Do the thing".into(),
+            requester_session_id: None,
         };
         assert!(args.validate().is_err());
     }
@@ -405,7 +417,7 @@ mod tests {
             s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5, "bg", 5)
                 .unwrap();
         }
-        let row = stamp_bg_row(&store, "u1", "Review the auth PR, carefully!").expect("row");
+        let row = stamp_bg_row(&store, "u1", "Review the auth PR, carefully!", None).expect("row");
         assert_eq!(
             row.friendly_name.as_deref(),
             Some("review the auth pr carefully")
@@ -416,7 +428,36 @@ mod tests {
         );
         assert!(row.started_at.is_some());
         // Unknown id ⇒ None, no panic.
-        assert!(stamp_bg_row(&store, "nope", "x").is_none());
+        assert!(stamp_bg_row(&store, "nope", "x", None).is_none());
+    }
+
+    #[test]
+    fn stamp_bg_row_records_the_session_that_asked_for_it() {
+        let store = make_store();
+        let parent = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_bg_session("local", "bg:u0", None, "u0", Some("working"), 5, "bg", 5)
+                .unwrap();
+            s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5, "bg", 5)
+                .unwrap();
+            s.get_session_by_claude_id("u0").unwrap().unwrap().id
+        };
+        let row = stamp_bg_row(&store, "u1", "go", Some(parent)).expect("the row is reconciled");
+        assert_eq!(row.parent_session_id, Some(parent));
+    }
+
+    #[test]
+    fn stamp_bg_row_leaves_no_parent_when_nobody_asked() {
+        let store = make_store();
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5, "bg", 5)
+                .unwrap();
+        }
+        let row = stamp_bg_row(&store, "u1", "go", None).expect("the row is reconciled");
+        assert_eq!(row.parent_session_id, None);
     }
 
     /// A listed background agent launched at `started_at` (unix seconds).
@@ -574,6 +615,7 @@ mod tests {
             host_alias: "mefistos".into(),
             name: "review-1".into(),
             prompt: "Summarise the diff".into(),
+            requester_session_id: None,
         };
         assert!(ok.validate().is_ok());
 

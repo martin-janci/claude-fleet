@@ -533,9 +533,17 @@ export async function newBgSession(
   hostAlias: string,
   name: string,
   prompt: string,
+  /** The session asking for this one; the new row becomes its child. Null
+   *  from the desktop dialog — nobody asked for it from inside a session. */
+  requesterSessionId: number | null = null,
 ): Promise<Result<NewBgSessionResult>> {
   const r = await invokeCmd<NewBgSessionResult>('new_bg_session', {
-    args: { host_alias: hostAlias, name, prompt },
+    args: {
+      host_alias: hostAlias,
+      name,
+      prompt,
+      requester_session_id: requesterSessionId,
+    },
   });
   if (r.ok && r.value?.session) acceptCommandRow(r.value.session);
   return r;
