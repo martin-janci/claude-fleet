@@ -10,6 +10,16 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-20-move-carry-claude-state-design.md` — read it before any task. Slice 1's spec and `docs/adr/0002-move-carries-work-as-is.md` are the background.
 
+## Superseded during execution
+
+The task listings below are the plan as written, not the code as landed. Where the two differ the **spec and the code win**; this list exists so nobody copies a superseded snippet out of here. What changed while the plan was executed:
+
+- **The tar exclude token is `[!/]`, not `?`.** A `?` matches `/` in both GNU and BSD tar's `fnmatch`, so a pattern built for one odd name (`a?b.txt` for `a b.txt`) could also match an unrelated `a/b.txt` one directory over. `exclude_pattern` maps every unsafe character to the bracket expression `[!/]` — exactly one NON-slash character.
+- **The fresh-line decision moved out of `merge_index` into `memory_append_index_script`.** `merge_index` never prefixes `"\n"` for a target that has an index; the script reads the real file's last byte instead, because the read `merge_index` gets is a bounded snapshot that is also empty for a file that exists but could not be read.
+- **Memory names are compared ASCII-case-insensitively throughout** — the `MEMORY.md` filter, the source-vs-target match and source-vs-source collisions — because a case-insensitive target volume (macOS default) makes `Note.md` and `note.md` one file. An exact name match on the target decides ahead of any case variant.
+- **Guards the listings do not show:** the session merge re-checks every staged path's charset and never echoes a raw name (a newline in one could forge a report line); the flow reconciles the selection against the merge report; both halves re-check the announced archive size before relaying; an exit-0 listing without the marker is a warning, not "nothing there"; `memory_append_index_script` refuses a delimiter line, over-long text and a NUL; and the memory half extracts through `claude_state::memory_extract_script`, which validates every archive member first, instead of `carry::extract_keep_existing_script`.
+- **The session listing record is `<bytes>\t<path>\0`, sized with `wc -c`** (not `<kb>` / `du -k`).
+
 ## Global Constraints
 
 - **Both halves can only warn.** No error from this step may abort a move; warnings are exactly `session state was not carried: <why>` and `project memory was not carried: <why>`. Every line of the step runs before `hooks.start_target`.

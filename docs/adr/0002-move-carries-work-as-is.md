@@ -38,11 +38,17 @@ The principle stays; the refusal goes.
   deny-list; what stays behind is reported.
 - The Claude-side state travels too: the per-session directory (subagent
   transcripts, tool results, title) is merged file by file — a file lands
-  only where the target has none or a strictly smaller one, since these
-  files are append-only and the larger copy is therefore the newer one,
-  which is what keeps a return trip A→B→A correct — and the project's Claude
-  memory travels keyed by the repo root, not the worktree: only names the
-  target lacks are added, index lines travel only with the file they
+  only where the target has none or a strictly smaller one. The merge
+  *treats* every file as append-only. That is exact for the transcripts,
+  where the larger copy really is the newer one and the rule is what keeps a
+  return trip A→B→A correct; for the small files Claude Code rewrites rather
+  than appends to (`custom-title.json`, `*.meta.json`, `workflows/…`) it is
+  an approximation: an equal-or-smaller copy on the target wins and is
+  reported `kept_target`, so a return trip can leave a stale title or
+  workflow file in place. One rule that can never lose data is worth that; a
+  per-file-type policy waits for slice 3 and the return trip. The project's
+  Claude memory travels keyed by the repo root, not the worktree: only names
+  the target lacks are added, index lines travel only with the file they
   describe, and the target's own files and index lines are never rewritten.
 - What the move writes on the source: unreferenced git objects, the private
   ref namespace and a temp directory. The refs and the directory are removed
@@ -67,8 +73,15 @@ The principle stays; the refusal goes.
 - A cancelled or crashed move skips the cleanup: the private refs and the
   transfer directory stay until the same session is moved again (the id is
   the Claude session id, and each run removes the directory before writing
-  it). The directory can hold `ignored.tgz` — `.env` content — at mode 0600
-  inside a 0700 directory, so it is private, but it is not transient.
+  it). The directory can hold `ignored.tgz` — `.env` content — and now also
+  `state.tgz` (subagent transcripts and tool results) and `memory.tgz`, each
+  at mode 0600 inside a 0700 directory, so it is private, but it is not
+  transient.
+- The move report gained required wire fields with the Claude-side state, so
+  in a mixed fleet **upgrade the hub before the desktops**: a new desktop
+  routed through an old hub fails to parse the reply (`E_PARSE`) *after* the
+  hub has already completed the move, so the work moved and only the report
+  is lost. An old desktop against a new hub is unaffected.
 - Each payload upload runs under a fixed 300 s wall clock. A bundle near the
   500 MiB cap therefore needs roughly a 14 Mbit/s uplink to finish; on a
   slower link the move fails at the upload with the source untouched.

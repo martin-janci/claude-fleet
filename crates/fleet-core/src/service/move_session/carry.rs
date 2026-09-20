@@ -67,7 +67,11 @@ pub enum TargetSeed {
 pub enum LeftReason {
     Denylisted,
     OverCap,
-    /// The path is not valid UTF-8.
+    /// The name is one the carry will not handle: not valid UTF-8 (the
+    /// git-ignored files), a character outside the half's safe charset or a
+    /// `..` segment (the session directory), or a name that only differs
+    /// from one already carried by ASCII case (the project memory, since a
+    /// case-insensitive target volume would make the two one file).
     UnsupportedName,
 }
 

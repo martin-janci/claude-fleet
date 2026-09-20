@@ -339,11 +339,13 @@ pub fn merge_index(
         return IndexMerge::default();
     }
     // The fresh-line decision (does the target need a "\n" before this text)
-    // belongs to `memory_append_index_script`, not here: `target_index` is
-    // only ever a possibly-truncated read (capped at `INDEX_READ_MAX_BYTES`,
-    // or empty when the file could not be read despite existing), so ITS
-    // trailing-newline state is not reliable evidence about the real file's
-    // last byte. The script inspects the real file directly instead.
+    // belongs to `memory_append_index_script`, not here. `target_index` is a
+    // snapshot read of the target's index taken a round trip earlier, and it
+    // is empty both for an empty file and for one that exists but could not
+    // be read — so ITS trailing-newline state is not reliable evidence about
+    // the real file's last byte. (It is never TRUNCATED: `carry_memory`
+    // refuses a read over `INDEX_READ_MAX_BYTES` before it ever gets here.)
+    // The script inspects the real file directly instead.
     let prefix = match target_index {
         None => "# Memory Index\n\n",
         Some(_) => "",

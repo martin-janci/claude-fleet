@@ -1,7 +1,7 @@
 # Move carry, slice 2: the Claude-side state travels too
 
 **Date:** 2026-09-20
-**Status:** Design — not yet implemented
+**Status:** Implemented
 **Builds on:** `docs/superpowers/specs/2026-09-19-move-carry-engine-design.md`
 (slice 1, landed in PR #163) and `docs/adr/0002-move-carries-work-as-is.md`
 **Slice:** 2 of 3. Slice 3 (Transfer button, preflight sheet, progress,
@@ -71,29 +71,53 @@ Target directory: the parent of the prep script's transcript path, plus
 `<id>/`. Absent on the source → nothing to do, no warning.
 
 1. **List (source):** every regular file under `<id>/` as
-   `<kb>\t<relative path>\0` (`find … -type f`, sized with `du -k`).
-   Symlinks and special files are not listed and do not travel.
+   `<bytes>\t<relative path>\0` (`find … -type f`, sized with `wc -c` — byte
+   exact, unlike `du -k`, which reports allocated blocks). Symlinks and
+   special files are not listed and do not travel.
 2. **Select (Rust, pure):** paths outside `[A-Za-z0-9._/-]`, or containing
    `..`, are left behind (`unsupported_name`). If the total is within
    `move.max_session_state_mb` (default **200**, 1–4096) everything
    travels. Otherwise the **largest** files are excluded one by one until
    the rest fits; more than 200 exclusions → the half is skipped with a
    warning. Excluded files are reported as left behind (`over_cap`).
-3. **Pack (source):** one `tar -czf` of `./<id>` from the project dir with
-   one `--exclude=./<id>/<path>` per excluded file (no globs can occur: the
-   names are charset-checked). The common case has no excludes, so argv
-   stays tiny; the bound of 200 keeps it small in the worst case.
+3. **Pack (source):** one `tar -czf` of **the whole `./<id>`** from the
+   project dir **minus** the excludes — not "the selected files". Each
+   excluded path contributes both member-name spellings
+   (`--exclude=./<id>/<p>` and `--exclude=<id>/<p>`) so GNU and BSD tar
+   agree. A path with a character outside the safe charset is excluded by a
+   pattern in which every such character becomes the `[!/]` token, a bracket
+   expression matching exactly one NON-slash character; a plain `?` is not
+   safe, since both tars' `fnmatch` let it match `/` too and a pattern built
+   for one odd file could then reach across a directory boundary. The common
+   case has no excludes, so argv stays tiny; the bound of 200 keeps it small
+   in the worst case.
 4. **Relay**, then **extract into a staging dir** inside the target's
    transfer dir — never in place.
 5. **Merge (target):** for each staged regular file, move it into place iff
-   the target has no such file or a **strictly smaller** one. These files
-   are append-only, so the larger copy is the newer one — the rule the main
-   transcript already follows ("a larger existing target transcript may hold
-   turns taken there"), and the one that keeps a return trip A→B→A correct.
-   Equal or larger on the target → kept, reported as `kept_target`.
-   Directories are created `0700`, files keep the `0600` they were packed
-   with. The script prints one `carried\t<path>` / `kept\t<path>` line per
-   file after the marker.
+   the target has no such file or a **strictly smaller** one. Equal or
+   larger on the target → kept, reported as `kept_target`. Directories are
+   created `0700`, files keep the `0600` they were packed with. The script
+   prints one `carried\t<bytes>\t<path>`, `kept\t<path>` or
+   `failed\t<path>` line per file after the marker.
+
+   The merge **treats every file as append-only**. That is exact for the
+   transcripts (`subagents/*.jsonl`), which is the rule the main transcript
+   already follows ("a larger existing target transcript may hold turns
+   taken there"). It is an approximation for the small files Claude Code
+   REWRITES rather than appends to — `custom-title.json`, `*.meta.json`,
+   `workflows/…`: on a return trip, such a file changed on B to an equal or
+   smaller size is `kept` on A, so A keeps its stale copy. That is the
+   deliberate price of one rule that can never lose data; a per-file-type
+   policy belongs to slice 3, with the return trip.
+
+   Because the pack is "the whole `./<id>` minus the excludes", a path the
+   LISTING dropped (a TAB or newline in the name, a non-UTF-8 name) still
+   reaches the staging dir, as does a file created after the listing. The
+   merge therefore re-checks the charset itself and never moves such a file,
+   reporting it `failed\t(unsupported name)` **without** its raw name — a
+   newline in a name would otherwise forge an extra report line. The flow
+   then reconciles: every path the selection chose must come back in
+   `carried ∪ kept ∪ failed`, or the half warns.
 
 ### B. Project memory
 
@@ -118,9 +142,14 @@ memory on the source → nothing to do, no warning.
    - on the target with another hash → `kept_target`. The target's file is
      never overwritten.
 3. **Carry the files:** pack the chosen names, relay, extract in the target
-   memory dir (created `0700` if absent) with slice 1's keep-existing
-   extraction — so even a file that appeared on the target since the listing
-   survives.
+   memory dir (created `0700` if absent) with the keep-existing extraction —
+   so even a file that appeared on the target since the listing survives.
+   This is the one extract that does not stage into a scratch directory
+   first: it writes straight into the user's own notes, so it does not trust
+   the archive the way slice 1's generic extract does. Every member must be
+   `<name>` or `./<name>` with `<name>` matching `[A-Za-z0-9._-]+\.md`, must
+   not be `MEMORY.md` in any ASCII case, and must be a regular file; one bad
+   member refuses the whole archive with nothing extracted.
 4. **Merge the index:** the source's and the target's `MEMORY.md` are read
    (each at most 256 KiB; larger → the index is left alone, with a
    warning). A source line is appended to the target's index iff its first
@@ -128,10 +157,16 @@ memory on the source → nothing to do, no warning.
    Lines of files the target already had, lines without a link, and headings
    do not travel: an index line describes a file, and the target's own line
    already describes the target's own version. The target's existing lines
-   are never rewritten or reordered; a missing trailing newline is added
-   before appending; with no `MEMORY.md` on the target one is created as
-   `# Memory Index` + a blank line + the appended lines. Appended text is
-   bounded at 32 KiB and reaches the script as a quoted heredoc.
+   are never rewritten or reordered; with no `MEMORY.md` on the target one
+   is created as `# Memory Index` + a blank line + the appended lines.
+   Appended text is bounded at 32 KiB and reaches the script as a quoted
+   heredoc; text with a line equal to the heredoc delimiter, or containing a
+   NUL (which bash silently discards while reading a script, so such a line
+   would still close the heredoc), is refused outright. The missing trailing
+   newline before the appended text is added by the append **script**, not
+   by the pure `merge_index`: only the script can see the real file's last
+   byte, since the read `merge_index` gets is bounded and can be empty for a
+   file that exists but could not be read.
 
 Host-specific notes travel like any other (a note about a macOS-only path
 arrives on a Linux host). The move does not try to judge portability;
@@ -163,6 +198,15 @@ pub struct MemoryReport {
     pub left_behind: Vec<LeftBehind>,
 }
 ```
+
+**Mixed versions: upgrade the hub before the desktops.** The report gained
+two REQUIRED wire fields, so a NEW desktop routed through an OLD hub gets
+`E_PARSE` when it reads the reply — and it gets it *after* the hub has
+already completed the move, so the move happened and only its report is
+lost. An old desktop talking to a new hub is fine (it ignores fields it does
+not know). This is the `repo_read` wire rule working as designed, exactly as
+in slice 1; it is stated here because the ordering it implies is not
+otherwise written down anywhere.
 
 No new move argument, so the hub route's hand-built argument JSON
 (`src-tauri/src/backend/remote.rs`) is unchanged; the routed report payload
