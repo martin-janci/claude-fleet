@@ -25,6 +25,7 @@ export const SETTING_KEYS = {
   moveMaxBundleMb: 'move.max_bundle_mb',
   moveIgnoredEntryKb: 'move.ignored_entry_kb',
   moveIgnoredTotalMb: 'move.ignored_total_mb',
+  moveMaxSessionStateMb: 'move.max_session_state_mb',
   usageEnabled: 'usage.enabled',
   usageIntervalSecs: 'usage.interval_secs',
   usagePricesJson: 'usage.prices_json',
@@ -56,6 +57,9 @@ export const MOVE_IGNORED_ENTRY_KB_MAX = 1_048_576;
 /** Mirror of `settings::MOVE_IGNORED_TOTAL_MB_MAX` (`Kind::Int { min: 1, max }`). */
 export const MOVE_IGNORED_TOTAL_MB_MAX = 1024;
 
+/** Mirror of `settings::MOVE_MAX_SESSION_STATE_MB_MAX` (`Kind::Int { min: 1, max }`). */
+export const MOVE_MAX_SESSION_STATE_MB_MAX = 4096;
+
 export type ProjectsLayout = 'github' | 'flat';
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -81,6 +85,7 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'move.max_bundle_mb': '500',
   'move.ignored_entry_kb': '1024',
   'move.ignored_total_mb': '20',
+  'move.max_session_state_mb': '200',
   'usage.enabled': 'true',
   'usage.interval_secs': '300',
   'usage.prices_json': '{}',

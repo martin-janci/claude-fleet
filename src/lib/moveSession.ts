@@ -16,6 +16,21 @@ export interface CarryReport {
     reason: 'denylisted' | 'over_cap' | 'unsupported_name';
   }[];
   target_seeded: 'existing' | 'cloned' | 'initialized';
+  /** The per-session directory (subagent transcripts, tool results, title). */
+  session_state: {
+    carried: { path: string; bytes: number }[];
+    /** The target already had an equal or larger copy. */
+    kept_target: string[];
+    left_behind: { path: string; bytes: number | null; reason: 'denylisted' | 'over_cap' | 'unsupported_name' }[];
+  };
+  /** The project's Claude memory; the target's own files are never replaced. */
+  memory: {
+    carried: { path: string; bytes: number }[];
+    kept_target: string[];
+    identical: number;
+    index_lines_added: number;
+    left_behind: { path: string; bytes: number | null; reason: 'denylisted' | 'over_cap' | 'unsupported_name' }[];
+  };
 }
 
 /** What a completed `move_session` did (mirrors `service::move_session::MoveReport`). */

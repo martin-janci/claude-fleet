@@ -335,7 +335,10 @@ impl FleetTools {
     #[tool(
         description = "Move a work session to another host, carrying its work as it is: the \
         Claude transcript, unpushed commits, staged/modified/untracked files and \
-        small git-ignored files (.env). Nothing is pushed, committed or stashed \
+        small git-ignored files (.env); also the session's Claude directory \
+        (subagent transcripts, tool results) and the project's Claude memory, \
+        added to the target without replacing anything there (these two only \
+        warn). Nothing is pushed, committed or stashed \
         and the source worktree is never modified; the target resumes the same \
         conversation and the source is killed only once the target runs \
         (keep_source=true leaves it). strict=true refuses instead of carrying: \

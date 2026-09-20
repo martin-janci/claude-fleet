@@ -144,7 +144,9 @@ event timeline (session_history). Handoff from the original spec is replaced by
 `docs/adr/0001-descope-freeze-ship-move.md`. `move_session` now CARRIES
 uncommitted and unpushed work plus small git-ignored files to the target
 instead of refusing a dirty or unpushed source (`strict: true` restores the
-ADR 0001 refusals), per `docs/adr/0002-move-carries-work-as-is.md` and
+ADR 0001 refusals), and the session's Claude directory and project memory
+(slice 2 spec `docs/superpowers/specs/2026-09-20-move-carry-claude-state-design.md`),
+per `docs/adr/0002-move-carries-work-as-is.md` and
 `docs/superpowers/specs/2026-09-19-move-carry-engine-design.md`. A full
 hardening review is in
 `docs/specs/2026-05-21-hardening-review.md` — consult it before touching SSH

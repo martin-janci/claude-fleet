@@ -112,6 +112,8 @@ pub const MOVE_MAX_BUNDLE_MB_MAX: u64 = 4096;
 pub const MOVE_IGNORED_ENTRY_KB_MAX: u64 = 1_048_576;
 /// Upper bound for [`MOVE_IGNORED_TOTAL_MB`]: one transfer's payload.
 pub const MOVE_IGNORED_TOTAL_MB_MAX: u64 = 1024;
+/// Upper bound for [`MOVE_MAX_SESSION_STATE_MB`]: one transfer's payload.
+pub const MOVE_MAX_SESSION_STATE_MB_MAX: u64 = 4096;
 
 /// Largest git bundle (MiB) `move_session` relays (`E_MOVE_TOO_LARGE` above it).
 pub const MOVE_MAX_BUNDLE_MB: &str = crate::service::move_session::carry::SETTING_MAX_BUNDLE_MB;
@@ -122,6 +124,10 @@ pub const MOVE_IGNORED_ENTRY_KB: &str =
 /// Total git-ignored payload (MiB) `move_session` carries.
 pub const MOVE_IGNORED_TOTAL_MB: &str =
     crate::service::move_session::carry::SETTING_IGNORED_TOTAL_MB;
+/// Largest per-session Claude directory (MiB) `move_session` carries; the
+/// biggest files stay behind above it.
+pub const MOVE_MAX_SESSION_STATE_MB: &str =
+    crate::service::move_session::claude_state::SETTING_MAX_SESSION_STATE_MB;
 
 /// Collect per-session token usage from Claude transcripts (Wave 5 G1).
 pub const USAGE_ENABLED: &str = "usage.enabled";
@@ -234,6 +240,14 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Int {
             min: 1,
             max: MOVE_IGNORED_TOTAL_MB_MAX,
+        },
+    },
+    Spec {
+        key: MOVE_MAX_SESSION_STATE_MB,
+        default: "200",
+        kind: Kind::Int {
+            min: 1,
+            max: MOVE_MAX_SESSION_STATE_MB_MAX,
         },
     },
     Spec {
@@ -556,6 +570,16 @@ mod tests {
         assert!(validate(MOVE_IGNORED_TOTAL_MB, "1025").is_err());
         assert_eq!(resolve(MOVE_IGNORED_TOTAL_MB, None), "20");
         assert_eq!(resolve(MOVE_IGNORED_TOTAL_MB, Some("5")), "5");
+    }
+
+    #[test]
+    fn session_state_cap_has_a_spec_a_default_and_bounds() {
+        assert_eq!(spec(MOVE_MAX_SESSION_STATE_MB).unwrap().default, "200");
+        assert!(validate(MOVE_MAX_SESSION_STATE_MB, "1").is_ok());
+        assert!(validate(MOVE_MAX_SESSION_STATE_MB, "0").is_err());
+        assert!(validate(MOVE_MAX_SESSION_STATE_MB, "4096").is_ok());
+        assert!(validate(MOVE_MAX_SESSION_STATE_MB, "4097").is_err());
+        assert_eq!(resolve(MOVE_MAX_SESSION_STATE_MB, Some("50")), "50");
     }
 
     #[test]

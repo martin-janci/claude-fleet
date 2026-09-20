@@ -857,9 +857,9 @@ describe('ConversationPanel live indicator', () => {
     expect(mockedAct).toHaveBeenCalledTimes(2);
   });
 
-  // #147: session_activity is local-only in remote mode (peek_session answers
-  // a different shape) — a hub client must not poll it every 2s only to drop
-  // an E_LOCAL_ONLY each time.
+  // #147: session_activity is local-only in remote mode (the hub's pane reads
+  // answer a different shape) — a hub client must not poll it every 2s only to
+  // drop an E_LOCAL_ONLY each time.
   it('a hub client never polls session_activity, even for a working row', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     hubStatus.set(REMOTE);

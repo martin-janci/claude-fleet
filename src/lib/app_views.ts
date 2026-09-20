@@ -56,13 +56,14 @@ export function requestOpenPath(sessionId: number, path: string, line: number | 
 export const OPEN_PATH_CONTEXT = 'md-open-path';
 export type OpenPathFn = (path: string, line: number | null) => void;
 
-export type AppChord = 'hosts' | 'settings';
+export type AppChord = 'hosts' | 'settings' | 'session-view';
 
 /**
  * The app-level chords, platform-correct like the quick switcher's:
- * ⌘I toggles Hosts and ⌘, opens Settings (Cmd never reaches the PTY); on
- * non-mac Ctrl+Shift+H also toggles Hosts (Ctrl+Shift+I is the devtools
- * chord). Plain Ctrl chords stay with the terminal.
+ * ⌘I toggles Hosts, ⌘J flips the Session view and ⌘, opens Settings (Cmd
+ * never reaches the PTY); on non-mac Ctrl+Shift+H and Ctrl+Shift+J do the
+ * same two views (Ctrl+Shift+I is the devtools chord). Plain Ctrl chords
+ * stay with the terminal — Ctrl+J is line-feed there.
  */
 export function appChord(
   e: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean },
@@ -72,14 +73,23 @@ export function appChord(
   const k = e.key.toLowerCase();
   if (e.metaKey && !e.ctrlKey && !e.shiftKey) {
     if (k === 'i') return 'hosts';
+    if (k === 'j') return 'session-view';
     if (k === ',') return 'settings';
     return null;
   }
-  if (!isMac && e.ctrlKey && e.shiftKey && !e.metaKey && k === 'h') return 'hosts';
+  if (!isMac && e.ctrlKey && e.shiftKey && !e.metaKey) {
+    if (k === 'h') return 'hosts';
+    if (k === 'j') return 'session-view';
+  }
   return null;
 }
 
 /** Label for the Hosts chord, for the tab and Settings. */
 export function hostsChordLabel(isMac: boolean): string {
   return isMac ? '⌘I' : 'Ctrl+Shift+H';
+}
+
+/** Label for the Session-view chord, for the segment's tooltip. */
+export function sessionViewChordLabel(isMac: boolean): string {
+  return isMac ? '⌘J' : 'Ctrl+Shift+J';
 }

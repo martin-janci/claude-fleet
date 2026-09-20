@@ -9,14 +9,48 @@
 //! Everything it creates lives under a `mktemp -d /tmp/cf-e2e.*` dir on the
 //! target, a temp dir here, and `~/.cache/claude-fleet/transfer/<fresh uuid>`
 //! on both; all of it is removed at the end (also after a failed check).
+//!
+//! Two more halves ride alongside the git carry, both from
+//! `service::move_session::claude_state` (see its module doc and
+//! `docs/superpowers/specs/2026-09-20-move-carry-claude-state-design.md`):
+//! **A. the per-session directory** uses EXPLICIT project dirs under this
+//! run's own temp trees (`-cf-e2e-src-<scenario>` / `-cf-e2e-tgt-<scenario>`,
+//! names beginning with `-` like every real encoded one) — never
+//! `~/.claude/projects` — so cleanup is just the usual temp-tree teardown.
+//! **B. the project's Claude memory** is keyed by the repo root, so it DOES
+//! land in the real `~/.claude/projects/` on both hosts; that is only safe
+//! because the repo root lives under a `cf-e2e` temp dir on each side, so its
+//! encoded name always contains the literal substring `cf-e2e` (the encoding
+//! turns every non-alphanumeric character into `-`, which cannot erase an
+//! existing run of alphanumerics). Every removal of such a directory goes
+//! through `guarded_projects_rm_script`, whose `case` pattern requires BOTH
+//! the `$HOME/.claude/projects/` prefix AND the `cf-e2e` substring before it
+//! will run `rm -rf` — a refusal exits non-zero instead, and teardown then
+//! verifies the directory is actually gone.
 
+use fleet_core::service::move_session::claude_state;
 use fleet_core::service::move_session::{self as mv, carry};
 use fleet_core::service::safe_kill::parse_porcelain;
 use fleet_core::shell::quote;
 use std::collections::BTreeSet;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+/// The source's `new.md`/`differs.md`/`MEMORY.md`, and the one line of that
+/// index that must — and must only — travel with `new.md`.
+const MEM_NEW_MD: &str = "the fact that only the source knows\n";
+const MEM_SRC_DIFFERS_MD: &str = "the source's version of this note\n";
+const MEM_SRC_INDEX: &str =
+    "# Memory Index\n\n- [new](new.md) — a new fact\n- [differs](differs.md) — an old fact\n";
+const MEM_NEW_LINE: &str = "- [new](new.md) — a new fact";
+/// The target's own memory, seeded before the carry: a `differs.md` with
+/// different content than the source's (so it is `kept_target`, never
+/// overwritten), and an index with NO trailing newline — the append script
+/// must add one itself before appending (see `memory_append_index_script`).
+const MEM_TGT_DIFFERS_MD: &str = "the target's own version of this note\n";
+const MEM_TGT_INDEX_SEED: &str = "- [differs](differs.md) — target's own note";
 
 struct Ctx {
     host: String,
@@ -135,6 +169,53 @@ fn line_set(files: &[fleet_core::service::safe_kill::DirtyFile]) -> BTreeSet<Str
         .collect()
 }
 
+/// `cat` on the remote side — small text-file comparisons don't need the
+/// chunked relay machinery, just its own bytes back for a direct comparison.
+fn remote_read(c: &Ctx, path: &str) -> Vec<u8> {
+    c.remote(&format!("cat -- {}", quote(path))).stdout
+}
+/// `stat -c %a` on the remote side (GNU stat; the target hosts this harness
+/// runs against are Linux fleet hosts, same assumption the git-carry checks
+/// below already make for `.env`/`mode.sh`).
+fn remote_mode(c: &Ctx, path: &str) -> String {
+    text(&c.remote(&format!("stat -c %a -- {}", quote(path))))
+        .trim()
+        .to_string()
+}
+
+/// Removes a directory under the real `~/.claude/projects/` iff its name
+/// contains `cf-e2e` AND it is really under that prefix — the `case` pattern
+/// is the guard, not the Rust caller: a path that fails to match falls to the
+/// `*)` branch and refuses (non-zero exit) instead of ever reaching `rm -rf`.
+/// Never used for anything but the memory-half fixtures (the session-half
+/// fixtures live under this run's own temp trees, never here).
+fn guarded_projects_rm_script(path: &str) -> String {
+    format!(
+        r#"set +e
+d={d}
+case "$d" in
+  "$HOME"/.claude/projects/*cf-e2e*) rm -rf -- "$d" ;;
+  *) printf 'refused: %s\n' "$d" >&2; exit 1 ;;
+esac
+"#,
+        d = quote(path)
+    )
+}
+/// [`guarded_projects_rm_script`]'s companion: reports `gone` only once the
+/// same guard passes and the path is confirmed absent.
+fn guarded_projects_gone_script(path: &str) -> String {
+    format!(
+        r#"set +e
+d={d}
+case "$d" in
+  "$HOME"/.claude/projects/*cf-e2e*) if [ -e "$d" ]; then echo present; else echo gone; fi ;;
+  *) echo refused ;;
+esac
+"#,
+        d = quote(path)
+    )
+}
+
 /// The source: a LINKED WORKTREE (claude-fleet's real shape) on `feat`, two
 /// commits ahead of origin, with every kind of state a move must reproduce.
 fn make_source(lt: &Path, origin_url: &str) -> PathBuf {
@@ -182,7 +263,6 @@ fn make_source(lt: &Path, origin_url: &str) -> PathBuf {
     std::fs::create_dir_all(wt.join("sub")).unwrap();
     std::fs::write(wt.join("sub/nested.txt"), "n\n").unwrap();
     std::fs::remove_file(wt.join("del.txt")).unwrap();
-    use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(wt.join("mode.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink("keep.txt", wt.join("link")).unwrap();
     // git-ignored: travels by tar, not by git
@@ -198,6 +278,351 @@ fn make_source(lt: &Path, origin_url: &str) -> PathBuf {
     std::fs::create_dir_all(wt.join("node_modules/pkg")).unwrap();
     std::fs::write(wt.join("node_modules/pkg/index.js"), "x").unwrap();
     wt
+}
+
+/// The `<id>/…` fixture a real per-session directory carries: one subagent
+/// transcript deliberately sized to 500 B (so a `cloned` target's own bigger
+/// copy wins the merge), its `.meta.json`, an out-of-line tool result and a
+/// custom title — every file `0600` like the real ones, so the packed
+/// archive (which preserves on-disk modes, umask does not touch it) actually
+/// exercises the "arrives 0600" contract instead of whatever the process
+/// umask happened to leave from a plain `fs::write`.
+fn write_session_fixture(project_dir: &Path, id: &str) {
+    let dir = project_dir.join(id);
+    for (rel, body) in [
+        ("subagents/agent-aa.jsonl", "a\n".repeat(250)), // 500 B
+        ("subagents/agent-aa.meta.json", "{}".to_string()),
+        ("tool-results/o.txt", "output\n".to_string()),
+        ("custom-title.json", "{\"title\":\"t\"}".to_string()),
+    ] {
+        let f = dir.join(rel);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, &body).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// Half A of the Claude-side carry: list → select → pack → chunked relay →
+/// merge, run against the EXPLICIT `src_proj`/`tgt_proj` dirs the caller
+/// fabricated (never `~/.claude/projects`), then check the result against
+/// `want_seed` (the `cloned` scenario pre-populates a bigger `agent-aa.jsonl`
+/// on the target; `initialized` starts the target empty).
+fn check_session_state(
+    c: &mut Ctx,
+    src_proj: &Path,
+    tgt_proj: &str,
+    id: &str,
+    tgt_dir: &str,
+    want_seed: carry::TargetSeed,
+    pre_existing_aa: Option<&str>,
+) {
+    let src_proj_s = src_proj.to_str().unwrap();
+    let o = c.local(&claude_state::session_list_script(src_proj_s, id));
+    let listed = claude_state::parse_file_list(&o.stdout);
+    let mut got: Vec<&str> = listed.iter().map(|f| f.path.as_str()).collect();
+    got.sort();
+    c.check(
+        "session-state: list (the 4 fixture files, nothing else)",
+        got == [
+            "custom-title.json",
+            "subagents/agent-aa.jsonl",
+            "subagents/agent-aa.meta.json",
+            "tool-results/o.txt",
+        ],
+        format!("{got:?}"),
+    );
+    let sel = claude_state::select_session_files(
+        listed,
+        claude_state::DEFAULT_MAX_SESSION_STATE_MB * 1024 * 1024,
+    );
+    c.check(
+        "session-state: select (well under the cap, nothing excluded)",
+        sel.skip.is_none() && sel.left.is_empty() && sel.exclude.is_empty() && sel.carry.len() == 4,
+        format!("{sel:?}"),
+    );
+    let o = c.local(&claude_state::session_pack_script(
+        src_proj_s,
+        id,
+        &sel.exclude,
+    ));
+    let Ok((bytes, archive)) = carry::parse_pack(&text(&o)) else {
+        c.check("session-state: pack", false, err(&o));
+        return;
+    };
+    let local_tgz = std::env::temp_dir().join(format!("cf-e2e-state-{id}.tgz"));
+    let dl = c.download_local(&archive, bytes, &local_tgz);
+    let staged = format!("{tgt_dir}/state.tgz");
+    let uploaded = dl.is_ok() && c.upload(&local_tgz, &staged);
+    c.check(
+        "session-state: pack + relay",
+        uploaded,
+        dl.err().unwrap_or_default(),
+    );
+    let _ = std::fs::remove_file(&local_tgz);
+    if !uploaded {
+        return;
+    }
+    let o = c.remote(&claude_state::session_merge_script(tgt_proj, id, &staged));
+    let Some(merged) = claude_state::parse_merge(&text(&o)) else {
+        c.check("session-state: merge parses", false, err(&o));
+        return;
+    };
+    c.check(
+        "session-state: nothing failed to place",
+        merged.failed.is_empty(),
+        format!("{:?}", merged.failed),
+    );
+    let mut carried_names: Vec<&str> = merged.carried.iter().map(|e| e.path.as_str()).collect();
+    carried_names.sort();
+    match want_seed {
+        carry::TargetSeed::Cloned => {
+            c.check(
+                "session-state: cloned — the larger target copy is kept, the rest carried",
+                merged.kept == ["subagents/agent-aa.jsonl"]
+                    && carried_names
+                        == [
+                            "custom-title.json",
+                            "subagents/agent-aa.meta.json",
+                            "tool-results/o.txt",
+                        ],
+                format!("carried={carried_names:?} kept={:?}", merged.kept),
+            );
+            let after = remote_read(c, &format!("{tgt_proj}/{id}/subagents/agent-aa.jsonl"));
+            c.check(
+                "session-state: the kept file is byte-identical to before the merge",
+                Some(after.as_slice()) == pre_existing_aa.map(str::as_bytes),
+                "",
+            );
+        }
+        carry::TargetSeed::Initialized => {
+            c.check(
+                "session-state: initialized — everything carried, nothing kept",
+                merged.kept.is_empty()
+                    && carried_names
+                        == [
+                            "custom-title.json",
+                            "subagents/agent-aa.jsonl",
+                            "subagents/agent-aa.meta.json",
+                            "tool-results/o.txt",
+                        ],
+                format!("carried={carried_names:?} kept={:?}", merged.kept),
+            );
+        }
+        carry::TargetSeed::Existing => unreachable!("no scenario uses this seed"),
+    }
+    for rel in &carried_names {
+        let src_bytes = std::fs::read(src_proj.join(id).join(rel)).unwrap();
+        let tgt_bytes = remote_read(c, &format!("{tgt_proj}/{id}/{rel}"));
+        let mode = remote_mode(c, &format!("{tgt_proj}/{id}/{rel}"));
+        c.check(
+            &format!("session-state: {rel} identical on the target, mode 0600"),
+            src_bytes == tgt_bytes && mode == "600",
+            format!("mode={mode}"),
+        );
+    }
+    for d in ["subagents", "tool-results"] {
+        let mode = remote_mode(c, &format!("{tgt_proj}/{id}/{d}"));
+        c.check(
+            &format!("session-state: {d}/ created on the target, mode 0700"),
+            mode == "700",
+            mode,
+        );
+    }
+}
+
+/// The SOURCE's real Claude memory fixture — created ONCE, before any
+/// scenario runs: memory is keyed by the repo root (the same `main` checkout
+/// for every scenario, since they all move the same worktree), not by the
+/// worktree, so there is exactly one source memory dir for the whole run.
+/// Uses the app's own `memory_list_script` to learn the real path rather
+/// than re-deriving Claude Code's encoding by hand — the same lookup
+/// `carry_memory` performs. Asserts the discovered dir is a `cf-e2e` temp
+/// dir under `~/.claude/projects/` before writing anything into it.
+fn setup_source_memory(c: &mut Ctx, wts: &str) -> String {
+    let o = c.local(&claude_state::memory_list_script(wts, Some(wts)));
+    let listing = claude_state::parse_memory_list(&o.stdout)
+        .unwrap_or_else(|| panic!("memory-list on the source did not parse: {}", err(&o)));
+    let home = std::env::var("HOME").unwrap_or_default();
+    c.check(
+        "memory: source dir is a cf-e2e temp dir under ~/.claude/projects",
+        listing.dir.contains("cf-e2e")
+            && listing
+                .dir
+                .starts_with(&format!("{home}/.claude/projects/")),
+        listing.dir.clone(),
+    );
+    std::fs::create_dir_all(&listing.dir).unwrap();
+    std::fs::set_permissions(&listing.dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for (name, body) in [
+        ("new.md", MEM_NEW_MD),
+        ("differs.md", MEM_SRC_DIFFERS_MD),
+        ("MEMORY.md", MEM_SRC_INDEX),
+    ] {
+        std::fs::write(Path::new(&listing.dir).join(name), body).unwrap();
+    }
+    listing.dir
+}
+
+/// Half B of the Claude-side carry, for one scenario's target: discover the
+/// target's real memory dir (`memory_list_script(root, None)`, exactly the
+/// app's own lookup for `tgt_project_root`), pre-populate it with the
+/// target's own `differs.md` and a one-line index with NO trailing newline,
+/// then run the real list-both → decide → pack → relay → extract →
+/// read-both-indexes → merge → append flow and check the result. Returns the
+/// target's memory PROJECT dir (the parent of `memory/`) for teardown, best
+/// effort even when a later step fails, so a partial run never leaks a
+/// `cf-e2e` directory on the target.
+fn check_memory(c: &mut Ctx, root: &str, tgt_dir: &str, wts: &str, id: &str) -> Option<String> {
+    let o = c.remote(&claude_state::memory_list_script(root, None));
+    let Some(discover) = claude_state::parse_memory_list(&o.stdout) else {
+        c.check("memory: target listing parses", false, err(&o));
+        return None;
+    };
+    let home_ok = discover.dir.contains("cf-e2e") && discover.dir.contains("/.claude/projects/");
+    c.check(
+        "memory: target dir is a cf-e2e temp dir under ~/.claude/projects",
+        home_ok,
+        discover.dir.clone(),
+    );
+    let project_dir = Path::new(&discover.dir)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned());
+    if !home_ok {
+        // Nothing here is safe to touch, let alone guard-delete later.
+        return None;
+    }
+
+    let o = c.remote(&format!(
+        "umask 077 && mkdir -p -- {d} && printf '%s' {differs} > {df} && printf '%s' {idx} > {idxf}",
+        d = quote(&discover.dir),
+        differs = quote(MEM_TGT_DIFFERS_MD),
+        df = quote(&format!("{}/differs.md", discover.dir)),
+        idx = quote(MEM_TGT_INDEX_SEED),
+        idxf = quote(&format!("{}/MEMORY.md", discover.dir)),
+    ));
+    c.check(
+        "memory: target pre-populated (its own differs.md + index, no trailing newline)",
+        o.status.success(),
+        err(&o),
+    );
+
+    let o = c.local(&claude_state::memory_list_script(wts, Some(wts)));
+    let source = claude_state::parse_memory_list(&o.stdout);
+    let o = c.remote(&claude_state::memory_list_script(root, None));
+    let target = claude_state::parse_memory_list(&o.stdout);
+    let (Some(source), Some(target)) = (source, target) else {
+        c.check("memory: re-listing both sides parses", false, "");
+        return project_dir;
+    };
+    let decided = claude_state::decide_memory(&source.files, &target.files);
+    let mut carried_names: Vec<&str> = decided.carry.iter().map(|e| e.path.as_str()).collect();
+    carried_names.sort();
+    c.check(
+        "memory: decide (new.md carries, differs.md is kept_target)",
+        carried_names == ["new.md"]
+            && decided.kept_target == ["differs.md"]
+            && decided.identical == 0
+            && decided.left.is_empty(),
+        format!("{decided:?}"),
+    );
+    if decided.carry.is_empty() {
+        return project_dir;
+    }
+    let names: Vec<String> = decided.carry.iter().map(|e| e.path.clone()).collect();
+
+    let o = c.local(&carry::pack_script(
+        &source.dir,
+        id,
+        claude_state::MEMORY_ARCHIVE,
+        &names,
+    ));
+    let Ok((bytes, archive)) = carry::parse_pack(&text(&o)) else {
+        c.check("memory: pack", false, err(&o));
+        return project_dir;
+    };
+    let local_tgz = std::env::temp_dir().join(format!("cf-e2e-memory-{id}.tgz"));
+    let dl = c.download_local(&archive, bytes, &local_tgz);
+    let staged = format!("{tgt_dir}/{}", claude_state::MEMORY_ARCHIVE);
+    let uploaded = dl.is_ok() && c.upload(&local_tgz, &staged);
+    c.check(
+        "memory: pack + relay",
+        uploaded,
+        dl.err().unwrap_or_default(),
+    );
+    let _ = std::fs::remove_file(&local_tgz);
+    if !uploaded {
+        return project_dir;
+    }
+    let o = c.remote(&claude_state::memory_extract_script(&target.dir, &staged));
+    c.check(
+        "memory: extract (keep-existing — target's own differs.md must survive)",
+        o.status.success(),
+        err(&o),
+    );
+
+    let o = c.local(&claude_state::memory_read_index_script(&source.dir));
+    let source_index = match claude_state::parse_index(&text(&o)) {
+        Some(Some(t)) => t,
+        other => {
+            c.check(
+                "memory: read the source index",
+                false,
+                format!("{other:?} / {}", err(&o)),
+            );
+            return project_dir;
+        }
+    };
+    let o = c.remote(&claude_state::memory_read_index_script(&target.dir));
+    let target_index = match claude_state::parse_index(&text(&o)) {
+        Some(Some(t)) => t,
+        other => {
+            c.check(
+                "memory: read the target index",
+                false,
+                format!("{other:?} / {}", err(&o)),
+            );
+            return project_dir;
+        }
+    };
+    let merged = claude_state::merge_index(&source_index, Some(&target_index), &names);
+    c.check(
+        "memory: index merge produces exactly the new.md line",
+        merged.lines == 1 && merged.append == format!("{MEM_NEW_LINE}\n"),
+        format!("{merged:?}"),
+    );
+    if merged.lines > 0 {
+        let o = c.remote(&claude_state::memory_append_index_script(
+            &target.dir,
+            &merged.append,
+        ));
+        c.check(
+            "memory: append the index on the target",
+            o.status.success(),
+            err(&o),
+        );
+    }
+
+    let new_on_target = remote_read(c, &format!("{}/new.md", target.dir));
+    c.check(
+        "memory: new.md arrived byte-identical",
+        new_on_target == MEM_NEW_MD.as_bytes(),
+        "",
+    );
+    let differs_on_target = remote_read(c, &format!("{}/differs.md", target.dir));
+    c.check(
+        "memory: the target's own differs.md is untouched (byte-identical to before)",
+        differs_on_target == MEM_TGT_DIFFERS_MD.as_bytes(),
+        "",
+    );
+    let index_on_target = remote_read(c, &format!("{}/MEMORY.md", target.dir));
+    let want_index = format!("{MEM_TGT_INDEX_SEED}\n{MEM_NEW_LINE}\n");
+    c.check(
+        "memory: target index = old bytes + newline + exactly the new.md line",
+        index_on_target == want_index.as_bytes(),
+        format!("{:?}", String::from_utf8_lossy(&index_on_target)),
+    );
+
+    project_dir
 }
 
 fn fingerprint(wt: &Path) -> (String, Vec<u8>, String) {
@@ -231,9 +656,17 @@ struct Scenario<'a> {
     want_upstream: bool,
 }
 
-/// One carried move. Returns the `~/.claude/projects/<enc>` dir the prep
-/// script created on the target, for teardown.
-fn scenario(c: &mut Ctx, env: &Env, s: &Scenario) -> Option<String> {
+/// What one scenario leaves behind for teardown: the target's transcript
+/// project dir (removed with a plain `rmdir` — the transcript itself was
+/// never written, so it must be empty) and its memory project dir (removed
+/// with the guarded `rm -rf`, since it holds real files).
+struct ScenarioLeftovers {
+    transcript_project_dir: Option<String>,
+    memory_project_dir: Option<String>,
+}
+
+/// One carried move and its two Claude-side halves.
+fn scenario(c: &mut Ctx, env: &Env, s: &Scenario) -> ScenarioLeftovers {
     let (wt, lt, rt) = (env.wt, env.lt, env.rt);
     let (name, clone_url, want_seed, want_upstream) =
         (s.name, s.clone_url, s.want_seed, s.want_upstream);
@@ -254,7 +687,10 @@ fn scenario(c: &mut Ctx, env: &Env, s: &Scenario) -> Option<String> {
                 false,
                 format!("{} / {}", e.message, err(&o)),
             );
-            return None;
+            return ScenarioLeftovers {
+                transcript_project_dir: None,
+                memory_project_dir: None,
+            };
         }
     };
     c.check(
@@ -280,7 +716,10 @@ fn scenario(c: &mut Ctx, env: &Env, s: &Scenario) -> Option<String> {
                 false,
                 format!("{} / {}", e.message, err(&o)),
             );
-            return None;
+            return ScenarioLeftovers {
+                transcript_project_dir: None,
+                memory_project_dir: None,
+            };
         }
     };
     c.check(
@@ -299,7 +738,10 @@ fn scenario(c: &mut Ctx, env: &Env, s: &Scenario) -> Option<String> {
                 false,
                 format!("{} / {}", e.message, err(&o)),
             );
-            return None;
+            return ScenarioLeftovers {
+                transcript_project_dir: None,
+                memory_project_dir: None,
+            };
         }
     };
     let want_commits = if want_seed == carry::TargetSeed::Cloned {
@@ -409,7 +851,44 @@ fn scenario(c: &mut Ctx, env: &Env, s: &Scenario) -> Option<String> {
         ),
     }
 
-    // 6. what arrived
+    // 6. Claude-side state, half A: the per-session directory. EXPLICIT
+    //    project dirs under this run's own temp trees — never
+    //    ~/.claude/projects (see the module doc comment).
+    let src_proj = lt.join("projects").join(format!("-cf-e2e-src-{name}"));
+    write_session_fixture(&src_proj, &id);
+    let tgt_proj = format!("{rt}/projects/-cf-e2e-tgt-{name}");
+    let pre_existing_aa = if want_seed == carry::TargetSeed::Cloned {
+        let body = "b\n".repeat(400); // 800 B — bigger than the source's 500 B
+        let o = c.remote(&format!(
+            "umask 077 && mkdir -p -- {d} && printf '%s' {body} > {f}",
+            d = quote(&format!("{tgt_proj}/{id}/subagents")),
+            body = quote(&body),
+            f = quote(&format!("{tgt_proj}/{id}/subagents/agent-aa.jsonl")),
+        ));
+        c.check(
+            "session-state: target pre-populated with a larger agent-aa.jsonl (cloned)",
+            o.status.success(),
+            err(&o),
+        );
+        Some(body)
+    } else {
+        None
+    };
+    check_session_state(
+        c,
+        &src_proj,
+        &tgt_proj,
+        &id,
+        &tgt_dir,
+        want_seed,
+        pre_existing_aa.as_deref(),
+    );
+
+    // 7. Claude-side state, half B: the project's Claude memory. Real
+    //    ~/.claude/projects on both hosts — guarded, see `check_memory`.
+    let memory_project_dir = check_memory(c, &root, &tgt_dir, wts, &id);
+
+    // 8. what arrived (the git carry)
     let files = [
         "mod.txt",
         "staged new.txt",
@@ -502,7 +981,7 @@ fn scenario(c: &mut Ctx, env: &Env, s: &Scenario) -> Option<String> {
         );
     }
 
-    // 7. cleanup, both hosts
+    // 9. cleanup, both hosts
     c.check(
         "cleanup: source",
         c.local(&carry::cleanup_script(wts, &id)).status.success(),
@@ -530,11 +1009,15 @@ fn scenario(c: &mut Ctx, env: &Env, s: &Scenario) -> Option<String> {
         fingerprint(wt) == before,
         "",
     );
-    prep.ok().and_then(|p| {
+    let transcript_project_dir = prep.ok().and_then(|p| {
         Path::new(&p.path)
             .parent()
             .map(|d| d.to_string_lossy().into_owned())
-    })
+    });
+    ScenarioLeftovers {
+        transcript_project_dir,
+        memory_project_dir,
+    }
 }
 
 fn main() {
@@ -571,8 +1054,14 @@ fn main() {
         .status
         .success());
     let wt = make_source(&lt, &format!("{}:{rt}/origin.git", c.host));
+    let wts = wt.to_str().unwrap();
 
-    let mut project_dirs = Vec::new();
+    // The memory half's source fixture: one dir, shared by every scenario
+    // (the repo root — this worktree's main checkout — never changes).
+    let source_memory_dir = setup_source_memory(&mut c, wts);
+
+    let mut transcript_dirs = Vec::new();
+    let mut memory_dirs = Vec::new();
     let env = Env {
         wt: &wt,
         lt: &lt,
@@ -595,14 +1084,51 @@ fn main() {
             want_upstream: false,
         },
     ] {
-        project_dirs.extend(scenario(&mut c, &env, &s));
+        let leftovers = scenario(&mut c, &env, &s);
+        transcript_dirs.extend(leftovers.transcript_project_dir);
+        memory_dirs.extend(leftovers.memory_project_dir);
     }
 
     // teardown: only what this run created
-    for d in &project_dirs {
+    for d in &transcript_dirs {
         if d.contains("/.claude/projects/-tmp-cf-e2e-") {
             let _ = c.remote(&format!("rmdir -- {} 2>/dev/null", quote(d)));
         }
+    }
+    // Memory: guarded rm -rf on both hosts, then verify each is gone. The
+    // guard lives in the shell script itself (see `guarded_projects_rm_script`),
+    // not in this Rust-side filtering — this loop only decides WHICH paths to
+    // ask the script to remove.
+    for d in &memory_dirs {
+        let o = c.remote(&guarded_projects_rm_script(d));
+        c.check(
+            "teardown: target memory project dir removed",
+            o.status.success(),
+            format!("{d}: {}", err(&o)),
+        );
+        let gone = text(&c.remote(&guarded_projects_gone_script(d)));
+        c.check(
+            "teardown: target memory project dir gone",
+            gone.trim() == "gone",
+            format!("{d}: {}", gone.trim()),
+        );
+    }
+    if let Some(source_memory_project) = Path::new(&source_memory_dir)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+    {
+        let o = c.local(&guarded_projects_rm_script(&source_memory_project));
+        c.check(
+            "teardown: source memory project dir removed",
+            o.status.success(),
+            format!("{source_memory_project}: {}", err(&o)),
+        );
+        let gone = text(&c.local(&guarded_projects_gone_script(&source_memory_project)));
+        c.check(
+            "teardown: source memory project dir gone",
+            gone.trim() == "gone",
+            format!("{source_memory_project}: {}", gone.trim()),
+        );
     }
     let _ = c.remote(&format!("rm -rf -- {}", quote(&rt)));
     let _ = std::fs::remove_dir_all(&lt);
