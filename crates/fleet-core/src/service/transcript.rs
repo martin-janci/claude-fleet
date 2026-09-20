@@ -48,6 +48,12 @@ const SUBAGENT_RESULT_MAX_CHARS: usize = 1_500;
 /// of a plain [`ConvItem::Tool`].
 const SUBAGENT_TOOLS: [&str; 2] = ["Task", "Agent"];
 
+/// The `tool_result` of a backgrounded `Agent` call is an acknowledgement
+/// that the agent was launched, not its report — the report arrives later in
+/// a `<task-notification>`. Recognising it keeps the block reading as running
+/// until the real one lands.
+const AGENT_LAUNCH_ACK: &str = "Async agent launched successfully";
+
 /// Encode a working directory the way Claude Code names its per-project
 /// transcript directory: every char outside `[A-Za-z0-9]` becomes `-`.
 /// The read script does this on the host (after `pwd -P`) with an
@@ -633,11 +639,24 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                     ..
                                 }) => {
                                     *error |= is_err;
-                                    *done = true;
-                                    *ended_at = ended;
-                                    if let Some(t) = tool_result_text(b) {
-                                        *result =
-                                            Some(cap_chars(t.trim(), SUBAGENT_RESULT_MAX_CHARS));
+                                    let ack = tool_result_text(b)
+                                        .map(|t| t.trim().starts_with(AGENT_LAUNCH_ACK))
+                                        .unwrap_or(false);
+                                    if ack {
+                                        // Backgrounded: this result only says
+                                        // the agent started. Leave the block
+                                        // open for its notification to fill.
+                                        *done = false;
+                                        *ended_at = None;
+                                    } else {
+                                        *done = true;
+                                        *ended_at = ended;
+                                        if let Some(t) = tool_result_text(b) {
+                                            *result = Some(cap_chars(
+                                                t.trim(),
+                                                SUBAGENT_RESULT_MAX_CHARS,
+                                            ));
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -845,7 +864,100 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
         }
     }
     push(&mut turns, current);
+    join_notifications(&mut turns);
     turns
+}
+
+/// Fill each launching call's block from the notification that reports on
+/// it. A notification always lands in a later turn than its call (it is a
+/// user entry, which closes the turn in progress), so the map is built over
+/// the finished turns and applied in a second walk — the notification and
+/// its target are in different turns and cannot both be borrowed mutably.
+///
+/// A notification with no `tool_use_id`, or one naming a call outside the
+/// loaded window, is left standing on its own. So is a mid-stream event:
+/// no `status` means progress, not completion.
+///
+/// `((turn index, item index), report, failed, arrived_at)` for one join.
+type NotificationJoin = ((usize, usize), Option<String>, bool, Option<String>);
+
+fn join_notifications(turns: &mut [ConvTurn]) {
+    let mut launched: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
+    for (ti, turn) in turns.iter().enumerate() {
+        for (ii, item) in turn.items.iter().enumerate() {
+            let id = match item {
+                ConvItem::Tool { id, .. } | ConvItem::Subagent { id, .. } => id.as_deref(),
+                _ => None,
+            };
+            if let Some(id) = id {
+                launched.insert(id.to_string(), (ti, ii));
+            }
+        }
+    }
+    // In transcript order, so a resumed agent's later notification
+    // overwrites its earlier one.
+    let mut updates: Vec<NotificationJoin> = Vec::new();
+    for turn in turns.iter() {
+        for item in turn.items.iter() {
+            let ConvItem::Notification {
+                tool_use_id,
+                status,
+                result,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            let Some(status) = status.as_deref() else {
+                continue;
+            };
+            let Some(target) = tool_use_id
+                .as_deref()
+                .and_then(|i| launched.get(i))
+                .copied()
+            else {
+                continue;
+            };
+            updates.push((
+                target,
+                result.clone(),
+                status != "completed",
+                turn.at.clone(),
+            ));
+        }
+    }
+    for ((ti, ii), report, failed, ended) in updates {
+        match turns[ti].items.get_mut(ii) {
+            Some(ConvItem::Subagent {
+                result,
+                error,
+                ended_at,
+                done,
+                ..
+            }) => {
+                if report.is_some() {
+                    *result = report;
+                }
+                *error |= failed;
+                *done = true;
+                *ended_at = ended;
+            }
+            // A tool line keeps its own summary — `Bash(command=…)` is the
+            // useful text, and the notification's sentence has its own row.
+            Some(ConvItem::Tool {
+                error,
+                ended_at,
+                done,
+                ..
+            }) => {
+                *error |= failed;
+                *done = true;
+                *ended_at = ended;
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Split a transcript into assistant turns rendered as plain text: each
@@ -2039,6 +2151,203 @@ mod tests {
     fn notification_result_cap_is_the_compaction_budget_not_the_subagent_one() {
         assert_eq!(NOTIFICATION_RESULT_MAX_CHARS, 20_000);
         assert_eq!(SUBAGENT_RESULT_MAX_CHARS, 1_500);
+    }
+
+    #[test]
+    fn a_backgrounded_agents_launch_ack_is_not_its_report() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Agent",
+                serde_json::json!({"description":"Posúdiť stratégiu testov","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            tool_result(
+                "2026-09-18T10:00:02Z",
+                "toolu_1",
+                serde_json::json!("Async agent launched successfully. (This tool result is internal metadata.)\nagentId: a623962a33b4c9765"),
+                false,
+            ),
+        ]));
+        let ConvItem::Subagent { result, done, .. } = &t[0].items[0] else {
+            panic!("expected a subagent, got {:?}", t[0].items[0]);
+        };
+        assert_eq!(*result, None, "the ack is metadata, not a report");
+        assert!(!*done, "the agent is still running until it notifies");
+    }
+
+    #[test]
+    fn a_notification_fills_in_the_agent_block_it_names() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Agent",
+                serde_json::json!({"description":"Posúdiť stratégiu testov","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            tool_result(
+                "2026-09-18T10:00:02Z",
+                "toolu_1",
+                serde_json::json!("Async agent launched successfully.\nagentId: a6"),
+                false,
+            ),
+            task_notification(
+                "2026-09-18T10:12:00Z",
+                "<task-notification>\n<task-id>a6</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n\
+                 <status>completed</status>\n<summary>Agent finished</summary>\n\
+                 <result># Posudok\n\nVšetko overené.</result>\n</task-notification>",
+            ),
+        ]));
+        let ConvItem::Subagent {
+            result,
+            done,
+            error,
+            ended_at,
+            ..
+        } = &t[0].items[0]
+        else {
+            panic!("expected a subagent");
+        };
+        assert_eq!(result.as_deref(), Some("# Posudok\n\nVšetko overené."));
+        assert!(*done);
+        assert!(!*error);
+        assert_eq!(ended_at.as_deref(), Some("2026-09-18T10:12:00Z"));
+    }
+
+    #[test]
+    fn a_failed_notification_flags_the_block_it_names() {
+        for status in ["failed", "killed", "stopped"] {
+            let t = parse_conversation(&jl(&[
+                user(serde_json::json!("go")),
+                tool_use(
+                    "2026-09-18T10:00:01Z",
+                    "toolu_1",
+                    "Agent",
+                    serde_json::json!({"description":"d","subagent_type":"general-purpose","prompt":"p"}),
+                ),
+                task_notification(
+                    "2026-09-18T10:12:00Z",
+                    &format!(
+                        "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n\
+                         <status>{status}</status>\n<summary>s</summary>\n</task-notification>"
+                    ),
+                ),
+            ]));
+            let ConvItem::Subagent { error, done, .. } = &t[0].items[0] else {
+                panic!("expected a subagent");
+            };
+            assert!(*error, "{status} is not a success");
+            assert!(*done, "{status} closes the call");
+        }
+    }
+
+    #[test]
+    fn a_notification_closes_a_background_bash_without_rewriting_its_summary() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_9",
+                "Bash",
+                serde_json::json!({"command":"gh run watch","description":"Watch Docker build CI"}),
+            ),
+            task_notification(
+                "2026-09-18T10:05:00Z",
+                "<task-notification>\n<task-id>bk9</task-id>\n<tool-use-id>toolu_9</tool-use-id>\n\
+                 <status>completed</status>\n\
+                 <summary>Background command \"Watch Docker build CI\" completed (exit code 0)</summary>\n\
+                 </task-notification>",
+            ),
+        ]));
+        let ConvItem::Tool {
+            summary,
+            done,
+            error,
+            ended_at,
+            ..
+        } = &t[0].items[0]
+        else {
+            panic!("expected a tool line");
+        };
+        assert!(
+            summary.contains("gh run watch"),
+            "the command stays the line's text"
+        );
+        assert!(*done);
+        assert!(!*error);
+        assert_eq!(ended_at.as_deref(), Some("2026-09-18T10:05:00Z"));
+    }
+
+    #[test]
+    fn a_mid_stream_event_closes_nothing() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_5",
+                "Monitor",
+                serde_json::json!({"description":"PR #165 CI checks"}),
+            ),
+            task_notification(
+                "2026-09-18T10:02:00Z",
+                "<task-notification>\n<task-id>bu1</task-id>\n<tool-use-id>toolu_5</tool-use-id>\n\
+                 <summary>Monitor event</summary>\n<event>frontend: pass</event>\n</task-notification>",
+            ),
+        ]));
+        let ConvItem::Tool { done, .. } = &t[0].items[0] else {
+            panic!("expected a tool line");
+        };
+        assert!(
+            !*done,
+            "an event with no status is progress, not completion"
+        );
+    }
+
+    #[test]
+    fn an_unmatched_notification_is_left_standing_alone() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            task_notification(
+                "2026-09-18T10:12:00Z",
+                "<task-notification>\n<tool-use-id>toolu_gone</tool-use-id>\n\
+                 <status>completed</status>\n<summary>s</summary>\n</task-notification>",
+            ),
+        ]));
+        assert!(matches!(t[1].items[0], ConvItem::Notification { .. }));
+    }
+
+    #[test]
+    fn the_last_notification_wins_when_an_agent_is_resumed() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Agent",
+                serde_json::json!({"description":"d","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            task_notification(
+                "2026-09-18T10:05:00Z",
+                "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n\
+                 <summary>s</summary>\n<result>first pass</result>\n</task-notification>",
+            ),
+            asst("keep going"),
+            task_notification(
+                "2026-09-18T10:20:00Z",
+                "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n\
+                 <summary>s</summary>\n<result>second pass</result>\n</task-notification>",
+            ),
+        ]));
+        let ConvItem::Subagent {
+            result, ended_at, ..
+        } = &t[0].items[0]
+        else {
+            panic!("expected a subagent");
+        };
+        assert_eq!(result.as_deref(), Some("second pass"));
+        assert_eq!(ended_at.as_deref(), Some("2026-09-18T10:20:00Z"));
     }
 
     /// A `Tool` item with only `summary`/`error` set, for synthetic

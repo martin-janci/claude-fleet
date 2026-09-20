@@ -119,8 +119,9 @@ When `tool_use_id` names an item in the loaded window:
   `completed`, and **replaces** its `result` with the notification's. This is
   what removes the `"Async agent launched successfully…"` text.
 - `ConvItem::Tool { id }` (`Bash`, `Monitor`, `Workflow`) — the line becomes
-  `done` and takes the notification's `summary` as its text, with `error` set
-  the same way.
+  `done` and takes `ended_at`, with `error` set the same way. Its own summary
+  is kept: `Bash(command=…)` is the useful text, and the notification's
+  sentence already has its own row.
 
 A notification whose `tool_use_id` is absent, or names an item outside the
 loaded window, joins nothing and stands alone. This is the documented
