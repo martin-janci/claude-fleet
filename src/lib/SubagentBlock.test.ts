@@ -73,6 +73,28 @@ describe('SubagentBlock', () => {
     expect(screen.getByTestId('conv-subagent-status').textContent).toBe('running');
   });
 
+  it('an unfinished background agent reads as running outside the live turn', () => {
+    // The switcher lists this same call as `running`. `onOpen` is passed
+    // only when it does, so its presence is what lets the block agree
+    // instead of falling back to a wordless "no result".
+    render(SubagentBlock, {
+      item: item({ done: false, ended_at: null, result: null }),
+      nowMs: 0,
+      live: false,
+      onOpen: () => {},
+    });
+    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('running');
+  });
+
+  it('an unfinished foreground call outside the live turn still gets no word', () => {
+    render(SubagentBlock, {
+      item: item({ done: false, ended_at: null, result: null }),
+      nowMs: 0,
+      live: false,
+    });
+    expect(screen.queryByTestId('conv-subagent-status')).toBeNull();
+  });
+
   it('offers an open affordance only when one is wired, and it is a real button', async () => {
     const { unmount } = render(SubagentBlock, { item: item(), nowMs: 0, live: false });
     expect(screen.queryByTestId('conv-subagent-open')).toBeNull();
