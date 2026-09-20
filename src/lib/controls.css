@@ -1,0 +1,157 @@
+/**
+ * The app's control primitives. Global on purpose: this is chrome, and
+ * per-component scoped copies are exactly how the app arrived at four
+ * different "primary button" conventions.
+ *
+ * Pill + border ⇒ clickable. Bare text ⇒ information (.tag). One rule.
+ */
+
+.btn {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: var(--control-h);
+  padding: 0 var(--control-px);
+  /* Always present, transparent by default, so hover and selected states
+     never shift layout. */
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--control-fg-quiet);
+  font: inherit;
+  font-size: var(--control-font);
+  font-weight: 400;
+  /* The box is set by `height`, never by the line box. */
+  line-height: 1;
+  white-space: nowrap;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The only 2px ring in the app. Nothing else may use one. */
+.btn:focus-visible {
+  outline: var(--ring-w) solid var(--ring);
+  outline-offset: var(--ring-offset);
+}
+/* Inside a clipping group, draw it inward instead. */
+.btn-group .btn:focus-visible {
+  outline-offset: calc(-1 * var(--ring-w));
+}
+
+/* One disabled convention. Never below 0.55: at 0.4, --fg-muted composites
+   to ~1.75:1 and the reason for the disabling sits inside a control the
+   user cannot see is there. */
+.btn:disabled,
+.btn[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: default;
+}
+.btn:disabled {
+  pointer-events: none;
+}
+
+.btn--primary {
+  height: var(--control-h-lg);
+  padding: 0 var(--control-px-lg);
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+.btn--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, #000 10%, var(--accent));
+}
+.btn--primary:active:not(:disabled) {
+  background: color-mix(in srgb, #000 18%, var(--accent));
+}
+
+.btn--quiet {
+  color: var(--control-fg-quiet);
+}
+/* The hover signal is a FILL, not a border: a --control-border change is
+   1.56:1 and nobody sees it. */
+.btn--quiet:hover:not(:disabled) {
+  background: var(--control-bg-hover);
+  color: var(--control-fg);
+}
+.btn--quiet:active:not(:disabled) {
+  background: var(--control-bg-active);
+}
+/* A resting affordance, for controls that must look like controls before
+   you hover them. */
+.btn--quiet.is-bounded {
+  border-color: var(--control-border);
+  background: var(--control-bg);
+}
+
+.btn--toggle {
+  border-radius: var(--radius-pill);
+  border-color: var(--control-border);
+  background: var(--control-bg);
+  color: var(--control-fg-quiet);
+}
+.btn--toggle:hover:not(:disabled) {
+  border-color: var(--control-border-strong);
+  color: var(--control-fg);
+}
+/* Selected is carried by the boundary (4.95:1); the fill only reinforces
+   it. A tint alone is ~1.2:1 and is decoration, not information. */
+.btn--toggle[aria-pressed='true'],
+.btn--toggle.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--control-fg);
+  font-weight: 500;
+}
+
+/* Square by construction, so a close button cannot end up 13×13px. */
+.btn--icon {
+  width: var(--control-h);
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+}
+.btn--icon.btn--primary {
+  width: var(--control-h-lg);
+  height: var(--control-h-lg);
+}
+
+.btn--warn {
+  --btn-tone: var(--usage-warn);
+}
+.btn--crit {
+  --btn-tone: var(--usage-crit);
+}
+.btn--warn,
+.btn--crit {
+  color: var(--btn-tone);
+  border-color: var(--btn-tone);
+}
+.btn--warn:hover:not(:disabled),
+.btn--crit:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--btn-tone) 14%, transparent);
+  color: var(--btn-tone);
+}
+
+/* Non-interactive information. No border, no pill, no box — this is what
+   stops model/status pills impersonating buttons. */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--control-h);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--control-fg-quiet);
+  font-size: var(--control-font-sm);
+  white-space: nowrap;
+  cursor: default;
+}
+.tag--mono {
+  font-family: var(--mono);
+}

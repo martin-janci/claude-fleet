@@ -21,6 +21,41 @@
      since the token was designed and never shipped. 59 more hardcode the
      stack; they are not this task's business. */
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* ── control geometry: one scale, no exceptions ──
+     --control-h is WCAG 2.5.8's 24px minimum target. Do not raise it to
+     "fix" a small control: this is a dense pro tool, and 24px is both the
+     floor and the answer. */
+  --control-h: 24px;
+  --control-h-lg: 28px;
+  --control-px: 8px;
+  --control-px-lg: 12px;
+  --control-gap: 6px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  /* RESERVED for aria-pressed toggles and the context meter. */
+  --radius-pill: 999px;
+
+  --control-font: 12px;
+  --control-font-sm: 11px;
+
+  --ring-w: 2px;
+  --ring-offset: 1px;
+
+  /* --border is 1.26:1 against --bg: it may SEPARATE things, but it can
+     never be the only signal for a state. Use --control-border-strong
+     (3.14:1) or --accent for anything that has to be read. */
+  --control-bg: #ffffff;
+  --control-bg-hover: #f0f0f0;
+  --control-bg-active: #e4e4e4;
+  --control-border: #cfcfcf;
+  --control-border-strong: #8e8e8e;
+  --control-fg: #1a1a1a;
+  --control-fg-quiet: #5a5a5a;
+  --accent-fg: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  --ring: var(--accent);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -40,6 +75,17 @@
     --usage-crit: #ef5350;
     /* vs --bg-pane #161616: 9.37:1. */
     --usage-ok: #5dd17a;
+
+    --control-bg: #1c1c1c;
+    --control-bg-hover: #262626;
+    --control-bg-active: #303030;
+    --control-border: #3a3a3a;
+    --control-border-strong: #6e6e6e;
+    --control-fg: #ededed;
+    --control-fg-quiet: #a8a8a8;
+    --accent-fg: #0b1220;
+    --accent-soft: color-mix(in srgb, var(--accent) 16%, var(--bg));
+    --ring: var(--accent);
   }
 }
 
@@ -60,6 +106,20 @@
   --usage-crit: #c62828;
   /* Healthy context. 4.91:1 vs --bg-pane #fafafa (5.13:1 vs --bg #fff). */
   --usage-ok: #2e7d32;
+
+  /* --border is 1.26:1 against --bg: it may SEPARATE things, but it can
+     never be the only signal for a state. Use --control-border-strong
+     (3.14:1) or --accent for anything that has to be read. */
+  --control-bg: #ffffff;
+  --control-bg-hover: #f0f0f0;
+  --control-bg-active: #e4e4e4;
+  --control-border: #cfcfcf;
+  --control-border-strong: #8e8e8e;
+  --control-fg: #1a1a1a;
+  --control-fg-quiet: #5a5a5a;
+  --accent-fg: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  --ring: var(--accent);
 }
 
 :root[data-theme='dark'] {
@@ -78,6 +138,17 @@
   --usage-crit: #ef5350;
   /* vs --bg-pane #161616: 9.37:1. */
   --usage-ok: #5dd17a;
+
+  --control-bg: #1c1c1c;
+  --control-bg-hover: #262626;
+  --control-bg-active: #303030;
+  --control-border: #3a3a3a;
+  --control-border-strong: #6e6e6e;
+  --control-fg: #ededed;
+  --control-fg-quiet: #a8a8a8;
+  --accent-fg: #0b1220;
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, var(--bg));
+  --ring: var(--accent);
 }
 
 html, body, #app {

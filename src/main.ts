@@ -1,5 +1,6 @@
 import App from './App.svelte';
 import './app.css';
+import './lib/controls.css';
 import { mount } from 'svelte';
 import { initTheme } from './lib/theme';
 

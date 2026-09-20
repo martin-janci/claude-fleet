@@ -28,6 +28,13 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'usage-ok': '#2e7d32',
     'usage-warn': '#b45309',
     'usage-crit': '#c62828',
+    'control-bg': '#ffffff',
+    'control-bg-hover': '#f0f0f0',
+    'control-bg-active': '#e4e4e4',
+    'control-border': '#cfcfcf',
+    'control-border-strong': '#8e8e8e',
+    'control-fg-quiet': '#5a5a5a',
+    'accent-fg': '#ffffff',
   },
   dark: {
     bg: '#0f0f0f',
@@ -39,6 +46,13 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'usage-ok': '#5dd17a',
     'usage-warn': '#d29b4a',
     'usage-crit': '#ef5350',
+    'control-bg': '#1c1c1c',
+    'control-bg-hover': '#262626',
+    'control-bg-active': '#303030',
+    'control-border': '#3a3a3a',
+    'control-border-strong': '#6e6e6e',
+    'control-fg-quiet': '#a8a8a8',
+    'accent-fg': '#0b1220',
   },
 };
 
@@ -49,6 +63,9 @@ export const CONTRAST_PAIRS: ContrastPair[] = [
   { fg: 'usage-warn', bg: 'bg-pane', min: 4.5, note: 'warn text and bars' },
   { fg: 'usage-crit', bg: 'bg-pane', min: 4.5, note: 'crit text and bars' },
   { fg: 'accent', bg: 'bg', min: 3, note: 'focus ring' },
+  { fg: 'control-fg-quiet', bg: 'bg-pane', min: 4.5, note: 'quiet control labels' },
+  { fg: 'control-border-strong', bg: 'bg-pane', min: 3, note: 'state boundaries' },
+  { fg: 'accent-fg', bg: 'accent', min: 4.5, note: 'text on a filled primary' },
 ];
 
 function channel(v: number): number {
