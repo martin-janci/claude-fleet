@@ -130,6 +130,14 @@ export function openAgent(): Promise<void> {
   // Not a boolean flag: a flag would let the second caller return before the
   // agent exists, and the panel would render `unknown` over a session that
   // is halfway born.
+  //
+  // Opening the panel happens HERE and not in `openAgentOnce`, because it is
+  // what every caller wants whether it starts the birth or joins one already
+  // running. Inside the work function it ran once, before the first `await`,
+  // so closing the sheet mid-birth and pressing again returned a promise
+  // already long past that line: the button did nothing, visibly, until the
+  // birth resolved.
+  agentPanelOpen.set(true);
   if (opening) return opening;
   const p = openAgentOnce().finally(() => {
     if (opening === p) opening = null;
@@ -139,7 +147,6 @@ export function openAgent(): Promise<void> {
 }
 
 async function openAgentOnce(): Promise<void> {
-  agentPanelOpen.set(true);
   await refreshOperator();
   if (get(operatorState) !== 'absent') return;
   operatorState.set('waking');

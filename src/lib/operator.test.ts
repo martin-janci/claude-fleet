@@ -166,6 +166,35 @@ describe('openAgent re-entrancy', () => {
     expect(get(operatorState)).toBe('ready');
   });
 
+  it('a joiner opens the panel too — closing mid-birth must not wedge the button', async () => {
+    // Opening is what EVERY caller wants, whether it starts the birth or
+    // joins one already running. With `agentPanelOpen.set(true)` inside the
+    // work function only, a press after closing mid-birth returned the
+    // in-flight promise (already past that line) and the sheet stayed shut
+    // until the birth resolved — the button doing nothing, visibly.
+    let releaseEnsure: (v: unknown) => void = () => {};
+    invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
+    invoke.mockImplementationOnce(
+      () => new Promise((res) => { releaseEnsure = res; }),
+    );
+
+    const birth = openAgent();
+    await vi.waitFor(() => expect(get(operatorState)).toBe('waking'));
+
+    closeAgent();
+    expect(get(agentPanelOpen)).toBe(false);
+
+    // Press again while the birth is STILL in flight.
+    const joined = openAgent();
+    expect(joined).toBe(birth);
+    expect(get(agentPanelOpen)).toBe(true);
+
+    releaseEnsure(row());
+    await Promise.all([birth, joined]);
+    expect(get(agentPanelOpen)).toBe(true);
+    expect(invoke.mock.calls.filter((c) => c[0] === 'ensure_operator')).toHaveLength(1);
+  });
+
   it('a later press is a fresh call, not the stale promise', async () => {
     invoke.mockResolvedValue({ ready: true, session: row(), blocked: null });
     await openAgent();
