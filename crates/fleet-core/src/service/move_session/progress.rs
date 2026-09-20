@@ -104,12 +104,17 @@ pub(super) fn count(n: usize, one: &str) -> String {
     }
 }
 
-/// The `git` step's detail.
+/// The `git` step's detail. ADR 0002 has the move carry uncommitted work as
+/// well as unpushed commits, and `CarryReport.commits` counts only the
+/// commits — so a move with dirty files and no unpushed commits used to
+/// report "0 commits" and hide the thing it actually carried. Whichever half
+/// is zero is left out.
 pub(super) fn git_detail(commits: u32, dirty: usize) -> String {
-    if commits == 0 && dirty == 0 {
-        "nothing to carry".to_string()
-    } else {
-        count(commits as usize, "commit")
+    match (commits, dirty) {
+        (0, 0) => "nothing to carry".to_string(),
+        (0, d) => count(d, "file"),
+        (c, 0) => count(c as usize, "commit"),
+        (c, d) => format!("{}, {}", count(c as usize, "commit"), count(d, "file")),
     }
 }
 
@@ -245,9 +250,10 @@ mod tests {
     #[test]
     fn details_are_counts() {
         assert_eq!(git_detail(0, 0), "nothing to carry");
-        assert_eq!(git_detail(0, 2), "0 commits");
+        assert_eq!(git_detail(0, 2), "2 files");
         assert_eq!(git_detail(1, 0), "1 commit");
-        assert_eq!(git_detail(2, 5), "2 commits");
+        assert_eq!(git_detail(2, 5), "2 commits, 5 files");
+        assert_eq!(git_detail(1, 1), "1 commit, 1 file");
         assert_eq!(count(1, "file"), "1 file");
         assert_eq!(count(3, "file"), "3 files");
         assert_eq!(state_detail(46, 4), "46 files, 4 notes");

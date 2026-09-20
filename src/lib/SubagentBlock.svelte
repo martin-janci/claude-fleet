@@ -23,11 +23,14 @@
   let expanded = $state(false);
 
   // The same words the switcher and the detail use, read off what the block
-  // already knows — no new data, and no claim the item cannot back. An
-  // unfinished block outside the live turn is the one case we cannot name:
-  // it is not running (nothing is driving it) and it is not done, so it
-  // gets no word and the duration's "no result" stands alone.
-  const statusWord = $derived(item.error ? 'failed' : item.done ? 'done' : live ? 'running' : null);
+  // already knows. `onOpen` is passed only when the switcher holds an entry
+  // for this call — which is exactly the case where an unfinished block is
+  // background work still running, rather than a call nothing is driving.
+  // Without it, an unfinished block outside the live turn still gets no word
+  // and the duration's "no result" stands alone.
+  const statusWord = $derived(
+    item.error ? 'failed' : item.done ? 'done' : live || onOpen ? 'running' : null,
+  );
 
   const elapsed = $derived(toolDurationMs(item.at, item.ended_at, item.done || !live ? null : nowMs));
   const noResult = $derived(!item.done && !live);

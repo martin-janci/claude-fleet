@@ -2867,6 +2867,30 @@ describe('ConversationPanel background switcher', () => {
     expect(heads).toEqual(['In this conversation']);
   });
 
+  it('marks a running fleet child so the row has something to colour', async () => {
+    // Not a red-to-green cycle: the markup already emitted the right
+    // `data-status` and only the stylesheet lacked a rule. This pins the
+    // attribute the new selector binds to, so a refactor cannot drop the
+    // hook and silently un-style the row. The colour itself is eyeballed.
+    const { getByTestId, getAllByTestId } = await renderWithConversation(convWithBackgroundAgent, {
+      sessions: [
+        session({
+          id: 2,
+          parent_session_id: 1,
+          kind: 'bg',
+          friendly_name: 'Load layers',
+          claude_status: 'working',
+        }),
+      ],
+    });
+    await fireEvent.click(getByTestId('conv-background-button'));
+    const statuses = getAllByTestId('conv-background-item').map((el) =>
+      el.querySelector('.bg-item-status')?.getAttribute('data-status'),
+    );
+    expect(statuses).toContain('running');
+    expect(statuses).toContain('done');
+  });
+
   it('hides the switcher when nothing ran in the background', async () => {
     const { queryByTestId } = await renderWithConversation(convWithNoBackground);
     expect(queryByTestId('conv-background-button')).toBeNull();

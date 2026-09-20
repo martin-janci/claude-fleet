@@ -3,7 +3,7 @@
   // an agent or command this conversation launched, or a fleet task it
   // dispatched. Read-only — it renders what the transcript and the stores
   // already carry, and fetches nothing.
-  import { formatDuration, type BackgroundEntry, type BackgroundReport } from './conversation';
+  import { formatDuration, lastNonNull, type BackgroundEntry, type BackgroundReport } from './conversation';
   import Markdown from './MarkdownView.svelte';
   import CopyButton from './CopyButton.svelte';
 
@@ -18,13 +18,6 @@
     onOpenSession?: (id: number) => void;
   } = $props();
 
-  const STATUS_WORD: Record<BackgroundEntry['status'], string> = {
-    running: 'running',
-    done: 'done',
-    failed: 'failed',
-    stopped: 'stopped',
-    idle: 'idle',
-  };
   // One report is the entry's own result, already shown above; only a
   // resumed task's several are worth listing separately.
   const reports = $derived(entry.history.length > 1 ? entry.history : []);
@@ -32,11 +25,7 @@
   /** The last report to carry a non-null `k` — the same last-non-null-wins
    *  rule `transcriptBackground` uses for `result` and the output file. */
   function newest<K extends keyof BackgroundReport>(k: K): BackgroundReport[K] | null {
-    for (let i = entry.history.length - 1; i >= 0; i--) {
-      const v = entry.history[i][k];
-      if (v !== null) return v;
-    }
-    return null;
+    return lastNonNull(entry.history, k);
   }
 
   // A background `Bash` or `Monitor` reports a `<summary>` carrying its exit
@@ -64,7 +53,7 @@
   <h3 class="bg-title">
     <span class="bg-kind" data-testid="bg-detail-kind">{entry.kind}</span>
     <span class="bg-label" data-testid="bg-detail-label">{entry.label}</span>
-    <span class="bg-status" data-status={entry.status} data-testid="bg-detail-status">{STATUS_WORD[entry.status]}</span>
+    <span class="bg-status" data-status={entry.status} data-testid="bg-detail-status">{entry.status}</span>
     {#if duration}<span class="bg-dur" data-testid="bg-detail-duration">{duration}</span>{/if}
   </h3>
 
@@ -85,6 +74,8 @@
     <p class="bg-summary" data-testid="bg-detail-summary">{summary}</p>
   {:else if nothing}
     <p class="muted" data-testid="bg-detail-empty">This background task has not reported back yet.</p>
+  {:else}
+    <p class="muted" data-testid="bg-detail-empty">It reported, but the report carried no text.</p>
   {/if}
 
   {#if reports.length > 0}
@@ -140,6 +131,9 @@
     flex: 0 0 auto;
     font-size: 0.75rem;
     color: var(--fg-muted);
+  }
+  .bg-status[data-status='running'] {
+    color: var(--accent);
   }
   .bg-status[data-status='failed'] {
     color: var(--usage-crit);

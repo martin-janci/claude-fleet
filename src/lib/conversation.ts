@@ -380,12 +380,16 @@ export interface BackgroundEntry {
  *  it only for a tool whose backgrounded shape has actually been observed. */
 const BACKGROUND_TOOLS = new Set(['Bash', 'Monitor', 'Workflow', 'SendMessage']);
 
+/** The newest report that carried a status decides. The failing values are
+ *  named explicitly and everything else is `done`, so this agrees with
+ *  `notificationTone` and `notificationMark`: a status the parser has never
+ *  seen is not evidence of a failure. */
 function statusFromReports(reports: BackgroundReport[]): BackgroundStatus {
   const last = [...reports].reverse().find((r) => r.status !== null);
   if (!last) return 'running';
-  if (last.status === 'completed') return 'done';
+  if (last.status === 'failed' || last.status === 'killed') return 'failed';
   if (last.status === 'stopped') return 'stopped';
-  return 'failed';
+  return 'done';
 }
 
 /** Running first, then newest launch first. */
@@ -395,8 +399,9 @@ function byRunningThenNewest(a: BackgroundEntry, b: BackgroundEntry): number {
   return (b.at ?? '').localeCompare(a.at ?? '');
 }
 
-/** The last report to carry a non-null value for `k`, or null. */
-function lastNonNull<K extends keyof BackgroundReport>(rs: BackgroundReport[], k: K): BackgroundReport[K] | null {
+/** The last report to carry a non-null value for `k`, or null. Exported so
+ *  `BackgroundDetail` reads the same rule rather than restating it. */
+export function lastNonNull<K extends keyof BackgroundReport>(rs: BackgroundReport[], k: K): BackgroundReport[K] | null {
   for (let i = rs.length - 1; i >= 0; i--) {
     const v = rs[i][k];
     if (v !== null) return v;

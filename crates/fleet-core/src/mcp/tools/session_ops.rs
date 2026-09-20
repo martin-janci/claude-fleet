@@ -347,7 +347,8 @@ impl FleetTools {
         immediate reconcile; the key is absent if the agent was not matched \
         yet — it appears on the next tick) so the next call can be \
         session_transcript { session_id }. The prompt becomes the row's default \
-        friendly name and last_prompt.")]
+        friendly name and last_prompt. Pass requester_session_id (yours, from \
+        whoami) to list it under that session's background work.")]
     pub(super) async fn new_bg_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -358,6 +359,14 @@ impl FleetTools {
             &format!("host={} name={}", args.host_alias, args.name),
         );
         require_host(&caller, &args.host_alias, "the new background session")?;
+        // The requester (when given) must exist and, for a per-host caller,
+        // live on that host — otherwise any agent could parent a background
+        // session onto somebody else's conversation. Same gate as
+        // `dispatch_task`; `parent_session_id` has no foreign key to catch it
+        // later.
+        if let Some(req) = args.requester_session_id {
+            self.resolve_target_row(&caller, Some(req), None, None, "requester_session_id")?;
+        }
         let res = crate::service::bg_sessions::new_bg_session_tracked(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;

@@ -41,6 +41,24 @@ describe('BackgroundDetail', () => {
     expect(queryByTestId('bg-detail-output')).toBeNull();
   });
 
+  it('still says something when the one report carried no text', () => {
+    // A report with a null summary AND a null result satisfied none of the
+    // arms, so the body rendered empty — one click after a row that said the
+    // task had reported.
+    const { getByTestId } = render(BackgroundDetail, {
+      entry: entry({
+        status: 'done',
+        result: null,
+        outputFile: null,
+        history: [{ at: '2026-09-18T10:05:00Z', status: 'completed', summary: null, result: null }],
+      }),
+      onBack: () => {},
+    });
+    const body = getByTestId('bg-detail-empty').textContent ?? '';
+    expect(body.length).toBeGreaterThan(0);
+    expect(body).not.toContain('has not reported back yet');
+  });
+
   it("shows a background command's summary when its report carries no result", () => {
     // Every background `Bash` / `Monitor` is this shape: a `<summary>` with
     // the exit code and no `<result>` at all. Falling through to the empty
