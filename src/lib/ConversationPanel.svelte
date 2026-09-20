@@ -74,6 +74,7 @@
     type SlashCommand,
     type ActivityProbe,
   } from './conversation';
+  import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
   import { hubStatus, ownsTheFleet } from './hub';
   import Markdown from './MarkdownView.svelte';
 
@@ -258,7 +259,7 @@
     findOpen = false;
     findQuery = '';
     findIndex = 0;
-    clearHighlights();
+    clearHighlights(hlNames);
   }
 
   /** resetView plus the send and probe state of the current conversation;
@@ -560,78 +561,20 @@
   // API where it exists; elsewhere (jsdom, older engines) the row outline
   // is the only highlight.
   const hlSuffix = ++panelSeq;
-  const HL_ALL = `conv-find-${hlSuffix}`;
-  const HL_CURRENT = `conv-find-current-${hlSuffix}`;
+  const hlNames = highlightNames(hlSuffix);
   // `::highlight()` names cannot be dynamic in the component's stylesheet:
   // each panel adds (and on unmount removes) the two rules for its own names.
   $effect(() => {
     const el = document.createElement('style');
     el.dataset.convFind = String(hlSuffix);
-    el.textContent =
-      `::highlight(${HL_ALL}) { background-color: color-mix(in srgb, var(--usage-warn) 35%, transparent); }\n` +
-      `::highlight(${HL_CURRENT}) { background-color: color-mix(in srgb, var(--usage-warn) 75%, transparent); color: var(--bg); }`;
+    el.textContent = highlightCss(hlNames);
     document.head.appendChild(el);
     return () => el.remove();
   });
-  const HL_MAX_RANGES = 2_000;
-  function highlightRegistry(): { set(n: string, h: unknown): void; delete(n: string): void } | null {
-    try {
-      const reg = (globalThis.CSS as unknown as { highlights?: unknown } | undefined)?.highlights;
-      if (!reg || typeof (globalThis as { Highlight?: unknown }).Highlight !== 'function') return null;
-      return reg as { set(n: string, h: unknown): void; delete(n: string): void };
-    } catch {
-      return null;
-    }
-  }
-  function clearHighlights() {
-    const reg = highlightRegistry();
-    if (!reg) return;
-    reg.delete(HL_ALL);
-    reg.delete(HL_CURRENT);
-  }
   $effect(() => {
-    const q = findQuery.trim().toLowerCase();
-    const keys = matchKeys;
-    const cur = currentMatch;
-    const reg = highlightRegistry();
-    if (!reg || !scroller || keys.size === 0 || q === '') {
-      clearHighlights();
-      return;
-    }
-    try {
-      const all: Range[] = [];
-      const current: Range[] = [];
-      for (const el of Array.from(scroller.querySelectorAll<HTMLElement>('[data-row-key]'))) {
-        const key = el.dataset.rowKey ?? '';
-        if (!keys.has(key)) continue;
-        // Only the conversation's own text: not button labels (Copy, Show
-        // more, a tool row's chrome), times, other controls or hidden
-        // chrome (a lone call's group summary).
-        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
-          acceptNode: (n) =>
-            n.parentElement?.closest('button, time, input, textarea, select, [role="button"], [aria-hidden="true"]')
-              ? NodeFilter.FILTER_REJECT
-              : NodeFilter.FILTER_ACCEPT,
-        });
-        for (let n = walker.nextNode(); n && all.length < HL_MAX_RANGES; n = walker.nextNode()) {
-          const text = (n.textContent ?? '').toLowerCase();
-          for (let at = text.indexOf(q); at !== -1 && all.length < HL_MAX_RANGES; at = text.indexOf(q, at + q.length)) {
-            const r = document.createRange();
-            r.setStart(n, at);
-            r.setEnd(n, at + q.length);
-            all.push(r);
-            if (key === cur) current.push(r);
-          }
-        }
-      }
-      const H = (globalThis as unknown as { Highlight: new (...r: Range[]) => unknown }).Highlight;
-      reg.set(HL_ALL, new H(...all));
-      reg.set(HL_CURRENT, new H(...current));
-    } catch {
-      clearHighlights();
-    }
+    paintHighlights(scroller, hlNames, { keys: matchKeys, current: currentMatch, query: findQuery });
   });
-  $effect(() => () => clearHighlights());
+  $effect(() => () => clearHighlights(hlNames));
 
   /** Turn index: jump to a turn and close the list. */
   function pickTurn(key: string) {
