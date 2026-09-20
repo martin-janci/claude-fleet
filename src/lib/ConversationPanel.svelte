@@ -615,23 +615,33 @@
   function openBackground(e: BackgroundEntry): void {
     backgroundOpen = false;
     if (e.source === 'fleet_session' && e.sessionId !== null) {
-      const row = $sessions.find((s) => s.id === e.sessionId);
-      if (row) selectSession(row);
+      goToSession(e.sessionId);
       return;
     }
     background = e.key;
   }
 
-  /** The entry a notification row belongs to, by task id first and by the
-   *  call it named second — the same keying `transcriptBackground` uses. */
-  function entryForNotification(n: { task_id: string | null; tool_use_id: string | null }): BackgroundEntry | null {
-    const keys = [n.task_id ? `task:${n.task_id}` : null, n.tool_use_id ? `tool:${n.tool_use_id}` : null];
-    for (const k of keys) {
-      if (k === null) continue;
-      const hit = bgEntries.find((e) => e.key === k);
-      if (hit) return hit;
-    }
-    return null;
+  /** Switch the whole app to a fleet session by id, when the store has it.
+   *  Shared by `openBackground` and the detail's worker-session link. */
+  function goToSession(id: number): void {
+    const row = $sessions.find((s) => s.id === id);
+    if (row) selectSession(row);
+  }
+
+  /** The entry a notification row belongs to: the call it named, which is
+   *  exactly how `transcriptBackground` keys one. A task id is deliberately
+   *  not tried — two calls can report the same one. */
+  function entryForNotification(n: { tool_use_id: string | null }): BackgroundEntry | null {
+    if (n.tool_use_id === null) return null;
+    return bgEntries.find((e) => e.key === `tool:${n.tool_use_id}`) ?? null;
+  }
+
+  /** The switcher entry for a subagent block, so the block can offer a way
+   *  into its detail. Null while the switcher does not list it (a finished
+   *  foreground call), and the block then shows no control. */
+  function entryForSubagent(id: string | null): BackgroundEntry | null {
+    if (id === null) return null;
+    return bgEntries.find((e) => e.key === `tool:${id}`) ?? null;
   }
 
   function onTurnsKey(e: KeyboardEvent) {
@@ -1020,7 +1030,7 @@
   {/if}
   <div class="thread-area">
   {#if bgEntry}
-    <BackgroundDetail entry={bgEntry} onBack={() => (background = null)} />
+    <BackgroundDetail entry={bgEntry} onBack={() => (background = null)} onOpenSession={goToSession} />
   {:else if empty && !(pending && viewing === null)}
     <div class="empty-state" data-testid="conv-empty-state">
       <p class="empty-title" data-testid="conv-empty">{empty}</p>
@@ -1249,15 +1259,18 @@
                       >
                         <span class="note-mark" aria-hidden="true">{notificationMark(g.status)}</span>
                         <span class="note-label">{notificationLabel(g)}</span>
+                        {#if g.at}<time class="note-time" datetime={g.at}>{relativeTime(g.at, nowMs)}</time>{/if}
                       </button>
                     {:else}
                       <div class="notification" data-testid="conv-notification" data-tone={notificationTone(g.status)}>
                         <span class="note-mark" aria-hidden="true">{notificationMark(g.status)}</span>
                         <span class="note-label">{notificationLabel(g)}</span>
+                        {#if g.at}<time class="note-time" datetime={g.at}>{relativeTime(g.at, nowMs)}</time>{/if}
                       </div>
                     {/if}
                   {:else if g.kind === 'subagent'}
-                    <SubagentBlock item={g} {nowMs} live={turnLive} />
+                    {@const bg = entryForSubagent(g.id)}
+                    <SubagentBlock item={g} {nowMs} live={turnLive} onOpen={bg ? () => openBackground(bg) : undefined} />
                   {/if}
                 {/each}
                 {#if duration}
@@ -2088,6 +2101,12 @@
   .note-label {
     min-width: 0;
     overflow-wrap: anywhere;
+  }
+  .note-time {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding-left: 0.4rem;
+    font-size: 0.72rem;
   }
   .latest {
     position: absolute;

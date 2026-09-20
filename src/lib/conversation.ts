@@ -320,8 +320,11 @@ export function notificationLabel(n: { summary: string | null; event: string | n
 // ─── Background work: the session's own list (task 4) ───────────────────────
 
 /** How a background entry currently stands. `running` covers "launched and
- *  has not reported back" as well as a queued fleet task. */
-export type BackgroundStatus = 'running' | 'done' | 'failed' | 'stopped';
+ *  has not reported back" as well as a queued fleet task, and a fleet child
+ *  that is blocked on a prompt — it is alive and wants attention. `idle` is
+ *  a fleet child that is neither working nor finished: it has nothing to
+ *  report, and calling it `done` would be a lie. */
+export type BackgroundStatus = 'running' | 'done' | 'failed' | 'stopped' | 'idle';
 
 /** One report a background task filed. A resumed agent files several. */
 export interface BackgroundReport {
@@ -334,8 +337,14 @@ export interface BackgroundReport {
 /** One background thing that belongs to a session: something this
  *  conversation launched, or a fleet row/task spawned from it. */
 export interface BackgroundEntry {
-  /** Stable across renders: `task:<task-id>` or `tool:<tool_use id>` for a
-   *  transcript entry, `session:<id>` / `fleettask:<id>` for a fleet one. */
+  /** Stable across renders AND across the entry's own life: it names the
+   *  LAUNCHING call — `tool:<tool_use id>`, or `item:<turn>:<item>` for an
+   *  item the transcript gave no id — never the task id. Two different
+   *  calls can report the SAME task id (an `Agent` launch and the
+   *  `SendMessage` that resumes it), so a task-id key collides; and a key
+   *  that mutated when the first notification landed snapped an open
+   *  detail shut at the moment its report arrived. Fleet entries are
+   *  `session:<id>` / `fleettask:<id>`. */
   key: string;
   source: 'transcript' | 'fleet_task' | 'fleet_session';
   /** `Agent` | `Bash` | `Monitor` | … for a transcript entry; the session
@@ -357,7 +366,18 @@ export interface BackgroundEntry {
 
 /** Tools whose calls can be backgrounded and then report in. A foreground
  *  call of the same tool never gets a notification, which is exactly how the
- *  two are told apart — the launch input carries no flag to read. */
+ *  two are told apart — the launch input carries no flag to read.
+ *
+ *  Deliberately narrower than the backend: `join_notifications`
+ *  (`crates/fleet-core/src/service/transcript.rs`) closes ANY `ConvItem::Tool`
+ *  a notification names, because a notification naming a call is proof that
+ *  call finished, whatever it was. This list is instead what the switcher
+ *  knows how to *present* — a kind, a label, a report shape. A notification
+ *  naming a tool outside it therefore still closes its line in the thread
+ *  but produces no switcher entry, and its row falls back to the
+ *  non-clickable form. That is the honest degradation: the thread stays
+ *  truthful, and nothing is invented for a shape we have never seen. Widen
+ *  it only for a tool whose backgrounded shape has actually been observed. */
 const BACKGROUND_TOOLS = new Set(['Bash', 'Monitor', 'Workflow', 'SendMessage']);
 
 function statusFromReports(reports: BackgroundReport[]): BackgroundStatus {
@@ -397,7 +417,6 @@ function lastNonNull<K extends keyof BackgroundReport>(rs: BackgroundReport[], k
  *  per entry afterwards. */
 export function transcriptBackground(turns: ConvTurn[]): BackgroundEntry[] {
   const reports = new Map<string, BackgroundReport[]>();
-  const taskIds = new Map<string, string>();
   const outputFiles = new Map<string, string>();
   for (const t of turns) {
     for (const item of t.items) {
@@ -405,7 +424,6 @@ export function transcriptBackground(turns: ConvTurn[]): BackgroundEntry[] {
       const list = reports.get(item.tool_use_id) ?? [];
       list.push({ at: item.at ?? t.at, status: item.status, summary: item.summary, result: item.result });
       reports.set(item.tool_use_id, list);
-      if (item.task_id !== null) taskIds.set(item.tool_use_id, item.task_id);
       // Last non-null wins, same as `result` and (via reports' own `at`)
       // the entry's finish time: a resumed call's newest report describes
       // its current run, so a later notification's output file supersedes
@@ -416,13 +434,18 @@ export function transcriptBackground(turns: ConvTurn[]): BackgroundEntry[] {
   }
 
   const out: BackgroundEntry[] = [];
-  for (const t of turns) {
-    for (const item of t.items) {
+  for (let ti = 0; ti < turns.length; ti++) {
+    const t = turns[ti];
+    for (let ii = 0; ii < t.items.length; ii++) {
+      const item = t.items[ii];
       if (item.kind === 'subagent') {
         const rs = (item.id !== null && reports.get(item.id)) || [];
         if (rs.length === 0 && item.done) continue;
         out.push({
-          key: item.id !== null && taskIds.has(item.id) ? `task:${taskIds.get(item.id)}` : `tool:${item.id ?? ''}`,
+          // The launching call, never the task id (see `key` above). An
+          // item the transcript gave no id falls back to its position,
+          // which is what tells two id-less subagents apart.
+          key: item.id !== null ? `tool:${item.id}` : `item:${ti}:${ii}`,
           source: 'transcript',
           kind: item.name || 'Agent',
           label: item.description ?? item.agent_type ?? 'subagent',
@@ -439,7 +462,7 @@ export function transcriptBackground(turns: ConvTurn[]): BackgroundEntry[] {
         const rs = reports.get(item.id) ?? [];
         if (rs.length === 0) continue;
         out.push({
-          key: taskIds.has(item.id) ? `task:${taskIds.get(item.id)}` : `tool:${item.id}`,
+          key: `tool:${item.id}`,
           source: 'transcript',
           kind: item.name,
           label: item.target ?? item.summary,
@@ -458,6 +481,26 @@ export function transcriptBackground(turns: ConvTurn[]): BackgroundEntry[] {
   return out.sort(byRunningThenNewest);
 }
 
+/** A fleet child session's `claude_status` as a background status. Every
+ *  value of the vocabulary is named: `blocked` is alive and wants attention
+ *  so it reads as running, `idle` is its own thing, and only `completed` —
+ *  or a status nobody has reported yet — is `done`. */
+function fleetSessionStatus(s: ClaudeStatus | null): BackgroundStatus {
+  switch (s) {
+    case 'working':
+    case 'blocked':
+      return 'running';
+    case 'idle':
+      return 'idle';
+    case 'stopped':
+      return 'stopped';
+    case 'failed':
+      return 'failed';
+    default:
+      return 'done';
+  }
+}
+
 /** The fleet rows and tasks this session spawned. A worker session appears
  *  both as a session and as its task: they are different things — one is a
  *  place to go, the other a unit of work with a result. */
@@ -470,14 +513,7 @@ export function fleetBackground(sessions: SessionRow[], tasks: TaskRow[], sessio
       source: 'fleet_session',
       kind: s.kind,
       label: s.friendly_name || s.tmux_name,
-      status:
-        s.claude_status === 'working'
-          ? 'running'
-          : s.claude_status === 'failed'
-            ? 'failed'
-            : s.claude_status === 'stopped'
-              ? 'stopped'
-              : 'done',
+      status: fleetSessionStatus(s.claude_status),
       at: null,
       result: null,
       error: null,

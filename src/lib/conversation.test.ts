@@ -747,15 +747,55 @@ describe('transcriptBackground', () => {
     expect(got[0].key).toBe('tool:toolu_1');
   });
 
-  it('keys an entry by its task id once one has been seen', () => {
+  it("keeps an entry's key unchanged when its first notification arrives", () => {
+    // The key names the LAUNCHING call, so an open detail keyed by it does
+    // not fall out from under the reader the moment the report lands.
+    const before = transcriptBackground([bgTurn([bgAgentItem('toolu_1')])]);
     const got = transcriptBackground([
       bgTurn([bgAgentItem('toolu_1')]),
       bgTurn([bgNoteItem('toolu_1', 'completed', '2026-09-18T10:12:00Z')], '2026-09-18T10:12:00Z'),
     ]);
-    expect(got[0].key).toBe('task:a6');
+    expect(got[0].key).toBe(before[0].key);
+    expect(got[0].key).toBe('tool:toolu_1');
     expect(got[0].status).toBe('done');
     expect(got[0].result).toBe('the report');
     expect(got[0].outputFile).toBe('/private/tmp/x/tasks/a6.output');
+  });
+
+  it('keeps two calls that report the SAME task id apart', () => {
+    // The resume workflow: `Agent` launches T, `SendMessage` resumes it, and
+    // both notifications carry task-id a6. Keying by task id collided and
+    // crashed the `{#each … (e.key)}` that lists them.
+    const send = (id: string) => ({
+      kind: 'tool' as const,
+      summary: 'SendMessage(agent=a6)',
+      error: false,
+      id,
+      name: 'SendMessage',
+      target: null,
+      at: '2026-09-18T10:30:00Z',
+      ended_at: null,
+      done: true,
+    });
+    const got = transcriptBackground([
+      bgTurn([bgAgentItem('toolu_A')]),
+      bgTurn([bgNoteItem('toolu_A', 'completed', '2026-09-18T10:12:00Z')], '2026-09-18T10:12:00Z'),
+      bgTurn([send('toolu_S')]),
+      bgTurn([bgNoteItem('toolu_S', 'completed', '2026-09-18T10:40:00Z')], '2026-09-18T10:40:00Z'),
+    ]);
+    expect(got).toHaveLength(2);
+    expect(new Set(got.map((e) => e.key)).size).toBe(2);
+  });
+
+  it('keys two id-less subagent items apart', () => {
+    const got = transcriptBackground([
+      bgTurn([
+        { ...bgAgentItem('ignored'), id: null, description: 'first' },
+        { ...bgAgentItem('ignored'), id: null, description: 'second' },
+      ]),
+    ]);
+    expect(got).toHaveLength(2);
+    expect(new Set(got.map((e) => e.key)).size).toBe(2);
   });
 
   it('maps each terminal status onto the entry', () => {
@@ -895,6 +935,21 @@ describe('fleetBackground', () => {
     expect(got[0].label).toBe('Load layers');
     expect(got[0].status).toBe('running');
     expect(got[0].sessionId).toBe(2);
+  });
+
+  it('maps every claude_status a child session can carry', () => {
+    // `blocked` is alive and wants attention, `idle` is neither running nor
+    // finished. Folding both into `done` made the one view meant to answer
+    // "what is still live" say a session on a trust prompt had finished.
+    const of = (claude_status: SessionRow['claude_status']) =>
+      fleetBackground([row({ id: 2, parent_session_id: 7, claude_status })], [], 7)[0].status;
+    expect(of('working')).toBe('running');
+    expect(of('blocked')).toBe('running');
+    expect(of('idle')).toBe('idle');
+    expect(of('stopped')).toBe('stopped');
+    expect(of('failed')).toBe('failed');
+    expect(of('completed')).toBe('done');
+    expect(of(null)).toBe('done');
   });
 
   it('lists tasks this session dispatched, with the worker to switch to', () => {

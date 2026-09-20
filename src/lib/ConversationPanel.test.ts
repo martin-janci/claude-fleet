@@ -2692,6 +2692,136 @@ describe('ConversationPanel background switcher', () => {
     expect(getByTestId('bg-detail-label').textContent).toContain('Posúdiť stratégiu testov');
   });
 
+  it('lists a launch and the resume that reports the same task id as two rows', async () => {
+    // `each_key_duplicate` is a hard throw in dev AND prod: the tab used to
+    // break the moment the dropdown opened on this very ordinary shape.
+    const sendItem = {
+      kind: 'tool' as const,
+      summary: 'SendMessage(agent=a6)',
+      error: false,
+      id: 'toolu_S',
+      name: 'SendMessage',
+      target: null,
+      at: '2026-09-13T10:10:00.000Z',
+      ended_at: null,
+      done: true,
+    };
+    const c: Conversation = conv({
+      turns: [
+        { prompt: 'go check', at: '2026-09-13T10:00:00.000Z', ended_at: null, items: [bgSubagentItem] },
+        { prompt: null, at: '2026-09-13T10:05:00.000Z', ended_at: null, items: [bgNotificationItem] },
+        { prompt: 'now resume it', at: '2026-09-13T10:10:00.000Z', ended_at: null, items: [sendItem] },
+        {
+          prompt: null,
+          at: '2026-09-13T10:15:00.000Z',
+          ended_at: null,
+          items: [{ ...bgNotificationItem, tool_use_id: 'toolu_S', at: '2026-09-13T10:15:00.000Z' }],
+        },
+      ],
+    });
+    const { getByTestId, getAllByTestId } = await renderWithConversation(c);
+    await fireEvent.click(getByTestId('conv-background-button'));
+    expect(getAllByTestId('conv-background-item')).toHaveLength(2);
+  });
+
+  it('keeps an open detail open when the agent reports in', async () => {
+    // The entry's key must not change under the open detail: it used to
+    // mutate from `tool:<id>` to `task:<id>` on the first notification, and
+    // the detail snapped shut at exactly the moment the report landed.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const running: Conversation = conv({
+      turns: [{ prompt: 'go check', at: '2026-09-13T10:00:00.000Z', ended_at: null, items: [bgSubagentItem] }],
+    });
+    const { getByTestId, getAllByTestId } = await renderWithConversation(running);
+    await fireEvent.click(getByTestId('conv-background-button'));
+    await fireEvent.click(getAllByTestId('conv-background-item')[0]);
+    expect(getByTestId('bg-detail')).toBeTruthy();
+    // The next poll carries the notification.
+    mockedConv.mockReturnValue(ok(convWithBackgroundAgent));
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await settle();
+    expect(getByTestId('bg-detail')).toBeTruthy();
+    expect(getByTestId('bg-detail-result').textContent).toContain('All good.');
+  });
+
+  it('opens the right entry from a notification row whose sibling carried no task id', async () => {
+    // First notification: no task-id. Second: task-id a6. Keying the entry
+    // by the task id left the FIRST row looking up a key nothing had, so it
+    // rendered as a dead, non-clickable div.
+    const c: Conversation = conv({
+      turns: [
+        { prompt: 'go check', at: '2026-09-13T10:00:00.000Z', ended_at: null, items: [bgSubagentItem] },
+        {
+          prompt: null,
+          at: '2026-09-13T10:03:00.000Z',
+          ended_at: null,
+          items: [
+            { ...bgNotificationItem, task_id: null, status: null, summary: 'still going', result: null },
+            bgNotificationItem,
+          ],
+        },
+      ],
+    });
+    const { getByTestId, getAllByTestId } = await renderWithConversation(c);
+    const rows = getAllByTestId('conv-notification');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].tagName).toBe('BUTTON');
+    await fireEvent.click(rows[0]);
+    expect(getByTestId('bg-detail-label').textContent).toContain('Posúdiť stratégiu testov');
+  });
+
+  it('puts the time on a notification row', async () => {
+    const { getAllByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    const row = getAllByTestId('conv-notification')[0];
+    expect(row.querySelector('time')?.getAttribute('datetime')).toBe('2026-09-13T10:05:00.000Z');
+  });
+
+  it('gives a backgrounded subagent block a way into its detail', async () => {
+    const { getByTestId } = await renderWithConversation(convWithBackgroundAgent);
+    await fireEvent.click(getByTestId('conv-subagent-open'));
+    expect(getByTestId('bg-detail-label').textContent).toContain('Posúdiť stratégiu testov');
+  });
+
+  it('leaves a foreground subagent block without one', async () => {
+    const c: Conversation = conv({
+      turns: [
+        {
+          prompt: 'go check',
+          at: '2026-09-13T10:00:00.000Z',
+          ended_at: null,
+          items: [{ ...bgSubagentItem, done: true, result: 'inline report' }],
+        },
+      ],
+    });
+    const { queryByTestId } = await renderWithConversation(c);
+    expect(queryByTestId('conv-subagent')).toBeTruthy();
+    expect(queryByTestId('conv-subagent-open')).toBeNull();
+  });
+
+  it("switches the app to a fleet task's worker session from the detail", async () => {
+    const { getByTestId, getAllByTestId } = await renderWithConversation(convWithNoBackground, {
+      sessions: [session({ id: 4, friendly_name: 'Worker' })],
+      tasks: [
+        {
+          id: 11,
+          requester_session_id: 1,
+          worker_session_id: 4,
+          prompt: 'Implement task 2',
+          state: 'running',
+          result: null,
+          error: null,
+          created_at: 1,
+          started_at: 2,
+          finished_at: null,
+        },
+      ],
+    });
+    await fireEvent.click(getByTestId('conv-background-button'));
+    await fireEvent.click(getAllByTestId('conv-background-item')[0]);
+    await fireEvent.click(getByTestId('bg-detail-open-session'));
+    expect(selectSessionSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 4 }));
+  });
+
   it('switches the app to a fleet child session rather than showing a detail', async () => {
     const { getByTestId, getAllByTestId } = await renderWithConversation(convWithNoBackground, {
       sessions: [session({ id: 2, parent_session_id: 1, friendly_name: 'Load layers' })],
