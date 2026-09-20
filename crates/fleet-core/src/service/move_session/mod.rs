@@ -1121,6 +1121,14 @@ async fn carry_session_state(
     )
     .await
     .map_err(|why| (so_far(&[]), why))?;
+    // An exit-0 reply without the marker is NOT "no session directory": the
+    // script prints the marker on every successful path, including the one
+    // where `<id>/` does not exist, so a missing marker means something
+    // swallowed the output and the listing cannot be trusted. Warn instead
+    // of silently carrying nothing.
+    if carry::payload(&out.stdout).is_none() {
+        return Err((so_far(&[]), format!("the listing on {src} said nothing")));
+    }
     let listed = claude_state::parse_file_list(&out.stdout);
     if listed.is_empty() {
         // No such directory, or an empty one: nothing to do, nothing to say.
@@ -1143,6 +1151,19 @@ async fn carry_session_state(
     .map_err(|why| (so_far(&sel.left), why))?;
     let (bytes, archive) = carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
         .map_err(|e| (so_far(&sel.left), e.message))?;
+    // The orchestrator does not take the source's word for the size of what
+    // it is about to relay — the same rule the bundle follows. The cap
+    // bounds the CONTENT, so the archive may exceed it only by tar's own
+    // overhead; anything more and nothing is downloaded.
+    let allowed = cap.saturating_add(claude_state::PACK_OVERHEAD_ALLOWANCE_BYTES);
+    if bytes > allowed {
+        return Err((
+            so_far(&sel.left),
+            format!(
+                "{src} announced a {bytes}-byte archive, over the {allowed}-byte bound; nothing was relayed"
+            ),
+        ));
+    }
     let staged = format!("{target_dir}/state.tgz");
     relay(ssh, src, &archive, bytes, target, &staged)
         .await
@@ -1162,16 +1183,50 @@ async fn carry_session_state(
                 format!("the merge on {target} said nothing"),
             )
         })?;
+    // What the policy SELECTED, what the pack actually archived and what the
+    // merge reports are three different sets: the pack takes the whole
+    // `./<id>` minus the excludes, the merge refuses names outside the safe
+    // charset, a file can vanish between the two, an `[!/]` exclude built
+    // for one odd name can collaterally match a safe sibling, and an archive
+    // without `./<id>` makes the merge's `cd` fail and report nothing at
+    // all. Reconcile at the point of effect: every selected path must come
+    // back accounted for, or the half warns — with whatever DID land still
+    // in the report.
+    let missing: Vec<String> = {
+        let accounted: std::collections::HashSet<&str> = merged
+            .carried
+            .iter()
+            .map(|e| e.path.as_str())
+            .chain(merged.kept.iter().map(String::as_str))
+            .chain(merged.failed.iter().map(String::as_str))
+            .collect();
+        sel.carry
+            .iter()
+            .map(|e| e.path.as_str())
+            .filter(|p| !accounted.contains(p))
+            .map(str::to_string)
+            .collect()
+    };
+    let failed = merged.failed;
     let report = carry::SessionStateReport {
         carried: merged.carried,
         kept_target: merged.kept,
         left_behind: sel.left,
     };
-    if !merged.failed.is_empty() {
-        let first: Vec<&str> = merged.failed.iter().take(3).map(String::as_str).collect();
+    if !missing.is_empty() {
+        let first: Vec<&str> = missing.iter().take(3).map(String::as_str).collect();
+        let why = format!(
+            "{} selected file(s) were not accounted for by the merge on {target}: {}",
+            missing.len(),
+            first.join(", ")
+        );
+        return Err((report, why));
+    }
+    if !failed.is_empty() {
+        let first: Vec<&str> = failed.iter().take(3).map(String::as_str).collect();
         let why = format!(
             "{} file(s) could not be placed on {target}: {}",
-            merged.failed.len(),
+            failed.len(),
             first.join(", ")
         );
         return Err((report, why));
@@ -1248,6 +1303,19 @@ async fn carry_memory(
     .map_err(|why| (report.clone(), why))?;
     let (bytes, archive) = carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
         .map_err(|e| (report.clone(), e.message))?;
+    // As in the session half: the announced size is re-checked here, before
+    // a byte is downloaded. The content is bounded by
+    // `MEMORY_TOTAL_MAX_BYTES`, so only tar's overhead may exceed it.
+    let allowed = claude_state::MEMORY_TOTAL_MAX_BYTES
+        .saturating_add(claude_state::PACK_OVERHEAD_ALLOWANCE_BYTES);
+    if bytes > allowed {
+        return Err((
+            report.clone(),
+            format!(
+                "{src} announced a {bytes}-byte archive, over the {allowed}-byte bound; nothing was relayed"
+            ),
+        ));
+    }
     let staged = format!("{target_dir}/{}", claude_state::MEMORY_ARCHIVE);
     relay(ssh, src, &archive, bytes, target, &staged)
         .await
@@ -1255,7 +1323,7 @@ async fn carry_memory(
     sh_soft(
         ssh,
         target,
-        &carry::extract_keep_existing_script(&tgt.dir, &staged, true),
+        &claude_state::memory_extract_script(&tgt.dir, &staged),
         "extracting the memory",
     )
     .await
@@ -2466,6 +2534,9 @@ mod tests {
     const HEAD: &str = "1111111111111111111111111111111111111111";
     const SRC_PATH: &str = "/home/a/.claude/projects/-home-a-p-o-r--claude-worktrees-feat/550e8400-e29b-41d4-a716-446655440000.jsonl";
     const TGT_CWD: &str = "/home/b/p/o/r/.claude/worktrees/feat";
+    /// The source worktree the inspection reports — the directory the source
+    /// memory listing is keyed by, as both its repo hint and its fallback.
+    const SRC_WORKTREE: &str = "/home/a/p/o/r/.claude/worktrees/feat";
     const TGT_ENC: &str = "-home-b-p-o-r--claude-worktrees-feat";
     const TRANSCRIPT: &str =
         "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n{\"type\":\"assistant\"}\n";
@@ -2562,7 +2633,7 @@ mod tests {
             )
             .on_host(
                 "beta",
-                Match::script_contains("# cf-carry:extract"),
+                Match::script_contains("# cf-carry:memory-extract"),
                 Reply::ok("ok\n"),
             )
             .on_host(
@@ -3638,7 +3709,7 @@ mod tests {
                     "# cf-carry:state-merge",
                     "# cf-carry:memory-list",
                     "# cf-carry:pack",
-                    "# cf-carry:extract",
+                    "# cf-carry:memory-extract",
                     "# cf-carry:memory-index",
                     "# cf-carry:memory-append",
                 ] {
@@ -3781,6 +3852,26 @@ mod tests {
             "{}",
             listings[0]
         );
+        // (E.2) The SOURCE's memory is keyed by the source WORKTREE in both
+        // slots: `r=` (whose repo root the script resolves) and `fb=` (the
+        // fallback tried when that root has no `memory/`). The target gets no
+        // fallback at all.
+        let src_listings = scripts_with(&f, "alpha", "# cf-carry:memory-list");
+        assert_eq!(src_listings.len(), 1, "one memory listing on the source");
+        assert!(
+            src_listings[0].contains(&format!(
+                "r={}\nfb={}\n",
+                quote(SRC_WORKTREE),
+                quote(SRC_WORKTREE)
+            )),
+            "{}",
+            src_listings[0]
+        );
+        assert!(
+            listings[0].contains(&format!("fb={}\n", quote(""))),
+            "the target has no fallback: {}",
+            listings[0]
+        );
         // Exactly one append, carrying the carried file's line and no other.
         let appends = scripts_with(&f, "beta", "# cf-carry:memory-append");
         assert_eq!(appends.len(), 1, "exactly one index append");
@@ -3902,7 +3993,7 @@ mod tests {
             ),
             case(
                 "beta",
-                "# cf-carry:extract",
+                "# cf-carry:memory-extract",
                 "exit",
                 Reply::fail(5, &failed("corrupt archive")),
                 MEMORY,
@@ -3968,7 +4059,7 @@ mod tests {
             "# cf-carry:state-pack",
             "# cf-carry:state-merge",
             "# cf-carry:pack",
-            "# cf-carry:extract",
+            "# cf-carry:memory-extract",
             "# cf-carry:memory-index",
             "# cf-carry:memory-append",
         ] {
@@ -4010,6 +4101,176 @@ mod tests {
             .collect();
         assert_eq!(warned.len(), 1, "{:?}", rep.warnings);
         assert!(warned[0].contains("index"), "{}", warned[0]);
+    }
+
+    /// (A.2) The merge's report must account for every path the selection
+    /// chose to carry. A reply that simply omits one — an archive without
+    /// `./<id>` whose `cd` failed, a file that vanished between the listing
+    /// and the pack, a collateral `[!/]` exclude — is a warning, and the
+    /// files that DID land stay reported.
+    #[tokio::test]
+    async fn a_merge_that_omits_a_selected_path_warns_and_still_reports_what_landed() {
+        let f = fixture();
+        with_claude_state(&f);
+        // The selection chose both files; the merge mentions only one.
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-carry:state-merge"),
+            Reply::ok(&out("carried\t550\tsubagents/agent-aa.jsonl\n")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false)
+            .await
+            .expect("the move still succeeds");
+        let warned: Vec<&String> = rep
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("session state was not carried:"))
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", rep.warnings);
+        assert!(
+            warned[0].contains("tool-results/out1.txt") && warned[0].contains("1 selected"),
+            "{}",
+            warned[0]
+        );
+        assert_eq!(
+            rep.carried.session_state.carried,
+            vec![carry::IgnoredEntry {
+                path: "subagents/agent-aa.jsonl".into(),
+                bytes: 550
+            }],
+            "what did land is still reported"
+        );
+        // The memory half is untouched by it.
+        assert_eq!(rep.carried.memory.carried.len(), 1);
+    }
+
+    /// (A.2, the other direction) An empty merge report for a selection that
+    /// carried nothing at all — the shape an archive without `./<id>`
+    /// produces — warns instead of returning `Ok` with an empty report.
+    #[tokio::test]
+    async fn a_merge_that_reports_nothing_at_all_warns() {
+        let f = fixture();
+        with_claude_state(&f);
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-carry:state-merge"),
+            Reply::ok(&out("")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        let warned: Vec<&String> = rep
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("session state was not carried:"))
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", rep.warnings);
+        assert!(warned[0].contains("2 selected"), "{}", warned[0]);
+        assert!(rep.carried.session_state.carried.is_empty());
+    }
+
+    /// (A.3 / H1) An exit-0 listing WITHOUT the marker is not "there is no
+    /// session directory" — the script prints the marker on every successful
+    /// path, including that one. Something swallowed the output, so the half
+    /// warns rather than silently carrying nothing.
+    #[tokio::test]
+    async fn a_marker_less_state_listing_warns_instead_of_carrying_nothing() {
+        let f = fixture();
+        with_claude_state(&f);
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-carry:state-list"),
+            Reply::ok("550\tsubagents/agent-aa.jsonl\0"),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false).await.expect("move");
+        let warned: Vec<&String> = rep
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("session state was not carried:"))
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", rep.warnings);
+        assert!(warned[0].contains("said nothing"), "{}", warned[0]);
+        for marker in ["# cf-carry:state-pack", "# cf-carry:state-merge"] {
+            for host in ["alpha", "beta"] {
+                assert!(
+                    scripts_with(&f, host, marker).is_empty(),
+                    "{marker} must not run on {host}"
+                );
+            }
+        }
+        // The memory half still ran in full.
+        assert_eq!(rep.carried.memory.carried.len(), 1);
+    }
+
+    /// (B / H2) Neither half takes the source's word for the size of what it
+    /// is about to pull: an announced archive over the bound is a warning
+    /// and NOTHING is downloaded — no `# cf-carry:chunk` script is sent.
+    #[tokio::test]
+    async fn an_oversized_announced_archive_is_never_downloaded() {
+        struct Case {
+            half: &'static str,
+            marker: &'static str,
+            bytes: u64,
+            warning: &'static str,
+        }
+        let cases = [
+            Case {
+                half: "session",
+                marker: "# cf-carry:state-pack",
+                // the default 200 MiB cap plus more than the tar allowance
+                bytes: 200 * 1024 * 1024 + claude_state::PACK_OVERHEAD_ALLOWANCE_BYTES + 1,
+                warning: "session state was not carried:",
+            },
+            Case {
+                half: "memory",
+                marker: "# cf-carry:pack",
+                bytes: claude_state::MEMORY_TOTAL_MAX_BYTES
+                    + claude_state::PACK_OVERHEAD_ALLOWANCE_BYTES
+                    + 1,
+                warning: "project memory was not carried:",
+            },
+        ];
+        for c in cases {
+            let f = fixture();
+            with_claude_state(&f);
+            let archive = if c.half == "session" {
+                format!("{SRC_DIR}/state.tgz")
+            } else {
+                format!("{SRC_DIR}/memory.tgz")
+            };
+            f.fake.on_host(
+                "alpha",
+                Match::script_contains(c.marker),
+                Reply::ok(&out(&format!("{}\t{archive}\n", c.bytes))),
+            );
+            let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            let rep = run(&f, &hooks, false).await.unwrap_or_else(|e| {
+                panic!("{}: the move must still succeed: {}", c.half, e.message)
+            });
+            let warned: Vec<&String> = rep
+                .warnings
+                .iter()
+                .filter(|w| w.starts_with(c.warning))
+                .collect();
+            assert_eq!(warned.len(), 1, "{}: {:?}", c.half, rep.warnings);
+            assert!(
+                warned[0].contains("over the") && warned[0].contains("nothing was relayed"),
+                "{}: {}",
+                c.half,
+                warned[0]
+            );
+            // The git bundle is relayed earlier in the same move, so chunk
+            // scripts do go out — none of them may name THIS archive.
+            let quoted = quote(&archive);
+            assert!(
+                scripts_with(&f, "alpha", "# cf-carry:chunk")
+                    .iter()
+                    .all(|s| !s.contains(&quoted)),
+                "{}: {archive} must never be downloaded",
+                c.half
+            );
+        }
     }
 
     /// The cap is the setting, in MiB: over it, the largest files stay behind
@@ -4063,6 +4324,59 @@ mod tests {
                 bytes: 10240
             }]
         );
+    }
+
+    /// (E.1) The half's stated central invariant: every `Err` carries the
+    /// best report built so far, `left_behind` above all. With the cap
+    /// forcing an exclusion AND the pack then failing, the over-cap file
+    /// must still be reported as left behind — otherwise the warning says
+    /// "not carried" and the report silently forgets what was dropped and
+    /// why.
+    #[tokio::test]
+    async fn a_pack_failure_still_reports_what_the_cap_left_behind() {
+        const BIG: u64 = 2 * 1024 * 1024;
+        let f = fixture();
+        with_claude_state(&f);
+        f.store
+            .lock()
+            .unwrap()
+            .set_setting(claude_state::SETTING_MAX_SESSION_STATE_MB, "1")
+            .unwrap();
+        f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:state-list"),
+                records_out(&[
+                    format!("{BIG}\tsubagents/big.jsonl"),
+                    "10240\tcustom-title.json".into(),
+                ]),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-carry:state-pack"),
+                Reply::fail(5, &format!("{} tar", carry::FAILED)),
+            );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false)
+            .await
+            .expect("the move still succeeds");
+        let warned: Vec<&String> = rep
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("session state was not carried:"))
+            .collect();
+        assert_eq!(warned.len(), 1, "{:?}", rep.warnings);
+        assert_eq!(
+            rep.carried.session_state.left_behind,
+            vec![carry::LeftBehind {
+                path: "subagents/big.jsonl".into(),
+                bytes: Some(BIG),
+                reason: carry::LeftReason::OverCap,
+            }],
+            "the over-cap file is still reported although the pack failed"
+        );
+        assert!(rep.carried.session_state.carried.is_empty());
+        assert!(rep.carried.session_state.kept_target.is_empty());
     }
 
     /// The relay loop itself: a payload larger than one chunk is pulled in

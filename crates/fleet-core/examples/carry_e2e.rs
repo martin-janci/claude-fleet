@@ -553,11 +553,7 @@ fn check_memory(c: &mut Ctx, root: &str, tgt_dir: &str, wts: &str, id: &str) -> 
     if !uploaded {
         return project_dir;
     }
-    let o = c.remote(&carry::extract_keep_existing_script(
-        &target.dir,
-        &staged,
-        true,
-    ));
+    let o = c.remote(&claude_state::memory_extract_script(&target.dir, &staged));
     c.check(
         "memory: extract (keep-existing — target's own differs.md must survive)",
         o.status.success(),
