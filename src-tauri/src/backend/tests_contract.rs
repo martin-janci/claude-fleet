@@ -410,6 +410,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             result: Some("r".into()),
             output_file: Some("/private/tmp/x/tasks/a6.output".into()),
             event: Some("e".into()),
+            at: Some("2026-09-18T10:12:00Z".into()),
         }),
     );
     put(

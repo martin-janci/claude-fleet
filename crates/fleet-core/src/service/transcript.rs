@@ -422,6 +422,11 @@ pub enum ConvItem {
         /// Monitor's streamed line.
         #[serde(default)]
         event: Option<String>,
+        /// ISO timestamp of the notification's own entry. Coalesced
+        /// notifications share a turn, so the turn's `at` is the first
+        /// one's — a joined block must take its finish time from here.
+        #[serde(default)]
+        at: Option<String>,
     },
     /// `[Request interrupted by user]` (`during_tool`: "… for tool use").
     Interrupt {
@@ -695,6 +700,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 .map(|r| cap_chars(&r, NOTIFICATION_RESULT_MAX_CHARS)),
                             output_file: tag_text(&text, "output-file"),
                             event: tag_text(&text, "event"),
+                            at: at(),
                         };
                         // Notifications that arrive back to back, with no
                         // assistant output between them, share one turn: three
@@ -904,6 +910,7 @@ fn join_notifications(turns: &mut [ConvTurn]) {
                 tool_use_id,
                 status,
                 result,
+                at,
                 ..
             } = item
             else {
@@ -919,12 +926,12 @@ fn join_notifications(turns: &mut [ConvTurn]) {
             else {
                 continue;
             };
-            updates.push((
-                target,
-                result.clone(),
-                status != "completed",
-                turn.at.clone(),
-            ));
+            // Coalesced notifications share a turn, whose `at` is the
+            // first one's — take the finish time from the notification's
+            // own timestamp, falling back to the turn's for a hub that
+            // predates the field.
+            let ended = at.clone().or_else(|| turn.at.clone());
+            updates.push((target, result.clone(), status != "completed", ended));
         }
     }
     for ((ti, ii), report, failed, ended) in updates {
@@ -2034,6 +2041,7 @@ mod tests {
                 result: Some("Mám naštudované všetky zdroje.".into()),
                 output_file: Some("/private/tmp/x/tasks/a6.output".into()),
                 event: None,
+                at: Some("2026-09-18T10:01:00Z".into()),
             }]
         );
     }
@@ -2348,6 +2356,50 @@ mod tests {
         };
         assert_eq!(result.as_deref(), Some("second pass"));
         assert_eq!(ended_at.as_deref(), Some("2026-09-18T10:20:00Z"));
+    }
+
+    #[test]
+    fn coalesced_notifications_each_close_their_own_call_at_their_own_time() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Agent",
+                serde_json::json!({"description":"first","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            tool_use(
+                "2026-09-18T10:00:02Z",
+                "toolu_2",
+                "Agent",
+                serde_json::json!({"description":"second","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            task_notification(
+                "2026-09-18T10:10:00Z",
+                "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n\
+                 <summary>first finished</summary>\n</task-notification>",
+            ),
+            task_notification(
+                "2026-09-18T10:25:00Z",
+                "<task-notification>\n<tool-use-id>toolu_2</tool-use-id>\n<status>completed</status>\n\
+                 <summary>second finished</summary>\n</task-notification>",
+            ),
+        ]));
+        // Both notifications share one coalesced turn.
+        assert_eq!(t[1].items.len(), 2, "the two notifications coalesce");
+        let ends: Vec<Option<&str>> = t[0]
+            .items
+            .iter()
+            .map(|i| match i {
+                ConvItem::Subagent { ended_at, .. } => ended_at.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            vec![Some("2026-09-18T10:10:00Z"), Some("2026-09-18T10:25:00Z")],
+            "each block takes its own notification's time, not the turn's"
+        );
     }
 
     /// A `Tool` item with only `summary`/`error` set, for synthetic
