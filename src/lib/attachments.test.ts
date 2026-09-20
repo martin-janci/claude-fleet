@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { addFiles, droppedFile, pastedName, fmtBytes, MAX_FILES, MAX_BYTES } from './attachments';
+import { addFiles, pastedName, fmtBytes, MAX_FILES, MAX_BYTES } from './attachments';
 
 const file = (o: Partial<{ path: string; name: string; size: number; kind: 'image' | 'text' | 'binary' }> = {}) => ({
   path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' as const, ...o,
@@ -85,21 +85,11 @@ describe('fmtBytes', () => {
   });
 });
 
-describe('droppedFile', () => {
-  it('names and classifies a dropped path the way Rust’s classify does', () => {
-    expect(droppedFile('/Users/me/shots/screen.PNG')).toMatchObject({ name: 'screen.PNG', kind: 'image' });
-    expect(droppedFile('/tmp/build.log')).toMatchObject({ name: 'build.log', kind: 'text' });
-    expect(droppedFile('/tmp/archive.zip')).toMatchObject({ name: 'archive.zip', kind: 'binary' });
-    expect(droppedFile('/tmp/Makefile')).toMatchObject({ name: 'Makefile', kind: 'binary' });
-    expect(droppedFile('C:\\Users\\me\\a.svg')).toMatchObject({ name: 'a.svg', kind: 'image' });
-  });
-
-  it('reports an unmeasured size as 0, because the drop event carries no size', () => {
-    expect(droppedFile('/tmp/a.png').size).toBe(0);
-    expect(droppedFile('/tmp/a.png').path).toBe('/tmp/a.png');
-  });
-
-  it('keeps the path verbatim — it is the key the Rust allow-list matches on', () => {
-    expect(droppedFile('/tmp/a b.png').path).toBe('/tmp/a b.png');
-  });
-});
+// `droppedFile` (a client-side `size: 0` placeholder guessed from the
+// extension) is gone — a dropped path is now measured by the Rust
+// `attachment_describe` command, the same way a picked one is measured by
+// `pick_attachments`. Once that real `PickedFile` reaches `addFiles`, it is
+// indistinguishable from a picked one, so there is nothing drop-specific
+// left to unit-test here; the integration is covered in
+// ConversationPanel.test.ts, where an oversized *dropped* file is shown to
+// be rejected by the same `addFiles` limit a picked one hits.

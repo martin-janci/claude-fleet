@@ -52,39 +52,16 @@ export function pastedName(now: Date): string {
   return `pasted-${p(now.getHours())}.${p(now.getMinutes())}.${p(now.getSeconds())}.png`;
 }
 
-/**
- * Describe a file an OS drop authorised, from its path alone.
- *
- * Tauri's drag-drop event — the same one `lib.rs` listens to in order to put
- * these paths on the Rust allow-list — carries paths and nothing else. There
- * is no `stat`: `pick_attachments` does that in Rust for the picker, and the
- * drop has no equivalent command. So `size` is **0 meaning unmeasured**, and
- * the byte budgets in {@link addFiles} cannot bite on a dropped file until
- * something measures it; the composer shows no size for one rather than
- * claiming "0 B".
- *
- * `kind` mirrors `classify` in `src-tauri/src/commands/upload.rs` — the same
- * extension lists, the same binary fallback. Both separators are handled
- * because the event's paths are the OS's own.
- */
-export function droppedFile(path: string): PickedFile {
-  const name = path.split(/[\\/]/).pop() ?? path;
-  const dot = name.lastIndexOf('.');
-  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
-  return { path, name, size: 0, kind: kindForExt(ext) };
-}
-
-const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'];
-const TEXT_EXT = [
-  'txt', 'md', 'log', 'json', 'yaml', 'yml', 'toml', 'csv', 'diff', 'patch',
-  'rs', 'ts', 'js', 'svelte', 'py', 'sh',
-];
-
-function kindForExt(ext: string): AttachKind {
-  if (IMAGE_EXT.includes(ext)) return 'image';
-  if (TEXT_EXT.includes(ext)) return 'text';
-  return 'binary';
-}
+// A dropped file used to be described client-side, from its path alone —
+// `droppedFile(path)`, a `size: 0` placeholder with `kind` guessed from the
+// extension. That let a dropped attachment sail past `MAX_BYTES`/`MAX_TOTAL`
+// below, which enforce on `size` and see 0 for every drop. Real measurement
+// now comes from the Rust `attachment_describe` command (the allow-list gate
+// runs first, then `stat`, then `classify` — see
+// `src-tauri/src/commands/upload.rs`), so a dropped file goes through
+// `addFiles` with the same real `size`/`kind` a picked file gets. If
+// describing a drop fails, the composer surfaces that as an error rather
+// than falling back to an unmeasured placeholder.
 
 let seq = 0;
 

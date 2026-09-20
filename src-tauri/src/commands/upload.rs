@@ -284,6 +284,21 @@ pub fn attachment_preview(
     preview_for(&allow, &path)
 }
 
+/// Measure already-allow-listed paths — the sibling of `attachment_preview`
+/// that gives a dropped file its real size and kind. See [`describe_for`]
+/// for the ordering this depends on: it authorises nothing, so it is safe to
+/// add without widening SEC-9's threat model.
+#[tauri::command]
+pub fn attachment_describe(
+    paths: Vec<String>,
+    backend: State<'_, Arc<FleetBackend>>,
+    allow: State<'_, Arc<UploadAllowList>>,
+) -> Result<Vec<PickedFile>, IpcError> {
+    // The files are on THIS machine; a hub client has nothing local to measure.
+    backend.refuse_local_only("attachment_describe")?;
+    describe_for(&allow, &paths)
+}
+
 /// Open the OS file picker and authorise whatever the user chooses. The
 /// picker runs HERE, not in the webview, so the webview still never gets to
 /// name a path (SEC-9).
@@ -344,6 +359,60 @@ pub fn check_paths_allowed(allow: &UploadAllowList, paths: &[String]) -> Result<
         }
     }
     Ok(())
+}
+
+/// The measuring sibling of [`preview_for`]: a dropped path arrives with no
+/// size (Tauri's drag-drop event carries paths only, unlike the OS picker,
+/// which `pick_attachments` stats itself), so this is what gives it a real
+/// one — the same `size`/`kind` a picked file already carries — before
+/// `addFiles` on the frontend can enforce `MAX_BYTES`/`MAX_TOTAL` against it.
+///
+/// The allow-list check runs FIRST, unconditionally, before any filesystem
+/// access — the same ordering `preview_for` uses and that its review
+/// verified. A `stat` before that gate would let the webview probe for the
+/// existence of an arbitrary path, which is exactly what the allow-list
+/// exists to prevent.
+///
+/// This authorises nothing: every path here is already on the allow-list,
+/// put there by the Tauri drag-drop handler in `lib.rs` before the webview
+/// ever saw the event. It only measures what is already there.
+///
+/// A path that fails `check_paths_allowed` fails the whole batch (SEC-9:
+/// nothing here should ever encourage assembling a batch of one allowed path
+/// to smuggle a probe for a second, unrelated one). Once past the gate, a
+/// single bad entry — gone, unreadable, or a newline in its basename — is
+/// left out rather than failing every other file in the batch, the same
+/// shape `record_picked` uses.
+pub fn describe_for(
+    allow: &UploadAllowList,
+    paths: &[String],
+) -> Result<Vec<PickedFile>, IpcError> {
+    check_paths_allowed(allow, paths)?;
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let path = Path::new(p);
+        // Gone or unreadable between the drop and this call: leave it out
+        // rather than failing every other file in the batch.
+        let Ok(meta) = std::fs::metadata(path) else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        // A newline in a basename would travel into the prompt text.
+        if name.contains(['\n', '\r']) {
+            continue;
+        }
+        out.push(PickedFile {
+            path: p.clone(),
+            name,
+            size: meta.len(),
+            kind: classify(path),
+        });
+    }
+    Ok(out)
 }
 
 /// Basenames of `paths`, in order — not yet collision-free (see
@@ -832,5 +901,83 @@ mod tests {
         assert!(preview_for(&allow, big.to_str().unwrap())
             .unwrap()
             .is_none());
+    }
+
+    // ── attachment_describe / describe_for ──────────────────────────────────
+    // The measuring sibling of `preview_for`: a dropped path arrives with no
+    // size (Tauri's drag-drop event carries paths only), so this is what
+    // gives it a real one before `addFiles` can enforce MAX_BYTES/MAX_TOTAL.
+
+    #[test]
+    fn describes_an_allow_listed_path_with_its_real_size_and_kind() {
+        let allow = UploadAllowList::new();
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
+        allow.allow(std::slice::from_ref(&png));
+
+        let described = describe_for(&allow, &[png.to_string_lossy().into_owned()]).unwrap();
+
+        assert_eq!(described.len(), 1);
+        assert_eq!(described[0].name, "shot.png");
+        assert_eq!(described[0].kind, AttachKind::Image);
+        assert_eq!(described[0].size, 8);
+    }
+
+    #[test]
+    fn an_unallowed_path_is_refused_and_never_touches_the_filesystem() {
+        let allow = UploadAllowList::new();
+        // Never written to disk: if the gate ran AFTER a stat, this would
+        // fail with something other than E_FORBIDDEN (a missing-file error),
+        // not the fixed sentence the allow-list gate returns.
+        let err = describe_for(
+            &allow,
+            &["/nonexistent/should-not-be-stated.png".to_string()],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN);
+    }
+
+    #[test]
+    fn a_batch_with_one_unreadable_file_still_describes_the_rest() {
+        let allow = UploadAllowList::new();
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("notes.txt");
+        std::fs::write(&good, b"hello").unwrap();
+        // Allow-listed but never actually written to disk: gone, or
+        // unreadable, between the drop and this call.
+        let gone = dir.path().join("gone.png");
+        allow.allow(&[good.clone(), gone.clone()]);
+
+        let described = describe_for(
+            &allow,
+            &[
+                good.to_string_lossy().into_owned(),
+                gone.to_string_lossy().into_owned(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            described.len(),
+            1,
+            "the missing file is left out, not fatal"
+        );
+        assert_eq!(described[0].name, "notes.txt");
+    }
+
+    #[test]
+    fn describing_authorises_nothing_and_consumes_nothing() {
+        let allow = UploadAllowList::new();
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
+        allow.allow(std::slice::from_ref(&png));
+
+        let _ = describe_for(&allow, &[png.to_string_lossy().into_owned()]).unwrap();
+
+        // Still allowed afterward: describing only reads, it does not
+        // consume the one-shot authorisation the way an upload does.
+        assert!(allow.is_allowed(&png));
     }
 }

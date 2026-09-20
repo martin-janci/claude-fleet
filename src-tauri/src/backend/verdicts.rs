@@ -371,6 +371,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "attachment_describe",
+        Verdict::LocalOnly {
+            instead: "the file is on this machine and a hub client has nothing local to \
+                      measure; drop it on a standalone app instead",
+        },
+    ),
+    (
         "upload_attachments",
         Verdict::LocalOnly {
             instead: "the bytes are on this machine and the session's host is the hub's to \

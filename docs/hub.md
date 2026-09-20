@@ -967,7 +967,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 126 commands, 36 route to a hub tool, 1 routes except for one argument shape, 75 refuse, and 14 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 127 commands, 36 route to a hub tool, 1 routes except for one argument shape, 76 refuse, and 14 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -975,6 +975,7 @@ Of the 126 commands, 36 route to a hub tool, 1 routes except for one argument sh
 | `add_project` | it clones or adopts a checkout using this machine's SSH and GitHub credentials; add the project on the hub, then it appears here |
 | `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `assets_scan_hosts` | the hub has this as its scan_assets tool, but its result feeds an inventory panel built on the catalog checkout, which only the machine that owns the fleet has; call scan_assets on the hub, or scan from that machine |
+| `attachment_describe` | the file is on this machine and a hub client has nothing local to measure; drop it on a standalone app instead |
 | `attachment_preview` | the file is on this machine and a hub client has nothing local to preview; open it from a standalone app instead |
 | `catalog_add_resource` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_apply_sync` | the hub's apply_sync is master-only: a paired client is never the fleet's administrator, and a sync writes to every host over SSH; run the sync on the hub |

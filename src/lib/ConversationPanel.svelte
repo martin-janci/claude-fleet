@@ -79,7 +79,7 @@
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { invokeCmd } from './result';
-  import { addFiles, droppedFile, pastedName, fmtBytes, type Attachment, type PickedFile } from './attachments';
+  import { addFiles, pastedName, fmtBytes, type Attachment, type PickedFile } from './attachments';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pointInRect } from './geometry';
   import Markdown from './MarkdownView.svelte';
@@ -1044,12 +1044,28 @@
     return pointInRect(px, py, shellEl.getBoundingClientRect());
   }
 
+  /**
+   * Measures dropped paths in Rust (`attachment_describe`) before attaching
+   * them — Tauri's drag-drop event carries paths only, with no size, so
+   * without this round trip a dropped file would sail past `addFiles`'s
+   * `MAX_BYTES`/`MAX_TOTAL` the way a picked one never can. A failure (an
+   * expired allow-list entry, most likely) is shown the same way a failed
+   * pick is, rather than falling back to an unmeasured attachment.
+   */
+  async function describeDroppedPaths(paths: string[]) {
+    const r = await invokeCmd<PickedFile[]>('attachment_describe', { paths });
+    if (r.ok) await attach(r.value ?? []);
+    else attachErrors = [r.error.message];
+  }
+
   function onDroppedPaths(paths: string[]) {
     // The same refusal the attach button carries: nothing here could upload.
     if (attachBlocked !== null || paths.length === 0) return;
     // These paths are already on the Rust allow-list — `lib.rs` recorded them
     // from this very event before the webview heard about it.
-    void attach(paths.filter((p) => p !== '').map(droppedFile));
+    const real = paths.filter((p) => p !== '');
+    if (real.length === 0) return;
+    void describeDroppedPaths(real);
   }
 
   /**

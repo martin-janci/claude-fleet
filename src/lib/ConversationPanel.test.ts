@@ -2821,10 +2821,17 @@ describe('ConversationPanel attachments', () => {
   // The DOM event cannot carry a filesystem path in a WKWebView; Tauri's
   // drag-drop event can, and it is the same event lib.rs listens to in order
   // to authorise those paths. So this is the one that must attach.
-  it('a drop inside the shell attaches the event’s paths; a drop outside it does nothing', async () => {
+  it('a drop inside the shell describes and attaches the event’s paths; a drop outside it does nothing', async () => {
     await renderPanel();
     placeShell();
     mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'attachment_describe')
+        return (args?.paths as string[]).map((path) => ({
+          path,
+          name: path.split('/').pop(),
+          size: 1024,
+          kind: 'image',
+        }));
       if (cmd === 'attachment_preview') return null;
       return baseInvoke(cmd, args);
     });
@@ -2832,13 +2839,43 @@ describe('ConversationPanel attachments', () => {
     dragDrop?.({ payload: { type: 'drop', position: { x: 10, y: 10 }, paths: ['/tmp/outside.png'] } });
     for (let i = 0; i < 3; i++) await settle();
     expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());
 
     dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/inside.png'] } });
     for (let i = 0; i < 4; i++) await settle();
     const tiles = screen.getAllByTestId('conv-attachment');
     expect(tiles).toHaveLength(1);
     expect(tiles[0].getAttribute('title')).toContain('inside.png');
+    expect(mockedInvoke).toHaveBeenCalledWith('attachment_describe', { paths: ['/tmp/inside.png'] });
     expect(mockedInvoke).toHaveBeenCalledWith('attachment_preview', { path: '/tmp/inside.png' });
+  });
+
+  // The hole Task 6b closes: a dropped file used to arrive with a client-side
+  // `size: 0` placeholder, which `addFiles`'s MAX_BYTES/MAX_TOTAL checks
+  // cannot enforce against. `attachment_describe` gives it a real size, so it
+  // hits the exact same limit — and the exact same message — a picked file
+  // over that size would.
+  it('an oversized dropped file is rejected with the same message an oversized picked file gets', async () => {
+    await renderPanel();
+    placeShell();
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'attachment_describe')
+        return (args?.paths as string[]).map((path) => ({
+          path,
+          name: 'big.png',
+          size: 11 * 1024 * 1024,
+          kind: 'image',
+        }));
+      if (cmd === 'attachment_preview') return null;
+      return baseInvoke(cmd, args);
+    });
+
+    dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/big.png'] } });
+    for (let i = 0; i < 4; i++) await settle();
+
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('big.png');
+    expect(screen.getByTestId('conv-attach-error').textContent).toContain('10 MB');
   });
 
   // A known past bug in this codebase (see the contract on `pointInRect` in
@@ -2851,6 +2888,13 @@ describe('ConversationPanel attachments', () => {
       await renderPanel();
       placeShell();
       mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'attachment_describe')
+          return (args?.paths as string[]).map((path) => ({
+            path,
+            name: path.split('/').pop(),
+            size: 1024,
+            kind: 'image',
+          }));
         if (cmd === 'attachment_preview') return null;
         return baseInvoke(cmd, args);
       });
@@ -2887,6 +2931,7 @@ describe('ConversationPanel attachments', () => {
     dragDrop?.({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/a.png'] } });
     for (let i = 0; i < 3; i++) await settle();
     expect(screen.queryByTestId('conv-attachments')).toBeNull();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());
     expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_preview', expect.anything());
   });
 
