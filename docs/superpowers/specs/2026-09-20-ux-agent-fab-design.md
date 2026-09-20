@@ -76,11 +76,23 @@ vocabulary every filter in the app must then respect.
 start. An unopened agent costs nothing.
 
 **It may not act on itself.** A guard refuses `kill_session`,
-`safe_kill_session`, `move_session` and `restart_session` when the target is
-the operator, and excludes the operator from `broadcast_prompt`'s targets.
-Without the first, "tidy up the zombie sessions" ends the conversation saying
-it. Without the second, the agent prompts itself in a loop that the existing
-broadcast rate limiter makes slow enough to look mysterious.
+`safe_kill_session`, `move_session`, `rename_session` and `recreate_session`
+when the target is the operator, and excludes the operator from
+`broadcast_prompt`'s targets. Without the first, "tidy up the zombie
+sessions" ends the conversation saying it. Without the second, the agent
+prompts itself in a loop that the existing broadcast rate limiter makes slow
+enough to look mysterious.
+
+`restart_session` is the one exception, and deliberately so: it *is* the
+panel's `lost` recovery, so guarding it would make the agent refuse the one
+button that brings it back — and a restart destroys nothing (the row, the
+transcript and the conversation all survive). `rename_session` and
+`recreate_session` join the list because both reach the operator by a route
+the original four did not cover: a rename permanently destroys the
+`(host, tmux name)` identity the guard keys on, and `recreate_session` is
+addressed by `session_id` with `confirm: false`. The reasoning lives at
+`refuse_if_operator`, and a source-pinned table fails if any call site drops
+its guard.
 
 ## Components
 
@@ -212,8 +224,14 @@ guard rails, not the agent.**
   session, one token. The most valuable test here, because it runs on every
   press of the button.
 - `refuse_if_operator`, as a table: `kill_session`, `safe_kill_session`,
-  `move_session`, `restart_session` aimed at the operator return
-  `E_FORBIDDEN`; aimed elsewhere they pass.
+  `move_session`, `rename_session`, `recreate_session` aimed at the operator
+  return `E_FORBIDDEN`; aimed elsewhere they pass. Plus a source-pinned
+  table over the call SITES, because a guard that is only tested through its
+  own function passes just as well when nobody calls it — which is how
+  `restart_session` was found to have no guard at all.
+- `ensure_operator` is idempotent under CONCURRENT presses, not only
+  sequential ones: two overlapping calls leave one session, one token, and a
+  `.mcp.json` on the host holding the token the database vouches for.
 - `broadcast_prompt` never has the operator among its targets.
 - The confirmation invariant above, walking `TOOL_POLICIES` in the manner of
   `every_router_tool_has_exactly_one_policy_row`: every `confirm: true` tool's
