@@ -944,6 +944,34 @@ fn only_move_session_gets_the_long_call_timeout() {
     }
 }
 
+/// The table above says which duration each tool gets; this says the bound is
+/// real. A hub that accepts the request and then says nothing must still end
+/// the call — the timeout moved out of the transport into
+/// [`HubBackend::call_text`] (F1), and a timeout nobody applies is worse than
+/// none, because the window would wait forever.
+///
+/// `start_paused` (the `test-util` feature already in this crate's
+/// dev-dependencies) auto-advances the clock whenever every task is idle, so
+/// this reaches the 30 s deadline without waiting 30 s.
+#[tokio::test(start_paused = true)]
+async fn a_hub_that_accepts_the_request_and_then_says_nothing_still_ends_the_call() {
+    struct Silent;
+    #[async_trait::async_trait]
+    impl HubTransport for Silent {
+        async fn post_json(&self, _: &str, _: &str, _: String) -> Result<HubResponse, String> {
+            std::future::pending().await
+        }
+    }
+    let b = HubBackend::with_transport(cfg(), Arc::new(Silent));
+    let e = b
+        .list_sessions(false)
+        .await
+        .expect_err("a hub that never answers cannot produce rows");
+    assert_eq!(e.code, codes::E_HUB_UNREACHABLE);
+    assert!(e.message.contains("no answer within"), "{}", e.message);
+    assert!(!e.message.contains("cl_s3cret-token"), "{}", e.message);
+}
+
 // --- the raw HTTP transport --------------------------------------------------
 
 /// A hub address is http or https and nothing else. Anything else must be
