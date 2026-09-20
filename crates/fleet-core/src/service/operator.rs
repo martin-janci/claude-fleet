@@ -276,17 +276,29 @@ pub struct OperatorStatus {
 
 /// Why the agent can or cannot work right now.
 ///
-/// Checked in the order the panel needs it: whether the agent has ever been
-/// created comes first, because "press the button to create it" and "the
-/// control API is off" are different messages, and a fleet that has never
-/// seen the operator must say so regardless of its MCP settings. Only once
-/// a reference is on record does whether the control API is enabled matter
-/// — an agent with no tools is a chatbot, and the panel must say so rather
-/// than let it apologise. The control-API check is computed HERE, inside
-/// the authoritative backend, rather than from the desktop's `mcp_status` —
-/// that command is `LocalOnly`, and a hub's API is always on. Asking the
-/// backend that would actually serve the agent is the same question in both
-/// modes.
+/// The control-API check comes FIRST, before whether the operator has ever
+/// been created — not the other way round. The caller (the FAB) only calls
+/// `ensure_operator` in response to `"absent"`, and `ensure_operator` cannot
+/// do useful work without the control API: `configured_port` refuses
+/// (`E_PROVISION`) whenever the API has never been enabled, since enabling
+/// it is what mints the master token in the first place
+/// (`src-tauri/src/bootstrap/mcp.rs`). If `absent` were reported while the
+/// API is off, the button would call `ensure_operator` and get an opaque
+/// `E_PROVISION` back — the exact "panel that apologises" this design
+/// exists to avoid. Worse, a desktop where someone merely opened the
+/// control-API settings panel once already has a minted token
+/// (`src-tauri/src/commands/mcp.rs`) with the API still off; under
+/// absent-first `ensure_operator` would then SUCCEED, birthing a session
+/// whose `.mcp.json` points at a loopback port nothing is listening on — a
+/// toolless agent that looks healthy, which is worse than one that visibly
+/// cannot be created. Checking `enabled` first turns both of those into the
+/// same actionable `"no_mcp"` answer, and loses nothing: a fleet with the
+/// API on and no agent still reports `"absent"`, which is the only case
+/// that matters for the button. The control-API check is computed HERE,
+/// inside the authoritative backend, rather than from the desktop's
+/// `mcp_status` — that command is `LocalOnly`, and a hub's API is always
+/// on. Asking the backend that would actually serve the agent is the same
+/// question in both modes.
 pub fn operator_status(store: &Mutex<Store>) -> Result<OperatorStatus, IpcError> {
     let s = lock(store)?;
     let blocked = |why: &str, session: Option<SessionRow>| OperatorStatus {
@@ -295,12 +307,12 @@ pub fn operator_status(store: &Mutex<Store>) -> Result<OperatorStatus, IpcError>
         blocked: Some(why.to_string()),
     };
 
-    let Some(r) = operator_ref(&s) else {
-        return Ok(blocked("absent", None));
-    };
     if !crate::mcp::settings::McpSettings::read(&s)?.enabled {
         return Ok(blocked("no_mcp", None));
     }
+    let Some(r) = operator_ref(&s) else {
+        return Ok(blocked("absent", None));
+    };
     let row = s
         .get_session(&r.tmux_name, &r.host_alias)
         .map_err(|e| IpcError::new(codes::E_SQLITE, format!("find operator: {e}")))?;
@@ -728,6 +740,17 @@ mod tests {
     fn status_names_why_the_agent_cannot_work() {
         let (store, _ssh, _reg) = fixture();
 
+        // The control API has to be turned ON for "absent" to be the
+        // never-born answer: `operator_status` checks `enabled` FIRST (see
+        // its doc comment), so an API that has never been enabled reports
+        // "no_mcp" regardless of whether a reference exists. `fixture()`
+        // only sets a master token, not `mcp.enabled` — this is that
+        // missing setup, not a workaround for the function.
+        {
+            let s = store.lock().unwrap();
+            s.set_setting(crate::mcp::SETTING_ENABLED, "true").unwrap();
+        }
+
         // Never born.
         let st = operator_status(&store).unwrap();
         assert!(!st.ready);
@@ -736,9 +759,11 @@ mod tests {
 
         // Born, but the control API is off: an agent with no tools is a
         // chatbot, and the panel must say so rather than let it apologise.
+        // This wins even though a reference is already on record, because
+        // the enabled check runs before the reference is even looked up.
         {
             let s = store.lock().unwrap();
-            s.set_setting("mcp.enabled", "false").unwrap();
+            s.set_setting(crate::mcp::SETTING_ENABLED, "false").unwrap();
             set_operator_ref(
                 &s,
                 &OperatorRef {
@@ -752,5 +777,68 @@ mod tests {
             operator_status(&store).unwrap().blocked.as_deref(),
             Some("no_mcp")
         );
+
+        // Re-enable and give the reference a real session row, lost the way
+        // a host reboot or a killed pane leaves it — `lost_at` set, status
+        // `ghost`.
+        let session_id = {
+            let s = store.lock().unwrap();
+            s.set_setting(crate::mcp::SETTING_ENABLED, "true").unwrap();
+            let id = s
+                .upsert_session(
+                    OPERATOR_TMUX_NAME,
+                    OPERATOR_HOST,
+                    None,
+                    None,
+                    1,
+                    1,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            // `probe_started_at: 0` disables the staleness guard so a
+            // freshly-inserted row (no `last_reconciled_at` yet) is still
+            // eligible — see `store::reconcile::ghost_cutoff`.
+            s.mark_host_sessions_lost(OPERATOR_HOST, "test_lost", &[], 100, 0)
+                .unwrap();
+            id
+        };
+        let st = operator_status(&store).unwrap();
+        assert!(!st.ready);
+        assert_eq!(st.blocked.as_deref(), Some("lost"));
+        assert!(
+            st.session.as_ref().is_some_and(|s| s.lost_at.is_some()),
+            "the lost session's own row comes back, so the panel can show when"
+        );
+
+        // Revive it (the recreate flow's own `restore_session`, which is
+        // what a real recreate does) and mint a token, but revoke it
+        // straight away — a deliberate act that must not re-mint itself.
+        {
+            let s = store.lock().unwrap();
+            s.restore_session(session_id).unwrap();
+            let sha = "deadbeef-token-sha";
+            s.insert_client_token(OPERATOR_CLIENT_NAME, sha, "full")
+                .unwrap();
+            s.set_setting(SETTING_OPERATOR_TOKEN_SHA, sha).unwrap();
+            s.revoke_client_token(OPERATOR_CLIENT_NAME).unwrap();
+        }
+        let st = operator_status(&store).unwrap();
+        assert!(!st.ready);
+        assert_eq!(st.blocked.as_deref(), Some("token_revoked"));
+        assert!(st.session.is_some(), "the session itself is fine");
+
+        // Mint a live one under the same name and it is finally ready.
+        {
+            let s = store.lock().unwrap();
+            let sha = "a-live-token-sha";
+            s.insert_client_token(OPERATOR_CLIENT_NAME, sha, "full")
+                .unwrap();
+            s.set_setting(SETTING_OPERATOR_TOKEN_SHA, sha).unwrap();
+        }
+        let st = operator_status(&store).unwrap();
+        assert!(st.ready);
+        assert!(st.blocked.is_none());
+        assert!(st.session.is_some());
     }
 }
