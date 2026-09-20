@@ -186,19 +186,10 @@ pub fn run() {
                 std::sync::Arc::new(OsTokenStore::new(data_dir.clone()));
             let backend = Backend::resolve(&store, tokens.as_ref());
             app.manage(std::sync::Arc::clone(&tokens));
-            // Two managed values, one decision. `Backend` is the resolved
-            // answer (what this block branches on below); `FleetBackend` is
-            // what the commands hold — the same answer plus the `HubBackend`
-            // to call when it is remote. Built once here so that every
-            // command shares one client, and so that nothing can re-resolve
-            // the mode mid-run.
-            app.manage(std::sync::Arc::new(backend::FleetBackend::from_resolved(
-                &backend,
-            )));
-            app.manage(backend.clone());
             // Whether this window's live link to the hub is up — the
             // disconnected banner. Standalone it never moves off
-            // `Standalone`; a hub client's bridge reports into it.
+            // `Standalone`; a hub client's bridge reports into it. Built
+            // before the backend below, which reads it.
             let hub_link = std::sync::Arc::new(match backend.remote() {
                 Some(cfg) => backend::connection::HubConnectionStatus::remote(
                     std::sync::Arc::clone(&frontend_bus)
@@ -208,6 +199,22 @@ pub fn run() {
                 None => backend::connection::HubConnectionStatus::standalone(),
             });
             app.manage(std::sync::Arc::clone(&hub_link));
+            // Two managed values, one decision. `Backend` is the resolved
+            // answer (what this block branches on below); `FleetBackend` is
+            // what the commands hold — the same answer plus the `HubBackend`
+            // to call when it is remote. Built once here so that every
+            // command shares one client, and so that nothing can re-resolve
+            // the mode mid-run.
+            //
+            // `watching` hands it the status above rather than a copy: a hub
+            // whose wire contract this build cannot read is then refused at
+            // the call, not only ignored by the event bridge.
+            app.manage(std::sync::Arc::new(
+                backend::FleetBackend::from_resolved(&backend)
+                    .watching(std::sync::Arc::clone(&hub_link)
+                        as std::sync::Arc<dyn backend::connection::ConnectionView>),
+            ));
+            app.manage(backend.clone());
             // Which background tasks this process may run is decided in
             // `backend::startup`, not here, and the real spawns live in
             // `bootstrap::tasks`. Both moved out of this closure because

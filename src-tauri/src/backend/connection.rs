@@ -84,6 +84,25 @@ pub trait ConnectionReporter: Send + Sync {
     fn report(&self, state: HubConnection);
 }
 
+/// The reading half: where the connection stands, for the code that must
+/// *consult* it rather than report into it — [`super::remote::HubBackend`],
+/// which refuses to call a hub the bridge has already found to be speaking a
+/// wire contract this build does not read.
+///
+/// A trait for the same reason [`ConnectionReporter`] is one. The two halves
+/// are deliberately worn by ONE value ([`HubConnectionStatus`] implements
+/// both), so what the bridge reports is exactly what the gate reads; a second
+/// copy of "where the connection stands" is a copy that can drift.
+pub trait ConnectionView: Send + Sync {
+    fn current(&self) -> HubConnection;
+}
+
+impl ConnectionView for HubConnectionStatus {
+    fn current(&self) -> HubConnection {
+        HubConnectionStatus::current(self)
+    }
+}
+
 /// For a bridge nobody is watching — the tests that are about something else.
 pub struct NoReporter;
 

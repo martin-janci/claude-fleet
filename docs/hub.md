@@ -1057,13 +1057,23 @@ is behind and what to do — the hub is too old (update the hub) or this app
 predates the hub (update this app) — and, for as long as that connection
 lasts, the event bridge applies no row event from it and calls no resync (the
 backfill a fresh connection would otherwise do): stale-but-honest beats
-fresh-but-wrong for anything driven by the live stream. Routed reads
-(`list_sessions`, `list_hosts`, `session_conversations`, repo reads, the
-focus-refresh path) do not yet consult the connection state and still run
-against a skewed hub — see *Known limitations*. It keeps retrying on the same
-backoff rather than hammering a hub it cannot use, and re-checks the
+fresh-but-wrong for anything driven by the live stream. It keeps retrying on
+the same backoff rather than hammering a hub it cannot use, and re-checks the
 revision on every reconnect, so an upgrade on either side is picked up on
 its own without restarting the app.
+
+Every **call** to that hub is refused too, for as long as its revision is the
+last thing this window learned: the routed reads (`list_sessions`,
+`list_hosts`, `session_conversations`, the repo reads, the focus-refresh
+path) and the routed mutations alike, since a mutation's answer is a row the
+window merges like any other. They answer `E_HUB_CONTRACT` with the banner's
+own sentence — which side is behind and what to do — and nothing is sent, so
+there is nothing to read with a renamed field silently defaulted. A desktop
+that has not finished a handshake yet (`connecting`) still calls, or the
+startup lists would wait on `GET /events`; a stream that is merely down
+(`reconnecting`, `offline`) still calls too, and fails the way it always did.
+The first `ready` frame that classifies the hub back in range opens all of it
+again, with no restart.
 
 ### Parity or refusal
 
@@ -1101,11 +1111,6 @@ the missing parameters, route it then.
 - **The New session dialog cannot list a remote host's existing worktrees**
   on a hub client — `list_host_worktrees` is local-only and there is no
   hub-side scanning tool yet. It can still create a new one on any host.
-- **Routed reads are not gated on contract skew.** `list_sessions`,
-  `list_hosts`, `session_conversations`, repo reads and the focus-refresh path
-  do not consult the connection state, so they still run against a hub whose
-  wire contract is outside this build's range — only the event bridge (row
-  events, resync) is gated; see *Version skew*.
 - **Not yet run as an app.** At the time of writing this mode is verified by
   its test suites only: the desktop has not been launched against a real hub.
   The macOS keychain path (`token_store.rs`) compiles on every macOS CI run,

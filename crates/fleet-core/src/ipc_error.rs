@@ -229,6 +229,17 @@ pub mod codes {
     /// the reason, rather than quietly managing the hub's fleet itself. The
     /// fix is in Settings → Hub: pair again, or Disconnect.
     pub const E_HUB_UNAVAILABLE: &str = "E_HUB_UNAVAILABLE";
+    /// Remote (hub-client) mode: the hub's `/events` hello frame named a
+    /// wire-contract revision outside the range this build reads
+    /// (`MIN_HUB_CONTRACT..=MAX_HUB_CONTRACT`,
+    /// `src-tauri/src/backend/contract.rs`), so a renamed field in its
+    /// answers would arrive as a silent default rather than as an error. The
+    /// desktop refuses every call to that hub — read and mutation alike —
+    /// until one side is updated, and the event bridge applies no row event
+    /// from it either. The message names which side is behind, the same way
+    /// the banner does; `details` carries the hub's revision and the bound it
+    /// missed.
+    pub const E_HUB_CONTRACT: &str = "E_HUB_CONTRACT";
     /// Pairing: the hub URL is plain `http://` to a host that is not
     /// loopback, so the client token this pairing is about to mint — a
     /// credential for the whole fleet — would cross the network in the clear

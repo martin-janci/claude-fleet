@@ -13,7 +13,7 @@
 //! process anyway.
 
 use crate::app_events::AppHandleEventBus;
-use crate::backend::connection::{ConnectionReporter, HubConnectionStatus};
+use crate::backend::connection::{ConnectionReporter, ConnectionView, HubConnectionStatus};
 use crate::backend::events::{spawn_event_bridge, EventBridge, HubResync, HubSse, RealDelay};
 use crate::backend::remote::HubBackend;
 use crate::backend::startup::FleetTasks;
@@ -127,7 +127,14 @@ impl FleetTasks for RealFleetTasks {
             tracing::error!("[hub events] asked to bridge events with no hub configured");
             return;
         };
-        let hub = Arc::new(HubBackend::new(cfg.clone()));
+        // Watched like the commands' own client: the resync is a re-list of
+        // every row, so it must not run against a hub whose wire contract
+        // this build cannot read either. `pump` reports `Connected` before it
+        // asks for one, so the gate is open by the time it does.
+        let hub = Arc::new(
+            HubBackend::new(cfg.clone())
+                .watching(Arc::clone(&self.hub_link) as Arc<dyn ConnectionView>),
+        );
         let sink = Arc::clone(&self.frontend);
         let bridge = EventBridge::new(
             Arc::new(HubSse::new(cfg)),
