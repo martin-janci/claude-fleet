@@ -255,7 +255,7 @@ fn is_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn parse_err(what: &str, got: &str) -> IpcError {
+pub(super) fn parse_err(what: &str, got: &str) -> IpcError {
     IpcError::new(codes::E_PARSE, format!("unexpected {what} output: {got:?}"))
 }
 
@@ -292,7 +292,7 @@ pub fn payload(stdout: &[u8]) -> Option<&[u8]> {
     None
 }
 
-fn payload_str(stdout: &str) -> Option<&str> {
+pub(super) fn payload_str(stdout: &str) -> Option<&str> {
     std::str::from_utf8(payload(stdout.as_bytes())?).ok()
 }
 
@@ -300,13 +300,13 @@ fn payload_str(stdout: &str) -> Option<&str> {
 /// `..`, before it reaches a path (`$HOME/.cache/claude-fleet/transfer/$id`)
 /// or a ref name (`refs/fleet/transfer/$id`). Interpolated right after
 /// `id=...` in every script that builds one of those.
-fn id_guard() -> String {
+pub(super) fn id_guard() -> String {
     format!(r#"case "$id" in ''|*/*|*..*) printf '{FAILED} id\n' >&2; exit 5;; esac"#)
 }
 
 /// Guard for scripts that build `$HOME/.cache/claude-fleet/transfer/...`: an
 /// empty `$HOME` would otherwise silently resolve to a repo-relative path.
-fn home_guard() -> String {
+pub(super) fn home_guard() -> String {
     format!(r#"[ -n "$HOME" ] || {{ printf '{FAILED} HOME\n' >&2; exit 5; }}"#)
 }
 
@@ -946,7 +946,7 @@ pub(crate) mod tests {
     /// Run a generated script the way a host would, with an isolated `$HOME`
     /// (so `~/.cache/claude-fleet/transfer` lands in the temp dir) and no
     /// user/system git config.
-    fn bash(script: &str, home: &Path) -> Output {
+    pub(crate) fn bash(script: &str, home: &Path) -> Output {
         Command::new("bash")
             .args(["-c", script])
             .env("HOME", home)
@@ -956,7 +956,7 @@ pub(crate) mod tests {
             .expect("bash")
     }
 
-    fn git(dir: &Path, args: &[&str]) -> String {
+    pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .arg("-C")
             .arg(dir)

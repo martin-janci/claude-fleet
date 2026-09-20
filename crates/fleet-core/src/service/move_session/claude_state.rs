@@ -4,7 +4,11 @@
 //! the scripts. Both halves only ever ADD to the target.
 //! See `docs/superpowers/specs/2026-09-20-move-carry-claude-state-design.md`.
 
-use crate::service::move_session::carry::{payload, IgnoredEntry, LeftBehind, LeftReason};
+use crate::service::move_session::carry::{
+    home_guard, id_guard, payload, payload_str, IgnoredEntry, LeftBehind, LeftReason, FAILED,
+    OUT_MARKER,
+};
+use crate::shell::quote;
 
 /// `settings` key: largest per-session directory (MiB) a move carries.
 pub const SETTING_MAX_SESSION_STATE_MB: &str = "move.max_session_state_mb";
@@ -269,10 +273,568 @@ pub fn merge_index(
     }
 }
 
+/// Every regular file under `<project dir>/<id>/` as `<bytes>\t<path>\0`,
+/// the path relative to `<id>/`. Symlinks and special files are not listed —
+/// and the merge moves regular files only, so they never travel. No such
+/// directory is not an error. Streaming: a `find` failure is detected after
+/// the marker; callers check the exit status first.
+pub fn session_list_script(project_dir: &str, claude_id: &str) -> String {
+    format!(
+        r#"# cf-carry:state-list
+set +e
+d={d}
+id={id}
+{id_guard}
+cd -- "$d" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
+printf '\n{OUT_MARKER}\n'
+[ -d "./$id" ] || exit 0
+cd -- "./$id" || {{ printf '{FAILED} cd-id\n' >&2; exit 5; }}
+find . -type f -exec sh -c 'for f; do n=$(wc -c < "$f" | tr -d " "); printf "%s\t%s\0" "${{n:-0}}" "${{f#./}}"; done' _ {{}} +
+[ "$?" -eq 0 ] || {{ printf '{FAILED} find\n' >&2; exit 5; }}
+"#,
+        d = quote(project_dir),
+        id = quote(claude_id),
+        id_guard = id_guard(),
+    )
+}
+
+/// One tar of `./<id>` minus `excludes` (patterns relative to `<id>/`, each
+/// given in both member-name spellings so GNU and BSD tar agree).
+pub fn session_pack_script(project_dir: &str, claude_id: &str, excludes: &[String]) -> String {
+    let ex: Vec<String> = excludes
+        .iter()
+        .flat_map(|p| {
+            [
+                format!("--exclude=./{claude_id}/{p}"),
+                format!("--exclude={claude_id}/{p}"),
+            ]
+        })
+        .map(|a| quote(&a))
+        .collect();
+    format!(
+        r#"# cf-carry:state-pack
+set +e
+d={d}
+id={id}
+{id_guard}
+{home_guard}
+umask 077
+cd -- "$d" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
+dir="$HOME/.cache/claude-fleet/transfer/$id"
+mkdir -p -- "$dir" || {{ printf '{FAILED} mkdir\n' >&2; exit 5; }}
+COPYFILE_DISABLE=1 tar -czf "$dir/state.tgz" {ex} "./$id" >/dev/null 2>&1 || {{ printf '{FAILED} tar\n' >&2; exit 5; }}
+n=$(wc -c < "$dir/state.tgz" | tr -d ' ')
+[ -n "$n" ] || {{ printf '{FAILED} size\n' >&2; exit 5; }}
+printf '\n{OUT_MARKER}\n'
+printf '%s\t%s\n' "$n" "$dir/state.tgz"
+"#,
+        d = quote(project_dir),
+        id = quote(claude_id),
+        ex = ex.join(" "),
+        id_guard = id_guard(),
+        home_guard = home_guard(),
+    )
+}
+
+/// Extract into a staging dir inside the transfer dir — never in place —
+/// then move each staged REGULAR file into `<target project dir>/<id>/` iff
+/// the target has no such file or a strictly smaller one (these files are
+/// append-only: the larger copy is the newer one).
+pub fn session_merge_script(target_project_dir: &str, claude_id: &str, archive: &str) -> String {
+    format!(
+        r#"# cf-carry:state-merge
+set +e
+d={d}
+id={id}
+a={a}
+{id_guard}
+{home_guard}
+umask 077
+fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
+stage="$HOME/.cache/claude-fleet/transfer/$id/state-staging"
+rm -rf -- "$stage"
+mkdir -p -- "$stage" || fail mkdir
+tar -tzf "$a" >/dev/null 2>&1 || fail corrupt
+tar -xzf "$a" -C "$stage" >/dev/null 2>&1 || fail extract
+mkdir -p -- "$d/$id" || fail mkdir-target
+printf '\n{OUT_MARKER}\n'
+if cd -- "$stage/$id" 2>/dev/null; then
+  find . -type f -print0 | while IFS= read -r -d '' f; do
+    rel=${{f#./}}
+    dst="$d/$id/$rel"
+    s=$(wc -c < "$f" | tr -d ' ')
+    t=-1
+    if [ -f "$dst" ] && [ ! -L "$dst" ]; then t=$(wc -c < "$dst" | tr -d ' '); elif [ -e "$dst" ] || [ -L "$dst" ]; then t=999999999999; fi
+    if [ "${{t:--1}}" -lt "${{s:-0}}" ]; then
+      if mkdir -p -- "$(dirname -- "$dst")" && mv -f -- "$f" "$dst"; then printf 'carried\t%s\t%s\n' "$s" "$rel"; else printf 'failed\t%s\n' "$rel"; fi
+    else
+      printf 'kept\t%s\n' "$rel"
+    fi
+  done
+fi
+cd / 2>/dev/null
+rm -rf -- "$stage"
+exit 0
+"#,
+        d = quote(target_project_dir),
+        id = quote(claude_id),
+        a = quote(archive),
+        id_guard = id_guard(),
+        home_guard = home_guard(),
+    )
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergeResult {
+    pub carried: Vec<IgnoredEntry>,
+    pub kept: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// Lines after the marker: `carried\t<bytes>\t<path>`, `kept\t<path>`,
+/// `failed\t<path>`. `None` without the marker.
+pub fn parse_merge(stdout: &str) -> Option<MergeResult> {
+    let mut r = MergeResult::default();
+    for line in payload_str(stdout)?.lines() {
+        match line.split('\t').collect::<Vec<_>>().as_slice() {
+            ["carried", n, path] => r.carried.push(IgnoredEntry {
+                path: path.to_string(),
+                bytes: n.trim().parse().ok()?,
+            }),
+            ["kept", path] => r.kept.push(path.to_string()),
+            ["failed", path] => r.failed.push(path.to_string()),
+            _ => {}
+        }
+    }
+    Some(r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::move_session::carry::tests::{bash, require};
     use crate::service::move_session::carry::{LeftReason, OUT_MARKER};
+    use std::os::unix::fs::PermissionsExt;
+
+    const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    /// A source project dir whose NAME begins with `-`, like every real one.
+    fn source_project(root: &std::path::Path) -> std::path::PathBuf {
+        let p = root.join("-Users-me-r--claude-worktrees-feat");
+        for (rel, body) in [
+            ("subagents/agent-aa.jsonl", "aaaaaaaaaa\n".repeat(50)), // 550 B
+            ("subagents/agent-aa.meta.json", "{}".to_string()),
+            ("subagents/agent-bb.jsonl", "b\n".repeat(2000)), // 4000 B — the largest
+            ("tool-results/out1.txt", "tool output\n".to_string()),
+            ("workflows/w1/step.json", "{}".to_string()),
+            ("custom-title.json", "{\"title\":\"t\"}".to_string()),
+        ] {
+            let f = p.join(ID).join(rel);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, body).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::os::unix::fs::symlink("/etc/hosts", p.join(ID).join("link-out")).unwrap();
+        std::fs::write(p.join(format!("{ID}.jsonl")), "main transcript\n").unwrap(); // must NOT be listed or packed
+        p
+    }
+
+    const SESSION_RELS: [&str; 6] = [
+        "subagents/agent-aa.jsonl",
+        "subagents/agent-aa.meta.json",
+        "subagents/agent-bb.jsonl",
+        "tool-results/out1.txt",
+        "workflows/w1/step.json",
+        "custom-title.json",
+    ];
+
+    /// `(rel path, real size on disk)` for every fixture file under `<root>/<id>/`.
+    fn real_sizes(root: &std::path::Path, id: &str, rels: &[&str]) -> Vec<(String, u64)> {
+        let mut v: Vec<(String, u64)> = rels
+            .iter()
+            .map(|r| {
+                let bytes = std::fs::metadata(root.join(id).join(r)).unwrap().len();
+                (r.to_string(), bytes)
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn mode(p: &std::path::Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn session_state_is_listed_packed_staged_and_merged() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = source_project(tmp.path());
+
+        // --- list ---
+        let out = bash(&session_list_script(src.to_str().unwrap(), ID), &home);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let listed = parse_file_list(&out.stdout);
+        let mut got: Vec<(String, u64)> =
+            listed.iter().map(|f| (f.path.clone(), f.bytes)).collect();
+        got.sort();
+        assert_eq!(got, real_sizes(&src, ID, &SESSION_RELS));
+
+        // --- select (whole thing fits) ---
+        let sel = select_session_files(listed, u64::MAX);
+        assert!(sel.exclude.is_empty() && sel.left.is_empty() && sel.skip.is_none());
+        assert_eq!(sel.carry.len(), 6);
+
+        // --- pack ---
+        let out = bash(
+            &session_pack_script(src.to_str().unwrap(), ID, &sel.exclude),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (bytes, archive) =
+            crate::service::move_session::carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+                .unwrap();
+        let archive = std::path::PathBuf::from(archive);
+        assert_eq!(bytes, std::fs::metadata(&archive).unwrap().len());
+        assert_eq!(mode(&archive), 0o600, "archive itself is private");
+        let transfer_dir = home.join(".cache/claude-fleet/transfer").join(ID);
+        assert_eq!(mode(&transfer_dir), 0o700, "transfer dir is private");
+
+        // --- merge into a FRESH target project dir ---
+        let tgt = tmp.path().join("-Users-other--claude-worktrees-feat");
+        assert!(!tgt.exists(), "must start out absent");
+        let out = bash(
+            &session_merge_script(tgt.to_str().unwrap(), ID, archive.to_str().unwrap()),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let merged = parse_merge(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert_eq!(merged.carried.len(), 6, "{merged:?}");
+        assert!(merged.kept.is_empty() && merged.failed.is_empty());
+
+        for rel in SESSION_RELS {
+            let s = src.join(ID).join(rel);
+            let t = tgt.join(ID).join(rel);
+            assert_eq!(
+                std::fs::read(&s).unwrap(),
+                std::fs::read(&t).unwrap(),
+                "{rel}"
+            );
+            assert_eq!(mode(&t), 0o600, "{rel}");
+        }
+        for d in ["subagents", "tool-results", "workflows", "workflows/w1"] {
+            assert_eq!(mode(&tgt.join(ID).join(d)), 0o700, "{d}");
+        }
+        assert!(
+            std::fs::symlink_metadata(tgt.join(ID).join("link-out")).is_err(),
+            "the symlink never travels"
+        );
+        assert!(
+            !tgt.join(format!("{ID}.jsonl")).exists(),
+            "the sibling transcript is untouched by the merge"
+        );
+        assert!(
+            !home
+                .join(".cache/claude-fleet/transfer")
+                .join(ID)
+                .join("state-staging")
+                .exists(),
+            "staging dir is cleaned up"
+        );
+        let top: Vec<_> = std::fs::read_dir(&tgt)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(top, vec![std::ffi::OsString::from(ID)], "{top:?}");
+    }
+
+    #[test]
+    fn merge_keeps_an_equal_or_larger_target_copy_and_replaces_a_smaller_one() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = source_project(tmp.path());
+        let out = bash(&session_pack_script(src.to_str().unwrap(), ID, &[]), &home);
+        assert!(out.status.success());
+        let (_, archive) =
+            crate::service::move_session::carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+                .unwrap();
+
+        let tgt = tmp.path().join("-Users-other--claude-worktrees-feat");
+        let aa_smaller = "x\n".repeat(10); // smaller than the source's 550 B
+        let bb_bigger = "b\n".repeat(2500); // bigger than the source's 4000 B
+        let title_identical = "{\"title\":\"t\"}";
+        for (rel, body) in [
+            ("subagents/agent-aa.jsonl", aa_smaller.as_str()),
+            ("subagents/agent-bb.jsonl", bb_bigger.as_str()),
+            ("custom-title.json", title_identical),
+            ("subagents/agent-own.jsonl", "only-on-target\n"),
+        ] {
+            let f = tgt.join(ID).join(rel);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, body).unwrap();
+        }
+
+        let out = bash(
+            &session_merge_script(tgt.to_str().unwrap(), ID, &archive),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let merged = parse_merge(&String::from_utf8_lossy(&out.stdout)).unwrap();
+
+        // aa: smaller on target -> replaced by the source's copy.
+        assert_eq!(
+            std::fs::read(tgt.join(ID).join("subagents/agent-aa.jsonl")).unwrap(),
+            std::fs::read(src.join(ID).join("subagents/agent-aa.jsonl")).unwrap()
+        );
+        // bb and the identical title: never touched.
+        assert_eq!(
+            std::fs::read_to_string(tgt.join(ID).join("subagents/agent-bb.jsonl")).unwrap(),
+            bb_bigger
+        );
+        assert_eq!(
+            std::fs::read_to_string(tgt.join(ID).join("custom-title.json")).unwrap(),
+            title_identical
+        );
+        // a target-only file is untouched and never mentioned.
+        assert_eq!(
+            std::fs::read_to_string(tgt.join(ID).join("subagents/agent-own.jsonl")).unwrap(),
+            "only-on-target\n"
+        );
+
+        let mut carried: Vec<&str> = merged.carried.iter().map(|e| e.path.as_str()).collect();
+        carried.sort();
+        assert_eq!(
+            carried,
+            vec![
+                "subagents/agent-aa.jsonl",
+                "subagents/agent-aa.meta.json",
+                "tool-results/out1.txt",
+                "workflows/w1/step.json",
+            ]
+        );
+        let mut kept = merged.kept.clone();
+        kept.sort();
+        assert_eq!(kept, vec!["custom-title.json", "subagents/agent-bb.jsonl"]);
+        assert!(merged.failed.is_empty());
+        assert!(!merged
+            .carried
+            .iter()
+            .any(|e| e.path == "subagents/agent-own.jsonl"));
+    }
+
+    #[test]
+    fn excluded_files_do_not_travel_on_either_tar() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = source_project(tmp.path());
+        std::fs::write(src.join(ID).join("we ird.txt"), "x").unwrap();
+
+        let excludes = vec![
+            "subagents/agent-bb.jsonl".to_string(),
+            exclude_pattern("we ird.txt"),
+        ];
+        let out = bash(
+            &session_pack_script(src.to_str().unwrap(), ID, &excludes),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (_, archive) =
+            crate::service::move_session::carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+                .unwrap();
+
+        let listing = std::process::Command::new("tar")
+            .args(["-tzf", &archive])
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        let names = String::from_utf8_lossy(&listing.stdout);
+        assert!(
+            !names.contains("agent-bb.jsonl"),
+            "excluded (plain name): {names}"
+        );
+        assert!(
+            !names.contains("we ird.txt"),
+            "excluded (odd name): {names}"
+        );
+        for present in [
+            "agent-aa.jsonl",
+            "agent-aa.meta.json",
+            "out1.txt",
+            "step.json",
+            "custom-title.json",
+        ] {
+            assert!(names.contains(present), "missing {present}: {names}");
+        }
+    }
+
+    #[test]
+    fn a_source_without_a_session_directory_lists_nothing_and_succeeds() {
+        if !require(&["bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = tmp.path().join("-Users-me-r--claude-worktrees-empty");
+        std::fs::create_dir_all(&src).unwrap();
+        // no `<id>/` under it at all
+
+        let out = bash(&session_list_script(src.to_str().unwrap(), ID), &home);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            crate::service::move_session::carry::payload(&out.stdout).is_some(),
+            "marker must still be printed"
+        );
+        assert!(parse_file_list(&out.stdout).is_empty());
+    }
+
+    #[test]
+    fn session_scripts_refuse_a_bad_id_fail_cleanly_and_quote_everything() {
+        if !require(&["bash", "tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = source_project(tmp.path());
+        let tgt = tmp.path().join("-Users-other--claude-worktrees-feat");
+        std::fs::create_dir_all(&tgt).unwrap();
+
+        let other_dir = home.join(".cache/claude-fleet/transfer/other");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(other_dir.join("keep.txt"), "keep").unwrap();
+
+        for bad in ["", "a/b", ".."] {
+            for (name, script) in [
+                ("list", session_list_script(src.to_str().unwrap(), bad)),
+                ("pack", session_pack_script(src.to_str().unwrap(), bad, &[])),
+                (
+                    "merge",
+                    session_merge_script(tgt.to_str().unwrap(), bad, "/nonexistent.tgz"),
+                ),
+            ] {
+                let out = bash(&script, &home);
+                assert!(!out.status.success(), "{name} must refuse id {bad:?}");
+                assert!(
+                    String::from_utf8_lossy(&out.stderr).contains(FAILED),
+                    "{name} id {bad:?}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(other_dir.join("keep.txt")).unwrap(),
+                "keep",
+                "a sibling transfer dir must survive a bad id {bad:?}"
+            );
+        }
+
+        // A corrupt archive: merge must fail, without the marker, target untouched.
+        let corrupt = tmp.path().join("corrupt.tgz");
+        std::fs::write(&corrupt, b"not a tarball").unwrap();
+        let fresh_tgt = tmp.path().join("-Users-other--claude-worktrees-fresh");
+        let out = bash(
+            &session_merge_script(fresh_tgt.to_str().unwrap(), ID, corrupt.to_str().unwrap()),
+            &home,
+        );
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
+        assert!(
+            crate::service::move_session::carry::payload(&out.stdout).is_none(),
+            "no marker on failure"
+        );
+        assert!(!fresh_tgt.join(ID).exists(), "target untouched");
+
+        // Every interpolated value goes through `quote`; the raw payload never leaks.
+        let evil = "a b'$(touch /tmp/pwn)\n;x";
+        let q = quote(evil);
+        // `session_pack_script`'s excludes are re-quoted in two extra
+        // spellings (`--exclude=./<id>/<p>` and `--exclude=<id>/<p>`), each
+        // its own quoted argv word — account for those too.
+        let pack_ex1 = quote(&format!("--exclude=./{evil}/{evil}"));
+        let pack_ex2 = quote(&format!("--exclude={evil}/{evil}"));
+        for script in [
+            session_list_script(evil, evil),
+            session_pack_script(evil, evil, &[evil.to_string()]),
+            session_merge_script(evil, evil, evil),
+        ] {
+            assert!(script.contains(&q), "{script}");
+            let without = script
+                .replace(&q, "")
+                .replace(&pack_ex1, "")
+                .replace(&pack_ex2, "");
+            assert!(
+                !without.contains("touch /tmp/pwn"),
+                "raw value leaked: {script}"
+            );
+        }
+
+        // A login-shell banner (no trailing newline of its own) must not
+        // confuse marker detection in the list or merge scripts.
+        let banner = "printf 'Welcome'; ";
+        let out = bash(
+            &format!("{banner}{}", session_list_script(src.to_str().unwrap(), ID)),
+            &home,
+        );
+        assert!(out.status.success());
+        assert_eq!(parse_file_list(&out.stdout).len(), 6);
+
+        let out = bash(&session_pack_script(src.to_str().unwrap(), ID, &[]), &home);
+        assert!(out.status.success());
+        let (_, archive) =
+            crate::service::move_session::carry::parse_pack(&String::from_utf8_lossy(&out.stdout))
+                .unwrap();
+        let banner_tgt = tmp.path().join("-Users-other--claude-worktrees-banner");
+        let out = bash(
+            &format!(
+                "{banner}{}",
+                session_merge_script(banner_tgt.to_str().unwrap(), ID, &archive)
+            ),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let merged = parse_merge(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert_eq!(merged.carried.len(), 6);
+    }
 
     fn marked(body: &[u8]) -> Vec<u8> {
         let mut v = format!("banner\n\n{OUT_MARKER}\n").into_bytes();
