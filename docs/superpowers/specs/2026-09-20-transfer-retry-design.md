@@ -389,6 +389,17 @@ for before it is pointed anywhere.
   differs, work is silently lost. It is deliberately built from `git`'s own
   comparisons over a throwaway index rather than from parsed text, and the
   existing porcelain verification still runs over the adopted state.
+- **`Ours` cannot tell an earlier attempt's leftover from the target's own edit
+  to a file the snapshot also writes.** The paths are identical, so the
+  classification cannot separate them, and `clean_target`'s reset to `HEAD`
+  discards the target's version. This is the one way the cleanup can still
+  destroy work someone wanted. What stands against it: the flag is never
+  implied (a flagless `Ours` refuses and says to inspect first), the sheet names
+  every path before the second click, and a single path the snapshot does NOT
+  write makes the whole target `Theirs` and refuses outright.
+- **A retried apply that fails after a cleanup leaves the target cleaned but not
+  replayed.** The source is untouched and the message says so, so this is
+  disclosed rather than hidden; recovering is another retry.
 - **`finalise_source` extraction touches the most delicate part of the move**
   (the kill and the events). The extraction is behaviour-preserving by
   construction: the move's existing tests for the kill, the usage carry and the
