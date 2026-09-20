@@ -279,17 +279,24 @@ implies nothing was written.
   confirm; a refusal from either is rendered in place, not as a toast.
 - The setup view is unchanged.
 
-### 6.4 Details panel
+The `sessionHistory` read happens inside `Timeline.svelte` (`Timeline.svelte:43`),
+not in `SessionDetails.svelte` — and `Timeline` also re-fetches on live timeline
+events. So `Timeline` gains an `onEvents` callback prop and hands its events up,
+rather than the panel making a second `sessionHistory` call (an extra hub round
+trip per panel open, and two sources of truth for freshness). Either way: no new
+IPC.
 
-On open, one `sessionHistory(sessionId)` read already happens for the timeline.
-A new pure helper in `timeline.ts` — `moveOrigin(events)` — returns
-`{ fromHost, claudeSessionId } | null` from the newest `session_moved` not
-followed by a later move, and `unresolvedPartial(events)` returns the partial
-that Finish/Undo apply to. Both are pure over the events the panel already
-has, so no new fetch.
+Two new pure helpers in `timeline.ts` read those events: `moveOrigin(events)`
+returns `{ fromHost, claudeSessionId } | null` from the newest `session_moved`,
+and `unresolvedPartial(events)` returns the partial that Finish/Undo apply to —
+`null` once a `session_moved` or `session_move_undone` follows it.
 
 The panel shows `Move back to {host}` and, for an unresolved partial,
-`Finish the move` / `Undo`, opening the same sheet.
+`Finish the move` / `Undo`. Both partial buttons open the **sheet**, which owns
+the confirmations and the refusal text, so there is exactly one place a
+destructive recovery can be triggered from. Because the app has usually been
+restarted since the partial, the sheet needs a run to show: `moves.ts` gains
+`adoptPartial(...)`, which rebuilds a `partial` run from the recorded event.
 
 ## 7. Generated files and surfaces
 
