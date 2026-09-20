@@ -4,6 +4,7 @@ import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
 import { hubStatus, STANDALONE, type HubStatus } from './lib/hub';
+import { hubConnection } from './lib/hub_connection';
 
 const remote: HubStatus = {
   remote: true,
@@ -47,6 +48,9 @@ beforeEach(() => {
   onboardingDismissed.set(true);
   clearToasts();
   hubStatus.set({ ...STANDALONE });
+  // Module-global like `hubStatus`: without this the banner a previous test
+  // left up is still up, and the next one asserts against its text.
+  hubConnection.set({ state: 'standalone' });
 });
 
 describe('the hub badge', () => {
@@ -152,6 +156,38 @@ describe('the disconnected banner', () => {
       const banner = await screen.findByTestId('hub-connection-banner');
       expect(banner.textContent).toContain('connection refused');
       expect(inv.mock.calls.some((c) => c[0] === 'hub_connection')).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  // The backend refuses every routed call while the hub's wire contract is
+  // outside this build's range (`E_HUB_CONTRACT`,
+  // `src-tauri/src/backend/remote.rs`), rather than deserialising its rows
+  // with silently defaulted fields. A read refused that way must not read as
+  // "this fleet has nothing in it": the banner says what is wrong, and the
+  // startup failure says which load did not happen and why.
+  it('a read refused for contract skew shows the reason, not an empty fleet', async () => {
+    const skew = { state: 'hub_too_old', hub_contract: 1, min_contract: 3 };
+    const { restore } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return remote;
+      if (cmd === 'hub_connection') return skew;
+      if (cmd === 'list_sessions') {
+        return Object.assign(new Error('contract'), {
+          code: 'E_HUB_CONTRACT',
+          message:
+            'list_sessions was not run: https://fleet.example.com’s wire contract is ' +
+            'revision 1, older than the 3 this app requires. Update the hub.',
+        });
+      }
+      return undefined;
+    });
+    try {
+      render(App);
+      const banner = await screen.findByTestId('hub-connection-banner');
+      expect(banner.textContent).toContain('Update the hub.');
+      const failed = await screen.findByTestId('bootstrap-error');
+      expect(failed.textContent).toContain('sessions: E_HUB_CONTRACT');
     } finally {
       restore();
     }
