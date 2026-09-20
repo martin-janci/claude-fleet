@@ -95,6 +95,10 @@ export function buildEntries(
     });
   }
   for (const p of projects) {
+    // A system project is fleet's own working directory, not one of yours —
+    // it labels the sessions above, but "New session in fleet/operator" is
+    // never an offer worth making. See `ProjectRow.system`.
+    if (p.project.system) continue;
     const name = `${p.project.owner}/${p.project.repo}`;
     out.push({
       kind: 'project',
@@ -189,7 +193,11 @@ export function contextProject(
   selected: SessionRow | null,
   projects: readonly ProjectTreeRow[],
 ): ProjectTreeRow | null {
-  const byId = new Map(projects.map((p) => [p.project.id, p]));
+  // System projects are excluded at every step: this function's answer is
+  // "where would a new session go", and the agent's own directory is not an
+  // answer to that — not even when the agent's session is the selected one.
+  const pickable = projects.filter((p) => !p.project.system);
+  const byId = new Map(pickable.map((p) => [p.project.id, p]));
   if (selected?.project_id != null) {
     const p = byId.get(selected.project_id);
     if (p) return p;
@@ -200,9 +208,9 @@ export function contextProject(
     if (p) return p;
   }
   const topProject = ranked.find((e) => e.kind === 'project');
-  if (topProject?.project) return topProject.project;
+  if (topProject?.project && !topProject.project.project.system) return topProject.project;
   return (
-    [...projects].sort(
+    [...pickable].sort(
       (a, b) => (b.project.last_session_at ?? 0) - (a.project.last_session_at ?? 0),
     )[0] ?? null
   );
