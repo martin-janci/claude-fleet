@@ -819,6 +819,50 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     assert!(s.list_tasks(None, None, None, 10).unwrap().is_empty());
 }
 
+/// F3: `dispatch_task` gates `requester_session_id` so an agent cannot file
+/// work as somebody else. `new_bg_session` takes the same field and must gate
+/// it the same way — the guard fires before any SSH is attempted.
+#[tokio::test]
+async fn a_background_session_cannot_name_a_requester_on_another_host() {
+    let (s, _pid, on_b) = two_host_store();
+    let t = test_tools(s);
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.new_bg_session(
+            Extension(a),
+            Parameters(crate::service::bg_sessions::NewBgSessionArgs {
+                host_alias: "hosta".into(),
+                name: "x".into(),
+                prompt: "p".into(),
+                requester_session_id: Some(on_b),
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+}
+
+/// `parent_session_id` has no foreign key, so an id that names nothing would
+/// otherwise be stored silently.
+#[tokio::test]
+async fn a_background_session_cannot_name_a_requester_that_does_not_exist() {
+    let (s, _pid, _on_b) = two_host_store();
+    let t = test_tools(s);
+    let err = t
+        .new_bg_session(
+            Extension(Caller::master()),
+            Parameters(crate::service::bg_sessions::NewBgSessionArgs {
+                host_alias: "hosta".into(),
+                name: "x".into(),
+                prompt: "p".into(),
+                requester_session_id: Some(9_999),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
+}
+
 /// `new_session`'s `kind`, `start_command` and `friendly_name` now thread
 /// through to `NewSessionArgs` instead of being hardcoded to `None` — Task 1
 /// (#146), so the hub tool can carry what the desktop's dialog sends. Proven

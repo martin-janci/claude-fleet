@@ -80,6 +80,7 @@
     type SlashCommand,
     type ActivityProbe,
     type BackgroundEntry,
+    type ConvGroup,
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
@@ -1537,6 +1538,11 @@
                     <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
                   {:else if g.kind === 'notification'}
                     {@const target = entryForNotification(g)}
+                    {#snippet noteBody(n: Extract<ConvGroup, { kind: 'notification' }>)}
+                      <span class="note-mark" aria-hidden="true">{notificationMark(n.status)}</span>
+                      <span class="note-label">{notificationLabel(n)}</span>
+                      {#if n.at}<time class="note-time" datetime={n.at}>{relativeTime(n.at, nowMs)}</time>{/if}
+                    {/snippet}
                     {#if target}
                       <button
                         type="button"
@@ -1545,15 +1551,11 @@
                         data-tone={notificationTone(g.status)}
                         onclick={() => openBackground(target)}
                       >
-                        <span class="note-mark" aria-hidden="true">{notificationMark(g.status)}</span>
-                        <span class="note-label">{notificationLabel(g)}</span>
-                        {#if g.at}<time class="note-time" datetime={g.at}>{relativeTime(g.at, nowMs)}</time>{/if}
+                        {@render noteBody(g)}
                       </button>
                     {:else}
                       <div class="notification" data-testid="conv-notification" data-tone={notificationTone(g.status)}>
-                        <span class="note-mark" aria-hidden="true">{notificationMark(g.status)}</span>
-                        <span class="note-label">{notificationLabel(g)}</span>
-                        {#if g.at}<time class="note-time" datetime={g.at}>{relativeTime(g.at, nowMs)}</time>{/if}
+                        {@render noteBody(g)}
                       </div>
                     {/if}
                   {:else if g.kind === 'subagent'}

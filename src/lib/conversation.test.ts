@@ -808,6 +808,11 @@ describe('transcriptBackground', () => {
     expect(of('failed')).toBe('failed');
     expect(of('killed')).toBe('failed');
     expect(of('stopped')).toBe('stopped');
+    // A status the parser has never seen is not evidence of a failure.
+    // `notificationTone` sends one to `info` and `notificationMark` to `✓`,
+    // so the switcher has to agree — otherwise the same report reads as a
+    // green tick in the thread and a red `failed` one click away.
+    expect(of('superseded')).toBe('done');
   });
 
   it('keeps every report of a resumed agent, newest state last', () => {

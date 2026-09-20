@@ -934,6 +934,10 @@ fn join_notifications(turns: &mut [ConvTurn]) {
             updates.push((target, result.clone(), status != "completed", ended));
         }
     }
+    // Applied in transcript order, so the newest report wins every field —
+    // `error` included. A notification arriving at all is proof the launch
+    // succeeded, so there is no launch-time error worth carrying forward: an
+    // agent that failed, was resumed and then finished is not a failure.
     for ((ti, ii), report, failed, ended) in updates {
         match turns[ti].items.get_mut(ii) {
             Some(ConvItem::Subagent {
@@ -946,7 +950,7 @@ fn join_notifications(turns: &mut [ConvTurn]) {
                 if report.is_some() {
                     *result = report;
                 }
-                *error |= failed;
+                *error = failed;
                 *done = true;
                 *ended_at = ended;
             }
@@ -958,7 +962,7 @@ fn join_notifications(turns: &mut [ConvTurn]) {
                 done,
                 ..
             }) => {
-                *error |= failed;
+                *error = failed;
                 *done = true;
                 *ended_at = ended;
             }
@@ -2356,6 +2360,67 @@ mod tests {
         };
         assert_eq!(result.as_deref(), Some("second pass"));
         assert_eq!(ended_at.as_deref(), Some("2026-09-18T10:20:00Z"));
+    }
+
+    #[test]
+    fn a_resumed_agent_that_recovers_is_no_longer_marked_failed() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Agent",
+                serde_json::json!({"description":"d","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            task_notification(
+                "2026-09-18T10:05:00Z",
+                "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n<status>failed</status>\n\
+                 <summary>s</summary>\n<result>boom</result>\n</task-notification>",
+            ),
+            asst("retrying"),
+            task_notification(
+                "2026-09-18T10:20:00Z",
+                "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n\
+                 <summary>s</summary>\n<result>fixed it</result>\n</task-notification>",
+            ),
+        ]));
+        let ConvItem::Subagent { result, error, .. } = &t[0].items[0] else {
+            panic!("expected a subagent, got {:?}", t[0].items[0]);
+        };
+        assert_eq!(result.as_deref(), Some("fixed it"));
+        assert!(
+            !*error,
+            "the newest report said completed, so the block is not a failure"
+        );
+    }
+
+    #[test]
+    fn a_resumed_agent_that_then_fails_is_marked_failed() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Agent",
+                serde_json::json!({"description":"d","subagent_type":"general-purpose","prompt":"p"}),
+            ),
+            task_notification(
+                "2026-09-18T10:05:00Z",
+                "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n\
+                 <summary>s</summary>\n<result>first pass</result>\n</task-notification>",
+            ),
+            asst("carry on"),
+            task_notification(
+                "2026-09-18T10:20:00Z",
+                "<task-notification>\n<tool-use-id>toolu_1</tool-use-id>\n<status>failed</status>\n\
+                 <summary>s</summary>\n<result>it broke</result>\n</task-notification>",
+            ),
+        ]));
+        let ConvItem::Subagent { result, error, .. } = &t[0].items[0] else {
+            panic!("expected a subagent, got {:?}", t[0].items[0]);
+        };
+        assert_eq!(result.as_deref(), Some("it broke"));
+        assert!(*error, "the newest report said failed");
     }
 
     #[test]

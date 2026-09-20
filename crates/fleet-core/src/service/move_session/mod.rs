@@ -3894,7 +3894,10 @@ mod tests {
         assert_eq!(git_done["to_host"], "beta");
         assert_eq!(git_done["index"], 4);
         assert_eq!(git_done["total"], 9);
-        assert_eq!(git_done["detail"], "2 commits");
+        // `dirty_unpushed_carry` carries two commits AND two dirty entries
+        // (` M src/lib.rs`, `?? notes.txt`). The detail names both: it used
+        // to say only "2 commits", hiding the files the move carried.
+        assert_eq!(git_done["detail"], "2 commits, 2 files");
 
         // And a failing move: every `failed` event says only which step.
         let (f, bus) = captured_fixture();
@@ -5754,7 +5757,11 @@ mod tests {
                 "{status}: {}",
                 err.message
             );
-            assert!(err.message.contains("not idle"), "{}", err.message);
+            // `moveErrors.ts` matches this exact substring to offer "wait for
+            // the turn to finish" instead of the raw sentence. Pin the whole
+            // phrase, not just "not idle", or a reword breaks the frontend
+            // silently.
+            assert!(err.message.contains("is not idle"), "{}", err.message);
             assert!(f.fake.calls().is_empty(), "{status}: no ssh at all");
         }
         assert!(require_source_idle(None)

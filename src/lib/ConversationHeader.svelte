@@ -598,6 +598,9 @@
     font-size: 0.72rem;
     color: var(--fg-muted);
   }
+  .bg-item-status[data-status='running'] {
+    color: var(--accent);
+  }
   .bg-item-status[data-status='failed'] {
     color: var(--usage-crit);
   }
