@@ -1114,9 +1114,13 @@ the missing parameters, route it then.
   the window regains focus.
 - **A hub older than this app cannot list a remote host's existing
   worktrees** for the New session dialog: `list_host_worktrees` is the hub
-  tool it asks for, and a hub that does not serve it yet answers
-  `E_HUB_PROTOCOL`. The dialog then says so and offers "+ new worktree" or
-  the project root, which works on any host either way.
+  tool it asks for. A hub that does not serve it refuses the call as
+  `E_FORBIDDEN` — the tool gates run before the router and fail closed on the
+  tool name, so a name that hub has no policy row for is "not a
+  client-callable tool" rather than "no such tool" — or, on a hub older than
+  that gate, as `E_HUB_PROTOCOL`. The dialog treats either as "this hub can't
+  list them", says so, and offers "+ new worktree" or the project root, which
+  works on any host either way.
 - **Not yet run as an app.** At the time of writing this mode is verified by
   its test suites only: the desktop has not been launched against a real hub.
   The macOS keychain path (`token_store.rs`) compiles on every macOS CI run,

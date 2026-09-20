@@ -180,7 +180,27 @@
   // anything about the host, so the dialog degrades to what it did before
   // the hub had the tool (#146) instead of showing a failure. Matched by
   // code, never by message text.
-  const HUB_CANNOT_SCAN = ['E_HUB_PROTOCOL', 'E_HUB_CONTRACT', 'E_HUB_UNREACHABLE', 'E_HUB_UNAVAILABLE'];
+  //
+  // `E_FORBIDDEN` is in the list, and it is safe to read as "this hub does
+  // not know the tool" for THIS call specifically: `list_host_worktrees` is
+  // client-callable and readonly in the policy table of every hub that serves
+  // it, so neither of the hub's two gates can refuse a paired client for it —
+  // and both gates fail closed on the tool NAME, so a hub with no row for it
+  // refuses with "not a client-callable tool" rather than "no such tool". A
+  // policy refusal for this one tool therefore means the name is unknown
+  // there. `E_HUB_PROTOCOL` stays for the callers those gates let through to
+  // the router: a master token, or a hub that predates the fail-closed gate.
+  // It also covers an argument-binding disagreement with a NEWER hub, which
+  // is knowingly folded in here: #166's contract gate catches the revision
+  // skew that would cause one, and the arguments are this command's own
+  // struct rather than a hand-written literal.
+  const HUB_CANNOT_SCAN = [
+    'E_FORBIDDEN',
+    'E_HUB_PROTOCOL',
+    'E_HUB_CONTRACT',
+    'E_HUB_UNREACHABLE',
+    'E_HUB_UNAVAILABLE',
+  ];
   let hostWorktrees = $state<HostWorktreesState>(
     untrack(() => ({ status: 'ready', rows: project.worktrees, cloned: true })),
   );

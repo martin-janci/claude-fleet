@@ -1002,9 +1002,18 @@ describe('NewSessionDialog host-scoped worktrees on a hub client', () => {
     expect(screen.queryByTestId('wt-status')).toBeNull();
   });
 
-  // The old-hub fallback and its two siblings: a hub that cannot answer the
-  // call at all is #146's state again, by code and not by message text.
-  for (const code of ['E_HUB_PROTOCOL', 'E_HUB_CONTRACT', 'E_HUB_UNREACHABLE', 'E_HUB_UNAVAILABLE']) {
+  // A hub that cannot answer the call at all is #146's state again, by code
+  // and not by message text.
+  //
+  // `E_FORBIDDEN` is the one an older hub really sends: this desktop pairs as
+  // an ordinary client, and the hub's tool gates run before its router
+  // dispatches and fail closed on the tool NAME — so a hub with no policy row
+  // for `list_host_worktrees` refuses it as "not a client-callable tool"
+  // rather than as "no such tool"
+  // (`a_tool_name_an_old_hub_does_not_know_refuses_a_client_with_e_forbidden`
+  // pins that on the hub side). `E_HUB_PROTOCOL` covers the hubs that predate
+  // that fail-closed gate.
+  for (const code of ['E_FORBIDDEN', 'E_HUB_PROTOCOL', 'E_HUB_CONTRACT', 'E_HUB_UNREACHABLE', 'E_HUB_UNAVAILABLE']) {
     it(`falls back to the neutral note when the hub answers ${code}`, async () => {
       refuseWith(code);
       hubStatus.set(remote);

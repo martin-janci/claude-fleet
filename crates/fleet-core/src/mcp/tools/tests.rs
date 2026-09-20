@@ -1380,6 +1380,34 @@ fn enforce_admin_fails_closed_for_an_unclassified_tool_name() {
     assert!(enforce_admin(&Caller::master(), made_up).is_ok());
 }
 
+/// What an OLDER hub answers a paired client that calls a tool that hub has
+/// never heard of — the shape the desktop has to recognise (#168).
+///
+/// The gates run before rmcp dispatches, and both fail closed on the tool
+/// NAME, so the call never reaches the "no such tool" path: a `full` client
+/// is refused by `enforce_admin` and a `readonly` one by `enforce_mode`, both
+/// with `E_FORBIDDEN`. And because that error carries a code,
+/// `tool_error_result` sends it as an `isError` tool RESULT with
+/// `structuredContent`, not as a JSON-RPC protocol error — so the desktop
+/// rebuilds `E_FORBIDDEN` and never sees `E_HUB_PROTOCOL`.
+#[test]
+fn a_tool_name_an_old_hub_does_not_know_refuses_a_client_with_e_forbidden() {
+    let unknown = "a_tool_this_hub_has_never_heard_of";
+    for mode in [TokenMode::Full, TokenMode::Readonly] {
+        let caller = client_caller("laptop", mode);
+        let refused = enforce_mode(&caller, unknown)
+            .and_then(|()| enforce_admin(&caller, unknown))
+            .expect_err("an unclassified name is refused, not dispatched");
+        let result = tool_error_result(refused).expect("a coded error is a tool result");
+        assert_eq!(result.is_error, Some(true), "{mode:?}");
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "E_FORBIDDEN",
+            "{mode:?}: this is the code the desktop rebuilds from the wire"
+        );
+    }
+}
+
 #[test]
 fn tool_deadline_uses_the_documented_caps() {
     use std::time::Duration;
