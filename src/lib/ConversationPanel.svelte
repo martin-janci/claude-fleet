@@ -1025,8 +1025,21 @@
   {:else if loading}
     <p class="muted">Loading…</p>
   {:else}
-    <!-- tabindex -1: a click in the thread focuses it, so Cmd/Ctrl+F finds -->
-    <div class="scroller" data-testid="conv-scroller" tabindex="-1" bind:this={scroller} onscroll={onScroll}>
+    <!-- A scrollable region has to be in the tab order, or the transcript
+         can only be scrolled with a pointer; being focusable is also what
+         lets Cmd/Ctrl+F find from inside the thread. The rule below does
+         not know about scroll containers, which are the documented
+         exception: a region that scrolls must be focusable. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <div
+      class="scroller"
+      data-testid="conv-scroller"
+      role="region"
+      aria-label="Conversation transcript"
+      tabindex="0"
+      bind:this={scroller}
+      onscroll={onScroll}
+    >
       {#if findOpen}
         <div class="find" data-testid="conv-find">
           <input

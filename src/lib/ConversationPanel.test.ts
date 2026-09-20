@@ -2296,6 +2296,18 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(screen.queryByTestId('conv-turn-index')).toBeNull();
   });
 
+  it('the transcript is a named region a keyboard can reach and scroll', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const scroller = screen.getByTestId('conv-scroller');
+    // A scrollable region that is not in the tab order cannot be scrolled
+    // without a pointer; and once it is reachable it needs a name.
+    expect(scroller.getAttribute('tabindex')).toBe('0');
+    expect(scroller.getAttribute('role')).toBe('region');
+    expect(scroller.getAttribute('aria-label')).toBeTruthy();
+  });
+
   it('Escape closes find from anywhere in the panel, but not over a menu that handled it', async () => {
     mockedConv.mockReturnValue(ok(threeTurns()));
     render(ConversationPanel, { session: session(), visible: true });
