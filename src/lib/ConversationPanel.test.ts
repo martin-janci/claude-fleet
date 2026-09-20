@@ -2265,6 +2265,32 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(screen.queryByTestId('conv-turn-index')).toBeNull();
   });
 
+  it('Escape closes find from anywhere in the panel, but not over a menu that handled it', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-find-button'));
+    await settle();
+    expect(screen.getByTestId('conv-find')).toBeTruthy();
+
+    // Focus has moved into the thread (clicking a match); Escape must still
+    // dismiss the bar rather than leaving it stranded.
+    await fireEvent.keyDown(screen.getByTestId('conv-scroller'), { key: 'Escape' });
+    await settle();
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+
+    // The slash menu handles its own Escape: that must not also close find.
+    await fireEvent.click(screen.getByTestId('conv-find-button'));
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '/' } });
+    expect(screen.getByTestId('conv-slash-menu')).toBeTruthy();
+    await fireEvent.keyDown(box, { key: 'Escape' });
+    await settle();
+    expect(screen.queryByTestId('conv-slash-menu')).toBeNull();
+    expect(screen.getByTestId('conv-find')).toBeTruthy();
+  });
+
   it('the turn index walks with the arrow keys and Home/End', async () => {
     mockedConv.mockReturnValue(ok(threeTurns()));
     render(ConversationPanel, { session: session(), visible: true });

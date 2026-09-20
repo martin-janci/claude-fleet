@@ -523,6 +523,19 @@
     const el = root;
     if (!el) return;
     function onKey(e: KeyboardEvent) {
+      // Escape dismisses find wherever focus sits in the panel — clicking a
+      // match moves focus into the thread, and the bar must not strand
+      // there. An open menu owns the key first, so one Escape closes one
+      // thing. The open menus are checked directly rather than through
+      // `defaultPrevented`: Svelte delegates `onkeydown` to the document, so
+      // this listener runs before the handler that would mark it handled.
+      if (e.key === 'Escape') {
+        if (findOpen && !slashOpen && !turnsOpen) {
+          e.preventDefault();
+          closeFind();
+        }
+        return;
+      }
       const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
       if (!mod || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return;
       // Nothing to search while the thread is loading or empty.
