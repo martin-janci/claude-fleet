@@ -96,21 +96,20 @@ export function selectSession(s: SessionRow | null, opts: { follow?: boolean } =
 
 // Monotonically increasing counter bumped by `selectSessionExplicitly`,
 // AFTER the selection itself has been applied. Deliberately NOT id-keyed:
-// - Sidebar can be unmounted (collapsed) when an explicit select happens, so
-//   a "consume once" flag would never be consumed and could go stale —
-//   `$effect` re-runs once whenever the tracked value differs from what it
-//   last saw, including a fresh mount, so re-mounting alone replays the most
-//   recent bump against whatever is selected right now (still correct: the
-//   currently-selected session should be revealed once the sidebar is back).
 // - Re-selecting the SAME session explicitly (no id change) must still
 //   reveal it; a counter bump is a distinct event even when the id repeats,
 //   where an id-keyed flag compared against `$selectedSession.id` would see
 //   no change and do nothing.
 // - Nothing can "replay" a stale reveal against an unrelated later
 //   selection: a non-explicit reselect never bumps this, so the sequence
-//   number the Sidebar effect reacts to only ever changes on an explicit
-//   pick, and it always reads the CURRENT `$selectedSession` at that moment
-//   rather than remembering which id the bump was "for".
+//   number a reader reacts to only ever changes on an explicit pick, and a
+//   reader reads the CURRENT `$selectedSession` at the moment it handles a
+//   bump rather than remembering which id the bump was "for".
+// A reader must compare against the value it saw when IT started watching
+// (not a fixed sentinel like 0, and not "did the number change since the
+// component's own last run"): the Sidebar is destroyed and recreated on
+// collapse/expand, so a fresh mount does NOT replay a bump that happened
+// before it existed — see `Sidebar.svelte`'s `appliedSeq`.
 export const revealSeq = writable(0);
 
 /**

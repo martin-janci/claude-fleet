@@ -334,6 +334,70 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(get(hostFilter)).toBe('mefistos');
   });
 
+  // #223 fix round 2: the Sidebar is destroyed and recreated on
+  // collapse/expand (App.svelte's `{#if sidebarCollapsed}`). `revealSeq` is
+  // a module-level counter that outlives any one Sidebar instance, so a
+  // fresh mount must only react to a bump that happens AFTER it exists —
+  // never replay whatever `revealSeq` already was, or it would widen the
+  // filter for a session that arrived non-explicitly while collapsed.
+  describe('reveal across a Sidebar remount', () => {
+    it('a bump from before mount is not replayed at mount time', async () => {
+      const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
+      mockBackend(fakeProjects, [sessionFor(1, 'dev-local'), onMac]);
+      hostFilter.set('mefistos');
+      // Bump `revealSeq` BEFORE the Sidebar ever mounts.
+      selectSessionExplicitly(onMac);
+
+      render(Sidebar);
+      await tick(); await tick(); await Promise.resolve();
+      expect(get(hostFilter)).toBe('mefistos');
+    });
+
+    it('an explicit select after mount still widens the filter', async () => {
+      const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
+      mockBackend(fakeProjects, [sessionFor(1, 'dev-local'), onMac]);
+      hostFilter.set('mefistos');
+      // Same pre-mount bump as above, so the mounted instance's baseline
+      // already accounts for it...
+      selectSessionExplicitly(onMac);
+      render(Sidebar);
+      await tick(); await tick(); await Promise.resolve();
+      expect(get(hostFilter)).toBe('mefistos');
+
+      // ...but a NEW explicit select after mount is a fresh bump and must
+      // still widen.
+      selectSessionExplicitly(onMac);
+      await tick(); await tick(); await Promise.resolve();
+      expect(get(hostFilter)).toBe('all');
+    });
+
+    it('unmount, a non-explicit reselect to another host, then remount: the filter stays put', async () => {
+      const onMefistos = { ...sessionFor(1, 'dev-mefistos'), host_alias: 'mefistos' };
+      const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
+      mockBackend(fakeProjects, [onMefistos, onMac]);
+      hostFilter.set('mefistos');
+
+      const first = render(Sidebar);
+      await tick(); await tick();
+      // An explicit select while mounted widens, as established above.
+      selectSessionExplicitly(onMefistos);
+      await tick(); await tick(); await Promise.resolve();
+      expect(get(hostFilter)).toBe('mefistos'); // already on the shown host — no-op widen
+
+      hostFilter.set('mefistos');
+      first.unmount();
+
+      // While unmounted, a non-explicit reselect (no bump) moves to `mac`.
+      selectSession(onMac, { follow: true });
+
+      // Remounting must NOT treat the leftover, already-applied `revealSeq`
+      // value as a fresh bump for whatever is selected now.
+      render(Sidebar);
+      await tick(); await tick(); await Promise.resolve();
+      expect(get(hostFilter)).toBe('mefistos');
+    });
+  });
+
   it('clicking a session row selects it in the store', async () => {
     const sess = sessionFor(1, 'dev-foo');
     mockBackend(fakeProjects, [sess]);

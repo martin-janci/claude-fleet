@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
+  import { get } from 'svelte/store';
   import { projects, refreshProjects, type ProjectTreeRow } from './projects';
   import {
     sessions,
@@ -250,20 +251,24 @@
   //    can never widen the filter — no matter how many times the id changes;
   //  - re-selecting the SAME session explicitly still reveals it, even
   //    though the id-keyed effect above wouldn't re-run for that (no id
-  //    change) — a bump is a distinct event regardless of the id it targets;
-  //  - a bump can never be replayed against a later, unrelated selection:
-  //    the effect always reads `$selectedSession` fresh (untracked) at the
-  //    moment it actually runs, rather than remembering which id the bump
-  //    was "for", and — since `$effect` always runs once on mount for
-  //    whatever its tracked value currently is — a bump that happened while
-  //    the Sidebar was unmounted (collapsed) still gets applied once it
-  //    remounts, instead of being lost.
+  //    change) — a bump is a distinct event regardless of the id it targets.
+  //
+  // `appliedSeq` is captured once, when THIS Sidebar instance is created,
+  // and the effect only reacts to a bump that lands AFTER that point — never
+  // to `$revealSeq`'s absolute value. That matters because the Sidebar is
+  // destroyed and recreated on collapse/expand (App.svelte's `{#if
+  // sidebarCollapsed}`): without this, a fresh mount would see whatever
+  // `$revealSeq` already was (non-zero after the first-ever explicit select)
+  // and treat it as a brand new bump, widening the filter for whatever
+  // happens to be selected right then — even a session that arrived via a
+  // later NON-explicit reselect while the Sidebar was unmounted. Comparing
+  // against this instance's own baseline means a remount never replays a
+  // bump from before it existed.
+  let appliedSeq = get(revealSeq);
   $effect(() => {
     const seq = $revealSeq;
-    // No explicit select has ever happened yet (a fresh module, or the
-    // selection was seeded by a non-explicit `selectSession` before this
-    // effect's first run) — nothing to reveal.
-    if (seq === 0) return;
+    if (seq === appliedSeq) return;
+    appliedSeq = seq;
     untrack(() => {
       const sess = $selectedSession;
       if (!sess) return;
