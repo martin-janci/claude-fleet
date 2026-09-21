@@ -3,11 +3,12 @@
 //!
 //! Routes in remote mode: `MoveSessionArgs` is exactly the tool's parameter
 //! set (`session_id`, `target_host_alias`, `keep_source`, `strict`,
-//! `clean_target`), and the tool answers the same `MoveReport`.
+//! `clean_target`, `dry_run`), and the tool answers the same `MoveOutcome`
+//! (a `MoveReport` for a real move, a `MovePreview` for `dry_run: true`).
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
-use fleet_core::service::move_session::{self, MoveReport, MoveSessionArgs};
+use fleet_core::service::move_session::{self, MoveOutcome, MoveSessionArgs};
 use fleet_core::ssh::SshClient;
 use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
@@ -19,7 +20,7 @@ pub async fn move_session(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
-) -> Result<MoveReport, IpcError> {
+) -> Result<MoveOutcome, IpcError> {
     routed::move_session(&backend, args, &store, &ssh).await
 }
 
@@ -31,7 +32,7 @@ pub(crate) mod routed {
         args: MoveSessionArgs,
         store: &Mutex<Store>,
         ssh: &Arc<SshClient>,
-    ) -> Result<MoveReport, IpcError> {
+    ) -> Result<MoveOutcome, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("move_session", &args).await,
             None => move_session::move_session(args, store, ssh).await,

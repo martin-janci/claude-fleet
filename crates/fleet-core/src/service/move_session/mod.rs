@@ -131,6 +131,10 @@ pub struct MoveSessionArgs {
     /// false.
     #[serde(default)]
     pub clean_target: bool,
+    /// Report what this move would do and change nothing (see `preview`).
+    /// Default false.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// What a completed move did.
@@ -154,6 +158,19 @@ pub struct MoveReport {
     /// What travelled besides the transcript.
     pub carried: carry::CarryReport,
     pub target: SessionRow,
+}
+
+/// What `move_session` did. Internally tagged, so a `Moved` outcome is the
+/// `MoveReport` object with one extra key, `"kind": "moved"` — every field a
+/// caller already reads stays where it was. Both variants are boxed only to
+/// keep the enum from ballooning to the larger one's size
+/// (`clippy::large_enum_variant`); serde serialises through a box
+/// transparently, so the wire shape is unaffected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MoveOutcome {
+    Moved(Box<MoveReport>),
+    Preview(Box<preview::MovePreview>),
 }
 
 /// Bounds for the "target is running" confirmation.
@@ -299,7 +316,7 @@ pub async fn move_session(
     args: MoveSessionArgs,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
-) -> Result<MoveReport, IpcError> {
+) -> Result<MoveOutcome, IpcError> {
     let hooks = RealHooks { ssh };
     move_session_with(args, store, &**ssh, &hooks, MoveOptions::default()).await
 }
@@ -1913,13 +1930,20 @@ fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcEr
 
 /// [`move_session`] over any transport and hooks. A partial move
 /// (`E_MOVE_PARTIAL`) is recorded on the timeline as [`EVENT_MOVE_PARTIAL`].
+/// `dry_run` short-circuits to a read-only [`preview::preview`] before any of
+/// that — no claim taken, no carry cleanup to run.
 pub async fn move_session_with(
     args: MoveSessionArgs,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     hooks: &dyn MoveHooks,
     opts: MoveOptions,
-) -> Result<MoveReport, IpcError> {
+) -> Result<MoveOutcome, IpcError> {
+    if args.dry_run {
+        return preview::preview(&args, store, ssh, hooks)
+            .await
+            .map(|p| MoveOutcome::Preview(Box::new(p)));
+    }
     let source_id = args.session_id;
     let to_host = args.target_host_alias.clone();
     move_session_steps(args, store, ssh, hooks, opts)
@@ -1929,6 +1953,7 @@ pub async fn move_session_with(
                 record_partial(store, source_id, &to_host, e);
             }
         })
+        .map(|rep| MoveOutcome::Moved(Box::new(rep)))
 }
 
 /// The move's steps, with the carry cleanup always run afterwards — on
@@ -3369,6 +3394,17 @@ mod tests {
             keep_source,
             strict: false,
             clean_target: false,
+            dry_run: false,
+        }
+    }
+
+    /// A real move's `MoveOutcome` is always `Moved` — `run`/`run_with` never
+    /// take `dry_run`, so a `Preview` here would mean the branch in
+    /// `move_session_with` took the wrong turn.
+    fn expect_moved(out: MoveOutcome) -> MoveReport {
+        match out {
+            MoveOutcome::Moved(rep) => *rep,
+            MoveOutcome::Preview(_) => panic!("run/run_with never dry_run; got a Preview"),
         }
     }
 
@@ -3381,11 +3417,15 @@ mod tests {
     ) -> Result<MoveReport, IpcError> {
         let mut a = args(f, false);
         edit(&mut a);
-        move_session_with(a, &f.store, &f.fake, hooks, fast()).await
+        move_session_with(a, &f.store, &f.fake, hooks, fast())
+            .await
+            .map(expect_moved)
     }
 
     async fn run(f: &Fixture, hooks: &FakeHooks, keep: bool) -> Result<MoveReport, IpcError> {
-        move_session_with(args(f, keep), &f.store, &f.fake, hooks, fast()).await
+        move_session_with(args(f, keep), &f.store, &f.fake, hooks, fast())
+            .await
+            .map(expect_moved)
     }
 
     #[tokio::test]
@@ -3416,6 +3456,38 @@ mod tests {
                 "handoff:done",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_moved_outcome_keeps_every_report_field_at_the_top_level() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        // A real report from a real (faked) move, never one built field by field.
+        let rep = run(&f, &hooks, false).await.expect("the fixture moves");
+        let v = serde_json::to_value(MoveOutcome::Moved(Box::new(rep.clone()))).unwrap();
+        assert_eq!(v["kind"], "moved");
+        assert_eq!(v["target_session_id"], rep.target_session_id);
+        // The session row's own `kind` sits under `target`, untouched by the tag.
+        assert_eq!(v["target"]["kind"], rep.target.kind);
+        let back: MoveOutcome = serde_json::from_value(v).unwrap();
+        assert!(matches!(back, MoveOutcome::Moved(_)));
+    }
+
+    #[tokio::test]
+    async fn dry_run_returns_a_preview_and_the_real_move_is_unchanged() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        let out = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .expect("a dry run");
+        assert!(matches!(out, MoveOutcome::Preview(_)), "{out:?}");
+        // The same session can still be moved for real afterwards — the dry run
+        // took no claim and left nothing behind.
+        let rep = run(&f, &hooks, false).await.expect("the real move");
+        assert!(rep.source_killed);
     }
 
     #[tokio::test]
@@ -6114,6 +6186,7 @@ mod tests {
             keep_source: false,
             strict: false,
             clean_target: false,
+            dry_run: false,
         };
         assert_eq!(
             move_session_with(same, &f.store, &f.fake, &hooks, fast())

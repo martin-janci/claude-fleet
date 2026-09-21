@@ -634,6 +634,9 @@ pub struct MoveSessionParams {
     /// Replace what an earlier attempt left in the target worktree.
     #[serde(default)]
     pub clean_target: bool,
+    /// Report what would travel; change nothing.
+    #[serde(default)]
+    pub dry_run: bool,
     /// Nonce from a previous E_CONFIRM_REQUIRED, once approved on the
     /// desktop (only when mcp.confirm_destructive is on).
     #[serde(default)]
@@ -656,6 +659,7 @@ impl MoveSessionParams {
             keep_source: self.keep_source,
             strict: self.strict,
             clean_target: self.clean_target,
+            dry_run: self.dry_run,
         }
     }
 }

@@ -2354,6 +2354,23 @@ fn move_session_params_carry_clean_target_into_the_service_args() {
         serde_json::from_value(serde_json::json!({ "session_id": 1, "target_host_alias": "beta" }))
             .unwrap();
     assert!(!p.into_args(41).clean_target);
+
+    // `dry_run` is the same story: a `{"dry_run": true}` arriving at the tool
+    // must reach `MoveSessionArgs.dry_run`, and the default stays false.
+    let p: super::params::MoveSessionParams = serde_json::from_value(serde_json::json!({
+        "session_id": 1,
+        "target_host_alias": "beta",
+        "dry_run": true,
+    }))
+    .unwrap();
+    assert!(
+        p.into_args(41).dry_run,
+        "a dry_run=true arriving at the tool must reach the service args"
+    );
+    let p: super::params::MoveSessionParams =
+        serde_json::from_value(serde_json::json!({ "session_id": 1, "target_host_alias": "beta" }))
+            .unwrap();
+    assert!(!p.into_args(41).dry_run);
 }
 
 /// …and the handler must be the mapping's only caller. `into_args` being
@@ -2373,6 +2390,53 @@ fn the_move_session_handler_builds_its_args_through_into_args() {
     assert!(
         !src.contains("clean_target:"),
         "no args literal in lifecycle.rs may set clean_target itself"
+    );
+    assert!(
+        !src.contains("dry_run:"),
+        "no args literal in lifecycle.rs may set dry_run itself"
+    );
+}
+
+/// The confirm gate must be skipped for a dry run — a preview changes
+/// nothing, so it needs no desktop approval — but a real move still does.
+/// `dry_run` is read from `p` before `into_args` consumes it, so this also
+/// proves the branch and the mapping agree on the same value.
+#[tokio::test]
+async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs_it() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
+        .unwrap();
+    let t = test_tools(s);
+    let caller = Caller::master();
+
+    let params = |dry_run: bool| super::params::MoveSessionParams {
+        session_id: on_b,
+        target_host_alias: "hosta".into(),
+        keep_source: false,
+        strict: false,
+        clean_target: false,
+        confirm_nonce: None,
+        dry_run,
+    };
+
+    let err = t
+        .move_session(Extension(caller.clone()), Parameters(params(false)))
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.starts_with("E_CONFIRM_REQUIRED"),
+        "a real move must still be gated: {}",
+        err.message
+    );
+
+    let err = t
+        .move_session(Extension(caller), Parameters(params(true)))
+        .await
+        .unwrap_err();
+    assert!(
+        !err.message.starts_with("E_CONFIRM_REQUIRED"),
+        "a dry run must skip the confirm gate: {}",
+        err.message
     );
 }
 

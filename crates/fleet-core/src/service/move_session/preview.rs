@@ -114,10 +114,6 @@ async fn probe_text(
 /// A read-only run of the move's own opening checks, plus the probes the move
 /// does not need. A refusal is `Err` with the code and message the real move
 /// would return — the same value, not a description of it.
-// Not called outside its own tests yet: Task 4 of the transfer-preflight
-// slice wires this into a command / MCP tool that returns `MovePreview` to
-// the UI.
-#[allow(dead_code)]
 pub(super) async fn preview(
     args: &MoveSessionArgs,
     store: &Mutex<Store>,

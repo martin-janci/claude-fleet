@@ -357,11 +357,12 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<MoveSessionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let dry_run = p.dry_run;
         audit(
             "move_session",
             &format!(
-                "session_id={} target={} keep_source={} strict={} clean_target={}",
-                p.session_id, p.target_host_alias, p.keep_source, p.strict, p.clean_target
+                "session_id={} target={} keep_source={} strict={} clean_target={} dry_run={}",
+                p.session_id, p.target_host_alias, p.keep_source, p.strict, p.clean_target, dry_run
             ),
         );
         crate::validate::host_alias(&p.target_host_alias).map_err(to_mcp_err)?;
@@ -373,25 +374,31 @@ impl FleetTools {
             "the session to move",
         )?;
         require_move_hosts(&caller, &row.host_alias, &p.target_host_alias)?;
-        self.confirm_gate(
-            "move_session",
-            p.confirm_nonce.as_deref(),
-            &format!(
-                "session_id={} from={} to={} keep_source={} strict={} clean_target={}",
-                row.id,
-                row.host_alias,
-                p.target_host_alias,
-                p.keep_source,
-                p.strict,
-                p.clean_target
-            ),
-            &caller,
-        )?;
-        let rep =
+        if !dry_run {
+            // Safe to skip only because `into_args` below maps this same
+            // `dry_run` onto `MoveSessionArgs` — a preview still reveals the
+            // source's file list and the target's state, so the access
+            // checks above stay unconditional either way.
+            self.confirm_gate(
+                "move_session",
+                p.confirm_nonce.as_deref(),
+                &format!(
+                    "session_id={} from={} to={} keep_source={} strict={} clean_target={}",
+                    row.id,
+                    row.host_alias,
+                    p.target_host_alias,
+                    p.keep_source,
+                    p.strict,
+                    p.clean_target
+                ),
+                &caller,
+            )?;
+        }
+        let outcome =
             crate::service::move_session::move_session(p.into_args(row.id), &self.store, &self.ssh)
                 .await
                 .map_err(to_mcp_err)?;
-        ok_json(&rep)
+        ok_json(&outcome)
     }
 
     #[tool(
