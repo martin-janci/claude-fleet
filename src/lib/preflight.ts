@@ -46,6 +46,14 @@ function put(entry: PreflightEntry): void {
   store.update((m) => new Map(m).set(keyOf(entry.sessionId, entry.toHost), entry));
 }
 
+/** Test-only: seed an entry directly, keyed the same way `settle` would —
+ *  so a consumer's tests (the Transfer sheet's setup view) can arm a specific
+ *  loading/ready/refused state without reimplementing this module's private
+ *  key format. */
+export function putPreflightForTest(entry: PreflightEntry): void {
+  put(entry);
+}
+
 export function preflightFor(
   map: Map<string, PreflightEntry>,
   sessionId: number,

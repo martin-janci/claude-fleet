@@ -1,26 +1,20 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
-import { get, writable, type Writable } from 'svelte/store';
+import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 
 // Task 7: `requestPreflight` becomes a bare spy so the setup-view tests can
 // see how the component called it, without a real debounced round trip
-// through `previewMove`/`invoke`. `preflights` is swapped for a test-owned
-// writable — the real one has no exported way to seed an arbitrary entry —
-// while `preflightFor`/`preflightAge`/the constants stay the real (pure)
-// implementations.
+// through `previewMove`/`invoke`. Everything else — `preflights`,
+// `preflightFor`, `preflightAge`, `putPreflightForTest`, the constants — stays
+// the real module, so seeding an entry goes through the module's own private
+// key function rather than a copy of it in this file.
 vi.mock('./preflight', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./preflight')>();
-  const testPreflights = writable(new Map());
-  return {
-    ...actual,
-    requestPreflight: vi.fn(),
-    preflights: testPreflights,
-    resetPreflightsForTest: () => testPreflights.set(new Map()),
-  };
+  return { ...actual, requestPreflight: vi.fn() };
 });
 
 // Only `retryMove`, `resolveMoveRun` and `startMove` are replaced: `startMove`
@@ -61,8 +55,8 @@ import { hubConnection } from './hub_connection';
 import type { HubConnection } from './hub_connection';
 import {
   requestPreflight,
-  preflights,
   resetPreflightsForTest,
+  putPreflightForTest,
   PREFLIGHT_DEBOUNCE_MS,
   PREFLIGHT_STALE_MS,
   type PreflightEntry,
@@ -740,13 +734,6 @@ describe('TransferSheet: preflight', () => {
     details: { leftovers: 'theirs', theirs: ['x.md'] },
   };
 
-  // Mirrors the private `keyOf` in `preflight.ts` exactly — not exported, so
-  // the test store must format the same key by hand to seed an entry
-  // `preflightFor` (the real, un-mocked implementation) will find.
-  function keyOf(sessionId: number, toHost: string): string {
-    return `${sessionId} ${toHost}`;
-  }
-
   function seed(toHost: string, kind: 'loading' | 'ready' | 'refused' | 'stale'): PreflightEntry {
     if (kind === 'loading') {
       return { sessionId: pfSource.id, toHost, status: 'loading', preview: null, error: null, at: null };
@@ -775,8 +762,7 @@ describe('TransferSheet: preflight', () => {
     hubConnection.set(opts.connection ?? { state: 'standalone' });
     if (opts.preflight) {
       const toHost = opts.targets[0];
-      const map = new Map<string, PreflightEntry>([[keyOf(pfSource.id, toHost), seed(toHost, opts.preflight)]]);
-      (preflights as unknown as Writable<Map<string, PreflightEntry>>).set(map);
+      putPreflightForTest(seed(toHost, opts.preflight));
     }
     transferSheetFor.set(pfSource.id);
     return render(TransferSheet);
