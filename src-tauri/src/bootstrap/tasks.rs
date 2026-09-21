@@ -16,6 +16,7 @@ use crate::app_events::AppHandleEventBus;
 use crate::backend::connection::{ConnectionReporter, ConnectionView, HubConnectionStatus};
 use crate::backend::events::{spawn_event_bridge, EventBridge, HubResync, HubSse, RealDelay};
 use crate::backend::remote::HubBackend;
+use crate::backend::report::{spawn_report_flusher, ReportFlusher};
 use crate::backend::startup::FleetTasks;
 use crate::backend::RemoteConfig;
 use crate::bootstrap::mcp::maybe_start_mcp;
@@ -147,5 +148,20 @@ impl FleetTasks for RealFleetTasks {
         // answers from.
         .reporting_to(Arc::clone(&self.hub_link) as Arc<dyn ConnectionReporter>);
         spawn_event_bridge(bridge);
+    }
+
+    /// Flush `fleet_core::logging::report_ring()` to the hub's `POST
+    /// /report`. The only other background task a hub client runs;
+    /// `start_background_tasks` gates it behind `CLAUDE_FLEET_HUB_REPORTS`.
+    fn start_report_flusher(&self) {
+        let Some(cfg) = self.remote.clone() else {
+            tracing::error!("[report] asked to flush reports with no hub configured");
+            return;
+        };
+        let transport = HubBackend::new(cfg.clone()).transport();
+        spawn_report_flusher(
+            ReportFlusher::new(cfg, transport, fleet_core::logging::report_ring()),
+            self.shutdown.clone(),
+        );
     }
 }

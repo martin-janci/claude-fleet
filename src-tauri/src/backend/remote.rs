@@ -97,6 +97,11 @@ impl HubBackend {
         }
     }
 
+    /// The transport, for the report flusher to share one TLS client.
+    pub fn transport(&self) -> Arc<dyn HubTransport> {
+        Arc::clone(&self.transport)
+    }
+
     /// Consult `link` before every call, so that a hub whose wire contract
     /// this build does not read is refused rather than deserialised.
     ///
