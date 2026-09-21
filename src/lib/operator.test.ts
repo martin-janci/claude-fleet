@@ -75,14 +75,24 @@ describe('blockedCopy', () => {
   // (`no_mcp` → `mcp_configure`) or doing nothing (`token_revoked` → the
   // session is alive, so `ensure_operator` would no-op). Those two states
   // get a title-only explanation and no button.
-  it('absent and lost offer a button; no_mcp and token_revoked do not', () => {
+  it('absent and lost offer a button; no_mcp, token_revoked and no_host do not', () => {
     expect(blockedCopy('absent').action).toBe('Wake the agent');
     expect(blockedCopy('lost').action).toBe('Restart the agent');
     expect(blockedCopy('no_mcp').action).toBeNull();
     expect(blockedCopy('token_revoked').action).toBeNull();
-    for (const b of ['no_mcp', 'lost', 'token_revoked', 'absent'] as const) {
+    // The operator runs on the `local` host. A hub with `hub.local_host=false`
+    // has none, so there is nowhere to start it and no press that could help
+    // — reporting `absent` there offered a button that silently did nothing.
+    expect(blockedCopy('no_host').action).toBeNull();
+    for (const b of ['no_mcp', 'lost', 'token_revoked', 'absent', 'no_host'] as const) {
       expect(blockedCopy(b).title.length).toBeGreaterThan(0);
     }
+  });
+
+  it('says where the agent would have to run, not merely that it is not running', () => {
+    const t = blockedCopy('no_host').title;
+    expect(t).toContain('local');
+    expect(t).not.toContain('not running');
   });
 });
 

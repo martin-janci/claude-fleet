@@ -123,10 +123,15 @@ pub const OPERATOR_DIR: &str = "~/.claude-fleet/operator";
 /// Fixed tmux name, so the session is recognisable in the sidebar and in
 /// `tmux ls` without consulting the database.
 pub const OPERATOR_TMUX_NAME: &str = "fleet-operator";
-/// The operator always runs on the machine that serves the control API —
-/// `local` for the desktop, the hub's own host for a hub. That is why the
-/// endpoint below can be loopback and no public URL is ever baked into the
-/// file.
+/// The operator always runs on the machine that serves the control API, as
+/// the host aliased `local`. That is why the endpoint below can be loopback
+/// and no public URL is ever baked into the file.
+///
+/// A hub started with `hub.local_host=false` has no such host, so the
+/// operator cannot exist there at all: `operator_status` reports `no_host`
+/// rather than `absent`, and the panel offers no button, because no press
+/// could help. Giving the operator a configurable home is a feature, not a
+/// fix — see the `no_host` branch in [`operator_status_with`].
 pub const OPERATOR_HOST: &str = "local";
 /// Name of the operator's client-token row. A client token in mode `full`,
 /// never the master token: the agent is a paired client like any other, and
@@ -297,7 +302,8 @@ impl OperatorHost for LiveHost {
 pub struct OperatorStatus {
     pub ready: bool,
     pub session: Option<SessionRow>,
-    /// `null`, or one of `"absent"`, `"lost"`, `"no_mcp"`, `"token_revoked"`.
+    /// `null`, or one of `"absent"`, `"lost"`, `"no_mcp"`, `"token_revoked"`,
+    /// `"no_host"` (the operator's host does not exist on this hub).
     pub blocked: Option<String>,
 }
 
@@ -327,24 +333,48 @@ pub struct OperatorStatus {
 /// on. Asking the backend that would actually serve the agent is the same
 /// question in both modes.
 pub fn operator_status(store: &Mutex<Store>) -> Result<OperatorStatus, IpcError> {
+    operator_status_with(store, crate::service::hub::local_host_enabled())
+}
+
+/// The pure half: `local_enabled` is [`crate::service::hub::local_host_enabled`]
+/// in production. Split out because `disable_local_host` is process-global and
+/// one-way, so a test can reach the `no_host` branch no other way — the same
+/// split [`crate::service::hub::check_local_allowed`] already uses.
+pub(crate) fn operator_status_with(
+    store: &Mutex<Store>,
+    local_enabled: bool,
+) -> Result<OperatorStatus, IpcError> {
     let s = lock(store)?;
     let blocked = |why: &str, session: Option<SessionRow>| OperatorStatus {
         ready: false,
         session,
         blocked: Some(why.to_string()),
     };
+    // Where "it is not there" is the answer, say WHY it is not there: the
+    // operator runs on `OPERATOR_HOST`, and a hub with `hub.local_host=false`
+    // has no such host, so `ensure_operator` cannot succeed however many
+    // times the button is pressed. Checked here rather than up front so an
+    // operator that is somehow already running still reports `ready` — only
+    // the absent answer changes.
+    let absent = |session: Option<SessionRow>| {
+        if crate::service::hub::check_local_allowed(OPERATOR_HOST, local_enabled).is_err() {
+            blocked("no_host", session)
+        } else {
+            blocked("absent", session)
+        }
+    };
 
     if !crate::mcp::settings::McpSettings::read(&s)?.enabled {
         return Ok(blocked("no_mcp", None));
     }
     let Some(r) = operator_ref(&s) else {
-        return Ok(blocked("absent", None));
+        return Ok(absent(None));
     };
     let row = s
         .get_session(&r.tmux_name, &r.host_alias)
         .map_err(|e| IpcError::new(codes::E_SQLITE, format!("find operator: {e}")))?;
     let Some(row) = row else {
-        return Ok(blocked("absent", None));
+        return Ok(absent(None));
     };
     if row.lost_at.is_some() {
         return Ok(blocked("lost", Some(row)));
@@ -829,6 +859,30 @@ mod tests {
     }
 
     // ------------------------------------------------------- operator_status
+
+    #[test]
+    fn a_hub_without_a_local_host_says_so_instead_of_absent() {
+        // The operator runs on `local` (`OPERATOR_HOST`). A hub started with
+        // `hub.local_host=false` has none, so `ensure_operator` can never
+        // succeed there — reporting "absent" put a "Wake the agent" button in
+        // front of a press that silently did nothing.
+        let (store, _ssh, _reg) = fixture();
+        {
+            let s = store.lock().unwrap();
+            s.set_setting(crate::mcp::SETTING_ENABLED, "true").unwrap();
+        }
+        // `disable_local_host()` is process-global and one-way, so the pure
+        // form is what a test can reach — the same split `check_local_allowed`
+        // already uses.
+        let st = operator_status_with(&store, false).unwrap();
+        assert!(!st.ready);
+        assert_eq!(st.blocked.as_deref(), Some("no_host"));
+        assert!(st.session.is_none());
+
+        // With a local host it is the ordinary never-born answer.
+        let st = operator_status_with(&store, true).unwrap();
+        assert_eq!(st.blocked.as_deref(), Some("absent"));
+    }
 
     #[test]
     fn status_names_why_the_agent_cannot_work() {
