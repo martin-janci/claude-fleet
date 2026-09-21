@@ -567,6 +567,9 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
     tracing::info!(host = %alias, conn = conn_id, "[agent] connected");
 
     let budgets = Arc::new(Mutex::new(Budgets::default()));
+    // Per connection, never shared with the HTTP `/report` route: a rotated
+    // or replaced connection gets a fresh minute, not the previous one's.
+    let report_windows = crate::service::reports::RateWindows::new();
     let mut writer = crate::rt::spawn(write_loop(
         sink,
         rx,
@@ -581,6 +584,7 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
         alias: &alias,
         conn_id,
         credential: &credential,
+        report_windows: &report_windows,
     };
     // Whichever ends first ends the connection: the reader when the agent
     // goes (or goes quiet), the writer when the registry lets go of it or a
@@ -758,6 +762,9 @@ struct Registered<'a> {
     conn_id: ConnId,
     /// SHA-256 of the token it authenticated with.
     credential: &'a str,
+    /// This connection's own one-minute rate windows for `Report` batches —
+    /// never shared with the HTTP report route.
+    report_windows: &'a crate::service::reports::RateWindows,
 }
 
 /// Read frames and hand them to the registry, pinging an idle agent and
@@ -775,6 +782,7 @@ async fn read_loop(
         alias,
         conn_id,
         credential,
+        report_windows,
     } = who;
     // Beats in a row with nothing heard. The `hello` does not count: silence
     // is measured from the registration.
@@ -861,6 +869,24 @@ async fn read_loop(
                         // DOES know but cannot parse is still corruption and
                         // still closes the connection.
                         match decode_agent_frame_lenient_within(&text, allowance) {
+                            Ok(Decoded::Frame(AgentFrame::Report { reports, dropped })) => {
+                                // The agent's own error log, batched on its
+                                // heartbeat. Origin is the connection's alias —
+                                // from the token, never the body. The store lock
+                                // is taken inside `ingest` for the insert only.
+                                let origin = format!("host:{alias}");
+                                let batch = fleet_proto::report::ReportBatch { reports, dropped };
+                                if let Err(e) = crate::service::reports::ingest(
+                                    store,
+                                    report_windows,
+                                    &origin,
+                                    batch,
+                                    crate::service::reports::AGENT_BATCH_MAX,
+                                    fleet_proto::report::now_unix(),
+                                ) {
+                                    tracing::warn!(host = %alias, code = %e.code, error = %e.message, "[agent] report batch refused");
+                                }
+                            }
                             Ok(Decoded::Frame(frame)) => {
                                 if let Some(id) = answered_id(&frame) {
                                     budgets.lock().unwrap_or_else(|e| e.into_inner()).done(id);
@@ -1605,6 +1631,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_report_frame_is_stored_under_the_connection_s_host() {
+        let hub = hub().await;
+        let mut ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
+        send(
+            &mut ws,
+            &AgentFrame::Report {
+                reports: vec![fleet_proto::report::Report::error(
+                    "fleet_agent::conn",
+                    "dial refused",
+                )],
+                dropped: 2,
+            },
+        )
+        .await;
+        wait_until("the report is stored", || {
+            hub.store
+                .lock()
+                .unwrap()
+                .list_reports(&crate::store::ReportFilter::default())
+                .unwrap()
+                .iter()
+                .any(|r| r.origin == "host:laptop" && r.message == "dial refused")
+        })
+        .await;
+        // Not an answer to anything: the connection is still live.
+        assert!(hub.registry.connected("laptop"));
+    }
+
+    #[tokio::test]
     async fn closing_the_socket_deregisters_the_alias() {
         let hub = hub().await;
         let mut ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
@@ -1970,12 +2025,14 @@ mod tests {
                 let mut stream = endless(Message::Text(pong.into()));
                 let budgets = Mutex::new(Budgets::default());
                 let credential = crate::mcp::auth::sha256_hex(LAPTOP_TOKEN);
+                let report_windows = crate::service::reports::RateWindows::new();
                 let who = Registered {
                     registry: &registry,
                     store: &store,
                     alias: "laptop",
                     conn_id: 1,
                     credential: &credential,
+                    report_windows: &report_windows,
                 };
                 read_loop(&mut stream, who, &budgets, &ping_tx, ticker).await;
             })
