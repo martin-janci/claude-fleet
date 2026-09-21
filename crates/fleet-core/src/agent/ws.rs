@@ -1001,7 +1001,7 @@ fn exec_budget(cap_bytes: Option<u64>) -> usize {
 fn answered_id(frame: &AgentFrame) -> Option<&str> {
     match frame {
         AgentFrame::Result { id, .. } | AgentFrame::Pong { id } => Some(id),
-        AgentFrame::Hello { .. } => None,
+        AgentFrame::Hello { .. } | AgentFrame::Report { .. } => None,
     }
 }
 

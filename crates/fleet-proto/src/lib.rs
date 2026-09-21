@@ -434,6 +434,16 @@ pub enum AgentFrame {
     Pong {
         id: String,
     },
+    /// A batch of the agent's own error-level log events, sent on a
+    /// heartbeat once welcomed. Answers nothing and is answered by nothing.
+    /// A hub older than this variant skips it under the unknown-kind rule
+    /// (crate doc), so `PROTO_VERSION` does not move for it.
+    Report {
+        #[serde(default)]
+        reports: Vec<report::Report>,
+        #[serde(default)]
+        dropped: u32,
+    },
 }
 
 /// What can go wrong turning bytes into a frame, or back.
@@ -1246,5 +1256,30 @@ mod tests {
                 c as u32
             );
         }
+    }
+
+    #[test]
+    fn a_report_frame_round_trips_and_a_full_batch_fits_the_frame_cap() {
+        let mut big = report::Report::error(
+            &"c".repeat(report::COMPONENT_MAX),
+            &"m".repeat(report::MESSAGE_MAX),
+        );
+        big.context = Some(serde_json::json!({ "s": "x".repeat(report::CONTEXT_MAX - 20) }));
+        big.code = Some("E_SSH".into());
+        let frame = AgentFrame::Report {
+            reports: vec![big; report::FRAME_BATCH_MAX],
+            dropped: 7,
+        };
+        let text = encode_agent_frame(&frame).expect("encodes");
+        assert!(text.len() < MAX_FRAME_BYTES);
+        assert_eq!(decode_agent_frame(&text).unwrap(), frame);
+        // Sparse on the wire: both fields default.
+        assert_eq!(
+            decode_agent_frame(r#"{"kind":"report"}"#).unwrap(),
+            AgentFrame::Report {
+                reports: vec![],
+                dropped: 0
+            }
+        );
     }
 }
