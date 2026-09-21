@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.33] - 2026-09-21
+
+### Documentation
+- **mcp:** list no_host in the operator_status description
 ## [0.2.32] - 2026-09-21
 
 ### Added
@@ -1091,6 +1095,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.33]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.33
 [0.2.32]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.32
 [0.2.31]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.31
 [0.2.30]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.30
