@@ -117,6 +117,14 @@ describe('previewMove', () => {
     const r = await previewMove(7, 'beta');
     expect(!r.ok && r.error.code).toBe('E_MOVE_MIDOP');
   });
+
+  it('never merges anything into the sessions store', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'preview', ...previewFixture }));
+    await previewMove(7, 'beta');
+    invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...reportFixture }));
+    await previewMove(7, 'beta');
+    expect(merged).not.toHaveBeenCalled();
+  });
 });
 
 describe('moveSession', () => {
@@ -131,5 +139,26 @@ describe('moveSession', () => {
     invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...reportFixture }));
     const r = await moveSession(7, 'beta');
     expect(r.ok && r.value.target_session_id).toBe(reportFixture.target_session_id);
+  });
+
+  it('merges the target row of a moved outcome, and only that', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...reportFixture }));
+    await moveSession(7, 'beta');
+    expect(merged).toHaveBeenCalledTimes(1);
+    expect(merged).toHaveBeenCalledWith(target);
+  });
+
+  // A preview's `target` is a `TargetState`, not a session row: merging it
+  // would put garbage into the sessions store.
+  it('merges nothing on a preview answer', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'preview', ...previewFixture }));
+    await moveSession(7, 'beta');
+    expect(merged).not.toHaveBeenCalled();
+  });
+
+  it('merges nothing on an error', async () => {
+    invoked.mockResolvedValueOnce(err('E_MOVE_MIDOP', 'mid-merge'));
+    await moveSession(7, 'beta');
+    expect(merged).not.toHaveBeenCalled();
   });
 });
