@@ -441,7 +441,9 @@ id for a different session returns the earlier result without delivering.
 Bodies are limited to
 64 KiB; `\r\n` is folded to `\n` and any other control character is refused
 (`E_VALIDATE`). The text lands in the pane reconcile last saw Claude in, or
-the session's active pane when that is unknown.
+the session's active pane when that is unknown. An empty prompt with
+`submit: false` is refused (`E_VALIDATE`); an empty prompt with `submit: true`
+is a bare Enter that bypasses the blocked-session check.
 `wait_for_session { session_id, until: "idle" | "turn_gt", turn?, timeout_s? }`
 is a bounded long-poll (500 ms polls, default 120 s, max 600 s) returning
 `{ status: satisfied | timeout, claude_status, turn_seq, last_stop_at,

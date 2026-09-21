@@ -2733,6 +2733,76 @@ async fn send_prompt_with_a_body_is_refused_into_a_blocked_session() {
     assert!(e.message.contains("press_enter"), "{}", e.message);
 }
 
+/// An empty prompt with `submit: false` types nothing and presses nothing,
+/// so it is refused BEFORE `bypasses_gate`'s bare-Enter early return would
+/// otherwise skip `delivery_gate` and no-op it into a false `delivered:
+/// true`. The row is on host "local" — nothing may be sent, or this test
+/// would hang or fail trying to reach real tmux.
+#[tokio::test]
+async fn an_empty_prompt_without_submit_is_refused_before_the_gate() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-blocked", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.record_notification_hook_for_row(
+        id,
+        crate::service::pane_intel::ClaudeStatus::Blocked,
+        Some(Some(crate::service::pane_intel::StuckKind::PressEnter)),
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let e = t
+        .send_prompt(
+            Extension(Caller::master()),
+            Parameters(SendPromptParams {
+                session_id: Some(id),
+                host_alias: None,
+                tmux_name: None,
+                prompt: "".into(),
+                submit: false,
+                raw: false,
+                force: false,
+                client_msg_id: None,
+            }),
+        )
+        .await
+        .expect_err("an empty prompt with submit: false has nothing to deliver");
+    assert!(e.message.starts_with("E_VALIDATE"), "{}", e.message);
+}
+
+/// The same refusal applies to a session that is NOT blocked: it is the
+/// empty + `submit: false` combination being refused, not the session's
+/// state, so a healthy `idle` row is refused identically.
+#[tokio::test]
+async fn an_empty_prompt_without_submit_is_refused_regardless_of_session_state() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-idle", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.record_notification_hook_for_row(id, crate::service::pane_intel::ClaudeStatus::Idle, None)
+        .unwrap();
+    let t = test_tools(s);
+    let e = t
+        .send_prompt(
+            Extension(Caller::master()),
+            Parameters(SendPromptParams {
+                session_id: Some(id),
+                host_alias: None,
+                tmux_name: None,
+                prompt: "".into(),
+                submit: false,
+                raw: false,
+                force: false,
+                client_msg_id: None,
+            }),
+        )
+        .await
+        .expect_err("an empty prompt with submit: false has nothing to deliver");
+    assert!(e.message.starts_with("E_VALIDATE"), "{}", e.message);
+}
+
 /// Minor 9: a QUEUED prompt's ack cannot be known. Claude Code holds it
 /// behind the running turn, and `UserPromptSubmit` fires only when that
 /// queued prompt actually starts — long after the 1.5 s wait. Waiting for it

@@ -971,7 +971,9 @@ impl FleetTools {
     /// [`delivery_gate`] entirely — pressing Enter into a stuck session is
     /// the whole point of it, so the gate's reason for refusing is the
     /// caller's reason for calling. Nothing is typed, nothing is queued, and
-    /// there is no ack to wait for.
+    /// there is no ack to wait for. An empty body with `submit: false` is
+    /// the one combination that types nothing AND presses nothing, so it is
+    /// refused up front with `E_VALIDATE` instead of silently no-opping.
     pub(super) async fn deliver_prompt(
         &self,
         row: &crate::store::SessionRow,
@@ -991,7 +993,15 @@ impl FleetTools {
                 &self.ssh,
             )
         };
-        if bypasses_gate(&prompt) {
+        let bare = bypasses_gate(&prompt);
+        if bare && !submit {
+            return Err(mcp_err(
+                "E_VALIDATE",
+                "nothing to deliver: an empty prompt with submit: false types nothing and presses nothing",
+                None,
+            ));
+        }
+        if bare {
             // The marker line is dropped with the rest: what goes to the pane
             // is the key press, not a sentence about where it came from.
             send(String::new()).await.map_err(to_mcp_err)?;
