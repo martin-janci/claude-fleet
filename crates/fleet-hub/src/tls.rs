@@ -209,6 +209,7 @@ pub(crate) mod tests {
             allowed_hosts: vec![],
             allowed_hosts_explicit: vec![],
             local_host: false,
+            operator_host: "local".into(),
             allow_plaintext: false,
             log_dir: "/unused/logs".into(),
             tls,
