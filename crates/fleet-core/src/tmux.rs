@@ -614,9 +614,18 @@ impl NamedKey {
     }
 }
 
-/// `tmux send-keys -t <session> <Key>` — one named key, no literal text.
+/// `tmux send-keys -t '=<session>:' <Key>` — one named key, no literal text.
+/// The target is an EXACT pane target (`exact_pane`, the same one
+/// `service::sessions::prompt::build_send_commands` uses for text): a bare
+/// `-t NAME` is a *lookup* that falls back to a unique prefix or an fnmatch
+/// pattern, so a key aimed at a dead/renamed session could otherwise land on
+/// an unrelated one whose name merely starts with it.
 pub fn send_named_key(tmux_name: &str, key: NamedKey) -> String {
-    format!("tmux send-keys -t {} {}", quote(tmux_name), key.tmux_name())
+    format!(
+        "tmux send-keys -t {} {}",
+        quote(&exact_pane(tmux_name)),
+        key.tmux_name()
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1514,7 +1523,7 @@ mod tests {
             send_named_key("my session", NamedKey::Escape),
             format!(
                 "tmux send-keys -t {} Escape",
-                crate::shell::quote("my session")
+                crate::shell::quote(&exact_pane("my session"))
             )
         );
     }
