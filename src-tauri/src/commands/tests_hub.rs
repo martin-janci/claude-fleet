@@ -7,7 +7,7 @@
 //! worth asserting is in the function underneath.
 
 use super::logic;
-use super::HubPairArgs;
+use super::{report_client_error_logic, HubPairArgs, ReportClientErrorArgs};
 use crate::backend::pairing::{PairTransport, PairedClient};
 use crate::backend::remote::HubResponse;
 use crate::backend::token_store::{InMemoryTokenStore, TokenStore};
@@ -860,4 +860,35 @@ fn nothing_about_a_stranded_token_carries_the_token() {
     assert!(!format!("{answer:?}").contains("cl_s3cret"));
     // The whole return type is a bool, so there is nowhere for it to ride.
     let _: bool = answer;
+}
+
+#[test]
+fn a_frontend_error_is_queued_clamped_with_its_code() {
+    let before = fleet_core::logging::report_ring().len();
+    report_client_error_logic(ReportClientErrorArgs {
+        level: "error".into(),
+        component: "frontend:unhandled".into(),
+        code: Some("E_PARSE".into()),
+        message: "x".repeat(5000),
+        context: Some(serde_json::json!({ "url": "app://index" })),
+    })
+    .unwrap();
+    assert_eq!(fleet_core::logging::report_ring().len(), before + 1);
+    let r = fleet_core::logging::report_ring()
+        .drain(usize::MAX)
+        .reports
+        .pop()
+        .unwrap();
+    assert_eq!(r.code.as_deref(), Some("E_PARSE"));
+    assert!(r.truncated);
+    assert_eq!(r.component, "frontend:unhandled");
+    let e = report_client_error_logic(ReportClientErrorArgs {
+        level: "debug".into(),
+        component: "frontend".into(),
+        code: None,
+        message: "m".into(),
+        context: None,
+    })
+    .unwrap_err();
+    assert_eq!(e.code, fleet_core::ipc_error::codes::E_VALIDATE);
 }

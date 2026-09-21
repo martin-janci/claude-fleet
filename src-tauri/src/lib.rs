@@ -347,6 +347,7 @@ pub fn run() {
             commands::hub::hub_disconnect,
             commands::hub::hub_connection,
             commands::hub::hub_stranded_token,
+            commands::hub::report_client_error,
             commands::onboarding::check_local_prereqs,
             commands::onboarding::tunnel_status,
             commands::assets::catalog_config,

@@ -655,6 +655,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                   whole state is that no hub is configured",
         },
     ),
+    (
+        "report_client_error",
+        Verdict::SameInBoth {
+            why: "queues a frontend error in THIS process's report ring; in standalone \
+                  nothing drains it, so the push is a no-op rather than a refusal",
+        },
+    ),
     // ── onboarding ──────────────────────────────────────────────────────────
     (
         "check_local_prereqs",
