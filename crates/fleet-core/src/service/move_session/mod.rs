@@ -6044,12 +6044,18 @@ mod tests {
         let (f, bus) = recorded_fixture();
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         let a = args(&f, false);
-        gather(&a, &f.store, &f.fake, &hooks, None)
+        // Held alive across the second acquire below: a claim carried OUT of
+        // gather() in its result (e.g. a field of `Gathered`) would still be
+        // held at this point and would fail that acquire. A claim taken and
+        // released entirely inside gather() blocks nothing, so it is
+        // correctly not this assertion's concern.
+        let g = gather(&a, &f.store, &f.fake, &hooks, None)
             .await
             .expect("the fixture's opening sequence succeeds");
         assert!(progress_of(&f, &bus).is_empty(), "no move:progress event");
         // No claim was taken: a real move of the same session can still start.
         MoveClaim::acquire(&f.store, a.session_id).expect("the claim is free");
+        drop(g);
     }
 
     #[tokio::test]
