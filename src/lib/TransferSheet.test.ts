@@ -113,7 +113,7 @@ describe('TransferSheet', () => {
     expect(mockInvoke).toHaveBeenCalledWith('move_session', {
       args: {
         session_id: 5, target_host_alias: 'turanga', keep_source: true, strict: false,
-        clean_target: false,
+        clean_target: false, dry_run: false,
       },
     });
     expect(await screen.findByTestId('transfer-steps')).toBeTruthy();
@@ -160,7 +160,7 @@ describe('TransferSheet', () => {
     startMove(source, 'turanga', { keepSource: false });
     transferSheetFor.set(5);
     render(TransferSheet);
-    p.resolve(report);
+    p.resolve({ kind: 'moved', ...report });
     await flush();
     await tick();
     const result = await screen.findByTestId('transfer-result');
@@ -185,7 +185,7 @@ describe('TransferSheet', () => {
     startMove(source, 'turanga', { keepSource: false });
     transferSheetFor.set(5);
     render(TransferSheet);
-    p.resolve({ ...report, warnings: [], carried: { ...report.carried, commits: 0, dirty_entries: [] } });
+    p.resolve({ kind: 'moved', ...report, warnings: [], carried: { ...report.carried, commits: 0, dirty_entries: [] } });
     await flush();
     await tick();
     expect((await screen.findByTestId('transfer-result')).textContent)
@@ -325,6 +325,7 @@ describe('TransferSheet', () => {
     render(TransferSheet);
     const both = { path: 'same.bin', bytes: 1, reason: 'over_cap' as const };
     p.resolve({
+      kind: 'moved',
       ...report,
       warnings: ['the very same warning', 'the very same warning'],
       carried: {
@@ -523,7 +524,7 @@ describe('TransferSheet: recovery actions', () => {
   it('offers Move back on a finished move', async () => {
     // Clicking "Move back" starts a genuine (mocked-invoke) move of session 8:
     // give it something to resolve with so that real flow does not throw.
-    mockInvoke.mockImplementation(() => Promise.resolve(report));
+    mockInvoke.mockImplementation(() => Promise.resolve({ kind: 'moved', ...report }));
     const { getByTestId } = renderSheet(doneRun({ fromHost: 'alpha', toHost: 'beta' }));
     const back = getByTestId('transfer-move-back');
     expect(back.textContent).toContain('alpha');

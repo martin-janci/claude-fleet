@@ -33,6 +33,34 @@ export interface CarryReport {
   };
 }
 
+export type TargetState =
+  | { state: 'absent' }
+  | { state: 'unknown' }
+  | { state: 'clean'; head: string }
+  | { state: 'dirty'; head: string; entries: { status: string; path: string }[] };
+
+/** Mirrors `service::move_session::preview::MovePreview`. */
+export interface MovePreview {
+  session_id: number;
+  from_host: string;
+  to_host: string;
+  branch: string;
+  source_cwd: string;
+  unpushed_commits: number | null;
+  commits_ahead: number | null;
+  dirty: { status: string; path: string }[];
+  ignored_carried: { path: string; bytes: number }[];
+  ignored_left_behind: CarryReport['ignored_left_behind'];
+  transcript_bytes: number;
+  session_state_files: number;
+  session_state_bytes: number;
+  memory_files: number;
+  memory_bytes: number;
+  target_path: string;
+  target: TargetState;
+  unknowns: string[];
+}
+
 /** What a completed `move_session` did (mirrors `service::move_session::MoveReport`). */
 export interface MoveReport {
   source_session_id: number;
@@ -52,6 +80,10 @@ export interface MoveReport {
   target: SessionRow;
 }
 
+/** What `move_session` answers. Internally tagged: a `moved` outcome is the
+ *  `MoveReport` with one extra key. */
+export type MoveOutcome = ({ kind: 'moved' } & MoveReport) | ({ kind: 'preview' } & MovePreview);
+
 /** Move a work session to another host with its work as it is: transcript,
  *  unpushed commits, uncommitted and untracked files, small git-ignored files.
  *  The source is killed once the target is confirmed (unless `keepSource`).
@@ -65,17 +97,54 @@ export async function moveSession(
   targetHostAlias: string,
   opts: { keepSource?: boolean; strict?: boolean; cleanTarget?: boolean } = {},
 ): Promise<Result<MoveReport>> {
-  const r = await invokeCmd<MoveReport>('move_session', {
+  const r = await invokeCmd<MoveOutcome>('move_session', {
     args: {
       session_id: sessionId,
       target_host_alias: targetHostAlias,
       keep_source: opts.keepSource ?? false,
       strict: opts.strict ?? false,
       clean_target: opts.cleanTarget ?? false,
+      dry_run: false,
     },
   });
-  if (r.ok) mergeSession(r.value.target);
-  return r;
+  if (!r.ok) return r;
+  if (r.value.kind !== 'moved') {
+    return {
+      ok: false,
+      error: { code: 'E_PARSE', message: 'move_session answered a preview, not a move' },
+    };
+  }
+  const { kind: _kind, ...report } = r.value;
+  mergeSession(report.target);
+  return { ok: true, value: report };
+}
+
+/** A dry run: what this move would do, changing nothing. `Err` is the
+ *  refusal the real move would return — same code, same message. The
+ *  Transfer sheet never offers `strict`, so this always sends `strict: false`. */
+export async function previewMove(
+  sessionId: number,
+  targetHostAlias: string,
+): Promise<Result<MovePreview>> {
+  const r = await invokeCmd<MoveOutcome>('move_session', {
+    args: {
+      session_id: sessionId,
+      target_host_alias: targetHostAlias,
+      keep_source: false,
+      strict: false,
+      clean_target: false,
+      dry_run: true,
+    },
+  });
+  if (!r.ok) return r;
+  if (r.value.kind !== 'preview') {
+    return {
+      ok: false,
+      error: { code: 'E_PARSE', message: 'move_session answered a move, not a preview' },
+    };
+  }
+  const { kind: _kind, ...preview } = r.value;
+  return { ok: true, value: preview };
 }
 
 export type ResolveAction = 'finish' | 'undo';

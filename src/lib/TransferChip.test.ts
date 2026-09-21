@@ -106,7 +106,7 @@ describe('TransferChip', () => {
     const p = donePromise();
     startMove(movable, 'beta', { keepSource: false });
     render(TransferChip, { props: { session: movable } });
-    p.resolve(report);
+    p.resolve({ kind: 'moved', ...report });
     await flush();
     await tick();
     expect(screen.getByTestId('transfer-live').textContent?.replace(/\s+/g, ' ').trim())
@@ -130,7 +130,7 @@ describe('TransferChip', () => {
   it('the target session wears the source\'s run and opens its sheet', async () => {
     const p = donePromise();
     startMove(movable, 'beta', { keepSource: false });
-    p.resolve(report);
+    p.resolve({ kind: 'moved', ...report });
     await flush();
     sessions.set([moved]);
     render(TransferChip, { props: { session: moved } });

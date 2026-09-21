@@ -86,7 +86,9 @@ function pending() {
         : Promise.resolve(ok(undefined)),
   );
   return {
-    resolve: (v: unknown) => doResolve(ok(v)),
+    // `move_session` now answers a `MoveOutcome`: `moveSession()` narrows a
+    // `moved` one back to the `MoveReport` these tests build with `report()`.
+    resolve: (v: unknown) => doResolve(ok({ kind: 'moved', ...(v as object) })),
     reject: (e: { code: string; message: string; details?: unknown }) =>
       doResolve(err(e.code, e.message, e.details)),
   };
@@ -117,7 +119,7 @@ describe('startMove', () => {
     expect(invoked).toHaveBeenCalledWith('move_session', {
       args: {
         session_id: 5, target_host_alias: 'turanga', keep_source: false, strict: false,
-        clean_target: false,
+        clean_target: false, dry_run: false,
       },
     });
   });
@@ -611,7 +613,7 @@ describe('retryMove', () => {
     await flush();
     expect(get(moves).get(7)!.status).toBe('failed');
 
-    invoked.mockResolvedValueOnce(ok(report({ target_session_id: 8 })));
+    invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...report({ target_session_id: 8 }) }));
     retryMove(7);
     await flush();
     const run = get(moves).get(7)!;
@@ -632,7 +634,7 @@ describe('retryMove', () => {
     invoked.mockResolvedValueOnce(err('E_MOVE_TARGET_DIRTY', 'dirty', { leftovers: 'ours', ours: ['a.txt'] }));
     startMove(session, 'beta', { keepSource: false });
     await flush();
-    invoked.mockResolvedValueOnce(ok(report({ target_session_id: 8 })));
+    invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...report({ target_session_id: 8 }) }));
     retryMove(7, { cleanTarget: true });
     await flush();
     expect(invoked.mock.calls.at(-1)![1].args).toMatchObject({ clean_target: true });
@@ -855,7 +857,7 @@ describe('a run that outlives the ids it started with', () => {
     resolveMoveRun(7, 'undo');
     await flush();
     expect(get(moves).get(7)!.status).toBe('failed');
-    invoked.mockResolvedValueOnce(ok(report({ target_session_id: 9 })));
+    invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...report({ target_session_id: 9 }) }));
     retryMove(7);
     await flush();
     expect(invoked.mock.calls.at(-1)![1].args).toMatchObject({ keep_source: true });
