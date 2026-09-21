@@ -797,7 +797,12 @@ mod tests {
 
         // A minted code is redeemed with NO Authorization header and from a
         // Host nobody allowlisted — a phone that scanned a QR knows neither.
-        let minted = pairings.mint("kiosk", "readonly", std::time::Duration::from_secs(600));
+        let minted = pairings.mint(
+            "kiosk",
+            "readonly",
+            false,
+            std::time::Duration::from_secs(600),
+        );
         let paired = round_trip(addr, &pair_req(&minted.code, "phone.invalid")).await;
         assert!(
             paired.contains("200 OK"),
@@ -823,11 +828,32 @@ mod tests {
         assert_eq!(json_field(&paired, "name"), "kiosk");
         assert_eq!(json_field(&paired, "mode"), "readonly");
         assert_eq!(json_field(&paired, "hub"), "https://fleet.example.com");
+        assert!(
+            body_of(&paired).contains("\"trusted\":false"),
+            "a plain pairing lands untrusted:\n{paired}"
+        );
         // The code never comes back in the answer.
         assert!(
             !paired.contains(&minted.code),
             "the pairing code must not be echoed:\n{paired}"
         );
+        // A code minted `--trusted` lands a trusted row: the grant rides on
+        // the code, not on anything the phone sends.
+        let vouched = pairings.mint("desk", "full", true, std::time::Duration::from_secs(600));
+        let paired_desk = round_trip(addr, &pair_req(&vouched.code, "phone.invalid")).await;
+        assert!(paired_desk.contains("200 OK"), "{paired_desk}");
+        assert!(
+            body_of(&paired_desk).contains("\"trusted\":true"),
+            "{paired_desk}"
+        );
+        {
+            let s = store.lock().unwrap();
+            let rows = s.active_client_tokens().unwrap();
+            let desk = rows.iter().find(|r| r.name == "desk").expect("desk row");
+            assert!(desk.trusted_at.is_some(), "the row is trusted");
+            let kiosk = rows.iter().find(|r| r.name == "kiosk").expect("kiosk row");
+            assert!(kiosk.trusted_at.is_none(), "the plain pairing is not");
+        }
 
         // A camera scan opens `GET /pair`, which must explain what to do
         // rather than answer 405. No secret is in it: the code lives in the
@@ -853,7 +879,7 @@ mod tests {
         // Used, never-minted and expired are one and the same answer.
         let reused = round_trip(addr, &pair_req(&minted.code, "127.0.0.1")).await;
         let unknown = round_trip(addr, &pair_req("ZZZZZZZZ", "127.0.0.1")).await;
-        let stale = pairings.mint("late", "full", std::time::Duration::from_millis(1));
+        let stale = pairings.mint("late", "full", false, std::time::Duration::from_millis(1));
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let expired = round_trip(addr, &pair_req(&stale.code, "127.0.0.1")).await;
         for (what, resp) in [
@@ -1111,7 +1137,8 @@ mod tests {
         );
         // Even a GOOD code is refused inside the window: the budget is spent
         // before the code is looked at.
-        let good = limited_pairings.mint("phone2", "full", std::time::Duration::from_secs(600));
+        let good =
+            limited_pairings.mint("phone2", "full", false, std::time::Duration::from_secs(600));
         let throttled = round_trip(addr3, &pair_req(&good.code, "127.0.0.1")).await;
         assert!(
             throttled.contains("429"),

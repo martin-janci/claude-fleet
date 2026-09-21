@@ -15,7 +15,6 @@
 //! for as long as the user takes to write the prompt around it — ordinary
 //! minutes, not a slow IPC round-trip.
 
-use crate::backend::FleetBackend;
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::shell::quote;
 use fleet_core::ssh::SshClient;
@@ -276,11 +275,11 @@ pub fn preview_for(allow: &UploadAllowList, path: &str) -> Result<Option<String>
 #[tauri::command]
 pub fn attachment_preview(
     path: String,
-    backend: State<'_, Arc<FleetBackend>>,
     allow: State<'_, Arc<UploadAllowList>>,
 ) -> Result<Option<String>, IpcError> {
-    // The file is on THIS machine; a hub client has nothing local to read.
-    backend.refuse_local_only("attachment_preview")?;
+    // Same in both modes: this machine has the disk and the ssh, and the
+    // session is addressed by the alias passed in. Pairing with a hub gives
+    // the hub the fleet's database and hosts — not this machine.
     preview_for(&allow, &path)
 }
 
@@ -291,11 +290,11 @@ pub fn attachment_preview(
 #[tauri::command]
 pub fn attachment_describe(
     paths: Vec<String>,
-    backend: State<'_, Arc<FleetBackend>>,
     allow: State<'_, Arc<UploadAllowList>>,
 ) -> Result<Vec<PickedFile>, IpcError> {
-    // The files are on THIS machine; a hub client has nothing local to measure.
-    backend.refuse_local_only("attachment_describe")?;
+    // Same in both modes: this machine has the disk and the ssh, and the
+    // session is addressed by the alias passed in. Pairing with a hub gives
+    // the hub the fleet's database and hosts — not this machine.
     describe_for(&allow, &paths)
 }
 
@@ -305,12 +304,11 @@ pub fn attachment_describe(
 #[tauri::command]
 pub async fn pick_attachments(
     app: tauri::AppHandle,
-    backend: State<'_, Arc<FleetBackend>>,
     allow: State<'_, Arc<UploadAllowList>>,
 ) -> Result<Vec<PickedFile>, IpcError> {
-    // The picker opens on THIS machine's desktop; there is no way to show a
-    // hub's file dialog through the frame this app draws.
-    backend.refuse_local_only("pick_attachments")?;
+    // Same in both modes: this machine has the disk and the ssh, and the
+    // session is addressed by the alias passed in. Pairing with a hub gives
+    // the hub the fleet's database and hosts — not this machine.
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
@@ -628,13 +626,12 @@ fn check_upload_budget(paths: &[String]) -> Result<(), IpcError> {
 #[tauri::command]
 pub async fn upload_attachments(
     args: AttachArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     ssh: State<'_, Arc<SshClient>>,
     allow: State<'_, Arc<UploadAllowList>>,
 ) -> Result<Vec<String>, IpcError> {
-    // Same reason as upload_to_session: the bytes are on THIS machine and the
-    // host is the hub's to reach.
-    backend.refuse_local_only("upload_attachments")?;
+    // Same in both modes: this machine has the disk and the ssh, and the
+    // session is addressed by the alias passed in. Pairing with a hub gives
+    // the hub the fleet's database and hosts — not this machine.
     fleet_core::validate::host_alias(&args.host_alias)?;
     fleet_core::validate::tmux_name_addressable(&args.session_name)?;
     if args.local_paths.is_empty() {

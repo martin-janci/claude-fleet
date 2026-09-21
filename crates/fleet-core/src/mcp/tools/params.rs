@@ -761,6 +761,18 @@ pub struct PairClientParams {
     /// code also dies on first use.
     #[serde(default)]
     pub ttl_s: Option<u64>,
+    /// Pair a device you vouch for: its prompts reach agents unmarked (see
+    /// `set_client_trust`). Default false.
+    #[serde(default)]
+    pub trusted: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SetClientTrustParams {
+    /// The live client's name.
+    pub name: String,
+    /// true: unmarked from its next call on; false: marked again.
+    pub trusted: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

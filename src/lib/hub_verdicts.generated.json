@@ -4,8 +4,6 @@
     "add_project",
     "assets_inventory",
     "assets_scan_hosts",
-    "attachment_describe",
-    "attachment_preview",
     "catalog_add_resource",
     "catalog_apply_sync",
     "catalog_commit_pending",
@@ -50,7 +48,6 @@
     "list_host_tokens",
     "mcp_configure",
     "mcp_status",
-    "pick_attachments",
     "probe_ssh_alias",
     "provision_hosts",
     "purge_project",
@@ -72,8 +69,7 @@
     "set_account_nickname",
     "set_fleet_setting",
     "set_host_token_mode",
-    "tunnel_status",
-    "upload_attachments"
+    "tunnel_status"
   ],
   "routed": [
     "cancel_task",
@@ -123,6 +119,8 @@
     }
   ],
   "same_in_both": [
+    "attachment_describe",
+    "attachment_preview",
     "cancel_command",
     "collect_diagnostics",
     "hub_connection",
@@ -133,11 +131,13 @@
     "mcp_confirm",
     "mcp_pending_confirms",
     "open_log_folder",
+    "pick_attachments",
     "pty_close",
     "pty_drain",
     "pty_open",
     "pty_resize",
     "pty_write",
+    "upload_attachments",
     "upload_to_session"
   ]
 }

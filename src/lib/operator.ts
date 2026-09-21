@@ -5,7 +5,7 @@ import { derived, get, writable, type Readable, type Writable } from 'svelte/sto
 import { invokeCmd } from './result';
 import { restartSession, sessions, type SessionRow } from './sessions';
 
-export type OperatorBlocked = 'absent' | 'lost' | 'no_mcp' | 'token_revoked';
+export type OperatorBlocked = 'absent' | 'lost' | 'no_mcp' | 'token_revoked' | 'no_host';
 
 export interface OperatorStatus {
   ready: boolean;
@@ -88,6 +88,14 @@ export function blockedCopy(b: OperatorBlocked): { title: string; action: string
       return {
         title:
           "The agent's token was revoked, so it can no longer reach the fleet. Kill its session from the sidebar and press the button again to mint a new one.",
+        action: null,
+      };
+    case 'no_host':
+      // `absent` here would offer "Wake the agent" for a press that cannot
+      // work: the agent runs on the `local` host, and this fleet has none.
+      return {
+        title:
+          'The agent runs on the local host, and this fleet has none (a hub started with hub.local_host=false). There is nowhere to start it.',
         action: null,
       };
   }

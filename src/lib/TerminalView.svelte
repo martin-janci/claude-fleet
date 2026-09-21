@@ -18,6 +18,7 @@
   import { createMouseController } from './terminal_mouse';
   import TransferChip from './TransferChip.svelte';
   import { fitCells } from './terminal_size';
+  import { ownsTheFleet } from './hub';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -451,7 +452,16 @@
       // those are Repair workspace only; we say so instead. A healthy session
       // costs one probe; orphans and background rows have nothing to check. An
       // offline host is left to the attach error.
-      if (sess.project_id != null && !hasNoPane(sess)) {
+      //
+      // A paired desktop does not run it at all. The check is
+      // `repair_session { explicit: false }`, which the hub client REFUSES on
+      // purpose (`backend/verdicts.rs`): routing it would quietly become the
+      // hub's always-explicit repair, which unregisters, adopts and
+      // rebranches. There is no safe variant to route, so there is nothing to
+      // ask for — attempting it anyway put an E_LOCAL_ONLY toast on every
+      // attach of a project-backed session. Repair workspace is unaffected:
+      // it passes `explicit: true` and routes.
+      if (sess.project_id != null && !hasNoPane(sess) && ownsTheFleet()) {
         const rep = await repairSession(sess.id);
         if (standDown()) return;
         if (rep.ok) {
@@ -1063,52 +1073,18 @@
   const selectedSessionHostTransport = $derived(
     $selectedSession ? ($hostByAlias.get($selectedSession.host_alias)?.transport ?? 'ssh') : 'ssh',
   );
-  // An agent host is the ONLY session this pane cannot attach. Being a hub
-  // client is not a reason on its own: `pty_open` spawns `ssh <host>` /
-  // `tmux attach` from THIS machine, against this machine's ssh config, and
-  // reads nothing out of the local store — so it works the same in both
-  // modes. An agent host, by contrast, has no SSH route from anywhere: it
-  // dials the hub outbound precisely because nothing can dial it.
-  const cannotAttachSelected = $derived(
+  // `transport: 'agent'` says the HUB cannot dial this host — that is why the
+  // host dials out instead. It says nothing about THIS machine: `pty_open`
+  // spawns `ssh <host>` against this machine's own ssh config, which may well
+  // have a route (an entry with a ProxyCommand through a box that can reach
+  // it). So the pane attaches every session alike and uses this only to
+  // explain a failure that has already happened, never to refuse in advance.
+  const selectedIsAgentHost = $derived(
     !!$selectedSession && selectedSessionHostTransport === 'agent',
   );
 </script>
 
-{#if cannotAttachSelected}
-  <!-- No SSH route exists to this host from any machine, so there is no
-       attach to offer — not the local one, and not one via the hub either.
-       The honest answer here really is "you can't from here", unlike the
-       ordinary hub-client case, which attaches exactly as standalone does. -->
-  <div class="empty" data-testid="terminal-no-attach">
-    <svg
-      class="empty-icon"
-      viewBox="0 0 64 64"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="6" y="10" width="52" height="44" rx="5" />
-      <line x1="6" y1="21" x2="58" y2="21" />
-      <circle cx="13" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
-      <circle cx="17.5" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
-      <circle cx="22" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
-      <polyline points="16,32 22,38 16,44" />
-      <line x1="27" y1="44" x2="42" y2="44" />
-    </svg>
-    <p class="empty-msg">This session cannot be attached.</p>
-    {#if $selectedSession}
-      <p class="empty-msg remote-why" data-testid="terminal-agent-transport">
-        {$selectedSession.host_alias} (session {$selectedSession.tmux_name}) is reached through
-        fleet-agent, not SSH. Nothing can dial that host — which is exactly why it dials the hub
-        instead — so no terminal can attach it: not this one, and not one on the hub either.
-      </p>
-      <p class="transfer-row"><TransferChip session={$selectedSession} /></p>
-    {/if}
-  </div>
-{:else if $selectedSession}
+{#if $selectedSession}
   <div class="wrap">
     {#if autoReconnecting}
       <div class="reconnect-banner" data-testid="terminal-autoreconnect-banner">
@@ -1246,7 +1222,19 @@
       </div>
     {/if}
     {#if openError}
-      <div class="err">{openError}</div>
+      {#if selectedIsAgentHost && $selectedSession}
+        <!-- The attach was tried and failed. `transport: 'agent'` is not a
+             claim that no route exists anywhere — only that the hub has
+             none — so name what is actually missing: a route from HERE. -->
+        <div class="err" data-testid="terminal-agent-transport">
+          {$selectedSession.host_alias} is reached through fleet-agent, not SSH, and this machine
+          has no SSH route to it. Give it one — an ssh config entry for {$selectedSession.host_alias},
+          through a host that can reach it — or move the session somewhere you can attach.
+          ({openError})
+        </div>
+      {:else}
+        <div class="err">{openError}</div>
+      {/if}
     {/if}
   </div>
 {:else}
@@ -1517,13 +1505,6 @@
     font-size: 0.95rem;
     letter-spacing: 0.01em;
   }
-  .remote-why {
-    max-width: 44rem;
-    font-size: 0.8rem;
-    opacity: 0.85;
-    text-align: center;
-  }
-  .transfer-row { margin: 0 0 0.5rem; }
   .err {
     flex: 0 0 auto;
     color: #e64a4a;

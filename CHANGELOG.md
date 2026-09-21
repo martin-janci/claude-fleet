@@ -8,6 +8,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.31] - 2026-09-21
+
+### Added
+- **hub:** a paired client the operator trusts delivers its prompts unmarked
+
+## [0.2.30] - 2026-09-21
+
+### Fixed
+- **hub-client:** attachments work from a paired desktop, as the terminal drop already did
+- **operator:** a fleet with no local host says so, instead of offering a dead button
+## [0.2.29] - 2026-09-21
+
+### Added
+- **hub:** demo-seed, so a freshly paired client has something to draw
+
+### Changed
+- **hub:** rustfmt, and move demo_seed above the test module
+
+### Fixed
+- **terminal:** an agent host is attached and only then explained
+## [0.2.28] - 2026-09-21
+
+### Added
+- **ui:** the details panel offers the return trip and a partial's recovery
+- **hub:** a paired desktop attaches its own terminal
+- **ui:** the Transfer sheet can retry, clean up, come back, finish and undo
+- **ui:** the run store can retry a failed transfer and resolve a partial
+- **composer:** send a prompt with its attachments
+- **ui:** a session's own timeline says where it came from and what is unresolved
+- **ui:** a dirty target says whose work it is holding, and what can be done about it
+- **move:** resolve_move reaches the desktop and the hub, with its generated docs
+- **ui:** mount the agent FAB and panel over every view
+- **composer:** attach files, with thumbnails in the box
+- **ui:** the agent panel
+- **composer:** the attachment list, with its limits and its wording
+- **ui:** the agent FAB
+- **ui:** the agent's store — open, wake, and say why not
+- **ui:** ⌘E opens the agent
+- **ui:** the agent's context chip, as a pure function
+- **upload:** attachments land inside the worktree, excluded untracked
+- **commands:** ensure_operator and operator_status, both routed
+- **upload:** inline previews for attached images
+- **move:** resolve_move finishes or undoes a partial transfer
+- **mcp:** ensure_operator and operator_status
+- **operator:** say why the agent cannot work, rather than letting it apologise
+- **upload:** a file picker that authorises its own result
+- **operator:** bring the UX agent's session into being, idempotently
+- **composer:** the transcript holds still when the box grows
+- **move:** a partial move records the facts a later finish or undo needs
+- **operator:** the UX agent's identity, and the rule that it may not act on itself
+- **composer:** a frozen session outranks the send button
+- **composer:** chips hold one row, More opens the rest
+- **bg:** a background session records the session that asked for it
+- **store:** a system project flag for fleet-internal working directories
+- **composer:** one shell, with send inside it
+- **ui:** switch between a session's background agents, tasks and sessions
+- **move:** clean_target replaces an unfinished attempt's leftovers, never the target's own work
+- **ui:** a detail view for one piece of background work
+- **ui:** derive a session's background work from its turns and fleet rows
+- **ui:** a task notification reads as an event row, not as XML
+- **ui:** a control token layer and four primitives
+- **transcript:** a background agent's block shows its report, not its launch ack
+- **transcript:** parse task notifications instead of printing their XML
+- **move:** adopt a target that already holds exactly the work being carried
+- **move:** a content-exact verifier for a dirty target, and a scoped rollback
+- **ui:** the details panel and the app open the one Transfer sheet
+- **ui:** Transfer chip on the terminal header's host name, live while moving
+- **ui:** Transfer sheet — setup, live steps, a readable result and failure
+- **ui:** move eligibility in one place, and move errors in words
+- **ui:** moves store — one run per moving session, fed by events and the result
+- **move:** report the nine steps of a move as move:progress
+- **events:** move:progress — the nine steps of a move on the event bus
+
+### Changed
+- ignore the session worktree tree and local MCP wiring
+- bump to 0.2.27
+- **ui:** hold the palette to app.css and make weak assertions fail
+- **agent:** the offline check bounds the budget, not the scheduler
+- ignore the per-worktree cargo target dir
+- **move:** the final source step becomes finalise_source, shared with recovery
+- **ui:** every shared control onto the primitives
+- **ui:** one Send, and a blocking reason you can reach
+- **conversation:** one inset for the bar, the turns and the box
+- **ui:** bordered pill means clickable, everywhere
+- **conversation:** one sticky bar, and turns survive find
+- **theme:** assert the contrast floors app.css claims in comments
+- **hub-client:** the moved call timeout is a real bound, not just a table
+
+### Fixed
+- **hub-client:** the automatic workspace check is skipped, not refused
+- **ui:** the run store and the sheet stop losing, coercing and offering the wrong things
+- **ui:** the switcher colours what is running, and the notification row is written once
+- **ui:** a running background agent says so in the thread, not only the switcher
+- **move:** refuse a target already running this conversation, and stop the engine overclaiming
+- **ui:** a background detail with an empty report still says so
+- **conv:** an unreadable status is not a failed background task
+- **hub:** a project row from a hub older than 038 still parses
+- **move:** the git step names the dirty files it carries, not just commits
+- **mcp:** clean_target reaches the engine from the tool and the hub
+- **mcp:** new_bg_session gates its requester, and says the field exists
+- **hooks:** make .githooks the hooks path without losing the local guard
+- **hooks:** key CARGO_TARGET_DIR to the worktree the commit is in
+- **ui:** a Finish/Undo refusal falls back to a toast once its sheet is gone
+- **ui:** carry a Finish/Undo refusal on the run, not a toast; name the true cleanup total
+- **composer:** drop the attachment tray when the session changes
+- **attachments:** let a spent tile be re-attached, and close the remote quoting gap
+- **agent:** a joiner opens the panel too — closing mid-birth wedged the button
+- **attachments:** keep un-uploadable tiles, flag spent ones, and bound quoted prompt size
+- **agent:** the panel can be closed — toggle, close button, Escape
+- **agent:** read the operator's LIVE row, not the snapshot the panel opened with
+- **projects:** actually hide the system project from the pickers
+- **ui:** close the retry race, guard resolveMoveRun to a partial
+- **attachments:** gate the drop on visibility and bound uploads in Rust
+- **operator:** serialise ensure_operator, commit the token after the host has it
+- **operator:** guard rename_session and recreate_session; argue restart's exemption
+- **transcript:** a background call's newest report decides whether it failed
+- **upload:** dropped attachments obey the same size limits as picked ones
+- **ui:** anchor the agent-fab hint to the actual button
+- **ui:** keep the draft on a failed send; the dropped chip is per-context
+- **composer:** dropped paths come from Tauri's drag-drop event
+- **ui:** one composer, not two, over the operator session
+- **upload:** resolve the exclude file through git, not a linked worktree's .git path
+- **ui:** ⌘E must not fall through to Settings
+- **upload:** tighten PICKED_ALLOW_TTL to 4 hours
+- **move:** resolve_move refuses an identity mismatch, keeps undo's kill best-effort
+- **upload:** give picked attachments their own allow-list TTL
+- **operator:** check the control API before the operator reference
+- **ui:** the background switcher heads its two groups and sorts each of them
+- **operator:** hand the agent's token to .mcp.json, and refuse before rotating it
+- **broadcast:** never fan a prompt into the UX agent's own session
+- **conv:** a background entry is keyed by the call that launched it
+- **composer:** split .btn--chip from .btn--toggle; re-measure overflow on preset change
+- **ui:** pin last-non-null-wins semantics for a resumed task's output file
+- **conversation:** disable find with no thread; ring only on focus-visible
+- **mcp:** a confirmed tool's deadline outlasts its confirmation window
+- **transcript:** give each coalesced notification its own join timestamp
+- **ui:** a stray file drop no longer navigates the webview away
+- **move:** prep-site TARGET_DIRTY can never adopt; close replay only after verify
+- **ui:** define --mono, and stop Retry rendering as a native button
+- **a11y:** the healthy context meter uses a token, not a 2:1 hex
+- **ui:** the conversation switcher menu drops over the toolbar, not under it
+- **ui:** a refused Transfer follows the real move, and a lost hub says what it said
+- **ui:** the Transfer sheet and chip tell the truth about a move that stopped
+- **ui:** the moves store stops rewriting its own steps, and checks its events
+- **move:** a move's progress survives a lost caller, and names the right step
+- **hub-client:** toast a creation that fails after the dialog closes
+- **hub-client:** cover health_check and TasksPanel in the contract skew
+- **hub-client:** stop offering a cancel that does not cancel
+- **hub-client:** show an honest empty state under a contract skew
+
+### Documentation
+- **transfer:** 3d has landed; its follow-ups join the roadmap's debts
+- **transfer:** reconcile the spec with the budget raise and where clean_target is documented
+- **attachments:** agent-only hosts CAN receive attachments
+- **review:** findings from the post-merge review, and the plan that closes them
+- **control-api:** register attachment_describe in the reference
+- **plan:** add Task 6b so the size limits apply to dropped files too
+- **attachments:** dropped paths come from Tauri's event, not the DOM
+- **conversations:** the spec said to key a background entry by task_id
+- **conversation:** a pill means chip, not toggle
+- **transfer:** name the two residual risks the clean_target review surfaced
+- **conversation:** the inset task is a cleanup, not a misalignment fix
+- **plan:** the find input's ring is :focus-visible, per the global constraint
+- **ux-agent:** the implementation plan, 14 tasks
+- **plan:** App.svelte tears down via onDestroy, not a returned cleanup
+- **transfer:** the prep-site dirty refusal is not classified — the verifier cannot answer there
+- **ux-agent:** correct three claims the plan disproved
+- **ux-agent:** one button, one operator, the whole fleet
+- **plan:** correct the --mono count, and close the .retry-btn gap
+- **conversation:** implementation plans, and three spec corrections
+- **conversations:** implementation plan for background work in the Conversations tab
+- **conversation:** one control system, one bar, one box
+- **conversations:** design for background work in the Conversations tab
+- **move:** recover_body/recover_script must not overclaim rollback safety
+- **transfer:** pre-flight rulings on the 3d plan (transcript path, task order, test consts)
+- **transfer:** slice 3d implementation plan, and the details panel's real event source
+- **transfer:** a routed command needs a hub tool — resolve_move gets a slim one
+- **transfer:** slice 3d design — retry, cleanup, the return trip and partial recovery
+- **transfer:** where the Transfer work stands and what comes next
+- **specs:** transfer sheet — what the whole-branch review changed
+- **plans:** transfer sheet implementation plan (slice 3a)
+- **specs:** transfer sheet — bridge test instead of the golden, moveProgress.ts, settle behaviour
+- **specs:** transfer sheet — one button, live progress, a readable result (slice 3a)
 ## [0.2.26] - 2026-09-20
 
 ### Added
@@ -900,6 +1083,10 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.31]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.31
+[0.2.30]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.30
+[0.2.29]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.29
+[0.2.28]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.28
 [0.2.26]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.26
 [0.2.25]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.25
 [0.2.24]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.24

@@ -158,6 +158,7 @@ mod tests {
             client: Some(ClientRef {
                 id: 1,
                 name: "phone".into(),
+                trusted: false,
             }),
             mode: TokenMode::Full,
         };

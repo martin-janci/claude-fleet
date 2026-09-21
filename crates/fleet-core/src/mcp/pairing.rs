@@ -57,6 +57,9 @@ pub struct PairingRequest {
     pub code: String,
     pub name: String,
     pub mode: String,
+    /// Whether the client is paired as one the operator vouches for
+    /// (`client_tokens.trusted_at`): its prompts are delivered unmarked.
+    pub trusted: bool,
     pub expires_at: Instant,
 }
 
@@ -68,6 +71,7 @@ impl std::fmt::Debug for PairingRequest {
             .field("code", &"<redacted>")
             .field("name", &self.name)
             .field("mode", &self.mode)
+            .field("trusted", &self.trusted)
             .field("expires_at", &self.expires_at)
             .finish()
     }
@@ -157,6 +161,7 @@ fn is_trusted_front_end(ip: std::net::IpAddr) -> bool {
 struct Pending {
     name: String,
     mode: String,
+    trusted: bool,
     expires_at: Instant,
 }
 
@@ -178,10 +183,11 @@ impl PendingPairings {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Mint a fresh code for `name`/`mode`, valid for `ttl`. Sweeps expired
-    /// entries first, so the map cannot grow without bound on a hub where
-    /// codes are minted and never redeemed.
-    pub fn mint(&self, name: &str, mode: &str, ttl: Duration) -> PairingRequest {
+    /// Mint a fresh code for `name`/`mode` (and whether the client is to be
+    /// `trusted`), valid for `ttl`. Sweeps expired entries first, so the map
+    /// cannot grow without bound on a hub where codes are minted and never
+    /// redeemed.
+    pub fn mint(&self, name: &str, mode: &str, trusted: bool, ttl: Duration) -> PairingRequest {
         let now = Instant::now();
         self.sweep(now);
         let expires_at = now + ttl;
@@ -199,6 +205,7 @@ impl PendingPairings {
             Pending {
                 name: name.to_string(),
                 mode: mode.to_string(),
+                trusted,
                 expires_at,
             },
         );
@@ -206,6 +213,7 @@ impl PendingPairings {
             code,
             name: name.to_string(),
             mode: mode.to_string(),
+            trusted,
             expires_at,
         }
     }
@@ -236,6 +244,7 @@ impl PendingPairings {
             code: key,
             name: entry.name,
             mode: entry.mode,
+            trusted: entry.trusted,
             expires_at: entry.expires_at,
         })
     }
@@ -426,11 +435,25 @@ pub async fn handle_pair(
             tracing::error!("[mcp] store lock poisoned while pairing");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         };
+        // The trust grant rides on the same code the operator minted: a
+        // `--trusted` pairing lands trusted, nothing else does.
         s.insert_client_token(&req.name, &hash, &req.mode)
+            .and_then(|row| {
+                if req.trusted {
+                    s.set_client_trust(&row.name, true)
+                } else {
+                    Ok(row)
+                }
+            })
     };
     match inserted {
         Ok(row) => {
-            tracing::info!(client = %row.name, mode = %row.mode, "[mcp] paired a client");
+            tracing::info!(
+                client = %row.name,
+                mode = %row.mode,
+                trusted = row.trusted_at.is_some(),
+                "[mcp] paired a client"
+            );
             // The ONE response that ever carries the plaintext token. Tell
             // every cache between here and the phone to keep no copy of it.
             (
@@ -439,6 +462,7 @@ pub async fn handle_pair(
                     "token": token,
                     "name": row.name,
                     "mode": row.mode,
+                    "trusted": row.trusted_at.is_some(),
                     "hub": state.base_url.as_str(),
                 })),
             )
@@ -465,8 +489,8 @@ mod tests {
     #[test]
     fn a_code_is_eight_crockford_chars_and_unique() {
         let p = PendingPairings::new();
-        let a = p.mint("phone", "full", Duration::from_secs(600));
-        let b = p.mint("tablet", "full", Duration::from_secs(600));
+        let a = p.mint("phone", "full", false, Duration::from_secs(600));
+        let b = p.mint("tablet", "full", false, Duration::from_secs(600));
         assert_eq!(a.code.len(), 8);
         assert!(
             a.code
@@ -481,7 +505,7 @@ mod tests {
     #[test]
     fn a_code_works_once() {
         let p = PendingPairings::new();
-        let req = p.mint("phone", "readonly", Duration::from_secs(600));
+        let req = p.mint("phone", "readonly", false, Duration::from_secs(600));
         let got = p.consume(&req.code).expect("first use");
         assert_eq!(got.name, "phone");
         assert_eq!(got.mode, "readonly");
@@ -491,7 +515,7 @@ mod tests {
     #[test]
     fn an_expired_code_is_refused_and_swept() {
         let p = PendingPairings::new();
-        let req = p.mint("phone", "full", Duration::from_millis(1));
+        let req = p.mint("phone", "full", false, Duration::from_millis(1));
         std::thread::sleep(Duration::from_millis(5));
         assert!(p.consume(&req.code).is_none());
     }
@@ -523,10 +547,10 @@ mod tests {
     #[test]
     fn minting_sweeps_expired_codes() {
         let p = PendingPairings::new();
-        let live = p.mint("kept", "full", Duration::from_secs(600));
-        p.mint("stale", "full", Duration::from_millis(1));
+        let live = p.mint("kept", "full", false, Duration::from_secs(600));
+        p.mint("stale", "full", false, Duration::from_millis(1));
         std::thread::sleep(Duration::from_millis(5));
-        p.mint("fresh", "full", Duration::from_secs(600));
+        p.mint("fresh", "full", false, Duration::from_secs(600));
         assert_eq!(p.len(), 2, "the expired code must have been swept");
         assert!(p.consume(&live.code).is_some(), "a live code still works");
         assert_eq!(p.len(), 1, "consuming frees the slot");
@@ -538,7 +562,7 @@ mod tests {
     #[test]
     fn debug_never_prints_the_code() {
         let p = PendingPairings::new();
-        let req = p.mint("phone", "full", Duration::from_secs(600));
+        let req = p.mint("phone", "full", false, Duration::from_secs(600));
         let rendered = format!("{req:?}");
         assert!(
             !rendered.contains(&req.code),
@@ -632,12 +656,29 @@ mod tests {
         );
     }
 
+    /// The trust grant rides on the code, per mint.
+    #[test]
+    fn a_code_carries_its_trust_grant() {
+        let p = PendingPairings::new();
+        let vouched = p.mint("desk", "full", true, Duration::from_secs(600));
+        let plain = p.mint("phone", "full", false, Duration::from_secs(600));
+        assert!(vouched.trusted && !plain.trusted);
+        assert!(p.consume(&vouched.code).unwrap().trusted);
+        assert!(!p.consume(&plain.code).unwrap().trusted);
+        // The Debug form names the grant, never the code.
+        let dbg = format!("{vouched:?}");
+        assert!(
+            dbg.contains("trusted: true") && !dbg.contains(&vouched.code),
+            "{dbg}"
+        );
+    }
+
     /// Codes are minted per request, so two clients never share one.
     #[test]
     fn each_code_carries_its_own_name_and_mode() {
         let p = PendingPairings::new();
-        let a = p.mint("phone", "full", Duration::from_secs(600));
-        let b = p.mint("kiosk", "readonly", Duration::from_secs(600));
+        let a = p.mint("phone", "full", false, Duration::from_secs(600));
+        let b = p.mint("kiosk", "readonly", false, Duration::from_secs(600));
         let got_b = p.consume(&b.code).expect("kiosk");
         assert_eq!(
             (got_b.name.as_str(), got_b.mode.as_str()),

@@ -458,6 +458,37 @@ routed to it.
     agent flags the cut, but the hub's command interface has nowhere to
     carry the flag, so a cut answer looks complete.
 
+## Demo rows, for setting a client up
+
+A client paired to a hub that has never run a session shows an empty list, and
+an empty list is indistinguishable from a broken pairing: no sessions, no
+hosts, no error. Somebody setting the app up for the first time — or a script
+doing it unattended — cannot tell "it works and there is nothing here" from "it
+does not work".
+
+```bash
+fleet-hub demo-seed              # two fake hosts, two projects, six sessions
+fleet-hub demo-seed --hosts 4
+fleet-hub demo-seed --clear      # remove them again
+```
+
+Every row is named `demo-…`, and that prefix is the whole mechanism: `--clear`
+removes exactly the rows `demo-seed` wrote and nothing else. There is no
+`is_demo` column and deliberately so — a migration to support a development
+convenience would put the concept in every production database for good.
+
+**It refuses a hub that already has rows of its own.** Seeding a live fleet
+would mix invented sessions into a list an operator makes decisions from, with
+only the names telling them apart. `--force` is there for somebody who
+genuinely wants both. Re-seeding a hub that holds *only* demo rows is the
+ordinary case and needs no flag.
+
+The fake fleet is arranged to be worth looking at rather than merely non-empty:
+one host reachable and one not, and one session in each of `working`, `blocked`
+and `completed` — `blocked` being what a client's "needs attention" filter
+keeps. A client that groups, filters or draws reachability wrongly shows it
+here, instead of the first time something actually goes down.
+
 ## Pair a phone
 
 A *client* is a device that drives the fleet without being a fleet host: a
@@ -492,11 +523,12 @@ so no proxy, access log or scroll-back of your terminal ever holds a
 credential. Codes live in the hub's memory only, so restarting the daemon
 voids every outstanding one. Mint a new one and walk back to the phone.
 
-Two options:
+Three options:
 
 ```bash
 fleet-hub pair --name kiosk --mode readonly   # observe only; the default is full
 fleet-hub pair --name phone --ttl 120         # seconds the code stays valid (30–3600)
+fleet-hub pair --name mac-desktop --trusted   # its prompts reach agents unmarked (see *Clients*)
 ```
 
 Pairing needs a **running** hub (`fleet-hub serve`): the code only means
@@ -529,14 +561,17 @@ before pairing anything, and the two agree again.
 fleet-hub client list
 fleet-hub client list --include-revoked
 fleet-hub client revoke phone
+fleet-hub client trust mac-desktop
+fleet-hub client untrust mac-desktop
 ```
 
 `client list` prints one line per client, newest first:
 
 ```
-NAME   MODE      CREATED            LAST SEEN          REVOKED
-phone  full      2026-09-17 09:20Z  2026-09-18 07:41Z  -
-kiosk  readonly  2026-09-17 09:12Z  -                  -
+NAME         MODE      TRUSTED            CREATED            LAST SEEN          REVOKED
+mac-desktop  full      2026-09-21 10:02Z  2026-09-21 10:01Z  2026-09-21 10:05Z  -
+phone        full      -                  2026-09-17 09:20Z  2026-09-18 07:41Z  -
+kiosk        readonly  -                  2026-09-17 09:12Z  -                  -
 ```
 
 The token itself is never shown again: only its SHA-256 is stored, and the
@@ -554,13 +589,25 @@ What a client may do:
   `E_FORBIDDEN`.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
-  `pair_client`, `revoke_client` and `list_clients` are master-token only, so
-  a paired phone can neither re-provision the fleet nor pair a second device
-  nor revoke your own client — nor even enumerate the other devices you have
-  paired.
-- A prompt typed on a phone always reaches an agent **marked** as untrusted
-  input, naming the client it came from. `raw: true` is the master token's
-  alone.
+  `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
+  master-token only, so a paired phone can neither re-provision the fleet nor
+  pair a second device nor revoke (or trust) your own client — nor even
+  enumerate the other devices you have paired.
+- A prompt typed on a phone reaches an agent **marked** as untrusted input,
+  naming the client it came from, unless you have **trusted** that client.
+  `raw: true` is the master token's alone.
+- **Trusted.** `fleet-hub pair --trusted`, or `fleet-hub client trust <name>`
+  later (`set_client_trust` over the API), says the device's words are your
+  own: everything it sends with `send_prompt`, `broadcast_prompt` or
+  `send_message` is delivered *without* the marker line, exactly as the
+  master's `raw: true` is, so the receiving agent is not told to distrust
+  what you typed. The grant is per client, revocable with `client untrust`,
+  shown in `client list`, and takes effect on the client's next call; the
+  session timeline still records the call as `client:<name>`. Trust a device
+  whose keyboard is yours — the desktop app paired to this hub, your phone —
+  never a token an agent holds: what makes an agent's output safe to relay
+  is precisely the marker. A fresh pairing is untrusted, and a hub older than
+  this option keeps marking everything, which is the safe direction.
 
 `revoke` takes effect on the client's very next request — the auth layer only
 resolves live rows — and an open event stream ends within one heartbeat
@@ -923,9 +970,13 @@ standalone exactly as before.
   this mode exists to prevent. The footer's version, database and schema are
   the hub's too — the badge beside them says whose.
 - **A prompt sent from the desktop reaches the agent marked *untrusted*,**
-  exactly as one typed on a phone does. `apply_marker` refuses `raw=true` to
-  any non-master caller and a paired client is never the master. Correct
-  behaviour, and the one behavioural difference in the common path.
+  exactly as one typed on a phone does, unless the hub's operator has
+  **trusted** this client (`fleet-hub pair --trusted` when pairing it, or
+  `fleet-hub client trust <name>` afterwards — see *Clients*). `apply_marker`
+  refuses `raw=true` to any non-master caller and a paired client is never
+  the master; a trusted client is delivered unmarked without asking for
+  `raw`. For the desktop you type on yourself, trusting it is the intended
+  setting; the marker exists for text an agent produced.
 - **Destructive confirmations are answered on the hub.** With
   `mcp.confirm_destructive` on, `kill_session`, `delete_worktree`,
   `move_session` and `cancel_task` come back `E_CONFIRM_REQUIRED`. The
@@ -974,7 +1025,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 130 commands, 39 route to a hub tool, 1 routes except for one argument shape, 74 refuse, and 16 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 130 commands, 39 route to a hub tool, 1 routes except for one argument shape, 70 refuse, and 20 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -982,8 +1033,6 @@ Of the 130 commands, 39 route to a hub tool, 1 routes except for one argument sh
 | `add_project` | it clones or adopts a checkout using this machine's SSH and GitHub credentials; add the project on the hub, then it appears here |
 | `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `assets_scan_hosts` | the hub has this as its scan_assets tool, but its result feeds an inventory panel built on the catalog checkout, which only the machine that owns the fleet has; call scan_assets on the hub, or scan from that machine |
-| `attachment_describe` | the file is on this machine and a hub client has nothing local to measure; drop it on a standalone app instead |
-| `attachment_preview` | the file is on this machine and a hub client has nothing local to preview; open it from a standalone app instead |
 | `catalog_add_resource` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_apply_sync` | the hub's apply_sync is master-only: a paired client is never the fleet's administrator, and a sync writes to every host over SSH; run the sync on the hub |
 | `catalog_commit_pending` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
@@ -1028,7 +1077,6 @@ Of the 130 commands, 39 route to a hub tool, 1 routes except for one argument sh
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
-| `pick_attachments` | the picker opens on this machine and the session's host is the hub's to reach; pick the files from a standalone app instead |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
 | `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub` |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
@@ -1052,7 +1100,6 @@ Of the 130 commands, 39 route to a hub tool, 1 routes except for one argument sh
 | `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
-| `upload_attachments` | the bytes are on this machine and the session's host is the hub's to reach; copy them there yourself, or drop them on a standalone app |
 <!-- END GENERATED: hub-client verdicts -->
 
 ### Version skew
@@ -1156,7 +1203,11 @@ deliberately.
   `Authorization: Bearer <token>`.
 - **Client tokens.** A paired device holds a third kind of token: named,
   revocable, `full` or `readonly`, never the master and never fleet admin.
-  Only its SHA-256 is stored. What crosses the room in the QR is a
+  Only its SHA-256 is stored. A client may additionally be *trusted*
+  (`client_tokens.trusted_at`), which drops the untrusted-content marker
+  from what it sends and nothing else — it widens what an agent will believe,
+  not what the token may call, so grant it to a device you type on and not
+  to a token an agent holds. What crosses the room in the QR is a
   single-use, minutes-long pairing *code* in a URL fragment — not a token —
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
   rate-limited to one attempt per address every six seconds. See *Pair a

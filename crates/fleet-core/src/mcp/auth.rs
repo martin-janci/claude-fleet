@@ -42,11 +42,15 @@ impl TokenMode {
 }
 
 /// The paired client behind a request: the `client_tokens` row that matched.
-/// Only the id and name travel — never the token or its hash.
+/// Only the id, the name and the trust flag travel — never the token or its
+/// hash. `trusted` is `trusted_at IS NOT NULL` on the row: the operator has
+/// vouched for this device, so what it sends is delivered without the
+/// untrusted-content marker (`mcp::tools::apply_marker`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientRef {
     pub id: i64,
     pub name: String,
+    pub trusted: bool,
 }
 
 /// The authenticated identity behind a request, derived from the bearer
@@ -90,6 +94,14 @@ impl Caller {
     /// True for a paired client (a phone), whatever its mode.
     pub fn is_client(&self) -> bool {
         self.client.is_some()
+    }
+
+    /// True for a paired client the operator has vouched for
+    /// (`client_tokens.trusted_at` set): its text is the operator's own, so
+    /// the untrusted-content marker is left off. Never true for the master
+    /// (which has `raw` for that) or a per-host token.
+    pub fn is_trusted_client(&self) -> bool {
+        self.client.as_ref().is_some_and(|c| c.trusted)
     }
 
     /// Short identity label for audit rows and rate-limit buckets.
@@ -174,6 +186,7 @@ pub fn resolve_token(
                 client: Some(ClientRef {
                     id: row.id,
                     name: row.name.clone(),
+                    trusted: row.trusted_at.is_some(),
                 }),
                 mode: TokenMode::parse(&row.mode),
             });
@@ -307,6 +320,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_trusted_row_resolves_to_a_trusted_client_ref() {
+        let mut row = client_row(3, "mac-desktop", "tok", "full");
+        row.trusted_at = Some(1_700_000_000);
+        let c = resolve_token("tok", "master", &[], &[row]).expect("resolves");
+        assert!(c.is_client() && !c.is_master());
+        assert!(c.is_trusted_client());
+        assert!(c.client.as_ref().unwrap().trusted);
+        let plain = resolve_token(
+            "tok",
+            "master",
+            &[],
+            &[client_row(3, "phone", "tok", "full")],
+        )
+        .unwrap();
+        assert!(!plain.is_trusted_client());
+        assert!(!Caller::master().is_trusted_client());
+    }
+
     fn client_row(id: i64, name: &str, token: &str, mode: &str) -> ClientTokenRow {
         ClientTokenRow {
             id,
@@ -316,6 +348,7 @@ mod tests {
             created_at: 0,
             last_seen_at: None,
             revoked_at: None,
+            trusted_at: None,
         }
     }
 
@@ -453,6 +486,7 @@ mod tests {
                     created_at: 0,
                     last_seen_at: None,
                     revoked_at: None,
+                    trusted_at: None,
                 }]
             ),
             None

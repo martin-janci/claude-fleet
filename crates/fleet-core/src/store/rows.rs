@@ -609,6 +609,8 @@ pub struct HostTokenRow {
 /// shown once at pairing and never needs to be displayed again. `mode` is
 /// `full` or `readonly`, mirroring `HostTokenRow::mode`. `revoked_at` is
 /// `None` for a live token; a revoked row keeps its name for the audit trail.
+/// `trusted_at` (migration 039) is `Some` for a client the operator vouches
+/// for: its prompts are delivered unmarked (see `mcp::tools::apply_marker`).
 #[derive(Debug, Clone)]
 pub struct ClientTokenRow {
     pub id: i64,
@@ -618,6 +620,7 @@ pub struct ClientTokenRow {
     pub created_at: i64,
     pub last_seen_at: Option<i64>,
     pub revoked_at: Option<i64>,
+    pub trusted_at: Option<i64>,
 }
 
 /// One inter-session message (migration 015). The store is the source of
