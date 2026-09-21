@@ -1023,6 +1023,34 @@ fn routed_mutation_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // A non-default `when`: Transfer 3c Task 4's own lesson (3d shipped
+        // a routed argument that reached the schema and the service but was
+        // never mapped into the wire args a hub actually receives) — pin
+        // that `when` itself, not just `dry_run`/`clean_target`, survives
+        // the trip onto the wire.
+        (
+            "move_session",
+            "move_session",
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": false, "clean_target": false, "dry_run": false, "when": "idle" }),
+            MOVE_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::move_session::routed::move_session(
+                    b,
+                    MoveSessionArgs {
+                        session_id: 7,
+                        target_host_alias: "hetzner".into(),
+                        keep_source: false,
+                        strict: false,
+                        clean_target: false,
+                        dry_run: false,
+                        when: fleet_core::service::move_session::When::Idle,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // The target session of a resolved partial move — the id a
         // `session_move_partial` timeline event names, not the source's.
         (
@@ -1739,6 +1767,112 @@ fn a_real_move_is_not_gated_on_the_confirmation() {
     let (tool, args) = fake.only_call();
     assert_eq!(tool, "move_session");
     assert_eq!(args["dry_run"], false);
+}
+
+// ── 2e. `when` widens the same guard a dry run uses ─────────────────────────
+
+fn when_args(
+    when: fleet_core::service::move_session::When,
+) -> fleet_core::service::move_session::MoveSessionArgs {
+    fleet_core::service::move_session::MoveSessionArgs {
+        session_id: 7,
+        target_host_alias: "hetzner".into(),
+        keep_source: false,
+        strict: false,
+        clean_target: false,
+        dry_run: false,
+        when,
+    }
+}
+
+/// A hub built before `when` existed ignores it and performs a REAL move —
+/// harmless for `idle` (a busy source is refused as today) but not for
+/// `cancel`: cancelling a wait would instead MOVE the session (spec §3,
+/// the hazard Task 4 exists to close). So `when != now` gets exactly the
+/// same "not yet confirmed" guard `dry_run` already has; `now` stays
+/// ungated (covered by `a_real_move_is_not_gated_on_the_confirmation`
+/// above).
+#[test]
+fn a_when_other_than_now_is_refused_until_this_launch_has_confirmed_the_hub() {
+    use fleet_core::service::move_session::When;
+    for when in [When::Idle, When::Cancel] {
+        let fake = Fake::answering(MOVE_PAYLOAD);
+        let (_dir, st) = store();
+        let err = block_on(commands::move_session::routed::move_session(
+            &unconfirmed_backend(&fake),
+            when_args(when),
+            &st,
+            &ssh(),
+        ))
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_HUB_CONTRACT, "{when:?}: {err:?}");
+        assert!(
+            err.message.contains("confirmed the hub's version"),
+            "{when:?}: {}",
+            err.message
+        );
+        fake.was_not_called();
+    }
+}
+
+/// Once this launch has seen an in-range `ready` frame, every `when` value
+/// routes — the guard exists only for the unconfirmed window.
+#[test]
+fn every_when_value_routes_once_an_in_range_ready_frame_has_been_seen() {
+    use fleet_core::service::move_session::When;
+    for when in [When::Now, When::Idle, When::Cancel] {
+        let fake = Fake::answering(MOVE_PAYLOAD);
+        let (_dir, st) = store();
+        let link = Arc::new(connection::HubConnectionStatus::remote(
+            Arc::new(Silent),
+            &cfg().token,
+        ));
+        let backend = FleetBackend::remote_over(cfg(), fake.clone())
+            .watching(Arc::clone(&link) as Arc<dyn connection::ConnectionView>);
+        link.report(connection::HubConnection::Connected);
+        block_on(commands::move_session::routed::move_session(
+            &backend,
+            when_args(when),
+            &st,
+            &ssh(),
+        ))
+        .unwrap_or_else(|e| panic!("{when:?}: {e:?}"));
+        let (tool, args) = fake.only_call();
+        assert_eq!(tool, "move_session");
+        assert_eq!(
+            args["when"],
+            serde_json::to_value(when).unwrap(),
+            "{when:?}"
+        );
+    }
+}
+
+const WAITING_PAYLOAD: &str =
+    r#"{"kind":"waiting","session_id":7,"to_host":"hetzner","deadline_unix":1234567890}"#;
+
+/// `MoveOutcome::Waiting` is otherwise untested anywhere: nothing else
+/// proves a hub's `when: idle` answer (deferring the move) round-trips
+/// through the desktop's `routed::move_session` into the right variant.
+#[test]
+fn a_hub_answering_a_wait_deserialises_into_move_outcome_waiting() {
+    use fleet_core::service::move_session::{MoveOutcome, When};
+
+    let fake = Fake::answering(WAITING_PAYLOAD);
+    let (_dir, st) = store();
+    let got = block_on(commands::move_session::routed::move_session(
+        &remote_backend(&fake),
+        when_args(When::Idle),
+        &st,
+        &ssh(),
+    ))
+    .expect("a waiting answer must deserialise as the command's return type");
+    match got {
+        MoveOutcome::Waiting(w) => assert_eq!(w.session_id, 7),
+        other => panic!("expected MoveOutcome::Waiting, got {other:?}"),
+    }
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "move_session");
+    assert_eq!(args["when"], "idle");
 }
 
 // ── 3. the local-only refusals ──────────────────────────────────────────────

@@ -928,6 +928,22 @@ fn a_hub_with_no_contract_field_or_still_on_revision_1_is_now_too_old() {
 }
 
 #[test]
+fn a_hub_still_on_revision_2_is_now_too_old_too() {
+    // Transfer 3c Task 4: `move_session` gained a `when` argument
+    // (`now` | `idle` | `cancel`), and an older hub ignoring it would
+    // perform a real move for `when: cancel` — cancelling a wait would
+    // MOVE the session. That raised MIN_HUB_CONTRACT past 2, same as the
+    // revision-2 bump raised it past 0 and 1 above: this is the live-bounds
+    // edge for the new minimum, kept alongside (not instead of) the
+    // revision-1 case, per the same "never delete a pin, only extend it"
+    // rule that test follows.
+    assert_eq!(
+        classify_hub_contract(2, MIN_HUB_CONTRACT, MAX_HUB_CONTRACT),
+        ContractFit::TooOld
+    );
+}
+
+#[test]
 fn todays_bounds_accept_this_builds_own_hub() {
     assert_eq!(
         classify_hub_contract(

@@ -358,11 +358,19 @@ impl FleetTools {
         Parameters(p): Parameters<MoveSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         let dry_run = p.dry_run;
+        let when = p.when;
         audit(
             "move_session",
             &format!(
-                "session_id={} target={} keep_source={} strict={} clean_target={} dry_run={}",
-                p.session_id, p.target_host_alias, p.keep_source, p.strict, p.clean_target, dry_run
+                "session_id={} target={} keep_source={} strict={} clean_target={} dry_run={} \
+                 when_is={:?}",
+                p.session_id,
+                p.target_host_alias,
+                p.keep_source,
+                p.strict,
+                p.clean_target,
+                dry_run,
+                when
             ),
         );
         crate::validate::host_alias(&p.target_host_alias).map_err(to_mcp_err)?;
@@ -374,11 +382,16 @@ impl FleetTools {
             "the session to move",
         )?;
         require_move_hosts(&caller, &row.host_alias, &p.target_host_alias)?;
-        if !dry_run {
-            // Safe to skip only because `into_args` below maps this same
-            // `dry_run` onto `MoveSessionArgs` — a preview still reveals the
-            // source's file list and the target's state, so the access
-            // checks above stay unconditional either way.
+        // `dry_run` changes nothing, and a `when` of `cancel` PREVENTS a
+        // move — for both, asking the user to confirm would put a dialog
+        // between them and the safe action. A `when` of `idle` is a
+        // (deferred) move and keeps the gate. Safe to skip either way only
+        // because `into_args` below maps these same fields onto
+        // `MoveSessionArgs`: a preview still reveals the source's file list
+        // and the target's state, and a cancel still needs to know which
+        // host it targets, so the access checks above stay unconditional
+        // regardless.
+        if !dry_run && when != crate::service::move_session::When::Cancel {
             self.confirm_gate(
                 "move_session",
                 p.confirm_nonce.as_deref(),

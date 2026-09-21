@@ -88,27 +88,27 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// The lowest hub wire-contract revision this build still trusts.
 ///
 /// A hub that sends no `contract` field at all — every hub released before
-/// this mechanism existed, or one still on revision 1 — is read as revision
-/// `0` or `1` respectively ([`hub_contract_revision`]), both now below this
-/// minimum: `move_session` answering a tagged `MoveOutcome` and honouring
-/// `dry_run` (revision 2, see
-/// [`fleet_core::wire_contract::CONTRACT_REVISION`]'s revision history) is
-/// the day a hub ships whose rows this build can no longer read. From here
-/// on such a hub is refused instead of trusted with a silent default —
-/// raise this again the next time that happens.
-pub const MIN_HUB_CONTRACT: u32 = 2;
+/// this mechanism existed, or one still on revision 1 or 2 — is read as
+/// revision `0`, `1` or `2` respectively ([`hub_contract_revision`]), all
+/// now below this minimum: `move_session` taking a `when` argument (revision
+/// 3, see [`fleet_core::wire_contract::CONTRACT_REVISION`]'s revision
+/// history) is the day a hub ships that would silently perform a real move
+/// for `when: cancel` instead of ending a wait. From here on such a hub is
+/// refused instead of trusted with a silent default — raise this again the
+/// next time that happens.
+pub const MIN_HUB_CONTRACT: u32 = 3;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
 /// safer to say so than to guess at fields it has never seen.
-pub const MAX_HUB_CONTRACT: u32 = 2;
+pub const MAX_HUB_CONTRACT: u32 = 3;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
-/// are `2..=2` today, and unlike the original `0..=1` range this one CAN
-/// exercise "too old" through a live `u32` (a hub reporting `0` or `1` is
-/// below `2`) — see `tests_contract.rs`, independent of whichever bounds a
-/// future release ships.
+/// are `3..=3` today, and unlike the original `0..=1` range this one CAN
+/// exercise "too old" through a live `u32` (a hub reporting `0`, `1` or `2`
+/// is below `3`) — see `tests_contract.rs`, independent of whichever bounds
+/// a future release ships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractFit {
     /// Inside `[min, max]`: trust this hub's rows.

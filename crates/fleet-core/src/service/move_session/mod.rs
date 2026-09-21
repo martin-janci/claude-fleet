@@ -126,8 +126,23 @@ const DIVERGED: &str = "__CF_DIVERGED__";
 /// spawns the wait; [`move_session_with`] treats `idle` exactly like `now`
 /// once it has decided not to defer — see that function's doc). `cancel`
 /// ends a pending wait instead of moving anything.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `JsonSchema` (Task 4): `MoveSessionParams` uses this type directly for
+/// the MCP `when` parameter, so the client needs a schema for it too. This
+/// module (unlike `mcp::tools`, which imports `rmcp::schemars` as
+/// `schemars`) has no such alias, so the derive and its crate path are
+/// spelled out in full, matching `service::hosts`/`service::repo` et al.
+/// `#[schemars(description = ..)]` overrides this whole doc comment for the
+/// served schema — schemars otherwise serialises it verbatim into
+/// `$defs.When.description`, which would put this internal reasoning (and
+/// its own byte cost) in front of every MCP client instead of the tool
+/// parameter's own slim one-clause-per-value doc on
+/// `MoveSessionParams::when`.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
+#[schemars(crate = "rmcp::schemars", description = "now, idle, or cancel a wait")]
 pub enum When {
     #[default]
     Now,
