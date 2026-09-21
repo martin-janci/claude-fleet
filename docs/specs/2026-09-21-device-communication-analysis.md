@@ -159,6 +159,8 @@ shippable and testable; none depends on a wire-format bump except phase 4.
 
 ### Phase 1 — Make delivery correct (flawless, last mile)
 
+Landed 2026-09-21 on branch feature/device-communication-fa2aec (plan: docs/superpowers/plans/2026-09-21-device-communication-phase-1.md). Deferred from item 4: idempotency keys on every hub-routed mutation — needs a wire change per mutating tool; send_prompt has client_msg_id.
+
 1. **Replace the send primitive** (`prompt.rs:20-30` + a new
    `SshClient::run_with_stdin`): normalise `\r\n`/`\r` to `\n`, reject
    control bytes other than `\n`/`\t` (`E_VALIDATE`), ship the body on stdin

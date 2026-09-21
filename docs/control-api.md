@@ -410,7 +410,18 @@ are distinguishable from "busy". A turn that ends in an API error fires
 type, so `run_prompt` / `wait_for_session` return and `session_history` shows
 why. A hook-stamped status that is newer than a reconcile pass's pane
 observation is never overwritten by the pane heuristic.
-`send_prompt` returns `{ delivered, session_id, turn_seq_before }`;
+`send_prompt` returns `{ delivered, session_id, turn_seq_before, queued, acked }`.
+It refuses a `blocked` or stuck session with `E_INVALID_STATE` (Enter would
+answer its dialog) unless `force: true`; to a `working` session the prompt is
+queued behind the running turn (`queued: true`, and `turn_seq_before` already
+points past that turn). `acked` is `true` once the session's `UserPromptSubmit`
+hook confirmed the prompt, `false` when it did not within 1.5 s (after one
+Enter retry), `null` when it cannot be known (nothing submitted, or no hook has
+ever reached the row). Pass a `client_msg_id` to make a retry return the first
+result instead of delivering twice (10-minute memory). Bodies are limited to
+64 KiB; `\r\n` is folded to `\n` and any other control character is refused
+(`E_VALIDATE`). The text lands in the pane reconcile last saw Claude in, or
+the session's active pane when that is unknown.
 `wait_for_session { session_id, until: "idle" | "turn_gt", turn?, timeout_s? }`
 is a bounded long-poll (500 ms polls, default 120 s, max 600 s) returning
 `{ status: satisfied | timeout, claude_status, turn_seq, last_stop_at,
