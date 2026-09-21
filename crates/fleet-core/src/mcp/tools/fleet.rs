@@ -186,7 +186,8 @@ impl FleetTools {
         mode is full (drive sessions fleet-wide) or readonly (observe only); \
         fleet-admin tools are out of a client's reach either way. Codes live \
         in memory only, so a hub restart invalidates every outstanding one. \
-        Master token only. Returns JSON { url, code, expires_in_s, name, mode }.")]
+        Master token only. Returns JSON { url, code, expires_in_s, name, mode, \
+        trusted }.")]
     // The master-only gate is `enforce_admin` in `call_tool` (`pair_client`
     // is in `guard::ADMIN_TOOLS`), so no caller extractor is needed here.
     pub(super) async fn pair_client(
@@ -202,7 +203,10 @@ impl FleetTools {
         crate::store::validate_client_mode(&mode).map_err(to_mcp_err)?;
         audit(
             "pair_client",
-            &format!("name={name} mode={mode} ttl_s={:?}", p.ttl_s),
+            &format!(
+                "name={name} mode={mode} trusted={} ttl_s={:?}",
+                p.trusted, p.ttl_s
+            ),
         );
         let ttl = pair_ttl(p.ttl_s);
         // Both reads under one lock, released before the mint.
@@ -228,13 +232,14 @@ impl FleetTools {
             }
             crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
         };
-        let req = self.guards.pairings.mint(&name, &mode, ttl);
+        let req = self.guards.pairings.mint(&name, &mode, p.trusted, ttl);
         ok_json(&serde_json::json!({
             "url": crate::mcp::pair_url(&base.url, &req.code),
             "code": req.code,
             "expires_in_s": ttl.as_secs(),
             "name": req.name,
             "mode": req.mode,
+            "trusted": req.trusted,
         }))
     }
 
@@ -245,7 +250,7 @@ impl FleetTools {
         (kept for the audit trail). Read-only, but master token only: the \
         list names every paired device, so it is not a phone's to read. \
         Returns JSON rows of \
-        { id, name, mode, created_at, last_seen_at, revoked_at }.")]
+        { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.")]
     pub(super) async fn list_clients(
         &self,
         Parameters(p): Parameters<ListClientsParams>,
@@ -281,6 +286,31 @@ impl FleetTools {
             s.revoke_client_token(&p.name).map_err(to_mcp_err)?
         };
         tracing::info!(client = %row.name, "[mcp] revoked a client token");
+        ok_json(&ClientSummary::from(row))
+    }
+
+    #[tool(description = "Grant or withdraw trust in a paired client by name: \
+        a trusted client's prompts and messages are delivered without the \
+        untrusted-content marker, as the master's raw=true is. Trust a device \
+        you type on, never an agent's token. E_NOTFOUND for an unknown live \
+        name. Master token only. Returns the row as JSON.")]
+    pub(super) async fn set_client_trust(
+        &self,
+        Parameters(p): Parameters<SetClientTrustParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "set_client_trust",
+            &format!("name={} trusted={}", p.name.escape_debug(), p.trusted),
+        );
+        let row = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.set_client_trust(&p.name, p.trusted).map_err(to_mcp_err)?
+        };
+        tracing::info!(
+            client = %row.name,
+            trusted = row.trusted_at.is_some(),
+            "[mcp] changed a client's trust"
+        );
         ok_json(&ClientSummary::from(row))
     }
 

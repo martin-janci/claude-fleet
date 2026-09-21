@@ -111,7 +111,7 @@ List the asset catalog (skills, agents, hooks, MCP servers, plugin refs) with ea
 
 ### `list_clients`
 
-List the paired client devices and what each one's token may do. The stored token digest is never returned — a client's token exists in plaintext only in the one /pair response that minted it. include_revoked also returns clients whose token was revoked (kept for the audit trail). Read-only, but master token only: the list names every paired device, so it is not a phone's to read. Returns JSON rows of { id, name, mode, created_at, last_seen_at, revoked_at }.
+List the paired client devices and what each one's token may do. The stored token digest is never returned — a client's token exists in plaintext only in the one /pair response that minted it. include_revoked also returns clients whose token was revoked (kept for the audit trail). Read-only, but master token only: the list names every paired device, so it is not a phone's to read. Returns JSON rows of { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.
 
 Parameters: `include_revoked`
 
@@ -183,9 +183,9 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked.
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (a phone, a laptop browser) and return the URL to show as a QR. The code — not a token — travels in the URL FRAGMENT, so no proxy or access log ever sees it; the device posts it to the hub's /pair once and gets a token of its own back. name must be 1-64 characters with no control characters and must not be one a live client already holds. mode is full (drive sessions fleet-wide) or readonly (observe only); fleet-admin tools are out of a client's reach either way. Codes live in memory only, so a hub restart invalidates every outstanding one. Master token only. Returns JSON { url, code, expires_in_s, name, mode }.
+Mint a single-use pairing code for a new client device (a phone, a laptop browser) and return the URL to show as a QR. The code — not a token — travels in the URL FRAGMENT, so no proxy or access log ever sees it; the device posts it to the hub's /pair once and gets a token of its own back. name must be 1-64 characters with no control characters and must not be one a live client already holds. mode is full (drive sessions fleet-wide) or readonly (observe only); fleet-admin tools are out of a client's reach either way. Codes live in memory only, so a hub restart invalidates every outstanding one. Master token only. Returns JSON { url, code, expires_in_s, name, mode, trusted }.
 
-Parameters: `mode`, `name`, `ttl_s`
+Parameters: `mode`, `name`, `trusted`, `ttl_s`
 
 ### `peer_status`
 
@@ -353,7 +353,7 @@ Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `su
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only). Returns JSON { delivered, session_id, turn_seq_before }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three).
+Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only) or the caller is a trusted client. Returns JSON { delivered, session_id, turn_seq_before }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three).
 
 Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
@@ -380,6 +380,12 @@ Parameters: `limit`, `session_id`
 Read a session's Claude Code transcript (the JSONL Claude writes, not the pane) and return the last assistant turn as plain text — text blocks verbatim, one summary line per tool call, no thinking. since_turn returns every turn after that turn_seq (use send_prompt's turn_seq_before). max_chars caps the text (default 8000, max 64000; the END is kept). Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply text.
 
 Parameters: `max_chars`, `session_id`, `since_turn`
+
+### `set_client_trust`
+
+Grant or withdraw trust in a paired client by name: a trusted client's prompts and messages are delivered without the untrusted-content marker, as the master's raw=true is. Trust a device you type on, never an agent's token. E_NOTFOUND for an unknown live name. Master token only. Returns the row as JSON.
+
+Parameters: `name`, `trusted`
 
 ### `set_clipboard`
 

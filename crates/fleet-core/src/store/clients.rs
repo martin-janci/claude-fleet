@@ -130,10 +130,10 @@ impl Store {
         include_revoked: bool,
     ) -> Result<Vec<ClientTokenRow>, crate::ipc_error::IpcError> {
         let sql = if include_revoked {
-            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at \
+            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at \
              FROM client_tokens ORDER BY id DESC"
         } else {
-            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at \
+            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at \
              FROM client_tokens WHERE revoked_at IS NULL ORDER BY id DESC"
         };
         let mut stmt = self.conn.prepare(sql)?;
@@ -204,6 +204,47 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// Grant or take back the operator's trust in the live client named
+    /// `name`: `trusted_at` becomes now, or NULL. `E_NOTFOUND` when no live
+    /// row holds the name (a revoked client cannot be trusted back into use;
+    /// pair it again). Granting to an already-trusted client keeps the
+    /// original grant time, so the audit row says when it was first given.
+    pub fn set_client_trust(
+        &self,
+        name: &str,
+        trusted: bool,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        let name = name.trim();
+        let at = now_unix();
+        let n = if trusted {
+            self.conn.execute(
+                "UPDATE client_tokens SET trusted_at = COALESCE(trusted_at, ?2) \
+                 WHERE name = ?1 AND revoked_at IS NULL",
+                rusqlite::params![name, at],
+            )?
+        } else {
+            self.conn.execute(
+                "UPDATE client_tokens SET trusted_at = NULL \
+                 WHERE name = ?1 AND revoked_at IS NULL",
+                rusqlite::params![name],
+            )?
+        };
+        if n == 0 {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("no active client token named '{name}'"),
+            ));
+        }
+        self.conn
+            .query_row(
+                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at \
+                 FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
+                rusqlite::params![name],
+                map_client_token_row,
+            )
+            .map_err(crate::ipc_error::IpcError::from)
+    }
 }
 
 /// Whether `e` is a SQLite UNIQUE constraint violation.
@@ -229,6 +270,7 @@ fn map_client_token_row(row: &rusqlite::Row) -> rusqlite::Result<ClientTokenRow>
         created_at: row.get(4)?,
         last_seen_at: row.get(5)?,
         revoked_at: row.get(6)?,
+        trusted_at: row.get(7)?,
     })
 }
 
@@ -237,7 +279,7 @@ fn get_client_token_by_id(
     id: i64,
 ) -> rusqlite::Result<Option<ClientTokenRow>> {
     conn.query_row(
-        "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at \
+        "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at \
          FROM client_tokens WHERE id = ?1",
         rusqlite::params![id],
         map_client_token_row,
@@ -399,6 +441,43 @@ mod tests {
                 Err(e) => e,
             }
         }
+    }
+
+    #[test]
+    fn a_fresh_client_is_untrusted_and_trust_is_granted_and_taken_back_by_name() {
+        let s = store();
+        let row = s.insert_client_token("phone", "aa11", "full").unwrap();
+        assert!(row.trusted_at.is_none(), "trust is opt-in");
+
+        let granted = s.set_client_trust("phone", true).unwrap();
+        assert_eq!(granted.id, row.id);
+        let first = granted.trusted_at.expect("granted");
+        // Granting again keeps the original grant time.
+        let again = s.set_client_trust("phone", true).unwrap();
+        assert_eq!(again.trusted_at, Some(first));
+        assert_eq!(s.active_client_tokens().unwrap()[0].trusted_at, Some(first));
+
+        let taken = s.set_client_trust(" phone ", false).unwrap();
+        assert!(taken.trusted_at.is_none(), "trimmed name, trust withdrawn");
+        assert!(s.active_client_tokens().unwrap()[0].trusted_at.is_none());
+    }
+
+    #[test]
+    fn trust_needs_a_live_row() {
+        let s = store();
+        let e = s
+            .set_client_trust("nobody", true)
+            .unwrap_err_or_panic("unknown name");
+        assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+        s.insert_client_token("phone", "aa11", "full").unwrap();
+        s.set_client_trust("phone", true).unwrap();
+        s.revoke_client_token("phone").unwrap();
+        let e = s
+            .set_client_trust("phone", false)
+            .unwrap_err_or_panic("revoked row");
+        assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+        // The revoked row keeps its grant for the audit trail.
+        assert!(s.list_client_tokens(true).unwrap()[0].trusted_at.is_some());
     }
 
     #[test]

@@ -80,6 +80,10 @@ enum Cmd {
         /// Seconds the pairing code stays valid (30-3600). [default: 600]
         #[arg(long)]
         ttl: Option<u64>,
+        /// Pair a device you vouch for: its prompts reach agents WITHOUT the
+        /// untrusted-content marker. Only for a keyboard that is yours.
+        #[arg(long)]
+        trusted: bool,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -143,6 +147,10 @@ enum ClientCmd {
     },
     /// Revoke a client's token by name; its next request is refused.
     Revoke { name: String },
+    /// Vouch for a client by name: its prompts reach agents unmarked.
+    Trust { name: String },
+    /// Take that back: its prompts are marked as untrusted input again.
+    Untrust { name: String },
 }
 
 #[tokio::main]
@@ -165,13 +173,16 @@ async fn main() -> ExitCode {
             name,
             mode,
             ttl,
+            trusted,
             opts,
-        } => pair::pair(&opts, &env, &name, mode.as_deref(), ttl).await,
+        } => pair::pair(&opts, &env, &name, mode.as_deref(), ttl, trusted).await,
         Cmd::Client { cmd, opts } => match cmd {
             ClientCmd::List { include_revoked } => {
                 pair::client_list(&opts, &env, include_revoked).await
             }
             ClientCmd::Revoke { name } => pair::client_revoke(&opts, &env, &name).await,
+            ClientCmd::Trust { name } => pair::client_trust(&opts, &env, &name, true).await,
+            ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
         },
         Cmd::DemoSeed {
             hosts,
@@ -346,7 +357,11 @@ mod tests {
         // `pair` and `client …`, including HubOptions before or after the
         // subcommand (they are `global = true`).
         let Cmd::Pair {
-            name, mode, ttl, ..
+            name,
+            mode,
+            ttl,
+            trusted,
+            ..
         } = Cli::try_parse_from([
             "fleet-hub",
             "pair",
@@ -363,9 +378,17 @@ mod tests {
             panic!("pair did not parse");
         };
         assert_eq!(
-            (name.as_str(), mode.as_deref(), ttl),
-            ("phone", Some("readonly"), Some(120))
+            (name.as_str(), mode.as_deref(), ttl, trusted),
+            ("phone", Some("readonly"), Some(120), false)
         );
+        let Cmd::Pair { trusted, .. } =
+            Cli::try_parse_from(["fleet-hub", "pair", "--name", "desk", "--trusted"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("pair --trusted did not parse");
+        };
+        assert!(trusted);
         // `--name` is required.
         assert!(Cli::try_parse_from(["fleet-hub", "pair"]).is_err());
         for argv in [
@@ -408,6 +431,22 @@ mod tests {
         };
         assert!(matches!(cmd, ClientCmd::Revoke { name } if name == "phone"));
         assert!(Cli::try_parse_from(["fleet-hub", "client", "revoke"]).is_err());
+        let Cmd::Client { cmd, .. } = Cli::try_parse_from(["fleet-hub", "client", "trust", "desk"])
+            .unwrap()
+            .cmd
+        else {
+            panic!("client trust did not parse");
+        };
+        assert!(matches!(cmd, ClientCmd::Trust { name } if name == "desk"));
+        let Cmd::Client { cmd, .. } =
+            Cli::try_parse_from(["fleet-hub", "client", "untrust", "desk"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("client untrust did not parse");
+        };
+        assert!(matches!(cmd, ClientCmd::Untrust { name } if name == "desk"));
+        assert!(Cli::try_parse_from(["fleet-hub", "client", "trust"]).is_err());
         Cli::try_parse_from(["fleet-hub", "ssh-key"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "healthcheck"]).unwrap();
         let Cmd::Healthcheck { port, tls } = Cli::try_parse_from([

@@ -11,7 +11,8 @@ impl FleetTools {
         it. Address the session with session_id OR host_alias + tmux_name. The \
         first prompt to a still-unnamed session also becomes its friendly name. \
         The text is prefixed with an untrusted-content marker line unless \
-        raw=true (master token only). Returns JSON { delivered, session_id, \
+        raw=true (master token only) or the caller is a trusted client. \
+        Returns JSON { delivered, session_id, \
         turn_seq_before }: pass turn_seq_before to wait_for_session \
         { until: \"turn_gt\" } or session_transcript { since_turn } to \
         collect the reply (or use run_prompt, which does all three).")]

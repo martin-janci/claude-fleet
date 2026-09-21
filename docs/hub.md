@@ -523,11 +523,12 @@ so no proxy, access log or scroll-back of your terminal ever holds a
 credential. Codes live in the hub's memory only, so restarting the daemon
 voids every outstanding one. Mint a new one and walk back to the phone.
 
-Two options:
+Three options:
 
 ```bash
 fleet-hub pair --name kiosk --mode readonly   # observe only; the default is full
 fleet-hub pair --name phone --ttl 120         # seconds the code stays valid (30–3600)
+fleet-hub pair --name mac-desktop --trusted   # its prompts reach agents unmarked (see *Clients*)
 ```
 
 Pairing needs a **running** hub (`fleet-hub serve`): the code only means
@@ -560,14 +561,17 @@ before pairing anything, and the two agree again.
 fleet-hub client list
 fleet-hub client list --include-revoked
 fleet-hub client revoke phone
+fleet-hub client trust mac-desktop
+fleet-hub client untrust mac-desktop
 ```
 
 `client list` prints one line per client, newest first:
 
 ```
-NAME   MODE      CREATED            LAST SEEN          REVOKED
-phone  full      2026-09-17 09:20Z  2026-09-18 07:41Z  -
-kiosk  readonly  2026-09-17 09:12Z  -                  -
+NAME         MODE      TRUSTED            CREATED            LAST SEEN          REVOKED
+mac-desktop  full      2026-09-21 10:02Z  2026-09-21 10:01Z  2026-09-21 10:05Z  -
+phone        full      -                  2026-09-17 09:20Z  2026-09-18 07:41Z  -
+kiosk        readonly  -                  2026-09-17 09:12Z  -                  -
 ```
 
 The token itself is never shown again: only its SHA-256 is stored, and the
@@ -585,13 +589,25 @@ What a client may do:
   `E_FORBIDDEN`.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
-  `pair_client`, `revoke_client` and `list_clients` are master-token only, so
-  a paired phone can neither re-provision the fleet nor pair a second device
-  nor revoke your own client — nor even enumerate the other devices you have
-  paired.
-- A prompt typed on a phone always reaches an agent **marked** as untrusted
-  input, naming the client it came from. `raw: true` is the master token's
-  alone.
+  `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
+  master-token only, so a paired phone can neither re-provision the fleet nor
+  pair a second device nor revoke (or trust) your own client — nor even
+  enumerate the other devices you have paired.
+- A prompt typed on a phone reaches an agent **marked** as untrusted input,
+  naming the client it came from, unless you have **trusted** that client.
+  `raw: true` is the master token's alone.
+- **Trusted.** `fleet-hub pair --trusted`, or `fleet-hub client trust <name>`
+  later (`set_client_trust` over the API), says the device's words are your
+  own: everything it sends with `send_prompt`, `broadcast_prompt` or
+  `send_message` is delivered *without* the marker line, exactly as the
+  master's `raw: true` is, so the receiving agent is not told to distrust
+  what you typed. The grant is per client, revocable with `client untrust`,
+  shown in `client list`, and takes effect on the client's next call; the
+  session timeline still records the call as `client:<name>`. Trust a device
+  whose keyboard is yours — the desktop app paired to this hub, your phone —
+  never a token an agent holds: what makes an agent's output safe to relay
+  is precisely the marker. A fresh pairing is untrusted, and a hub older than
+  this option keeps marking everything, which is the safe direction.
 
 `revoke` takes effect on the client's very next request — the auth layer only
 resolves live rows — and an open event stream ends within one heartbeat
@@ -954,9 +970,13 @@ standalone exactly as before.
   this mode exists to prevent. The footer's version, database and schema are
   the hub's too — the badge beside them says whose.
 - **A prompt sent from the desktop reaches the agent marked *untrusted*,**
-  exactly as one typed on a phone does. `apply_marker` refuses `raw=true` to
-  any non-master caller and a paired client is never the master. Correct
-  behaviour, and the one behavioural difference in the common path.
+  exactly as one typed on a phone does, unless the hub's operator has
+  **trusted** this client (`fleet-hub pair --trusted` when pairing it, or
+  `fleet-hub client trust <name>` afterwards — see *Clients*). `apply_marker`
+  refuses `raw=true` to any non-master caller and a paired client is never
+  the master; a trusted client is delivered unmarked without asking for
+  `raw`. For the desktop you type on yourself, trusting it is the intended
+  setting; the marker exists for text an agent produced.
 - **Destructive confirmations are answered on the hub.** With
   `mcp.confirm_destructive` on, `kill_session`, `delete_worktree`,
   `move_session` and `cancel_task` come back `E_CONFIRM_REQUIRED`. The
@@ -1183,7 +1203,11 @@ deliberately.
   `Authorization: Bearer <token>`.
 - **Client tokens.** A paired device holds a third kind of token: named,
   revocable, `full` or `readonly`, never the master and never fleet admin.
-  Only its SHA-256 is stored. What crosses the room in the QR is a
+  Only its SHA-256 is stored. A client may additionally be *trusted*
+  (`client_tokens.trusted_at`), which drops the untrusted-content marker
+  from what it sends and nothing else — it widens what an agent will believe,
+  not what the token may call, so grant it to a device you type on and not
+  to a token an agent holds. What crosses the room in the QR is a
   single-use, minutes-long pairing *code* in a URL fragment — not a token —
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
   rate-limited to one attempt per address every six seconds. See *Pair a

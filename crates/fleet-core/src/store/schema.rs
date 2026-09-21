@@ -84,6 +84,15 @@ fn projects_has_adopted(conn: &Connection) -> rusqlite::Result<bool> {
 /// `already_applied` guard of migration 038: `projects` already has its
 /// `system` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
+fn client_tokens_has_trusted_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('client_tokens') WHERE name = 'trusted_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -299,6 +308,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 38,
         sql: include_str!("../../migrations/038_project_system.sql"),
         already_applied: Some(projects_has_system),
+    },
+    // `client_tokens.trusted_at`; ADD COLUMN, so the same guard as 038.
+    Migration {
+        version: 39,
+        sql: include_str!("../../migrations/039_client_trust.sql"),
+        already_applied: Some(client_tokens_has_trusted_at),
     },
 ];
 
