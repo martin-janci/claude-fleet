@@ -8,6 +8,16 @@ use super::*;
 const END_COMPACTING: &str = ", current_activity = CASE WHEN current_activity = 'compacting' \
      THEN NULL ELSE current_activity END";
 
+/// What a sender needs to know to wait for the REPL's acknowledgement of a
+/// prompt: the submit counter to watch, and whether this row has EVER been
+/// stamped by a hook (a host without hooks can never ack, so the sender must
+/// not wait for one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptAckState {
+    pub prompt_submit_seq: i64,
+    pub hooks_seen: bool,
+}
+
 impl Store {
     // ---- Private fetch helpers used after writes to produce emit payloads ----
     //
@@ -812,12 +822,15 @@ impl Store {
     }
 
     /// Stamp when fleet created this session (migration 019). Only sets the
-    /// value once — a re-create keeps the original start.
+    /// value once — a re-create keeps the original start. Emits
+    /// `session_updated` so the sidebar's elapsed label does not wait for a
+    /// re-list.
     pub fn set_started_at(&self, id: i64, at: i64) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE sessions SET started_at=COALESCE(started_at, ?1) WHERE id=?2",
             rusqlite::params![at, id],
         )?;
+        self.emit_session(id)?;
         Ok(())
     }
 
@@ -972,7 +985,8 @@ impl Store {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
-                     last_hook_at = ?2{END_COMPACTING} WHERE id = ?1"
+                     last_hook_at = ?2, prompt_submit_seq = prompt_submit_seq + 1{END_COMPACTING} \
+                     WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
@@ -980,6 +994,25 @@ impl Store {
             return Ok(None);
         }
         Ok(self.emit_session(row_id)?)
+    }
+
+    /// Read [`PromptAckState`] for a row: `prompt_submit_seq` to watch, and
+    /// whether a hook has EVER stamped `last_hook_at` on it. `None` when the
+    /// row is gone.
+    pub fn prompt_ack_state(&self, row_id: i64) -> Result<Option<PromptAckState>, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT prompt_submit_seq, last_hook_at IS NOT NULL FROM sessions WHERE id = ?1",
+                rusqlite::params![row_id],
+                |r| {
+                    Ok(PromptAckState {
+                        prompt_submit_seq: r.get(0)?,
+                        hooks_seen: r.get::<_, i64>(1)? != 0,
+                    })
+                },
+            )
+            .optional()
     }
 
     /// The SessionEnd hook's write: the Claude process is gone. Sets
@@ -2805,5 +2838,68 @@ mod tests {
             detail: None,
         });
         assert_eq!(bus.take(), vec!["move:progress:7:git:done"]);
+    }
+
+    #[test]
+    fn row_version_bumps_on_every_update_and_rides_the_row() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let v0 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        s.set_friendly_name("local", "sess", Some("one")).unwrap();
+        let v1 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        s.set_started_at(id, 99).unwrap();
+        let v2 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        assert!(v1 > v0, "an UPDATE must bump row_version ({v0} -> {v1})");
+        assert!(v2 > v1, "every UPDATE bumps it ({v1} -> {v2})");
+        // The upsert's DO UPDATE arm is an UPDATE too.
+        s.upsert_session("sess", "local", None, None, 1, 2, "running", None)
+            .unwrap();
+        let v3 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        assert!(
+            v3 > v2,
+            "an upsert of an existing row bumps it ({v2} -> {v3})"
+        );
+    }
+
+    #[test]
+    fn prompt_submit_seq_counts_submits_and_reports_whether_hooks_were_ever_seen() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let st = s.prompt_ack_state(id).unwrap().expect("row exists");
+        assert_eq!(st.prompt_submit_seq, 0);
+        assert!(!st.hooks_seen, "no hook has stamped this row yet");
+        s.record_prompt_submit_hook_for_row(id).unwrap();
+        s.record_prompt_submit_hook_for_row(id).unwrap();
+        let st = s.prompt_ack_state(id).unwrap().unwrap();
+        assert_eq!(st.prompt_submit_seq, 2);
+        assert!(st.hooks_seen);
+        assert!(s.prompt_ack_state(999_999).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_started_at_emits_session_updated() {
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        bus.take();
+        s.set_started_at(id, 42).unwrap();
+        assert!(
+            bus.names().contains(&"session:updated"),
+            "started_at must reach the UI by event, not only by re-list: {:?}",
+            bus.names()
+        );
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().started_at,
+            Some(42)
+        );
     }
 }

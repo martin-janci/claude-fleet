@@ -241,6 +241,7 @@
       "pr_url",
       "project_id",
       "reviews_session_id",
+      "row_version",
       "safe_kill_detail",
       "safe_kill_nonce",
       "safe_kill_requested_at",

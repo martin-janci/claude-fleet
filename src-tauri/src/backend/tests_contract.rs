@@ -74,6 +74,7 @@ pub(crate) fn sample_session() -> SessionRow {
         last_stop_at: Some(1_725_000_900),
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
+        row_version: 12,
         usage: sample_usage(),
         context: SessionContext {
             model: Some("claude-opus-5".into()),
@@ -654,6 +655,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_one() {
         "pr_url",
         "project_id",
         "reviews_session_id",
+        "row_version",
         "safe_kill_detail",
         "safe_kill_nonce",
         "safe_kill_requested_at",
@@ -677,7 +679,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_one() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 51, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 52, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

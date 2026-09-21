@@ -367,6 +367,7 @@ mod tests {
     fn row(id: i64, kind: &str, idle_since: Option<i64>, last_activity_at: i64) -> SessionRow {
         SessionRow {
             id,
+            row_version: 0,
             tmux_name: format!("s{id}"),
             host_alias: "local".into(),
             project_id: None,

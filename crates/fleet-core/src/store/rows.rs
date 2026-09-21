@@ -109,8 +109,12 @@ pub(super) const KIND_TMUX: &str = "kind NOT IN ('bg','external')";
 /// them.
 pub(super) const KIND_PANE_LESS: &str = "kind IN ('bg','external')";
 
-/// `PartialEq` covers every wire field, so `upsert_session_in_tx` can tell a
-/// no-op reconcile pass from a real change before emitting `session:updated`.
+/// `PartialEq` covers every wire field including `row_version`. For the
+/// no-op-reconcile-pass check `upsert_session_in_tx` wants (a real change vs.
+/// a pass that observed exactly what is already stored), use
+/// [`SessionRow::eq_ignoring_row_version`] instead: the migration 040 trigger
+/// bumps `row_version` on every physical UPDATE, no-op or not, so plain `==`
+/// would make every pass look like a change.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionRow {
     pub id: i64,
@@ -202,6 +206,11 @@ pub struct SessionRow {
     /// (NULL ⇒ empty) and always surfaced as a list on the wire.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Bumped by a trigger on every UPDATE (migration 040). The frontend's
+    /// merge guard orders a command's return value against a row event by
+    /// it. `#[serde(default)]`: a hub older than the column sends none.
+    #[serde(default)]
+    pub row_version: i64,
     /// Token usage + estimated cost (migration 025), flattened onto the
     /// wire as the `usage_*` fields.
     #[serde(flatten)]
@@ -209,6 +218,23 @@ pub struct SessionRow {
     /// Current-conversation context (migration 037), flattened on the wire.
     #[serde(flatten)]
     pub context: SessionContext,
+}
+
+impl SessionRow {
+    /// Field-by-field equality excluding `row_version`: whether two reads of
+    /// this row carry the same user-visible content. See the note on
+    /// `row_version` above `PartialEq` cannot answer that question directly,
+    /// because migration 040's trigger bumps `row_version` on every physical
+    /// UPDATE regardless of whether any other field changed.
+    pub fn eq_ignoring_row_version(&self, other: &Self) -> bool {
+        Self {
+            row_version: 0,
+            ..self.clone()
+        } == Self {
+            row_version: 0,
+            ..other.clone()
+        }
+    }
 }
 
 /// The `sessions` column list every `SessionRow` read shares, in the order
@@ -225,7 +251,8 @@ pub(super) const SESSION_COLUMNS: &str =
      turn_seq, last_stop_at, parent_session_id, tags, \
      usage_input_tokens, usage_output_tokens, usage_cache_write_tokens, usage_cache_read_tokens, \
      usage_cost_micros, usage_model, usage_updated_at, \
-     model, context_tokens, context_window, context_source, context_at, context_stale, tmux_pane_id";
+     model, context_tokens, context_window, context_source, context_at, context_stale, tmux_pane_id, \
+     row_version";
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -287,6 +314,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         last_stop_at: row.get(34)?,
         parent_session_id: row.get(35)?,
         tags: decode_tags(row.get(36)?),
+        row_version: row.get(51)?,
         usage: SessionUsage {
             usage_input_tokens: row.get(37)?,
             usage_output_tokens: row.get(38)?,

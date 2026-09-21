@@ -142,6 +142,7 @@ fn row(
 ) -> SessionRow {
     SessionRow {
         id,
+        row_version: 0,
         tmux_name: tmux.into(),
         host_alias: host.into(),
         project_id,
