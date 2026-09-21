@@ -108,11 +108,12 @@ pub struct MoveWaiting {
 }
 ```
 
-and `when: cancel` answers `Waiting`-free: a new `MoveOutcome::WaitCancelled {
-session_id, was_waiting: bool }` — `was_waiting: false` when there was nothing
-to cancel, so a cancel is never an error and never silent.
+and `when: cancel` answers with a third new variant, `WaitCancelled(Box<MoveWaitCancelled>)`
+where `MoveWaitCancelled { session_id: i64, was_waiting: bool }` — `was_waiting:
+false` when there was nothing to cancel, so a cancel is never an error and never
+silent.
 
-No `#[serde(default)]` on `MoveWaiting` or `WaitCancelled` (wire rule).
+No `#[serde(default)]` on `MoveWaiting` or `MoveWaitCancelled` (wire rule).
 
 `when` is added to `MoveSessionParams` and mapped through its single `into_args`
 (3d's lesson), with a non-default row in `tests_routing.rs`. It costs one enum
@@ -123,8 +124,11 @@ the test's own documentation asks.
 **`dry_run` and `when` together:** a dry run with `when: idle` skips exactly one
 check — the source-idle check, which `idle` exists to defer — and says "the
 source is busy now; the move will wait for it" in `unknowns`. Every other check
-runs as before. `when: cancel` with `dry_run: true` is refused (`E_INVALID`):
-there is nothing to preview about a cancel.
+runs as before. This is the preview's second sanctioned divergence from the
+move (the first, from 3b, is that a dry run never fetches), and it is exact
+rather than approximate: a `when: idle` move does not require idle at request
+time either. `when: cancel` with `dry_run: true` is refused (`E_INVALID`): there
+is nothing to preview about a cancel.
 
 ## 5. The waiter
 
