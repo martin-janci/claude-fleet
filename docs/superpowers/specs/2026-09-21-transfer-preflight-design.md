@@ -19,6 +19,25 @@ by pressing Transfer and reading what came back.
 3b puts that in front of the button: **what would travel, and what would be
 refused, before anything is written.**
 
+## Revisions, made while planning
+
+Planning against the real code found five places this spec asked for more than
+the move can give. The plan (`plans/2026-09-21-transfer-preflight.md`, "Corrections
+to the spec") argues each in full; the sections below have been updated to match.
+
+1. **No accumulation.** `gather()` short-circuits exactly as the move does, so a
+   preview reports the one refusal the move would raise (§5).
+2. **"Nothing writes" means nothing writes to a host.** The source reconcile
+   (`refresh_host`) updates the local store, as the background tick does (§4).
+3. **`TargetState` describes the path the move would aim at**, which
+   `ensure_target_workspace` may resolve differently on repair (§3).
+4. **A refusal is the move's own error.** `refusals`, `Refusal` and
+   `transcript_over_cap` are gone: under revision 1 a successful preview can hold
+   no refusal, so a dry run returns `Err` with the same code and message the real
+   move would (§3, §5).
+5. **`unpushed_commits` and `target_path` are added** — the first because
+   `commits_ahead` is `None` on every first transfer to a host (§3).
+
 ## 2. Decisions
 
 | # | Question | Decision |
@@ -96,29 +115,29 @@ pub struct MovePreview {
     pub to_host: String,
     pub branch: String,
     pub source_cwd: String,
-    /// Commits the target's clone lacks. `None` when the target has no clone
-    /// yet, so there is nothing to compare against — not zero, which would
-    /// read as "the target is up to date".
+    /// Commits the source has that origin lacks; `None` when git could not say.
+    /// Always available, unlike `commits_ahead`.
+    pub unpushed_commits: Option<u32>,
+    /// Commits the target's clone lacks. `None` when it has no clone yet, or
+    /// when its branch tip is a commit the source has never seen — not zero,
+    /// which would read as "the target is up to date".
     pub commits_ahead: Option<u32>,
     /// `git status --porcelain` rows, exactly as the carry would replay them.
     pub dirty: Vec<DirtyFile>,
     pub ignored_carried: Vec<carry::IgnoredEntry>,
     pub ignored_left_behind: Vec<carry::LeftBehind>,
     pub transcript_bytes: u64,
-    /// `transcript_bytes` exceeds `move.max_transcript_mb`.
-    pub transcript_over_cap: bool,
+    /// Present on the source; the move applies its own caps to these.
     pub session_state_files: u32,
     pub session_state_bytes: u64,
     pub memory_files: u32,
     pub memory_bytes: u64,
+    /// The path the move would aim at (revision 3).
+    pub target_path: String,
     pub target: TargetState,
-    /// Every refusal this pass could establish (§5 explains why a store-level
-    /// refusal is always alone).
-    pub refusals: Vec<Refusal>,
     /// What this preview cannot tell you, in words a person can read: both
     /// what a read-only pass cannot establish (§5) and anything about the
-    /// request a dry run ignores (§6) — so a caller never has to infer either
-    /// from a field's absence.
+    /// request a dry run ignores (§6).
     pub unknowns: Vec<String>,
 }
 
@@ -136,12 +155,6 @@ pub enum TargetState {
     Dirty { head: String, entries: Vec<DirtyFile> },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Refusal {
-    /// The `E_*` code the move would return.
-    pub code: String,
-    pub message: String,
-}
 ```
 
 Every one of these derives `Serialize + Deserialize` with **no
@@ -178,8 +191,10 @@ a dry run returns it and stops. It reuses, unchanged:
   byte totals for the session directory and the project memory.
 - A read-only probe of the target worktree for `TargetState`.
 
-Roughly five round trips on the source and one on the target. Nothing in that
-list writes.
+Roughly five round trips on the source and two on the target. Nothing in that
+list writes to either host; the source reconcile updates the local store's rows,
+as the background tick does (revision 2), and the target probes run git under
+`GIT_OPTIONAL_LOCKS=0` so that even `git status` leaves the index untouched.
 
 ## 5. What is exact, and what is not
 
@@ -198,13 +213,19 @@ exists (though not whose work a dirty one holds — see `TargetState::Dirty`).
   what creates it, so its cleanliness is unknowable until the move runs.
   `TargetState::Absent` says exactly that.
 
-**A store-level refusal is always alone.** `snapshot()` short-circuits on the
-first problem, and the preflight reuses it unchanged rather than refactoring it
-to collect — a refactor there would risk changing what the move refuses, to make
-a preview prettier. When `snapshot()` refuses there is also no host, worktree or
-branch to inspect, so the preview carries that one refusal and nothing else.
-Host-phase findings (mid-operation, transcript over cap, target dirty) are
-independent and do accumulate.
+**A refusal is the move's own error, and there is only ever one.** The preview
+runs the move's opening sequence (`gather()`) unchanged, and that sequence
+short-circuits on its first problem — the store checks, the source reconcile and
+idle check, the source's git state, the transcript's size. So a dry run that
+meets a refusal returns `Err` carrying **the same code and message** the real
+move would return: not a description of the refusal, the refusal itself. A
+source that is both mid-merge and over the transcript cap therefore shows one of
+the two, exactly as the move would.
+
+What runs *after* `gather()` — the target's state, the ignored-file split, the
+session-state and memory counts — is independent of it and only runs when it
+succeeds. None of it can refuse: the ignored carry and the Claude-state carry
+are warn-only in the move, so a failed listing lands in `unknowns`.
 
 ## 6. `dry_run`'s guard rails
 
@@ -224,15 +245,18 @@ independent and do accumulate.
 - `moveSession.ts` returns `MoveOutcome`; a new `previewMove(sessionId, toHost)`
   wraps the `dry_run: true` call and narrows to `Preview`, returning an error if
   the backend ever answers `Moved` to a dry run.
-- `moves.ts` narrows on `kind` and **refuses to build a run from a preview** —
-  a preview must never appear as a move in progress.
+- **A preview cannot reach the run store, by construction.** `moveSession()`
+  narrows its answer to `moved` and a new `previewMove()` narrows to `preview`,
+  each refusing the other kind — so `moves.ts`, which only ever calls
+  `moveSession()`, needs no change and can never be handed a preview. (Stronger
+  than `moves.ts` checking `kind`, which is what this bullet first asked for.)
 - A small `preflight.ts` store holds the newest preview per `(sessionId,
   toHost)`, its `at` timestamp, and its in-flight state.
 - The setup view requests a preflight when it has a target and on every target
   change, debounced (~250 ms) so flicking through a host list fires one call.
   It renders: what would travel (commits, dirty entries, ignored files with
   sizes, session-state and memory counts), what would be left behind and why,
-  the refusals, and the unknowns.
+  a refusal — in the same words the failure view would use — and the unknowns.
 - **Transfer stays enabled throughout** — while a preflight is in flight and
   when one returned a refusal. A refusal is text beside the button, never a
   disabled button: the engine re-checks everything authoritatively, and a stale
@@ -255,10 +279,11 @@ Engine, over `FakeSsh`:
    pins "the preview cannot drift from the move". It runs the dry run and the
    real move over one fixture and compares, rather than asserting two
    hand-written expectations that could drift together.
-3. Each store-level refusal class appears as the single `refusals` entry, with
-   the same code the move returns.
-4. A mid-operation source, a transcript over `move.max_transcript_mb`, and a
-   dirty target each appear in `refusals` while the others still report.
+3. A refusal from a dry run equals the real move's error — same code, same
+   message — over one fixture. (By construction under revision 4; one
+   representative plus the alias-validation case pins the mechanism.)
+4. A malformed `target_host_alias` gets the same error from a dry run as from
+   the move, since the move validates it before `gather()`.
 5. `commits_ahead` is `None` when the target has no clone, not `0`.
 6. `TargetState::Absent` when the target worktree does not exist.
 7. The bundle size appears in `unknowns` and nowhere else — no numeric field
