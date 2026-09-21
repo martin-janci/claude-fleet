@@ -459,6 +459,11 @@ mkdir -p -- "$dir" || fail mkdir
 export GIT_AUTHOR_NAME=claude-fleet GIT_AUTHOR_EMAIL=fleet@localhost GIT_COMMITTER_NAME=claude-fleet GIT_COMMITTER_EMAIL=fleet@localhost
 real=$(git rev-parse --git-path index)
 cp -- "$real" "$dir/index.ix" 2>/dev/null && cp -- "$real" "$dir/index.wt" 2>/dev/null || fail index
+# The copies keep the index's mtime: git re-hashes a "racily clean" entry (a
+# same-size edit in the index's last-write second) only when the index is not
+# newer than the file, and a fresh copy is. `touch -r` (POSIX, GNU and BSD)
+# rather than `cp -p`, which would also copy the mode past the umask above.
+touch -r "$real" -- "$dir/index.ix" "$dir/index.wt" 2>/dev/null || fail index
 # Everything that writes into the USER's repository — the blobs `add`
 # hashes, the trees, the two commits, the refs — runs under the umask the
 # host really has: a 0700 `objects/ab/` or ref file would lock every other
@@ -2868,6 +2873,64 @@ pub(crate) mod tests {
             String::from_utf8_lossy(&added.stderr)
         );
         assert_eq!(git(&wt, &["rev-parse", "HEAD"]).trim(), src_head);
+    }
+
+    /// A same-size edit in the same second as the index's last write is
+    /// "racily clean": its stat data still matches the index entry, and only
+    /// the index file's own mtime tells git to re-hash it. The snapshot reads
+    /// COPIES of the index, so a copy with a fresh mtime would hide the edit.
+    /// Built deterministically: every mtime is pinned in the past, so a plain
+    /// copy is strictly newer; ctime (which the rewrite bumps) is taken out of
+    /// the stat match; and no `git status` refreshes the index first.
+    #[test]
+    fn snapshot_captures_a_racily_clean_edit() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        git(&src, &["init", "-q", "-b", "feat"]);
+        git(&src, &["config", "core.trustctime", "false"]);
+
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(100);
+        let pin = |p: &Path| {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(then)
+                .unwrap();
+        };
+        let file = src.join("mod.txt");
+        std::fs::write(&file, "v1\n").unwrap();
+        pin(&file); // recorded in the entry; older than the index write below
+        git(&src, &["add", "mod.txt"]);
+        git(&src, &["commit", "-q", "-m", "base"]);
+
+        std::fs::write(&file, "v2\n").unwrap(); // same size
+        pin(&file); // same mtime: the entry's stat data still matches
+        pin(&src.join(".git/index")); // index written in the edit's second
+
+        let out = bash(
+            &snapshot_script(src.to_str().unwrap(), ID, &[], u64::MAX),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            git(
+                &src,
+                &["show", &format!("refs/fleet/transfer/{ID}/wt:mod.txt")]
+            ),
+            "v2\n",
+            "the racily clean edit must reach the worktree snapshot"
+        );
     }
 
     #[test]

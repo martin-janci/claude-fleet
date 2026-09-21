@@ -383,7 +383,7 @@ impl FleetTools {
     }
 
     #[tool(
-        description = "Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked."
+        description = "Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host."
     )]
     pub(super) async fn operator_status(&self) -> Result<CallToolResult, McpError> {
         audit("operator_status", "");

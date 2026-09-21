@@ -227,6 +227,44 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
 
 /// `fetch_owner_repo` is the shared lookup behind `new_bg_session`,
 /// `spawn_review` and every remote-host path.
+/// `new_session` on a system project: the row's `base_path` verbatim, no
+/// clone, no worktree — on a remote host as much as on `local`. A worktree
+/// request against it is refused rather than guessed.
+#[test]
+fn a_system_project_pins_the_pane_cwd_and_refuses_worktrees() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let pid = s
+        .upsert_system_project("fleet", "operator", "/home/mjanci/.claude-fleet/operator")
+        .unwrap();
+    let regular = s.upsert_project("acme", "repo", "/base/repo").unwrap();
+
+    assert_eq!(
+        system_project_cwd(&s, pid, None, None).unwrap().as_deref(),
+        Some("/home/mjanci/.claude-fleet/operator")
+    );
+    assert_eq!(
+        system_project_cwd(&s, regular, None, None).unwrap(),
+        None,
+        "an ordinary project keeps the ordinary resolution"
+    );
+    let err = system_project_cwd(&s, pid, Some(3), None).unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::ipc_error::codes::E_INVALID,
+        "{}",
+        err.message
+    );
+    let err = system_project_cwd(&s, pid, None, Some("feat-x")).unwrap_err();
+    assert_eq!(
+        err.code,
+        crate::ipc_error::codes::E_INVALID,
+        "{}",
+        err.message
+    );
+    let err = system_project_cwd(&s, 4242, None, None).unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+}
+
 #[test]
 fn fetch_owner_repo_reports_an_unknown_project_as_not_found() {
     let s = crate::store::Store::open_in_memory().unwrap();

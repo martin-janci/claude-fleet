@@ -707,6 +707,15 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
     format!("-{lines}")
 }
 
+/// Inline stand-in for the user's `cl` wrapper (`~/bin/cl`, documented as
+/// `exec claude --dangerously-skip-permissions "$@"`), defined only when no
+/// `cl` is on PATH. The pane runs in the environment of the tmux CLIENT that
+/// created the session — for the hub that is a non-interactive `bash -lc`
+/// over SSH — so a `cl` that only exists in interactive shells (a zsh alias,
+/// a `.zshrc`-only PATH entry) is simply not there. POSIX `sh` syntax: tmux
+/// runs the pane command under `default-shell -c`, whatever that shell is.
+pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then cl() { claude --dangerously-skip-permissions "$@"; }; fi;"#;
+
 /// The pane command for a Claude ("work"/"review") session. With a known
 /// session id: resume it, else create it under that id, else a bare `cl` — an
 /// idempotent create-or-resume. Without an id (legacy rows): today's
@@ -718,14 +727,19 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
 /// session under its tmux name and reconcile pairs it with its agent BY NAME
 /// (authoritative) instead of inferring it from the cwd, which is ambiguous
 /// once two sessions share a directory.
+///
+/// The command starts with [`CL_FALLBACK`]: the user's own `cl` wins when it
+/// is on PATH, otherwise an inline `claude --dangerously-skip-permissions`
+/// stands in. Without it a host whose `cl` lives only in interactive shells
+/// printed "command not found: cl" and dropped straight to the login shell.
 pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> String {
     let tail = "exec ${SHELL:-/bin/zsh} -l";
     let name = format!("--name {}", crate::shell::quote(tmux_name));
     match claude_session_id {
         Some(id) => format!(
-            "cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
+            "{CL_FALLBACK} cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
         ),
-        None => format!("cl --continue {name} || cl {name}; {tail}"),
+        None => format!("{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"),
     }
 }
 
@@ -1088,6 +1102,144 @@ mod tests {
         // "can't find pane".
         assert_eq!(exact_session("dev-foo"), "=dev-foo");
         assert_eq!(exact_pane("dev-foo"), "=dev-foo:");
+    }
+
+    #[test]
+    fn pane_command_for_defines_cl_fallback_before_first_use() {
+        // Regression: `cl` is a convenience from the user's dotfiles. On macOS
+        // it exists only in interactive zsh, and a tmux session created by the
+        // hub over SSH inherits the ssh client's non-interactive PATH, where
+        // `cl` is missing — the pane printed "command not found: cl" twice
+        // and dropped to a login shell. The pane command must therefore carry
+        // its own fallback (the documented `~/bin/cl` wrapper, inline).
+        for cmd in [
+            pane_command_for(None, "dev-x"),
+            pane_command_for(Some("550e8400-e29b-41d4-a716-446655440000"), "dev-x"),
+        ] {
+            let def = cmd
+                .find(CL_FALLBACK)
+                .unwrap_or_else(|| panic!("fallback definition missing: {cmd}"));
+            let first_use = cmd.find("cl --").expect("no cl invocation");
+            assert!(
+                def < first_use,
+                "fallback must precede the first `cl`: {cmd}"
+            );
+            assert!(
+                cmd.contains("claude --dangerously-skip-permissions \"$@\""),
+                "fallback must forward all args to claude: {cmd}"
+            );
+        }
+    }
+
+    /// Run a pane command under a real shell with a fake `claude` on PATH and
+    /// a fake `$SHELL` for the trailing `exec`, returning the argv lines the
+    /// fake `claude` recorded. `with_cl` also puts a fake `cl` on PATH.
+    #[cfg(unix)]
+    fn run_pane_command(shell: &str, cmd: &str, with_cl: bool) -> Vec<String> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("argv.log");
+        let write = |name: &str, body: String| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // `--resume` fails (no such conversation) so the chain has to reach
+        // `--session-id`; everything else succeeds.
+        write(
+            "claude",
+            format!(
+                "#!/bin/sh\nprintf 'claude %s\\n' \"$*\" >> '{}'\ncase \"$*\" in *--resume*) exit 1;; esac\nexit 0\n",
+                log.display()
+            ),
+        );
+        if with_cl {
+            write(
+                "cl",
+                format!(
+                    "#!/bin/sh\nprintf 'cl %s\\n' \"$*\" >> '{}'\nexit 0\n",
+                    log.display()
+                ),
+            );
+        }
+        // The trailing `exec ${SHELL:-/bin/zsh} -l` must terminate, not hang.
+        write("fake-shell", "#!/bin/sh\nexit 0\n".to_string());
+        let status = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(cmd)
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+            .env("HOME", dir.path())
+            .env("SHELL", dir.path().join("fake-shell"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "{shell}: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn available_shells() -> Vec<&'static str> {
+        ["/bin/sh", "bash", "zsh"]
+            .into_iter()
+            .filter(|s| {
+                std::process::Command::new(s)
+                    .arg("-c")
+                    .arg("exit 0")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|st| st.success())
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pane_command_launches_claude_when_cl_is_not_on_path() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        for shell in available_shells() {
+            let argv = run_pane_command(shell, &pane_command_for(Some(id), "dev-x"), false);
+            assert_eq!(
+                argv,
+                vec![
+                    format!("claude --dangerously-skip-permissions --resume {id} --name dev-x"),
+                    format!("claude --dangerously-skip-permissions --session-id {id} --name dev-x"),
+                ],
+                "{shell}"
+            );
+            let argv = run_pane_command(shell, &pane_command_for(None, "dev-x"), false);
+            assert_eq!(
+                argv,
+                vec!["claude --dangerously-skip-permissions --continue --name dev-x".to_string()],
+                "{shell}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pane_command_prefers_the_users_cl_when_present() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        for shell in available_shells() {
+            let argv = run_pane_command(shell, &pane_command_for(Some(id), "dev-x"), true);
+            assert_eq!(
+                argv,
+                vec![format!("cl --resume {id} --name dev-x")],
+                "{shell}"
+            );
+        }
     }
 
     #[test]

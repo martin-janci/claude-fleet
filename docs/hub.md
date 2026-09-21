@@ -805,6 +805,7 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--public-url` | `FLEET_HUB_PUBLIC_URL` | `hub.public_url` | unset (loopback + reverse tunnels) |
 | `--allowed-host` (repeatable) | `FLEET_HUB_ALLOWED_HOSTS` (comma-separated) | `hub.allowed_hosts` | none — the public URL's own host is always accepted in addition to this list |
 | `--local-host true\|false` | `FLEET_HUB_LOCAL_HOST` | `hub.local_host` | `false` |
+| `--operator-host <alias>` | `FLEET_HUB_OPERATOR_HOST` | `operator.host` | `local` |
 | `--allow-plaintext` | `FLEET_HUB_ALLOW_PLAINTEXT` (`1`/`true` or `0`/`false`) | `hub.allow_plaintext` | off |
 | `--log-dir` | `FLEET_HUB_LOG_DIR` | — | `<data-dir>/logs` |
 | `--tls off\|auto\|cert` | `FLEET_HUB_TLS` | `hub.tls` | `off` (`auto` is refused — see above) |
@@ -839,6 +840,22 @@ host: with it off, reconcile never creates or probes a `local` host, and a
 single-host refresh of `local` returns `E_NOTFOUND`. With it off, any tool
 or command naming host `local` returns `E_NOTFOUND` too, so nothing runs on
 the hub's machine as a fleet host.
+
+`--operator-host` names the fleet host the UX agent's operator session
+(`ensure_operator` / `operator_status`, the desktop's agent panel) is homed
+on. It defaults to `local`, which on a hub with `--local-host false` is a
+host the fleet does not have: `operator_status` then answers `no_host`, the
+panel says there is nowhere to start the agent, and `serve` logs a warning
+at startup. Point it at any host in the fleet (`--operator-host mefistos`)
+and the next press of the agent button creates the session there — its
+`~/.claude-fleet/operator/.mcp.json` is handed the hub's public URL, the
+same address every provisioned host uses. Only the alias's syntax is checked
+at startup; whether the fleet has that host is answered live, since hosts
+come and go while the hub runs, and a configured host that is missing is
+reported as `no_host` naming the alias. The setting is saved like the
+others, so a later bare `serve` keeps it. Changing it does not move a
+running operator: kill the old `fleet-operator` session first, then press
+the button again.
 
 ## Migrating from the desktop
 
