@@ -29,6 +29,7 @@ vi.mock('./moves', async (importOriginal) => {
     retryMove: vi.fn(),
     resolveMoveRun: vi.fn(),
     startMove: vi.fn(actual.startMove),
+    cancelWait: vi.fn(),
   };
 });
 import TransferSheet from './TransferSheet.svelte';
@@ -38,6 +39,7 @@ import {
   startMove,
   retryMove,
   resolveMoveRun,
+  cancelWait,
   putRunForTest,
   applyMoveProgress,
   resetMovesForTest,
@@ -698,6 +700,90 @@ describe('TransferSheet: recovery actions', () => {
     await tick();
     expect(queryByTestId('transfer-finish-confirm')).toBeNull();
     expect(queryByTestId('transfer-resolve-error')).toBeNull();
+  });
+});
+
+// Task 8: a pending `waiting` run (Transfer sends `when: 'idle'`, and a busy
+// source parks the run at `status: 'waiting'` instead of failing) and a run
+// that ended a wait without a move (`waitEnded`). Fixtures built directly
+// with `putRunForTest`, like the recovery-action tests above.
+describe('TransferSheet: waiting', () => {
+  function blankSteps() {
+    return MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null }));
+  }
+
+  function waitingRun(over: Partial<MoveRun> = {}): MoveRun {
+    return {
+      sessionId: 7,
+      sessionName: 'sess7',
+      fromHost: 'alpha',
+      toHost: 'beta',
+      keepSource: null,
+      origin: 'local',
+      steps: blankSteps(),
+      status: 'waiting',
+      report: null,
+      error: null,
+      resolveError: null,
+      startedAt: Date.now(),
+      settledAt: null,
+      cleanTarget: false,
+      attempt: 1,
+      resolving: false,
+      awaitingStart: false,
+      deadlineUnix: Math.floor(Date.now() / 1000) + 600,
+      waitEnded: null,
+      ...over,
+    };
+  }
+
+  function renderSheet(run: MoveRun) {
+    putRunForTest(run);
+    transferSheetFor.set(run.sessionId);
+    return render(TransferSheet);
+  }
+
+  beforeEach(() => {
+    vi.mocked(retryMove).mockClear();
+    vi.mocked(cancelWait).mockClear();
+    resetMovesForTest();
+    sessions.set([source]);
+    hosts.set([host('alpha'), host('beta')]);
+    selectSession(null);
+  });
+
+  it('shows the host, the deadline, a Cancel that calls cancelWait, and the right title', async () => {
+    const { getByTestId } = renderSheet(waitingRun());
+    const waiting = getByTestId('transfer-waiting');
+    expect(waiting.textContent).toContain('Waiting for sess7 to finish');
+    expect(waiting.textContent).toContain('will transfer to beta');
+    expect(getByTestId('transfer-wait-deadline').textContent).toMatch(/\d/);
+    expect(getByTestId('move-dialog').querySelector('.title')?.textContent).toBe('Waiting to move to beta');
+    await fireEvent.click(getByTestId('transfer-cancel-wait'));
+    expect(cancelWait).toHaveBeenCalledWith(7);
+  });
+
+  it('a run with no deadline shows no deadline line', () => {
+    const { queryByTestId } = renderSheet(waitingRun({ deadlineUnix: null }));
+    expect(queryByTestId('transfer-wait-deadline')).toBeNull();
+  });
+
+  it.each([
+    ['cancelled', /cancel/i],
+    ['timed_out', /timed out/i],
+    ['session_gone', /disappear/i],
+    ['refused', /refused/i],
+    ['hub_restarted', /hub restart/i],
+  ])('says why the wait ended (%s) and offers Transfer again', async (reason, pattern) => {
+    const { getByTestId, queryByTestId } = renderSheet(
+      waitingRun({ status: 'failed', waitEnded: reason, deadlineUnix: null }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toMatch(pattern);
+    // Not the generic "started elsewhere" failure text a null `error` would
+    // otherwise produce through `describeMoveError`.
+    expect(queryByTestId('transfer-failure')).toBeNull();
+    await fireEvent.click(getByTestId('transfer-wait-retry'));
+    expect(retryMove).toHaveBeenCalledWith(7);
   });
 });
 

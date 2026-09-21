@@ -703,6 +703,9 @@ export function applyMoveProgress(p: MoveProgress): void {
       // below), so the wait's timeline subscription is no longer needed —
       // `move:progress` settles it from here.
       if (run.status === 'waiting') unwatchWait(run.sessionId);
+      // The origin flips local -> observed here on purpose: the waiting
+      // run's own `move_session` call already resolved (with `Waiting`), so
+      // this new move has no local caller left to settle it — only events.
       run = undefined; // a NEW move of this session
     } else {
       return;

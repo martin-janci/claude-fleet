@@ -9,7 +9,17 @@
   import { preflightAge, preflightFor, preflights, PREFLIGHT_STALE_MS, requestPreflight } from './preflight';
   import type { ResolveAction } from './moveSession';
   import { stepLabel } from './moveProgress';
-  import { dismissMove, displaySteps, moves, resolveMoveRun, retryMove, startMove, transferSheetFor } from './moves';
+  import {
+    cancelWait,
+    dismissMove,
+    displaySteps,
+    moves,
+    resolveMoveRun,
+    retryMove,
+    startMove,
+    transferSheetFor,
+  } from './moves';
+  import { formatDuration } from './account_usage';
   import { selectSession } from './selection';
   import { sessions } from './sessions';
 
@@ -84,9 +94,10 @@
   $effect(() => {
     if (id !== null && !run && target && preflightAllowed) requestPreflight(id, target);
   });
-  // The age ticker: only while there is a setup view to show it in.
+  // The age ticker: the setup view's preflight age, and a waiting run's
+  // countdown to its deadline — both live displays, nothing else needs it.
   $effect(() => {
-    if (id === null || run) return;
+    if (id === null || (run && run.status !== 'waiting')) return;
     const timer = setInterval(() => {
       now = Date.now();
     }, 1000);
@@ -98,11 +109,38 @@
   const shown = $derived(run ? displaySteps(run) : []);
   /** The last step that is not pending: how far the move actually got. */
   const reached = $derived(shown.findLast((s) => s.state !== 'pending')?.step ?? null);
+
+  /** Why a `waiting` run's wait ended without a move ever starting — in
+   *  plain words, one per `WaitEnd` reason (`crates/fleet-core/src/service/
+   *  move_session/wait.rs`). A reason this build does not know still renders
+   *  something rather than nothing, the same way an unrecognised leftover
+   *  `reason` elsewhere in this file is shown as it came. */
+  const WAIT_END_TEXT: Record<string, string> = {
+    cancelled: 'You cancelled the wait.',
+    timed_out: 'The wait timed out after the limit.',
+    session_gone: 'The session disappeared while fleet was waiting for it to finish.',
+    refused: 'The source finished, but the move itself was refused.',
+    hub_restarted: 'The hub restarted while the wait was pending.',
+  };
+  /** Set only for a `failed` run whose wait ended without ever starting a
+   *  move — a distinct view from an ordinary failure (below), since there is
+   *  no error, no steps, and nothing was ever copied anywhere. */
+  const waitEndedText = $derived(
+    run && run.status === 'failed' && run.waitEnded !== null
+      ? (WAIT_END_TEXT[run.waitEnded] ?? 'The wait ended without a move.')
+      : null,
+  );
   const failure = $derived(
-    run && (run.status === 'failed' || run.status === 'partial')
+    run && waitEndedText === null && (run.status === 'failed' || run.status === 'partial')
       ? describeMoveError(run.error, run.status, run.toHost, reached)
       : null,
   );
+  /** A `waiting` run's countdown to `deadlineUnix`, ticking with `now`. */
+  const deadlineText = $derived.by(() => {
+    if (!run || run.status !== 'waiting' || run.deadlineUnix === null) return null;
+    const secs = run.deadlineUnix - Math.floor(now / 1000);
+    return secs > 0 ? `in ${formatDuration(secs)}` : 'any moment now';
+  });
   const carried = $derived(run?.report?.carried ?? null);
   /** Narrows `failure.action` for the template, which otherwise cannot keep
    *  `.paths` in scope across the `{#if}` that tests `.kind`. */
@@ -211,7 +249,9 @@
         ? `Moving to ${run.toHost}`
         : run.status === 'done'
           ? `Moved to ${run.toHost}`
-          : 'The move did not finish',
+          : run.status === 'waiting'
+            ? `Waiting to move to ${run.toHost}`
+            : 'The move did not finish',
   );
 </script>
 
@@ -454,6 +494,26 @@
         {#if run.fromHost && moveBackTarget}
           <button onclick={moveBack} data-testid="transfer-move-back">Move back to {run.fromHost}</button>
         {/if}
+        <button onclick={done} data-testid="transfer-done">Done</button>
+      </div>
+    {:else if run && run.status === 'waiting'}
+      <p class="note" data-testid="transfer-waiting">
+        Waiting for {run.sessionName} to finish — will transfer to {run.toHost}
+      </p>
+      {#if deadlineText}
+        <p class="muted" data-testid="transfer-wait-deadline">Gives up {deadlineText}</p>
+      {/if}
+      <div class="buttons">
+        <button onclick={() => cancelWait(run.sessionId)} data-testid="transfer-cancel-wait">Cancel</button>
+      </div>
+    {:else if run && waitEndedText}
+      <div data-testid="transfer-wait-ended">
+        <p class="what">{waitEndedText}</p>
+      </div>
+      <div class="buttons">
+        <button onclick={() => retryMove(run.sessionId)} data-testid="transfer-wait-retry">
+          Transfer again
+        </button>
         <button onclick={done} data-testid="transfer-done">Done</button>
       </div>
     {:else if run && failure}
