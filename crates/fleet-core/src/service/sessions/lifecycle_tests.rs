@@ -413,3 +413,52 @@ fn item_source_stops_at_the_function_it_was_asked_for() {
     let b = item_source(src, "fn b(");
     assert!(b.contains("neighbour()") && !b.contains("mine()"), "{b:?}");
 }
+
+/// The row `new_session` hands back is the row as of its LAST write — not a
+/// snapshot from before `set_started_at` / `set_friendly_name` /
+/// `set_claude_session_id` that the frontend would then merge over fresher
+/// state (its guard is `row_version`, and a stale snapshot has the lower one).
+#[test]
+fn finalize_new_session_returns_the_row_as_of_its_last_write() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let s = crate::store::Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("f4final", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let before = s.get_session_by_id(id).unwrap().unwrap();
+    let row = finalize_new_session(
+        &s,
+        id,
+        "local",
+        "f4final",
+        Some("Nice Name"),
+        Some("uuid-9"),
+        false,
+    )
+    .unwrap();
+    assert!(
+        row.started_at.is_some(),
+        "started_at is on the returned row"
+    );
+    assert_eq!(row.friendly_name.as_deref(), Some("Nice Name"));
+    assert_eq!(row.claude_session_id.as_deref(), Some("uuid-9"));
+    assert!(
+        row.row_version > before.row_version,
+        "the returned row is the fresh one"
+    );
+    let latest = s.get_session_by_id(id).unwrap().unwrap();
+    assert_eq!(row, latest, "returned == stored");
+}
+
+#[test]
+fn finalize_new_session_tags_a_shell_session() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("f4shell", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let row = finalize_new_session(&s, id, "local", "f4shell", None, None, true).unwrap();
+    assert_eq!(row.kind, "shell");
+    assert!(row.started_at.is_some());
+}
