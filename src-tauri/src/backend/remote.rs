@@ -215,6 +215,31 @@ impl HubBackend {
         Some(IpcError::new(codes::E_HUB_CONTRACT, message).with_details(details))
     }
 
+    /// Fail fast while the event bridge already knows the hub refuses
+    /// connections: from the second failed attempt on, a call is answered
+    /// from that knowledge instead of waiting its own bound. Reads the
+    /// STATE, unlike [`Self::contract_error`], because this gate only ever
+    /// closes — it refuses a call, it never lets one through that the
+    /// contract verdict would have stopped.
+    fn offline_error(&self, what: &str) -> Option<IpcError> {
+        match self.link.as_ref()?.current() {
+            HubConnection::Offline {
+                attempt,
+                retry_in_secs,
+                reason,
+            } if attempt >= 2 => Some(IpcError::new(
+                codes::E_HUB_UNREACHABLE,
+                format!(
+                    "{what} was not sent: {} has refused {attempt} connection attempts ({}); \
+                     retrying in {retry_in_secs}s",
+                    self.cfg.base_url,
+                    self.redact(&reason)
+                ),
+            )),
+            _ => None,
+        }
+    }
+
     pub fn config(&self) -> &RemoteConfig {
         &self.cfg
     }
@@ -300,6 +325,9 @@ impl HubBackend {
         if let Some(refused) = self.contract_error(tool) {
             return Err(refused);
         }
+        if let Some(refused) = self.offline_error(tool) {
+            return Err(refused);
+        }
         let body = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -318,9 +346,10 @@ impl HubBackend {
                 .await
                 .map_err(|_| {
                     IpcError::new(
-                        codes::E_HUB_UNREACHABLE,
+                        codes::E_HUB_TIMEOUT,
                         format!(
-                            "{} did not answer: no answer within {limit:.0?}",
+                            "{} did not answer: no answer within {limit:.0?} — the request may \
+                             still complete on the hub; refresh before retrying",
                             self.cfg.base_url
                         ),
                     )
@@ -1014,9 +1043,19 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> Duplex for 
 /// Connect to `at`, wrapping in TLS when it says so. The one place a socket
 /// to a hub is opened.
 pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
-    let tcp = tokio::net::TcpStream::connect((at.host(), at.port()))
-        .await
-        .map_err(|e| format!("connect {}:{}: {e}", at.host(), at.port()))?;
+    let tcp = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect((at.host(), at.port())),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "connect {}:{}: timed out after {CONNECT_TIMEOUT:?}",
+            at.host(),
+            at.port()
+        )
+    })?
+    .map_err(|e| format!("connect {}:{}: {e}", at.host(), at.port()))?;
     if !at.is_tls() {
         return Ok(Box::new(tcp));
     }
@@ -1026,9 +1065,15 @@ pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
     // at `https://10.0.0.5` needs.
     let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(at.host().to_string())
         .map_err(|e| format!("{} is not a valid certificate name: {e}", at.host()))?;
-    let stream = connector
-        .connect(server_name, tcp)
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(server_name, tcp))
         .await
+        .map_err(|_| {
+            format!(
+                "TLS handshake with {}:{} timed out after {CONNECT_TIMEOUT:?}",
+                at.host(),
+                at.port()
+            )
+        })?
         // The usual causes are an expired or self-signed certificate and a
         // name that does not match; rustls says which, and the operator needs
         // to hear it verbatim.
@@ -1041,26 +1086,30 @@ pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
 /// hundred kilobytes.
 const MAX_RESPONSE: u64 = 8 * 1024 * 1024;
 
-/// One whole request/response exchange, for a tool that answers promptly —
-/// which is every one of them but [`MOVE_CALL_TIMEOUT`]'s.
-const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Added to the hub's own per-tool deadline ([`fleet_core::mcp::tool_deadline`])
+/// so the client never gives up before the server: a call reported failed
+/// while the hub completes it is how a `new_session` gets clicked twice.
+const CALL_MARGIN: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// `move_session` is the one tool whose work is minutes rather than
-/// milliseconds: it copies a repository, a transcript and the Claude state
-/// between two hosts, with a 120 s copy step, a 40 s bound per git step, a
-/// 60 s confirm wait and a chunked bundle download in between. Bounding it
-/// at [`CALL_TIMEOUT`] reported a failure to the user while the hub was
-/// still moving the session — and the move then finished, unobserved.
-const MOVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// `move_session` copies a repository, a transcript and the Claude state
+/// between hosts: minutes, not seconds. Its bound is the larger of the hub's
+/// deadline and this floor.
+const MOVE_CALL_FLOOR: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// How long `tool` may take to answer. Still bounded: a hub that stops
-/// answering mid-move must not leave the window waiting forever.
+/// How long `tool` may take to answer: the hub's deadline for it plus a
+/// margin. Still bounded: a hub that stops answering mid-call must not leave
+/// the window waiting forever.
 fn call_timeout(tool: &str) -> std::time::Duration {
+    let bound = fleet_core::mcp::tool_deadline(tool) + CALL_MARGIN;
     match tool {
-        "move_session" => MOVE_CALL_TIMEOUT,
-        _ => CALL_TIMEOUT,
+        "move_session" => bound.max(MOVE_CALL_FLOOR),
+        _ => bound,
     }
 }
+
+/// TCP connect, and separately the TLS handshake, each get this long. A
+/// black-holed hub then costs seconds, not the whole call bound.
+pub(super) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[async_trait::async_trait]
 impl HubTransport for TcpTransport {

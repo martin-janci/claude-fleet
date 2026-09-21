@@ -94,10 +94,10 @@ const STATES: ReadonlySet<string> = new Set<MoveStepState>(['started', 'done', '
  */
 export const SETTLE_GRACE_MS = 5000;
 
-/** The code the hub client answers with when the hub said nothing at all
+/** The codes the hub client answers with when the hub said nothing at all
  *  (no connection, a timed-out exchange, a proxy's 5xx). The move is very
  *  probably still running there, so it is not a failure. */
-const NO_ANSWER = 'E_HUB_UNREACHABLE';
+const NO_ANSWER: ReadonlySet<string> = new Set(['E_HUB_UNREACHABLE', 'E_HUB_TIMEOUT']);
 
 const store = writable<Map<number, MoveRun>>(new Map());
 
@@ -296,7 +296,7 @@ function settle(sessionId: number, r: Result<MoveReport>): void {
     pushError(r.error, `Transfer of ${run.sessionName}`);
     return;
   }
-  if (r.error.code === NO_ANSWER) {
+  if (NO_ANSWER.has(r.error.code)) {
     // The hub never answered. Unless its events already said how the move
     // ended, the move is most likely still running there and its events
     // still reach this window — so keep following it as if it had been

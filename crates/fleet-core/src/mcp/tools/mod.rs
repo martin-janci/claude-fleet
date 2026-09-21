@@ -56,6 +56,8 @@ use params::CancelTaskParams;
 use params::*;
 use support::*;
 
+pub use support::tool_deadline;
+
 /// The MCP server handler. Cloned per session by the streamable-HTTP service;
 /// every clone shares the same backend state via the `Arc`s.
 #[derive(Clone)]

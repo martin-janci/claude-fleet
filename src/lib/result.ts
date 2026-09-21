@@ -16,7 +16,12 @@ export async function invokeCmd<T>(
     const value = await invoke<T>(cmd, args);
     return { ok: true, value };
   } catch (raw) {
-    return { ok: false, error: toIpcError(raw) };
+    const error = toIpcError(raw);
+    if (error.code === 'E_HUB_TIMEOUT' && typeof window !== 'undefined') {
+      // The hub may have done it anyway: whoever owns the lists re-fetches.
+      window.dispatchEvent(new CustomEvent('fleet:outcome-unknown', { detail: { cmd } }));
+    }
+    return { ok: false, error };
   }
 }
 

@@ -271,6 +271,14 @@
   // targets call stopPropagation(), so this only ever sees strays.
   const swallowDrag = (e: DragEvent) => e.preventDefault();
 
+  // A hub-routed command timed out (`E_HUB_TIMEOUT`): the hub may have done
+  // it anyway. Unlike `onFocus`, this always re-fetches — the whole point is
+  // that the outcome is unknown right now, not on the next alt-tab.
+  function onOutcomeUnknown() {
+    void loadProjects();
+    void loadSessions();
+  }
+
   onMount(() => {
     window.addEventListener('focus', onFocus);
     window.addEventListener('keydown', onKeydown);
@@ -279,6 +287,7 @@
     window.addEventListener('keydown', onChordKeydown, true);
     window.addEventListener('dragover', swallowDrag);
     window.addEventListener('drop', swallowDrag);
+    window.addEventListener('fleet:outcome-unknown', onOutcomeUnknown);
   });
 
   // Opening a session from anywhere (sidebar, quick switcher, a Hosts-view
@@ -292,6 +301,7 @@
     window.removeEventListener('keydown', onChordKeydown, true);
     window.removeEventListener('dragover', swallowDrag);
     window.removeEventListener('drop', swallowDrag);
+    window.removeEventListener('fleet:outcome-unknown', onOutcomeUnknown);
     unsubOpened();
     unlistenEvents?.();
   });

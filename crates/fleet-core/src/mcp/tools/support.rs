@@ -1101,7 +1101,7 @@ pub(super) const QUICK_CAP: std::time::Duration = std::time::Duration::from_secs
 /// in [`guard::TOOL_POLICIES`]. An unknown name gets the quick cap; the
 /// exhaustiveness test in `tools::tests` guarantees every served tool has a
 /// row.
-pub(super) fn tool_deadline(tool: &str) -> std::time::Duration {
+pub fn tool_deadline(tool: &str) -> std::time::Duration {
     match guard::policy(tool) {
         Some(p) => {
             let work = match p.deadline {
