@@ -323,6 +323,29 @@ pub(crate) fn fetch_owner_repo(s: &Store, project_id: i64) -> Result<(String, St
     .map_err(missing_row("project", project_id))
 }
 
+/// A system project's `base_path`, or `None` for an ordinary project.
+///
+/// A system project (`projects.system`, e.g. the UX agent's operator dir) is
+/// not a repository: nothing is cloned for it, no worktree hangs off it, and
+/// its `base_path` is the pane cwd on the host the row names — absolute and
+/// already resolved for that host by the service that created it. Every
+/// path resolver checks this first, because deriving `<root>/<owner>/<repo>`
+/// for it names a checkout that does not exist.
+pub(crate) fn fetch_system_base_path(
+    s: &Store,
+    project_id: i64,
+) -> Result<Option<String>, IpcError> {
+    let mut stmt = s
+        .conn_ref()
+        .prepare("SELECT base_path, system FROM projects WHERE id=?1")?;
+    let (path, system): (String, bool) = stmt
+        .query_row(rusqlite::params![project_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+        })
+        .map_err(missing_row("project", project_id))?;
+    Ok(system.then_some(path))
+}
+
 /// The project's checkout path on this machine.
 pub(crate) fn fetch_base_path(s: &Store, project_id: i64) -> Result<String, IpcError> {
     let mut stmt = s
@@ -477,6 +500,9 @@ pub(super) fn worktree_path_on_disk(
 #[cfg_attr(test, derive(Debug))]
 pub(super) enum CwdSource {
     Local(String),
+    /// A system project's `base_path`: the cwd verbatim on ANY host — see
+    /// [`fetch_system_base_path`].
+    Fixed(String),
     Remote {
         /// Host's projects root from the `projects.*` settings, unexpanded
         /// (may start with `~/`; expanded against the remote `$HOME`).
@@ -495,8 +521,13 @@ pub(super) fn cwd_source_for_session(
     s: &Store,
     row: &crate::store::SessionRow,
 ) -> Result<CwdSource, IpcError> {
+    crate::service::hub::ensure_local_allowed(&row.host_alias)?;
+    if let Some(pid) = row.project_id {
+        if let Some(fixed) = fetch_system_base_path(s, pid)? {
+            return Ok(CwdSource::Fixed(fixed));
+        }
+    }
     if row.host_alias == "local" {
-        crate::service::hub::ensure_local_allowed(&row.host_alias)?;
         return Ok(CwdSource::Local(resolve_session_cwd(s, row)?));
     }
     let pid = row.project_id.ok_or_else(|| {
@@ -536,7 +567,7 @@ pub(super) async fn resolve_cwd_source(
     ssh: &Arc<SshClient>,
 ) -> Result<String, IpcError> {
     match src {
-        CwdSource::Local(p) => Ok(p),
+        CwdSource::Local(p) | CwdSource::Fixed(p) => Ok(p),
         CwdSource::Remote {
             root,
             layout,
