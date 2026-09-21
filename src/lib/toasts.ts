@@ -1,6 +1,7 @@
 import { get, writable } from 'svelte/store';
 import type { IpcError, Result } from './result';
 import { hubNextStep } from './hub';
+import { reportError } from './error_report';
 
 // Global, non-blocking notifications. Errors used to land in per-component
 // `error: string | null` state that never cleared and dropped the
@@ -127,6 +128,7 @@ export function clearToasts(): void {
 export function pushError(error: IpcError, context?: string): number {
   const base = context ? `${context}: ${error.message}` : error.message;
   const next = hubNextStep(error);
+  reportError('frontend', base, error.code ?? null);
   return push({ kind: 'error', code: error.code, message: next ? `${base} — ${next}` : base });
 }
 
