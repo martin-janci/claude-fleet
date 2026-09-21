@@ -1,5 +1,7 @@
 // Find-in-conversation and the turn index for the Conversations tab: pure
 // helpers over the panel's thread rows (`buildThread`).
+import { get } from 'svelte/store';
+import { sessions, sessionsLoaded } from './sessions';
 import type { ConvItem, ThreadRow } from './conversation';
 
 /** The key the panel's `{#each thread}` uses for a row. */
@@ -85,11 +87,32 @@ export function turnIndex(rows: ThreadRow[]): TurnIndexEntry[] {
 // bottom every time.
 
 export interface ScrollSnapshot {
+  /** Content anchor: the `at` of the turn the remembered row belongs to.
+   *  The row KEY cannot be the anchor — `t<i>` is a position inside the
+   *  loaded window, so the same key names a different turn as soon as the
+   *  tail moves or "Load older" grows the window. A timestamp names the
+   *  turn itself, whatever window it lands in next time. Null when no turn
+   *  at-or-before the row carries one; the restore then stays pinned. */
+  turnAt: string | null;
+  /** The key the row had when the snapshot was taken. Window-relative for a
+   *  turn (see `turnAt`), but stable for an inline event (`e<id>` is the
+   *  backend's own event id), which is why an event row is restored by it. */
   rowKey: string;
   atBottom: boolean;
 }
 
 export const scrollMemory = new Map<number, ScrollSnapshot>();
+
+// A session that leaves the store (killed, removed, or gone from the fleet)
+// can never be returned to, so its remembered position is dead weight — and
+// worse, a NEW session could one day reuse the id and inherit it. Prune on
+// every store write, but only once the first list has landed: before that an
+// empty store means "not loaded yet", not "no sessions".
+sessions.subscribe((rows) => {
+  if (scrollMemory.size === 0 || !get(sessionsLoaded)) return;
+  const live = new Set(rows.map((r) => r.id));
+  for (const id of [...scrollMemory.keys()]) if (!live.has(id)) scrollMemory.delete(id);
+});
 
 /** Records where session `sessionId`'s view was left. A snapshot at the
  *  bottom is dropped rather than stored: recalling "no entry" already means
@@ -106,6 +129,33 @@ export function rememberScroll(sessionId: number, snapshot: ScrollSnapshot): voi
  *  (never scrolled away from the bottom, or never visited). */
 export function recallScroll(sessionId: number): ScrollSnapshot | null {
   return scrollMemory.get(sessionId) ?? null;
+}
+
+/** Forget where `sessionId` was left: the conversation on screen is being
+ *  replaced (a /clear or /resume the session followed, the header's
+ *  conversation switcher), so a position inside the old transcript would
+ *  restore into unrelated content. */
+export function forgetScroll(sessionId: number): void {
+  scrollMemory.delete(sessionId);
+}
+
+/** The content anchor for a read position: the `at` of the index entry
+ *  nearest at-or-before `turnKey` (`nearestTurn`'s rule). Null when the
+ *  index is empty, the key is null, or that turn carries no timestamp. */
+export function anchorAt(index: TurnIndexEntry[], turnKey: string | null): string | null {
+  if (turnKey === null || index.length === 0) return null;
+  return index[nearestTurn(index, turnKey)]?.at ?? null;
+}
+
+/** Where a returning session should scroll, resolved against the FRESHLY
+ *  built index: the current key of the turn the snapshot was anchored to.
+ *  An inline event keeps its own key (`e<id>` is window-independent).
+ *  Null when nothing matches — the caller then leaves the view pinned to
+ *  the bottom rather than scrolling somewhere arbitrary. */
+export function resolveScroll(index: TurnIndexEntry[], snap: ScrollSnapshot): string | null {
+  if (/^e\d+$/.test(snap.rowKey)) return snap.rowKey;
+  if (snap.turnAt === null) return null;
+  return index.find((e) => e.at === snap.turnAt)?.rowKey ?? null;
 }
 
 // ---- Turn stepper ---------------------------------------------------------
@@ -128,6 +178,27 @@ export function nearestTurn(index: TurnIndexEntry[], topVisibleKey: string | nul
     else break;
   }
   return best;
+}
+
+/** The turn-row key a read position resolves to. `key` itself when it
+ *  already names a turn row; an inline event has no turn of its own, so the
+ *  nearest `t…` in `dir` (1 = the turn BELOW it, -1 = the turn above) in
+ *  document order, falling back to the other direction when that side has
+ *  none. Null when `key` is null/unknown or `keys` holds no turn row.
+ *
+ *  Stepping forward matters: resolving an event row through `nearestTurn`
+ *  alone yields 0 — the first turn — so `]` from an event jumped the reader
+ *  to the top of the conversation instead of to the next turn.
+ */
+export function turnKeyNear(keys: string[], key: string | null, dir: 1 | -1): string | null {
+  if (key === null) return null;
+  const i = keys.indexOf(key);
+  if (i < 0) return null;
+  const isTurn = (k: string) => /^t\d+$/.test(k);
+  if (isTurn(key)) return key;
+  const below = keys.slice(i + 1).find(isTurn) ?? null;
+  const above = keys.slice(0, i).reverse().find(isTurn) ?? null;
+  return dir === 1 ? (below ?? above) : (above ?? below);
 }
 
 /** The turn one step (`delta`) away from `current` (a position in `index`),

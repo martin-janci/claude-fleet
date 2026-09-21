@@ -34,7 +34,11 @@
     rowKey,
     rememberScroll,
     recallScroll,
+    forgetScroll,
+    anchorAt,
+    resolveScroll,
     nearestTurn,
+    turnKeyNear,
     adjacentTurn,
   } from './conversation_nav';
   import { detectMac, isEditable } from './terminal_keys';
@@ -141,6 +145,12 @@
   let atBottom = $state(true);
   // Items that landed while the user was scrolled up; shown on the button.
   let unseen = $state(0);
+  // True between `resetView()` and the first load that lands on the fresh
+  // view. The scroller still holds the OUTGOING conversation's geometry at
+  // that point (the reset has not flushed), so measuring it would report
+  // "scrolled up" and count the whole incoming transcript as unseen. A view
+  // that has just been reset is pinned by definition.
+  let justReset = $state(true);
   // Turn window asked of the backend; undefined = its default. "Load older"
   // grows it; polls keep using it so loaded history does not vanish.
   let turnsWanted = $state<number | undefined>(undefined);
@@ -250,7 +260,7 @@
     const mine = ++seq;
     loading = conv === null;
     const fetchedTurnSeq = session.turn_seq;
-    const pinned = scroller ? isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight) : true;
+    const pinned = justReset || !scroller ? true : isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
     try {
@@ -269,6 +279,7 @@
       // at the normal cadence, not after the quiet one.
       lastFetchAt = Date.now();
       lastFetchTurnSeq = fetchedTurnSeq;
+      justReset = false;
       errorCode = null;
       errorMsg = null;
       convCid = cid;
@@ -317,6 +328,7 @@
     expanded = new Set();
     atBottom = true;
     unseen = 0;
+    justReset = true;
     turnsWanted = undefined;
     loadingOlder = false;
     turnsOpen = false;
@@ -339,22 +351,15 @@
     idleSeenSinceSend = false;
   }
 
-  // The session this panel was last showing, so a switch can snapshot where
-  // the outgoing session's view was (`topVisibleRowKey`/`atBottom`) before
-  // `resetThread()` below wipes it. Null on first mount, when there is
-  // nothing yet to remember.
-  let lastScrollSessionId: number | null = null;
-
-  // Reset + immediate fetch on session change.
+  // Reset + immediate fetch on session change. Nothing is snapshotted here:
+  // the position is remembered as the user scrolls (`rememberHere`), so an
+  // unmount — which this effect never sees — is remembered too.
   $effect(() => {
     void sessionId;
     untrack(() => {
-      const outgoing = lastScrollSessionId;
-      if (outgoing !== null && outgoing !== sessionId) {
-        const key = topVisibleRowKey();
-        if (key !== null) rememberScroll(outgoing, { rowKey: key, atBottom });
-      }
-      lastScrollSessionId = sessionId;
+      // The outgoing conversation is still on screen and still scrolled
+      // where the reader left it: measure it now, before the reset wipes it.
+      flushScroll();
       resetThread();
       viewing = null;
       newerAvailable = false;
@@ -383,13 +388,18 @@
         const snap = recallScroll(id);
         if (!snap) return;
         void tick().then(() => {
-          // The remembered row may not be in the freshly-loaded (truncated)
-          // window; when it isn't, leave the pinned-to-bottom state alone
-          // rather than showing "↓ Latest" over a view that is, in fact,
-          // already at the bottom.
-          if (scrollToRow(snap.rowKey)) {
+          // `turnAt` names the turn itself; the key it wears in THIS window
+          // is whatever the freshly built index says. No match (the turn
+          // fell out of the window, or the row is simply not rendered) →
+          // leave the pinned-to-bottom state alone rather than showing
+          // "↓ Latest" over a view that is, in fact, already at the bottom.
+          const key = resolveScroll(turnEntries, snap);
+          if (key !== null && scrollToRow(key)) {
             atBottom = false;
-            currentTurnPos = nearestTurn(turnEntries, snap.rowKey);
+            // The count belongs to the load that just filled this view, not
+            // to the reader: nothing here has gone unseen.
+            unseen = 0;
+            currentTurnPos = nearestTurn(turnEntries, key);
           }
         });
       });
@@ -413,6 +423,9 @@
         newerAvailable = true;
         return;
       }
+      // A followed /clear or /resume replaces the transcript wholesale: a
+      // position inside the old one would restore into unrelated content.
+      forgetScroll(sid);
       resetThread();
       void load();
       void loadConversations();
@@ -427,6 +440,9 @@
     const leavingForNewer = id === null && newerAvailable;
     viewing = id;
     switchNotice = null;
+    // Another conversation entirely — the remembered position belonged to
+    // the one being left.
+    forgetScroll(sessionId);
     resetView();
     if (id === null) {
       newerAvailable = false;
@@ -616,6 +632,13 @@
     return null;
   }
 
+  /** Every rendered row key in document order — what `turnKeyNear` walks to
+   *  turn an inline event's key into the turn it should resolve to. */
+  function rowKeys(): string[] {
+    if (!scroller) return [];
+    return Array.from(scroller.querySelectorAll<HTMLElement>('[data-row-key]')).map((el) => el.dataset.rowKey ?? '');
+  }
+
   // Position in `turnEntries` nearest the current read position, kept in
   // sync with actual scrolling (see the `onScroll`/`scrollToBottom` calls
   // below) rather than recomputed on every render: `topVisibleRowKey` reads
@@ -623,7 +646,29 @@
   // both the `[`/`]` step target and the stepper buttons' disabled state.
   let currentTurnPos = $state(0);
   function refreshCurrentTurnPos() {
-    currentTurnPos = nearestTurn(turnEntries, topVisibleRowKey());
+    // An inline event is not a turn: resolve it FORWARD to the turn below it
+    // rather than letting `nearestTurn` fall back to 0, which sent `]` to
+    // the top of the conversation.
+    currentTurnPos = nearestTurn(turnEntries, turnKeyNear(rowKeys(), topVisibleRowKey(), 1));
+  }
+
+  /** Remember the current read position for this session (see `rememberScroll`).
+   *  Anchored on the turn's `at`, so the window may slide or grow before the
+   *  reader comes back. */
+  function rememberHere(id: number) {
+    if (!scroller) return;
+    const key = topVisibleRowKey();
+    if (atBottom || key === null) {
+      // At the bottom there is nothing to come back TO: the default view is
+      // already the latest turn, so drop any earlier snapshot.
+      forgetScroll(id);
+      return;
+    }
+    rememberScroll(id, {
+      turnAt: anchorAt(turnEntries, turnKeyNear(rowKeys(), key, -1)),
+      rowKey: key,
+      atBottom,
+    });
   }
   const prevTurn = $derived(adjacentTurn(turnEntries, currentTurnPos, -1));
   const nextTurn = $derived(adjacentTurn(turnEntries, currentTurnPos, 1));
@@ -1162,12 +1207,40 @@
     refreshCurrentTurnPos();
   }
 
+  // Reading every row's rect is a forced layout, and a scroll fires dozens
+  // of events per gesture: one pending frame collapses a flick into a single
+  // measurement. `scrollFrameFor` is the session the pending frame measured,
+  // so a switch that flushes it still writes the snapshot under the OUTGOING
+  // session's id (`sessionId` is the incoming one by then).
+  let scrollFrame: number | null = null;
+  let scrollFrameFor: number | null = null;
+  function afterScroll() {
+    const id = scrollFrameFor;
+    scrollFrame = null;
+    scrollFrameFor = null;
+    if (id === null || !scroller) return;
+    if (id === sessionId) refreshCurrentTurnPos();
+    rememberHere(id);
+  }
+  /** Run a pending measurement now — a session switch or an unmount, either
+   *  of which would drop the frame and lose the last scroll. */
+  function flushScroll() {
+    if (scrollFrame === null) return;
+    cancelAnimationFrame(scrollFrame);
+    afterScroll();
+  }
   function onScroll() {
     if (!scroller) return;
     atBottom = isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
     if (atBottom) unseen = 0;
-    refreshCurrentTurnPos();
+    if (scrollFrame === null) {
+      scrollFrameFor = sessionId;
+      scrollFrame = requestAnimationFrame(afterScroll);
+    }
   }
+  // The panel is ONE instance for every session, so an unmount is the only
+  // place a pending frame is lost for good.
+  $effect(() => () => flushScroll());
 
   /** Run a mutation that changes the composer's height without moving the
    *  transcript under the reader. The composer is flex: 0 0 auto at the
@@ -1700,18 +1773,20 @@
               class="turn-step"
               data-testid="conv-turn-prev"
               aria-label="Previous turn"
+              title="Previous turn ([)"
               disabled={prevTurn === null}
               onclick={() => prevTurn && stepTurn(-1)}
-              >‹ turn</button
+              >‹ Prev turn</button
             >
             <button
               type="button"
               class="turn-step"
               data-testid="conv-turn-next"
               aria-label="Next turn"
+              title="Next turn (])"
               disabled={nextTurn === null}
               onclick={() => nextTurn && stepTurn(1)}
-              >turn ›</button
+              >Next turn ›</button
             >
           </div>
         {/if}

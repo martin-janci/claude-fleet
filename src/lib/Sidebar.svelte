@@ -234,10 +234,20 @@
   // scroll its row into view. Keyed on the id so reconcile updates (a new
   // row object every tick) neither re-scroll nor undo a later collapse.
   const revealId = $derived($selectedSession?.id ?? null);
+  // The id this pair of effects last revealed, so the same session is never
+  // scrolled into view twice for one user action.
+  let revealedId: number | null = null;
   $effect(() => {
     const id = revealId;
     if (id === null) return;
     untrack(() => {
+      // Only when the id actually changed, and not when an explicit select
+      // is mid-flight: `selectSessionExplicitly` moves the selection and THEN
+      // bumps `revealSeq`, so both writes land in one flush — the effect
+      // below is about to reveal this very session (widening the filter
+      // first), and revealing here too would scroll for it twice.
+      if (id === revealedId || get(revealSeq) !== appliedSeq) return;
+      revealedId = id;
       const sess = $selectedSession;
       if (sess) expandAndScrollTo(sess);
     });
@@ -273,6 +283,7 @@
     untrack(() => {
       const sess = $selectedSession;
       if (!sess) return;
+      revealedId = sess.id;
       if ($hostFilter !== 'all' && $hostFilter !== sess.host_alias) hostFilter.set('all');
       expandAndScrollTo(sess);
     });

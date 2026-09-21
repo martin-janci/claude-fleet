@@ -341,6 +341,31 @@ describe('Sidebar (sessions-grouped view)', () => {
   // never replay whatever `revealSeq` already was, or it would widen the
   // filter for a session that arrived non-explicitly while collapsed.
   describe('reveal across a Sidebar remount', () => {
+    it('an explicit select scrolls the row into view ONCE, not once per effect', async () => {
+      // Two effects reveal: the id-keyed one and the `revealSeq` one. An
+      // explicit select moves the selection AND bumps the sequence in the
+      // same flush, so without a gate both fired for the same session.
+      const onLocal = sessionFor(1, 'dev-local');
+      const onOther = sessionFor(1, 'dev-other');
+      mockBackend(fakeProjects, [onLocal, onOther]);
+      hostFilter.set('all');
+      render(Sidebar);
+      await tick(); await tick();
+
+      const scrolled: string[] = [];
+      const orig = Element.prototype.scrollIntoView;
+      Element.prototype.scrollIntoView = function (this: Element) {
+        scrolled.push((this as HTMLElement).dataset.sessionId ?? '');
+      };
+      try {
+        selectSessionExplicitly(onOther);
+        await tick(); await tick(); await Promise.resolve(); await tick();
+        expect(scrolled).toEqual([String(onOther.id)]);
+      } finally {
+        Element.prototype.scrollIntoView = orig;
+      }
+    });
+
     it('a bump from before mount is not replayed at mount time', async () => {
       const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
       mockBackend(fakeProjects, [sessionFor(1, 'dev-local'), onMac]);
@@ -375,14 +400,16 @@ describe('Sidebar (sessions-grouped view)', () => {
       const onMefistos = { ...sessionFor(1, 'dev-mefistos'), host_alias: 'mefistos' };
       const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
       mockBackend(fakeProjects, [onMefistos, onMac]);
-      hostFilter.set('mefistos');
+      // Start on a filter that HIDES the session about to be selected, so
+      // the widen below is a real event and not a no-op on a matching host.
+      hostFilter.set('mac');
 
       const first = render(Sidebar);
       await tick(); await tick();
       // An explicit select while mounted widens, as established above.
       selectSessionExplicitly(onMefistos);
       await tick(); await tick(); await Promise.resolve();
-      expect(get(hostFilter)).toBe('mefistos'); // already on the shown host — no-op widen
+      expect(get(hostFilter)).toBe('all');
 
       hostFilter.set('mefistos');
       first.unmount();

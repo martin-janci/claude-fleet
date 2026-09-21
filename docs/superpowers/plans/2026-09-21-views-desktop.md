@@ -22,7 +22,7 @@
 
 | File | Responsibility |
 |---|---|
-| `src/lib/HostsList.svelte`, `src/lib/HostDetail.svelte`, `src/App.svelte` | "View sessions" action: set host filter + close Hosts |
+| `src/lib/host_actions.ts`, `src/lib/HostDetail.svelte`, `src/lib/HostsView.svelte`, `src/App.svelte` | "View sessions" action: set host filter + close Hosts (as shipped: `HostsList.svelte` is untouched and the action lives in `host_actions.ts`, not `hosts.ts`) |
 | `src/lib/Sidebar.svelte` | filter reset gating; search over tags |
 | `src/lib/ConversationPanel.svelte` | per-session scroll memory; prev/next turn keys |
 | `src/lib/conversation_nav.ts` | pure helpers: `nearestTurn`, `adjacentTurn` |
@@ -32,9 +32,9 @@
 
 ### Task 1: Host → sessions in one click
 
-**Files:** `src/lib/HostsList.svelte`, `src/lib/HostDetail.svelte`, `src/App.svelte:477-480`, `src/lib/HostsView.svelte:317-319`; test `src/lib/HostsView.test.ts` (extend or create following the existing `*.test.ts` style with `@testing-library/svelte` if used there).
+**Files (as shipped):** `src/lib/host_actions.ts`, `src/lib/HostDetail.svelte`, `src/App.svelte:477-480`, `src/lib/HostsView.svelte:317-319` — `HostsList.svelte` is untouched: the list row keeps opening the detail, and "View sessions" is the detail's header button plus the `s` key; test `src/lib/HostsView.test.ts` (extend or create following the existing `*.test.ts` style with `@testing-library/svelte` if used there).
 
-**Interfaces:** a single exported action `viewHostSessions(alias: string)` in `src/lib/hosts.ts` that does `hostFilter.set(alias)` and `closeHosts()` (import the existing overlay close from wherever `App.svelte` defines it; if it is component-local, lift a `hostsOpen` store to `hosts.ts`).
+**Interfaces (as shipped):** a single exported action `viewHostSessions(alias: string)` in `src/lib/host_actions.ts` that does `hostFilter.set(alias)` and `closeHosts()` (import the existing overlay close from wherever `App.svelte` defines it; if it is component-local, lift a `hostsOpen` store to `hosts.ts`).
 
 - [ ] Step 1: failing test — calling `viewHostSessions('mefistos')` sets `hostFilter` to `mefistos` and `hostsOpen` to false.
 - [ ] Step 2: run, RED. Step 3: implement `viewHostSessions`; wire a "View sessions" button in `HostDetail.svelte`'s header and make the whole `HostsList` row's primary click call it (keep the `s` key in `HostsView.svelte` calling the same action). Step 4: GREEN + `svelte-check`. Step 5: commit `feat(hosts): one click from a host to its sessions, and the overlay closes`.
@@ -56,7 +56,7 @@
 
 **Files:** `src/lib/ConversationPanel.svelte` (`resetView`/`resetThread`, `scroller`, `load()`); `src/lib/conversation_nav.ts` (+ `scrollMemory`); test `src/lib/conversation_nav.test.ts`.
 
-**Interfaces:** `export const scrollMemory = new Map<number, { rowKey: string; atBottom: boolean }>()`; `rememberScroll(sessionId, snapshot)`, `recallScroll(sessionId)`.
+**Interfaces (as shipped):** `export const scrollMemory = new Map<number, { turnAt: string | null; rowKey: string; atBottom: boolean }>()`; `rememberScroll(sessionId, snapshot)`, `recallScroll(sessionId)`, `forgetScroll(sessionId)`. The anchor is the CONTENT key `turnAt` (the turn's timestamp), not `rowKey`: `t<i>` is a position inside the loaded window, so it names a different turn as soon as the tail moves or "Load older" runs. `rowKey` is kept only to restore an inline event by its (window-independent) `e<id>`.
 
 - [ ] Step 1: failing tests — `rememberScroll(1, {rowKey:'turn-7', atBottom:false}); recallScroll(1)` returns it; `recallScroll(2)` is null; an `atBottom:true` snapshot recalls as "go to bottom".
 - [ ] Step 2: RED. Step 3: before `resetThread()` on a session switch, store the top-most visible `rowKey` (the existing row keys) and `atBottom`; after `load()` resolves for the returning session, if a snapshot exists and `!atBottom`, `scrollToRow(rowKey)` instead of snapping to bottom. In-memory for the app lifetime. Step 4: GREEN + a manual check in the running app (`pnpm tauri dev` is heavy — the memory says a dev build kills the installed app and migrates its DB; do NOT run it; rely on the unit test and svelte-check). Step 5: commit `feat(conversation): remember the scroll position per session`.

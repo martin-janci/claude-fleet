@@ -296,6 +296,27 @@ describe('App: the Hosts view', () => {
     expect(hostsView()).toBeNull();
   });
 
+  it('View sessions from the detail expands a collapsed sidebar, exactly like the `s` key', async () => {
+    // The button and the key are one action (`viewHostSessions`): the filter
+    // it sets is worthless behind a collapsed rail, and only the key used to
+    // expand it.
+    localStorage.setItem('cf:pref:layout.sidebar-collapsed', 'true');
+    render(App);
+    await waitFor(() => expect(screen.getByTestId('sidebar-expand')).toBeTruthy());
+    await cmdI(window);
+    await tick();
+    const mef = screen.getAllByTestId('host-row').find((r) => r.dataset.alias === 'mefistos')!;
+    await fireEvent.click(mef);
+    await tick();
+
+    await fireEvent.click(within(screen.getByTestId('host-detail')).getByTestId('detail-view-sessions'));
+    await tick();
+    expect(hostsView()).toBeNull();
+    expect(screen.queryByTestId('sidebar-expand')).toBeNull();
+    await waitFor(() => expect(screen.getAllByTestId('sess-row').length).toBeGreaterThan(0));
+    expect(get(hostFilter)).toBe('mefistos');
+  });
+
   it('n opens the project picker, then New session with that host preselected', async () => {
     await mountApp();
     await openSession(rows[0]);

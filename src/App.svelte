@@ -289,7 +289,13 @@
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
   // through this signal instead, same shape as `onSessionOpened` above.
-  const unsubHostsClose = onHostsCloseRequested(() => closeHosts());
+  // Expanding the sidebar belongs HERE, not at one call site: the action has
+  // just narrowed the sidebar to a host, and a collapsed rail would hide the
+  // very list it filtered.
+  const unsubHostsClose = onHostsCloseRequested(() => {
+    sidebarCollapsed = false;
+    closeHosts();
+  });
 
   onDestroy(() => {
     window.removeEventListener('focus', onFocus);
@@ -482,7 +488,9 @@
   });
 
   function onHostsFilterSidebar(alias: string) {
-    sidebarCollapsed = false;
+    // `viewHostSessions` fires `onHostsCloseRequested`, which expands the
+    // sidebar and closes the overlay — the `s` key and HostDetail's button
+    // are the same path.
     viewHostSessions(alias);
   }
   function onHostsNewSession(alias: string) {
