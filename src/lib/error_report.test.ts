@@ -49,6 +49,16 @@ describe('reportError', () => {
     reportError('frontend', 'later');
     expect(calls()).toHaveLength(MAX_PER_MINUTE + 1);
   });
+
+  it('a rate-limited message is not marked seen', () => {
+    for (let i = 0; i < MAX_PER_MINUTE; i++) reportError('frontend', `m${i}`);
+    expect(calls()).toHaveLength(MAX_PER_MINUTE);
+    reportError('frontend', 'late'); // rate-limited, not sent
+    expect(calls()).toHaveLength(MAX_PER_MINUTE);
+    vi.advanceTimersByTime(60_001);
+    reportError('frontend', 'late'); // must not have been marked `seen`, so it sends now
+    expect(calls()).toHaveLength(MAX_PER_MINUTE + 1);
+  });
 });
 
 describe('installErrorReporting', () => {
