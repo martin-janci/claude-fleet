@@ -1127,32 +1127,20 @@ impl Store {
         }
     }
 
-    /// Set (or clear) the row's `current_activity`. Emits `session_updated`.
+    /// Set (or clear) the row's `current_activity`. Also clears
+    /// `pending_input`: every caller of this method is overriding the pane
+    /// guess with something authoritative (a hook, not the reconcile pass
+    /// that derives `pending_input` from the same pane read), so whatever
+    /// dialog was last seen no longer describes what the pane is showing
+    /// now. Emits `session_updated`.
     pub fn set_current_activity(
         &self,
         id: i64,
         activity: Option<&str>,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         self.conn.execute(
-            "UPDATE sessions SET current_activity = ?2 WHERE id = ?1",
+            "UPDATE sessions SET current_activity = ?2, pending_input = NULL WHERE id = ?1",
             rusqlite::params![id, activity],
-        )?;
-        Ok(self.emit_session(id)?)
-    }
-
-    /// Set (or clear) the row's `pending_input` — the permission/question
-    /// dialog `pane_intel::analyze` found on the pane, JSON-encoded. Emits
-    /// `session_updated`. The reconcile write-burst folds this into its own
-    /// upsert instead (see `Store::apply_host_reconcile`); this is the
-    /// single-row path used elsewhere (and by tests).
-    pub fn set_pending_input(
-        &self,
-        id: i64,
-        pending_input: Option<&PendingInput>,
-    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
-        self.conn.execute(
-            "UPDATE sessions SET pending_input = ?2 WHERE id = ?1",
-            rusqlite::params![id, encode_pending_input(pending_input)],
         )?;
         Ok(self.emit_session(id)?)
     }
@@ -1307,6 +1295,11 @@ mod tests {
 
     #[test]
     fn pending_input_round_trips_and_defaults_to_none() {
+        // The reconcile upsert (`Store::apply_host_reconcile`) is the only
+        // production writer of this column; seed it directly here with a
+        // raw UPDATE, the same way `map_session_row`/`encode_pending_input`
+        // read and write it, to check the round trip without a dedicated
+        // single-row setter.
         let s = store();
         let id = s
             .upsert_session("a", "local", None, None, 1, 1, "running", None)
@@ -1320,12 +1313,22 @@ mod tests {
                 selected: true,
             }],
         };
-        s.set_pending_input(id, Some(&pi)).unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET pending_input = ?2 WHERE id = ?1",
+                rusqlite::params![id, encode_pending_input(Some(&pi))],
+            )
+            .unwrap();
         assert_eq!(
             s.get_session_by_id(id).unwrap().unwrap().pending_input,
             Some(pi)
         );
-        s.set_pending_input(id, None).unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET pending_input = NULL WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
         assert_eq!(
             s.get_session_by_id(id).unwrap().unwrap().pending_input,
             None
@@ -2589,6 +2592,9 @@ mod tests {
         assert!(decode_tags(Some("".into())).is_empty());
         assert_eq!(decode_tags(Some("[\"a\"]".into())), vec!["a".to_string()]);
         assert_eq!(encode_tags(&[]), None);
+        // Same rule for pending_input: a malformed column reads as no dialog.
+        assert_eq!(decode_pending_input(Some("not json".into())), None);
+        assert_eq!(decode_pending_input(None), None);
         // A reconcile pass does not touch tags / parent / turn_seq.
         s.set_session_tags(id, &["keep".to_string()]).unwrap();
         s.set_parent_session_id(id, Some(7)).unwrap();

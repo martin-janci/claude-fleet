@@ -606,14 +606,30 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
         .iter()
         .find(|(_, _, _, sel)| *sel)
         .map(|(i, ..)| lines[*i].trim_start_matches(['❯', '›']).trim().to_string());
-    let options = choices
-        .iter()
-        .map(|(_, n, label, selected)| PendingOption {
-            n: *n,
-            label: (*label).to_string(),
-            selected: *selected,
-        })
-        .collect();
+    // `options` is bounded to the dialog's OWN choice block: the trailing
+    // contiguous run of choice lines at or before `dialog_end`, not every
+    // numbered line in the captured tail. Without this, a numbered list
+    // further up the scrollback (an agent's own "2. Add the guard / 3. Run
+    // the tests" text) leaks in, duplicating `n` and confusing the buttons
+    // a client builds from it.
+    let options = match choices.last() {
+        Some((last_idx, ..)) => {
+            let mut start = *last_idx;
+            while start > 0 && is_choice(start - 1) {
+                start -= 1;
+            }
+            choices
+                .iter()
+                .filter(|(i, ..)| *i >= start)
+                .map(|(_, n, label, selected)| PendingOption {
+                    n: *n,
+                    label: (*label).to_string(),
+                    selected: *selected,
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
     Some(Dialog {
         kind,
         prompt: question.or(selected),
@@ -1124,6 +1140,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_choice_extracts_the_ordinal_and_label() {
+        assert_eq!(
+            parse_choice("10) Something"),
+            Some((10, "Something", false))
+        );
+        assert_eq!(parse_choice("2) No"), Some((2, "No", false)));
+        assert_eq!(parse_choice("❯ 1. Yes"), Some((1, "Yes", true)));
+    }
+
+    #[test]
     fn waiting_for_tags_are_stable() {
         assert_eq!(WaitingFor::Permission.as_str(), "permission");
         assert_eq!(WaitingFor::Input.as_str(), "input");
@@ -1169,6 +1195,24 @@ Do you want to make this edit to src/main.rs?
                 .collect::<Vec<_>>(),
             ["1 hour", "1 day"]
         );
+    }
+
+    #[test]
+    fn options_stop_at_the_dialog_and_do_not_swallow_an_earlier_numbered_list() {
+        // A numbered list further up the scrollback (an agent's own plan or
+        // suggestion text) must not leak into `options` and duplicate `n`.
+        let pane = "\
+  2. Add the guard
+  3. Run the tests
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and don't ask again
+  3. No, and tell Claude what to do differently
+";
+        let p = detect_dialog(pane).expect("dialog").pending_input();
+        assert_eq!(p.question.as_deref(), Some("Do you want to proceed?"));
+        assert_eq!(p.options.len(), 3);
+        assert_eq!(p.options.iter().map(|o| o.n).collect::<Vec<_>>(), [1, 2, 3]);
     }
 
     #[test]

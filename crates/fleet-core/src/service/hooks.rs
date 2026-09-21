@@ -2163,6 +2163,21 @@ mod tests {
             .unwrap()
             .set_context(id, OLD, 50_000, 200_000, "transcript", None)
             .unwrap();
+        // A dialog from the old conversation's pane must not survive the
+        // reset: seed pending_input directly (the reconcile upsert is the
+        // only production writer) and check it is gone below.
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET pending_input = ?2 WHERE id = ?1",
+                rusqlite::params![
+                    id,
+                    r#"{"kind":"permission","question":"Do it?","options":[]}"#
+                ],
+            )
+            .unwrap();
         let host = host_caller("local");
         let mut p = make_payload("SessionStart", OLD);
         p.source = Some("startup".into());
@@ -2170,6 +2185,10 @@ mod tests {
         let row = status_of(&store, id);
         assert_eq!(row.claude_session_id.as_deref(), Some(OLD));
         assert_eq!(row.context.context_tokens, Some(0));
+        assert_eq!(
+            row.pending_input, None,
+            "a resetting SessionStart must clear a stale dialog too"
+        );
         // `/resume` back to the current conversation after SessionEnd(resume)
         // reopens it and clears the awaiting mark.
         let mut end = make_payload("SessionEnd", OLD);
@@ -2189,6 +2208,22 @@ mod tests {
     fn pre_and_post_compact_record_one_compaction() {
         let store = make_store();
         let id = pane_session(&store, "s", "%3");
+        // A dialog seen on the pane right before compaction starts is stale
+        // the moment PreCompact overrides current_activity with
+        // "compacting" — seed it directly (the reconcile upsert is the only
+        // production writer) and check it does not survive the hook.
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET pending_input = ?2 WHERE id = ?1",
+                rusqlite::params![
+                    id,
+                    r#"{"kind":"permission","question":"Do it?","options":[]}"#
+                ],
+            )
+            .unwrap();
         let host = host_caller("local");
         let mut pre = make_payload("PreCompact", OLD);
         pre.trigger = Some("auto".into());
@@ -2196,6 +2231,11 @@ mod tests {
         assert_eq!(
             status_of(&store, id).current_activity.as_deref(),
             Some("compacting")
+        );
+        assert_eq!(
+            status_of(&store, id).pending_input,
+            None,
+            "PreCompact must clear a stale dialog when it overrides current_activity"
         );
         apply_hook(
             &store,
