@@ -315,6 +315,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/039_client_trust.sql"),
         already_applied: Some(client_tokens_has_trusted_at),
     },
+    // `CREATE TABLE IF NOT EXISTS` plus two `CREATE INDEX IF NOT EXISTS`,
+    // safe to re-run.
+    Migration::plain(40, include_str!("../../migrations/040_error_reports.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -529,6 +532,7 @@ mod tests {
         "sync_runs",
         "client_tokens",
         "conversations",
+        "error_reports",
     ];
 
     #[test]
