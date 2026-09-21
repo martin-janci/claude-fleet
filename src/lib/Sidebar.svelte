@@ -14,6 +14,7 @@
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
+  import { sessionMatchesSearch } from './search';
   import { type ProjectRow } from './projects';
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
   import { forgetSessionUi } from './session_ui';
@@ -301,12 +302,7 @@
     const needle = q.toLowerCase();
     if (p.project.owner.toLowerCase().includes(needle)) return true;
     if (p.project.repo.toLowerCase().includes(needle)) return true;
-    return sessionsForProject(p.project.id).some(
-      (s) =>
-        s.tmux_name.toLowerCase().includes(needle) ||
-        s.host_alias.toLowerCase().includes(needle) ||
-        (s.friendly_name?.toLowerCase().includes(needle) ?? false),
-    );
+    return sessionsForProject(p.project.id).some((s) => sessionMatchesSearch(s, needle));
   }
 
   // Sessions under the host / bg filters only (no triage predicate): the
