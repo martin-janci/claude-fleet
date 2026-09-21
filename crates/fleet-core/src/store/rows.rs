@@ -222,18 +222,25 @@ pub struct SessionRow {
 
 impl SessionRow {
     /// Field-by-field equality excluding `row_version`: whether two reads of
-    /// this row carry the same user-visible content. See the note on
-    /// `row_version` above `PartialEq` cannot answer that question directly,
-    /// because migration 040's trigger bumps `row_version` on every physical
-    /// UPDATE regardless of whether any other field changed.
+    /// this row carry the same user-visible content.
+    ///
+    /// See the note above the `PartialEq` derive: plain `==` cannot answer
+    /// that question, because migration 040's trigger bumps `row_version` on
+    /// every physical UPDATE regardless of whether any other field changed.
+    ///
+    /// The equal-version case — every no-op reconcile pass, which is what
+    /// calls this — compares in place. Only a genuine version difference
+    /// pays for a clone, and then for one row rather than two: this runs
+    /// once per session per pass, and a `SessionRow` is some forty fields
+    /// with a dozen heap allocations among them.
     pub fn eq_ignoring_row_version(&self, other: &Self) -> bool {
-        Self {
-            row_version: 0,
-            ..self.clone()
-        } == Self {
-            row_version: 0,
-            ..other.clone()
+        if self.row_version == other.row_version {
+            return self == other;
         }
+        Self {
+            row_version: other.row_version,
+            ..self.clone()
+        } == *other
     }
 }
 

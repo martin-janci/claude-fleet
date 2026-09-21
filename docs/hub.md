@@ -174,6 +174,13 @@ untouched. The previous file is saved as `settings.json.fleet-bak` first.
 **After provisioning, restart Claude Code on each host** to pick up the new
 MCP server entry (the skill files and hooks are picked up live).
 
+**What a host needs for prompt delivery.** A prompt rides to the pane as
+`base64 -d` piped into `tmux load-buffer -`, so each managed host needs
+`base64(1)` with `-d` (GNU coreutils and the BSD/macOS build both have it) and
+**tmux 3.0 or newer** (`load-buffer -` reads from stdin only from 3.0). A host
+missing either one fails every send with `E_TMUX` carrying the shell's own
+complaint — `base64: illegal option` or `load-buffer: invalid option`.
+
 ## A host that cannot be reached
 
 The hub normally reaches every host over SSH. A laptop behind a home router,
@@ -1131,9 +1138,18 @@ sockets: a hub whose event stream is down, or behind a flapping proxy, can
 still answer calls, and its row shapes have not changed because a socket
 dropped. So only a hello frame moves the verdict — a desktop that has not
 finished a handshake yet (`connecting`) calls, because nothing has been
-learned; a stream that is merely down (`reconnecting`, `offline`) changes
-nothing either way; and the first `ready` frame that classifies the hub back
-in range opens all of it again, with no restart.
+learned; a stream that ended, or that answered anything other than 200,
+changes nothing either way for calls; and the first `ready` frame that
+classifies the hub back in range opens all of it again, with no restart.
+
+One narrower thing does short-circuit a call, and only to save it waiting:
+after **two consecutive failures to even CONNECT** to the hub — no socket at
+all, not a hub that answered a 503 or closed the stream — a call is refused
+immediately with `E_HUB_UNREACHABLE` instead of spending its own bound
+discovering the same thing. The event bridge's reconnect is already probing;
+the user's click need not probe again. Anything that got an answer out of the
+hub leaves calls alone, because `GET /events` and `POST /mcp` are separate
+sockets and a hub whose stream is unhappy can still serve every call.
 
 ### Parity or refusal
 

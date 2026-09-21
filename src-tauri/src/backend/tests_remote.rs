@@ -955,16 +955,16 @@ async fn a_timed_out_call_says_the_outcome_is_unknown() {
     assert!(!e.message.contains("cl_s3cret-token"), "{}", e.message);
 }
 
-/// While the event bridge has already found the hub unreachable twice, a
-/// call is refused at once instead of hanging its full bound: the bridge's
-/// reconnect is the probe, and the user's click is not.
+/// While the event bridge has already failed twice to even CONNECT, a call is
+/// refused at once instead of hanging its full bound: the bridge's reconnect
+/// is the probe, and the user's click is not.
 #[test]
 fn a_call_while_the_link_is_known_offline_is_refused_before_the_transport_is_touched() {
     let fake = Fake::answering(Ok(ok("[]")));
     let status = link(HubConnection::Offline {
         attempt: 2,
         retry_in_secs: 7,
-        reason: "connection refused".into(),
+        reason: "connect 127.0.0.1:4180: connection refused".into(),
     });
     let err = block_on(watched(&fake, &status).list_sessions(false)).expect_err("refused");
     assert_eq!(err.code, codes::E_HUB_UNREACHABLE);
@@ -974,11 +974,101 @@ fn a_call_while_the_link_is_known_offline_is_refused_before_the_transport_is_tou
     let status = link(HubConnection::Offline {
         attempt: 1,
         retry_in_secs: 1,
-        reason: "connection refused".into(),
+        reason: "connect 127.0.0.1:4180: connection refused".into(),
     });
     let fake = Fake::answering(Ok(ok("[]")));
     block_on(watched(&fake, &status).list_sessions(false)).expect("still tried");
     assert_eq!(fake.seen.lock().unwrap().len(), 1);
+}
+
+/// The prefixes [`is_connect_failure`] matches are not guessed: they are the
+/// ones [`connect`] itself produces. Loopback port 1 refuses (or, on a box
+/// that filters it, times out) — both arms are `connect …`, so this pins the
+/// spelling either way, and it opens no outward socket.
+#[tokio::test]
+async fn a_real_failed_connect_is_recognised_as_a_connect_failure() {
+    let at = Endpoint::parse("http://127.0.0.1:1/mcp").expect("parses");
+    let reason = connect(&at).await.err().expect("nothing listens on port 1");
+    assert!(
+        is_connect_failure(&reason),
+        "connect() said {reason:?}, which the breaker would not recognise"
+    );
+}
+
+/// The breaker is about a hub that cannot be REACHED. A hub that answered —
+/// with a 504, a 503 on `/events`, or a close after the head — is reachable,
+/// and its `/mcp` socket is a different one from the event stream's: refusing
+/// calls there turns one unhappy stream into a window that cannot do anything
+/// at all, and the refusal (`E_HUB_UNREACHABLE`) is not even true.
+#[test]
+fn an_answered_but_unhappy_event_stream_never_refuses_a_call() {
+    for reason in [
+        "the hub answered 504 Gateway Timeout to GET /events",
+        "the hub answered 503 to GET /events: events are not enabled on this server",
+        "the hub closed the connection before answering",
+        "read from fleet.example.com:443: connection reset by peer",
+    ] {
+        let fake = Fake::answering(Ok(ok("[]")));
+        let status = link(HubConnection::Offline {
+            attempt: 3,
+            retry_in_secs: 7,
+            reason: reason.into(),
+        });
+        block_on(watched(&fake, &status).list_sessions(false))
+            .unwrap_or_else(|e| panic!("{reason:?} must still reach the hub: {e:?}"));
+        assert_eq!(fake.seen.lock().unwrap().len(), 1, "{reason:?}");
+    }
+}
+
+/// `Reconnecting` is a stream that opened and then ended: the hub answered,
+/// so it never arms the breaker however many attempts have gone by.
+#[test]
+fn a_reconnecting_link_never_refuses_a_call() {
+    for attempt in [1u32, 2, 9] {
+        let fake = Fake::answering(Ok(ok("[]")));
+        let status = link(HubConnection::Reconnecting {
+            attempt,
+            retry_in_secs: 4,
+            reason: "connect 127.0.0.1:4180: connection refused".into(),
+        });
+        block_on(watched(&fake, &status).list_sessions(false))
+            .unwrap_or_else(|e| panic!("attempt {attempt} must still reach the hub: {e:?}"));
+        assert_eq!(fake.seen.lock().unwrap().len(), 1, "attempt {attempt}");
+    }
+}
+
+/// A timed-out call says whether the hub may have CHANGED anything. Only a
+/// mutation leaves an unknown outcome; a read that never answered changed
+/// nothing, and the frontend's fleet-wide re-fetch (`fleet:outcome-unknown`)
+/// is itself made of reads, so broadcasting for one amplifies.
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_read_is_not_outcome_unknown_but_a_timed_out_mutation_is() {
+    struct Silent;
+    #[async_trait::async_trait]
+    impl HubTransport for Silent {
+        async fn post_json(&self, _: &str, _: &str, _: String) -> Result<HubResponse, String> {
+            std::future::pending().await
+        }
+    }
+    let b = HubBackend::with_transport(cfg(), Arc::new(Silent));
+    let unknown = |e: &fleet_core::ipc_error::IpcError| {
+        e.details
+            .as_ref()
+            .and_then(|d| d.get("outcome_unknown"))
+            .cloned()
+    };
+    let e = b
+        .call_text("list_sessions", json!({}))
+        .await
+        .expect_err("never answers");
+    assert_eq!(e.code, codes::E_HUB_TIMEOUT);
+    assert_eq!(unknown(&e), Some(json!(false)), "{:?}", e.details);
+    let e = b
+        .call_text("kill_session", json!({ "session_id": 1 }))
+        .await
+        .expect_err("never answers");
+    assert_eq!(e.code, codes::E_HUB_TIMEOUT);
+    assert_eq!(unknown(&e), Some(json!(true)), "{:?}", e.details);
 }
 
 /// The table above says which duration each tool gets; this says the bound is

@@ -25,7 +25,7 @@ Parameters: `confirm_nonce`, `force_partial`, `plan_id`
 
 ### `broadcast_prompt`
 
-Send the same prompt to every matching work session (excludes the controller). Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked as untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Send the same prompt to every matching work session (excludes the controller), skipping blocked or stuck ones unless status="blocked". Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked as untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
 Parameters: `confirm_nonce`, `host`, `project_id`, `prompt`, `raw`, `status`, `submit`
 
@@ -347,13 +347,13 @@ Parameters: `host_alias`
 
 ### `send_message`
 
-Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails. Returns JSON with the new message id and the delivery outcome. Pass reply_to (an inbox message id) to thread an answer. A per-host token must send from a session on its own host (E_FORBIDDEN). The body is prefixed with an untrusted-content marker line unless raw=true (master token only).
+Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails or is refused into a blocked recipient. Returns JSON with the new message id and the delivery outcome. Pass reply_to (an inbox message id) to thread an answer. A per-host token must send from a session on its own host (E_FORBIDDEN). The body is prefixed with an untrusted-content marker line unless raw=true (master token only).
 
 Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `submit`, `to_session_id`
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only) or the caller is a trusted client. Returns JSON { delivered, session_id, turn_seq_before }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working session queues it (queued=true). acked reports whether the REPL's hook confirmed it. Repeat a client_msg_id to retry without delivering twice.
+Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one Enter). The first prompt to a still-unnamed session also becomes its friendly name. Marked untrusted unless raw=true (master only) or a trusted client. Returns JSON { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working session queues it (queued=true). acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable. Repeat a client_msg_id to retry without delivering twice.
 
 Parameters: `client_msg_id`, `force`, `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 

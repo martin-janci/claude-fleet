@@ -345,13 +345,39 @@ pub(super) fn turn_seq_before(turn_seq: i64, queued: bool, acked: Option<bool>) 
     }
 }
 
-/// Whether the bare-Enter retry may still fire, given the row's freshly
-/// re-read `claude_status`. A false-negative ack (the hook was merely slow)
-/// means the turn already started; pressing Enter now could land on a
-/// dialog that turn just opened, so the retry is skipped once the status
-/// reads `working`.
-pub(super) fn retry_enter_allowed(status_now: Option<&str>) -> bool {
-    status_now != Some("working")
+/// Whether this delivery can produce a meaningful `acked` at all.
+///
+/// Three things make it unknowable, and none of them is a failure:
+/// nothing was submitted (`submit: false` stages text, no hook fires), the
+/// prompt was QUEUED behind a running turn (Claude Code fires
+/// `UserPromptSubmit` when the queued prompt STARTS, which is whenever that
+/// turn ends — not within [`ACK_WAIT`]), or no hook has ever reached this
+/// row (an un-provisioned host: nothing will ever stamp it). Waiting in
+/// those cases buys a guaranteed `false`, which reads as "the send failed".
+pub(super) fn ack_knowable(submit: bool, queued: bool, hooks_seen: bool) -> bool {
+    submit && !queued && hooks_seen
+}
+
+/// Whether this body is a bare Enter rather than a prompt — the one delivery
+/// that walks past [`delivery_gate`].
+///
+/// The gate refuses a `blocked` or stuck session because Enter would ANSWER
+/// its dialog. Pressing Enter is exactly what the Conversation tab's "Press
+/// Enter" chip (and `stuck_kind: press_enter`) is for, so the gate's own
+/// reason for refusing is the caller's reason for calling: an empty body has
+/// to bypass it, or a session stuck on a Press-Enter prompt cannot be
+/// unstuck from a hub client at all.
+///
+/// It reads the body AFTER [`apply_marker`], because that is what
+/// [`FleetTools::deliver_prompt`] is handed. An empty prompt from an
+/// untrusted caller arrives as the marker line and nothing else, so
+/// [`guard::strip_marker`] is what makes "empty" recognisable on both paths;
+/// a marked non-empty prompt keeps its body and is not affected.
+///
+/// Only an EMPTY body qualifies. Whitespace is text: it would be typed into
+/// the REPL, so the gate still owns it.
+pub(super) fn bypasses_gate(body: &str) -> bool {
+    guard::strip_marker(body).is_empty()
 }
 
 /// The text a task worker receives (S8): the requester's prompt behind the
@@ -924,19 +950,28 @@ impl FleetTools {
     /// `{ delivered, session_id, turn_seq_before, queued, acked }`.
     ///
     /// `acked` is `true` once the session's `UserPromptSubmit` hook stamped
-    /// the row after the send, `false` when it did not within [`ACK_WAIT`]
-    /// (after one Enter retry for an idle session — the classic "text
-    /// arrived, Enter did not"), and `null` when it cannot be known: nothing
-    /// was submitted, or no hook has ever reached this row.
+    /// the row after the send, `false` when it did not within [`ACK_WAIT`],
+    /// and `null` when it cannot be known ([`ack_knowable`]).
     ///
-    /// The retry is best-effort in both directions: a failed retry send is
-    /// logged and leaves `acked: false` rather than failing the whole call
-    /// (the original prompt already landed, so a caller retrying on error
-    /// with the same `client_msg_id` must still find the first attempt in
-    /// the dedupe cache, not resend it); and it is skipped entirely
-    /// ([`retry_enter_allowed`]) when a fresh read of the row shows the turn
-    /// already started — a false-negative ack (hook merely slow) would
-    /// otherwise press Enter into whatever that turn just opened.
+    /// **`false` is not "the send failed".** It is "not confirmed within
+    /// 1.5 s": the text is in the pane either way, and a slow hook, a busy
+    /// host or a REPL that took the paste without firing all look the same
+    /// from here. A caller that needs certainty reads the pane
+    /// (`capture_session`); a caller that believes Enter did not land sends
+    /// an EMPTY prompt, which is a bare Enter and nothing else.
+    ///
+    /// There is deliberately no automatic Enter retry. It existed, and it
+    /// cannot be made safe: the only evidence available is a 1.5 s
+    /// non-answer, and between that read and the retry the session may have
+    /// opened a permission dialog — into which the retry presses Enter,
+    /// choosing whatever is highlighted. A missing Enter costs a round trip;
+    /// an Enter into a dialog approves something nobody approved.
+    ///
+    /// An EMPTY body ([`bypasses_gate`]) is that bare Enter, and it skips
+    /// [`delivery_gate`] entirely — pressing Enter into a stuck session is
+    /// the whole point of it, so the gate's reason for refusing is the
+    /// caller's reason for calling. Nothing is typed, nothing is queued, and
+    /// there is no ack to wait for.
     pub(super) async fn deliver_prompt(
         &self,
         row: &crate::store::SessionRow,
@@ -944,12 +979,6 @@ impl FleetTools {
         submit: bool,
         force: bool,
     ) -> Result<serde_json::Value, McpError> {
-        let queued = delivery_gate(row, force, submit)?;
-        let before = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.prompt_ack_state(row.id)
-                .map_err(|e| to_mcp_err(e.into()))?
-        };
         let send = |prompt: String| {
             sessions::send_prompt(
                 sessions::SendPromptArgs {
@@ -962,43 +991,28 @@ impl FleetTools {
                 &self.ssh,
             )
         };
+        if bypasses_gate(&prompt) {
+            // The marker line is dropped with the rest: what goes to the pane
+            // is the key press, not a sentence about where it came from.
+            send(String::new()).await.map_err(to_mcp_err)?;
+            return Ok(serde_json::json!({
+                "delivered": true,
+                "session_id": row.id,
+                "turn_seq_before": row.turn_seq,
+                "queued": false,
+                "acked": serde_json::Value::Null,
+            }));
+        }
+        let queued = delivery_gate(row, force, submit)?;
+        let before = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.prompt_ack_state(row.id)
+                .map_err(|e| to_mcp_err(e.into()))?
+        };
         send(prompt).await.map_err(to_mcp_err)?;
         let acked = match before {
-            Some(st) if submit && st.hooks_seen => {
-                let mut ok =
-                    await_prompt_ack(&self.store, row.id, st.prompt_submit_seq, ACK_WAIT).await?;
-                if !ok && !queued {
-                    let status_now = {
-                        let s = lock(&self.store).map_err(to_mcp_err)?;
-                        s.get_session_by_id(row.id)
-                            .map_err(|e| to_mcp_err(e.into()))?
-                            .and_then(|r| r.claude_status)
-                    };
-                    if retry_enter_allowed(status_now.as_deref()) {
-                        // One more Enter: an empty body is the bare-Enter path.
-                        // Best-effort — a failed retry must not fail the whole
-                        // call, since the original prompt already landed.
-                        match send(String::new()).await {
-                            Ok(()) => {
-                                ok = await_prompt_ack(
-                                    &self.store,
-                                    row.id,
-                                    st.prompt_submit_seq,
-                                    ACK_WAIT,
-                                )
-                                .await?;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    session = row.id,
-                                    error = %e.message,
-                                    "[send_prompt] Enter retry failed"
-                                );
-                            }
-                        }
-                    }
-                }
-                Some(ok)
+            Some(st) if ack_knowable(submit, queued, st.hooks_seen) => {
+                Some(await_prompt_ack(&self.store, row.id, st.prompt_submit_seq, ACK_WAIT).await?)
             }
             _ => None,
         };

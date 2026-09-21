@@ -335,7 +335,7 @@ mod tests {
         let header = pane_header(7, "alpha", "local", "it's done; $HOME `ok`");
         let body = normalize_prompt_body(&header).unwrap();
         let s = build_send_script("beta", None, &body, "buf", true);
-        assert!(s.starts_with("t='=beta:'; "), "{s}");
+        assert!(s.starts_with("set -o pipefail; t='=beta:'; "), "{s}");
         assert!(s.contains("load-buffer -b 'buf' -"), "{s}");
         assert!(s.contains("paste-buffer -p -d -b 'buf' -t \"$t\""), "{s}");
         assert!(

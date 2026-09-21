@@ -271,12 +271,26 @@
   // targets call stopPropagation(), so this only ever sees strays.
   const swallowDrag = (e: DragEvent) => e.preventDefault();
 
-  // A hub-routed command timed out (`E_HUB_TIMEOUT`): the hub may have done
-  // it anyway. Unlike `onFocus`, this always re-fetches — the whole point is
-  // that the outcome is unknown right now, not on the next alt-tab.
+  // A hub-routed MUTATION timed out (`E_HUB_TIMEOUT` with
+  // `details.outcome_unknown`): the hub may have done it anyway. Unlike
+  // `onFocus`, this is not throttled by a clock — the whole point is that the
+  // outcome is unknown right now, not on the next alt-tab.
+  //
+  // It is bounded in the only two ways that cannot lose a refresh: a window
+  // whose configured hub is unusable fetches nothing at all (same rule as
+  // `onFocus`), and a refresh this listener already started is not started a
+  // second time while it is still in flight. The second matters because the
+  // refresh is itself two hub-routed reads: a hub answering slowly would
+  // otherwise get one full fleet re-fetch per timed-out call, each able to
+  // time out in turn.
+  let outcomeRefreshInFlight = false;
   function onOutcomeUnknown() {
-    void loadProjects();
-    void loadSessions();
+    if (get(hubStatus).unavailable) return;
+    if (outcomeRefreshInFlight) return;
+    outcomeRefreshInFlight = true;
+    void Promise.all([loadProjects(), loadSessions()]).finally(() => {
+      outcomeRefreshInFlight = false;
+    });
   }
 
   onMount(() => {

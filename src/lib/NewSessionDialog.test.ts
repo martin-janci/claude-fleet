@@ -1013,7 +1013,10 @@ describe('NewSessionDialog host-scoped worktrees on a hub client', () => {
   // (`a_tool_name_an_old_hub_does_not_know_refuses_a_client_with_e_forbidden`
   // pins that on the hub side). `E_HUB_PROTOCOL` covers the hubs that predate
   // that fail-closed gate.
-  for (const code of ['E_FORBIDDEN', 'E_HUB_PROTOCOL', 'E_HUB_CONTRACT', 'E_HUB_UNREACHABLE', 'E_HUB_UNAVAILABLE']) {
+  // `E_HUB_TIMEOUT` joins them: a scan the hub never answered tells us nothing
+  // about the host's worktrees either, and the red error line would blame the
+  // scan for what is a slow or wedged hub.
+  for (const code of ['E_FORBIDDEN', 'E_HUB_PROTOCOL', 'E_HUB_CONTRACT', 'E_HUB_UNREACHABLE', 'E_HUB_UNAVAILABLE', 'E_HUB_TIMEOUT']) {
     it(`falls back to the neutral note when the hub answers ${code}`, async () => {
       refuseWith(code);
       hubStatus.set(remote);

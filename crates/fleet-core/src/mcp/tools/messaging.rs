@@ -6,20 +6,18 @@ use crate::ipc_error::lock;
 #[tool_router(router = messaging_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Send and SUBMIT a prompt to a running Claude \
-        session's REPL (literal text, then one Enter). This is how you steer a \
-        session. Set submit=false to stage text in the REPL without submitting \
-        it. Address the session with session_id OR host_alias + tmux_name. The \
-        first prompt to a still-unnamed session also becomes its friendly name. \
-        The text is prefixed with an untrusted-content marker line unless \
-        raw=true (master token only) or the caller is a trusted client. \
-        Returns JSON { delivered, session_id, \
-        turn_seq_before }: pass turn_seq_before to wait_for_session \
+        session's REPL (pasted, then one Enter). The first prompt to a \
+        still-unnamed session also becomes its friendly name. \
+        Marked untrusted unless raw=true (master only) or a trusted client. \
+        Returns JSON { delivered, session_id, turn_seq_before, queued, acked \
+        }: pass turn_seq_before to wait_for_session \
         { until: \"turn_gt\" } or session_transcript { since_turn } to \
         collect the reply (or use run_prompt, which does all three). \
         Refuses a blocked or stuck session (E_INVALID_STATE) unless \
-        force=true; a working session queues it (queued=true). acked \
-        reports whether the REPL's hook confirmed it. Repeat a \
-        client_msg_id to retry without delivering twice.")]
+        force=true; a working session queues it (queued=true). acked: true \
+        = hook-confirmed, false = not within 1.5 s (check capture_session), \
+        null = unknowable. Repeat a client_msg_id to retry without \
+        delivering twice.")]
     pub(super) async fn send_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -41,25 +39,55 @@ impl FleetTools {
             "the session to prompt",
         )?;
         let label = caller.label();
-        if let Some(id) = p.client_msg_id.as_deref() {
-            if let Some(hit) = self.recent_sends.lock().unwrap().get(&label, id) {
-                audit("send_prompt", &format!("dedupe client_msg_id={id}"));
-                return ok_json(&hit);
+        // The key is RESERVED before the send, not written after it. A send
+        // is an SSH round trip plus up to 1.5 s of ack wait, and a caller
+        // that gives up and retries does so DURING that window — which a
+        // write-on-success cache does not cover at all: both calls miss, both
+        // deliver, and the session gets the prompt twice.
+        let dedupe_id = p.client_msg_id.clone();
+        if let Some(id) = dedupe_id.as_deref() {
+            match lock_sends(&self.recent_sends).reserve(&label, id) {
+                Reservation::Fresh => {}
+                Reservation::Done(hit) => {
+                    audit("send_prompt", &format!("dedupe client_msg_id={id}"));
+                    return ok_json(&hit);
+                }
+                Reservation::Pending => {
+                    audit("send_prompt", &format!("in flight client_msg_id={id}"));
+                    return Err(mcp_err(
+                        "E_IN_FLIGHT",
+                        "a send with this client_msg_id is still in progress",
+                        None,
+                    ));
+                }
             }
         }
-        let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
-        let out = self.deliver_prompt(&row, prompt, p.submit, p.force).await?;
-        if let Some(id) = p.client_msg_id.as_deref() {
-            self.recent_sends
-                .lock()
-                .unwrap()
-                .put(&label, id, out.clone());
+        // From here every exit must either complete the reservation or
+        // release it: a key left `Pending` refuses the caller's own retry,
+        // which is the one thing `client_msg_id` exists to allow.
+        let delivered = async {
+            let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
+            self.deliver_prompt(&row, prompt, p.submit, p.force).await
+        }
+        .await;
+        let out = match delivered {
+            Ok(out) => out,
+            Err(e) => {
+                if let Some(id) = dedupe_id.as_deref() {
+                    lock_sends(&self.recent_sends).release(&label, id);
+                }
+                return Err(e);
+            }
+        };
+        if let Some(id) = dedupe_id.as_deref() {
+            lock_sends(&self.recent_sends).complete(&label, id, out.clone());
         }
         ok_json(&out)
     }
 
     #[tool(description = "Send the same prompt to every matching work session \
-        (excludes the controller). Returns per-session results. Rate-limited \
+        (excludes the controller), skipping blocked or stuck ones unless \
+        status=\"blocked\". Returns per-session results. Rate-limited \
         per caller (default one call per 30 s; E_RATE_LIMITED with \
         retry_after_secs). Marked as untrusted unless raw=true (master token \
         only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.")]
@@ -175,7 +203,8 @@ impl FleetTools {
         The message is persisted to the recipient's inbox (read with `inbox`); \
         set `deliver: true` to ALSO type the message into the recipient's tmux \
         pane with a `[msg #id from name@host]:` header. The inbox row is the \
-        source of truth — it lands even if the pane delivery fails. Returns \
+        source of truth — it lands even if the pane delivery fails or is \
+        refused into a blocked recipient. Returns \
         JSON with the new message id and the delivery outcome. Pass reply_to \
         (an inbox message id) to thread an answer. A per-host token must \
         send from a session on its own host (E_FORBIDDEN). The body is \

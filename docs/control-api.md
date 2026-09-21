@@ -415,10 +415,30 @@ It refuses a `blocked` or stuck session with `E_INVALID_STATE` (Enter would
 answer its dialog) unless `force: true`; to a `working` session the prompt is
 queued behind the running turn (`queued: true`, and `turn_seq_before` already
 points past that turn). `acked` is `true` once the session's `UserPromptSubmit`
-hook confirmed the prompt, `false` when it did not within 1.5 s (after one
-Enter retry), `null` when it cannot be known (nothing submitted, or no hook has
-ever reached the row). Pass a `client_msg_id` to make a retry return the first
-result instead of delivering twice (10-minute memory). Bodies are limited to
+hook confirmed the prompt, `false` when it did not within 1.5 s, and `null`
+when it cannot be known — nothing was submitted, no hook has ever reached the
+row, or the prompt was QUEUED (the hook fires when the queued prompt starts,
+which is whenever the running turn ends, so there is nothing to wait for).
+
+`acked: false` is **not** "the send failed": the text is in the pane either
+way, and a slow hook, a busy host and a REPL that took the paste without
+firing all look identical from the outside. Read the pane with
+`capture_session` when you need certainty. There is deliberately no automatic
+Enter retry — the only evidence available is a 1.5 s non-answer, and between
+that and a retry the session may have opened a permission dialog, into which
+Enter would select the highlighted answer. **To press Enter yourself, send an
+EMPTY prompt**: an empty body is a bare Enter, it skips the blocked/stuck
+refusal (pressing Enter into a stuck session is the point of it), and it
+returns `queued: false, acked: null` with `turn_seq_before` unchanged.
+
+Pass a `client_msg_id` to make a retry return the first
+result instead of delivering twice (10-minute memory). The key is reserved
+before delivery, so a retry sent while the first call is still running is
+refused with `E_IN_FLIGHT` rather than delivered a second time; a send that
+failed releases its key, so retrying after an error does deliver. The key is
+`(caller, client_msg_id)` and does not include the target session — reusing an
+id for a different session returns the earlier result without delivering.
+Bodies are limited to
 64 KiB; `\r\n` is folded to `\n` and any other control character is refused
 (`E_VALIDATE`). The text lands in the pane reconcile last saw Claude in, or
 the session's active pane when that is unknown.

@@ -1394,14 +1394,17 @@ fn send_script_ships_the_body_base64_through_load_buffer_and_pastes_bracketed() 
     let s = build_send_script("dev-foo", None, "it's a test", "fleet-abc", true);
     assert!(
         s.contains(&format!(
-            "printf %s '{}' | base64 -d | tmux load-buffer -b 'fleet-abc' - && tmux paste-buffer -p -d -b 'fleet-abc' -t \"$t\" || {{ tmux delete-buffer -b 'fleet-abc'; false; }}",
+            "printf %s '{}' | base64 -d | tmux load-buffer -b 'fleet-abc' - && tmux paste-buffer -p -d -b 'fleet-abc' -t \"$t\" || {{ tmux delete-buffer -b 'fleet-abc' 2>/dev/null; false; }}",
             b64("it's a test")
         )),
         "{s}"
     );
     // A failed paste deletes the buffer AND stops the chain before Enter.
     assert!(s.contains("delete-buffer -b 'fleet-abc'"), "{s}");
-    assert!(s.contains("delete-buffer -b 'fleet-abc'; false; }"), "{s}");
+    assert!(
+        s.contains("delete-buffer -b 'fleet-abc' 2>/dev/null; false; }"),
+        "{s}"
+    );
     assert!(s.contains("sleep 0.15"), "{s}");
     assert!(
         s.trim_end().ends_with("tmux send-keys -t \"$t\" Enter"),
@@ -1414,10 +1417,28 @@ fn send_script_ships_the_body_base64_through_load_buffer_and_pastes_bracketed() 
 #[test]
 fn send_script_targets_the_known_pane_id_and_falls_back_to_the_exact_session() {
     let s = build_send_script("dev-foo", Some("%17"), "x", "fleet-1", true);
-    assert!(s.starts_with("t='=dev-foo:'; if [ \"$(tmux display-message -p -t '%17' '#{session_name}' 2>/dev/null)\" = 'dev-foo' ]; then t='%17'; fi; "), "{s}");
+    assert!(s.starts_with("set -o pipefail; t='=dev-foo:'; if [ \"$(tmux display-message -p -t '%17' '#{session_name}' 2>/dev/null)\" = 'dev-foo' ]; then t='%17'; fi; "), "{s}");
     let s = build_send_script("dev-foo", None, "x", "fleet-1", true);
-    assert!(s.starts_with("t='=dev-foo:'; "), "{s}");
+    assert!(s.starts_with("set -o pipefail; t='=dev-foo:'; "), "{s}");
     assert!(!s.contains("display-message"), "{s}");
+}
+
+/// Minor 8: without `pipefail`, `printf … | base64 -d | tmux load-buffer -`
+/// reports only the LAST command's status. A `base64` that dies part-way
+/// (a truncated argv, an OOM) still leaves `load-buffer` succeeding on the
+/// bytes it did get, and a TRUNCATED prompt is pasted and submitted. The
+/// prompt body is the one thing in this script that must never be delivered
+/// in part.
+#[test]
+fn send_script_fails_the_whole_pipeline_when_base64_dies_mid_stream() {
+    let s = build_send_script("dev-x", None, "body", "fleet-1", true);
+    assert!(s.starts_with("set -o pipefail; "), "{s}");
+    // And the cleanup's own noise ("no buffer fleet-1") must not become the
+    // E_TMUX message in place of the real failure.
+    assert!(
+        s.contains("|| { tmux delete-buffer -b 'fleet-1' 2>/dev/null; false; }"),
+        "{s}"
+    );
 }
 
 #[test]

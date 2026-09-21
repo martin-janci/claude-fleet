@@ -260,8 +260,10 @@ pub struct SendPromptParams {
     /// default: Enter on a permission prompt selects the highlighted answer.
     #[serde(default)]
     pub force: bool,
-    /// Caller-chosen id for this send. A repeat with the same id within ten
-    /// minutes returns the first result instead of delivering again.
+    /// Caller-chosen id, unique per send for this caller. A repeat within
+    /// ten minutes replays the first result (E_IN_FLIGHT while it still
+    /// runs). The key does not include the session, so reusing an id for a
+    /// different session returns the earlier result without delivering.
     #[serde(default)]
     pub client_msg_id: Option<String>,
 }

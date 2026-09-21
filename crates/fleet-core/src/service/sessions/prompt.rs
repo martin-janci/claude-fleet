@@ -45,6 +45,12 @@ pub fn normalize_prompt_body(prompt: &str) -> Result<String, IpcError> {
 /// The one shell script that delivers a prompt to a session, in a single
 /// round trip:
 ///
+/// 0. `set -o pipefail`, so the body can never be pasted in PART: without
+///    it a pipeline reports only its last command's status, and a `base64`
+///    that dies half-way (a truncated argv, an OOM) still leaves
+///    `load-buffer` succeeding on the bytes it did receive — a truncated
+///    prompt, pasted and submitted, indistinguishable from what was asked
+///    for;
 /// 1. pick the target: the row's known pane id when it still belongs to
 ///    this session (a split window's active pane is the shell, not Claude),
 ///    else the EXACT session target `=<name>:` (a bare name would let tmux
@@ -57,7 +63,9 @@ pub fn normalize_prompt_body(prompt: &str) -> Result<String, IpcError> {
 ///    end marker and internal newlines stay soft; on failure (e.g. a stale
 ///    target) the buffer is explicitly deleted so it can't leak on the
 ///    host, and the chain stops there — Enter never fires after a failed
-///    paste;
+///    paste. The cleanup's own stderr is discarded: a "no buffer fleet-…"
+///    from deleting a buffer that was never loaded would otherwise BE the
+///    `E_TMUX` message, in place of the failure that caused it;
 /// 4. when `submit`, a short settle and ONE Enter.
 ///
 /// A single trailing newline is stripped so it cannot pre-submit the body.
@@ -74,7 +82,8 @@ pub fn build_send_script(
     use base64::Engine as _;
     let body = body.strip_suffix('\n').unwrap_or(body);
     let exact = quote(&crate::tmux::exact_pane(tmux_name));
-    let mut script = format!("t={exact}; ");
+    // See step 0 above: the body must arrive whole or not at all.
+    let mut script = format!("set -o pipefail; t={exact}; ");
     if let Some(pane) = pane_id {
         let pane_q = quote(pane);
         let name_q = quote(tmux_name);
@@ -96,7 +105,7 @@ pub fn build_send_script(
     let b64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
     let buf_q = quote(buffer);
     script.push_str(&format!(
-        "printf %s {} | base64 -d | tmux load-buffer -b {buf_q} - && tmux paste-buffer -p -d -b {buf_q} -t \"$t\" || {{ tmux delete-buffer -b {buf_q}; false; }}",
+        "printf %s {} | base64 -d | tmux load-buffer -b {buf_q} - && tmux paste-buffer -p -d -b {buf_q} -t \"$t\" || {{ tmux delete-buffer -b {buf_q} 2>/dev/null; false; }}",
         quote(&b64)
     ));
     if submit {
