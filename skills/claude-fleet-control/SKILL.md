@@ -295,6 +295,17 @@ It returns a RepairReport (`cwd`, `healthy`, `actions`, `warnings`,
 `branch_source`, `tmux`); each attempt shows in `session_history` as
 `workspace_repaired` or `workspace_repair_failed`.
 
+**Continue a session on another host:** `move_session { session_id,
+target_host_alias }` carries the transcript and the work as it is (unpushed
+commits, uncommitted files, small git-ignored ones); `strict: true` refuses a
+dirty or unpushed source instead. Look first with `dry_run: true`: it writes
+nothing to either host, needs no confirmation, and returns what would travel
+and what cannot be known (`unknowns`) — or the exact refusal the real move
+would return. The result is tagged: `kind: "preview"` for a dry run,
+`kind: "moved"` (the move report) for a real move. Never retry a real move
+after a timeout; re-sync first. `E_MOVE_PARTIAL` leaves both sessions alive —
+`resolve_move` finishes or undoes it.
+
 ## Reviewing a session's work
 
 Read the worktree without touching it: `repo_changes` (git status),
@@ -340,7 +351,7 @@ errors. Three classes, three responses:
   re-sync. If it fails again, surface.
 - **Destructive ops** (`kill_session`, `safe_kill_session`, `recreate_session`,
   `restart_session`, `delete_worktree`, `remove_host`, `dismiss_ghost_session`,
-  `cancel_task`): never auto-retry — a timeout may still have succeeded
+  `cancel_task`, a real `move_session`): never auto-retry — a timeout may still have succeeded
   server-side. Re-sync, confirm the actual state, then decide.
 - **Bounded waits** (`wait_for_session`, `wait_for_task`, `run_prompt`) return
   `status: "timeout"` rather than an error when the condition did not hold in

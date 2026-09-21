@@ -1135,6 +1135,21 @@ learned; a stream that is merely down (`reconnecting`, `offline`) changes
 nothing either way; and the first `ready` frame that classifies the hub back
 in range opens all of it again, with no restart.
 
+**Upgrade a desktop and its hub together from contract revision 2.**
+Revision 2 is the release where `move_session` answers a tagged result
+(`kind: moved | preview`) and honours `dry_run`. Both ends require it: a new
+desktop refuses an older hub (revision 0 or 1, "update the hub"), and an older
+desktop refuses a newer hub ("update this app"). There is no mixed window in
+which the two work together.
+
+One command waits for more than the absence of a skew: a Transfer preview
+(`move_session` with `dry_run: true`). A hub from before revision 2 ignores
+`dry_run` and performs a real move, so the desktop refuses a preview with
+`E_HUB_CONTRACT` until this launch has seen the hub's `ready` frame judged in
+range — not merely "no mismatch recorded yet", which is also what a desktop
+still connecting sees. Previews become available once the desktop has
+confirmed the hub's version; a real move is not held back by this.
+
 ### Parity or refusal
 
 A desktop mutation is routed to the hub **only where the desktop's arguments
