@@ -46,6 +46,13 @@ pub struct SendPromptArgs {
     pub prompt: String,
     #[serde(default = "default_submit")]
     pub submit: bool,
+    /// Mirrors `SendPromptParams.keys` for the hub wire (the hub-client
+    /// route serialises this whole struct as the tool call's arguments).
+    /// This struct's own `send_prompt` does not act on it — the desktop has
+    /// no `keys` UI yet, and a phone presses keys through the MCP tool,
+    /// which branches on `keys` before ever building one of these.
+    #[serde(default)]
+    pub keys: Option<String>,
 }
 
 pub(super) async fn send_prompt_inner(
@@ -101,6 +108,52 @@ pub(super) async fn send_prompt_inner(
         });
         record_prompt_outcome(store, host_alias, tmux_name, prompt);
     }
+    Ok(())
+}
+
+/// Press a single named key in a session's REPL — the `send_prompt { keys }`
+/// path. Unlike [`send_prompt_inner`], this is never marked (a key is not
+/// text) and never records a `prompt_sent` event or touches `last_prompt`;
+/// it records a `keys_sent` timeline event instead, whose detail is the key
+/// name (`"Enter"` / `"Escape"` / `"C-c"`).
+pub async fn send_keys(
+    host_alias: &str,
+    tmux_name: &str,
+    key: crate::tmux::NamedKey,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<(), IpcError> {
+    crate::validate::host_alias(host_alias)?;
+    crate::validate::tmux_name_addressable(tmux_name)?;
+    let script = crate::tmux::send_named_key(tmux_name, key);
+    let out = if host_alias == "local" {
+        crate::service::hub::ensure_local_allowed(host_alias)?;
+        tokio::process::Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .await
+            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))?
+    } else {
+        ssh.run(
+            host_alias,
+            &["bash", "-lc", &quote(&script)],
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+    };
+    if !out.status.success() {
+        return Err(IpcError::new(
+            codes::E_TMUX,
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    record_session_event(
+        store,
+        host_alias,
+        tmux_name,
+        "keys_sent",
+        Some(key.tmux_name().to_string()),
+    );
     Ok(())
 }
 

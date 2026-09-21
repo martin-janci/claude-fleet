@@ -256,6 +256,11 @@ pub struct SendPromptParams {
     /// marked. Default false.
     #[serde(default)]
     pub raw: bool,
+    /// Press a key instead of typing text: `Enter`, `Escape` or `C-c`. Never
+    /// marked (a key is not text) and never recorded as a prompt. `prompt`
+    /// must be empty with it.
+    #[serde(default)]
+    pub keys: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

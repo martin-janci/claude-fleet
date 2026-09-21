@@ -707,7 +707,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "send_prompt",
             "send_prompt",
-            json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "go", "submit": true }),
+            json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "go", "submit": true, "keys": "Enter" }),
             r#"{"delivered":true}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::send_prompt(
@@ -717,6 +717,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         tmux_name: "demo".into(),
                         prompt: "go".into(),
                         submit: true,
+                        keys: Some("Enter".into()),
                     },
                     s,
                     h,
