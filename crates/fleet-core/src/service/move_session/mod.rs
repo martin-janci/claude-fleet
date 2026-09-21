@@ -70,6 +70,7 @@ pub mod preview;
 pub mod probe;
 mod progress;
 pub mod resolve;
+pub mod wait;
 
 use crate::events::MoveStep;
 use crate::ipc_error::lock;
@@ -92,6 +93,11 @@ pub const EVENT_MOVED: &str = "session_moved";
 /// Timeline event recorded on both rows when `resolve_move` discards a
 /// partial move (Task 6): the target is killed, the source is left as-is.
 pub const EVENT_MOVE_UNDONE: &str = "session_move_undone";
+
+/// Leading sentence of [`require_source_idle`]'s refusal — how [`wait`]'s
+/// `run_wait` tells "the source went busy again" (resume the wait) from
+/// every other refusal (`Err(e) if e.message.contains(SOURCE_NOT_IDLE)`).
+pub const SOURCE_NOT_IDLE: &str = "the source Claude is not idle";
 
 const LOCAL: &str = "local";
 
@@ -720,7 +726,7 @@ pub fn require_source_idle(status: Option<&str>) -> Result<(), IpcError> {
         other => Err(IpcError::new(
             codes::E_INVALID_STATE,
             format!(
-                "the source Claude is not idle (claude_status {}); moving now would lose the turn in progress — wait until it finishes, then retry",
+                "{SOURCE_NOT_IDLE} (claude_status {}); moving now would lose the turn in progress — wait until it finishes, then retry",
                 other
                     .map(|s| format!("{s:?}"))
                     .unwrap_or_else(|| "unknown".into())
@@ -2993,6 +2999,7 @@ mod tests {
     use super::*;
     use crate::ssh_fake::{FakeSsh, Match, Reply};
     use crate::tmux::{RemoteTmux, TmuxExec};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
     const HEAD: &str = "1111111111111111111111111111111111111111";
@@ -3157,6 +3164,11 @@ mod tests {
         /// `refresh_host` fails when reconciling the target — the earliest
         /// partial call site, before any target row exists.
         refresh_target_fails: bool,
+        /// When set, the *next* `refresh_host` for the source host flips its
+        /// Claude status to `working` before returning (a turn slipping in
+        /// while a wait's retry re-checks idle), then clears itself — so it
+        /// fires exactly once.
+        busy_once_on_refresh: AtomicBool,
         /// Whether `session_moved` was already on the source when the kill
         /// ran (`None` = no kill).
         moved_at_kill: Mutex<Option<bool>>,
@@ -3175,6 +3187,7 @@ mod tests {
                 grow_source_on_start: false,
                 grow_source_on_kill: false,
                 refresh_target_fails: false,
+                busy_once_on_refresh: AtomicBool::new(false),
                 moved_at_kill: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
@@ -3242,6 +3255,13 @@ mod tests {
         async fn refresh_host(&self, store: &Mutex<Store>, host: &str) -> Result<(), IpcError> {
             if self.refresh_target_fails && host != "alpha" {
                 return Err(IpcError::new(codes::E_SSH, "refresh failed"));
+            }
+            if host == "alpha" && self.busy_once_on_refresh.swap(false, Ordering::SeqCst) {
+                store
+                    .lock()
+                    .unwrap()
+                    .set_claude_status_by_session_id(SID, "working")
+                    .unwrap();
             }
             let started = self.started.lock().unwrap().clone();
             let s = store.lock().unwrap();
@@ -7168,5 +7188,278 @@ mod tests {
             format!("{:?}", baseline.target)
         );
         assert_eq!(with_clean_target.commits_ahead, baseline.commits_ahead);
+    }
+
+    // ── wait.rs (Transfer slice 3c, Task 2) ─────────────────────────────
+
+    /// Set the fixture's source Claude status.
+    fn set_status(f: &Fixture, status: &str) {
+        f.store
+            .lock()
+            .unwrap()
+            .set_claude_status_by_session_id(SID, status)
+            .unwrap();
+    }
+
+    /// The wait-related events on the source, oldest first — `events()`
+    /// itself is newest-first (it mirrors `list_session_events`), so this
+    /// reverses the filtered slice to read the way the tests below want to:
+    /// `first()` is the wait's own opening `session_move_waiting`, `last()`
+    /// is however it ended.
+    fn wait_events(f: &Fixture) -> Vec<(String, Option<String>)> {
+        let mut v: Vec<_> = events(f, f.source_id)
+            .into_iter()
+            .filter(|(k, _)| k == wait::EVENT_MOVE_WAITING || k == wait::EVENT_MOVE_WAIT_ENDED)
+            .collect();
+        v.reverse();
+        v
+    }
+
+    const POLL: Duration = Duration::from_millis(10);
+
+    #[tokio::test]
+    async fn a_wait_moves_the_session_once_it_goes_idle() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).expect("registered");
+        let (end, ()) = tokio::join!(
+            wait::run_wait(
+                a,
+                &f.store,
+                &f.fake,
+                &hooks,
+                fast(),
+                guard.token(),
+                deadline,
+                POLL
+            ),
+            async {
+                tokio::time::sleep(POLL * 5).await;
+                set_status(&f, "idle");
+            },
+        );
+        assert_eq!(end, wait::WaitEnd::Moved);
+        assert!(
+            events(&f, f.source_id)
+                .iter()
+                .any(|(k, _)| k == EVENT_MOVED),
+            "the move happened"
+        );
+        let w = wait_events(&f);
+        assert_eq!(
+            w.first().map(|(k, _)| k.as_str()),
+            Some(wait::EVENT_MOVE_WAITING)
+        );
+        let (_, ended) = w.last().unwrap();
+        assert!(ended.as_deref().unwrap().contains("moved"), "{ended:?}");
+    }
+
+    #[tokio::test]
+    async fn blocked_is_not_idle_and_does_not_end_the_wait() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "blocked");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let (end, ()) = tokio::join!(
+            wait::run_wait(
+                a,
+                &f.store,
+                &f.fake,
+                &hooks,
+                fast(),
+                guard.token(),
+                deadline,
+                POLL
+            ),
+            async {
+                tokio::time::sleep(POLL * 5).await;
+                // Still waiting after a while spent blocked: no move yet.
+                assert!(!events(&f, f.source_id)
+                    .iter()
+                    .any(|(k, _)| k == EVENT_MOVED));
+                set_status(&f, "idle");
+            },
+        );
+        assert_eq!(end, wait::WaitEnd::Moved);
+    }
+
+    #[tokio::test]
+    async fn the_deadline_ends_the_wait_without_a_move() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let deadline = tokio::time::Instant::now() + POLL * 3;
+        let end = wait::run_wait(
+            a,
+            &f.store,
+            &f.fake,
+            &hooks,
+            fast(),
+            guard.token(),
+            deadline,
+            POLL,
+        )
+        .await;
+        assert_eq!(end, wait::WaitEnd::TimedOut);
+        assert!(!events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_the_wait_without_a_move() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let (end, cancelled) = tokio::join!(
+            wait::run_wait(
+                a,
+                &f.store,
+                &f.fake,
+                &hooks,
+                fast(),
+                guard.token(),
+                deadline,
+                POLL
+            ),
+            async {
+                tokio::time::sleep(POLL * 3).await;
+                wait::cancel_wait(&f.store, f.source_id)
+            },
+        );
+        assert!(cancelled, "a pending wait was found and cancelled");
+        assert_eq!(end, wait::WaitEnd::Cancelled);
+        assert!(!events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+        // Once the guard that backed the registration is dropped, there is
+        // nothing left to cancel.
+        drop(guard);
+        assert!(!wait::cancel_wait(&f.store, f.source_id));
+    }
+
+    #[tokio::test]
+    async fn a_second_wait_for_the_same_session_is_refused() {
+        let (f, _bus) = recorded_fixture();
+        let a = args(&f, false);
+        let _first = wait::begin_wait(&a, &f.store).unwrap();
+        let err = wait::begin_wait(&a, &f.store).err().expect("refused");
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+    }
+
+    #[tokio::test]
+    async fn a_wait_is_refused_while_a_move_of_the_session_is_in_flight() {
+        let (f, _bus) = recorded_fixture();
+        let a = args(&f, false);
+        let _claim = MoveClaim::acquire(&f.store, a.session_id).unwrap();
+        let err = wait::begin_wait(&a, &f.store).err().expect("refused");
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+    }
+
+    #[test]
+    fn the_startup_sweep_closes_waits_nothing_is_honouring() {
+        let (f, _bus) = recorded_fixture();
+        let a = args(&f, false);
+        let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        drop(guard); // the process "restarted": the waiter is gone, the event is not
+        assert_eq!(wait::sweep_unresolved_waits(&f.store).unwrap(), 1);
+        let (_, ended) = wait_events(&f).last().cloned().unwrap();
+        assert!(ended.unwrap().contains("hub_restarted"));
+        assert_eq!(
+            wait::sweep_unresolved_waits(&f.store).unwrap(),
+            0,
+            "idempotent"
+        );
+    }
+
+    #[test]
+    fn the_startup_sweep_never_closes_a_wait_still_registered() {
+        let (f, _bus) = recorded_fixture();
+        let a = args(&f, false);
+        // Not dropped: this wait is still live in this process.
+        let (_guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        assert_eq!(
+            wait::sweep_unresolved_waits(&f.store).unwrap(),
+            0,
+            "a live wait must never be marked hub_restarted"
+        );
+        assert!(
+            wait_events(&f)
+                .iter()
+                .all(|(k, _)| k != wait::EVENT_MOVE_WAIT_ENDED),
+            "no ended event for a wait nothing has abandoned"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_session_disappearing_mid_wait_ends_it_as_session_gone() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let (end, ()) = tokio::join!(
+            wait::run_wait(
+                a,
+                &f.store,
+                &f.fake,
+                &hooks,
+                fast(),
+                guard.token(),
+                deadline,
+                POLL
+            ),
+            async {
+                tokio::time::sleep(POLL * 3).await;
+                f.store.lock().unwrap().delete_session(f.source_id).unwrap();
+            },
+        );
+        assert_eq!(end, wait::WaitEnd::SessionGone);
+    }
+
+    #[tokio::test]
+    async fn busy_again_refuses_the_retry_and_the_wait_resumes_until_a_later_idle_moves_it() {
+        let (f, _bus) = recorded_fixture();
+        // The fixture's source starts idle: the wait's first check succeeds
+        // at once and the move attempt runs immediately, where `refresh_host`
+        // flips the source back to `working` exactly once.
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.busy_once_on_refresh.store(true, Ordering::SeqCst);
+        let a = args(&f, false);
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).expect("registered");
+        let (end, ()) = tokio::join!(
+            wait::run_wait(
+                a,
+                &f.store,
+                &f.fake,
+                &hooks,
+                fast(),
+                guard.token(),
+                deadline,
+                POLL
+            ),
+            async {
+                // Give the busy-again refusal time to land and the wait to
+                // observe the (still) non-idle status at least once before
+                // it goes idle again for good.
+                tokio::time::sleep(POLL * 5).await;
+                set_status(&f, "idle");
+            },
+        );
+        assert_eq!(end, wait::WaitEnd::Moved);
+        assert!(events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+        // The busy-again refusal must never appear as the wait's own ending.
+        let w = wait_events(&f);
+        let (_, ended) = w.last().unwrap();
+        assert!(ended.as_deref().unwrap().contains("moved"), "{ended:?}");
     }
 }
