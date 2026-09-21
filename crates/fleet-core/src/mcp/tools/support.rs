@@ -345,6 +345,15 @@ pub(super) fn turn_seq_before(turn_seq: i64, queued: bool, acked: Option<bool>) 
     }
 }
 
+/// Whether the bare-Enter retry may still fire, given the row's freshly
+/// re-read `claude_status`. A false-negative ack (the hook was merely slow)
+/// means the turn already started; pressing Enter now could land on a
+/// dialog that turn just opened, so the retry is skipped once the status
+/// reads `working`.
+pub(super) fn retry_enter_allowed(status_now: Option<&str>) -> bool {
+    status_now != Some("working")
+}
+
 /// The text a task worker receives (S8): the requester's prompt behind the
 /// untrusted-content marker and closed by [`guard::UNTRUSTED_END`], THEN the
 /// fleet-authored completion instruction outside that block. A master
@@ -919,6 +928,15 @@ impl FleetTools {
     /// (after one Enter retry for an idle session — the classic "text
     /// arrived, Enter did not"), and `null` when it cannot be known: nothing
     /// was submitted, or no hook has ever reached this row.
+    ///
+    /// The retry is best-effort in both directions: a failed retry send is
+    /// logged and leaves `acked: false` rather than failing the whole call
+    /// (the original prompt already landed, so a caller retrying on error
+    /// with the same `client_msg_id` must still find the first attempt in
+    /// the dedupe cache, not resend it); and it is skipped entirely
+    /// ([`retry_enter_allowed`]) when a fresh read of the row shows the turn
+    /// already started — a false-negative ack (hook merely slow) would
+    /// otherwise press Enter into whatever that turn just opened.
     pub(super) async fn deliver_prompt(
         &self,
         row: &crate::store::SessionRow,
@@ -950,10 +968,35 @@ impl FleetTools {
                 let mut ok =
                     await_prompt_ack(&self.store, row.id, st.prompt_submit_seq, ACK_WAIT).await?;
                 if !ok && !queued {
-                    // One more Enter: an empty body is the bare-Enter path.
-                    send(String::new()).await.map_err(to_mcp_err)?;
-                    ok = await_prompt_ack(&self.store, row.id, st.prompt_submit_seq, ACK_WAIT)
-                        .await?;
+                    let status_now = {
+                        let s = lock(&self.store).map_err(to_mcp_err)?;
+                        s.get_session_by_id(row.id)
+                            .map_err(|e| to_mcp_err(e.into()))?
+                            .and_then(|r| r.claude_status)
+                    };
+                    if retry_enter_allowed(status_now.as_deref()) {
+                        // One more Enter: an empty body is the bare-Enter path.
+                        // Best-effort — a failed retry must not fail the whole
+                        // call, since the original prompt already landed.
+                        match send(String::new()).await {
+                            Ok(()) => {
+                                ok = await_prompt_ack(
+                                    &self.store,
+                                    row.id,
+                                    st.prompt_submit_seq,
+                                    ACK_WAIT,
+                                )
+                                .await?;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    session = row.id,
+                                    error = %e.message,
+                                    "[send_prompt] Enter retry failed"
+                                );
+                            }
+                        }
+                    }
                 }
                 Some(ok)
             }

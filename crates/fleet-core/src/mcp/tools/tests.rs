@@ -2602,6 +2602,14 @@ fn turn_seq_before_points_past_the_current_turn_only_for_an_unacked_queued_promp
     assert_eq!(turn_seq_before(7, true, None), 8);
 }
 
+#[test]
+fn retry_enter_is_skipped_once_the_turn_has_started() {
+    assert!(!retry_enter_allowed(Some("working")));
+    assert!(retry_enter_allowed(Some("idle")));
+    assert!(retry_enter_allowed(Some("blocked")));
+    assert!(retry_enter_allowed(None));
+}
+
 #[tokio::test(start_paused = true)]
 async fn await_prompt_ack_returns_true_once_the_submit_counter_moves() {
     let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
