@@ -2504,7 +2504,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// Raised from 57,700 to 57,900 for `send_prompt { keys }`: one clause
     /// on the tool description plus the `keys` field's one-line doc measured
     /// 57,870, 170 over budget.
-    const BUDGET_BYTES: usize = 57_900;
+    ///
+    /// Raised from 57,900 to 58,000 for the one-clause addition to
+    /// `submit`'s doc comment (fix round 1: "ignored when `keys` is set"),
+    /// which measured 57,935, 35 over budget.
+    const BUDGET_BYTES: usize = 58_000;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

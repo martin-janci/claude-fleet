@@ -55,6 +55,42 @@ pub struct SendPromptArgs {
     pub keys: Option<String>,
 }
 
+/// Run `script` as one tmux invocation on `host_alias`: locally via
+/// `bash -c` for `local` (after `ensure_local_allowed`), else over ssh via
+/// `bash -lc '<quoted script>'`. `Ok(())` on a zero exit; `E_TMUX` (the
+/// process's stderr) otherwise. Shared by [`send_prompt_inner`] (literal
+/// text, then an optional Enter) and [`send_keys`] (one named key) — the two
+/// `send_prompt` delivery paths differ only in the script they build and
+/// what they record afterward, not in how the script reaches the pane.
+async fn run_tmux_script(
+    host_alias: &str,
+    ssh: &Arc<SshClient>,
+    script: &str,
+) -> Result<(), IpcError> {
+    let out = if host_alias == "local" {
+        crate::service::hub::ensure_local_allowed(host_alias)?;
+        tokio::process::Command::new("bash")
+            .args(["-c", script])
+            .output()
+            .await
+            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))?
+    } else {
+        ssh.run(
+            host_alias,
+            &["bash", "-lc", &quote(script)],
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+    };
+    if !out.status.success() {
+        return Err(IpcError::new(
+            codes::E_TMUX,
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) async fn send_prompt_inner(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -69,27 +105,7 @@ pub(super) async fn send_prompt_inner(
     // failed literal-text send doesn't still fire Enter) — one round-trip
     // instead of two.
     let script = build_send_commands(tmux_name, prompt, submit).join(" && ");
-    let out = if host_alias == "local" {
-        crate::service::hub::ensure_local_allowed(host_alias)?;
-        tokio::process::Command::new("bash")
-            .args(["-c", &script])
-            .output()
-            .await
-            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))?
-    } else {
-        ssh.run(
-            host_alias,
-            &["bash", "-lc", &quote(&script)],
-            std::time::Duration::from_secs(10),
-        )
-        .await?
-    };
-    if !out.status.success() {
-        return Err(IpcError::new(
-            codes::E_TMUX,
-            String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        ));
-    }
+    run_tmux_script(host_alias, ssh, &script).await?;
     // Task G: record the prompt on the session's timeline (detail truncated to
     // ~120 chars). Append-only + best-effort: never fail the send on this.
     // A bare Enter (empty body: the Conversation tab's "Press Enter" chip
@@ -126,27 +142,7 @@ pub async fn send_keys(
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name_addressable(tmux_name)?;
     let script = crate::tmux::send_named_key(tmux_name, key);
-    let out = if host_alias == "local" {
-        crate::service::hub::ensure_local_allowed(host_alias)?;
-        tokio::process::Command::new("bash")
-            .args(["-c", &script])
-            .output()
-            .await
-            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))?
-    } else {
-        ssh.run(
-            host_alias,
-            &["bash", "-lc", &quote(&script)],
-            std::time::Duration::from_secs(10),
-        )
-        .await?
-    };
-    if !out.status.success() {
-        return Err(IpcError::new(
-            codes::E_TMUX,
-            String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        ));
-    }
+    run_tmux_script(host_alias, ssh, &script).await?;
     record_session_event(
         store,
         host_alias,
