@@ -21,7 +21,7 @@ refused, before anything is written.**
 
 ## Revisions, made while planning
 
-Planning against the real code found five places this spec asked for more than
+Planning against the real code found five places, and review found two more (6, 7), this spec asked for more than
 the move can give. The plan (`plans/2026-09-21-transfer-preflight.md`, "Corrections
 to the spec") argues each in full; the sections below have been updated to match.
 
@@ -37,6 +37,21 @@ to the spec") argues each in full; the sections below have been updated to match
    move would (§3, §5).
 5. **`unpushed_commits` and `target_path` are added** — the first because
    `commits_ahead` is `None` on every first transfer to a host (§3).
+
+6. **A dry run never fetches** (found by the whole-branch review). The move's
+   source inspection fetches `origin/<branch>` when its tip is not local; a dry
+   run skips that fetch and runs its git calls under `GIT_OPTIONAL_LOCKS=0`, so
+   it writes nothing on the source either. The cost is the slice's one
+   sanctioned drift: when origin has commits the source has not fetched, the
+   preview's unpushed count is unknown, and a strict dry run cannot decide the
+   unpushed refusal — both say so in `unknowns` rather than guess. The real
+   move keeps fetching; its script is byte-identical to before (its `git status`
+   index write is load-bearing for the snapshot's racily-clean handling).
+7. **The desktop refuses a preview until the hub's contract is confirmed.** An
+   older hub would silently run a real move for a `dry_run`, and the contract
+   check only engages once a `ready` frame arrives. So in hub-client mode the
+   desktop answers a dry run with `E_HUB_CONTRACT` until this launch has seen an
+   in-range `ready` frame. Real moves are unaffected.
 
 ## 2. Decisions
 
@@ -91,9 +106,10 @@ involved — and `docs/control-api-reference.md` regenerates itself.
 `MoveSessionArgs` gains:
 
 ```rust
-/// Report what this move WOULD do and refuse nothing: no snapshot, no clone,
-/// no worktree, no transcript copy, no tmux, no timeline event. `strict` and
-/// `clean_target` are ignored, and the preview says so. Default false.
+/// Report what this move WOULD do and change nothing on either host: no
+/// snapshot, no clone, no worktree, no transcript copy, no fetch, no tmux, no
+/// timeline event. `strict` is honoured (it is a read-only verdict); a
+/// `clean_target` is named in `unknowns` and not applied. Default false.
 #[serde(default)]
 pub dry_run: bool,
 ```
