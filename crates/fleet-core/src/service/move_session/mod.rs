@@ -1401,29 +1401,29 @@ async fn carry_memory(
 // ── the move ────────────────────────────────────────────────────────────────
 
 /// Everything the move reads from the store, taken under one lock.
-struct Snapshot {
-    row: SessionRow,
-    claude_id: String,
-    branch: String,
-    project_id: i64,
-    worktree_id: i64,
-    worktree_name: String,
-    worktree_path: Option<String>,
-    owner: String,
-    repo: String,
-    project_base: Option<String>,
-    stored_transcript: Option<String>,
-    cap: u64,
-    bundle_cap: u64,
-    ignored_entry_kb: u64,
-    ignored_total_kb: u64,
-    session_state_cap: u64,
-    target_projects_root: String,
-    layout: crate::projects::Layout,
-    target_taken: Vec<String>,
+pub(super) struct Snapshot {
+    pub(super) row: SessionRow,
+    pub(super) claude_id: String,
+    pub(super) branch: String,
+    pub(super) project_id: i64,
+    pub(super) worktree_id: i64,
+    pub(super) worktree_name: String,
+    pub(super) worktree_path: Option<String>,
+    pub(super) owner: String,
+    pub(super) repo: String,
+    pub(super) project_base: Option<String>,
+    pub(super) stored_transcript: Option<String>,
+    pub(super) cap: u64,
+    pub(super) bundle_cap: u64,
+    pub(super) ignored_entry_kb: u64,
+    pub(super) ignored_total_kb: u64,
+    pub(super) session_state_cap: u64,
+    pub(super) target_projects_root: String,
+    pub(super) layout: crate::projects::Layout,
+    pub(super) target_taken: Vec<String>,
     /// `(project root, worktree dir)` by the local projects root and layout:
     /// the fallback when a `local` target has no project / worktree row path.
-    local_layout_paths: (String, String),
+    pub(super) local_layout_paths: (String, String),
 }
 
 fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
@@ -1952,21 +1952,41 @@ async fn move_session_steps(
     result
 }
 
-/// The move's steps (see the module docs).
-async fn move_session_inner(
-    args: MoveSessionArgs,
+/// What the move's opening sequence established. Everything a dry run reports
+/// about the source comes from here, so it cannot disagree with the move.
+pub(super) struct Gathered {
+    pub snap: Snapshot,
+    pub src: String,
+    pub target: String,
+    /// The Claude conversation id (`snap.claude_id`).
+    pub id: String,
+    pub state: SourceState,
+    pub located: Located,
+}
+
+/// The move's opening checks, in the move's order, short-circuiting on the
+/// first problem exactly as the move does. `progress` is `Some` for a real
+/// move — it emits the `check` and `transcript` step boundaries at the points
+/// the move always has — and `None` for a dry run, which emits nothing.
+/// Does NOT take the move claim: the caller does, when it is a real move.
+///
+/// Not `pub(super)`: its `progress` parameter names `progress::Progress`,
+/// which is itself only visible inside this module (`mod progress;` is
+/// private) — a wider visibility here than that would trip the
+/// private-interfaces lint under `-D warnings` for no actual gain, since
+/// nothing outside `move_session` can name that type anyway. Any submodule
+/// of `move_session` (e.g. a future `preview.rs`, alongside `finalise.rs`)
+/// already sees this without a `pub` qualifier.
+async fn gather(
+    args: &MoveSessionArgs,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     hooks: &dyn MoveHooks,
-    opts: MoveOptions,
-    cleanup: &mut CarryCleanup,
-    progress: &mut progress::Progress<'_>,
-) -> Result<MoveReport, IpcError> {
-    crate::validate::host_alias(&args.target_host_alias)?;
-    let _claim = MoveClaim::acquire(store, args.session_id)?;
+    mut progress: Option<&mut progress::Progress<'_>>,
+) -> Result<Gathered, IpcError> {
     let snap = {
         let s = lock(store)?;
-        let snap = snapshot(&s, &args)?;
+        let snap = snapshot(&s, args)?;
         crate::service::operator::refuse_if_operator(
             &s,
             &snap.row.host_alias,
@@ -1981,9 +2001,10 @@ async fn move_session_inner(
     crate::service::hub::ensure_local_allowed(&src)?;
     let target = args.target_host_alias.clone();
     let id = snap.claude_id.clone();
-    let mut warnings: Vec<String> = Vec::new();
 
-    progress.start(MoveStep::Check);
+    if let Some(p) = progress.as_mut() {
+        p.start(MoveStep::Check);
+    }
     // 0. The source Claude must be idle NOW: reconcile its host so the status
     //    is fresh, then refuse a turn in progress or an unknown status.
     hooks.refresh_host(store, &src).await?;
@@ -2022,12 +2043,10 @@ async fn move_session_inner(
     } else {
         carry_verdict(&state, &snap.branch)?;
     }
-    let mut carried = carry::CarryReport {
-        dirty_entries: state.dirty.clone(),
-        ..Default::default()
-    };
 
-    progress.start(MoveStep::Transcript);
+    if let Some(p) = progress.as_mut() {
+        p.start(MoveStep::Transcript);
+    }
     // 2. Transcript: locate, cap, read (whole lines only).
     let out = sh(
         ssh,
@@ -2052,6 +2071,41 @@ async fn move_session_inner(
     if located.size > snap.cap {
         return Err(too_large(located.size, snap.cap));
     }
+    Ok(Gathered {
+        snap,
+        src,
+        target,
+        id,
+        state,
+        located,
+    })
+}
+
+/// The move's steps (see the module docs).
+async fn move_session_inner(
+    args: MoveSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    hooks: &dyn MoveHooks,
+    opts: MoveOptions,
+    cleanup: &mut CarryCleanup,
+    progress: &mut progress::Progress<'_>,
+) -> Result<MoveReport, IpcError> {
+    crate::validate::host_alias(&args.target_host_alias)?;
+    let _claim = MoveClaim::acquire(store, args.session_id)?;
+    let Gathered {
+        snap,
+        src,
+        target,
+        id,
+        state,
+        located,
+    } = gather(&args, store, ssh, hooks, Some(progress)).await?;
+    let mut warnings: Vec<String> = Vec::new();
+    let mut carried = carry::CarryReport {
+        dirty_entries: state.dirty.clone(),
+        ..Default::default()
+    };
     // Exactly the located bytes: the end-of-move check compares against
     // this size / mtime, so the copy and the check describe the same file.
     let out = sh(
@@ -5981,6 +6035,21 @@ mod tests {
         // Released on drop, including after a finished move.
         run(&f, &hooks, true).await.expect("move after release");
         assert!(MoveClaim::acquire(&f.store, f.source_id).is_ok());
+    }
+
+    /// `gather()` with no progress sink emits no `move:progress` event and takes
+    /// no claim — the two properties Task 3's dry run depends on.
+    #[tokio::test]
+    async fn gather_without_progress_emits_nothing_and_takes_no_claim() {
+        let (f, bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        gather(&a, &f.store, &f.fake, &hooks, None)
+            .await
+            .expect("the fixture's opening sequence succeeds");
+        assert!(progress_of(&f, &bus).is_empty(), "no move:progress event");
+        // No claim was taken: a real move of the same session can still start.
+        MoveClaim::acquire(&f.store, a.session_id).expect("the claim is free");
     }
 
     #[tokio::test]
