@@ -47,10 +47,12 @@ pub struct SendPromptArgs {
     #[serde(default = "default_submit")]
     pub submit: bool,
     /// Mirrors `SendPromptParams.keys` for the hub wire (the hub-client
-    /// route serialises this whole struct as the tool call's arguments).
-    /// This struct's own `send_prompt` does not act on it — the desktop has
-    /// no `keys` UI yet, and a phone presses keys through the MCP tool,
-    /// which branches on `keys` before ever building one of these.
+    /// route serialises this whole struct as the tool call's arguments) —
+    /// this struct's own `send_prompt` acts on it too, exactly like the MCP
+    /// tool: `Enter` | `Escape` | `C-c` presses that key instead of typing
+    /// `prompt`, which must be empty alongside it. The desktop has no
+    /// `keys` UI yet; a phone (via the MCP tool) or a hub-routed call is
+    /// what sets this today.
     #[serde(default)]
     pub keys: Option<String>,
 }
@@ -62,6 +64,9 @@ pub struct SendPromptArgs {
 /// text, then an optional Enter) and [`send_keys`] (one named key) — the two
 /// `send_prompt` delivery paths differ only in the script they build and
 /// what they record afterward, not in how the script reaches the pane.
+/// Validating `host_alias` / `tmux_name` is the caller's job — both callers
+/// do it (`crate::validate::host_alias` / `tmux_name_addressable`) before
+/// building the script this runs.
 async fn run_tmux_script(
     host_alias: &str,
     ssh: &Arc<SshClient>,
@@ -290,11 +295,33 @@ pub(super) fn record_session_event(
     }
 }
 
+/// PARITY with `mcp::tools::messaging::send_prompt` (the MCP tool):
+/// `args.keys`, when set, presses that key via [`send_keys`] instead of
+/// typing `args.prompt` — a hub-routed desktop and a standalone one must
+/// behave the same way, and this is the function `commands::sessions::
+/// routed::send_prompt`'s standalone (`backend.hub() == None`) branch calls
+/// directly (the hub-routed branch instead ships the whole `args` struct
+/// over the wire to the hub's own MCP tool, which does this same check).
 pub async fn send_prompt(
     args: SendPromptArgs,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<(), IpcError> {
+    if let Some(k) = args.keys.as_deref() {
+        let key = crate::tmux::NamedKey::parse(k).ok_or_else(|| {
+            IpcError::new(
+                codes::E_VALIDATE,
+                format!("keys must be Enter, Escape or C-c, not {k:?}"),
+            )
+        })?;
+        if !args.prompt.is_empty() {
+            return Err(IpcError::new(
+                codes::E_VALIDATE,
+                "keys and a non-empty prompt cannot be sent together",
+            ));
+        }
+        return send_keys(&args.host_alias, &args.tmux_name, key, store, ssh).await;
+    }
     send_prompt_inner(
         store,
         ssh,
@@ -486,5 +513,112 @@ mod prompt_tests {
         assert!(!is_prompt("  \n"));
         assert!(is_prompt("/clear"));
         assert!(is_prompt("fix it"));
+    }
+
+    /// PARITY with the MCP tool's own `keys_refuse_an_unknown_key_and_text_
+    /// alongside_it` (`mcp::tools::tests`): validation happens before any
+    /// tmux/ssh delivery, so this needs no real backend either.
+    #[tokio::test]
+    async fn send_prompt_refuses_an_unknown_key_and_text_alongside_it() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let ssh = Arc::new(SshClient::new());
+        let bad = send_prompt(
+            SendPromptArgs {
+                host_alias: "local".into(),
+                tmux_name: "dev-keys".into(),
+                prompt: String::new(),
+                submit: true,
+                keys: Some("Delete".into()),
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .expect_err("unknown key");
+        assert_eq!(bad.code, crate::ipc_error::codes::E_VALIDATE);
+
+        let both = send_prompt(
+            SendPromptArgs {
+                host_alias: "local".into(),
+                tmux_name: "dev-keys".into(),
+                prompt: "hi".into(),
+                submit: true,
+                keys: Some("Enter".into()),
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .expect_err("text and keys");
+        assert_eq!(both.code, crate::ipc_error::codes::E_VALIDATE);
+    }
+
+    /// PARITY with `keys_press_a_key_without_a_marker_and_without_recording_
+    /// a_prompt` (`mcp::tools::tests`) — same real-tmux precedent, driving
+    /// `send_prompt` (the standalone/local path `commands::sessions::
+    /// routed::send_prompt` calls when there is no hub) directly instead of
+    /// through the MCP tool, since that is the code path this fix touches.
+    /// Skipped when `tmux` isn't on PATH (the macOS CI runner).
+    #[tokio::test]
+    async fn send_prompt_local_keys_press_a_key_without_touching_last_prompt() {
+        if tokio::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .await
+            .is_err()
+        {
+            eprintln!(
+                "skipping send_prompt_local_keys_press_a_key_without_touching_last_prompt: no tmux on PATH"
+            );
+            return;
+        }
+        let name = format!("fleet-test-send-prompt-keys-{}", std::process::id());
+        let created = tokio::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &name])
+            .output()
+            .await
+            .expect("spawn tmux");
+        assert!(created.status.success(), "{created:?}");
+        struct KillOnDrop(String);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux")
+                    .args(["kill-session", "-t", &self.0])
+                    .output();
+            }
+        }
+        let _guard = KillOnDrop(name.clone());
+
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let sid = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_session(&name, "local", None, None, 1, 1, "running", None)
+                .unwrap()
+        };
+        let ssh = Arc::new(SshClient::new());
+        send_prompt(
+            SendPromptArgs {
+                host_alias: "local".into(),
+                tmux_name: name.clone(),
+                prompt: String::new(),
+                submit: true,
+                keys: Some("Escape".into()),
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .expect("keys");
+        let s = store.lock().unwrap();
+        let hist = s.list_session_events(sid, 10).unwrap();
+        assert!(
+            hist.iter()
+                .any(|e| e.kind == "keys_sent" && e.detail.as_deref() == Some("Escape")),
+            "{hist:?}"
+        );
+        assert!(!hist.iter().any(|e| e.kind == "prompt_sent"), "{hist:?}");
+        let row = s.get_session_by_id(sid).unwrap().unwrap();
+        assert!(row.last_prompt.is_none(), "{row:?}");
     }
 }

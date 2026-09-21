@@ -498,15 +498,38 @@ impl Dialog {
         s.chars().take(ACTIVITY_MAX).collect()
     }
 
-    /// What gets stored on `sessions.pending_input`.
+    /// What gets stored on `sessions.pending_input`. Capped by construction
+    /// ([`PENDING_QUESTION_MAX`] / [`PENDING_LABEL_MAX`] / [`PENDING_OPTIONS_MAX`])
+    /// so a pane a client turns straight into buttons can never blow up the
+    /// row or the wire, however malformed the captured text.
     fn pending_input(&self) -> PendingInput {
         PendingInput {
             kind: self.kind.as_str().into(),
-            question: self.prompt.clone(),
-            options: self.options.clone(),
+            question: self
+                .prompt
+                .as_deref()
+                .map(|q| q.chars().take(PENDING_QUESTION_MAX).collect()),
+            options: self
+                .options
+                .iter()
+                .take(PENDING_OPTIONS_MAX)
+                .map(|o| PendingOption {
+                    n: o.n,
+                    label: o.label.chars().take(PENDING_LABEL_MAX).collect(),
+                    selected: o.selected,
+                })
+                .collect(),
         }
     }
 }
+
+/// Cap on `PendingInput.question`'s length — a client turns this straight
+/// into UI, so a runaway pane read must not blow up the row or the wire.
+const PENDING_QUESTION_MAX: usize = 300;
+/// Cap on each `PendingOption.label`'s length.
+const PENDING_LABEL_MAX: usize = 200;
+/// Cap on the number of options `PendingInput` carries.
+const PENDING_OPTIONS_MAX: usize = 16;
 
 /// A pane line without surrounding whitespace or box-drawing borders, so a
 /// boxed dialog (`│ ❯ 1. Yes   │`) reads like an unboxed one.
@@ -621,7 +644,12 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
     // found), every choice AFTER it and at or before `dialog_end` belongs
     // to the dialog — real dialogs interleave indented description lines
     // between choices (see `question_ask_user.txt`), so this branch does
-    // not require contiguity.
+    // not require contiguity. `ask` is the LAST such phrase anywhere in the
+    // pane, which can be stale scrollback prose sitting above the real
+    // dialog's own question; taking the LATER of `ask` and `question_idx`
+    // (not just preferring `ask`) keeps the bound as close to the actual
+    // choices as possible, so that stale prose does not widen `options`
+    // back into an unrelated numbered list between it and the real dialog.
     //
     // Without such a line (a bare `tell_claude` match with no "do you
     // want"/"?" line above its choices), fall back to the trailing run of
@@ -629,7 +657,7 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
     // between only when it is blank/decoration-only or was indented in the
     // raw capture (a description line) — an unindented, non-empty line ends
     // the run, so an unrelated list higher up the scrollback is excluded.
-    let bound_after = ask.or(question_idx);
+    let bound_after = ask.into_iter().chain(question_idx).max();
     let options: Vec<PendingOption> = match bound_after {
         Some(after) => choices
             .iter()
@@ -1244,6 +1272,28 @@ mod tests {
     }
 
     #[test]
+    fn pending_input_caps_question_label_and_option_count() {
+        // A client turns this straight into UI, so a malformed or
+        // adversarial pane read must not blow up the row or the wire.
+        let long_label = "x".repeat(500);
+        let dialog = Dialog {
+            kind: WaitingFor::Input,
+            prompt: Some("q".repeat(500)),
+            options: (1..=20u8)
+                .map(|n| PendingOption {
+                    n,
+                    label: long_label.clone(),
+                    selected: false,
+                })
+                .collect(),
+        };
+        let p = dialog.pending_input();
+        assert_eq!(p.question.as_deref().map(|q| q.chars().count()), Some(300));
+        assert_eq!(p.options.len(), 16);
+        assert!(p.options.iter().all(|o| o.label.chars().count() == 200));
+    }
+
+    #[test]
     fn a_permission_dialog_carries_its_numbered_options() {
         let pane = "\
 Do you want to make this edit to src/main.rs?
@@ -1333,6 +1383,27 @@ Some unrelated prose line
                 },
             ]
         );
+    }
+
+    #[test]
+    fn bound_after_picks_the_later_of_ask_and_question_not_stale_scrollback_prose() {
+        // Stale scrollback prose containing "do you want to" sits well above
+        // the real dialog and its own unrelated numbered list; the real
+        // dialog's own question line is LATER (closer to its choices) and
+        // must win the bound, or the stale prose's numbered list leaks back
+        // into `options`.
+        let pane = "\
+Earlier I asked: do you want to grab coffee?
+  2. Add the guard
+  3. Run the tests
+Keep ghosted sessions for how long before deleting them?
+❯ 1. 1 hour
+  2. 1 day
+Enter to select
+";
+        let p = detect_dialog(pane).expect("dialog").pending_input();
+        assert_eq!(p.options.len(), 2);
+        assert_eq!(p.options.iter().map(|o| o.n).collect::<Vec<_>>(), [1, 2]);
     }
 
     #[test]

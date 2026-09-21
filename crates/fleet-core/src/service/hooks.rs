@@ -998,16 +998,21 @@ mod tests {
         // A turn finishing (Stop hook) means the session is idle/ready, not
         // terminated — see apply_stop_hook.
         let store = make_store();
+        let id;
         {
             let s = store.lock().unwrap();
             s.upsert_host("local").unwrap();
-            let id = s
+            id = s
                 .upsert_session("sess", "local", None, None, 0, 0, "running", None)
                 .unwrap();
             s.set_claude_session_id(id, "uuid-1").unwrap();
             // Pretend it was last seen working.
             s.set_claude_status_by_session_id("uuid-1", "working")
                 .unwrap();
+            // A dialog seen on the pane before the turn ended must not
+            // survive it — seed it directly (the reconcile upsert is the
+            // only production writer) and check it below.
+            seed_pending_input(&s, id);
         }
         apply_hook(
             &store,
@@ -1019,6 +1024,10 @@ mod tests {
         let s = store.lock().unwrap();
         let row = s.get_session("sess", "local").unwrap().unwrap();
         assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        assert_eq!(
+            row.pending_input, None,
+            "Stop must clear a stale dialog too"
+        );
     }
 
     #[test]
@@ -1131,6 +1140,9 @@ mod tests {
                 .unwrap();
             s.set_claude_session_id(id, "uuid-b").unwrap();
             s.set_claude_status_by_session_id("uuid-b", "idle").unwrap();
+            // A dialog left over from the previous turn must not survive
+            // the next one starting.
+            seed_pending_input(&s, id);
             id
         };
         let host_a = Caller {
@@ -1170,6 +1182,10 @@ mod tests {
         assert_eq!(row.idle_since, None);
         // A submit does not count as a turn.
         assert_eq!(row.turn_seq, 0);
+        assert_eq!(
+            row.pending_input, None,
+            "UserPromptSubmit must clear a stale dialog too"
+        );
         drop(s);
         // Unknown session: no-op for any caller.
         assert!(apply_hook(
@@ -1687,15 +1703,36 @@ mod tests {
             .unwrap()
     }
 
+    /// Seed `pending_input` directly with a raw UPDATE — the reconcile
+    /// upsert is the only production writer of this column — so a test can
+    /// check that a hook path clears a stale dialog.
+    fn seed_pending_input(s: &Store, id: i64) {
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET pending_input = ?2 WHERE id = ?1",
+                rusqlite::params![
+                    id,
+                    r#"{"kind":"permission","question":"Do it?","options":[]}"#
+                ],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn session_end_marks_stopped_and_records_the_reason() {
         let store = make_store();
         let id = hooked(&store);
+        // No pane is left to show a dialog once the process is gone.
+        seed_pending_input(&store.lock().unwrap(), id);
         let mut p = make_payload("SessionEnd", "uuid-1");
         p.reason = Some("prompt_input_exit".into());
         apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None)).unwrap();
         let row = status_of(&store, id);
         assert_eq!(row.claude_status.as_deref(), Some("stopped"));
+        assert_eq!(
+            row.pending_input, None,
+            "SessionEnd must clear a stale dialog too"
+        );
         assert!(events(&store, id).contains(&(
             "session_end".to_string(),
             Some("prompt_input_exit".to_string())
@@ -2164,20 +2201,8 @@ mod tests {
             .set_context(id, OLD, 50_000, 200_000, "transcript", None)
             .unwrap();
         // A dialog from the old conversation's pane must not survive the
-        // reset: seed pending_input directly (the reconcile upsert is the
-        // only production writer) and check it is gone below.
-        store
-            .lock()
-            .unwrap()
-            .conn_ref()
-            .execute(
-                "UPDATE sessions SET pending_input = ?2 WHERE id = ?1",
-                rusqlite::params![
-                    id,
-                    r#"{"kind":"permission","question":"Do it?","options":[]}"#
-                ],
-            )
-            .unwrap();
+        // reset: seed it directly and check it is gone below.
+        seed_pending_input(&store.lock().unwrap(), id);
         let host = host_caller("local");
         let mut p = make_payload("SessionStart", OLD);
         p.source = Some("startup".into());
@@ -2210,20 +2235,9 @@ mod tests {
         let id = pane_session(&store, "s", "%3");
         // A dialog seen on the pane right before compaction starts is stale
         // the moment PreCompact overrides current_activity with
-        // "compacting" — seed it directly (the reconcile upsert is the only
-        // production writer) and check it does not survive the hook.
-        store
-            .lock()
-            .unwrap()
-            .conn_ref()
-            .execute(
-                "UPDATE sessions SET pending_input = ?2 WHERE id = ?1",
-                rusqlite::params![
-                    id,
-                    r#"{"kind":"permission","question":"Do it?","options":[]}"#
-                ],
-            )
-            .unwrap();
+        // "compacting" — seed it directly and check it does not survive
+        // the hook.
+        seed_pending_input(&store.lock().unwrap(), id);
         let host = host_caller("local");
         let mut pre = make_payload("PreCompact", OLD);
         pre.trigger = Some("auto".into());

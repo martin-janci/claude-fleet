@@ -936,10 +936,11 @@ impl Store {
 
     /// The Stop hook's write: the turn is over. Sets `claude_status = idle`,
     /// bumps `turn_seq`, stamps `last_stop_at` / `last_turn_at`, maintains
-    /// `idle_since` and ends a `compacting` activity. Keyed by row id (the
-    /// hook resolver already picked the row: two rows may share one
-    /// `claude_session_id`); returns the updated row (`None` when the row is
-    /// gone). Emits `session_updated`.
+    /// `idle_since`, ends a `compacting` activity, and clears `pending_input`
+    /// (a dialog on the just-ended turn's pane does not survive it). Keyed
+    /// by row id (the hook resolver already picked the row: two rows may
+    /// share one `claude_session_id`); returns the updated row (`None` when
+    /// the row is gone). Emits `session_updated`.
     pub fn record_stop_hook_for_row(
         &self,
         row_id: i64,
@@ -949,7 +950,7 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
-                     idle_since = COALESCE(idle_since, ?2){END_COMPACTING} \
+                     idle_since = COALESCE(idle_since, ?2), pending_input = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -963,8 +964,10 @@ impl Store {
     /// The UserPromptSubmit hook's write: a turn is starting. Sets
     /// `claude_status = working`, clears `idle_since` so "idle because
     /// never started" and "idle after a turn" are distinguishable from
-    /// "busy", and ends a `compacting` activity. Returns the updated row
-    /// (`None` when the row is gone). Emits `session_updated`.
+    /// "busy", ends a `compacting` activity, and clears `pending_input` (a
+    /// dialog on the pane before this prompt is stale the moment a new turn
+    /// starts). Returns the updated row (`None` when the row is gone).
+    /// Emits `session_updated`.
     pub fn record_prompt_submit_hook_for_row(
         &self,
         row_id: i64,
@@ -972,7 +975,7 @@ impl Store {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
-                     last_hook_at = ?2{END_COMPACTING} WHERE id = ?1"
+                     last_hook_at = ?2, pending_input = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
@@ -984,9 +987,10 @@ impl Store {
 
     /// The SessionEnd hook's write: the Claude process is gone. Sets
     /// `claude_status = stopped`, starts `idle_since` if not already idle,
-    /// clears any stuck episode and stamps `last_hook_at` so the reconcile
-    /// guard keeps the verdict until a later pass observes the pane afresh.
-    /// Returns the row (`None` when the row is gone). Emits `session_updated`.
+    /// clears any stuck episode and `pending_input` (no pane is left to show
+    /// a dialog), and stamps `last_hook_at` so the reconcile guard keeps the
+    /// verdict until a later pass observes the pane afresh. Returns the row
+    /// (`None` when the row is gone). Emits `session_updated`.
     pub fn record_session_end_hook_for_row(
         &self,
         row_id: i64,
@@ -995,7 +999,7 @@ impl Store {
         let changed = self.conn.execute(
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
-                 stuck_kind = NULL, stuck_since = NULL \
+                 stuck_kind = NULL, stuck_since = NULL, pending_input = NULL \
                  WHERE id = ?1",
             rusqlite::params![row_id, now],
         )?;

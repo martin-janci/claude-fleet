@@ -707,7 +707,10 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "send_prompt",
             "send_prompt",
-            json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "go", "submit": true, "keys": "Enter" }),
+            // `prompt` must be empty alongside `keys` (the hub refuses text
+            // and a key press together, same as the local path) — this row
+            // still proves `keys` crosses the wire.
+            json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "", "submit": true, "keys": "Enter" }),
             r#"{"delivered":true}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::send_prompt(
@@ -715,7 +718,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                     SendPromptArgs {
                         host_alias: "trn".into(),
                         tmux_name: "demo".into(),
-                        prompt: "go".into(),
+                        prompt: "".into(),
                         submit: true,
                         keys: Some("Enter".into()),
                     },
