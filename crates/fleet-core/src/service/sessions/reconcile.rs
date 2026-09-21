@@ -615,6 +615,7 @@ pub(super) fn reconcile_write_one_host(
                     ci_status: pr.and_then(|p| p.ci_status.clone()),
                     pr_observed: pr.is_some(),
                     tmux_pane_id: sess.pane_id.clone(),
+                    pending_input: pane.and_then(|p| p.pending_input.clone()),
                 });
             }
             let now = now_unix();

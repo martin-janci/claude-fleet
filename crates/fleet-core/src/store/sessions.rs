@@ -1140,6 +1140,23 @@ impl Store {
         Ok(self.emit_session(id)?)
     }
 
+    /// Set (or clear) the row's `pending_input` — the permission/question
+    /// dialog `pane_intel::analyze` found on the pane, JSON-encoded. Emits
+    /// `session_updated`. The reconcile write-burst folds this into its own
+    /// upsert instead (see `Store::apply_host_reconcile`); this is the
+    /// single-row path used elsewhere (and by tests).
+    pub fn set_pending_input(
+        &self,
+        id: i64,
+        pending_input: Option<&PendingInput>,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE sessions SET pending_input = ?2 WHERE id = ?1",
+            rusqlite::params![id, encode_pending_input(pending_input)],
+        )?;
+        Ok(self.emit_session(id)?)
+    }
+
     /// The one live row on `host_alias` whose last-seen pane is `pane_id`.
     /// `None` when there is none or more than one (a stale pane id after a
     /// tmux server restart shared with a new row).
@@ -1286,6 +1303,41 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         s
+    }
+
+    #[test]
+    fn pending_input_round_trips_and_defaults_to_none() {
+        let s = store();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let pi = PendingInput {
+            kind: "permission".into(),
+            question: Some("Do it?".into()),
+            options: vec![PendingOption {
+                n: 1,
+                label: "Yes".into(),
+                selected: true,
+            }],
+        };
+        s.set_pending_input(id, Some(&pi)).unwrap();
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().pending_input,
+            Some(pi)
+        );
+        s.set_pending_input(id, None).unwrap();
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().pending_input,
+            None
+        );
+
+        // An older hub's JSON (no key at all) still parses.
+        let row: SessionRow = serde_json::from_str(
+            r#"{"id":1,"tmux_name":"s","host_alias":"h","created_at":0,
+                "last_activity_at":0,"status":"running","kind":"work","turn_seq":0}"#,
+        )
+        .unwrap();
+        assert!(row.pending_input.is_none());
     }
 
     #[test]

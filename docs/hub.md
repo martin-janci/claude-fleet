@@ -639,6 +639,12 @@ dropped from the filter and logged as a warning by the hub, and it is missing
 from the `ready` frame's `kinds` — which is how you spot the typo instead of
 watching a stream that never says anything.
 
+A session row's `pending_input` (carried on `session:updated`, migration 040)
+is the permission/question dialog a blocked pane is showing —
+`{kind, question, options[{n,label,selected}]}`, or null when the pane shows
+none — so a client can turn the numbered choices into buttons instead of
+typing them.
+
 The `ready` frame also carries `contract`, the wire-contract revision of the
 row shapes and tool results this hub sends (`fleet_core::wire_contract`,
 starting at `1`). It moves only when a client's assumptions about the wire

@@ -364,6 +364,11 @@ not stuck). The enums in `crates/fleet-core/src/service/pane_intel.rs` are the s
 source of truth; the tool descriptions, server instructions and the control
 skill quote them, and a test fails if any of those drift.
 
+A full row also carries `pending_input`: the permission/question dialog a
+blocked pane is showing, as `{kind, question, options[{n,label,selected}]}`
+(`kind` is `permission` | `input`), or null when the pane shows no such
+dialog — derived alongside `current_activity` on the same reconcile pass.
+
 ### Response caps
 
 Responses are sized for MCP token limits: `list_sessions` and `list_projects`

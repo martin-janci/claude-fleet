@@ -191,6 +191,28 @@ pub struct PaneIntel {
     /// so [`analyze`] also puts it in `activity` as
     /// `waiting for <reason>: <question>`.
     pub waiting_for: Option<WaitingFor>,
+    /// The dialog's question and numbered choices, stored on the session row
+    /// (`sessions.pending_input`) so a client can turn them into buttons.
+    /// `None` whenever the pane shows no permission/question dialog.
+    pub pending_input: Option<PendingInput>,
+}
+
+/// One numbered choice of a permission or question dialog.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingOption {
+    pub n: u8,
+    pub label: String,
+    pub selected: bool,
+}
+
+/// The permission/question dialog a blocked pane is showing, as stored on
+/// `sessions.pending_input`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingInput {
+    /// `"permission"` | `"input"` (mirrors [`WaitingFor::as_str`]).
+    pub kind: String,
+    pub question: Option<String>,
+    pub options: Vec<PendingOption>,
 }
 
 /// Why a pane showing a Claude Code dialog is waiting on the user.
@@ -462,6 +484,8 @@ struct Dialog {
     /// The dialog's question line, or the selected answer when no line of it
     /// ends with `?`.
     prompt: Option<String>,
+    /// The dialog's numbered choices, in on-screen order.
+    options: Vec<PendingOption>,
 }
 
 impl Dialog {
@@ -473,6 +497,15 @@ impl Dialog {
         };
         s.chars().take(ACTIVITY_MAX).collect()
     }
+
+    /// What gets stored on `sessions.pending_input`.
+    fn pending_input(&self) -> PendingInput {
+        PendingInput {
+            kind: self.kind.as_str().into(),
+            question: self.prompt.clone(),
+            options: self.options.clone(),
+        }
+    }
 }
 
 /// A pane line without surrounding whitespace or box-drawing borders, so a
@@ -481,9 +514,12 @@ fn clean_line(line: &str) -> &str {
     line.trim_matches(|c: char| c.is_whitespace() || c == '│' || c == '║')
 }
 
-/// `Some(selected)` when a cleaned line is a numbered choice such as
-/// `❯ 1. Yes` (`selected` = true) or `2. No`. `1.5 GB` and `42 + x` are not.
-fn numbered_choice(line: &str) -> Option<bool> {
+/// Parse a cleaned line as a numbered choice such as `❯ 1. Yes` or `2) No`:
+/// the ordinal, the label after the `N. ` / `N) ` marker (trimmed), and
+/// whether it carries the `❯`/`›` selection glyph. `None` for anything else
+/// (`1.5 GB`, `42 + x`, prose) — the one parser [`numbered_choice`] and the
+/// dialog's `options` both build on.
+fn parse_choice(line: &str) -> Option<(u8, &str, bool)> {
     let rest = line.trim_start_matches(['❯', '›']);
     let selected = rest.len() != line.len();
     let rest = rest.trim_start();
@@ -493,9 +529,22 @@ fn numbered_choice(line: &str) -> Option<bool> {
     }
     let mut after = rest[digits..].chars();
     match (after.next(), after.next()) {
-        (Some('.' | ')'), Some(' ') | None) => Some(selected),
+        (Some('.' | ')'), Some(' ') | None) => {
+            let n: u8 = rest[..digits].parse().ok()?;
+            let label = rest[digits + 1..].trim();
+            Some((n, label, selected))
+        }
         _ => None,
     }
+}
+
+/// `Some(selected)` when a cleaned line is a numbered choice such as
+/// `❯ 1. Yes` (`selected` = true) or `2. No`. `1.5 GB` and `42 + x` are not.
+/// A thin, test-only view of [`parse_choice`] (production code needs the
+/// ordinal and label too, so it calls `parse_choice` directly).
+#[cfg(test)]
+fn numbered_choice(line: &str) -> Option<bool> {
+    parse_choice(line).map(|(_, _, selected)| selected)
 }
 
 /// Detect a Claude Code permission or question dialog on screen.
@@ -513,12 +562,13 @@ fn numbered_choice(line: &str) -> Option<bool> {
 fn detect_dialog(stripped: &str) -> Option<Dialog> {
     let lines: Vec<&str> = stripped.lines().map(clean_line).collect();
     let lower: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
-    let choices: Vec<(usize, bool)> = lines
+    // (line index, ordinal, label, selected) for every numbered-choice line.
+    let choices: Vec<(usize, u8, &str, bool)> = lines
         .iter()
         .enumerate()
-        .filter_map(|(i, l)| numbered_choice(l).map(|sel| (i, sel)))
+        .filter_map(|(i, l)| parse_choice(l).map(|(n, label, sel)| (i, n, label, sel)))
         .collect();
-    let is_choice = |i: usize| choices.iter().any(|(j, _)| *j == i);
+    let is_choice = |i: usize| choices.iter().any(|(j, ..)| *j == i);
     let last = |pred: &dyn Fn(&str) -> bool| lower.iter().rposition(|l| pred(l));
 
     let tell_claude = last(&|l| l.contains("no, and tell claude"));
@@ -526,10 +576,10 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
     let select_hint = last(&|l| l.contains("enter to select"));
 
     let kind = if tell_claude.is_some()
-        || ask.is_some_and(|a| choices.iter().filter(|(j, _)| *j > a).count() >= 2)
+        || ask.is_some_and(|a| choices.iter().filter(|(j, ..)| *j > a).count() >= 2)
     {
         WaitingFor::Permission
-    } else if select_hint.is_some() && choices.iter().any(|(_, sel)| *sel) {
+    } else if select_hint.is_some() && choices.iter().any(|(_, _, _, sel)| *sel) {
         WaitingFor::Input
     } else {
         return None;
@@ -554,11 +604,20 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
         .map(|(_, l)| l.to_string());
     let selected = choices
         .iter()
-        .find(|(_, sel)| *sel)
-        .map(|(i, _)| lines[*i].trim_start_matches(['❯', '›']).trim().to_string());
+        .find(|(_, _, _, sel)| *sel)
+        .map(|(i, ..)| lines[*i].trim_start_matches(['❯', '›']).trim().to_string());
+    let options = choices
+        .iter()
+        .map(|(_, n, label, selected)| PendingOption {
+            n: *n,
+            label: (*label).to_string(),
+            selected: *selected,
+        })
+        .collect();
     Some(Dialog {
         kind,
         prompt: question.or(selected),
+        options,
     })
 }
 
@@ -684,12 +743,14 @@ pub fn analyze(pane_tail: &str) -> PaneIntel {
         None => pick_activity(&stripped),
     };
     let derived_status = derive_status(stuck, dialog.as_ref(), &stripped);
+    let pending_input = dialog.as_ref().map(Dialog::pending_input);
     PaneIntel {
         activity,
         stuck,
         context_pct,
         derived_status,
         waiting_for: dialog.map(|d| d.kind),
+        pending_input,
     }
 }
 
@@ -1066,6 +1127,48 @@ mod tests {
     fn waiting_for_tags_are_stable() {
         assert_eq!(WaitingFor::Permission.as_str(), "permission");
         assert_eq!(WaitingFor::Input.as_str(), "input");
+    }
+
+    #[test]
+    fn a_permission_dialog_carries_its_numbered_options() {
+        let pane = "\
+Do you want to make this edit to src/main.rs?
+❯ 1. Yes
+  2. Yes, and don't ask again this session
+  3. No, and tell Claude what to do differently
+";
+        let d = detect_dialog(pane).expect("dialog");
+        let p = d.pending_input();
+        assert_eq!(p.kind, "permission");
+        assert_eq!(
+            p.question.as_deref(),
+            Some("Do you want to make this edit to src/main.rs?")
+        );
+        assert_eq!(p.options.len(), 3);
+        assert_eq!(
+            p.options[0],
+            PendingOption {
+                n: 1,
+                label: "Yes".into(),
+                selected: true
+            }
+        );
+        assert_eq!(p.options[2].n, 3);
+        assert!(!p.options[2].selected);
+    }
+
+    #[test]
+    fn a_question_dialog_is_input_and_a_boxed_dialog_loses_its_borders() {
+        let pane = "│ Keep ghosted sessions for how long before deleting them? │\n│ ❯ 1. 1 hour │\n│   2. 1 day │\nEnter to select\n";
+        let p = detect_dialog(pane).expect("dialog").pending_input();
+        assert_eq!(p.kind, "input");
+        assert_eq!(
+            p.options
+                .iter()
+                .map(|o| o.label.as_str())
+                .collect::<Vec<_>>(),
+            ["1 hour", "1 day"]
+        );
     }
 
     #[test]
