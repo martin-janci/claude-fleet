@@ -17,7 +17,10 @@
 use super::carry::{self, IgnoredEntry, LeftBehind};
 use super::claude_state;
 use super::probe::{self, Probed};
-use super::{gather, sh, sh_soft, stderr_of, target_paths, MoveHooks, MoveSessionArgs};
+use super::{
+    before_target, gather, sh, sh_soft, stderr_of, target_paths, MoveHooks, MoveSessionArgs,
+    COPY_TIMEOUT, GIT_TIMEOUT,
+};
 use crate::ipc_error::IpcError;
 use crate::service::safe_kill::DirtyFile;
 use crate::ssh::SshExec;
@@ -25,13 +28,6 @@ use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::time::Duration;
-
-/// ssh connect timeout for the read-only probes: local git only, same bound
-/// as the move's own git inspection.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
-/// Timeout for the source listings (ignored files, session state, memory):
-/// the same bound the move itself uses for these.
-const LISTING_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MovePreview {
@@ -145,7 +141,7 @@ pub(super) async fn preview(
         ssh,
         &g.src,
         &carry::ignored_list_script(&g.state.worktree),
-        LISTING_TIMEOUT,
+        COPY_TIMEOUT,
     )
     .await
     {
@@ -229,8 +225,12 @@ pub(super) async fn preview(
     };
 
     // 4. Where the move would put the target's clone and worktree. A
-    // failure here is the move's own error (it fails on exactly this step).
-    let (project_root, cwd_hint) = target_paths(&g.snap, &g.target, ssh).await?;
+    // failure here is the move's own error (it fails on exactly this step) —
+    // wrapped the same way the move's own call site wraps it, so the two
+    // errors are the same value, not merely the same code.
+    let (project_root, cwd_hint) = target_paths(&g.snap, &g.target, ssh)
+        .await
+        .map_err(|e| before_target("resolving the target $HOME", e))?;
 
     // 5. What sits at the path the move would aim at. Never a refusal: the
     // move does not probe, so a preview must not refuse on something the
@@ -239,7 +239,7 @@ pub(super) async fn preview(
         ssh,
         &g.target,
         &probe::target_probe_script(&cwd_hint),
-        PROBE_TIMEOUT,
+        GIT_TIMEOUT,
     )
     .await
     {
@@ -287,7 +287,7 @@ pub(super) async fn preview(
         ssh,
         &g.target,
         &probe::target_tip_script(&project_root, &g.snap.branch),
-        PROBE_TIMEOUT,
+        GIT_TIMEOUT,
     )
     .await
     {
@@ -297,7 +297,7 @@ pub(super) async fn preview(
                     ssh,
                     &g.src,
                     &probe::commits_ahead_script(&g.state.worktree, &tip),
-                    PROBE_TIMEOUT,
+                    GIT_TIMEOUT,
                 )
                 .await
                 {
@@ -322,17 +322,24 @@ pub(super) async fn preview(
         Err(why) => unknowns.push(format!("the target's branch tip could not be read: {why}")),
     }
 
-    // 7. What a dry run cannot know, or chooses not to act on.
+    // 7. What a dry run cannot know, or chooses not to act on. `strict` is
+    // NOT one of these: it is a read-only verdict `gather()` evaluates
+    // itself (step 1, above), so a strict dry run over a dirty or unpushed
+    // source already refuses exactly as a strict move would — nothing about
+    // it is ignored here.
     unknowns.push(
         "the bundle size is decided by snapshotting the source worktree, which a dry run does \
          not do, so it cannot be known here; it is what E_MOVE_TOO_LARGE depends on"
             .to_string(),
     );
-    if args.strict {
-        unknowns.push("strict is ignored by a dry run".to_string());
-    }
     if args.clean_target {
-        unknowns.push("clean_target is ignored by a dry run".to_string());
+        unknowns.push(
+            "clean_target only ever acts in the write phase — replacing stale leftovers \
+             immediately before replaying the carry — which a dry run never reaches; whether \
+             it would even apply depends on a target classification (adopted vs. left dirty) \
+             that needs the transfer refs a real move creates, which a dry run never creates"
+                .to_string(),
+        );
     }
 
     Ok(MovePreview {

@@ -6474,18 +6474,55 @@ mod tests {
 
     use super::preview::{preview, TargetState};
 
-    /// Every script marker a dry run must never send: each one writes.
-    const WRITING_MARKERS: &[&str] = &[
-        "# cf-carry:seed",
-        "# cf-carry:snapshot",
-        "# cf-carry:chunk",
-        "# cf-carry:fetch",
-        "# cf-carry:apply",
-        "# cf-carry:recover",
-        "# cf-carry:ignored-pack",
-        "# cf-move:prep",
-        "# cf-move:prefetch",
+    /// Every marker the move's own scripts can print, scraped from the
+    /// source text rather than copied by hand — so a newly added
+    /// `# cf-carry:` / `# cf-move:` script is caught by the writes-nothing
+    /// test below even if nobody remembers to add it to a literal list.
+    /// `# cf-probe:*` markers are the preview's own reads, never the move's,
+    /// and the pattern excludes them by construction.
+    fn all_move_script_markers() -> std::collections::BTreeSet<String> {
+        let re = regex::Regex::new(r"# cf-(?:carry|move):[a-z-]+").unwrap();
+        [
+            include_str!("mod.rs"),
+            include_str!("carry.rs"),
+            include_str!("claude_state.rs"),
+        ]
+        .iter()
+        .flat_map(|src| re.find_iter(src).map(|m| m.as_str().to_string()))
+        .collect()
+    }
+
+    /// The read-only markers a dry run legitimately sends: the move's own
+    /// opening checks (`gather`, unconditionally) plus the preview's own
+    /// source-side listings (step 2/3). Every other marker the move can
+    /// print belongs to the write/carry flow — including ones that are
+    /// arguably reads in isolation (`haves`, `chunk`, `read`, `size`,
+    /// `verify`, `prep`) but that the move only ever sends from inside that
+    /// flow, so their presence here would mean a dry run started carrying.
+    const READ_ONLY_MARKERS: &[&str] = &[
+        "# cf-move:inspect",
+        "# cf-move:locate",
+        "# cf-carry:ignored-list",
+        "# cf-carry:state-list",
+        "# cf-carry:memory-list",
     ];
+
+    /// [`all_move_script_markers`] minus [`READ_ONLY_MARKERS`]: every script
+    /// marker a dry run must never send.
+    fn writing_markers() -> Vec<String> {
+        let markers: Vec<String> = all_move_script_markers()
+            .into_iter()
+            .filter(|m| !READ_ONLY_MARKERS.contains(&m.as_str()))
+            .collect();
+        // A regex that stopped matching anything (a doc-comment reformat, a
+        // marker syntax change) would make the writes-nothing test pass
+        // vacuously; guard against that silently happening.
+        assert!(
+            markers.len() >= 15,
+            "the marker scan found suspiciously few writing scripts: {markers:?}"
+        );
+        markers
+    }
 
     #[tokio::test]
     async fn a_dry_run_writes_nothing_on_either_host() {
@@ -6495,13 +6532,21 @@ mod tests {
         preview(&args(&f, false), &f.store, &f.fake, &hooks)
             .await
             .expect("a preview");
+        let markers = writing_markers();
         for host in ["alpha", "beta"] {
-            for m in WRITING_MARKERS {
+            for m in &markers {
                 assert!(
                     scripts_with(&f, host, m).is_empty(),
                     "a dry run sent {m} to {host}"
                 );
             }
+            // Starting the target is not a `# cf-*` script at all (it's a
+            // bare `tmux new-session` over the same bash -lc transport), so
+            // the marker scan above cannot see it.
+            assert!(
+                scripts_with(&f, host, "tmux new-session").is_empty(),
+                "a dry run sent a tmux new-session to {host}"
+            );
         }
         // No upload of any kind (the transcript copy is an upload).
         assert!(
@@ -6542,8 +6587,21 @@ mod tests {
             .expect("a preview");
         let rep = run(&f, &hooks, false).await.expect("the real move");
         assert_eq!(p.dirty, rep.carried.dirty_entries);
+        assert!(
+            !p.dirty.is_empty(),
+            "the fixture must exercise a non-empty case"
+        );
         assert_eq!(p.ignored_carried, rep.carried.ignored_carried);
+        assert!(
+            !p.ignored_carried.is_empty(),
+            "the fixture must exercise a non-empty case"
+        );
         assert_eq!(p.ignored_left_behind, rep.carried.ignored_left_behind);
+        assert!(
+            !p.ignored_left_behind.is_empty(),
+            "the fixture's denylisted node_modules/ must show up as left-behind on both sides, \
+             or this comparison is empty-vs-empty and proves nothing"
+        );
     }
 
     #[tokio::test]
@@ -6567,8 +6625,8 @@ mod tests {
     // Spec test 3 asked for every store-level refusal class. Under correction 4
     // that holds by construction — the preview's refusal IS `gather()`'s error,
     // the same value the move returns — so one representative (above) plus the
-    // alias-validation test (below) pins the mechanism rather than re-testing
-    // each refusal a second time.
+    // alias-validation and target-$HOME tests (below) pin the mechanism rather
+    // than re-testing each refusal a second time.
 
     #[tokio::test]
     async fn a_malformed_target_alias_is_the_same_refusal_as_the_move() {
@@ -6580,6 +6638,29 @@ mod tests {
         let from_move = move_session_with(a.clone(), &f.store, &f.fake, &hooks, fast())
             .await
             .unwrap_err();
+        assert_eq!(from_preview.code, from_move.code);
+        assert_eq!(from_preview.message, from_move.message);
+    }
+
+    /// `target_paths` fails on exactly one thing: the target's `$HOME`
+    /// lookup. The move wraps that with `before_target(...)`; the preview
+    /// must wrap it the same way, or the two errors share a code but not a
+    /// message.
+    #[tokio::test]
+    async fn a_target_home_lookup_failure_is_the_same_refusal_as_the_move() {
+        let (f, _bus) = recorded_fixture();
+        // Overrides the fixture's blanket `with_home` reply for "beta" only —
+        // the most recently added matching rule wins.
+        f.fake.on_host(
+            "beta",
+            Match::prefix("printenv HOME"),
+            Reply::fail(1, "no such user"),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let from_preview = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .unwrap_err();
+        let from_move = run(&f, &hooks, false).await.unwrap_err();
         assert_eq!(from_preview.code, from_move.code);
         assert_eq!(from_preview.message, from_move.message);
     }
@@ -6614,6 +6695,11 @@ mod tests {
             .expect("a preview");
         assert!(matches!(p.target, TargetState::Absent), "{:?}", p.target);
         assert!(!p.target_path.is_empty(), "it says which path it looked at");
+        assert!(
+            p.unknowns.iter().any(|u| u.contains("does not exist yet")),
+            "{:?}",
+            p.unknowns
+        );
     }
 
     #[tokio::test]
@@ -6629,22 +6715,66 @@ mod tests {
             .await
             .expect("a probe failure must not fail the preview");
         assert!(matches!(p.target, TargetState::Unknown), "{:?}", p.target);
-        assert!(!p.unknowns.is_empty());
+        assert!(
+            p.unknowns
+                .iter()
+                .any(|u| u.contains("ssh: connection reset")),
+            "the probe's own failure reason should be in unknowns: {:?}",
+            p.unknowns
+        );
     }
 
+    /// `strict` is a read-only verdict `gather()` evaluates itself: a strict
+    /// dry run over a dirty, unpushed source must refuse exactly like a
+    /// strict move — nothing about `strict` is ignored by a preview.
     #[tokio::test]
-    async fn the_bundle_size_is_named_as_unknown_and_ignored_flags_are_said() {
+    async fn a_strict_preview_refuses_dirty_work_exactly_like_a_strict_move() {
         let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         let mut a = args(&f, false);
         a.strict = true;
-        a.clean_target = true;
-        let p = preview(&a, &f.store, &f.fake, &hooks)
+        let from_preview = preview(&a, &f.store, &f.fake, &hooks).await.unwrap_err();
+        let from_move = run_with(&f, &hooks, |a| a.strict = true).await.unwrap_err();
+        assert_eq!(from_preview.code, from_move.code);
+        assert_eq!(from_preview.message, from_move.message);
+    }
+
+    #[tokio::test]
+    async fn the_bundle_size_and_clean_target_are_named_as_unknowns() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let baseline = preview(&args(&f, false), &f.store, &f.fake, &hooks)
             .await
             .expect("a preview");
-        let all = p.unknowns.join(" | ");
+        let mut a = args(&f, false);
+        a.clean_target = true;
+        let with_clean_target = preview(&a, &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        let all = with_clean_target.unknowns.join(" | ");
         assert!(all.contains("bundle"), "{all}");
-        assert!(all.contains("strict"), "{all}");
         assert!(all.contains("clean_target"), "{all}");
+        // Worded as what it actually does, not merely "ignored": it only
+        // acts in the write phase a dry run never reaches.
+        assert!(all.contains("write phase"), "{all}");
+        // clean_target changes nothing else in the preview: it adds exactly
+        // one unknowns line and nothing about the computed state.
+        assert_eq!(
+            with_clean_target.unknowns.len(),
+            baseline.unknowns.len() + 1
+        );
+        assert_eq!(with_clean_target.dirty, baseline.dirty);
+        assert_eq!(with_clean_target.ignored_carried, baseline.ignored_carried);
+        assert_eq!(
+            with_clean_target.ignored_left_behind,
+            baseline.ignored_left_behind
+        );
+        assert_eq!(with_clean_target.target_path, baseline.target_path);
+        assert_eq!(
+            format!("{:?}", with_clean_target.target),
+            format!("{:?}", baseline.target)
+        );
+        assert_eq!(with_clean_target.commits_ahead, baseline.commits_ahead);
     }
 }
