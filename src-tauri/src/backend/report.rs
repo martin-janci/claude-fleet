@@ -1,11 +1,29 @@
 //! Flushes `fleet_core::logging::report_ring()` to the hub's `POST /report`.
 //! Fire-and-forget: nothing awaits it, and its answers only steer itself.
 //! Spec: docs/superpowers/specs/2026-09-21-hub-error-channel-design.md
+//!
+//! What the hub's answer does to the flusher:
+//!
+//! | Answer | Then |
+//! |---|---|
+//! | `204` | Sent. Reset the backoff. |
+//! | `404` | The hub predates this route: log once at `info`, stop the flusher for this run. |
+//! | `401` / `403` | The token is dead or the client is refused: log once, stop. |
+//! | `429` | Over budget: keep the batch, wait one full minute before the next flush. |
+//! | Other `400..=499` | The hub deterministically refused this exact batch (e.g. `400` from validation, `413` from its own body-size limit) — retrying it forever would poison the flusher, so it is discarded (one `warn`, never the body) and the backoff resets. |
+//! | `5xx`, transport error, or no answer within the timeout | Keep the batch (the ring caps it), back off 5 s → 10 s → 20 s → 40 s → 60 s until an answer. |
+//!
+//! A batch that would itself cross the hub's `BODY_MAX` (a drain of up to
+//! `HTTP_BATCH_MAX` clamped reports can, at roughly 6 KiB apiece) is split
+//! before it is ever posted: [`ReportFlusher::next_batch`] trims reports off
+//! the end until what is left fits, and carries the trimmed tail to go out
+//! ahead of anything drained later — see `carry` below.
 
 use crate::backend::remote::HubTransport;
 use crate::backend::RemoteConfig;
 use fleet_core::logging::redact;
-use fleet_proto::report::{ReportBatch, ReportRing, HTTP_BATCH_MAX};
+use fleet_proto::report::{Report, ReportBatch, ReportRing, BODY_MAX, HTTP_BATCH_MAX};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -20,6 +38,11 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 pub enum Flush {
     Nothing,
     Sent(usize),
+    /// The hub deterministically refused this batch — a `400..=499` other
+    /// than `401`/`403`/`404`/`429`, which would otherwise repost the same
+    /// doomed batch forever and starve every report behind it. Dropped, not
+    /// retried.
+    Discarded(usize),
     /// The hub predates the route or refuses this client: stop for this run.
     Stop,
     /// Keep the batch and wait this long.
@@ -31,8 +54,14 @@ pub struct ReportFlusher {
     token: String,
     transport: Arc<dyn HubTransport>,
     ring: &'static ReportRing,
-    /// A batch the last flush could not deliver, retried before the ring.
+    /// A batch the last flush could not deliver, retried before anything
+    /// else — it already went through redaction and the body-size split, so
+    /// it is reposted exactly as built.
     held: Option<ReportBatch>,
+    /// The tail trimmed off an oversize batch by [`Self::next_batch`],
+    /// oldest first. Consumed before a fresh ring drain, so a report that
+    /// arrived earlier is never overtaken by one the ring handed out later.
+    carry: VecDeque<Report>,
     backoff: Duration,
 }
 
@@ -48,30 +77,57 @@ impl ReportFlusher {
             transport,
             ring,
             held: None,
+            carry: VecDeque::new(),
             backoff: BACKOFF_START,
         }
+    }
+
+    /// Whether `batch`, as JSON, fits the hub's `POST /report` body limit.
+    /// An encode failure is not this function's problem to solve — treat it
+    /// as fitting so the caller's trim loop terminates and `flush_once`
+    /// reports the (harmless) encode error itself.
+    fn fits(batch: &ReportBatch) -> bool {
+        serde_json::to_string(batch)
+            .map(|s| s.len() <= BODY_MAX)
+            .unwrap_or(true)
     }
 
     fn next_batch(&mut self) -> Option<ReportBatch> {
         if let Some(h) = self.held.take() {
             return Some(h);
         }
-        let mut b = self.ring.drain(HTTP_BATCH_MAX);
-        if b.reports.is_empty() && b.dropped == 0 {
-            return None;
-        }
-        for r in &mut b.reports {
-            r.message = redact(&r.message).into_owned();
-            if let Some(ctx) = &r.context {
-                if let Ok(text) = serde_json::to_string(ctx) {
-                    let red = redact(&text);
-                    if red != text {
-                        r.context = serde_json::from_str(&red).ok();
+        let (reports, dropped) = if !self.carry.is_empty() {
+            (self.carry.drain(..).collect::<Vec<_>>(), 0)
+        } else {
+            let b = self.ring.drain(HTTP_BATCH_MAX);
+            if b.reports.is_empty() && b.dropped == 0 {
+                return None;
+            }
+            let mut reports = b.reports;
+            for r in &mut reports {
+                r.message = redact(&r.message).into_owned();
+                if let Some(ctx) = &r.context {
+                    if let Ok(text) = serde_json::to_string(ctx) {
+                        let red = redact(&text);
+                        if red != text {
+                            r.context = serde_json::from_str(&red).ok();
+                        }
                     }
                 }
             }
+            (reports, b.dropped)
+        };
+
+        // A single clamped report is well under BODY_MAX (`Report::clamp`
+        // bounds it to roughly 6.3 KiB), so this always terminates with at
+        // least one report left in `batch`.
+        let mut batch = ReportBatch { reports, dropped };
+        while batch.reports.len() > 1 && !Self::fits(&batch) {
+            if let Some(tail) = batch.reports.pop() {
+                self.carry.push_front(tail);
+            }
         }
-        Some(b)
+        Some(batch)
     }
 
     fn back_off(&mut self, batch: ReportBatch) -> Flush {
@@ -116,6 +172,19 @@ impl ReportFlusher {
                     self.held = Some(batch);
                     Flush::Backoff(BACKOFF_MAX)
                 }
+                s @ 400..=499 => {
+                    // Deterministic for this exact body (bad shape, or over
+                    // the hub's own size limit): holding it would repost the
+                    // same doomed batch every backoff forever and starve
+                    // every report queued behind it. Never log the body.
+                    tracing::warn!(
+                        status = s,
+                        batch_size = n,
+                        "[report] the hub deterministically refused this batch; discarding it"
+                    );
+                    self.backoff = BACKOFF_START;
+                    Flush::Discarded(n)
+                }
                 other => {
                     tracing::warn!(status = other, "[report] unexpected answer from /report");
                     self.back_off(batch)
@@ -143,7 +212,7 @@ impl ReportFlusher {
             match self.flush_once().await {
                 Flush::Stop => return,
                 Flush::Backoff(d) => wait = d,
-                Flush::Nothing | Flush::Sent(_) => {
+                Flush::Nothing | Flush::Sent(_) | Flush::Discarded(_) => {
                     wait = if self.ring.len() >= FLUSH_AT {
                         Duration::ZERO
                     } else {
@@ -163,7 +232,7 @@ pub fn spawn_report_flusher(flusher: ReportFlusher, shutdown: CancellationToken)
 mod tests {
     use super::*;
     use crate::backend::remote::HubResponse;
-    use fleet_proto::report::{Report, ReportRing};
+    use fleet_proto::report::ReportRing;
     use std::sync::Mutex;
 
     struct Fake {
@@ -286,5 +355,86 @@ mod tests {
         r.push(Report::error("c", "m"));
         let (mut f, _) = flusher(vec![status(401)], r);
         assert_eq!(f.flush_once().await, Flush::Stop);
+    }
+
+    /// The regression this fix round exists for: without it, a `400` or
+    /// `413` — deterministic for this exact body — would be held and
+    /// reposted every backoff forever, poisoning the flusher.
+    #[tokio::test]
+    async fn a_400_or_413_discards_the_batch_and_keeps_draining() {
+        let r = ring();
+        r.push(Report::error("c", "m1"));
+        let (mut f, fake) = flusher(vec![status(413), ok()], r);
+        assert_eq!(f.flush_once().await, Flush::Discarded(1));
+
+        r.push(Report::error("c", "m2"));
+        assert_eq!(
+            f.flush_once().await,
+            Flush::Sent(1),
+            "the discard did not wedge the flusher behind it"
+        );
+
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_ne!(
+            seen[0].1, seen[1].1,
+            "the second post must not just replay the discarded batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversize_drain_is_split_under_the_body_cap_and_the_tail_goes_first_next_time() {
+        let r = ring();
+        for i in 0..50u32 {
+            // A numbered message so push order is recoverable from the
+            // posted bodies, padded out toward `MESSAGE_MAX` so 50 of these
+            // cannot possibly fit one `BODY_MAX` body.
+            let mut rep = Report::error("c", &format!("{i:03}-{}", "x".repeat(1996)));
+            rep.context = Some(serde_json::json!({ "s": "x".repeat(3900) }));
+            rep.clamp();
+            r.push(rep);
+        }
+        // More answers than any plausible split count needs; the loop below
+        // stops at `Flush::Nothing` well before they run out.
+        let (mut f, fake) = flusher(std::iter::repeat_with(ok).take(20).collect(), r);
+
+        let mut posted_bodies = vec![];
+        loop {
+            match f.flush_once().await {
+                Flush::Nothing => break,
+                Flush::Sent(_) => {
+                    posted_bodies.push(fake.seen.lock().unwrap().last().unwrap().1.clone());
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+
+        assert!(
+            posted_bodies.len() > 1,
+            "50 reports at ~6 KiB apiece must not fit one BODY_MAX body"
+        );
+        let mut all_indices = vec![];
+        for body in &posted_bodies {
+            assert!(
+                body.len() <= BODY_MAX,
+                "a posted body of {} bytes exceeds BODY_MAX ({BODY_MAX})",
+                body.len()
+            );
+            let batch: ReportBatch = serde_json::from_str(body).unwrap();
+            for r in &batch.reports {
+                let idx: u32 = r.message[..3].parse().expect("numbered prefix");
+                all_indices.push(idx);
+            }
+        }
+        assert_eq!(
+            all_indices.len(),
+            50,
+            "every pushed report must be posted exactly once"
+        );
+        assert_eq!(
+            all_indices,
+            (0..50).collect::<Vec<_>>(),
+            "reports must go out in push order across posts, tail-of-a-split first"
+        );
     }
 }

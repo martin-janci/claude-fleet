@@ -276,11 +276,18 @@ itself:
 
 | Answer | Then |
 |---|---|
-| `204` | Done. |
+| `204` | Done. Reset the backoff. |
 | `404` | The hub predates this route: log once at `info`, stop the flusher for this run. |
 | `401` / `403` | The token is dead or the client is refused: log once, stop — the window is already showing the banner for this. |
 | `429` | Over budget: keep the batch, wait one full minute before the next flush. |
-| Anything else, or no answer | Keep the batch (the ring caps it), back off 5 s → 10 s → 20 s → 40 s → 60 s until an answer. |
+| Any other `400..=499` | Deterministic for this exact body — `400` from the hub's own validation, `413` from its `DefaultBodyLimit`, above all. Holding it would repost the same doomed batch every backoff forever, starving every report queued behind it: instead it is discarded (one `warn` naming the status and the batch size, never the body) and the backoff resets. |
+| `5xx`, a transport error, or no answer | Keep the batch (the ring caps it), back off 5 s → 10 s → 20 s → 40 s → 60 s until an answer. |
+
+A drain of up to `HTTP_BATCH_MAX` clamped reports can itself exceed
+`BODY_MAX` (roughly 6 KiB per report at the caps above). Before a batch is
+ever posted the flusher trims reports off its end until the JSON fits, and
+carries the trimmed tail to go out ahead of anything drained later — so a
+report already queued is never overtaken by one the ring hands out after it.
 
 The flusher's own errors go to the log at `warn`, and — because the layer
 only captures `error` — never back into the ring. A `RemoteConfig` value,
@@ -407,9 +414,11 @@ sender's filter is `RUST_LOG=off`). The `fleet-agent` config section names
   by `since`, `origin`, `level` and caps `limit`.
 - **Desktop flusher:** against a recorded `HubTransport`: batches at 20 or
   5 s, stops after `404`, backs off after a transport error and keeps the
-  batch, holds a minute after `429`, never runs in `Backend::Local`, never
-  runs with `CLAUDE_FLEET_HUB_REPORTS=0`. The routing tests get the
-  `report_client_error` row and its verdict.
+  batch, holds a minute after `429`, discards (not holds) any other
+  `400..=499` and keeps draining behind it, splits an oversize drain under
+  `BODY_MAX` and carries the tail out first next time, never runs in
+  `Backend::Local`, never runs with `CLAUDE_FLEET_HUB_REPORTS=0`. The
+  routing tests get the `report_client_error` row and its verdict.
 - **Agent:** with the fake hub in `conn`'s tests, an error pushed before the
   handshake arrives as a `Report` frame on the first beat after `welcome`;
   with `report_errors: false` no layer is installed.
