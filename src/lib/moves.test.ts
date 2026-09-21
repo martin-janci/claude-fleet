@@ -754,6 +754,45 @@ describe('a waiting run', () => {
     const run = get(moves).get(7)!;
     expect(run.status).toBe('failed');
     expect(run.waitEnded).toBe('timed_out');
+    // Only `refused` ever carries one — nothing else in `record_wait_ended`
+    // writes a `code`/`message`.
+    expect(run.waitRefusal).toBeNull();
+  });
+
+  // Fix round 1, finding 1: `record_wait_ended` (wait.rs) writes `code` and
+  // `message` on a `refused` end; the sheet needs them to say more than "the
+  // move was refused".
+  it('carries the refusal (code and message) when the wait ends refused', async () => {
+    invoked.mockResolvedValueOnce(
+      ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+    );
+    startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+    await flush();
+    dispatchTimelineEvents([
+      waitingEvent({
+        detail: JSON.stringify({ reason: 'refused', code: 'E_MOVE_DIRTY', message: 'dirty' }),
+      }),
+    ]);
+    const run = get(moves).get(7)!;
+    expect(run.status).toBe('failed');
+    expect(run.waitEnded).toBe('refused');
+    expect(run.waitRefusal).toEqual({ code: 'E_MOVE_DIRTY', message: 'dirty' });
+  });
+
+  // The detail may lack `code`/`message` (an older backend, or a `refused`
+  // this build cannot fully parse) — `waitRefusal` must fall back to `null`
+  // rather than half-populating or throwing.
+  it('falls back to no refusal when the detail lacks code or message', async () => {
+    invoked.mockResolvedValueOnce(
+      ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+    );
+    startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+    await flush();
+    dispatchTimelineEvents([waitingEvent({ detail: JSON.stringify({ reason: 'refused' }) })]);
+    const run = get(moves).get(7)!;
+    expect(run.status).toBe('failed');
+    expect(run.waitEnded).toBe('refused');
+    expect(run.waitRefusal).toBeNull();
   });
 
   it('a "moved" wait_ended is left alone: move:progress settles it instead', async () => {

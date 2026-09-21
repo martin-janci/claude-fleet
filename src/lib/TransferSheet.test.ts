@@ -414,6 +414,7 @@ describe('TransferSheet: recovery actions', () => {
       awaitingStart: false,
       deadlineUnix: null,
       waitEnded: null,
+      waitRefusal: null,
     };
   }
 
@@ -450,6 +451,7 @@ describe('TransferSheet: recovery actions', () => {
       awaitingStart: false,
       deadlineUnix: null,
       waitEnded: null,
+      waitRefusal: null,
     };
   }
 
@@ -483,6 +485,7 @@ describe('TransferSheet: recovery actions', () => {
       awaitingStart: false,
       deadlineUnix: null,
       waitEnded: null,
+      waitRefusal: null,
     };
   }
 
@@ -733,6 +736,7 @@ describe('TransferSheet: waiting', () => {
       awaitingStart: false,
       deadlineUnix: Math.floor(Date.now() / 1000) + 600,
       waitEnded: null,
+      waitRefusal: null,
       ...over,
     };
   }
@@ -784,6 +788,46 @@ describe('TransferSheet: waiting', () => {
     expect(queryByTestId('transfer-failure')).toBeNull();
     await fireEvent.click(getByTestId('transfer-wait-retry'));
     expect(retryMove).toHaveBeenCalledWith(7);
+  });
+
+  // Fix round 1, finding 1: a `refused` wait carries `code`/`message`
+  // (`moves.ts`'s `waitRefusal`) that the sheet should read, in preference
+  // to the bare "the move was refused" sentence.
+  it('a refused wait with a known code shows the failure view\'s own wording for it', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({
+        status: 'failed',
+        waitEnded: 'refused',
+        deadlineUnix: null,
+        waitRefusal: { code: 'E_MOVE_DIRTY', message: 'raw backend text' },
+      }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toContain(
+      'The source has uncommitted work, and this move was asked to refuse that.',
+    );
+  });
+
+  it('a refused wait with an unrecognised code falls back to its message', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({
+        status: 'failed',
+        waitEnded: 'refused',
+        deadlineUnix: null,
+        waitRefusal: { code: 'E_SOME_FUTURE_CODE', message: 'a message from a newer backend' },
+      }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toContain(
+      'a message from a newer backend',
+    );
+  });
+
+  it('a refused wait with no usable refusal falls back to the bare sentence', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({ status: 'failed', waitEnded: 'refused', deadlineUnix: null, waitRefusal: null }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toContain(
+      'The source finished, but the move itself was refused.',
+    );
   });
 });
 

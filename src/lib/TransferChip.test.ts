@@ -129,7 +129,7 @@ describe('TransferChip', () => {
       status: 'waiting', report: null, error: null, resolveError: null,
       startedAt: Date.now(), settledAt: null, cleanTarget: false, attempt: 1,
       resolving: false, awaitingStart: false,
-      deadlineUnix: Math.floor(Date.now() / 1000) + 600, waitEnded: null,
+      deadlineUnix: Math.floor(Date.now() / 1000) + 600, waitEnded: null, waitRefusal: null,
     };
     putRunForTest(run);
     render(TransferChip, { props: { session: movable } });

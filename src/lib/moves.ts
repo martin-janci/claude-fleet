@@ -95,6 +95,12 @@ export interface MoveRun {
    *  `refused`, `hub_restarted`); `null` while waiting, or for a run that
    *  never waited. */
   waitEnded: string | null;
+  /** The refusal `record_wait_ended` recorded on a `refused`
+   *  `session_move_wait_ended` (`crates/fleet-core/src/service/move_session/
+   *  wait.rs`) — `code` and `message`, the same shape as `IpcError`'s own.
+   *  `null` for every other reason, and for a `refused` one whose detail
+   *  predates these fields or is otherwise unusable. */
+  waitRefusal: { code: string; message: string } | null;
 }
 
 const DETAIL_MAX = 80;
@@ -259,6 +265,7 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     awaitingStart: replacing,
     deadlineUnix: null,
     waitEnded: null,
+    waitRefusal: null,
   });
   void moveSession(session.id, toHost, { keepSource: opts.keepSource, when: 'idle' }).then((r) =>
     settleMoveResult(session.id, r),
@@ -370,6 +377,25 @@ function waitEndReason(detail: string | null): string | null {
   }
 }
 
+/** `code`/`message` on a `refused` `session_move_wait_ended` — only
+ *  `record_wait_ended` (`crates/fleet-core/src/service/move_session/wait.rs`)
+ *  writes them, and only for that one reason. `null` when either field is
+ *  missing (an older backend's detail, or any other reason) so the caller can
+ *  fall back to a plain sentence instead of showing half a refusal. */
+function waitEndRefusal(detail: string | null): { code: string; message: string } | null {
+  if (detail === null) return null;
+  try {
+    const v: unknown = JSON.parse(detail);
+    if (typeof v !== 'object' || v === null) return null;
+    const o = v as Record<string, unknown>;
+    const code = o.code;
+    const message = o.message;
+    return typeof code === 'string' && typeof message === 'string' ? { code, message } : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Subscribe a `waiting` run to its own session's live timeline, so a wait
  * that ends WITHOUT a move (cancelled, timed out, the session gone, refused,
@@ -389,7 +415,11 @@ function watchWait(sessionId: number): void {
     if (!run || run.status !== 'waiting') return;
     unwatchWait(sessionId);
     if (reason === null) return; // an unusable event: nothing to settle with
-    put({ ...run, status: 'failed', waitEnded: reason, error: null, settledAt: Date.now() });
+    // Only a `refused` end ever carries a refusal; every other reason's
+    // detail has no `code`/`message` to find, so `waitEndRefusal` would only
+    // waste a parse (and does return `null` on one — this just skips it).
+    const waitRefusal = reason === 'refused' ? waitEndRefusal(e.detail) : null;
+    put({ ...run, status: 'failed', waitEnded: reason, waitRefusal, error: null, settledAt: Date.now() });
   });
   waitWatchers.set(sessionId, unsub);
 }
@@ -397,7 +427,7 @@ function watchWait(sessionId: number): void {
 function settleWaiting(sessionId: number, w: MoveWaiting): void {
   const run = get(store).get(sessionId);
   if (!run || run.origin !== 'local' || run.status !== 'running') return;
-  put({ ...run, status: 'waiting', deadlineUnix: w.deadline_unix, waitEnded: null });
+  put({ ...run, status: 'waiting', deadlineUnix: w.deadline_unix, waitEnded: null, waitRefusal: null });
   watchWait(sessionId);
 }
 
@@ -449,6 +479,7 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     awaitingStart: true,
     deadlineUnix: null,
     waitEnded: null,
+    waitRefusal: null,
   });
   void moveSession(sessionId, run.toHost, {
     // `null` only for a run this window never started (an `observed` one —
@@ -592,6 +623,7 @@ export function adoptPartial(p: UnresolvedPartial, sessionName: string): void {
     settledAt: Date.now(),
     deadlineUnix: null,
     waitEnded: null,
+    waitRefusal: null,
   });
 }
 
@@ -628,6 +660,7 @@ export function adoptWait(w: UnresolvedWait, sessionName: string): void {
     settledAt: null,
     deadlineUnix: w.deadlineUnix,
     waitEnded: null,
+    waitRefusal: null,
   });
   watchWait(w.sessionId);
 }
@@ -654,6 +687,7 @@ function observed(p: MoveProgress): MoveRun {
     awaitingStart: false,
     deadlineUnix: null,
     waitEnded: null,
+    waitRefusal: null,
   };
 }
 

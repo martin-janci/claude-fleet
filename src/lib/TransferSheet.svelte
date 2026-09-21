@@ -18,6 +18,7 @@
     retryMove,
     startMove,
     transferSheetFor,
+    type MoveRun,
   } from './moves';
   import { formatDuration } from './account_usage';
   import { selectSession } from './selection';
@@ -113,8 +114,9 @@
   /** Why a `waiting` run's wait ended without a move ever starting — in
    *  plain words, one per `WaitEnd` reason (`crates/fleet-core/src/service/
    *  move_session/wait.rs`). A reason this build does not know still renders
-   *  something rather than nothing, the same way an unrecognised leftover
-   *  `reason` elsewhere in this file is shown as it came. */
+   *  a fixed fallback sentence rather than nothing. `refused` is handled
+   *  separately (`refusedWaitText`, below) since it may carry an actual
+   *  refusal to show instead of this bare fallback. */
   const WAIT_END_TEXT: Record<string, string> = {
     cancelled: 'You cancelled the wait.',
     timed_out: 'The wait timed out after the limit.',
@@ -122,12 +124,27 @@
     refused: 'The source finished, but the move itself was refused.',
     hub_restarted: 'The hub restarted while the wait was pending.',
   };
+  /** `refused` with a usable `waitRefusal`: the same wording the ordinary
+   *  failure view would use for that code, when the code is one this build
+   *  recognises; `describeMoveError`'s own fallback for an unknown code is
+   *  the raw message, so this only needs its own fallback for the gaps that
+   *  leaves — an empty message, or no `waitRefusal` at all (an older
+   *  backend's detail, or one `waitEndRefusal` could not parse). */
+  function refusedWaitText(run: MoveRun): string {
+    const r = run.waitRefusal;
+    if (!r) return WAIT_END_TEXT.refused;
+    const text = describeMoveError({ code: r.code, message: r.message, details: null }, 'failed', run.toHost, null)
+      .what;
+    return text.trim() !== '' ? text : WAIT_END_TEXT.refused;
+  }
   /** Set only for a `failed` run whose wait ended without ever starting a
    *  move — a distinct view from an ordinary failure (below), since there is
    *  no error, no steps, and nothing was ever copied anywhere. */
   const waitEndedText = $derived(
     run && run.status === 'failed' && run.waitEnded !== null
-      ? (WAIT_END_TEXT[run.waitEnded] ?? 'The wait ended without a move.')
+      ? run.waitEnded === 'refused'
+        ? refusedWaitText(run)
+        : (WAIT_END_TEXT[run.waitEnded] ?? 'The wait ended without a move.')
       : null,
   );
   const failure = $derived(
