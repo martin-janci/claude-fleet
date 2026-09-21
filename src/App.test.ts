@@ -82,6 +82,41 @@ describe('App bootstrap failure', () => {
   });
 });
 
+describe('App startup order', () => {
+  it('subscribes to row events before the first list resolves', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const { listen } = await import('@tauri-apps/api/event');
+    const inv = invoke as ReturnType<typeof vi.fn>;
+    const lis = listen as ReturnType<typeof vi.fn>;
+    const original = inv.getMockImplementation() as
+      | ((cmd: string, ...rest: unknown[]) => Promise<unknown>)
+      | undefined;
+    const order: string[] = [];
+    lis.mockImplementation(async (name: string) => {
+      order.push(`listen:${name}`);
+      return () => {};
+    });
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+      if (cmd === 'list_sessions') {
+        order.push('list_sessions');
+        return [];
+      }
+      return original ? original(cmd, ...rest) : null;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(order).toContain('list_sessions'));
+      const firstListen = order.findIndex((o) => o === 'listen:session:updated');
+      const list = order.indexOf('list_sessions');
+      expect(firstListen).toBeGreaterThanOrEqual(0);
+      expect(firstListen).toBeLessThan(list);
+    } finally {
+      inv.mockImplementation(original!);
+      lis.mockImplementation(async () => () => {});
+    }
+  });
+});
+
 describe('App layout', () => {
   it('renders sidebar, center, and terminal panes', () => {
     const { getByTestId } = render(App);

@@ -110,6 +110,10 @@ export interface SessionRow {
   context_stale: boolean;
   /** tmux pane id (`%17`) reconcile last saw for this row. */
   tmux_pane_id: string | null;
+  /** Bumped by the backend on every write (migration 040); orders a
+   *  command's return value against a row event. Absent on rows built
+   *  client-side and on rows from a hub older than the column. */
+  row_version?: number;
 }
 
 type UsageFields = Partial<
@@ -155,10 +159,14 @@ const rows = createRowStore<SessionRow, number>({
   // delete a row; a `session:updated` still in flight for that id would
   // otherwise re-insert the dead row ("ghost session").
   tombstoneMs: 5000,
-  // Monotonic guard: don't let a staler payload (e.g. a command return value
-  // that raced a newer `session:updated` event) clobber a fresher row. Equal
-  // timestamps still apply — they may carry a status change.
-  isStale: (incoming, current) => incoming.last_activity_at < current.last_activity_at,
+  // Monotonic guard: a payload carrying a lower row_version than the row we
+  // hold is a stale snapshot (a command return value that raced a newer
+  // `session:updated`). Equal versions still apply. A payload without one is
+  // never rejected for it — only a KNOWN older version is.
+  isStale: (incoming, current) =>
+    incoming.row_version !== undefined &&
+    current.row_version !== undefined &&
+    incoming.row_version < current.row_version,
 });
 export const sessions = rows.store;
 export const resetTombstonesForTests = rows.resetTombstonesForTests;
@@ -195,7 +203,12 @@ showRowDetails.subscribe((v) => writePref('rows.details', v));
 export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
   if (r.ok) {
-    sessions.set(r.value);
+    const listed = new Set(r.value.map((s) => s.id));
+    sessions.update((cur) => {
+      let next = cur.filter((s) => listed.has(s.id));
+      for (const row of r.value) next = rows.mergeInto(next, row);
+      return next;
+    });
     sessionsLoaded.set(true);
   }
   return r;

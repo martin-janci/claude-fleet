@@ -187,6 +187,24 @@
       healthError = `${hr0.error.code}: ${hr0.error.message}`;
       push({ kind: 'error', code: hr0.error.code, message: `Health check failed: ${hr0.error.message}` });
     }
+    // Subscribed BEFORE the first list: a `session:updated` that lands while
+    // the list is in flight would otherwise be emitted to no listener and
+    // lost until the row changes again.
+    unlistenEvents = await subscribeToRowEvents({
+      onSessionEvents: applySessionEvents,
+      onHostEvents: applyHostEvents,
+      onAccountEvents: applyAccountEvents,
+      onProjectEvents: applyProjectEvents,
+      onTaskEvents: applyTaskEvents,
+      onAccountUsageEvents: applyAccountUsageEvents,
+      onTimelineEvents: dispatchTimelineEvents,
+      onConversationsChanged: dispatchConversationsChanged,
+      onAssetInventoryUpdated: mergeInventoryRow,
+      onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
+      onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
+      onSyncProgress: (p) => syncProgress.set(p),
+      onMoveProgress: applyMoveProgress,
+    });
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),
       loadSessions(),
@@ -213,23 +231,6 @@
     if (!get(onboardingWelcomed) && visibleHostCount === 0 && workSessionCount === 0) {
       showWelcome = true;
     }
-    // Batched handlers: a reconcile burst of N `session:updated` events lands
-    // as ONE store update instead of N (see events.ts).
-    unlistenEvents = await subscribeToRowEvents({
-      onSessionEvents: applySessionEvents,
-      onHostEvents: applyHostEvents,
-      onAccountEvents: applyAccountEvents,
-      onProjectEvents: applyProjectEvents,
-      onTaskEvents: applyTaskEvents,
-      onAccountUsageEvents: applyAccountUsageEvents,
-      onTimelineEvents: dispatchTimelineEvents,
-      onConversationsChanged: dispatchConversationsChanged,
-      onAssetInventoryUpdated: mergeInventoryRow,
-      onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
-      onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
-      onSyncProgress: (p) => syncProgress.set(p),
-      onMoveProgress: applyMoveProgress,
-    });
     // Tasks are secondary to the session list: load after the row
     // subscription is live so no `task:updated` is missed, and never block
     // startup on it (a failure only leaves the Tasks panel empty).
