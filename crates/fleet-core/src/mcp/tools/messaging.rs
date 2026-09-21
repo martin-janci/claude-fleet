@@ -15,7 +15,11 @@ impl FleetTools {
         Returns JSON { delivered, session_id, \
         turn_seq_before }: pass turn_seq_before to wait_for_session \
         { until: \"turn_gt\" } or session_transcript { since_turn } to \
-        collect the reply (or use run_prompt, which does all three).")]
+        collect the reply (or use run_prompt, which does all three). \
+        Refuses a blocked or stuck session (E_INVALID_STATE) unless \
+        force=true; a working session queues it (queued=true). acked \
+        reports whether the REPL's hook confirmed it. Repeat a \
+        client_msg_id to retry without delivering twice.")]
     pub(super) async fn send_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -36,8 +40,21 @@ impl FleetTools {
             p.tmux_name.as_deref(),
             "the session to prompt",
         )?;
+        let label = caller.label();
+        if let Some(id) = p.client_msg_id.as_deref() {
+            if let Some(hit) = self.recent_sends.lock().unwrap().get(&label, id) {
+                audit("send_prompt", &format!("dedupe client_msg_id={id}"));
+                return ok_json(&hit);
+            }
+        }
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
-        let out = self.deliver_prompt(&row, prompt, p.submit).await?;
+        let out = self.deliver_prompt(&row, prompt, p.submit, p.force).await?;
+        if let Some(id) = p.client_msg_id.as_deref() {
+            self.recent_sends
+                .lock()
+                .unwrap()
+                .put(&label, id, out.clone());
+        }
         ok_json(&out)
     }
 

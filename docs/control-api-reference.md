@@ -353,9 +353,9 @@ Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `su
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only) or the caller is a trusted client. Returns JSON { delivered, session_id, turn_seq_before }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three).
+Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only) or the caller is a trusted client. Returns JSON { delivered, session_id, turn_seq_before }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working session queues it (queued=true). acked reports whether the REPL's hook confirmed it. Repeat a client_msg_id to retry without delivering twice.
 
-Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
+Parameters: `client_msg_id`, `force`, `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
 ### `session_conversation`
 

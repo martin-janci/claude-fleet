@@ -256,6 +256,14 @@ pub struct SendPromptParams {
     /// marked. Default false.
     #[serde(default)]
     pub raw: bool,
+    /// Deliver even when the session is blocked on a dialog or stuck. Off by
+    /// default: Enter on a permission prompt selects the highlighted answer.
+    #[serde(default)]
+    pub force: bool,
+    /// Caller-chosen id for this send. A repeat with the same id within ten
+    /// minutes returns the first result instead of delivering again.
+    #[serde(default)]
+    pub client_msg_id: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

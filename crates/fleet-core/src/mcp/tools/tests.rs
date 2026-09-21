@@ -1,5 +1,6 @@
 use super::*;
 use crate::ipc_error::codes;
+use std::time::Duration;
 
 fn text_of(c: &Content) -> &str {
     c.as_text().expect("text content").text.as_str()
@@ -1487,7 +1488,6 @@ fn a_tool_name_an_old_hub_does_not_know_refuses_a_client_with_e_forbidden() {
 
 #[test]
 fn tool_deadline_uses_the_documented_caps() {
-    use std::time::Duration;
     assert_eq!(tool_deadline("wait_for_session"), Duration::from_secs(660));
     assert_eq!(tool_deadline("run_prompt"), Duration::from_secs(660));
     assert_eq!(tool_deadline("new_session"), Duration::from_secs(300));
@@ -2354,7 +2354,17 @@ fn the_served_definition_budget_stays_bounded() {
     /// of headroom — and the two together, already cut to a one-sentence
     /// description and one-line field docs, add 615 for a total of 57,603.
     /// Headroom is again deliberately small.
-    const BUDGET_BYTES: usize = 57_700;
+    ///
+    /// Raised from 57,700 to 58,300 for `send_prompt`'s `force` and
+    /// `client_msg_id` (device-communication phase 1, task 3): two new
+    /// fields on an already-served tool, each paying the JSON-schema
+    /// structural cost (`"default"`, `"type"`, the property wrapper) on top
+    /// of its description, which trimming cannot touch. A degenerate pass —
+    /// the tool description cut to a fragment, both field docs to a few
+    /// words — still measured 57,892, 192 over the old budget, so text
+    /// could not have paid for it either; the two fields plus the three
+    /// required sentences of tool description measure 58,217.
+    const BUDGET_BYTES: usize = 58_300;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -2538,4 +2548,106 @@ fn every_confirmed_tool_outlives_its_confirmation_window() {
             crate::mcp::guard::CONFIRM_TTL,
         );
     }
+}
+
+fn row_with(status: Option<&str>, stuck: Option<&str>, turn_seq: i64) -> crate::store::SessionRow {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("gate", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let mut row = s.get_session_by_id(id).unwrap().unwrap();
+    row.claude_status = status.map(str::to_string);
+    row.stuck_kind = stuck.map(str::to_string);
+    row.turn_seq = turn_seq;
+    row
+}
+
+#[test]
+fn delivery_gate_refuses_a_blocked_or_stuck_session_unless_forced() {
+    let blocked = row_with(Some("blocked"), None, 3);
+    let e = delivery_gate(&blocked, false, true).unwrap_err();
+    assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
+    assert!(e.message.contains("force"), "{}", e.message);
+    let stuck = row_with(Some("idle"), Some("trust_prompt"), 3);
+    let e = delivery_gate(&stuck, false, true).unwrap_err();
+    assert!(e.message.contains("trust_prompt"), "{}", e.message);
+    assert!(!delivery_gate(&blocked, true, true).unwrap());
+    assert!(!delivery_gate(&stuck, true, true).unwrap());
+}
+
+#[test]
+fn delivery_gate_reports_a_working_session_as_queued_and_idle_as_not() {
+    assert!(delivery_gate(&row_with(Some("working"), None, 1), false, true).unwrap());
+    assert!(!delivery_gate(&row_with(Some("idle"), None, 1), false, true).unwrap());
+    assert!(!delivery_gate(&row_with(None, None, 1), false, true).unwrap());
+    // Staging text (submit=false) never queues a turn.
+    assert!(!delivery_gate(&row_with(Some("working"), None, 1), false, false).unwrap());
+}
+
+#[test]
+fn turn_seq_before_points_past_the_current_turn_only_for_an_unacked_queued_prompt() {
+    assert_eq!(turn_seq_before(7, false, Some(true)), 7);
+    assert_eq!(turn_seq_before(7, false, None), 7);
+    assert_eq!(
+        turn_seq_before(7, true, Some(true)),
+        7,
+        "acked now: the status was stale"
+    );
+    assert_eq!(
+        turn_seq_before(7, true, Some(false)),
+        8,
+        "really queued behind the running turn"
+    );
+    assert_eq!(turn_seq_before(7, true, None), 8);
+}
+
+#[tokio::test(start_paused = true)]
+async fn await_prompt_ack_returns_true_once_the_submit_counter_moves() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("ack", "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let bump = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            store
+                .lock()
+                .unwrap()
+                .record_prompt_submit_hook_for_row(id)
+                .unwrap();
+        })
+    };
+    let acked = await_prompt_ack(&store, id, 0, ACK_WAIT).await.unwrap();
+    bump.await.unwrap();
+    assert!(acked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn await_prompt_ack_returns_false_when_nothing_moves_before_the_deadline() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("ack", "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    assert!(!await_prompt_ack(&store, id, 0, ACK_WAIT).await.unwrap());
+}
+
+#[test]
+fn recent_sends_returns_the_first_result_for_a_repeated_id_and_stays_bounded() {
+    let mut r = RecentSends::default();
+    assert!(r.get("m", "a").is_none());
+    r.put("m", "a", serde_json::json!({"n": 1}));
+    assert_eq!(r.get("m", "a"), Some(serde_json::json!({"n": 1})));
+    assert!(r.get("other-caller", "a").is_none(), "keyed per caller");
+    for i in 0..(RECENT_SENDS_MAX + 5) {
+        r.put("m", &format!("id-{i}"), serde_json::json!(i));
+    }
+    assert!(r.entries.len() <= RECENT_SENDS_MAX);
 }

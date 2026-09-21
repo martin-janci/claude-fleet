@@ -370,6 +370,12 @@ pub fn select_targets(
     sessions
         .iter()
         .filter(|s| s.kind == "work")
+        // Never fan Enter into a dialog: a blocked or stuck session is
+        // skipped unless the operator's status filter asks for exactly that.
+        .filter(|s| {
+            f.status.as_deref() == Some("blocked")
+                || (s.claude_status.as_deref() != Some("blocked") && s.stuck_kind.is_none())
+        })
         .filter(|s| match &f.host {
             Some(h) => &s.host_alias == h,
             None => true,

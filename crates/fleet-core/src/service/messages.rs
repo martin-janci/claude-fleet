@@ -172,21 +172,29 @@ pub async fn send_message(
     let mut delivered_to_pane = false;
     let mut deliver_error: Option<String> = None;
     if args.deliver {
-        let header = pane_header(id, &from_row.tmux_name, &from_row.host_alias, &args.body);
-        match sessions::send_prompt(
-            sessions::SendPromptArgs {
-                host_alias: to_row.host_alias.clone(),
-                tmux_name: to_row.tmux_name.clone(),
-                prompt: header,
-                submit: args.submit,
-            },
-            store,
-            ssh,
-        )
-        .await
-        {
-            Ok(()) => delivered_to_pane = true,
-            Err(e) => deliver_error = Some(e.message),
+        if to_row.claude_status.as_deref() == Some("blocked") || to_row.stuck_kind.is_some() {
+            deliver_error = Some(format!(
+                "session {} is waiting on {}; the message is in its inbox but was not typed into the dialog",
+                to_row.id,
+                to_row.stuck_kind.as_deref().unwrap_or("a dialog")
+            ));
+        } else {
+            let header = pane_header(id, &from_row.tmux_name, &from_row.host_alias, &args.body);
+            match sessions::send_prompt(
+                sessions::SendPromptArgs {
+                    host_alias: to_row.host_alias.clone(),
+                    tmux_name: to_row.tmux_name.clone(),
+                    prompt: header,
+                    submit: args.submit,
+                },
+                store,
+                ssh,
+            )
+            .await
+            {
+                Ok(()) => delivered_to_pane = true,
+                Err(e) => deliver_error = Some(e.message),
+            }
         }
     }
 
@@ -434,6 +442,32 @@ mod tests {
             received[0].detail.as_deref(),
             Some(format!("from={a} ping").as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn deliver_to_a_blocked_recipient_lands_in_the_inbox_but_is_not_typed() {
+        let (store, ssh, a, b) = fixture();
+        {
+            let s = store.lock().unwrap();
+            s.record_notification_hook_for_row(
+                b,
+                crate::service::pane_intel::ClaudeStatus::Blocked,
+                None,
+            )
+            .unwrap();
+        }
+        let mut a_args = args(a, b, "ping");
+        a_args.deliver = true;
+        let res = send_message(a_args, &store, &ssh).await.unwrap();
+
+        assert!(!res.delivered_to_pane);
+        let err = res.deliver_error.expect("blocked recipient reports why");
+        assert!(err.contains("inbox"), "{err}");
+
+        let s = store.lock().unwrap();
+        let inbox = s.list_inbox(b, false, 10).unwrap();
+        assert_eq!(inbox.len(), 1, "the message still lands in the inbox");
+        assert_eq!(inbox[0].body, "ping");
     }
 
     #[tokio::test]

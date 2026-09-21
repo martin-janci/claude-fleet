@@ -226,6 +226,32 @@ fn select_targets_filters_by_project() {
 }
 
 #[test]
+fn select_targets_skips_blocked_and_stuck_sessions_unless_asked_for_them() {
+    let mut s = sample_sessions();
+    s[0].claude_status = Some("blocked".into());
+    s[1].stuck_kind = Some("auth_menu".into());
+    let f = BroadcastFilter::default();
+    let picked = select_targets(&s, &f, None, None);
+    assert!(
+        !picked.contains(&1),
+        "a blocked session would get Enter on its dialog: {picked:?}"
+    );
+    assert!(
+        !picked.contains(&2),
+        "a stuck session would get Enter on its menu: {picked:?}"
+    );
+    let f = BroadcastFilter {
+        status: Some("blocked".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        select_targets(&s, &f, None, None),
+        vec![1],
+        "an explicit status filter is the operator's choice"
+    );
+}
+
+#[test]
 fn select_targets_filters_combined() {
     let s = sample_sessions();
     let f = BroadcastFilter {

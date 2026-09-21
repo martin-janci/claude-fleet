@@ -271,6 +271,80 @@ pub(super) fn run_prompt_ready(row: &crate::store::SessionRow) -> Result<(), Mcp
     }
 }
 
+/// How long a send waits for the REPL's `UserPromptSubmit` hook before
+/// reporting `acked: false`, and how often it looks.
+pub(super) const ACK_WAIT: std::time::Duration = std::time::Duration::from_millis(1_500);
+pub(super) const ACK_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// May a prompt be delivered to this row now? `Err(E_INVALID_STATE)` for a
+/// session that is `blocked` or has a `stuck_kind` (Enter would answer its
+/// dialog) unless `force`. `Ok(queued)`: true when the session is `working`
+/// and the prompt will be submitted, so Claude Code queues it behind the
+/// running turn.
+pub(super) fn delivery_gate(
+    row: &crate::store::SessionRow,
+    force: bool,
+    submit: bool,
+) -> Result<bool, McpError> {
+    let blocked_on = match (row.claude_status.as_deref(), row.stuck_kind.as_deref()) {
+        (_, Some(kind)) => Some(kind.to_string()),
+        (Some("blocked"), None) => Some("a dialog".to_string()),
+        _ => None,
+    };
+    if let (Some(what), false) = (blocked_on, force) {
+        return Err(mcp_err(
+            "E_INVALID_STATE",
+            format!(
+                "session {} is waiting on {what}; Enter would answer it — resolve it in the \
+                 terminal, or pass force: true to type into it anyway",
+                row.id
+            ),
+            None,
+        ));
+    }
+    Ok(submit && row.claude_status.as_deref() == Some("working"))
+}
+
+/// Poll `prompt_submit_seq` until it passes `seq_before` (the REPL took the
+/// prompt) or `wait` elapses. Lock, read, unlock — never across the sleep.
+pub(super) async fn await_prompt_ack(
+    store: &Mutex<crate::store::Store>,
+    row_id: i64,
+    seq_before: i64,
+    wait: std::time::Duration,
+) -> Result<bool, McpError> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let seq = {
+            let s = lock(store).map_err(to_mcp_err)?;
+            s.prompt_ack_state(row_id)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .map(|st| st.prompt_submit_seq)
+        };
+        match seq {
+            None => return Ok(false),
+            Some(seq) if seq > seq_before => return Ok(true),
+            Some(_) => {}
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(ACK_POLL.min(deadline - now)).await;
+    }
+}
+
+/// The turn number a caller waits past to collect THIS prompt's reply. A
+/// prompt queued behind a running turn is answered by the turn after it;
+/// one that was acked now (the `working` status was stale) is the next turn.
+pub(super) fn turn_seq_before(turn_seq: i64, queued: bool, acked: Option<bool>) -> i64 {
+    if queued && acked != Some(true) {
+        turn_seq + 1
+    } else {
+        turn_seq
+    }
+}
+
 /// The text a task worker receives (S8): the requester's prompt behind the
 /// untrusted-content marker and closed by [`guard::UNTRUSTED_END`], THEN the
 /// fleet-authored completion instruction outside that block. A master
@@ -838,26 +912,59 @@ impl FleetTools {
     }
 
     /// Deliver a (already marked) prompt to a resolved session and return
-    /// `{ delivered, session_id, turn_seq_before }`.
+    /// `{ delivered, session_id, turn_seq_before, queued, acked }`.
+    ///
+    /// `acked` is `true` once the session's `UserPromptSubmit` hook stamped
+    /// the row after the send, `false` when it did not within [`ACK_WAIT`]
+    /// (after one Enter retry for an idle session — the classic "text
+    /// arrived, Enter did not"), and `null` when it cannot be known: nothing
+    /// was submitted, or no hook has ever reached this row.
     pub(super) async fn deliver_prompt(
         &self,
         row: &crate::store::SessionRow,
         prompt: String,
         submit: bool,
+        force: bool,
     ) -> Result<serde_json::Value, McpError> {
-        let args = sessions::SendPromptArgs {
-            host_alias: row.host_alias.clone(),
-            tmux_name: row.tmux_name.clone(),
-            prompt,
-            submit,
+        let queued = delivery_gate(row, force, submit)?;
+        let before = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.prompt_ack_state(row.id)
+                .map_err(|e| to_mcp_err(e.into()))?
         };
-        sessions::send_prompt(args, &self.store, &self.ssh)
-            .await
-            .map_err(to_mcp_err)?;
+        let send = |prompt: String| {
+            sessions::send_prompt(
+                sessions::SendPromptArgs {
+                    host_alias: row.host_alias.clone(),
+                    tmux_name: row.tmux_name.clone(),
+                    prompt,
+                    submit,
+                },
+                &self.store,
+                &self.ssh,
+            )
+        };
+        send(prompt).await.map_err(to_mcp_err)?;
+        let acked = match before {
+            Some(st) if submit && st.hooks_seen => {
+                let mut ok =
+                    await_prompt_ack(&self.store, row.id, st.prompt_submit_seq, ACK_WAIT).await?;
+                if !ok && !queued {
+                    // One more Enter: an empty body is the bare-Enter path.
+                    send(String::new()).await.map_err(to_mcp_err)?;
+                    ok = await_prompt_ack(&self.store, row.id, st.prompt_submit_seq, ACK_WAIT)
+                        .await?;
+                }
+                Some(ok)
+            }
+            _ => None,
+        };
         Ok(serde_json::json!({
             "delivered": true,
             "session_id": row.id,
-            "turn_seq_before": row.turn_seq,
+            "turn_seq_before": turn_seq_before(row.turn_seq, queued, acked),
+            "queued": queued,
+            "acked": acked,
         }))
     }
 

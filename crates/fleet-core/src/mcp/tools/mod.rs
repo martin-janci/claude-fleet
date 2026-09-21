@@ -69,7 +69,52 @@ pub struct FleetTools {
     /// Per-caller cap on concurrent bounded waits (S4). Created once in
     /// `new`; every per-MCP-session clone shares it.
     long_polls: Arc<guard::LongPollLimiter>,
+    /// `send_prompt` results by `(caller label, client_msg_id)`, so a
+    /// retried call delivers once. Created once in `new`; every per-MCP-
+    /// session clone shares it.
+    recent_sends: Arc<std::sync::Mutex<RecentSends>>,
     tool_router: ToolRouter<FleetTools>,
+}
+
+/// Bounded, TTL'd memory of recent `send_prompt` results (S-dedupe).
+#[derive(Default)]
+pub(super) struct RecentSends {
+    entries: std::collections::HashMap<(String, String), (std::time::Instant, serde_json::Value)>,
+}
+
+pub(super) const RECENT_SENDS_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+pub(super) const RECENT_SENDS_MAX: usize = 1024;
+
+impl RecentSends {
+    pub(super) fn get(&mut self, caller: &str, id: &str) -> Option<serde_json::Value> {
+        self.sweep();
+        self.entries
+            .get(&(caller.to_string(), id.to_string()))
+            .map(|(_, v)| v.clone())
+    }
+    pub(super) fn put(&mut self, caller: &str, id: &str, value: serde_json::Value) {
+        self.sweep();
+        if self.entries.len() >= RECENT_SENDS_MAX {
+            // Drop the oldest so the map stays bounded under a chatty client.
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(
+            (caller.to_string(), id.to_string()),
+            (std::time::Instant::now(), value),
+        );
+    }
+    fn sweep(&mut self) {
+        let now = std::time::Instant::now();
+        self.entries
+            .retain(|_, (at, _)| now.duration_since(*at) < RECENT_SENDS_TTL);
+    }
 }
 
 /// Server-level instructions handed to every MCP client on `initialize`.
@@ -107,6 +152,7 @@ impl FleetTools {
             tunnels,
             guards,
             long_polls: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            recent_sends: Arc::new(std::sync::Mutex::new(RecentSends::default())),
             tool_router: Self::tool_router(),
         }
     }
