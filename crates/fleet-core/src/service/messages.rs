@@ -262,7 +262,7 @@ pub fn peer_status(session_id: i64, store: &Mutex<Store>) -> Result<PeerStatus, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::sessions::build_send_commands;
+    use crate::service::sessions::{build_send_script, normalize_prompt_body};
 
     fn seed(s: &Store, name: &str) -> i64 {
         s.upsert_host("local").unwrap();
@@ -321,19 +321,21 @@ mod tests {
     }
 
     #[test]
-    fn deliver_payload_is_the_header_as_a_literal_send_keys_then_enter() {
+    fn deliver_payload_is_the_header_pasted_via_load_buffer_then_enter() {
         // The transport (`send_prompt` → bash/ssh + tmux) is not exercised
         // here; this pins the tmux payload the deliver path hands to it.
         let header = pane_header(7, "alpha", "local", "it's done; $HOME `ok`");
-        let cmds = build_send_commands("beta", &header, true);
-        assert_eq!(cmds.len(), 3);
-        assert_eq!(
-            cmds[0],
-            "tmux send-keys -t '=beta:' -l '[msg #7 from alpha@local]: it'\\''s done; $HOME `ok`'"
+        let body = normalize_prompt_body(&header).unwrap();
+        let s = build_send_script("beta", None, &body, "buf", true);
+        assert!(s.starts_with("t='=beta:'; "), "{s}");
+        assert!(s.contains("load-buffer -b 'buf' -"), "{s}");
+        assert!(s.contains("paste-buffer -p -d -b 'buf' -t \"$t\""), "{s}");
+        assert!(
+            s.trim_end().ends_with("tmux send-keys -t \"$t\" Enter"),
+            "{s}"
         );
-        assert_eq!(cmds[2], "tmux send-keys -t '=beta:' Enter");
         // submit=false stages the text without pressing Enter.
-        assert_eq!(build_send_commands("beta", &header, false).len(), 1);
+        assert!(!build_send_script("beta", None, &body, "buf", false).contains("Enter"));
     }
 
     // ---- send_message validation ----
