@@ -2406,7 +2406,18 @@ async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs
     let (s, _pid, on_b) = two_host_store();
     s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
         .unwrap();
-    let t = test_tools(s);
+    // Kept as its own `Arc` (rather than going through `test_tools`, which
+    // swallows it into the `FleetTools` it builds) so this test can take
+    // `MoveClaim::acquire`'s own claim below on the SAME store the service
+    // will see — the claim is keyed by the store's pointer.
+    let store = Arc::new(Mutex::new(s));
+    let t = FleetTools::new(
+        Arc::clone(&store),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    );
     let caller = Caller::master();
 
     let params = |dry_run: bool| super::params::MoveSessionParams {
@@ -2429,6 +2440,20 @@ async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs
         err.message
     );
 
+    // Hold the real move's own concurrency claim for the whole dry-run call.
+    // Only `move_session_inner` (the real-move branch, reached only once
+    // `dry_run` is false) ever calls `MoveClaim::acquire`; `preview::preview`
+    // (the `dry_run: true` branch) never does. So if a regression skipped
+    // the confirm gate above AND fell through to a real move for
+    // `dry_run: true`, this held claim would collide and the call would
+    // answer "already in progress" instead of the preview path's own
+    // refusal — proving whether the service actually branched on `dry_run`,
+    // not merely that SOME error came back (which the old assertion here
+    // could not tell apart from a real move quietly succeeding or failing
+    // for an unrelated reason).
+    let _claim = crate::service::move_session::MoveClaim::acquire(&store, on_b)
+        .expect("nothing else holds this session's claim yet");
+
     let err = t
         .move_session(Extension(caller), Parameters(params(true)))
         .await
@@ -2436,6 +2461,22 @@ async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs
     assert!(
         !err.message.starts_with("E_CONFIRM_REQUIRED"),
         "a dry run must skip the confirm gate: {}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("is already in progress"),
+        "a dry run must never reach MoveClaim::acquire — the real move's own \
+         concurrency guard — which would mean it ran the real move instead: {}",
+        err.message
+    );
+    // The fixture's session has no `claude_session_id`, which is exactly
+    // the refusal `gather()` — shared by `preview()` and the real move —
+    // raises first when nothing SSH-dependent has run yet. Landing here
+    // (rather than on the claim above) is the positive proof the call took
+    // the preview branch.
+    assert!(
+        err.message.contains("no Claude session id"),
+        "expected the preview path's own local refusal, got: {}",
         err.message
     );
 }

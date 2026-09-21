@@ -346,7 +346,8 @@ impl FleetTools {
         Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, \
         E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both \
         sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts \
-        (in practice the master). Returns a MoveReport with the new row as target."
+        (in practice the master). Returns a MoveOutcome: kind moved \
+        (MoveReport) or preview (dry_run)."
     )]
     // `clean_target`'s prose lives on the parameter itself rather than in the
     // sentence above: the served tool surface is capped

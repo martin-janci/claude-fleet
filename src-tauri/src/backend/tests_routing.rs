@@ -1122,6 +1122,45 @@ fn routed_mutation_cases() -> Vec<Case> {
     ]
 }
 
+/// A complete `MovePreview` (every field required — no `#[serde(default)]`,
+/// per the wire rule), wrapped as a `MoveOutcome::Preview` the way a hub
+/// answering a `dry_run: true` call actually does.
+const PREVIEW_PAYLOAD: &str = r#"{"kind":"preview","session_id":7,"from_host":"trn","to_host":"hetzner","branch":"main","source_cwd":"/w/demo","unpushed_commits":2,"commits_ahead":null,"dirty":[{"status":" M","path":"src/lib.rs"}],"ignored_carried":[{"path":".env","bytes":4096}],"ignored_left_behind":[{"path":"node_modules/","bytes":null,"reason":"denylisted"}],"transcript_bytes":1024,"session_state_files":2,"session_state_bytes":2048,"memory_files":1,"memory_bytes":128,"target_path":"/w/demo","target":{"state":"clean","head":"1111111111111111111111111111111111111111"},"unknowns":["bundle size is decided only by snapshotting"]}"#;
+
+/// `MoveOutcome::Preview` is otherwise untested anywhere: every routed
+/// `move_session` case above answers `MOVE_PAYLOAD` (`kind: "moved"`), so
+/// nothing proves the OTHER tag actually round-trips through the desktop's
+/// `routed::move_session` — a `dry_run: true` call sent to the hub and a
+/// `MovePreview` sent back.
+#[test]
+fn a_hub_answering_a_preview_deserialises_into_move_outcome_preview() {
+    use fleet_core::service::move_session::{MoveOutcome, MoveSessionArgs};
+
+    let fake = Fake::answering(PREVIEW_PAYLOAD);
+    let (_dir, st) = store();
+    let got = block_on(commands::move_session::routed::move_session(
+        &remote_backend(&fake),
+        MoveSessionArgs {
+            session_id: 7,
+            target_host_alias: "hetzner".into(),
+            keep_source: false,
+            strict: false,
+            clean_target: false,
+            dry_run: true,
+        },
+        &st,
+        &ssh(),
+    ))
+    .expect("a preview answer must deserialise as the command's return type");
+    match got {
+        MoveOutcome::Preview(p) => assert_eq!(p.session_id, 7),
+        MoveOutcome::Moved(_) => panic!("expected MoveOutcome::Preview, got Moved"),
+    }
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "move_session");
+    assert_eq!(args["dry_run"], true);
+}
+
 /// The answer the UI gets in remote mode is the hub's, deserialised
 /// unchanged — not merged with, and not falling back to, the local database.
 #[test]
