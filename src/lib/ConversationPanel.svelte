@@ -28,8 +28,16 @@
   import ToolLine from './ToolLine.svelte';
   import SubagentBlock from './SubagentBlock.svelte';
   import CopyButton from './CopyButton.svelte';
-  import { findMatches, turnIndex, rowKey, rememberScroll, recallScroll } from './conversation_nav';
-  import { detectMac } from './terminal_keys';
+  import {
+    findMatches,
+    turnIndex,
+    rowKey,
+    rememberScroll,
+    recallScroll,
+    nearestTurn,
+    adjacentTurn,
+  } from './conversation_nav';
+  import { detectMac, isEditable } from './terminal_keys';
   import {
     sessionConversation,
     listConversations,
@@ -586,7 +594,8 @@
    *  `el.getBoundingClientRect().bottom > scroller.getBoundingClientRect().top`
    *  is the scroll-position-independent form of "row bottom below
    *  scroller.scrollTop" (the scrollTop term cancels between the two rects).
-   *  Backs the per-session scroll memory (`rememberScroll`). */
+   *  Backs the per-session scroll memory (`rememberScroll`) and the `[`/`]`
+   *  turn stepper's "where am I" when no turn is otherwise current. */
   function topVisibleRowKey(): string | null {
     if (!scroller) return null;
     const top = scroller.getBoundingClientRect().top;
@@ -594,6 +603,15 @@
       if (el.getBoundingClientRect().bottom > top) return el.dataset.rowKey ?? null;
     }
     return null;
+  }
+
+  /** `[` / `]` and the turn-stepper buttons: jump to the turn adjacent to
+   *  the one nearest the current read position. */
+  function stepTurn(delta: 1 | -1) {
+    if (turnEntries.length === 0) return;
+    const current = nearestTurn(turnEntries, topVisibleRowKey());
+    const next = adjacentTurn(turnEntries, current, delta);
+    if (next) scrollToRow(next.rowKey);
   }
 
   async function openFind() {
@@ -645,6 +663,21 @@
           e.preventDefault();
           closeFind();
         }
+        return;
+      }
+      // `[` / `]` step the turn stepper — only away from any text entry
+      // (the composer, the find box), same guard the terminal uses for its
+      // own global shortcuts.
+      if (
+        (e.key === '[' || e.key === ']') &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !isEditable(e.target as HTMLElement | null)
+      ) {
+        if (!threadShown) return;
+        e.preventDefault();
+        stepTurn(e.key === '[' ? -1 : 1);
         return;
       }
       const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
@@ -1633,10 +1666,24 @@
         {/if}
       </div>
     </div>
-    {#if !atBottom}
-      <button type="button" class="latest" class:fresh={unseen > 0} data-testid="conv-latest" aria-live="polite" onclick={scrollToBottom}
-        >↓ {unseen > 0 ? `${unseen} new` : 'Latest'}</button
-      >
+    {#if turnEntries.length > 0 || !atBottom}
+      <div class="scroll-actions">
+        {#if turnEntries.length > 0}
+          <div class="turn-nav" role="group" aria-label="Step turns">
+            <button type="button" class="turn-step" data-testid="conv-turn-prev" aria-label="Previous turn" onclick={() => stepTurn(-1)}
+              >‹ turn</button
+            >
+            <button type="button" class="turn-step" data-testid="conv-turn-next" aria-label="Next turn" onclick={() => stepTurn(1)}
+              >turn ›</button
+            >
+          </div>
+        {/if}
+        {#if !atBottom}
+          <button type="button" class="latest" class:fresh={unseen > 0} data-testid="conv-latest" aria-live="polite" onclick={scrollToBottom}
+            >↓ {unseen > 0 ? `${unseen} new` : 'Latest'}</button
+          >
+        {/if}
+      </div>
     {/if}
   {/if}
   </div>
@@ -2460,10 +2507,20 @@
     padding-left: 0.4rem;
     font-size: 0.72rem;
   }
-  .latest {
+  .scroll-actions {
     position: absolute;
     right: 1rem;
     bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .turn-nav {
+    display: flex;
+    gap: 0.35rem;
+  }
+  .turn-step,
+  .latest {
     padding: 0.3rem 0.7rem;
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -2473,6 +2530,7 @@
     cursor: pointer;
     box-shadow: 0 2px 8px color-mix(in srgb, var(--fg) 15%, transparent);
   }
+  .turn-step:hover,
   .latest:hover {
     border-color: var(--accent);
   }
@@ -2498,7 +2556,7 @@
       align-items: stretch;
       gap: 0.45rem;
     }
-    .latest {
+    .scroll-actions {
       right: 0.5rem;
       bottom: 0.5rem;
     }

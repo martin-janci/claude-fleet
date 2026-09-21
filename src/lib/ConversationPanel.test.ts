@@ -38,6 +38,7 @@ import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
 import { composerPresets, resetComposerPresets } from './composer_presets';
 import { composerDrafts } from './conversation';
+import { scrollMemory } from './conversation_nav';
 import { openPathRequest } from './app_views';
 import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_events';
 import type { SessionEvent } from './timeline';
@@ -139,6 +140,7 @@ beforeEach(() => {
   mockedList.mockResolvedValue({ ok: true, value: [] });
   mockedAct.mockResolvedValue({ ok: false, error: { code: 'E_INVALID_STATE', message: 'no pane' } });
   composerDrafts.clear();
+  scrollMemory.clear();
   resetComposerPresets();
   setVisibility('visible');
   hubStatus.set({ ...STANDALONE });
@@ -2611,6 +2613,42 @@ describe('ConversationPanel find, copy and turn index', () => {
     await settle();
     expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t1');
     expect(screen.getByTestId('conv-latest')).toBeTruthy();
+  });
+
+  it('the turn-stepper buttons and `[`/`]` move to the turn adjacent to the read position', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+
+    const scroller = screen.getByTestId('conv-scroller');
+    scroller.getBoundingClientRect = () => rect(0, 500);
+    // The reader is at t1: its row is the first whose bottom sits below the
+    // scroller's own top edge.
+    (document.querySelector('[data-row-key="t0"]') as HTMLElement).getBoundingClientRect = () => rect(-50, -10);
+    (document.querySelector('[data-row-key="t1"]') as HTMLElement).getBoundingClientRect = () => rect(-10, 40);
+    (document.querySelector('[data-row-key="t2"]') as HTMLElement).getBoundingClientRect = () => rect(40, 90);
+
+    const next = screen.getByTestId('conv-turn-next');
+    const prev = screen.getByTestId('conv-turn-prev');
+    expect(next.getAttribute('aria-label')).toBe('Next turn');
+    expect(prev.getAttribute('aria-label')).toBe('Previous turn');
+
+    await fireEvent.click(next);
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t2');
+
+    await fireEvent.click(prev);
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t0');
+
+    await fireEvent.keyDown(scroller, { key: ']' });
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t2');
+    await fireEvent.keyDown(scroller, { key: '[' });
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t0');
+
+    // Typing `[`/`]` into the composer must not steal the keystroke.
+    const before = scrolled.length;
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.keyDown(box, { key: ']' });
+    expect(scrolled.length).toBe(before);
   });
 
   it('an unfinished tool call in an earlier turn shows "no result"; the running turn counts up', async () => {

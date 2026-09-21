@@ -107,3 +107,32 @@ export function rememberScroll(sessionId: number, snapshot: ScrollSnapshot): voi
 export function recallScroll(sessionId: number): ScrollSnapshot | null {
   return scrollMemory.get(sessionId) ?? null;
 }
+
+// ---- Turn stepper ---------------------------------------------------------
+
+/** Position in `index` of the turn at or immediately before `topVisibleKey`
+ *  (an exact match "contains" it; otherwise the closest earlier turn).
+ *  0 when `topVisibleKey` is null, matches nothing, or isn't a turn row key
+ *  (e.g. it names an inline event) — the safe "unknown" fallback is the
+ *  first turn. */
+export function nearestTurn(index: TurnIndexEntry[], topVisibleKey: string | null): number {
+  if (topVisibleKey === null || index.length === 0) return 0;
+  const m = /^t(\d+)$/.exec(topVisibleKey);
+  if (!m) return 0;
+  const target = Number(m[1]);
+  let best = 0;
+  for (let i = 0; i < index.length; i++) {
+    const em = /^t(\d+)$/.exec(index[i].rowKey);
+    const n = em ? Number(em[1]) : null;
+    if (n !== null && n <= target) best = i;
+    else break;
+  }
+  return best;
+}
+
+/** The turn one step (`delta`) away from `current` (a position in `index`),
+ *  or null past either end. */
+export function adjacentTurn(index: TurnIndexEntry[], current: number, delta: 1 | -1): TurnIndexEntry | null {
+  const next = current + delta;
+  return next >= 0 && next < index.length ? index[next] : null;
+}

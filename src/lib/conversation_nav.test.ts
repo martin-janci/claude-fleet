@@ -1,5 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { findMatches, turnIndex, rowKey, scrollMemory, rememberScroll, recallScroll } from './conversation_nav';
+import {
+  findMatches,
+  turnIndex,
+  rowKey,
+  scrollMemory,
+  rememberScroll,
+  recallScroll,
+  nearestTurn,
+  adjacentTurn,
+} from './conversation_nav';
 import type { ConvItem, ConvTurn, ThreadRow, InlineEvent } from './conversation';
 
 const tool = (summary: string, target: string | null): ConvItem => ({
@@ -109,5 +118,39 @@ describe('scroll memory', () => {
     rememberScroll(3, { rowKey: 't1', atBottom: false });
     rememberScroll(3, { rowKey: 't9', atBottom: true });
     expect(recallScroll(3)).toBeNull();
+  });
+});
+
+describe('turn stepper', () => {
+  // t0, t1, (t2 has no prompt/command — skipped by turnIndex), t3, t4.
+  const idx = turnIndex([
+    { kind: 'turn', turn: turn('first line\nsecond line', [], '2026-09-18T09:00:00Z'), index: 0 },
+    { kind: 'event', event: ev(1, 'Resumed conversation') },
+    { kind: 'turn', turn: turn('second turn', []), index: 1 },
+    { kind: 'turn', turn: turn(null, [{ kind: 'text', text: 'assistant only' }]), index: 2 },
+    { kind: 'turn', turn: turn(null, [{ kind: 'command', name: '/model', args: 'opus', output: null }]), index: 3 },
+    { kind: 'turn', turn: turn(null, [{ kind: 'command', name: '/cost', args: null, output: 'x' }]), index: 4 },
+  ]);
+
+  it('nearestTurn finds the turn at or before the top visible key', () => {
+    expect(idx.map((e) => e.rowKey)).toEqual(['t0', 't1', 't3', 't4']);
+    expect(nearestTurn(idx, 't0')).toBe(0);
+    expect(nearestTurn(idx, 't4')).toBe(3);
+    // t2 is not itself a turn-index entry (no label) — nearest at-or-before is t1.
+    expect(nearestTurn(idx, 't2')).toBe(1);
+  });
+
+  it('nearestTurn falls back to the first turn (0) when the key is unknown', () => {
+    expect(nearestTurn(idx, null)).toBe(0);
+    expect(nearestTurn(idx, 'e1')).toBe(0);
+    expect(nearestTurn(idx, 'nonsense')).toBe(0);
+    expect(nearestTurn([], 't0')).toBe(0);
+  });
+
+  it('adjacentTurn steps to the neighboring turn and clamps to null at either end', () => {
+    expect(adjacentTurn(idx, 0, 1)).toEqual(idx[1]);
+    expect(adjacentTurn(idx, 3, -1)).toEqual(idx[2]);
+    expect(adjacentTurn(idx, 0, -1)).toBeNull();
+    expect(adjacentTurn(idx, 3, 1)).toBeNull();
   });
 });
