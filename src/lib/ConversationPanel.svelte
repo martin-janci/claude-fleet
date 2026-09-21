@@ -383,8 +383,14 @@
         const snap = recallScroll(id);
         if (!snap) return;
         void tick().then(() => {
-          scrollToRow(snap.rowKey);
-          atBottom = false;
+          // The remembered row may not be in the freshly-loaded (truncated)
+          // window; when it isn't, leave the pinned-to-bottom state alone
+          // rather than showing "↓ Latest" over a view that is, in fact,
+          // already at the bottom.
+          if (scrollToRow(snap.rowKey)) {
+            atBottom = false;
+            currentTurnPos = nearestTurn(turnEntries, snap.rowKey);
+          }
         });
       });
       void loadConversations();
@@ -584,9 +590,14 @@
   function rowEl(key: string): HTMLElement | null {
     return scroller?.querySelector<HTMLElement>(`[data-row-key="${key}"]`) ?? null;
   }
-  function scrollToRow(key: string) {
+  /** Scrolls to the row and reports whether one was found: false means the
+   *  key names a row outside the currently loaded window (or an empty
+   *  thread), so the caller must not act as though the scroll happened. */
+  function scrollToRow(key: string): boolean {
     const el = rowEl(key);
-    if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
+    if (!el || typeof el.scrollIntoView !== 'function') return false;
+    el.scrollIntoView({ block: 'center' });
+    return true;
   }
 
   /** The row nearest the top of the visible scroller area: the first row (in
@@ -605,13 +616,25 @@
     return null;
   }
 
+  // Position in `turnEntries` nearest the current read position, kept in
+  // sync with actual scrolling (see the `onScroll`/`scrollToBottom` calls
+  // below) rather than recomputed on every render: `topVisibleRowKey` reads
+  // live layout, which is not itself a Svelte reactive dependency. Backs
+  // both the `[`/`]` step target and the stepper buttons' disabled state.
+  let currentTurnPos = $state(0);
+  function refreshCurrentTurnPos() {
+    currentTurnPos = nearestTurn(turnEntries, topVisibleRowKey());
+  }
+  const prevTurn = $derived(adjacentTurn(turnEntries, currentTurnPos, -1));
+  const nextTurn = $derived(adjacentTurn(turnEntries, currentTurnPos, 1));
+
   /** `[` / `]` and the turn-stepper buttons: jump to the turn adjacent to
    *  the one nearest the current read position. */
   function stepTurn(delta: 1 | -1) {
     if (turnEntries.length === 0) return;
-    const current = nearestTurn(turnEntries, topVisibleRowKey());
-    const next = adjacentTurn(turnEntries, current, delta);
-    if (next) scrollToRow(next.rowKey);
+    refreshCurrentTurnPos();
+    const next = adjacentTurn(turnEntries, currentTurnPos, delta);
+    if (next && scrollToRow(next.rowKey)) currentTurnPos += delta;
   }
 
   async function openFind() {
@@ -1136,12 +1159,14 @@
     scroller.scrollTop = scroller.scrollHeight;
     atBottom = true;
     unseen = 0;
+    refreshCurrentTurnPos();
   }
 
   function onScroll() {
     if (!scroller) return;
     atBottom = isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
     if (atBottom) unseen = 0;
+    refreshCurrentTurnPos();
   }
 
   /** Run a mutation that changes the composer's height without moving the
@@ -1666,14 +1691,26 @@
         {/if}
       </div>
     </div>
-    {#if turnEntries.length > 0 || !atBottom}
+    {#if turnEntries.length > 1 || !atBottom}
       <div class="scroll-actions">
-        {#if turnEntries.length > 0}
+        {#if turnEntries.length > 1}
           <div class="turn-nav" role="group" aria-label="Step turns">
-            <button type="button" class="turn-step" data-testid="conv-turn-prev" aria-label="Previous turn" onclick={() => stepTurn(-1)}
+            <button
+              type="button"
+              class="turn-step"
+              data-testid="conv-turn-prev"
+              aria-label="Previous turn"
+              disabled={prevTurn === null}
+              onclick={() => prevTurn && stepTurn(-1)}
               >‹ turn</button
             >
-            <button type="button" class="turn-step" data-testid="conv-turn-next" aria-label="Next turn" onclick={() => stepTurn(1)}
+            <button
+              type="button"
+              class="turn-step"
+              data-testid="conv-turn-next"
+              aria-label="Next turn"
+              disabled={nextTurn === null}
+              onclick={() => nextTurn && stepTurn(1)}
               >turn ›</button
             >
           </div>
@@ -2533,6 +2570,13 @@
   .turn-step:hover,
   .latest:hover {
     border-color: var(--accent);
+  }
+  .turn-step:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .turn-step:disabled:hover {
+    border-color: var(--border);
   }
   .latest.fresh {
     border-color: var(--accent);

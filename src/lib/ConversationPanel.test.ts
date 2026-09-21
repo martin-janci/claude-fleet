@@ -2615,6 +2615,40 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(screen.getByTestId('conv-latest')).toBeTruthy();
   });
 
+  it('a remembered row outside the returning session\'s loaded window keeps the view pinned to the bottom', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    const { rerender } = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await settle();
+
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 500, configurable: true });
+    scroller.scrollTop = 300;
+    await fireEvent.scroll(scroller);
+    expect(screen.getByTestId('conv-latest')).toBeTruthy();
+    scroller.getBoundingClientRect = () => rect(0, 500);
+    (document.querySelector('[data-row-key="t1"]') as HTMLElement).getBoundingClientRect = () => rect(-10, 40);
+
+    // Switch to another session: a fresh view starts at the bottom.
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'other session', at: null, ended_at: null, items: [] }] })));
+    await rerender({ session: session({ id: 2 }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-latest')).toBeNull();
+
+    // Switching back to session 1, but its transcript now loads with only a
+    // single (different) turn — t1, where the view was left, is not among
+    // the rendered rows. The restore must not fake a scroll to a row that
+    // isn't there.
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'trimmed history', at: null, ended_at: null, items: [] }] })));
+    const before = scrolled.length;
+    await rerender({ session: session({ id: 1 }), visible: true });
+    await settle();
+    await settle();
+
+    expect(scrolled.length).toBe(before);
+    expect(screen.queryByTestId('conv-latest')).toBeNull();
+  });
+
   it('the turn-stepper buttons and `[`/`]` move to the turn adjacent to the read position', async () => {
     mockedConv.mockReturnValue(ok(threeTurns()));
     render(ConversationPanel, { session: session(), visible: true });
@@ -2628,8 +2662,8 @@ describe('ConversationPanel find, copy and turn index', () => {
     (document.querySelector('[data-row-key="t1"]') as HTMLElement).getBoundingClientRect = () => rect(-10, 40);
     (document.querySelector('[data-row-key="t2"]') as HTMLElement).getBoundingClientRect = () => rect(40, 90);
 
-    const next = screen.getByTestId('conv-turn-next');
-    const prev = screen.getByTestId('conv-turn-prev');
+    const next = screen.getByTestId('conv-turn-next') as HTMLButtonElement;
+    const prev = screen.getByTestId('conv-turn-prev') as HTMLButtonElement;
     expect(next.getAttribute('aria-label')).toBe('Next turn');
     expect(prev.getAttribute('aria-label')).toBe('Previous turn');
 
@@ -2643,12 +2677,29 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t2');
     await fireEvent.keyDown(scroller, { key: '[' });
     expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t0');
+    // Landed back on the first turn: "previous" disables, "next" stays live.
+    await tick();
+    expect(prev.disabled).toBe(true);
+    expect(next.disabled).toBe(false);
+
+    // A disabled button ignores a click — no further scroll, no exception.
+    const before1 = scrolled.length;
+    await fireEvent.click(prev);
+    expect(scrolled.length).toBe(before1);
 
     // Typing `[`/`]` into the composer must not steal the keystroke.
     const before = scrolled.length;
     const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
     await fireEvent.keyDown(box, { key: ']' });
     expect(scrolled.length).toBe(before);
+  });
+
+  it('the turn stepper only shows with more than one turn', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-turn-prev')).toBeNull();
+    expect(screen.queryByTestId('conv-turn-next')).toBeNull();
   });
 
   it('an unfinished tool call in an earlier turn shows "no result"; the running turn counts up', async () => {
