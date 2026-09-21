@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { fmtBytes } from './attachments';
   import Modal from './Modal.svelte';
   import { hosts } from './hosts';
   import { hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { moveBlockedReason, moveTargetsFor } from './moveEligibility';
   import { describeMoveError } from './moveErrors';
+  import { preflightAge, preflightFor, preflights, PREFLIGHT_STALE_MS, requestPreflight } from './preflight';
   import type { ResolveAction } from './moveSession';
   import { stepLabel } from './moveProgress';
   import { dismissMove, displaySteps, moves, resolveMoveRun, retryMove, startMove, transferSheetFor } from './moves';
@@ -30,6 +32,35 @@
   // Which destructive action is one click from happening. Cleared whenever the
   // sheet's session changes, like `showDetails`.
   let confirming = $state<'clean' | 'finish' | 'undo' | null>(null);
+  /** Ticks while the setup view is open, so a stale preview's age display
+   *  keeps counting up rather than freezing at the moment it was rendered. */
+  let now = $state(Date.now());
+
+  /** A hub built before dry_run existed would silently treat a preview
+   *  request as a real move. The desktop refuses such a hub, but only once
+   *  its `ready` frame has been read and its wire contract checked
+   *  (`src-tauri/src/backend/events.rs`); before that the state is
+   *  `connecting` (or `reconnecting`/`offline`), and a request could still
+   *  reach an old hub. So a preview is only ever asked for with no hub at
+   *  all, or once the link is fully up. */
+  const preflightAllowed = $derived(
+    $hubConnection.state === 'standalone' || $hubConnection.state === 'connected',
+  );
+  /** The preview for the currently selected target, once one exists — only
+   *  meaningful on the setup view (no run yet). */
+  const preflightEntry = $derived(
+    id !== null && !run && target ? preflightFor($preflights, id, target) : undefined,
+  );
+  /** Narrows `preflightEntry.preview` for the template, the same way
+   *  `cleanAction` narrows `failure.action` above — Svelte cannot carry a
+   *  `.status === 'ready'` check on one expression into `.preview` on
+   *  another inside an `{#if}`. */
+  const preview = $derived(
+    preflightEntry && preflightEntry.status === 'ready' ? preflightEntry.preview : null,
+  );
+  const targetDirty = $derived(
+    preview && preview.target.state === 'dirty' ? preview.target : null,
+  );
 
   // A fresh setup each time the sheet opens on a session.
   $effect(() => {
@@ -46,6 +77,20 @@
   // Nothing to show: the row is gone and no run remembers it.
   $effect(() => {
     if (id !== null && !run && !session) transferSheetFor.set(null);
+  });
+  // Ask for a preview of the selected target. Debounced per session inside
+  // `requestPreflight` itself, so a burst of target changes collapses to one
+  // call. Transfer's own `disabled` never reads any of this — see `transfer`.
+  $effect(() => {
+    if (id !== null && !run && target && preflightAllowed) requestPreflight(id, target);
+  });
+  // The age ticker: only while there is a setup view to show it in.
+  $effect(() => {
+    if (id === null || run) return;
+    const timer = setInterval(() => {
+      now = Date.now();
+    }, 1000);
+    return () => clearInterval(timer);
   });
 
   // What the steps list shows: a settled run completes its own picture at
@@ -123,7 +168,7 @@
   const n = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
   const REASON = {
     denylisted: 'never carried (secrets, caches, build output)',
-    over_cap: 'over the size cap',
+    over_cap: 'too large to carry (over the size cap)',
     unsupported_name: 'a file name that cannot be carried safely',
   } as const;
 
@@ -203,6 +248,96 @@
           <input type="checkbox" bind:checked={keepSource} data-testid="move-keep-source" />
           Keep this session running
         </label>
+        <div class="details" data-testid="transfer-preflight">
+          {#if !preflightAllowed}
+            <p class="note">The preview will appear once connected.</p>
+          {:else if !preflightEntry || preflightEntry.status === 'loading'}
+            <p class="note">Checking what would travel…</p>
+          {:else if preflightEntry.status === 'refused'}
+            <p class="note" data-testid="transfer-preflight-refusal">
+              {describeMoveError(preflightEntry.error, 'failed', target, null).what}
+            </p>
+          {:else if preview}
+            {#if preflightAge(preflightEntry, now) !== null && preflightAge(preflightEntry, now)! > PREFLIGHT_STALE_MS}
+              <p class="muted" data-testid="transfer-preflight-age">
+                From {Math.round((preflightAge(preflightEntry, now) ?? 0) / 1000)}s ago
+              </p>
+            {/if}
+            <ul class="summary">
+              <li>
+                {#if preview.unpushed_commits === null}
+                  <span class="muted">Unpushed commits unknown</span>
+                {:else}
+                  {n(preview.unpushed_commits, 'unpushed commit')}
+                {/if}
+                {#if preview.commits_ahead !== null}
+                  <span class="muted">· target lacks {n(preview.commits_ahead, 'commit')}</span>
+                {/if}
+              </li>
+              {#if preview.dirty.length > 0}
+                <li>
+                  {n(preview.dirty.length, 'uncommitted entry', 'uncommitted entries')}
+                  <ul class="clean-paths">
+                    {#each preview.dirty as d, i (i)}
+                      <li><code>{d.path}</code></li>
+                    {/each}
+                  </ul>
+                </li>
+              {/if}
+              <li>
+                {n(preview.ignored_carried.length, 'ignored file')} carried
+                {#if preview.ignored_carried.length > 0}
+                  <ul class="clean-paths">
+                    {#each preview.ignored_carried as f, i (i)}
+                      <li><code>{f.path}</code> <span class="muted">({fmtBytes(f.bytes)})</span></li>
+                    {/each}
+                  </ul>
+                {/if}
+                {#if preview.ignored_left_behind.length > 0}
+                  <span class="muted">· {preview.ignored_left_behind.length} left behind</span>
+                  <ul class="clean-paths">
+                    {#each preview.ignored_left_behind as f, i (i)}
+                      <li><code>{f.path}</code> — {REASON[f.reason] ?? f.reason}</li>
+                    {/each}
+                  </ul>
+                {/if}
+              </li>
+              <li>{fmtBytes(preview.transcript_bytes)} of conversation</li>
+              <li>
+                {n(preview.session_state_files, 'session file')}
+                <span class="muted">({fmtBytes(preview.session_state_bytes)})</span>
+              </li>
+              <li>
+                {n(preview.memory_files, 'memory note')}
+                <span class="muted">({fmtBytes(preview.memory_bytes)})</span>
+              </li>
+            </ul>
+            <p class="note">
+              Target path <code>{preview.target_path}</code>
+              {#if preview.target.state === 'absent'}
+                would be created.
+              {:else if preview.target.state === 'unknown'}
+                could not be checked.
+              {:else if preview.target.state === 'clean'}
+                is clean at <code>{preview.target.head}</code>.
+              {:else if targetDirty}
+                has uncommitted work at <code>{targetDirty.head}</code>:
+              {/if}
+            </p>
+            {#if targetDirty}
+              <ul class="clean-paths">
+                {#each targetDirty.entries as e, i (i)}
+                  <li><code>{e.path}</code></li>
+                {/each}
+              </ul>
+            {/if}
+            {#if preview.unknowns.length > 0}
+              <p class="muted" data-testid="transfer-preflight-unknowns">
+                Cannot know: {preview.unknowns.join('; ')}
+              </p>
+            {/if}
+          {/if}
+        </div>
       {/if}
       <p class="note">
         Uncommitted and unpushed work, small ignored files, subagents and project memory travel
