@@ -69,7 +69,8 @@ recover   restart_session recreate_session repair_session move_session
 review    repo_changes repo_diff repo_file repo_tree repo_log
           repo_branches repo_commit repo_commit_diff
 admin     add_host remove_host probe_host hide_host provision_hosts
-          pair_client list_clients revoke_client set_secret refresh_projects
+          pair_client list_clients revoke_client set_client_trust set_secret
+          refresh_projects
           delete_worktree get_clipboard set_clipboard rename_session
           set_friendly_name list_accounts
 ```

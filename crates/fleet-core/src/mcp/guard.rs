@@ -209,6 +209,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Trusting a client widens what its token can do (unmarked delivery), so
+    // it is credential administration like minting and revoking.
+    ToolPolicy {
+        name: "set_client_trust",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // session_ops.rs
     ToolPolicy {
         name: "list_sessions",
@@ -1574,6 +1583,7 @@ mod tests {
             // admin, so neither a per-host token nor a paired phone reaches it.
             "pair_client",
             "revoke_client",
+            "set_client_trust",
         ] {
             assert!(is_admin_tool(t), "{t}");
             assert!(!is_readonly_tool(t), "{t}");

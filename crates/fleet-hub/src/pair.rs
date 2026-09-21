@@ -314,19 +314,20 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
             .to_string()
     };
     let time = |r: &serde_json::Value, k: &str| fmt_time(r.get(k).and_then(|v| v.as_i64()));
-    let cells: Vec<[String; 5]> = rows
+    let cells: Vec<[String; 6]> = rows
         .iter()
         .map(|r| {
             [
                 field(r, "name"),
                 field(r, "mode"),
+                time(r, "trusted_at"),
                 time(r, "created_at"),
                 time(r, "last_seen_at"),
                 time(r, "revoked_at"),
             ]
         })
         .collect();
-    let header = ["NAME", "MODE", "CREATED", "LAST SEEN", "REVOKED"];
+    let header = ["NAME", "MODE", "TRUSTED", "CREATED", "LAST SEEN", "REVOKED"];
     let mut width = header.map(str::len);
     for row in &cells {
         for (w, c) in width.iter_mut().zip(row) {
@@ -337,7 +338,7 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
     // Padding is counted in terminal columns, not `char`s: `{:<w$}` pads to a
     // char count, which would under-pad a CJK or emoji name (two columns per
     // char) and misalign every column after it.
-    let line = |row: &[String; 5]| {
+    let line = |row: &[String; 6]| {
         let mut s = String::new();
         for (i, (cell, w)) in row.iter().zip(width).enumerate() {
             s.push_str(cell);
@@ -358,17 +359,18 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
 
 // --- the commands ------------------------------------------------------------
 
-/// `fleet-hub pair --name <name> [--mode …] [--ttl …]`: mint a code through
-/// the running hub and show the URL as a QR for a phone camera.
+/// `fleet-hub pair --name <name> [--mode …] [--ttl …] [--trusted]`: mint a
+/// code through the running hub and show the URL as a QR for a phone camera.
 pub async fn pair(
     opts: &HubOptions,
     env: &HashMap<String, String>,
     name: &str,
     mode: Option<&str>,
     ttl: Option<u64>,
+    trusted: bool,
 ) -> Result<ExitCode, String> {
     let conn = hub_conn(opts, env)?;
-    let mut args = serde_json::json!({ "name": name });
+    let mut args = serde_json::json!({ "name": name, "trusted": trusted });
     if let Some(m) = mode {
         args["mode"] = serde_json::Value::String(m.to_string());
     }
@@ -381,9 +383,14 @@ pub async fn pair(
     out::line(url);
     out::line("");
     out::line(&format!(
-        "client:  {} ({})",
+        "client:  {} ({}{})",
         v["name"].as_str().unwrap_or(name),
-        v["mode"].as_str().unwrap_or("full")
+        v["mode"].as_str().unwrap_or("full"),
+        if v["trusted"].as_bool().unwrap_or(false) {
+            ", trusted — its prompts reach agents unmarked"
+        } else {
+            ""
+        }
     ));
     out::line(&format!(
         "expires: in {} s — the code works once, and a hub restart voids it",
@@ -408,6 +415,32 @@ pub async fn client_list(
     .await?;
     let rows = v.as_array().cloned().unwrap_or_default();
     out::line(&client_table(&rows));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `fleet-hub client trust <name>` / `client untrust <name>`.
+pub async fn client_trust(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+    name: &str,
+    trusted: bool,
+) -> Result<ExitCode, String> {
+    let conn = hub_conn(opts, env)?;
+    let v = call_tool(
+        &conn,
+        "set_client_trust",
+        serde_json::json!({ "name": name, "trusted": trusted }),
+    )
+    .await?;
+    let shown = v["name"].as_str().unwrap_or(name);
+    out::line(&if trusted {
+        format!(
+            "trusted {shown} (since {}); its prompts reach agents unmarked from its next call on",
+            fmt_time(v["trusted_at"].as_i64())
+        )
+    } else {
+        format!("untrusted {shown}; its prompts are marked again from its next call on")
+    });
     Ok(ExitCode::SUCCESS)
 }
 
@@ -711,7 +744,8 @@ mod tests {
             serde_json::json!({
                 "id": 2, "name": "phone", "mode": "full",
                 "created_at": 1_700_000_000, "last_seen_at": 1_700_000_600,
-                "revoked_at": serde_json::Value::Null
+                "revoked_at": serde_json::Value::Null,
+                "trusted_at": 1_700_000_300
             }),
             serde_json::json!({
                 "id": 1, "name": "old kiosk", "mode": "readonly",
@@ -730,12 +764,23 @@ mod tests {
             lines[0].contains("CREATED") && lines[0].contains("LAST SEEN"),
             "{t}"
         );
-        assert!(lines[0].contains("REVOKED"), "{t}");
+        assert!(
+            lines[0].contains("REVOKED") && lines[0].contains("TRUSTED"),
+            "{t}"
+        );
         assert!(
             lines[1].contains("phone") && lines[1].contains("full"),
             "{t}"
         );
         assert!(lines[1].contains("2023-11-14 22:13Z"), "{t}");
+        // TRUSTED is a time for a vouched-for client, a dash otherwise (and
+        // a dash for a row from a hub that predates the column).
+        assert!(lines[1].contains("2023-11-14 22:18Z"), "{t}");
+        assert_eq!(
+            lines[2].split_whitespace().filter(|c| *c == "-").count(),
+            2,
+            "a dash for TRUSTED and one for LAST SEEN:\n{t}"
+        );
         // A live client's revoked column is a dash, not an empty gap.
         assert!(lines[1].trim_end().ends_with('-'), "{t}");
         assert!(
@@ -850,7 +895,7 @@ mod tests {
 
         let (dir, shutdown, task) = running_hub(Some(tls)).await;
         let opts = opts_for(&dir, None);
-        let result = pair(&opts, &HashMap::new(), "phone", None, None).await;
+        let result = pair(&opts, &HashMap::new(), "phone", None, None, false).await;
         shutdown.cancel();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
         assert!(result.is_ok(), "pair over TLS must succeed: {result:?}");
@@ -862,7 +907,7 @@ mod tests {
     async fn pair_reaches_a_plaintext_hub() {
         let (dir, shutdown, task) = running_hub(None).await;
         let opts = opts_for(&dir, None);
-        let result = pair(&opts, &HashMap::new(), "phone", None, None).await;
+        let result = pair(&opts, &HashMap::new(), "phone", None, None, false).await;
         shutdown.cancel();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
         assert!(

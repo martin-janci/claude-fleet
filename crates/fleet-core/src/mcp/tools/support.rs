@@ -417,17 +417,26 @@ pub(super) fn marker_origin(caller: &Caller) -> String {
 }
 
 /// Prefix `text` with the untrusted-content marker unless the caller is the
-/// master token AND asked for `raw` delivery. A per-host caller asking for
-/// `raw` is refused outright (`E_FORBIDDEN`) rather than silently marked, so
-/// an agent cannot believe it delivered unmarked text. A paired client is not
-/// the master ([`Caller::is_master`] checks `client` too), so it is refused
-/// here as well: text typed on a phone always reaches an agent marked.
+/// master token AND asked for `raw` delivery, or is a paired client the
+/// operator has vouched for. A per-host caller asking for `raw` is refused
+/// outright (`E_FORBIDDEN`) rather than silently marked, so an agent cannot
+/// believe it delivered unmarked text. An ordinary paired client is not the
+/// master ([`Caller::is_master`] checks `client` too), so it is refused here
+/// as well: text typed on a phone reaches an agent marked — unless the
+/// operator trusted that device (`client_tokens.trusted_at`,
+/// [`Caller::is_trusted_client`]), in which case its words are the
+/// operator's own and go through unmarked whatever `raw` says. The audit
+/// row still names the client; only the receiving agent stops being told to
+/// distrust it.
 pub(super) fn apply_marker(
     text: String,
     from: &str,
     caller: &Caller,
     raw: bool,
 ) -> Result<String, McpError> {
+    if caller.is_trusted_client() {
+        return Ok(text);
+    }
     if raw {
         if caller.is_master() {
             return Ok(text);
@@ -569,6 +578,7 @@ pub(super) struct ClientSummary {
     pub(super) created_at: i64,
     pub(super) last_seen_at: Option<i64>,
     pub(super) revoked_at: Option<i64>,
+    pub(super) trusted_at: Option<i64>,
 }
 
 impl From<crate::store::ClientTokenRow> for ClientSummary {
@@ -580,6 +590,7 @@ impl From<crate::store::ClientTokenRow> for ClientSummary {
             created_at: r.created_at,
             last_seen_at: r.last_seen_at,
             revoked_at: r.revoked_at,
+            trusted_at: r.trusted_at,
         }
     }
 }
