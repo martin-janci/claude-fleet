@@ -634,7 +634,7 @@ pub struct MoveSessionParams {
     /// Replace what an earlier attempt left in the target worktree.
     #[serde(default)]
     pub clean_target: bool,
-    /// Report what would travel; change nothing.
+    /// Preview; no changes.
     #[serde(default)]
     pub dry_run: bool,
     /// Nonce from a previous E_CONFIRM_REQUIRED, once approved on the
