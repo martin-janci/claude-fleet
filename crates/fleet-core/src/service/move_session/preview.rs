@@ -272,6 +272,15 @@ pub(super) async fn preview(
     {
         Ok(stdout) => match probe::parse_target_probe(&stdout) {
             Ok(Probed::Absent) => TargetState::Absent,
+            Ok(Probed::Enclosed { toplevel }) => {
+                unknowns.push(format!(
+                    "{cwd_hint} on {} exists but is not a git worktree of its own: it lies \
+                     inside the repository at {toplevel}, whose state is not the target's, so \
+                     the target's state is unknown",
+                    g.target
+                ));
+                TargetState::Unknown
+            }
             Ok(Probed::Worktree { head, porcelain }) => {
                 if porcelain.is_empty() {
                     TargetState::Clean { head }

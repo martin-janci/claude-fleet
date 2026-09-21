@@ -20,10 +20,18 @@ pub enum Probed {
         head: String,
         porcelain: Vec<DirtyFile>,
     },
+    /// The path exists and is not a worktree of its own, but lies inside the
+    /// worktree rooted at `toplevel` — whose HEAD and porcelain are that
+    /// repository's, not the target's, so neither is reported.
+    Enclosed { toplevel: String },
 }
 
 /// Look at `cwd` and change nothing. Prints [`OUT_MARKER`] then either
-/// `absent`, or `worktree`, a HEAD line, and [`STATUS_PORCELAIN`]'s output.
+/// `absent`; or `enclosed` and the enclosing worktree's root, when `cwd` is
+/// not a worktree root itself (compared physically, so a symlinked path to a
+/// real root still counts as that root); or `worktree`, a HEAD line, and
+/// [`STATUS_PORCELAIN`]'s output. A path in no worktree at all fails with
+/// [`FAILED`]` not-a-worktree`.
 /// Every git call is prefixed with `GIT_OPTIONAL_LOCKS=0` — without it `git
 /// status` refreshes and rewrites the index's stat cache, which is a write.
 pub fn target_probe_script(cwd: &str) -> String {
@@ -33,6 +41,11 @@ set +e
 cwd={cwd}
 if [ ! -e "$cwd" ]; then printf '\n{OUT_MARKER}\nabsent\n'; exit 0; fi
 cd -- "$cwd" 2>/dev/null || {{ printf '{FAILED} cd\n' >&2; exit 5; }}
+top=$(GIT_OPTIONAL_LOCKS=0 git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$top" ]; then printf '{FAILED} not-a-worktree\n' >&2; exit 5; fi
+if [ "$(cd -- "$top" 2>/dev/null && pwd -P)" != "$(pwd -P)" ]; then
+  printf '\n{OUT_MARKER}\nenclosed\n%s\n' "$top"; exit 0
+fi
 head=$(GIT_OPTIONAL_LOCKS=0 git rev-parse HEAD 2>/dev/null)
 if [ -z "$head" ]; then printf '{FAILED} head\n' >&2; exit 5; fi
 printf '\n{OUT_MARKER}\nworktree\n%s\n' "$head"
@@ -49,6 +62,15 @@ pub fn parse_target_probe(stdout: &str) -> Result<Probed, IpcError> {
     let mut lines = body.lines();
     match lines.next().map(str::trim) {
         Some("absent") => Ok(Probed::Absent),
+        Some("enclosed") => {
+            let toplevel = lines
+                .next()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| parse_err("target-probe", stdout))?
+                .to_string();
+            Ok(Probed::Enclosed { toplevel })
+        }
         Some("worktree") => {
             let head = lines
                 .next()
@@ -204,6 +226,62 @@ mod tests {
             paths.iter().any(|p| p.contains("new file.txt")),
             "{paths:?}"
         );
+    }
+
+    /// A path that exists but is not a repository of its own, sitting inside
+    /// ANOTHER repository: git walks up and answers for the enclosing repo.
+    /// Its HEAD and its dirty files are not the target's, and must never be
+    /// reported as if they were.
+    #[test]
+    fn a_path_inside_another_repo_is_not_reported_as_that_repos_worktree() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path().join("outer");
+        std::fs::create_dir_all(&outer).unwrap();
+        git(&outer, &["init", "-q", "-b", "main"]);
+        std::fs::write(outer.join("a.txt"), "a\n").unwrap();
+        git(&outer, &["add", "a.txt"]);
+        git(&outer, &["commit", "-q", "-m", "a"]);
+        std::fs::write(outer.join("a.txt"), "dirty\n").unwrap();
+        let inner = outer.join("sub").join("wt");
+        std::fs::create_dir_all(&inner).unwrap();
+        let out = bash(&target_probe_script(inner.to_str().unwrap()), tmp.path());
+        let parsed = parse_target_probe(&String::from_utf8_lossy(&out.stdout));
+        assert!(
+            !matches!(parsed, Ok(Probed::Worktree { .. })),
+            "the enclosing repository's state was reported as the target's: {parsed:?}"
+        );
+        match parsed {
+            Ok(Probed::Enclosed { toplevel }) => assert_eq!(
+                std::fs::canonicalize(toplevel).unwrap(),
+                std::fs::canonicalize(&outer).unwrap()
+            ),
+            other => panic!("expected Enclosed, got {other:?}"),
+        }
+    }
+
+    /// A path in no repository at all is unknown, with a reason — never a
+    /// worktree.
+    #[test]
+    fn a_path_in_no_repo_is_an_error_not_a_worktree() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let out = std::process::Command::new("bash")
+            .args(["-c", &target_probe_script(plain.to_str().unwrap())])
+            .env("HOME", tmp.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CEILING_DIRECTORIES", tmp.path())
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("not-a-worktree"));
     }
 
     #[test]
