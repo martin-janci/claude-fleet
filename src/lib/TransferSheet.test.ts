@@ -134,7 +134,7 @@ describe('TransferSheet', () => {
     expect(mockInvoke).toHaveBeenCalledWith('move_session', {
       args: {
         session_id: 5, target_host_alias: 'turanga', keep_source: true, strict: false,
-        clean_target: false, dry_run: false, when: 'idle',
+        clean_target: false, dry_run: false, when: 'now',
       },
     });
     expect(await screen.findByTestId('transfer-steps')).toBeTruthy();

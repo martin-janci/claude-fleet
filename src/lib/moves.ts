@@ -6,7 +6,14 @@
 import { get, writable, type Readable } from 'svelte/store';
 import { UNDONE } from './moveErrors';
 import { MOVE_STEPS, type MoveProgress, type MoveStep, type MoveStepState } from './moveProgress';
-import { moveSession, resolveMove, type MoveReport, type ResolveAction, type ResolveMoveReport } from './moveSession';
+import {
+  moveSession,
+  resolveMove,
+  type MoveReport,
+  type MoveWaiting,
+  type ResolveAction,
+  type ResolveMoveReport,
+} from './moveSession';
 import type { IpcError, Result } from './result';
 import { sessions, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
@@ -235,16 +242,9 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     // Same mechanism as `retryMove`. See `MoveRun.awaitingStart`.
     awaitingStart: replacing,
   });
-  void moveSession(session.id, toHost, { keepSource: opts.keepSource }).then((r) => {
-    // Task 6 made `moveSession` default to `when: 'idle'`, so a busy source
-    // now answers `waiting` instead of `moved`. Task 7 gives a `waiting` run
-    // its own status (`deadlineUnix`, Cancel); until then there is nothing to
-    // settle, so this run stays `running` rather than mis-settling as if a
-    // move had happened.
-    if (!r.ok) { settle(session.id, r); return; }
-    if (r.value.kind === 'waiting') return;
-    settle(session.id, { ok: true, value: r.value });
-  });
+  void moveSession(session.id, toHost, { keepSource: opts.keepSource, when: 'now' }).then((r) =>
+    settleMoveResult(session.id, r),
+  );
 }
 
 /** "1 warning" / "3 warnings". */
@@ -325,6 +325,31 @@ function settle(sessionId: number, r: Result<MoveReport>): void {
   if (!sheetOpen) pushError(r.error, `Move of ${run.sessionName} failed`);
 }
 
+/** Both call sites below always pass `when: 'now'`, so `moveSession`'s
+ *  return type still allows `waiting` (a caller could ask for `when:
+ *  'idle'`) even though it can never actually happen here. A `waiting`
+ *  answer would mean the backend and this wrapper disagree about the call
+ *  just made — it is settled as a failure, never as a move, so a stray one
+ *  can never be reported as done. Task 7 gives a real `when: 'idle'` run its
+ *  own `waiting` status (`deadlineUnix`, Cancel). */
+function settleMoveResult(
+  sessionId: number,
+  r: Result<({ kind: 'moved' } & MoveReport) | ({ kind: 'waiting' } & MoveWaiting)>,
+): void {
+  if (!r.ok) {
+    settle(sessionId, r);
+    return;
+  }
+  if (r.value.kind === 'waiting') {
+    settle(sessionId, {
+      ok: false,
+      error: { code: 'E_PARSE', message: 'move_session waited despite when: "now"' },
+    });
+    return;
+  }
+  settle(sessionId, { ok: true, value: r.value });
+}
+
 /**
  * Run the same move again, on the same run entry. Only for a run that FAILED:
  * a running one is already going, and a partial needs `resolveMoveRun` — a
@@ -357,12 +382,8 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     // that does know carries the answer (`adoptPartial`).
     keepSource: run.keepSource ?? false,
     cleanTarget,
-  }).then((r) => {
-    // See the comment in `startMove`: Task 7 owns the `waiting` run status.
-    if (!r.ok) { settle(sessionId, r); return; }
-    if (r.value.kind === 'waiting') return;
-    settle(sessionId, { ok: true, value: r.value });
-  });
+    when: 'now',
+  }).then((r) => settleMoveResult(sessionId, r));
 }
 
 /** The TARGET session's id `resolve_move` needs, from whichever of the run's

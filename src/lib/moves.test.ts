@@ -119,7 +119,7 @@ describe('startMove', () => {
     expect(invoked).toHaveBeenCalledWith('move_session', {
       args: {
         session_id: 5, target_host_alias: 'turanga', keep_source: false, strict: false,
-        clean_target: false, dry_run: false, when: 'idle',
+        clean_target: false, dry_run: false, when: 'now',
       },
     });
   });

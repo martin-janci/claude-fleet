@@ -118,7 +118,12 @@ export type MoveOutcome =
  *  leaves both sessions. `cleanTarget` replaces a stale attempt's leftovers on
  *  the target instead of refusing with `E_MOVE_TARGET_DIRTY` again.
  *  `when` defaults to `'idle'` — an idle source moves at once, a busy one
- *  yields a pending wait. Narrows to `moved | waiting`. */
+ *  yields a pending wait. That default is this wrapper's own; the wire's
+ *  own default (an omitted `when`) is `'now'` (`MoveSessionArgs::when`,
+ *  `#[serde(default)]` on `When::Now`) — a caller that talks to
+ *  `move_session` directly, bypassing this wrapper, still gets the old flat
+ *  refusal on a busy source unless it asks for `idle` itself. Narrows to
+ *  `moved | waiting`. */
 export async function moveSession(
   sessionId: number,
   targetHostAlias: string,
