@@ -7,9 +7,11 @@ import { get, writable, type Readable } from 'svelte/store';
 import { UNDONE } from './moveErrors';
 import { MOVE_STEPS, type MoveProgress, type MoveStep, type MoveStepState } from './moveProgress';
 import {
+  cancelMoveWait,
   moveSession,
   resolveMove,
   type MoveReport,
+  type MoveWaitCancelled,
   type MoveWaiting,
   type ResolveAction,
   type ResolveMoveReport,
@@ -17,11 +19,12 @@ import {
 import type { IpcError, Result } from './result';
 import { sessions, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
-import type { UnresolvedPartial } from './timeline';
+import { onTimelineEvent } from './live_events';
+import type { SessionEvent, UnresolvedPartial, UnresolvedWait } from './timeline';
 import { push, pushError } from './toasts';
 
 export type StepState = 'pending' | MoveStepState;
-export type MoveStatus = 'running' | 'done' | 'failed' | 'partial';
+export type MoveStatus = 'running' | 'done' | 'failed' | 'partial' | 'waiting';
 
 export interface MoveRunStep {
   step: MoveStep;
@@ -84,6 +87,14 @@ export interface MoveRun {
    * straggle, so it does not wait.
    */
   awaitingStart: boolean;
+  /** The wall-clock deadline (`when: 'idle'`'s `MoveWaiting.deadline_unix`) a
+   *  `waiting` run will time out at; `null` off that status. */
+  deadlineUnix: number | null;
+  /** Why a `waiting` run's wait ended without a move — the reason on its
+   *  `session_move_wait_ended` (`cancelled`, `timed_out`, `session_gone`,
+   *  `refused`, `hub_restarted`); `null` while waiting, or for a run that
+   *  never waited. */
+  waitEnded: string | null;
 }
 
 const DETAIL_MAX = 80;
@@ -123,7 +134,10 @@ function put(run: MoveRun): void {
 
 export function activeMoveFor(sessionId: number): MoveRun | undefined {
   const run = get(store).get(sessionId);
-  return run?.status === 'running' ? run : undefined;
+  // A `waiting` run has no move running YET, but it is just as much "already
+  // doing something with this session" as a running one: a second click must
+  // not race it into the backend's own "already waiting" refusal.
+  return run?.status === 'running' || run?.status === 'waiting' ? run : undefined;
 }
 
 /** 1-based number of the step the run has reached (at least 1). */
@@ -147,7 +161,9 @@ export function displaySteps(run: MoveRun): MoveRunStep[] {
   if (run.status === 'done') {
     return run.steps.map((s) => (s.state === 'warned' ? s : { ...s, state: 'done' as StepState }));
   }
-  if (run.status === 'running' || run.steps.some((s) => s.state === 'failed')) return run.steps;
+  if (run.status === 'running' || run.status === 'waiting' || run.steps.some((s) => s.state === 'failed')) {
+    return run.steps;
+  }
   // Failed or partial with no `failed` event — the events lost the race, or
   // never came. The step that was running is the one that failed; failing
   // that, the one the move had got to (step 1 when nothing arrived at all).
@@ -241,8 +257,10 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     resolving: false,
     // Same mechanism as `retryMove`. See `MoveRun.awaitingStart`.
     awaitingStart: replacing,
+    deadlineUnix: null,
+    waitEnded: null,
   });
-  void moveSession(session.id, toHost, { keepSource: opts.keepSource, when: 'now' }).then((r) =>
+  void moveSession(session.id, toHost, { keepSource: opts.keepSource, when: 'idle' }).then((r) =>
     settleMoveResult(session.id, r),
   );
 }
@@ -325,13 +343,71 @@ function settle(sessionId: number, r: Result<MoveReport>): void {
   if (!sheetOpen) pushError(r.error, `Move of ${run.sessionName} failed`);
 }
 
-/** Both call sites below always pass `when: 'now'`, so `moveSession`'s
- *  return type still allows `waiting` (a caller could ask for `when:
- *  'idle'`) even though it can never actually happen here. A `waiting`
- *  answer would mean the backend and this wrapper disagree about the call
- *  just made — it is settled as a failure, never as a move, so a stray one
- *  can never be reported as done. Task 7 gives a real `when: 'idle'` run its
- *  own `waiting` status (`deadlineUnix`, Cancel). */
+/** One subscription per session currently `waiting`, watching its own live
+ *  timeline for the `session_move_wait_ended` that would settle it without a
+ *  move (see `watchWait`). Torn down the moment that run leaves `waiting`,
+ *  however it does — a settled wait, a dismiss, a fresh restart under the
+ *  same key — so a session is never listened to twice. */
+const waitWatchers = new Map<number, () => void>();
+
+function unwatchWait(sessionId: number): void {
+  waitWatchers.get(sessionId)?.();
+  waitWatchers.delete(sessionId);
+}
+
+/** `detail` on `session_move_wait_ended` — parsed as defensively as
+ *  `timeline.ts`'s own `detailOf`, since this is the same wire shape crossing
+ *  the same IPC boundary. */
+function waitEndReason(detail: string | null): string | null {
+  if (detail === null) return null;
+  try {
+    const v: unknown = JSON.parse(detail);
+    if (typeof v !== 'object' || v === null) return null;
+    const reason = (v as Record<string, unknown>).reason;
+    return typeof reason === 'string' ? reason : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Subscribe a `waiting` run to its own session's live timeline, so a wait
+ * that ends WITHOUT a move (cancelled, timed out, the session gone, refused,
+ * a hub restart) still settles this run — nothing else tells this window
+ * that the wait is over, since `move:progress` only ever reports an actual
+ * move. A `moved` reason needs no action here: `move:progress` settles that
+ * run itself, the same way it always has. Idempotent — a run already watched
+ * (an adopted one, a straggler retry) is not subscribed twice.
+ */
+function watchWait(sessionId: number): void {
+  if (waitWatchers.has(sessionId)) return;
+  const unsub = onTimelineEvent(sessionId, (e: SessionEvent) => {
+    if (e.kind !== 'session_move_wait_ended') return;
+    const reason = waitEndReason(e.detail);
+    if (reason === 'moved') return;
+    const run = get(store).get(sessionId);
+    if (!run || run.status !== 'waiting') return;
+    unwatchWait(sessionId);
+    if (reason === null) return; // an unusable event: nothing to settle with
+    put({ ...run, status: 'failed', waitEnded: reason, error: null, settledAt: Date.now() });
+  });
+  waitWatchers.set(sessionId, unsub);
+}
+
+function settleWaiting(sessionId: number, w: MoveWaiting): void {
+  const run = get(store).get(sessionId);
+  if (!run || run.origin !== 'local' || run.status !== 'running') return;
+  put({ ...run, status: 'waiting', deadlineUnix: w.deadline_unix, waitEnded: null });
+  watchWait(sessionId);
+}
+
+/**
+ * Settle what `startMove`/`retryMove`'s own `move_session` call answered: a
+ * `moved` outcome exactly as before, a `waiting` one parks the run at
+ * `status: 'waiting'` instead (Task 7) — never reported as done, and never
+ * settled as a failure the way a stray one used to be, back when both call
+ * sites always asked for `when: 'now'`.
+ */
 function settleMoveResult(
   sessionId: number,
   r: Result<({ kind: 'moved' } & MoveReport) | ({ kind: 'waiting' } & MoveWaiting)>,
@@ -341,10 +417,7 @@ function settleMoveResult(
     return;
   }
   if (r.value.kind === 'waiting') {
-    settle(sessionId, {
-      ok: false,
-      error: { code: 'E_PARSE', message: 'move_session waited despite when: "now"' },
-    });
+    settleWaiting(sessionId, r.value);
     return;
   }
   settle(sessionId, { ok: true, value: r.value });
@@ -374,6 +447,8 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     // See the field comment on `MoveRun.awaitingStart`: a straggler from the
     // attempt this run replaces must not land on the fresh step list.
     awaitingStart: true,
+    deadlineUnix: null,
+    waitEnded: null,
   });
   void moveSession(sessionId, run.toHost, {
     // `null` only for a run this window never started (an `observed` one —
@@ -382,7 +457,9 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     // that does know carries the answer (`adoptPartial`).
     keepSource: run.keepSource ?? false,
     cleanTarget,
-    when: 'now',
+    // Same as `startMove`: a source busy again on retry waits instead of
+    // refusing outright, and a `waiting` answer parks this same run there.
+    when: 'idle',
   }).then((r) => settleMoveResult(sessionId, r));
 }
 
@@ -513,7 +590,46 @@ export function adoptPartial(p: UnresolvedPartial, sessionName: string): void {
     awaitingStart: false,
     startedAt: Date.now(),
     settledAt: Date.now(),
+    deadlineUnix: null,
+    waitEnded: null,
   });
+}
+
+/**
+ * Rebuild a `waiting` run from a recorded `session_move_waiting` event with
+ * no later `session_move_wait_ended`, so the sheet can offer Cancel — and the
+ * chip its deadline — for a wait this window never saw, usually because the
+ * app was restarted while it was still pending. Keyed like a live wait: the
+ * source session's id. A no-op when a run already exists for that key — a
+ * live run is always the better picture.
+ */
+export function adoptWait(w: UnresolvedWait, sessionName: string): void {
+  if (get(store).has(w.sessionId)) return;
+  const row = get(sessions).find((s) => s.id === w.sessionId);
+  put({
+    sessionId: w.sessionId,
+    sessionName,
+    fromHost: row?.host_alias ?? '',
+    toHost: w.toHost,
+    // Not knowable from the wait's own event (`begin_wait` does not record
+    // it) — same "unknown, not false" reasoning as `adoptPartial`'s `keptSource`.
+    keepSource: null,
+    origin: 'local',
+    steps: blank(),
+    status: 'waiting',
+    report: null,
+    error: null,
+    resolveError: null,
+    cleanTarget: false,
+    attempt: 1,
+    resolving: false,
+    awaitingStart: false,
+    startedAt: Date.now(),
+    settledAt: null,
+    deadlineUnix: w.deadlineUnix,
+    waitEnded: null,
+  });
+  watchWait(w.sessionId);
 }
 
 function observed(p: MoveProgress): MoveRun {
@@ -536,6 +652,8 @@ function observed(p: MoveProgress): MoveRun {
     attempt: 1,
     resolving: false,
     awaitingStart: false,
+    deadlineUnix: null,
+    waitEnded: null,
   };
 }
 
@@ -580,6 +698,11 @@ export function applyMoveProgress(p: MoveProgress): void {
       // they may not touch the outcome the user is already reading.
       settledLocal = true;
     } else if (isFreshStart) {
+      // A `waiting` run's own move just started: from here it is patched
+      // exactly like any other run this window is only observing (`observed`
+      // below), so the wait's timeline subscription is no longer needed —
+      // `move:progress` settles it from here.
+      if (run.status === 'waiting') unwatchWait(run.sessionId);
       run = undefined; // a NEW move of this session
     } else {
       return;
@@ -604,14 +727,41 @@ export function applyMoveProgress(p: MoveProgress): void {
 }
 
 /**
- * Forget a run. A LOCAL running one cannot be dismissed — this window owns
- * it and its result is still coming. An observed run is only this window's
- * view of someone else's move, so it can always be let go of; the next event
- * re-creates it.
+ * End a pending wait. Only `move_session`'s own `when: 'cancel'` decides how
+ * this settles — the answer's `was_waiting` tells this window whether there
+ * was still anything to cancel, but it never settles the run itself: however
+ * the cancel lands, the backend records its own `session_move_wait_ended`,
+ * which the run's `watchWait` subscription (still active — a cancel does not
+ * touch it) settles from, exactly like any other way a wait can end.
+ */
+export function cancelWait(sessionId: number): void {
+  const run = get(store).get(sessionId);
+  if (!run || run.status !== 'waiting') return;
+  const sessionName = run.sessionName;
+  void cancelMoveWait(sessionId, run.toHost).then((r: Result<MoveWaitCancelled>) => {
+    if (!r.ok) {
+      pushError(r.error, `Cancelling the transfer of ${sessionName}`);
+      return;
+    }
+    if (!r.value.was_waiting) {
+      // Nothing was pending any more — the wait ended on its own (moved,
+      // timed out, …) right before this reached the backend. Say so rather
+      // than claim credit for ending something that was already over; the
+      // timeline event that already recorded why settles the run as usual.
+      push({ kind: 'info', message: `The wait for ${sessionName} had already ended.` });
+    }
+  });
+}
+
+/**
+ * Forget a run. A LOCAL running or waiting one cannot be dismissed — this
+ * window owns it and its result (a move, or the wait ending some other way)
+ * is still coming. An observed run is only this window's view of someone
+ * else's move, so it can always be let go of; the next event re-creates it.
  */
 export function dismissMove(sessionId: number): void {
   const run = get(store).get(sessionId);
-  if (run && run.origin === 'local' && run.status === 'running') return;
+  if (run && run.origin === 'local' && (run.status === 'running' || run.status === 'waiting')) return;
   store.update((m) => {
     const next = new Map(m);
     next.delete(sessionId);
@@ -622,6 +772,8 @@ export function dismissMove(sessionId: number): void {
 export function resetMovesForTest(): void {
   store.set(new Map());
   transferSheetFor.set(null);
+  for (const unsub of waitWatchers.values()) unsub();
+  waitWatchers.clear();
 }
 
 /** Test-only: inject an arbitrary run directly, bypassing the state machine —

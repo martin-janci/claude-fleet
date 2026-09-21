@@ -9,6 +9,8 @@ import {
   eventTime,
   moveOrigin,
   unresolvedPartial,
+  unresolvedWait,
+  lastWaitEnd,
   type SessionEvent,
   type EventCategory,
 } from './timeline';
@@ -184,6 +186,54 @@ describe('moveOrigin / unresolvedPartial', () => {
         partial(3),
       );
       expect(unresolvedPartial(events)!.targetSessionId).toBe(8);
+    });
+  });
+
+  describe('unresolvedWait / lastWaitEnd', () => {
+    const waiting = (id: number, over: Record<string, unknown> = {}) =>
+      ev(id, 'session_move_waiting', { to_host: 'beta', deadline_unix: 2_000_000_000, ...over });
+    const ended = (id: number, over: Record<string, unknown> = {}) =>
+      ev(id, 'session_move_wait_ended', { reason: 'timed_out', ...over });
+
+    it('finds a wait nothing has ended yet', () => {
+      const events = newestFirst(waiting(1));
+      events[0].session_id = 9;
+      expect(unresolvedWait(events)).toEqual({
+        sessionId: 9,
+        toHost: 'beta',
+        deadlineUnix: 2_000_000_000,
+      });
+    });
+
+    it('is null once the wait ended', () => {
+      const events = newestFirst(waiting(1), ended(2));
+      expect(unresolvedWait(events)).toBeNull();
+    });
+
+    it('finds a NEWER wait that followed one already closed', () => {
+      const events = newestFirst(waiting(1), ended(2), waiting(3, { to_host: 'gamma' }));
+      expect(unresolvedWait(events)!.toHost).toBe('gamma');
+    });
+
+    it('is null when the waiting event itself is unusable', () => {
+      expect(unresolvedWait(newestFirst(ev(1, 'session_move_waiting', null)))).toBeNull();
+    });
+
+    it('is null with no move-wait events at all', () => {
+      expect(unresolvedWait([])).toBeNull();
+      expect(unresolvedWait(newestFirst(ev(1, 'killed', null)))).toBeNull();
+    });
+
+    it('reads the reason of the newest wait_ended', () => {
+      const events = newestFirst(ended(1, { reason: 'timed_out' }), ended(2, { reason: 'cancelled' }));
+      expect(lastWaitEnd(events)).toBe('cancelled');
+    });
+
+    it('is null when there is no wait_ended, or its detail is unusable', () => {
+      expect(lastWaitEnd([])).toBeNull();
+      expect(lastWaitEnd(newestFirst(waiting(1)))).toBeNull();
+      expect(lastWaitEnd(newestFirst(ev(1, 'session_move_wait_ended', null)))).toBeNull();
+      expect(lastWaitEnd(newestFirst(ev(1, 'session_move_wait_ended', { reason: 7 })))).toBeNull();
     });
   });
 });

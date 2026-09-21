@@ -132,6 +132,17 @@ export interface UnresolvedPartial {
 
 const MOVE_KINDS = new Set(['session_moved', 'session_move_partial', 'session_move_undone']);
 
+/** A pending `move.wait_max_mins` wait for a busy source to go idle, from
+ *  `session_move_waiting`'s own detail (`crates/fleet-core/src/service/
+ *  move_session/wait.rs::begin_wait`). */
+export interface UnresolvedWait {
+  sessionId: number;
+  toHost: string;
+  deadlineUnix: number | null;
+}
+
+const WAIT_KINDS = new Set(['session_move_waiting', 'session_move_wait_ended']);
+
 /** Parses `detail` defensively: `null`, malformed JSON, or a non-object
  *  value all mean "no usable record" rather than a thrown error. */
 function detailOf(e: SessionEvent): Record<string, unknown> | null {
@@ -180,6 +191,36 @@ export function unresolvedPartial(events: SessionEvent[]): UnresolvedPartial | n
     const step = typeof d.step === 'string' ? d.step : null;
     const keptSource = typeof d.kept_source === 'boolean' ? d.kept_source : null;
     return { targetSessionId, sourceSessionId, fromHost, toHost, step, keptSource };
+  }
+  return null;
+}
+
+/** The newest `session_move_waiting` with no later `session_move_wait_ended`:
+ *  scans newest-first over the two wait-related kinds and stops at the first
+ *  one that decides — an end means resolved (`null`), a wait is the answer,
+ *  provided its detail is usable. */
+export function unresolvedWait(events: SessionEvent[]): UnresolvedWait | null {
+  for (const e of events) {
+    if (!WAIT_KINDS.has(e.kind)) continue;
+    if (e.kind === 'session_move_wait_ended') return null;
+    // e.kind === 'session_move_waiting'
+    const d = detailOf(e);
+    if (!d) return null;
+    const toHost = typeof d.to_host === 'string' ? d.to_host : '';
+    const deadlineUnix = typeof d.deadline_unix === 'number' ? d.deadline_unix : null;
+    return { sessionId: e.session_id, toHost, deadlineUnix };
+  }
+  return null;
+}
+
+/** The reason of the newest `session_move_wait_ended`, or `null` when there
+ *  is none, or its detail is unusable. */
+export function lastWaitEnd(events: SessionEvent[]): string | null {
+  for (const e of events) {
+    if (e.kind !== 'session_move_wait_ended') continue;
+    const d = detailOf(e);
+    if (!d) return null;
+    return typeof d.reason === 'string' ? d.reason : null;
   }
   return null;
 }
