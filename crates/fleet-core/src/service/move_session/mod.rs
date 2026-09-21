@@ -66,6 +66,7 @@
 pub mod carry;
 pub mod claude_state;
 mod finalise;
+pub mod probe;
 mod progress;
 pub mod resolve;
 
