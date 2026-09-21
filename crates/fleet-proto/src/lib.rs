@@ -60,6 +60,7 @@
 
 pub mod backoff;
 pub mod net;
+pub mod report;
 
 use base64::Engine as _;
 use serde::de::DeserializeOwned;
