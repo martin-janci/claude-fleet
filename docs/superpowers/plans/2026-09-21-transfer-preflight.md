@@ -589,6 +589,9 @@ pub struct MovePreview {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum TargetState {
     Absent,
+    /// The probe could not answer (an SSH failure, an unreadable reply). The
+    /// reason is in `unknowns`. Never a refusal: the move does not probe.
+    Unknown,
     Clean { head: String },
     /// Deliberately not classified as 3d's `ours` / `theirs`: that verdict
     /// needs `refs/fleet/transfer/<id>/*`, which a dry run never creates.
@@ -766,6 +769,22 @@ assertion can fail by making `preview()` briefly call the thing it forbids.
     }
 
     #[tokio::test]
+    async fn a_failed_target_probe_is_unknown_not_a_refusal() {
+        let (f, _bus) = recorded_fixture();
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-probe:target"),
+            Reply::fail(255, "ssh: connection reset"),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let p = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a probe failure must not fail the preview");
+        assert!(matches!(p.target, TargetState::Unknown), "{:?}", p.target);
+        assert!(!p.unknowns.is_empty());
+    }
+
+    #[tokio::test]
     async fn the_bundle_size_is_named_as_unknown_and_ignored_flags_are_said() {
         let (f, _bus) = recorded_fixture();
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
@@ -813,9 +832,15 @@ In order, and **mirroring the move's own call sites** — read them first
    (the parent of `g.located.path`) and the memory listing of the worktree, as
    counts and byte totals. Also warn-only: a failure goes to `unknowns`.
 4. `let (project_root, cwd_hint) = target_paths(&g.snap, &g.target, ssh).await?;`
-5. On the target: `target_probe_script(&cwd_hint)` → `TargetState`.
+5. On the target: `target_probe_script(&cwd_hint)` → `TargetState`. A probe that
+   fails or cannot be parsed is `TargetState::Unknown` plus a line in
+   `unknowns` — **never** an `Err`: the move does not probe, so a preview must
+   not refuse on something the move would never have looked at.
 6. On the target: `target_tip_script(&project_root, &g.snap.branch)`; when it
    yields a tip, on the source `commits_ahead_script(&g.state.worktree, &tip)`.
+   Either failing leaves `commits_ahead: None` with a line in `unknowns`, same
+   reasoning. Only steps 0, 1 and 4 may return `Err` — they are the ones the
+   move itself would fail on.
 7. `unknowns`: always the bundle size — say that it is decided by snapshotting
    and so cannot be known without writing, and that it is what `E_MOVE_TOO_LARGE`
    depends on. Add a line for `strict` and for `clean_target` when set, saying a
@@ -1074,6 +1099,7 @@ calling `moveSession()` and keep receiving a `MoveReport`.
 ```ts
 export type TargetState =
   | { state: 'absent' }
+  | { state: 'unknown' }
   | { state: 'clean'; head: string }
   | { state: 'dirty'; head: string; entries: { status: string; path: string }[] };
 

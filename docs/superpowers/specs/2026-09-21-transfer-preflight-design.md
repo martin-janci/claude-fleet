@@ -146,6 +146,9 @@ pub struct MovePreview {
 pub enum TargetState {
     /// No worktree there yet; the move would create it.
     Absent,
+    /// The probe could not answer; the reason is in `unknowns`. Never a
+    /// refusal — the move itself does not probe.
+    Unknown,
     Clean { head: String },
     /// Its porcelain. Deliberately NOT classified as 3d's `ours` / `theirs`:
     /// that verdict comes from `carry::verify_replayed_script`, which compares
