@@ -26,6 +26,10 @@ pub(super) const PANE_TAIL_LINES: u32 = 8;
 /// master.
 pub(crate) const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Production cadence for `claude agents --json` per host (a node cold
+/// start): once per minute, not every reconcile pass. See `agents_due`.
+pub(crate) const AGENTS_CADENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Default cadence (seconds) for the background reconcile tick, and the
 /// freshness window `list_sessions` serves cached rows within when the tick
 /// is disabled. Overridden by the `reconcile.interval_secs` setting.
@@ -175,7 +179,9 @@ pub(super) const PR_PROBE_BATCH: usize = 12;
 pub(super) struct HostProbe {
     pub(super) host: HostRow,
     pub(super) result: Result<Vec<crate::tmux::TmuxSession>, IpcError>,
-    pub(super) agent_rows: Vec<crate::claude_agents::ClaudeAgentRow>,
+    /// `None`: not asked this pass (cadence) or unanswerable — the bg
+    /// pruner is skipped.
+    pub(super) agent_rows: Option<Vec<crate::claude_agents::ClaudeAgentRow>>,
     /// `sessionId → transcript mtime (unix s)` for this pass's `Background`
     /// agents (one extra host call, only when there is at least one; no bg
     /// agent ⇒ `Some` empty map). `None` when that call failed (spawn error,
@@ -236,6 +242,11 @@ pub(crate) struct ReconcileDeps {
     /// created, an existing one is never probed, and the local Claude
     /// account is not read.
     pub(super) local_host: bool,
+    /// How often `claude agents --json` (a node cold start) is asked per
+    /// host. `0` = every pass (tests).
+    pub(super) agents_every: std::time::Duration,
+    /// When each host was last asked.
+    pub(super) last_agents: dashmap::DashMap<String, std::time::Instant>,
 }
 
 /// `host alias → tmux executor` factory used by `ReconcileDeps`.
@@ -255,6 +266,8 @@ impl ReconcileDeps {
             pr_cache: crate::service::outcome::pr_probe_cache(),
             local_home: local_host.then(crate::service::hosts::local_home_dir),
             local_host,
+            agents_every: AGENTS_CADENCE,
+            last_agents: dashmap::DashMap::new(),
         })
     }
 
@@ -283,6 +296,10 @@ impl ReconcileDeps {
             )),
             local_home: None,
             local_host: true,
+            // Tests want the agents probe on every pass unless they build
+            // their own `ReconcileDeps` with an explicit cadence.
+            agents_every: std::time::Duration::ZERO,
+            last_agents: dashmap::DashMap::new(),
         })
     }
 
@@ -314,6 +331,18 @@ impl ReconcileDeps {
         Arc::get_mut(&mut deps).expect("fresh Arc").local_host = false;
         deps
     }
+}
+
+/// Whether this pass asks `host` for its agents; records the ask.
+pub(super) fn agents_due(deps: &ReconcileDeps, alias: &str, now: std::time::Instant) -> bool {
+    let due = match deps.last_agents.get(alias) {
+        Some(last) => now.duration_since(*last) >= deps.agents_every,
+        None => true,
+    };
+    if due {
+        deps.last_agents.insert(alias.to_string(), now);
+    }
+    due
 }
 
 /// Shared overlap guard + freshness marker for the fleet-wide reconcile.
@@ -494,7 +523,12 @@ pub(super) fn reconcile_write_one_host(
 ) -> Result<(), IpcError> {
     let host = &probe.host;
     let paths = HostPaths::for_host(s, &host.alias);
-    let agent_rows = &probe.agent_rows;
+    // `None` (not asked this pass, or unanswerable) reads as "no agents"
+    // for pairing/status purposes ONLY — the pruner below is gated
+    // separately on `probe.agent_rows` itself, so a `None` never ghosts a
+    // bg row.
+    let agent_rows: &[crate::claude_agents::ClaudeAgentRow] =
+        probe.agent_rows.as_deref().unwrap_or(&[]);
     let intel = &probe.intel;
     match &probe.result {
         Ok(live) => {
@@ -781,16 +815,18 @@ pub(super) fn reconcile_write_one_host(
             // instead they are pruned inside `reconcile_agent_rows` against
             // the current `claude agents --json` result, so dead agents can't
             // accumulate.
-            reconcile_agent_rows(
-                s,
-                &host.alias,
-                live,
-                projects,
-                agent_rows,
-                probe.agent_mtimes.as_ref(),
-                now,
-                probe.started_at,
-            )?;
+            if let Some(agents) = &probe.agent_rows {
+                reconcile_agent_rows(
+                    s,
+                    &host.alias,
+                    live,
+                    projects,
+                    agents,
+                    probe.agent_mtimes.as_ref(),
+                    now,
+                    probe.started_at,
+                )?;
+            }
             // Task H: stamp freshness on every session this pass observed live,
             // so a proactive (background) reconcile keeps `last_reconciled_at`
             // current and the UI can dim rows whose host has gone quiet. It is
@@ -1102,11 +1138,13 @@ pub(super) async fn probe_one_host(
     deps: &ReconcileDeps,
 ) -> HostProbe {
     let tmux = (deps.exec)(&host.alias);
+    let fetch_agents = agents_due(deps, &host.alias, std::time::Instant::now());
     probe_with_timeout(
         host,
         tmux,
         deps.probe_timeout,
         Some((deps.shell.as_ref(), deps.pr_cache.as_ref(), &paths)),
+        fetch_agents,
     )
     .await
 }
@@ -1171,6 +1209,7 @@ pub(super) async fn probe_with_timeout(
         &crate::service::outcome::PrProbeCache,
         &HostPaths,
     )>,
+    fetch_agents: bool,
 ) -> HostProbe {
     // Recorded BEFORE the first await: this is the instant the probe's view of
     // the host stops being current (BE-3 ghost guard).
@@ -1186,7 +1225,15 @@ pub(super) async fn probe_with_timeout(
         let identity = tmux.host_identity().await;
         let tmux_result = tmux.list_sessions().await;
         let identity = if tmux_result.is_ok() { identity } else { None };
-        let agent_rows = tmux.list_claude_agents().await;
+        // `None`: not due this pass (cadence) or the host could not be
+        // asked. Either way the bg pruner below must not run this pass —
+        // treating "not asked" as "no agents" is exactly what ghosts every
+        // background row.
+        let agent_rows = if fetch_agents && tmux_result.is_ok() {
+            tmux.list_claude_agents().await
+        } else {
+            None
+        };
         // Which account the host is logged into NOW — so a `claude /login`
         // as someone else on a remote host relinks it within one pass
         // instead of waiting for a manual Re-probe. Skipped when the list
@@ -1199,15 +1246,20 @@ pub(super) async fn probe_with_timeout(
         };
         // Transcript mtimes feed the inactive-bg-agent rule; one host call,
         // only when this pass saw a background agent.
-        let bg_ids: Vec<String> = agent_rows
-            .iter()
-            .filter(|a| a.kind == crate::claude_agents::AgentKind::Background)
-            .filter_map(|a| a.session_id.clone())
-            .collect();
-        let agent_mtimes = if bg_ids.is_empty() {
-            Some(std::collections::HashMap::new())
-        } else {
-            tmux.transcript_mtimes(&bg_ids).await
+        let agent_mtimes = match &agent_rows {
+            None => None,
+            Some(rows) => {
+                let bg_ids: Vec<String> = rows
+                    .iter()
+                    .filter(|a| a.kind == crate::claude_agents::AgentKind::Background)
+                    .filter_map(|a| a.session_id.clone())
+                    .collect();
+                if bg_ids.is_empty() {
+                    Some(std::collections::HashMap::new())
+                } else {
+                    tmux.transcript_mtimes(&bg_ids).await
+                }
+            }
         };
         // One pane-tail read per live session, parsed into reconcile intel.
         let intel = match &tmux_result {
@@ -1244,7 +1296,7 @@ pub(super) async fn probe_with_timeout(
             return HostProbe {
                 host,
                 result: Err(IpcError::new(codes::E_TIMEOUT, "host probe timed out")),
-                agent_rows: Vec::new(),
+                agent_rows: None,
                 agent_mtimes: None,
                 intel: PaneIntelMap::new(),
                 pr_info: PrInfoMap::new(),

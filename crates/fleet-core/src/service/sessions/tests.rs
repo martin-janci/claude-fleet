@@ -956,8 +956,8 @@ impl TmuxExec for AgentsTmux {
     async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
         Ok(String::new())
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        self.agents.clone()
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(self.agents.clone())
     }
     async fn transcript_mtimes(
         &self,
@@ -997,6 +997,7 @@ async fn probe_reads_transcript_mtimes_for_background_agents_only() {
         Box::new(tmux),
         std::time::Duration::from_secs(5),
         None,
+        true,
     )
     .await;
     assert_eq!(*calls.lock().unwrap(), vec![vec![BG_ID.to_string()]]);
@@ -1021,6 +1022,7 @@ async fn probe_reads_transcript_mtimes_for_background_agents_only() {
         Box::new(tmux),
         std::time::Duration::from_secs(5),
         None,
+        true,
     )
     .await;
     assert!(calls.lock().unwrap().is_empty());
@@ -1045,10 +1047,115 @@ async fn probe_reports_a_failed_mtime_call_as_none() {
         Box::new(tmux),
         std::time::Duration::from_secs(5),
         None,
+        true,
     )
     .await;
     assert_eq!(calls.lock().unwrap().len(), 1);
     assert_eq!(probe.agent_mtimes, None);
+}
+
+/// A `claude agents --json` that could not be asked (ssh 255, timeout) is
+/// `None`, and a `None` never reaches the pruner: every bg row survives.
+#[tokio::test]
+async fn an_unanswerable_agents_call_keeps_every_bg_row() {
+    struct NoAgentsAnswer;
+    #[async_trait::async_trait]
+    impl TmuxExec for NoAgentsAnswer {
+        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+            Ok(Vec::new())
+        }
+        async fn new_session(&self, _: &str, _: &std::path::Path, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn restart_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn capture_pane_scrollback(&self, _: &str, _: u32) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            None
+        }
+    }
+    let host = host_row("h");
+    let probe = probe_with_timeout(
+        host,
+        Box::new(NoAgentsAnswer),
+        std::time::Duration::from_secs(5),
+        None,
+        true,
+    )
+    .await;
+    assert!(probe.result.is_ok());
+    assert!(
+        probe.agent_rows.is_none(),
+        "an unanswered call is None, not an empty list"
+    );
+    assert!(probe.agent_mtimes.is_none());
+}
+
+#[tokio::test]
+async fn agents_are_not_asked_when_the_cadence_says_no() {
+    struct CountingAgents(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl TmuxExec for CountingAgents {
+        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+            Ok(Vec::new())
+        }
+        async fn new_session(&self, _: &str, _: &std::path::Path, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn restart_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn capture_pane_scrollback(&self, _: &str, _: u32) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(Vec::new())
+        }
+    }
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let host = host_row("h");
+    let probe = probe_with_timeout(
+        host.clone(),
+        Box::new(CountingAgents(calls.clone())),
+        std::time::Duration::from_secs(5),
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(probe.agent_rows.is_none());
+    let probe = probe_with_timeout(
+        host,
+        Box::new(CountingAgents(calls.clone())),
+        std::time::Duration::from_secs(5),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(probe.agent_rows, Some(Vec::new()));
 }
 
 /// Scriptable executor for the identity probe tests: a fixed session list
@@ -1090,12 +1197,54 @@ impl TmuxExec for IdentityTmux {
     async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
         Ok(String::new())
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        self.agents.clone()
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(self.agents.clone())
     }
     async fn host_identity(&self) -> Option<crate::tmux::HostIdentity> {
         self.identity.clone()
     }
+}
+
+/// `ReconcileDeps` built by hand (not `ReconcileDeps::fake`, which forces
+/// `agents_every` to zero) so a test can set its own agents cadence.
+fn deps_with_cadence_for_tests() -> ReconcileDeps {
+    ReconcileDeps {
+        exec: Box::new(|_alias| Box::new(IdentityTmux::default())),
+        probe_timeout: std::time::Duration::from_secs(5),
+        shell: Arc::new(NoHostShell),
+        pr_cache: Arc::new(crate::service::outcome::PrProbeCache::new(
+            crate::service::outcome::PR_PROBE_TTL,
+        )),
+        local_home: None,
+        local_host: true,
+        agents_every: std::time::Duration::from_secs(60),
+        last_agents: dashmap::DashMap::new(),
+    }
+}
+
+#[test]
+fn agents_due_fires_on_first_contact_then_only_after_the_cadence() {
+    let deps = ReconcileDeps::fake(
+        |_| Box::new(IdentityTmux::default()),
+        std::time::Duration::from_secs(5),
+    );
+    // `fake` sets agents_every = 0 → always due.
+    let t0 = std::time::Instant::now();
+    assert!(agents_due(&deps, "h", t0));
+    assert!(agents_due(&deps, "h", t0));
+    let deps = deps_with_cadence_for_tests();
+    assert!(agents_due(&deps, "h", t0), "first contact is due");
+    assert!(!agents_due(
+        &deps,
+        "h",
+        t0 + std::time::Duration::from_secs(20)
+    ));
+    assert!(agents_due(
+        &deps,
+        "h",
+        t0 + std::time::Duration::from_secs(61)
+    ));
+    assert!(agents_due(&deps, "other", t0), "per host");
 }
 
 #[tokio::test]
@@ -1113,6 +1262,7 @@ async fn a_probe_records_the_host_identity_only_when_the_list_succeeded() {
         }),
         std::time::Duration::from_secs(5),
         None,
+        true,
     )
     .await;
     assert_eq!(probe.identity, Some(id));
@@ -1155,8 +1305,8 @@ async fn a_probe_drops_the_host_identity_when_list_sessions_fails() {
         async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
             Ok(String::new())
         }
-        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-            vec![]
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
         }
         async fn host_identity(&self) -> Option<crate::tmux::HostIdentity> {
             self.identity.clone()
@@ -1172,6 +1322,7 @@ async fn a_probe_drops_the_host_identity_when_list_sessions_fails() {
         }),
         std::time::Duration::from_secs(5),
         None,
+        true,
     )
     .await;
     assert!(probe.result.is_err());
@@ -1519,8 +1670,8 @@ async fn parallel_reconcile_does_not_serialise_on_slow_host() {
         ) -> Result<String, IpcError> {
             Ok(String::new())
         }
-        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-            vec![]
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
         }
     }
 
@@ -1581,8 +1732,8 @@ async fn wedged_host_probe_times_out_into_unreachable() {
         async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
             Ok(String::new())
         }
-        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-            vec![]
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
         }
     }
 
@@ -1598,8 +1749,14 @@ async fn wedged_host_probe_times_out_into_unreachable() {
 
     let start = std::time::Instant::now();
     let before = now_unix();
-    let probe =
-        probe_with_timeout(host, Box::new(HangingTmux), Duration::from_millis(80), None).await;
+    let probe = probe_with_timeout(
+        host,
+        Box::new(HangingTmux),
+        Duration::from_millis(80),
+        None,
+        true,
+    )
+    .await;
     let elapsed = start.elapsed();
 
     assert_eq!(
@@ -1610,7 +1767,7 @@ async fn wedged_host_probe_times_out_into_unreachable() {
         probe.result.is_err(),
         "wedged probe must surface as Err → unreachable"
     );
-    assert!(probe.agent_rows.is_empty());
+    assert!(probe.agent_rows.is_none());
     assert!(probe.intel.is_empty());
     assert!(
         probe.started_at >= before && probe.started_at <= now_unix(),
@@ -1661,8 +1818,8 @@ impl TmuxExec for ScriptedTmux {
     async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
         Ok(String::new())
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        vec![]
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(vec![])
     }
 }
 
@@ -1840,8 +1997,8 @@ impl TmuxExec for AccountTmux {
     async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
         Ok(String::new())
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        vec![]
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(vec![])
     }
     async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
         self.account.clone()
@@ -2095,7 +2252,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
     let stale = HostProbe {
         host: host.clone(),
         result: Ok(Vec::new()),
-        agent_rows: Vec::new(),
+        agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
@@ -2142,7 +2299,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
     let later = HostProbe {
         host,
         result: Ok(Vec::new()),
-        agent_rows: Vec::new(),
+        agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
@@ -2264,8 +2421,8 @@ async fn wait_for_repl_ready_returns_once_prompt_appears() {
         ) -> Result<String, IpcError> {
             Ok(String::new())
         }
-        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-            vec![]
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
         }
     }
 
@@ -2718,7 +2875,7 @@ fn reconcile_linking(
             path: PathBuf::from(cwd),
             pane_id: None,
         }]),
-        agent_rows: Vec::new(),
+        agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
@@ -4447,7 +4604,7 @@ async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
     let probe = HostProbe {
         host: host.clone(),
         result: Ok(Vec::new()),
-        agent_rows: Vec::new(),
+        agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
@@ -4924,7 +5081,7 @@ fn pair_pass(
     let probe = HostProbe {
         host,
         result: Ok(live),
-        agent_rows: agents,
+        agent_rows: Some(agents),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,

@@ -57,10 +57,10 @@ pub trait TmuxExec: Send + Sync {
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
     /// Capture the pane plus `lines` rows of scrollback history.
     async fn capture_pane_scrollback(&self, name: &str, lines: u32) -> Result<String, IpcError>;
-    /// Run `claude agents --json` on this host and return parsed session info.
-    /// Returns an empty vec if claude CLI is not installed or the command fails —
-    /// the fleet treats missing Claude agent data as degraded-gracefully.
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow>;
+    /// `claude agents --json` on the host. `None` when the host could not be
+    /// asked (ssh failure, timeout, non-zero exit): the caller must not treat
+    /// it as "no agents" — that is what ghosts every background row.
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>>;
     /// `sessionId → transcript mtime (unix s)` for the given ids; ids that are not
     /// valid Claude session ids are skipped. `Some(map)` when the call succeeded
     /// (possibly empty: no transcript found, or no valid id to ask about);
@@ -305,20 +305,19 @@ impl TmuxExec for LocalTmux {
             Ok(String::new())
         }
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        if local_allowed().is_err() {
-            return Vec::new();
-        }
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        local_allowed().ok()?;
         let output = tokio::process::Command::new("claude")
             .args(["agents", "--json"])
             .output()
             .await
-            .ok();
-        let json = output
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_else(|| "[]".to_string());
-        crate::claude_agents::parse_claude_agents_json(&json)
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(crate::claude_agents::parse_claude_agents_json(
+            &String::from_utf8_lossy(&output.stdout),
+        ))
     }
     async fn transcript_mtimes(
         &self,
@@ -541,14 +540,17 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(String::new())
         }
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        let script = "claude agents --json 2>/dev/null || echo '[]'";
-        let output = self.remote_bash(script).await.ok();
-        let json = output
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_else(|| "[]".to_string());
-        crate::claude_agents::parse_claude_agents_json(&json)
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        let output = self
+            .remote_bash("claude agents --json 2>/dev/null")
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(crate::claude_agents::parse_claude_agents_json(
+            &String::from_utf8_lossy(&output.stdout),
+        ))
     }
     async fn transcript_mtimes(
         &self,

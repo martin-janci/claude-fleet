@@ -933,6 +933,42 @@ async fn bg_agents_surface_prune_and_filter_unknown_statuses() {
     );
 }
 
+/// One unreachable `claude agents --json` (ssh 255) must not ghost a single
+/// background row: the pruner is skipped, not fed an empty list.
+#[tokio::test]
+async fn a_failed_agents_call_does_not_ghost_bg_rows() {
+    let f = Fleet::new(&["alpha"]);
+    f.list("alpha", "");
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"bg1","name":"nightly","status":"working","cwd":"/tmp/bg"}]"#,
+    );
+    f.pass().await;
+    let before = {
+        let s = f.store.lock().unwrap();
+        s.list_sessions_for_host("alpha").unwrap()
+    };
+    assert!(
+        !before.is_empty(),
+        "the bg row exists after the first pass: {before:?}"
+    );
+    f.fake.on_host(
+        "alpha",
+        Match::script_contains("claude agents --json"),
+        Reply::Unreachable,
+    );
+    f.pass().await;
+    let after = {
+        let s = f.store.lock().unwrap();
+        s.list_sessions_for_host("alpha").unwrap()
+    };
+    assert_eq!(
+        after.iter().filter(|r| r.status != "ghost").count(),
+        before.len(),
+        "no row was ghosted: {after:?}"
+    );
+}
+
 #[tokio::test]
 async fn bg_agent_with_unknown_status_is_not_stored_verbatim() {
     // bg rows (`reconcile_agent_rows` → `upsert_bg_session`) run the agent

@@ -254,15 +254,16 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
         vec![
             crate::tmux::HOST_IDENTITY_SCRIPT.to_string(),
             LIST_SCRIPT.to_string(),
-            "claude agents --json 2>/dev/null || echo '[]'".to_string(),
+            "claude agents --json 2>/dev/null".to_string(),
             crate::service::hosts::OAUTH_ACCOUNT_SCRIPT.to_string(),
             "tmux capture-pane -t '=alpha-live:' -S '-8' -p".to_string(),
         ]
     );
     // beta and gamma: the identity read (attempted before the list, its
-    // result discarded once the list fails), the list and the
-    // (unconditional) agents probe, and nothing more — a failed list skips
-    // the account read and the per-session pane captures.
+    // result discarded once the list fails) and the list, and nothing
+    // more — a failed list skips the agents probe (a `None` agent read
+    // must never reach the bg pruner), the account read and the
+    // per-session pane captures.
     for host in ["beta", "gamma"] {
         let scripts: Vec<String> = fake
             .calls_for(host)
@@ -274,7 +275,6 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
             vec![
                 crate::tmux::HOST_IDENTITY_SCRIPT.to_string(),
                 LIST_SCRIPT.to_string(),
-                "claude agents --json 2>/dev/null || echo '[]'".to_string(),
             ],
             "{host}"
         );

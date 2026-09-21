@@ -62,7 +62,7 @@ async fn a_disabled_local_host_refuses_explicit_local_targets() {
     assert_eq!(e.code, codes::E_NOTFOUND);
     let e = LocalTmux.capture_pane("x").await.unwrap_err();
     assert_eq!(e.code, codes::E_NOTFOUND);
-    assert!(LocalTmux.list_claude_agents().await.is_empty());
+    assert!(LocalTmux.list_claude_agents().await.is_none());
     assert!(LocalTmux
         .transcript_mtimes(&["00000000-0000-0000-0000-000000000000".to_string()])
         .await

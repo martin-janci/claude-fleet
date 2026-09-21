@@ -934,7 +934,10 @@ pub(super) async fn kill_session_with(
             .unwrap_or_else(|| args.name.trim_start_matches("bg:").to_string());
         let status = claude_status.as_deref();
         let agents = if bg_kill_needs_listing(&kind, status) {
-            exec_for(&args.host_alias, ssh).list_claude_agents().await
+            exec_for(&args.host_alias, ssh)
+                .list_claude_agents()
+                .await
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
