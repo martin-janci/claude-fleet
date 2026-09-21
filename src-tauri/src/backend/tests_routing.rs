@@ -154,8 +154,11 @@ const REPAIR_PAYLOAD: &str = r#"{"session_id":7,"host_alias":"trn","tmux_name":"
 const RESOLVE_MOVE_PAYLOAD: &str = r#"{"action":"finish","source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","source_killed":true,"target_killed":false,"warnings":[]}"#;
 /// A complete `OperatorStatus`: both `Option` fields are required on the
 /// wire (no `#[serde(default)]`), so `session` and `blocked` are spelled out
-/// as `null` rather than omitted.
-const OPERATOR_STATUS_PAYLOAD: &str = r#"{"ready":true,"session":null,"blocked":null}"#;
+/// as `null` rather than omitted. `host` is the one defaulted field (a hub
+/// from before it only ever homed the operator on `local`), spelled out here
+/// all the same so the payload is the whole shape.
+const OPERATOR_STATUS_PAYLOAD: &str =
+    r#"{"ready":true,"session":null,"blocked":null,"host":"local"}"#;
 
 /// One row of the tables below: the command it drives, the tool that command
 /// must name, and the arguments it must send.
