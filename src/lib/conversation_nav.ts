@@ -76,3 +76,34 @@ export function turnIndex(rows: ThreadRow[]): TurnIndexEntry[] {
   }
   return out;
 }
+
+// ---- Scroll memory -------------------------------------------------------
+//
+// Where the panel was scrolled to in each session's conversation view, kept
+// for the app's lifetime (one Map, not persisted) so switching to another
+// session and back restores the read position instead of snapping to the
+// bottom every time.
+
+export interface ScrollSnapshot {
+  rowKey: string;
+  atBottom: boolean;
+}
+
+export const scrollMemory = new Map<number, ScrollSnapshot>();
+
+/** Records where session `sessionId`'s view was left. A snapshot at the
+ *  bottom is dropped rather than stored: recalling "no entry" already means
+ *  "go to the bottom", which is the panel's default view. */
+export function rememberScroll(sessionId: number, snapshot: ScrollSnapshot): void {
+  if (snapshot.atBottom) {
+    scrollMemory.delete(sessionId);
+    return;
+  }
+  scrollMemory.set(sessionId, snapshot);
+}
+
+/** The remembered snapshot for `sessionId`, or null when there is none
+ *  (never scrolled away from the bottom, or never visited). */
+export function recallScroll(sessionId: number): ScrollSnapshot | null {
+  return scrollMemory.get(sessionId) ?? null;
+}

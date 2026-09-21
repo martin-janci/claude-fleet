@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { findMatches, turnIndex, rowKey } from './conversation_nav';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { findMatches, turnIndex, rowKey, scrollMemory, rememberScroll, recallScroll } from './conversation_nav';
 import type { ConvItem, ConvTurn, ThreadRow, InlineEvent } from './conversation';
 
 const tool = (summary: string, target: string | null): ConvItem => ({
@@ -93,5 +93,21 @@ describe('conversation_nav', () => {
       { rowKey: 't4', label: '/cost', at: null },
     ]);
     expect(idx[1].label).toHaveLength(80);
+  });
+});
+
+describe('scroll memory', () => {
+  beforeEach(() => scrollMemory.clear());
+
+  it('remembers and recalls a scroll snapshot per session', () => {
+    rememberScroll(1, { rowKey: 't7', atBottom: false });
+    expect(recallScroll(1)).toEqual({ rowKey: 't7', atBottom: false });
+    expect(recallScroll(2)).toBeNull();
+  });
+
+  it('drops the entry when atBottom is true — recall then means "go to bottom"', () => {
+    rememberScroll(3, { rowKey: 't1', atBottom: false });
+    rememberScroll(3, { rowKey: 't9', atBottom: true });
+    expect(recallScroll(3)).toBeNull();
   });
 });

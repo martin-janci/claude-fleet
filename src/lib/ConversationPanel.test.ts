@@ -2578,6 +2578,41 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(document.activeElement).toBe(items[0]);
   });
 
+  function rect(top: number, bottom: number) {
+    return { top, bottom, left: 0, right: 0, width: 0, height: bottom - top, x: 0, y: top, toJSON: () => ({}) } as DOMRect;
+  }
+
+  it('remembers where a session was scrolled to across a switch away and back', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    const { rerender } = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await settle();
+
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 500, configurable: true });
+    scroller.scrollTop = 300;
+    await fireEvent.scroll(scroller);
+    // Scrolled away from the bottom, and reading around t1.
+    expect(screen.getByTestId('conv-latest')).toBeTruthy();
+    scroller.getBoundingClientRect = () => rect(0, 500);
+    (document.querySelector('[data-row-key="t1"]') as HTMLElement).getBoundingClientRect = () => rect(-10, 40);
+
+    // Switch to another session: a fresh view starts at the bottom.
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'other session', at: null, ended_at: null, items: [] }] })));
+    await rerender({ session: session({ id: 2 }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-latest')).toBeNull();
+
+    // Switching back restores both the scroll position and the "not at the
+    // bottom" state, instead of snapping to the latest turn.
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    await rerender({ session: session({ id: 1 }), visible: true });
+    await settle();
+    await settle();
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t1');
+    expect(screen.getByTestId('conv-latest')).toBeTruthy();
+  });
+
   it('an unfinished tool call in an earlier turn shows "no result"; the running turn counts up', async () => {
     const at = new Date(Date.now() - 3_000).toISOString();
     mockedConv.mockReturnValue(

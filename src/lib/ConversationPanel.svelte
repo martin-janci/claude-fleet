@@ -28,7 +28,7 @@
   import ToolLine from './ToolLine.svelte';
   import SubagentBlock from './SubagentBlock.svelte';
   import CopyButton from './CopyButton.svelte';
-  import { findMatches, turnIndex, rowKey } from './conversation_nav';
+  import { findMatches, turnIndex, rowKey, rememberScroll, recallScroll } from './conversation_nav';
   import { detectMac } from './terminal_keys';
   import {
     sessionConversation,
@@ -331,10 +331,22 @@
     idleSeenSinceSend = false;
   }
 
+  // The session this panel was last showing, so a switch can snapshot where
+  // the outgoing session's view was (`topVisibleRowKey`/`atBottom`) before
+  // `resetThread()` below wipes it. Null on first mount, when there is
+  // nothing yet to remember.
+  let lastScrollSessionId: number | null = null;
+
   // Reset + immediate fetch on session change.
   $effect(() => {
     void sessionId;
     untrack(() => {
+      const outgoing = lastScrollSessionId;
+      if (outgoing !== null && outgoing !== sessionId) {
+        const key = topVisibleRowKey();
+        if (key !== null) rememberScroll(outgoing, { rowKey: key, atBottom });
+      }
+      lastScrollSessionId = sessionId;
       resetThread();
       viewing = null;
       newerAvailable = false;
@@ -353,7 +365,20 @@
       // catch that; it has to be dropped here.
       attachments = [];
       attachErrors = [];
-      void load();
+      // Restore where the returning session was left, once its fetch lands —
+      // a snapshot only exists when it was scrolled away from the bottom
+      // (`rememberScroll` drops an at-bottom one), so recalling one always
+      // means "come back here", not "come back to the bottom".
+      const id = sessionId;
+      void load().then(() => {
+        if (sessionId !== id) return;
+        const snap = recallScroll(id);
+        if (!snap) return;
+        void tick().then(() => {
+          scrollToRow(snap.rowKey);
+          atBottom = false;
+        });
+      });
       void loadConversations();
     });
   });
@@ -554,6 +579,21 @@
   function scrollToRow(key: string) {
     const el = rowEl(key);
     if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
+  }
+
+  /** The row nearest the top of the visible scroller area: the first row (in
+   *  document order) whose bottom edge is below the scroller's own top edge.
+   *  `el.getBoundingClientRect().bottom > scroller.getBoundingClientRect().top`
+   *  is the scroll-position-independent form of "row bottom below
+   *  scroller.scrollTop" (the scrollTop term cancels between the two rects).
+   *  Backs the per-session scroll memory (`rememberScroll`). */
+  function topVisibleRowKey(): string | null {
+    if (!scroller) return null;
+    const top = scroller.getBoundingClientRect().top;
+    for (const el of Array.from(scroller.querySelectorAll<HTMLElement>('[data-row-key]'))) {
+      if (el.getBoundingClientRect().bottom > top) return el.dataset.rowKey ?? null;
+    }
+    return null;
   }
 
   async function openFind() {
