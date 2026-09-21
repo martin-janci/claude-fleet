@@ -153,20 +153,27 @@ export function formatCostMicros(micros: number | null | undefined): string {
   return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
+// Monotonic guard: a payload carrying a lower row_version than the row we
+// hold is a stale snapshot (a command return value that raced a newer
+// `session:updated`). Equal versions still apply. A payload without one is
+// never rejected for it — only a KNOWN older version is. Shared by the
+// `rows` store's `isStale` option and by `loadSessions`'s own list/event
+// reconciliation below, so both use exactly the same rule.
+function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
+  return (
+    incoming.row_version !== undefined &&
+    current.row_version !== undefined &&
+    incoming.row_version < current.row_version
+  );
+}
+
 const rows = createRowStore<SessionRow, number>({
   key: (s) => s.id,
   // Both the optimistic `removeSession()` and the `session:killed` event
   // delete a row; a `session:updated` still in flight for that id would
   // otherwise re-insert the dead row ("ghost session").
   tombstoneMs: 5000,
-  // Monotonic guard: a payload carrying a lower row_version than the row we
-  // hold is a stale snapshot (a command return value that raced a newer
-  // `session:updated`). Equal versions still apply. A payload without one is
-  // never rejected for it — only a KNOWN older version is.
-  isStale: (incoming, current) =>
-    incoming.row_version !== undefined &&
-    current.row_version !== undefined &&
-    incoming.row_version < current.row_version,
+  isStale: sessionIsStale,
 });
 export const sessions = rows.store;
 export const resetTombstonesForTests = rows.resetTombstonesForTests;
@@ -203,10 +210,19 @@ showRowDetails.subscribe((v) => writePref('rows.details', v));
 export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
   if (r.ok) {
-    const listed = new Set(r.value.map((s) => s.id));
+    // The list owns ORDER (the backend's `ORDER BY last_activity_at DESC`);
+    // events own CONTENT. Rebuilding from the current store's position would
+    // freeze every row at wherever it first landed — position has to be
+    // taken from the list every time, and content still has to lose to a
+    // `session:updated` that raced this call and is strictly newer.
     sessions.update((cur) => {
-      let next = cur.filter((s) => listed.has(s.id));
-      for (const row of r.value) next = rows.mergeInto(next, row);
+      const byId = new Map(cur.map((s) => [s.id, s] as const));
+      const next: SessionRow[] = [];
+      for (const listed of r.value) {
+        if (rows.isTombstoned(listed.id)) continue;
+        const current = byId.get(listed.id);
+        next.push(current && sessionIsStale(listed, current) ? current : listed);
+      }
       return next;
     });
     sessionsLoaded.set(true);

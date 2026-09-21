@@ -300,4 +300,15 @@ describe('optimistic merge guard', () => {
     await loadSessions();
     expect(get(sessions).map((s) => s.id)).toEqual([1]);
   });
+
+  it("loadSessions adopts the list's order", async () => {
+    sessions.set([{ ...base, id: 1, row_version: 1 }, { ...base, id: 2, row_version: 1 }]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'list_sessions'
+        ? [{ ...base, id: 2, row_version: 2 }, { ...base, id: 1, row_version: 2 }]
+        : null,
+    );
+    await loadSessions();
+    expect(get(sessions).map((s) => s.id)).toEqual([2, 1]);
+  });
 });
