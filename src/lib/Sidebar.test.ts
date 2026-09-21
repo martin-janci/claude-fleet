@@ -63,7 +63,7 @@ import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, loadProjects } from './projects';
 import { sessions, loadSessions, showBgAgents, showRowDetails, resetTombstonesForTests, type SessionRow } from './sessions';
-import { selectedSession, selectSession } from './selection';
+import { selectedSession, selectSession, selectSessionExplicitly } from './selection';
 import { hosts, loadHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
 import { accounts, loadAccounts } from './accounts';
 import { onboardingDismissed } from './onboarding';
@@ -237,7 +237,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     }
   });
 
-  it('selecting a session on a host hidden by the host filter widens the filter to all', async () => {
+  it('an explicit select on a host hidden by the host filter widens the filter to all', async () => {
     // The persisted host filter outlives the New-session dialog: a session
     // created (and auto-selected) on another host used to vanish from the
     // tree with no feedback, so the user kept creating it again.
@@ -249,13 +249,37 @@ describe('Sidebar (sessions-grouped view)', () => {
     await tick(); await tick();
     expect(screen.queryAllByTestId('sess-row')).toHaveLength(1);
 
-    // Select from outside the tree, as onCreated / the quick switcher do.
-    selectSession(created);
+    // Select from outside the tree, as onCreated / the quick switcher do —
+    // both go through `selectSessionExplicitly`, which is what marks the
+    // pick as reveal-worthy.
+    selectSessionExplicitly(created);
     await tick(); await tick(); await Promise.resolve();
     expect(get(hostFilter)).toBe('all');
     const ids = screen.queryAllByTestId('sess-row').map((r) => r.getAttribute('data-session-id'));
     expect(ids).toContain(String(created.id));
     expect(ids).toContain(String(shown.id));
+  });
+
+  it('a non-explicit reselect to a session on a hidden host does NOT widen the host filter', async () => {
+    // A rename/recreate resync or a completed move's follow reselect can
+    // move the selection to a session on a different host without any user
+    // "open" action — e.g. `moves.ts` calling `selectSession(target, {
+    // follow: true })` once a move finishes. That must never reset a filter
+    // the user deliberately set.
+    const onMefistos = sessionFor(1, 'dev-mefistos');
+    onMefistos.host_alias = 'mefistos';
+    const onMac = sessionFor(1, 'dev-mac');
+    onMac.host_alias = 'mac';
+    mockBackend(fakeProjects, [onMefistos, onMac]);
+    hostFilter.set('mefistos');
+    render(Sidebar);
+    await tick(); await tick();
+
+    // Simulate the store's selection moving to the `mac` session through a
+    // non-explicit path (no `selectSessionExplicitly` anywhere in it).
+    selectSession(onMac, { follow: true });
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('mefistos');
   });
 
   it('clicking a session row selects it in the store', async () => {

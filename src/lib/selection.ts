@@ -94,6 +94,40 @@ export function selectSession(s: SessionRow | null, opts: { follow?: boolean } =
   if (!opts.follow) for (const fn of openedListeners) fn(s);
 }
 
+// Set by `selectSessionExplicitly` for the id it just selected, and cleared
+// the first time Sidebar consumes it. A plain `selectSession` call (a
+// rename/recreate resync, a post-move follow reselect, the sessions-store
+// re-sync above) never touches this, so it never widens `hostFilter` — see
+// `consumeRevealRequest`.
+const revealRequested = writable<number | null>(null);
+
+/**
+ * Select a session as a deliberate user action: a sidebar row click, the
+ * quick switcher, restore-on-launch, or a fresh New-session create. Marks
+ * the pick as reveal-worthy so Sidebar widens `hostFilter` to `all` if it
+ * hides the session's host — a non-explicit reselect (a rename/recreate
+ * resync, a completed move's follow reselect) must go through the plain
+ * `selectSession` instead and stays silent.
+ */
+export function selectSessionExplicitly(
+  s: SessionRow,
+  opts: { follow?: boolean } = {},
+): void {
+  selectSession(s, opts);
+  revealRequested.set(s.id);
+}
+
+/**
+ * Sidebar-only: true the first time it's called for `id` after an explicit
+ * select, then clears itself so a later non-explicit id change never re-widens
+ * the filter on this same id's behalf.
+ */
+export function consumeRevealRequest(id: number): boolean {
+  if (get(revealRequested) !== id) return false;
+  revealRequested.set(null);
+  return true;
+}
+
 /**
  * Re-select the session the user last had open. Call once after the `sessions`
  * store is populated (post-bootstrap). If the remembered session no longer
@@ -106,7 +140,7 @@ export function restoreLastSession(): void {
     (s) => s.host_alias === ident.host_alias && s.tmux_name === ident.tmux_name,
   );
   if (match && match.status !== 'ghost') {
-    selectSession(match, { follow: true });
+    selectSessionExplicitly(match, { follow: true });
   } else {
     writePref<SessionIdent | null>(LAST_SESSION_KEY, null);
   }

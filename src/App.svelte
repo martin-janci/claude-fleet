@@ -30,7 +30,7 @@
   import { push, pushError } from './lib/toasts';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-  import { selectedSession, restoreLastSession, selectSession, onSessionOpened } from './lib/selection';
+  import { selectedSession, restoreLastSession, selectSessionExplicitly, onSessionOpened } from './lib/selection';
   import {
     appChord,
     hostsChordLabel,
@@ -581,7 +581,7 @@
     initialName={$newSessionRequest.initialName}
     onCreate={(s) => {
       clearNewSessionRequest();
-      selectSession(s);
+      selectSessionExplicitly(s);
     }}
     onCancel={clearNewSessionRequest}
   />

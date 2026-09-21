@@ -14,7 +14,7 @@
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
   import { type ProjectRow } from './projects';
-  import { selectedSession, selectSession } from './selection';
+  import { selectedSession, selectSession, selectSessionExplicitly, consumeRevealRequest } from './selection';
   import { forgetSessionUi } from './session_ui';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
@@ -207,24 +207,31 @@
   let collapsed: Set<number> = $state(new Set());
 
   // Reveal the selected session wherever the selection came from (quick
-  // switcher, restore-on-launch, a fresh New-session create, a click): widen
-  // the host filter if it hides the session's host, expand its project if
-  // collapsed, then scroll its row into view. Keyed on the id so reconcile
-  // updates (a new row object every tick) neither re-scroll nor undo a
-  // later collapse or re-filter.
+  // switcher, restore-on-launch, a fresh New-session create, a click):
+  // expand its project if collapsed and scroll its row into view — always,
+  // since that's harmless regardless of what moved the selection. Widening
+  // the host filter is gated on `consumeRevealRequest`: only an *explicit*
+  // select (`selectSessionExplicitly`) marks the id as reveal-worthy, so a
+  // non-explicit id change (a rename/recreate resync, a completed move's
+  // follow reselect, the selection store's own re-sync) never resets the
+  // filter out from under the user. Keyed on the id so reconcile updates (a
+  // new row object every tick) neither re-scroll nor undo a later collapse
+  // or re-filter.
   let sidebarEl: HTMLElement | undefined = $state();
   const revealId = $derived($selectedSession?.id ?? null);
   $effect(() => {
     const id = revealId;
     if (id === null) return;
-    const host = untrack(() => $selectedSession?.host_alias ?? null);
-    const filter = untrack(() => $hostFilter);
-    if (host !== null && filter !== 'all' && filter !== host) hostFilter.set('all');
     const pid = untrack(() => $selectedSession?.project_id ?? null);
     if (pid !== null && untrack(() => collapsed.has(pid))) {
       const next = new Set(untrack(() => collapsed));
       next.delete(pid);
       collapsed = next;
+    }
+    if (consumeRevealRequest(id)) {
+      const host = untrack(() => $selectedSession?.host_alias ?? null);
+      const filter = untrack(() => $hostFilter);
+      if (host !== null && filter !== 'all' && filter !== host) hostFilter.set('all');
     }
     void tick().then(() => {
       const el = sidebarEl?.querySelector<HTMLElement>(`[data-session-id="${id}"]`);
@@ -438,7 +445,7 @@
   function onCreated(s: SessionRow) {
     dialogProject = null;
     // Auto-focus the just-created session in the center/terminal panes.
-    selectSession(s);
+    selectSessionExplicitly(s);
   }
 
   function onCancel() {
@@ -472,7 +479,7 @@
     if (cur && cur.id === sess.id && !$hostsViewOpen) {
       selectSession(null);
     } else {
-      selectSession(sess);
+      selectSessionExplicitly(sess);
     }
   }
 
