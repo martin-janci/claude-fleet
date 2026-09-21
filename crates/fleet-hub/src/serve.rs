@@ -9,6 +9,7 @@ use fleet_core::service::hub::{
     SETTING_ALLOWED_HOSTS, SETTING_ALLOW_PLAINTEXT, SETTING_BIND, SETTING_LOCAL_HOST,
     SETTING_PUBLIC_URL, SETTING_TLS, SETTING_TLS_CERT, SETTING_TLS_KEY,
 };
+use fleet_core::service::operator::{OPERATOR_HOST, SETTING_OPERATOR_HOST};
 use fleet_core::service::projects::LOCAL_HOST;
 use fleet_core::store::Store;
 use std::collections::HashMap;
@@ -104,6 +105,7 @@ fn persist(store: &Mutex<Store>, r: &Resolved) -> Result<(), String> {
         SETTING_LOCAL_HOST,
         if r.local_host { "true" } else { "false" },
     )?;
+    set(SETTING_OPERATOR_HOST, &r.operator_host)?;
     set(
         SETTING_ALLOW_PLAINTEXT,
         if r.allow_plaintext { "true" } else { "false" },
@@ -703,6 +705,16 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         // tool or command naming host `local` is refused with E_NOTFOUND
         // instead of running on this machine.
         fleet_core::service::hub::disable_local_host();
+        if r.operator_host == OPERATOR_HOST {
+            // Not an error: the fleet works without the agent panel. But the
+            // panel will say "nowhere to start it" until this is set, and
+            // the log is where the operator looks first.
+            tracing::warn!(
+                "the UX agent's operator is homed on `local`, which this hub does not have \
+                 (local_host=false); the agent panel is unavailable until \
+                 --operator-host / FLEET_HUB_OPERATOR_HOST names a fleet host"
+            );
+        }
     }
     let token = {
         let s = store
@@ -771,6 +783,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         bind = %r.bind,
         port = r.port,
         local_host = r.local_host,
+        operator_host = %r.operator_host,
         tls = r.tls.as_str(),
         "fleet-hub serving"
     );
@@ -915,6 +928,7 @@ mod tests {
             allowed_hosts: vec!["b.example.com:8443".into(), "fleet.example.com".into()],
             allowed_hosts_explicit: vec!["b.example.com:8443".into()],
             local_host,
+            operator_host: "devbox".into(),
             allow_plaintext: false,
             log_dir: "/unused/logs".into(),
             tls: crate::config::TlsMode::Off,
@@ -952,6 +966,11 @@ mod tests {
         );
         assert_eq!(get(SETTING_LOCAL_HOST).as_deref(), Some("false"));
         assert_eq!(get(SETTING_ALLOW_PLAINTEXT).as_deref(), Some("false"));
+        assert_eq!(
+            get(fleet_core::service::operator::SETTING_OPERATOR_HOST).as_deref(),
+            Some("devbox"),
+            "the operator's home is saved like every other resolved value"
+        );
         let local = s.get_host_row("local").unwrap().unwrap();
         assert!(local.hidden);
         assert!(!s.get_host_row("devbox").unwrap().unwrap().hidden);
