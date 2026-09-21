@@ -151,6 +151,39 @@ fn the_contract_verdict_outlives_the_state_and_only_a_hello_moves_it() {
     assert_eq!(s.contract_verdict(), None);
 }
 
+/// "Confirmed" is positive knowledge: only an in-range `ready` frame
+/// (`Connected`) sets it, a socket drop leaves it, a skew clears it. A fresh
+/// client — whose verdict is also `None` — is NOT confirmed.
+#[test]
+fn only_an_in_range_hello_confirms_the_contract() {
+    let (s, _) = status("cl_t");
+    assert!(!s.contract_confirmed(), "never judged is not confirmed");
+    for state in [
+        HubConnection::Connecting,
+        HubConnection::Offline {
+            attempt: 1,
+            retry_in_secs: 1,
+            reason: "connection refused".into(),
+        },
+    ] {
+        s.report(state.clone());
+        assert!(!s.contract_confirmed(), "{state:?}");
+    }
+    s.report(HubConnection::Connected);
+    assert!(s.contract_confirmed());
+    s.report(HubConnection::Reconnecting {
+        attempt: 1,
+        retry_in_secs: 1,
+        reason: "the hub closed the event stream".into(),
+    });
+    assert!(s.contract_confirmed(), "a socket drop re-judges nothing");
+    s.report(HubConnection::HubTooOld {
+        hub_contract: 1,
+        min_contract: 2,
+    });
+    assert!(!s.contract_confirmed(), "a skew withdraws it");
+}
+
 #[test]
 fn a_standalone_status_emits_nothing() {
     let s = HubConnectionStatus::standalone();

@@ -109,8 +109,18 @@ fn cfg() -> RemoteConfig {
     }
 }
 
+/// A hub client in its working state: its hub's `ready` frame has been
+/// judged in range on this launch (the event bridge reported `Connected`).
+/// `move_session`'s dry run is refused on any client that has not got this
+/// far — see `a_dry_run_is_refused_until_this_launch_has_confirmed_the_hub`.
 fn remote_backend(fake: &Arc<Fake>) -> FleetBackend {
+    let link = Arc::new(connection::HubConnectionStatus::remote(
+        Arc::new(Silent),
+        &cfg().token,
+    ));
+    link.report(connection::HubConnection::Connected);
     FleetBackend::remote_over(cfg(), fake.clone())
+        .watching(link as Arc<dyn connection::ConnectionView>)
 }
 
 /// A real on-disk store; `Store`'s in-memory constructor is fleet-core-test
@@ -1586,6 +1596,142 @@ fn a_hub_with_a_skewed_wire_contract_refuses_every_routed_command() {
         assert_eq!(err.code, codes::E_HUB_CONTRACT, "health_check: {err:?}");
         fake.was_not_called();
     }
+}
+
+// ── 2d. a dry run needs a hub this launch has CONFIRMED ─────────────────────
+
+fn dry_run_args(dry_run: bool) -> fleet_core::service::move_session::MoveSessionArgs {
+    fleet_core::service::move_session::MoveSessionArgs {
+        session_id: 7,
+        target_host_alias: "hetzner".into(),
+        keep_source: false,
+        strict: false,
+        clean_target: false,
+        dry_run,
+    }
+}
+
+/// A hub client whose link has not yet judged any `ready` frame.
+fn unconfirmed_backend(fake: &Arc<Fake>) -> FleetBackend {
+    let link = Arc::new(connection::HubConnectionStatus::remote(
+        Arc::new(Silent),
+        &cfg().token,
+    ));
+    FleetBackend::remote_over(cfg(), fake.clone())
+        .watching(link as Arc<dyn connection::ConnectionView>)
+}
+
+/// A hub built before `dry_run` existed ignores the flag and performs a REAL
+/// move. The contract gate only refuses such a hub once its `ready` frame has
+/// been judged; before that, "no verdict" means "never judged" as much as
+/// "in range". So a dry run is refused until this launch has positively seen
+/// an in-range `ready` frame — before the first frame, and on a backend with
+/// no link to consult at all — and the hub is never called.
+#[test]
+fn a_dry_run_is_refused_until_this_launch_has_confirmed_the_hub() {
+    for (what, backend_of) in [
+        (
+            "before any ready frame",
+            unconfirmed_backend as fn(&Arc<Fake>) -> FleetBackend,
+        ),
+        ("with no link to consult", |fake: &Arc<Fake>| {
+            FleetBackend::remote_over(cfg(), fake.clone())
+        }),
+    ] {
+        let fake = Fake::answering(PREVIEW_PAYLOAD);
+        let (_dir, st) = store();
+        let err = block_on(commands::move_session::routed::move_session(
+            &backend_of(&fake),
+            dry_run_args(true),
+            &st,
+            &ssh(),
+        ))
+        .expect_err(what);
+        assert_eq!(err.code, codes::E_HUB_CONTRACT, "{what}: {err:?}");
+        assert!(
+            err.message.contains("confirmed the hub's version"),
+            "{what}: {}",
+            err.message
+        );
+        fake.was_not_called();
+    }
+}
+
+#[test]
+fn a_dry_run_routes_once_an_in_range_ready_frame_has_been_seen() {
+    let fake = Fake::answering(PREVIEW_PAYLOAD);
+    let (_dir, st) = store();
+    let link = Arc::new(connection::HubConnectionStatus::remote(
+        Arc::new(Silent),
+        &cfg().token,
+    ));
+    let backend = FleetBackend::remote_over(cfg(), fake.clone())
+        .watching(Arc::clone(&link) as Arc<dyn connection::ConnectionView>);
+    link.report(connection::HubConnection::Connected);
+    // The event stream dropping afterwards says nothing about the hub's
+    // version: the confirmation stands.
+    link.report(connection::HubConnection::Reconnecting {
+        attempt: 1,
+        retry_in_secs: 1,
+        reason: "stream ended".into(),
+    });
+    block_on(commands::move_session::routed::move_session(
+        &backend,
+        dry_run_args(true),
+        &st,
+        &ssh(),
+    ))
+    .expect("a confirmed hub takes a dry run");
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "move_session");
+    assert_eq!(args["dry_run"], true);
+}
+
+/// An out-of-range `ready` frame is already refused by the contract gate,
+/// and that refusal — which names both revisions and says what to update —
+/// is the one a dry run gets, not the vaguer "not yet confirmed".
+#[test]
+fn a_dry_run_against_a_skewed_hub_gets_the_contract_refusal() {
+    let fake = Fake::answering(PREVIEW_PAYLOAD);
+    let (_dir, st) = store();
+    let err = block_on(commands::move_session::routed::move_session(
+        &skewed_backend(
+            &fake,
+            connection::HubConnection::HubTooOld {
+                hub_contract: 1,
+                min_contract: 2,
+            },
+        ),
+        dry_run_args(true),
+        &st,
+        &ssh(),
+    ))
+    .expect_err("a skewed hub");
+    assert_eq!(err.code, codes::E_HUB_CONTRACT);
+    assert!(
+        err.message.contains("wire contract is revision 1"),
+        "{}",
+        err.message
+    );
+    fake.was_not_called();
+}
+
+/// The confirmation gates previews only: a real move before any `ready`
+/// frame routes exactly as it always has.
+#[test]
+fn a_real_move_is_not_gated_on_the_confirmation() {
+    let fake = Fake::answering(MOVE_PAYLOAD);
+    let (_dir, st) = store();
+    block_on(commands::move_session::routed::move_session(
+        &unconfirmed_backend(&fake),
+        dry_run_args(false),
+        &st,
+        &ssh(),
+    ))
+    .expect("a real move routes");
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "move_session");
+    assert_eq!(args["dry_run"], false);
 }
 
 // ── 3. the local-only refusals ──────────────────────────────────────────────

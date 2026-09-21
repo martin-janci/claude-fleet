@@ -34,7 +34,17 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
     ) -> Result<MoveOutcome, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.route("move_session", &args).await,
+            Some(hub) => {
+                // A hub built before `dry_run` ignores it and MOVES the
+                // session. The contract gate only refuses such a hub once its
+                // `ready` frame has been judged, so a preview waits for a
+                // positive in-range judgement on this launch. Real moves are
+                // not gated here.
+                if args.dry_run {
+                    hub.require_confirmed_contract("move_session (dry run)")?;
+                }
+                hub.route("move_session", &args).await
+            }
             None => move_session::move_session(args, store, ssh).await,
         }
     }

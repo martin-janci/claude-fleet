@@ -108,6 +108,17 @@ pub trait ConnectionView: Send + Sync {
     /// all. Reading the state would let every read back in on a failed
     /// reconnect.
     fn contract_verdict(&self) -> Option<HubConnection>;
+
+    /// Whether THIS launch has positively seen a `ready` frame whose wire
+    /// contract is in range — set only when the event bridge reports
+    /// [`HubConnection::Connected`], which it does only in the in-range arm
+    /// of its ready-frame check, and cleared by a later skew verdict.
+    ///
+    /// Not the same as [`Self::contract_verdict`] being `None`: that also
+    /// means "never judged". It gates what must not reach a hub that might
+    /// predate it — `move_session`'s dry run, which a hub built before it
+    /// ignores, performing a real move instead.
+    fn contract_confirmed(&self) -> bool;
 }
 
 impl ConnectionView for HubConnectionStatus {
@@ -117,6 +128,10 @@ impl ConnectionView for HubConnectionStatus {
 
     fn contract_verdict(&self) -> Option<HubConnection> {
         HubConnectionStatus::contract_verdict(self)
+    }
+
+    fn contract_confirmed(&self) -> bool {
+        self.confirmed.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -146,6 +161,10 @@ pub struct HubConnectionStatus {
     /// effect at the next launch (the backend is resolved once, at startup),
     /// so there is no in-process re-pair that would have to clear it too.
     contract: Mutex<Option<HubConnection>>,
+    /// See [`ConnectionView::contract_confirmed`]. Set by
+    /// [`HubConnection::Connected`], cleared by a skew verdict, untouched by
+    /// every socket-only transition.
+    confirmed: std::sync::atomic::AtomicBool,
     sink: Option<Arc<dyn RemoteEventSink>>,
     /// Only ever used to blank itself out of a reason.
     token: String,
@@ -168,6 +187,7 @@ impl HubConnectionStatus {
         Self {
             current: Mutex::new(HubConnection::Standalone),
             contract: Mutex::new(None),
+            confirmed: std::sync::atomic::AtomicBool::new(false),
             sink: None,
             token: String::new(),
         }
@@ -178,6 +198,7 @@ impl HubConnectionStatus {
         Self {
             current: Mutex::new(HubConnection::Connecting),
             contract: Mutex::new(None),
+            confirmed: std::sync::atomic::AtomicBool::new(false),
             sink: Some(sink),
             token: token.to_string(),
         }
@@ -273,9 +294,15 @@ impl ConnectionReporter for HubConnectionStatus {
         // [`ConnectionView::contract_verdict`].
         match &state {
             HubConnection::HubTooOld { .. } | HubConnection::HubTooNew { .. } => {
-                self.remember_contract(Some(state.clone()))
+                self.remember_contract(Some(state.clone()));
+                self.confirmed
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
             }
-            HubConnection::Connected => self.remember_contract(None),
+            HubConnection::Connected => {
+                self.remember_contract(None);
+                self.confirmed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             _ => {}
         }
         match serde_json::to_value(&state) {
