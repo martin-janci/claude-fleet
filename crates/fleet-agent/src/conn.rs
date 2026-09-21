@@ -307,6 +307,10 @@ pub struct Agent {
     /// How many `exec`s are running or queued, so `stop` knows when the
     /// last child is gone.
     running: tokio::sync::watch::Sender<usize>,
+    /// `config.report_errors` (`run`, via [`Agent::with_report_errors`]).
+    /// Gates the heartbeat flush in `serve` only — `crate::report::ring()`
+    /// fills from the installed layer regardless.
+    pub report_errors: bool,
 }
 
 /// One `exec` counted in [`Agent::running`] for as long as it lives.
@@ -320,14 +324,25 @@ impl Drop for Running {
 
 impl Agent {
     /// `home` is where children start and relative uploads land — `$HOME`,
-    /// the directory an ssh remote command starts in.
+    /// the directory an ssh remote command starts in. `report_errors` is on.
     pub fn new(home: Option<PathBuf>, concurrency: usize) -> Arc<Self> {
+        Self::with_report_errors(home, concurrency, true)
+    }
+
+    /// [`Agent::new`], with an explicit `report_errors` — how `run` wires in
+    /// `config.report_errors`.
+    pub fn with_report_errors(
+        home: Option<PathBuf>,
+        concurrency: usize,
+        report_errors: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             seen: Mutex::new(SeenIds::new(exec::SEEN_IDS)),
             slots: Arc::new(Semaphore::new(concurrency.max(1))),
             home,
             stopping: tokio::sync::watch::Sender::new(false),
             running: tokio::sync::watch::Sender::new(0),
+            report_errors,
         })
     }
 
@@ -592,6 +607,23 @@ where
                 let alive = missed < SILENT_BEATS;
                 if let Some(ack) = ack {
                     let _ = ack.send(alive);
+                }
+                if alive && welcomed && agent.report_errors {
+                    let batch = crate::report::ring().drain(fleet_proto::report::FRAME_BATCH_MAX);
+                    if !batch.reports.is_empty() || batch.dropped > 0 {
+                        let frame = AgentFrame::Report {
+                            reports: batch.reports,
+                            dropped: batch.dropped,
+                        };
+                        match encode_agent_frame(&frame) {
+                            Ok(text) => {
+                                let _ = out.send(Out::Frame(text));
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "[agent] a report batch did not encode; dropped")
+                            }
+                        }
+                    }
                 }
                 if !alive {
                     break SessionEnd::HubSilent;
@@ -1056,9 +1088,10 @@ where
 pub async fn run(config: crate::config::Config) -> Result<(), String> {
     let endpoint = Endpoint::parse(&config.hub, config.insecure)?;
     let dialer = Dialer::new(endpoint, config.token, config.ca_file.as_deref())?;
-    let agent = Agent::new(
+    let agent = Agent::with_report_errors(
         std::env::var_os("HOME").map(PathBuf::from),
         exec::MAX_CONCURRENT,
+        config.report_errors,
     );
     let notifier = Notifier::from_env();
     let stop = shutdown_signal()?;
@@ -1587,6 +1620,35 @@ mod tests {
             next_frame(&mut p.hub).await.map(|f| f.0),
             Some(AgentFrame::Pong { id: "p1".into() })
         );
+    }
+
+    /// An error queued before the handshake is flushed on the first beat
+    /// after `welcome` — the case the channel exists for.
+    #[tokio::test]
+    async fn queued_reports_are_flushed_on_a_beat_once_welcomed() {
+        crate::report::ring().push(fleet_proto::report::Report::error(
+            "fleet_agent::conn",
+            "earlier dial refused",
+        ));
+        let mut p = pair().await;
+        assert!(p.beat().await);
+        // The ring is process-global and this crate's tests run in
+        // parallel, so another test's frame (e.g. a stray `Pong`) could in
+        // principle be interleaved here; skip anything that is not our
+        // report, bounded so a genuine regression still fails the test.
+        let mut reports = None;
+        for _ in 0..5 {
+            match next_frame(&mut p.hub).await.map(|f| f.0) {
+                Some(AgentFrame::Report { reports: r, .. }) => {
+                    reports = Some(r);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        let reports =
+            reports.unwrap_or_else(|| panic!("no report frame within 5 frames after the beat"));
+        assert!(reports.iter().any(|r| r.message == "earlier dial refused"));
     }
 
     /// A replayed id runs nothing and answers nothing: the first run's answer
