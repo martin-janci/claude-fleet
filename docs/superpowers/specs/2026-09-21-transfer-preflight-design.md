@@ -238,8 +238,16 @@ are warn-only in the move, so a failed listing lands in `unknowns`.
 - No `move:progress` events and no timeline event for a dry run: the sheet's
   nine-step view belongs to real moves, and a preview in the timeline would be
   noise in the durable record 3d leans on.
-- `strict` and `clean_target` are ignored under `dry_run`, and the preview's
-  `unknowns` says so rather than silently dropping them.
+- **`strict` is honoured; `clean_target` is not, and the preview says why.**
+  (Revised during Task 3's review, which found the first version saying strict
+  was ignored while `gather()` enforced it.) `strict` is a read-only verdict
+  evaluated inside the move's opening checks, so a dry run with `strict: true`
+  reports exactly what a strict move would do — on a dirty or unpushed source,
+  that is the refusal, with the move's own code and message. Ignoring it would
+  make the preview disagree with a strict move: drift. `clean_target` only acts
+  in the write phase, which a dry run never reaches, and whether it would fire
+  depends on a target classification that needs transfer refs a dry run never
+  creates — so `unknowns` names it and explains that.
 - A dry run takes no move claim, so it can run while a real move of the same
   session is in flight and two of them cannot collide.
 
@@ -291,8 +299,9 @@ Engine, over `FakeSsh`:
 6. `TargetState::Absent` when the target worktree does not exist.
 7. The bundle size appears in `unknowns` and nowhere else — no numeric field
    for it exists.
-8. `strict: true, dry_run: true` and `clean_target: true, dry_run: true` both
-   report the ignored flag in `unknowns` and change nothing else.
+8. `strict: true, dry_run: true` on a dirty source returns the same `Err` as a
+   real strict move over the same fixture; `clean_target: true, dry_run: true`
+   names the flag in `unknowns` and changes nothing else in the preview.
 9. A dry run emits no `move:progress` event and inserts no timeline row.
 10. A real move still returns `Moved` and behaves exactly as before — every
     pre-existing `move_session` test passes unedited apart from the mechanical
