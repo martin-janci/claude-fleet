@@ -66,6 +66,7 @@
 pub mod carry;
 pub mod claude_state;
 mod finalise;
+pub mod preview;
 pub mod probe;
 mod progress;
 pub mod resolve;
@@ -2082,6 +2083,39 @@ async fn gather(
     })
 }
 
+/// Where the move would put the target's clone and worktree: `(project_root,
+/// cwd_hint)`. Read-only — a `remote_home` lookup and path arithmetic,
+/// nothing that creates either. The move's own step 3 derives this
+/// immediately before `carry::seed_script`, the first write; a dry run stops
+/// here. The caller maps a `remote_home` failure with its own
+/// `before_target("resolving the target $HOME", e)` — that error mapping
+/// stays at the call site, not here, since a preview reports it differently
+/// than a move does.
+pub(super) async fn target_paths(
+    snap: &Snapshot,
+    target: &str,
+    ssh: &dyn SshExec,
+) -> Result<(String, String), IpcError> {
+    if target == LOCAL {
+        // The rows' own paths when present, else the layout-derived ones.
+        let (layout_root, layout_cwd) = snap.local_layout_paths.clone();
+        Ok((
+            snap.project_base.clone().unwrap_or(layout_root),
+            snap.worktree_path.clone().unwrap_or(layout_cwd),
+        ))
+    } else {
+        let home = ssh.remote_home(target).await?;
+        let root = crate::service::projects::expand_home(&snap.target_projects_root, &home);
+        Ok(crate::service::sessions::remote_project_path(
+            &root,
+            snap.layout,
+            &snap.owner,
+            &snap.repo,
+            Some(&snap.worktree_name),
+        ))
+    }
+}
+
 /// The move's steps (see the module docs).
 async fn move_session_inner(
     args: MoveSessionArgs,
@@ -2141,27 +2175,9 @@ async fn move_session_inner(
     progress.start(MoveStep::Workspace);
     // 3. Target workspace: refresh origin/<branch>, create/repair the
     //    worktree, fast-forward to the source HEAD, resolve the transcript path.
-    let (project_root, cwd_hint) = if target == LOCAL {
-        // The rows' own paths when present, else the layout-derived ones.
-        let (layout_root, layout_cwd) = snap.local_layout_paths.clone();
-        (
-            snap.project_base.clone().unwrap_or(layout_root),
-            snap.worktree_path.clone().unwrap_or(layout_cwd),
-        )
-    } else {
-        let home = ssh
-            .remote_home(&target)
-            .await
-            .map_err(|e| before_target("resolving the target $HOME", e))?;
-        let root = crate::service::projects::expand_home(&snap.target_projects_root, &home);
-        crate::service::sessions::remote_project_path(
-            &root,
-            snap.layout,
-            &snap.owner,
-            &snap.repo,
-            Some(&snap.worktree_name),
-        )
-    };
+    let (project_root, cwd_hint) = target_paths(&snap, &target, ssh)
+        .await
+        .map_err(|e| before_target("resolving the target $HOME", e))?;
     // 3a. Seed: the target needs a main clone before anything can be fetched
     //     into it. Never prompts; falls back to `git init` without origin.
     let clone_url = crate::repo_url::clone_url_for(&snap.owner, &snap.repo);
@@ -3064,6 +3080,18 @@ mod tests {
         }
         fn log(&self) -> Vec<String> {
             self.log.lock().unwrap().clone()
+        }
+        /// `(host, tmux_name)` of every `start_target` call.
+        fn started(&self) -> Vec<(String, String)> {
+            self.started.lock().unwrap().clone()
+        }
+        /// Whether `kill_tmux_session` ran at all.
+        fn killed_any(&self) -> bool {
+            self.log().iter().any(|l| l.starts_with("kill "))
+        }
+        /// Whether `ensure_target_workspace` ran at all.
+        fn ensured_any(&self) -> bool {
+            self.log().iter().any(|l| l.starts_with("ensure "))
         }
     }
 
@@ -6440,5 +6468,183 @@ mod tests {
             .unwrap();
         assert_eq!(out.status.code(), Some(4));
         assert!(String::from_utf8_lossy(&out.stderr).contains(NO_TRANSCRIPT));
+    }
+
+    // ── preview (dry run) ──
+
+    use super::preview::{preview, TargetState};
+
+    /// Every script marker a dry run must never send: each one writes.
+    const WRITING_MARKERS: &[&str] = &[
+        "# cf-carry:seed",
+        "# cf-carry:snapshot",
+        "# cf-carry:chunk",
+        "# cf-carry:fetch",
+        "# cf-carry:apply",
+        "# cf-carry:recover",
+        "# cf-carry:ignored-pack",
+        "# cf-move:prep",
+        "# cf-move:prefetch",
+    ];
+
+    #[tokio::test]
+    async fn a_dry_run_writes_nothing_on_either_host() {
+        let (f, bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        for host in ["alpha", "beta"] {
+            for m in WRITING_MARKERS {
+                assert!(
+                    scripts_with(&f, host, m).is_empty(),
+                    "a dry run sent {m} to {host}"
+                );
+            }
+        }
+        // No upload of any kind (the transcript copy is an upload).
+        assert!(
+            f.fake.calls().iter().all(|c| !c.is_upload()),
+            "a dry run uploaded something"
+        );
+        assert!(
+            hooks.started().is_empty(),
+            "a dry run started a target session"
+        );
+        assert!(!hooks.killed_any(), "a dry run killed a session");
+        assert!(
+            !hooks.ensured_any(),
+            "a dry run created or repaired a workspace"
+        );
+        assert!(
+            progress_of(&f, &bus).is_empty(),
+            "a dry run emitted move:progress"
+        );
+        // Nor a timeline row: a preview in the durable record 3d leans on would
+        // be noise, and would read as a move that happened.
+        assert!(
+            events(&f, f.source_id).is_empty(),
+            "a dry run recorded a timeline event"
+        );
+    }
+
+    /// The preview cannot drift from the move: run both over ONE fixture and
+    /// compare, rather than asserting two hand-written expectations that could
+    /// drift together.
+    #[tokio::test]
+    async fn the_preview_reports_exactly_what_the_move_carries() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let p = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        let rep = run(&f, &hooks, false).await.expect("the real move");
+        assert_eq!(p.dirty, rep.carried.dirty_entries);
+        assert_eq!(p.ignored_carried, rep.carried.ignored_carried);
+        assert_eq!(p.ignored_left_behind, rep.carried.ignored_left_behind);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_the_error_the_move_would_return() {
+        // A mid-operation source: gather() refuses before any carry step.
+        let (f, _bus) = recorded_fixture();
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection_midop("", "", "0", "merge")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let from_preview = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .unwrap_err();
+        let from_move = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(from_preview.code, from_move.code);
+        assert_eq!(from_preview.message, from_move.message);
+    }
+
+    // Spec test 3 asked for every store-level refusal class. Under correction 4
+    // that holds by construction — the preview's refusal IS `gather()`'s error,
+    // the same value the move returns — so one representative (above) plus the
+    // alias-validation test (below) pins the mechanism rather than re-testing
+    // each refusal a second time.
+
+    #[tokio::test]
+    async fn a_malformed_target_alias_is_the_same_refusal_as_the_move() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.target_host_alias = "-bad".into();
+        let from_preview = preview(&a, &f.store, &f.fake, &hooks).await.unwrap_err();
+        let from_move = move_session_with(a.clone(), &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
+        assert_eq!(from_preview.code, from_move.code);
+        assert_eq!(from_preview.message, from_move.message);
+    }
+
+    #[tokio::test]
+    async fn commits_ahead_is_unknown_without_a_target_clone() {
+        let (f, _bus) = recorded_fixture();
+        // The target has no clone: its tip lookup answers nothing.
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-probe:tip"),
+            Reply::ok(&out("")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let p = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        assert_eq!(p.commits_ahead, None, "unknown, not zero");
+    }
+
+    #[tokio::test]
+    async fn an_absent_target_worktree_is_reported_as_absent() {
+        let (f, _bus) = recorded_fixture();
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-probe:target"),
+            Reply::ok(&out("absent\n")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let p = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        assert!(matches!(p.target, TargetState::Absent), "{:?}", p.target);
+        assert!(!p.target_path.is_empty(), "it says which path it looked at");
+    }
+
+    #[tokio::test]
+    async fn a_failed_target_probe_is_unknown_not_a_refusal() {
+        let (f, _bus) = recorded_fixture();
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-probe:target"),
+            Reply::fail(255, "ssh: connection reset"),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let p = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a probe failure must not fail the preview");
+        assert!(matches!(p.target, TargetState::Unknown), "{:?}", p.target);
+        assert!(!p.unknowns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_bundle_size_is_named_as_unknown_and_ignored_flags_are_said() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.strict = true;
+        a.clean_target = true;
+        let p = preview(&a, &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        let all = p.unknowns.join(" | ");
+        assert!(all.contains("bundle"), "{all}");
+        assert!(all.contains("strict"), "{all}");
+        assert!(all.contains("clean_target"), "{all}");
     }
 }

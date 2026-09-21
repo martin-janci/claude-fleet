@@ -52,6 +52,12 @@ impl Call {
         }
     }
 
+    /// Whether this call was an `upload_file` (the only call shape that ever
+    /// carries `stdin`): `run` / `run_bounded` / `run_cancellable` never do.
+    pub fn is_upload(&self) -> bool {
+        self.stdin.is_some()
+    }
+
     /// The uploaded bytes as text (`upload_file` calls only).
     pub fn stdin_str(&self) -> Option<String> {
         self.stdin
