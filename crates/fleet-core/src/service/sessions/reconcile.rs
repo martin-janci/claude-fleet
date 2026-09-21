@@ -331,6 +331,17 @@ impl ReconcileDeps {
         Arc::get_mut(&mut deps).expect("fresh Arc").local_host = false;
         deps
     }
+
+    /// Override the agents cadence on a freshly built `Arc<ReconcileDeps>`
+    /// (e.g. `ReconcileDeps::fake(..).with_agents_every(Duration::from_secs(60))`),
+    /// for a test that must make `agents_due` say "not yet" on a later pass
+    /// instead of `fake`'s always-due zero cadence.
+    #[cfg(test)]
+    pub(crate) fn with_agents_every(self: Arc<Self>, every: std::time::Duration) -> Arc<Self> {
+        let mut deps = self;
+        Arc::get_mut(&mut deps).expect("fresh Arc").agents_every = every;
+        deps
+    }
 }
 
 /// Whether this pass asks `host` for its agents; records the ask.
@@ -602,11 +613,20 @@ pub(super) fn reconcile_write_one_host(
                 let pr = probe.pr_info.get(&sess.name);
                 let agent_status =
                     known_agent_status(&sess.name, agent.and_then(|a| a.status.as_deref()));
+                // Already vocabulary-checked (and logged when dropped) by
+                // `known_agent_status` above, so the reparse can't fail.
+                let agent_status_typed = agent_status
+                    .as_deref()
+                    .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok());
+                let pane_status = pane.and_then(|p| p.derived_status);
                 // Prefer the authoritative `claude agents` status; fall back to
-                // the status derived from the pane tail only when it is absent
-                // (or outside the documented vocabulary).
-                let claude_status = agent_status
-                    .or_else(|| pane.and_then(|p| p.derived_status).map(|s| s.to_string()));
+                // the pane heuristic per `status_candidate` — full weight when
+                // this pass actually asked, `Blocked`-only otherwise (a
+                // cadence-skipped or unanswerable pass must not let a weak
+                // pane guess overwrite the stored status every time).
+                let claude_status =
+                    status_candidate(probe.agent_rows.is_some(), agent_status_typed, pane_status)
+                        .map(|s| s.as_str().to_string());
                 let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
                 // Transition-detection: remember the PRIOR stored values (the
                 // upsert below overwrites them). A first sighting skips the
@@ -1656,5 +1676,43 @@ pub(super) fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Optio
             );
             None
         }
+    }
+}
+
+/// The `claude_status` candidate for one live session this pass.
+///
+/// `agents_asked` is `probe.agent_rows.is_some()` — whether `claude agents
+/// --json` was actually asked this pass (see `agents_due`): a cadence-
+/// skipped host or an unanswerable call both leave `agent_status` at
+/// `None` before this function is even reached.
+///
+/// When agents WERE asked: the authoritative agent status wins, falling
+/// back to the pane heuristic when absent — this is the pre-cadence
+/// behaviour, unchanged.
+///
+/// When agents were NOT asked: `agent_status` is always `None` (no
+/// pairing ran), so falling back to the pane heuristic unconditionally
+/// would overwrite a stored authoritative/hook-stamped status with a weak
+/// pane guess on every skipped pass — at the 60 s agents / 20 s reconcile
+/// cadence that is 2 of every 3 passes, producing status flicker and
+/// spurious `status_change` events. Only `Blocked` (a real dialog or
+/// stuck pane) is strong enough pane evidence to surface without waiting
+/// for the next agents pass; any other pane verdict yields `None` so the
+/// upsert's `COALESCE(excluded.claude_status, claude_status)` keeps
+/// whatever is stored (a hook-stamped `idle`/`working` survives between
+/// agent fetches).
+pub(super) fn status_candidate(
+    agents_asked: bool,
+    agent_status: Option<crate::service::pane_intel::ClaudeStatus>,
+    pane: Option<crate::service::pane_intel::ClaudeStatus>,
+) -> Option<crate::service::pane_intel::ClaudeStatus> {
+    if agents_asked {
+        return agent_status.or(pane);
+    }
+    match pane {
+        Some(crate::service::pane_intel::ClaudeStatus::Blocked) => {
+            Some(crate::service::pane_intel::ClaudeStatus::Blocked)
+        }
+        _ => None,
     }
 }

@@ -109,6 +109,16 @@ impl Fleet {
         }
     }
 
+    /// Like `new`, but the agents probe follows `agents_every` instead of
+    /// `fake`'s always-due zero cadence — for a test that must make a later
+    /// pass skip `claude agents --json` (`agents_due` returns false because
+    /// the previous pass's ask is still within the window).
+    fn new_with_agents_cadence(hosts: &[&str], agents_every: Duration) -> Self {
+        let mut f = Self::new(hosts);
+        f.deps = f.deps.with_agents_every(agents_every);
+        f
+    }
+
     async fn pass(&self) {
         reconcile_sessions_with(&self.store, &self.deps)
             .await
@@ -504,6 +514,56 @@ async fn no_phantom_status_change_when_the_last_hook_at_guard_wins() {
         f.timeline(r1.id),
         vec![ev("conversation_started", Some("unknown"))],
         "the guard kept the stored status, so nothing transitioned"
+    );
+}
+
+#[tokio::test]
+async fn a_skipped_agents_pass_keeps_the_stored_status() {
+    // A cadence-skipped (or unanswerable) agents pass must not let the pane
+    // heuristic overwrite the stored `claude_status` — only a real
+    // `Blocked` pane verdict (a dialog) is strong enough to surface
+    // without a fresh agents read. See `status_candidate`.
+    let f = Fleet::new_with_agents_cadence(&["alpha"], Duration::from_secs(60));
+    f.list("alpha", "work|1|2|0|/tmp/w\n");
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"t1","name":"work","status":"working","cwd":"/tmp/w"}]"#,
+    );
+
+    // Pass 1 — first contact: agents are always asked regardless of
+    // cadence (`agents_due`'s first-sighting rule), so the authoritative
+    // status wins.
+    f.pass().await;
+    let r1 = f.row("work", "alpha");
+    let id = r1.id;
+    assert_eq!(r1.claude_status.as_deref(), Some("working"));
+
+    // Pass 2 — still inside the 60 s cadence window: agents are NOT asked
+    // this pass. The pane now reads idle, but the stored `working` must
+    // survive, and no status_change is recorded.
+    f.pane("alpha", "work", IDLE);
+    f.pass().await;
+    assert_eq!(
+        f.row("work", "alpha").claude_status.as_deref(),
+        Some("working"),
+        "a skipped-agents pass must not flip the status to a pane guess"
+    );
+    assert!(
+        !f.timeline(id)
+            .iter()
+            .any(|(kind, _)| kind == "status_change"),
+        "no status_change from a skipped-agents pass: {:?}",
+        f.timeline(id)
+    );
+
+    // Pass 3 — still skipped, but the pane now shows a real permission
+    // dialog: `Blocked` is strong enough evidence to surface immediately,
+    // even without a fresh agents read.
+    f.pane("alpha", "work", TRUST);
+    f.pass().await;
+    assert_eq!(
+        f.row("work", "alpha").claude_status.as_deref(),
+        Some("blocked")
     );
 }
 

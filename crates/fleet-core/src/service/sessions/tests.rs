@@ -26,6 +26,42 @@ fn known_agent_status_keeps_vocabulary_and_drops_the_rest() {
     assert_eq!(known_agent_status("dev", None), None);
 }
 
+#[test]
+fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
+    use crate::service::pane_intel::ClaudeStatus;
+    // Agents NOT asked this pass (cadence-skipped or unanswerable): a weak
+    // pane guess must not overwrite the stored status — only `Blocked` (a
+    // real dialog / stuck pane) is strong enough to surface immediately.
+    assert_eq!(
+        status_candidate(false, None, Some(ClaudeStatus::Working)),
+        None
+    );
+    assert_eq!(
+        status_candidate(false, None, Some(ClaudeStatus::Idle)),
+        None
+    );
+    assert_eq!(status_candidate(false, None, None), None);
+    assert_eq!(
+        status_candidate(false, None, Some(ClaudeStatus::Blocked)),
+        Some(ClaudeStatus::Blocked)
+    );
+
+    // Agents WERE asked this pass: unchanged pre-cadence behaviour — the
+    // authoritative agent status wins, falling back to the pane only when
+    // the agent gave nothing.
+    assert_eq!(
+        status_candidate(true, Some(ClaudeStatus::Working), Some(ClaudeStatus::Idle)),
+        Some(ClaudeStatus::Working),
+        "the agent status wins over the pane"
+    );
+    assert_eq!(
+        status_candidate(true, None, Some(ClaudeStatus::Idle)),
+        Some(ClaudeStatus::Idle),
+        "falls back to the pane when the agent gave nothing"
+    );
+    assert_eq!(status_candidate(true, None, None), None);
+}
+
 fn job_agent(session_id: &str, job_id: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
     crate::claude_agents::ClaudeAgentRow {
         session_id: Some(session_id.into()),
