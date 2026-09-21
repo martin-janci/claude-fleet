@@ -120,6 +120,15 @@ pub(super) async fn preview(
     ssh: &dyn SshExec,
     hooks: &dyn MoveHooks,
 ) -> Result<MovePreview, IpcError> {
+    // A preview is a dry run whoever calls it: `gather()` reads `dry_run` to
+    // keep its source inspection fetch-free, so it must never see `false`
+    // here.
+    let dry = MoveSessionArgs {
+        dry_run: true,
+        ..args.clone()
+    };
+    let args = &dry;
+
     // 0. The move validates the alias *before* taking its claim, which is
     // outside `gather()` — a dry run must do it itself, or it would accept an
     // alias the move refuses.
@@ -130,6 +139,28 @@ pub(super) async fn preview(
     let g = gather(args, store, ssh, hooks, None).await?;
 
     let mut unknowns: Vec<String> = Vec::new();
+
+    // 1b. The one thing `gather()` reads differently on a dry run: it does
+    // not fetch origin's tip, so when the source has not fetched it the
+    // unpushed count (and, for a strict move, the unpushed refusal) cannot
+    // be decided here. Named, never guessed.
+    if g.state.origin_tip_not_local {
+        unknowns.push(format!(
+            "origin/{br} has commits {src} has not fetched, and a dry run does not fetch, so \
+             the number of unpushed commits cannot be counted here; the move fetches them \
+             first",
+            br = g.snap.branch,
+            src = g.src,
+        ));
+        if args.strict {
+            unknowns.push(format!(
+                "strict: whether {br} has commits origin/{br} lacks is only decided once the \
+                 move fetches origin's newer commits; a strict move refuses with \
+                 E_MOVE_UNPUSHED if it does, or if that fetch fails",
+                br = g.snap.branch,
+            ));
+        }
+    }
 
     // 2. The small git-ignored files: never a refusal — the move only warns
     // on this half too.

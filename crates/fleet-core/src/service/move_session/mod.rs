@@ -385,6 +385,10 @@ pub struct SourceState {
     pub remote_sha: Option<String>,
     /// Commits in HEAD not on the origin branch; -1 when unknown.
     pub ahead: i64,
+    /// `ahead` is unknown because origin's tip is not in the source's object
+    /// store and the inspection did not fetch it — only ever true of a dry
+    /// run's inspection ([`inspect_script_with`] with `fetch: false`).
+    pub origin_tip_not_local: bool,
     /// An operation in progress (`merge`, `rebase`, `cherry-pick`, `revert`,
     /// `bisect`); its state is not carried, so the move is refused.
     pub midop: Option<String>,
@@ -410,6 +414,7 @@ pub fn parse_inspection(stdout: &str) -> Result<SourceState, IpcError> {
         current_branch: parts[3].trim().to_string(),
         remote_sha: (!remote.is_empty()).then(|| remote.to_string()),
         ahead: parts[5].trim().parse().unwrap_or(-1),
+        origin_tip_not_local: parts[5].trim() == ORIGIN_TIP_NOT_LOCAL,
         midop: Some(parts[6].trim())
             .filter(|m| !m.is_empty())
             .map(str::to_string),
@@ -554,6 +559,62 @@ pub fn parse_target_prep(stdout: &str, claude_id: &str) -> Result<TargetPrep, Ip
 /// replay, so a difference between the two hosts' git configs must not be
 /// able to fail a good move.
 pub fn inspect_script(tmux_name: &str, hint: Option<&str>, branch: &str) -> String {
+    inspect_script_with(tmux_name, hint, branch, true)
+}
+
+/// What [`inspect_script_with`] prints in the ahead field when `fetch` is
+/// off and origin's tip is not in the source's object store: the unpushed
+/// count needs that tip, and a dry run does not fetch it. Parses as
+/// `ahead == -1` (unknown) with [`SourceState::origin_tip_not_local`] set.
+pub const ORIGIN_TIP_NOT_LOCAL: &str = "origin-tip-not-local";
+
+/// [`inspect_script`], with the fetch of origin's tip optional.
+///
+/// `fetch: true` is the real move's inspection, byte for byte what it has
+/// always been: when origin's tip for `branch` is not in the source's object
+/// store it fetches it (objects, `FETCH_HEAD`, the tracking ref) so the
+/// unpushed count is exact.
+///
+/// `fetch: false` is a dry run's, and writes nothing: in that corner it
+/// prints [`ORIGIN_TIP_NOT_LOCAL`] instead of a count, and every git call
+/// runs under `GIT_OPTIONAL_LOCKS=0` so `git status` leaves the index's stat
+/// cache alone (its output is the same either way).
+///
+/// The real move's calls deliberately do NOT carry `GIT_OPTIONAL_LOCKS=0`.
+/// Its `git status` rewrite of the index is load-bearing: writing the index
+/// smudges racily-clean entries, and the snapshot that follows reads a COPY
+/// of that index (`carry::snapshot_script`), whose newer file mtime would
+/// otherwise make a same-size edit made in the index's own second look
+/// clean, so `git add -A` would skip it and the move would drop it.
+/// `hosts_that_disagree_about_quote_path_still_produce_a_matching_porcelain`
+/// fails intermittently when the prefix is applied here.
+pub fn inspect_script_with(
+    tmux_name: &str,
+    hint: Option<&str>,
+    branch: &str,
+    fetch: bool,
+) -> String {
+    let (g, missing_tip) = if fetch {
+        (
+            "",
+            r#"git -C "$wt" cat-file -e "$rsha^{commit}" 2>/dev/null || git -C "$wt" fetch -q origin "refs/heads/$br" >/dev/null 2>&1
+  ahead=$(git -C "$wt" rev-list --count "$rsha..HEAD" 2>/dev/null)
+  if [ -z "$ahead" ]; then ahead=-1; fi"#
+                .to_string(),
+        )
+    } else {
+        (
+            "GIT_OPTIONAL_LOCKS=0 ",
+            format!(
+                r#"if GIT_OPTIONAL_LOCKS=0 git -C "$wt" cat-file -e "$rsha^{{commit}}" 2>/dev/null; then
+    ahead=$(GIT_OPTIONAL_LOCKS=0 git -C "$wt" rev-list --count "$rsha..HEAD" 2>/dev/null)
+    if [ -z "$ahead" ]; then ahead=-1; fi
+  else
+    ahead={ORIGIN_TIP_NOT_LOCAL}
+  fi"#
+            ),
+        )
+    };
     format!(
         r#"# cf-move:inspect
 set +e
@@ -563,23 +624,21 @@ br={br}
 wt=''
 if [ -n "$name" ]; then
   c=$(tmux display-message -p -t "=$name:" '#{{pane_current_path}}' 2>/dev/null)
-  if [ -n "$c" ] && git -C "$c" rev-parse --git-dir >/dev/null 2>&1; then wt="$c"; fi
+  if [ -n "$c" ] && {g}git -C "$c" rev-parse --git-dir >/dev/null 2>&1; then wt="$c"; fi
 fi
-if [ -z "$wt" ] && [ -n "$hint" ] && git -C "$hint" rev-parse --git-dir >/dev/null 2>&1; then wt="$hint"; fi
+if [ -z "$wt" ] && [ -n "$hint" ] && {g}git -C "$hint" rev-parse --git-dir >/dev/null 2>&1; then wt="$hint"; fi
 if [ -z "$wt" ]; then printf '{NO_WORKTREE}\n' >&2; exit 3; fi
-top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)
+top=$({g}git -C "$wt" rev-parse --show-toplevel 2>/dev/null)
 if [ -n "$top" ]; then wt="$top"; fi
-porcelain=$(git -C "$wt" {status} 2>/dev/null)
-head=$(git -C "$wt" rev-parse HEAD 2>/dev/null)
-cur=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
-rsha=$(git -C "$wt" ls-remote --heads origin "refs/heads/$br" 2>/dev/null | cut -f1 | head -n1)
+porcelain=$({g}git -C "$wt" {status} 2>/dev/null)
+head=$({g}git -C "$wt" rev-parse HEAD 2>/dev/null)
+cur=$({g}git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
+rsha=$({g}git -C "$wt" ls-remote --heads origin "refs/heads/$br" 2>/dev/null | cut -f1 | head -n1)
 ahead=-1
 if [ -n "$rsha" ]; then
-  git -C "$wt" cat-file -e "$rsha^{{commit}}" 2>/dev/null || git -C "$wt" fetch -q origin "refs/heads/$br" >/dev/null 2>&1
-  ahead=$(git -C "$wt" rev-list --count "$rsha..HEAD" 2>/dev/null)
-  if [ -z "$ahead" ]; then ahead=-1; fi
+  {missing_tip}
 fi
-gd=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)
+gd=$({g}git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)
 midop=''
 if [ -n "$gd" ]; then
   if [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ]; then midop=rebase
@@ -2045,11 +2104,18 @@ async fn gather(
 
     // 1. Source git state: on its branch, nothing in progress — and what the
     //    carry has to take along (strict: today's clean + pushed refusals).
+    //    A dry run's inspection never fetches (it writes nothing to either
+    //    host); the move's does, when origin's tip is not local.
     let hint = hooks.source_cwd_hint(store, &snap.row).await;
     let out = sh(
         ssh,
         &src,
-        &inspect_script(&snap.row.tmux_name, hint.as_deref(), &snap.branch),
+        &inspect_script_with(
+            &snap.row.tmux_name,
+            hint.as_deref(),
+            &snap.branch,
+            !args.dry_run,
+        ),
         GIT_TIMEOUT,
     )
     .await?;
@@ -2065,7 +2131,18 @@ async fn gather(
         return Err(IpcError::new(codes::E_GIT, msg));
     }
     let state = parse_inspection(&String::from_utf8_lossy(&out.stdout))?;
-    if args.strict {
+    if args.strict && args.dry_run && state.origin_tip_not_local {
+        // The move would fetch origin's tip here and then refuse only if the
+        // source has commits it lacks. Without the fetch that half cannot be
+        // decided, so decide every other strict refusal exactly as the move
+        // does and leave that one to `preview()`'s `unknowns` — neither a
+        // refusal the move might not raise, nor a pass it might not give.
+        let decidable = SourceState {
+            ahead: 0,
+            ..state.clone()
+        };
+        preflight_verdict(&decidable, &snap.branch)?;
+    } else if args.strict {
         preflight_verdict(&state, &snap.branch)?;
     } else {
         carry_verdict(&state, &snap.branch)?;
@@ -6399,6 +6476,29 @@ mod tests {
         }
     }
 
+    /// The dry run's inspection runs every git call under
+    /// `GIT_OPTIONAL_LOCKS=0`; the move's runs none of them that way, on
+    /// purpose (see [`inspect_script_with`]: its index rewrite is what the
+    /// snapshot's copied index relies on).
+    #[test]
+    fn only_the_dry_runs_inspection_disables_optional_locks() {
+        let dry = inspect_script_with("n", Some("/h"), "feat", false);
+        let calls = dry.matches("git -C").count();
+        assert!(calls >= 9, "{dry}");
+        assert_eq!(
+            dry.matches("GIT_OPTIONAL_LOCKS=0 git -C").count(),
+            calls,
+            "a git call in the dry run's inspection can take optional locks:\n{dry}"
+        );
+        assert!(!dry.contains("fetch"), "{dry}");
+        let real = inspect_script("n", Some("/h"), "feat");
+        assert!(!real.contains("GIT_OPTIONAL_LOCKS"), "{real}");
+        assert!(
+            real.contains(r#"fetch -q origin "refs/heads/$br""#),
+            "{real}"
+        );
+    }
+
     /// Runs the generated `inspect_script` through real `git`/`bash` against a
     /// temp repo that is genuinely mid-merge (two branches editing the same
     /// line, `git merge` left conflicted), then again after `git merge
@@ -6477,6 +6577,117 @@ mod tests {
 
         assert!(git(&["merge", "--abort"]).status.success());
         assert_eq!(probe().midop, None);
+    }
+
+    /// A source whose `origin/<br>` has moved on since it last fetched: the
+    /// case where the move's inspection fetches origin's tip to count the
+    /// unpushed commits. A dry run's inspection must not — no objects, no
+    /// FETCH_HEAD, no moved tracking ref — and must not rewrite the index's
+    /// stat cache through `git status` either. The count it cannot make is
+    /// reported as unknown (`ahead == -1`), never guessed.
+    #[test]
+    fn a_dry_run_inspection_writes_nothing_when_origin_has_moved_on() {
+        use carry::tests::{bash, git};
+        if !carry::tests::require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let origin = tmp.path().join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "--bare", "-b", "feat"]);
+        let seed = tmp.path().join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git(&seed, &["init", "-q", "-b", "feat"]);
+        std::fs::write(seed.join("a.txt"), "a\n").unwrap();
+        git(&seed, &["add", "a.txt"]);
+        git(&seed, &["commit", "-q", "-m", "a"]);
+        git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&seed, &["push", "-q", "origin", "feat"]);
+        let src = tmp.path().join("src");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                src.to_str().unwrap(),
+            ],
+        );
+        // Origin moves on; the source never hears about it.
+        std::fs::write(seed.join("b.txt"), "b\n").unwrap();
+        git(&seed, &["add", "b.txt"]);
+        git(&seed, &["commit", "-q", "-m", "b"]);
+        git(&seed, &["push", "-q", "origin", "feat"]);
+        let origin_tip = git(&seed, &["rev-parse", "HEAD"]).trim().to_string();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", src.to_str().unwrap(), "cat-file", "-e"])
+                .arg(format!("{origin_tip}^{{commit}}"))
+                .output()
+                .is_ok_and(|o| !o.status.success()),
+            "the fixture must leave origin's tip out of the source's object store"
+        );
+        // The racily-clean setup `probe.rs`'s writes-nothing test uses: a
+        // settled index, then a tracked file's mtime bumped with its content
+        // unchanged, so a `git status` without GIT_OPTIONAL_LOCKS=0 rewrites
+        // the index's stat cache.
+        git(&src, &["update-index", "-q", "--refresh"]);
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        std::fs::File::open(src.join("a.txt"))
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+
+        let gd = src.join(".git");
+        let fetch_head = || std::fs::read(gd.join("FETCH_HEAD")).ok();
+        let tracking = || git(&src, &["rev-parse", "refs/remotes/origin/feat"]);
+        let objects = || git(&src, &["count-objects", "-v"]);
+        let index = || std::fs::read(gd.join("index")).unwrap();
+        let before = (fetch_head(), tracking(), objects(), index());
+
+        let out = bash(
+            &inspect_script_with("", Some(src.to_str().unwrap()), "feat", false),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let mut wrote = Vec::new();
+        if fetch_head() != before.0 {
+            wrote.push("FETCH_HEAD".to_string());
+        }
+        if tracking() != before.1 {
+            wrote.push(format!(
+                "refs/remotes/origin/feat ({} -> {})",
+                before.1.trim(),
+                tracking().trim()
+            ));
+        }
+        if objects() != before.2 {
+            wrote.push(format!("objects:\n{}\n->\n{}", before.2, objects()));
+        }
+        if index() != before.3 {
+            wrote.push("the index".to_string());
+        }
+        assert!(
+            wrote.is_empty(),
+            "the dry run's inspection wrote: {wrote:#?}"
+        );
+        let st = parse_inspection(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert_eq!(st.remote_sha.as_deref(), Some(origin_tip.as_str()));
+        assert_eq!(
+            st.ahead, -1,
+            "an unpushed count it could not make, not a guess"
+        );
+        assert!(st.origin_tip_not_local, "and it says why");
     }
 
     #[test]
@@ -6621,6 +6832,22 @@ mod tests {
                 "a dry run sent a tmux new-session to {host}"
             );
         }
+        // `# cf-move:inspect` is on the read-only list only because a dry
+        // run's copy of it cannot fetch: the move's own copy runs `git fetch`
+        // when origin's tip is not in the source's object store, which writes
+        // objects, FETCH_HEAD and the remote-tracking ref. Asserted on the
+        // script text the fake recorded, not on the marker alone.
+        let inspects = scripts_with(&f, "alpha", "# cf-move:inspect");
+        assert!(
+            !inspects.is_empty(),
+            "the dry run never inspected the source"
+        );
+        for s in &inspects {
+            assert!(
+                !s.contains("fetch"),
+                "a dry run's source inspection can fetch from origin:\n{s}"
+            );
+        }
         // No upload of any kind (the transcript copy is an upload).
         assert!(
             f.fake.calls().iter().all(|c| !c.is_upload()),
@@ -6693,6 +6920,98 @@ mod tests {
         let from_move = run(&f, &hooks, false).await.unwrap_err();
         assert_eq!(from_preview.code, from_move.code);
         assert_eq!(from_preview.message, from_move.message);
+    }
+
+    /// What a dry run's inspection prints in the ahead field when origin's
+    /// tip is not in the source's object store and it did not fetch it.
+    const NOT_LOCAL: &str = ORIGIN_TIP_NOT_LOCAL;
+
+    /// The dry run cannot count the unpushed commits when origin has commits
+    /// the source never fetched — so it says so, rather than reporting 0 (or
+    /// a count against an older tip).
+    #[tokio::test]
+    async fn a_dry_run_names_an_unpushed_count_it_could_not_make_without_fetching() {
+        let (f, _bus) = recorded_fixture();
+        let moved_on = "2".repeat(40);
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection("", &moved_on, NOT_LOCAL)),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        let p = preview(&a, &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        assert_eq!(p.unpushed_commits, None);
+        assert!(
+            p.unknowns
+                .iter()
+                .any(|u| u.contains("has not fetched") && u.contains("origin/feat")),
+            "{:?}",
+            p.unknowns
+        );
+    }
+
+    /// A strict move fetches origin's tip and then refuses only if the source
+    /// has commits origin lacks. A dry run that did not fetch cannot decide
+    /// that half, so it must neither refuse on it (the move might not) nor
+    /// pass silently (the move might refuse): it decides everything else and
+    /// names the half it could not decide.
+    #[tokio::test]
+    async fn a_strict_dry_run_names_the_unpushed_verdict_it_cannot_decide() {
+        let (f, _bus) = recorded_fixture();
+        let moved_on = "2".repeat(40);
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection("", &moved_on, NOT_LOCAL)),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        a.strict = true;
+        let p = preview(&a, &f.store, &f.fake, &hooks)
+            .await
+            .expect("undecidable is not a refusal");
+        assert!(
+            p.unknowns
+                .iter()
+                .any(|u| u.contains("strict") && u.contains("E_MOVE_UNPUSHED")),
+            "{:?}",
+            p.unknowns
+        );
+
+        // Everything the strict verdict CAN decide without the fetch is still
+        // decided: a dirty source is refused exactly as a strict move refuses
+        // it.
+        let (f, _bus) = recorded_fixture();
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection(" M a.rs", &moved_on, NOT_LOCAL)),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = preview(&a, &f.store, &f.fake, &hooks).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_DIRTY);
+    }
+
+    /// The other half of the dry run's fetch-free inspection: the real move
+    /// still fetches origin's tip when the source lacks it, exactly as before.
+    #[tokio::test]
+    async fn the_real_move_still_fetches_origins_tip_when_the_source_lacks_it() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        run(&f, &hooks, false).await.expect("the real move");
+        let inspects = scripts_with(&f, "alpha", "# cf-move:inspect");
+        assert!(!inspects.is_empty(), "the move never inspected the source");
+        for s in &inspects {
+            assert!(
+                s.contains(r#"fetch -q origin "refs/heads/$br""#),
+                "the move's inspection no longer fetches origin's tip:\n{s}"
+            );
+        }
     }
 
     // Spec test 3 asked for every store-level refusal class. Under correction 4
