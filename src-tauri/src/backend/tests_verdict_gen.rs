@@ -341,3 +341,41 @@ fn docs_hub_md_carries_both_markers_today() {
     assert!(doc.contains(BEGIN_MARKER), "missing {BEGIN_MARKER}");
     assert!(doc.contains(END_MARKER), "missing {END_MARKER}");
 }
+
+/// The two uploads do the same thing and must be classified alike.
+///
+/// `upload_to_session` is the terminal pane's drop handler; `upload_attachments`
+/// is the composer's. Both take `local_paths` from THIS machine, address the
+/// session by the `host_alias` passed in, carry the bytes over THIS machine's
+/// `SshClient`, and read no `state.db` — the shapes are identical down to the
+/// two validators. They were nonetheless split, `SameInBoth` against
+/// `LocalOnly`, and the refusing one gave as its reason "Same reason as
+/// upload_to_session" — citing, for the opposite conclusion, the command that
+/// concluded the other way. The effect was that a paired desktop could drop a
+/// file on the terminal pane but not attach one in the composer.
+///
+/// Being a hub client does not take this machine's disk or its ssh away; it
+/// means the fleet's database and hosts are the hub's. Whatever these two are,
+/// they are it together.
+#[test]
+fn the_two_uploads_are_classified_alike() {
+    let row = |n: &str| {
+        VERDICTS
+            .iter()
+            .find(|(name, _)| *name == n)
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("{n} has a row in VERDICTS"))
+    };
+    let pane = row("upload_to_session");
+    let composer = row("upload_attachments");
+    assert_eq!(
+        std::mem::discriminant(pane),
+        std::mem::discriminant(composer),
+        "upload_to_session is {pane:?} but upload_attachments is {composer:?}; they copy \
+         local bytes to a session's host over this machine's ssh in exactly the same way"
+    );
+    assert!(
+        matches!(composer, Verdict::SameInBoth { .. }),
+        "both uploads work from a paired desktop, so both are SameInBoth"
+    );
+}

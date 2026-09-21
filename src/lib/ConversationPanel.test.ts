@@ -3140,11 +3140,15 @@ describe('ConversationPanel attachments', () => {
     expect(screen.getByTestId('conv-attach-error').textContent).toContain('10 MB');
   });
 
-  it('the attach button states why it is unavailable in hub mode', async () => {
+  // The composer's attach and the terminal pane's drop do the same thing:
+  // read this machine's disk and copy over this machine's ssh. Pairing with a
+  // hub gives the hub the fleet's database and hosts, not this machine's disk
+  // — so attaching works here exactly as it does standalone.
+  it('the attach button is live in hub mode, as the terminal drop already was', async () => {
     await renderPanelInHubMode();
     const btn = screen.getByTestId('conv-attach-button');
-    expect(btn.getAttribute('aria-disabled')).toBe('true');
-    expect(btn.getAttribute('title')).toContain('standalone');
+    expect(btn.getAttribute('aria-disabled')).toBeNull();
+    expect(btn.getAttribute('title')).toBe('Attach files');
   });
 
   /**
@@ -3275,15 +3279,13 @@ describe('ConversationPanel attachments', () => {
     expect(shell.className).not.toContain('is-dragging');
   });
 
-  it('a drop is refused in hub mode, where nothing could upload it', async () => {
+  it('a drop is taken in hub mode: the file is on this machine either way', async () => {
     await renderPanelInHubMode();
     placeShell();
     mockedInvoke.mockClear();
     drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/a.png'] });
     for (let i = 0; i < 3; i++) await settle();
-    expect(screen.queryByTestId('conv-attachments')).toBeNull();
-    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_describe', expect.anything());
-    expect(mockedInvoke).not.toHaveBeenCalledWith('attachment_preview', expect.anything());
+    expect(mockedInvoke).toHaveBeenCalledWith('attachment_describe', expect.anything());
   });
 
   // The panel is ONE instance for every session (App.svelte does not `{#key}`
