@@ -29,6 +29,8 @@ export const SETTING_KEYS = {
   usageEnabled: 'usage.enabled',
   usageIntervalSecs: 'usage.interval_secs',
   usagePricesJson: 'usage.prices_json',
+  reportsMaxRows: 'reports.max_rows',
+  reportsMaxAgeSecs: 'reports.max_age_secs',
 } as const;
 
 /** Derived, read-only entry in the `get_fleet_settings` map: JSON object of
@@ -60,6 +62,10 @@ export const MOVE_IGNORED_TOTAL_MB_MAX = 1024;
 /** Mirror of `settings::MOVE_MAX_SESSION_STATE_MB_MAX` (`Kind::Int { min: 1, max }`). */
 export const MOVE_MAX_SESSION_STATE_MB_MAX = 4096;
 
+/** Mirror of the `reports.max_rows` bounds (`Kind::Int { min: 100, max }`). */
+export const REPORTS_MAX_ROWS_MIN = 100;
+export const REPORTS_MAX_ROWS_MAX = 100_000;
+
 export type ProjectsLayout = 'github' | 'flat';
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -89,6 +95,8 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'usage.enabled': 'true',
   'usage.interval_secs': '300',
   'usage.prices_json': '{}',
+  'reports.max_rows': '5000',
+  'reports.max_age_secs': '604800',
 };
 
 export type FleetSettings = Record<string, string>;
