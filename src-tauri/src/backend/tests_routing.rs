@@ -124,11 +124,14 @@ fn remote_backend(fake: &Arc<Fake>) -> FleetBackend {
 }
 
 /// A real on-disk store; `Store`'s in-memory constructor is fleet-core-test
-/// only.
-fn store() -> (tempfile::TempDir, Mutex<Store>) {
+/// only. An `Arc` because `move_session`'s routed helper takes one (Transfer
+/// 3c Task 3: `when: idle` on a busy source spawns a waiter that must
+/// outlive the call) — every other routed helper still takes `&Mutex<Store>`
+/// and gets there by deref coercion from `&Arc<Mutex<Store>>`.
+fn store() -> (tempfile::TempDir, Arc<Mutex<Store>>) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
-    (dir, Mutex::new(store))
+    (dir, Arc::new(Mutex::new(store)))
 }
 
 fn ssh() -> Arc<SshClient> {
@@ -191,7 +194,7 @@ type Case = (
     &'static str,
     Value,
     &'static str,
-    Box<dyn Fn(&FleetBackend, &Mutex<Store>, &Arc<SshClient>) -> Result<(), IpcError>>,
+    Box<dyn Fn(&FleetBackend, &Arc<Mutex<Store>>, &Arc<SshClient>) -> Result<(), IpcError>>,
 );
 
 fn check(cases: Vec<Case>) {
@@ -973,7 +976,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "move_session",
             "move_session",
-            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true, "clean_target": false, "dry_run": true }),
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true, "clean_target": false, "dry_run": true, "when": "now" }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::move_session::routed::move_session(
@@ -985,6 +988,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         strict: true,
                         clean_target: false,
                         dry_run: true,
+                        when: fleet_core::service::move_session::When::Now,
                     },
                     s,
                     h,
@@ -999,7 +1003,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "move_session",
             "move_session",
-            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": true, "strict": false, "clean_target": true, "dry_run": false }),
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": true, "strict": false, "clean_target": true, "dry_run": false, "when": "now" }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::move_session::routed::move_session(
@@ -1011,6 +1015,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         strict: false,
                         clean_target: true,
                         dry_run: false,
+                        when: fleet_core::service::move_session::When::Now,
                     },
                     s,
                     h,
@@ -1157,6 +1162,7 @@ fn a_hub_answering_a_preview_deserialises_into_move_outcome_preview() {
             strict: false,
             clean_target: false,
             dry_run: true,
+            when: fleet_core::service::move_session::When::Now,
         },
         &st,
         &ssh(),
@@ -1164,7 +1170,7 @@ fn a_hub_answering_a_preview_deserialises_into_move_outcome_preview() {
     .expect("a preview answer must deserialise as the command's return type");
     match got {
         MoveOutcome::Preview(p) => assert_eq!(p.session_id, 7),
-        MoveOutcome::Moved(_) => panic!("expected MoveOutcome::Preview, got Moved"),
+        other => panic!("expected MoveOutcome::Preview, got {other:?}"),
     }
     let (tool, args) = fake.only_call();
     assert_eq!(tool, "move_session");
@@ -1608,6 +1614,7 @@ fn dry_run_args(dry_run: bool) -> fleet_core::service::move_session::MoveSession
         strict: false,
         clean_target: false,
         dry_run,
+        when: fleet_core::service::move_session::When::Now,
     }
 }
 

@@ -30,7 +30,7 @@ pub(crate) mod routed {
     pub async fn move_session(
         backend: &FleetBackend,
         args: MoveSessionArgs,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
         ssh: &Arc<SshClient>,
     ) -> Result<MoveOutcome, IpcError> {
         match backend.hub() {

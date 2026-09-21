@@ -660,6 +660,10 @@ impl MoveSessionParams {
             strict: self.strict,
             clean_target: self.clean_target,
             dry_run: self.dry_run,
+            // `when` is not yet a tool parameter (Task 4 adds it to
+            // `MoveSessionParams` and maps it here); every MCP call today
+            // means `now`.
+            when: crate::service::move_session::When::Now,
         }
     }
 }

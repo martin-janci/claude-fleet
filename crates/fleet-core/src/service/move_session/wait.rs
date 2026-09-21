@@ -90,20 +90,12 @@ fn key_for(store: &Mutex<Store>, session_id: i64) -> WaitKey {
 
 /// Held for as long as a wait is pending; dropping it deregisters — the
 /// startup sweep relies on this to tell a live wait from an orphaned one.
-///
-/// Only `sweep_unresolved_waits` (fully `pub`) is reachable from outside this
-/// module today: `begin_wait` / `run_wait` / `cancel_wait` are exercised by
-/// this file's tests, and are wired into the public move flow by Task 3 (the
-/// spawned entry point this module's docs describe) — hence the blanket
-/// `#[allow(dead_code)]`s below on otherwise-correct, tested code.
-#[allow(dead_code)]
 pub(super) struct WaitGuard {
     key: WaitKey,
     token: CancellationToken,
 }
 
 impl WaitGuard {
-    #[allow(dead_code)]
     pub(super) fn token(&self) -> &CancellationToken {
         &self.token
     }
@@ -117,7 +109,6 @@ impl Drop for WaitGuard {
     }
 }
 
-#[allow(dead_code)]
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -129,7 +120,6 @@ fn now_unix() -> i64 {
 /// (capped at `MOVE_WAIT_MAX_MINS_MAX`), else [`DEFAULT_WAIT_MAX_MINS`] — the
 /// same "get_string, parse, positive, else default" shape the move uses for
 /// its other numeric settings (`SETTING_MAX_TRANSCRIPT_MB` and friends).
-#[allow(dead_code)]
 fn wait_max_mins(s: &Store) -> u64 {
     settings::get_string(s, settings::MOVE_WAIT_MAX_MINS)
         .parse::<u64>()
@@ -146,7 +136,6 @@ fn wait_max_mins(s: &Store) -> u64 {
 /// currently in flight (queried, per [`super::moves_in_flight`] — the claim
 /// itself is never taken here; the real move takes it on each retry inside
 /// [`run_wait`]'s loop).
-#[allow(dead_code)]
 pub(super) fn begin_wait(
     args: &MoveSessionArgs,
     store: &Mutex<Store>,
@@ -224,7 +213,6 @@ pub(super) fn begin_wait(
 /// [`WaitGuard`]'s own drop once `run_wait` observes the cancellation and
 /// returns, so a second call for the same session (once that drop has
 /// happened) correctly reports nothing left to cancel.
-#[allow(dead_code)]
 pub(super) fn cancel_wait(store: &Mutex<Store>, session_id: i64) -> bool {
     let key = key_for(store, session_id);
     let Ok(reg) = waits().lock() else {
@@ -239,11 +227,11 @@ pub(super) fn cancel_wait(store: &Mutex<Store>, session_id: i64) -> bool {
     }
 }
 
-/// The wait loop. `args.when` must be `Now` — this is the move it will run
-/// once the source is idle (Task 3 adds `when`; until then this simply runs
-/// `args` as given). Records `session_move_wait_ended` with the reason
-/// before returning it.
-#[allow(dead_code, clippy::too_many_arguments)]
+/// The wait loop. `args` must carry `when: Now` and `dry_run: false` — this
+/// is the move it will run once the source is idle, not a preview and not
+/// another wait; the public `move_session` forces both when it spawns this.
+/// Records `session_move_wait_ended` with the reason before returning it.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_wait(
     args: MoveSessionArgs,
     store: &Mutex<Store>,
@@ -274,7 +262,23 @@ pub(super) async fn run_wait(
         // cancelling a running move is out of scope.
         match move_session_with(args.clone(), store, ssh, hooks, opts).await {
             Ok(MoveOutcome::Moved(_)) => break WaitEnd::Moved,
-            Ok(MoveOutcome::Preview(_)) => break WaitEnd::Refused,
+            // `args` is forced to `when: Now, dry_run: false` by the only
+            // caller that spawns this loop, so `move_session_with` can only
+            // ever answer `Moved` or an `Err` here — a `Preview` needs
+            // `dry_run: true`, and `Waiting` / `WaitCancelled` need a `when`
+            // other than `Now`. Kept as a match arm (not `unreachable!()`) so
+            // a future caller that breaks that invariant gets a recorded
+            // refusal instead of a panicked task.
+            Ok(other) => {
+                refusal = Some(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "a wait retry got an outcome it cannot use: {other:?} — run_wait \
+                         requires when: Now and dry_run: false"
+                    ),
+                ));
+                break WaitEnd::Refused;
+            }
             Err(e) if e.code == codes::E_MOVE_PARTIAL => break WaitEnd::Partial,
             Err(e) if e.message.contains(SOURCE_NOT_IDLE) => continue,
             Err(e) => {
@@ -290,7 +294,6 @@ pub(super) async fn run_wait(
 /// Best-effort: record why a wait ended. Never `?` — the wait itself is
 /// already over by the time this runs, so a store failure here must not
 /// change what the caller gets back.
-#[allow(dead_code)]
 fn record_wait_ended(
     store: &Mutex<Store>,
     session_id: i64,

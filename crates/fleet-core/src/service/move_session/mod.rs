@@ -120,6 +120,21 @@ const NO_WORKTREE: &str = "__CF_NO_WORKTREE__";
 const NO_CWD: &str = "__CF_NO_CWD__";
 const DIVERGED: &str = "__CF_DIVERGED__";
 
+/// When a move happens (Transfer slice 3c). `now` (default) is today's move:
+/// a busy source is refused outright. `idle` waits, in-process, for the
+/// source to go idle and then runs the move (the public [`move_session`]
+/// spawns the wait; [`move_session_with`] treats `idle` exactly like `now`
+/// once it has decided not to defer — see that function's doc). `cancel`
+/// ends a pending wait instead of moving anything.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum When {
+    #[default]
+    Now,
+    Idle,
+    Cancel,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveSessionArgs {
     pub session_id: i64,
@@ -141,6 +156,11 @@ pub struct MoveSessionArgs {
     /// Default false.
     #[serde(default)]
     pub dry_run: bool,
+    /// When to move: `now` (default — a busy source is refused), `idle`
+    /// (wait for the source and return `Waiting`), `cancel` (end a pending
+    /// wait).
+    #[serde(default)]
+    pub when: When,
 }
 
 /// What a completed move did.
@@ -177,6 +197,17 @@ pub struct MoveReport {
 pub enum MoveOutcome {
     Moved(Box<MoveReport>),
     Preview(Box<preview::MovePreview>),
+    Waiting(Box<wait::MoveWaiting>),
+    WaitCancelled(Box<MoveWaitCancelled>),
+}
+
+/// What `when: cancel` answers with — never a move. `was_waiting` is `false`
+/// when there was nothing pending to cancel (already resolved, or never
+/// started).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveWaitCancelled {
+    pub session_id: i64,
+    pub was_waiting: bool,
 }
 
 /// Bounds for the "target is running" confirmation.
@@ -317,12 +348,67 @@ impl MoveHooks for RealHooks<'_> {
     }
 }
 
-/// Move a session (see the module docs).
+/// Poll interval for [`wait::run_wait`]'s retry loop — the same cadence
+/// [`crate::service::tasks::wait_for_session`] long-polls at.
+const WAIT_POLL: Duration = crate::service::tasks::POLL_INTERVAL;
+
+/// Whether the source is idle right now, read fresh from the store (no
+/// reconcile: this only decides whether `move_session` needs to spawn a
+/// waiter, not whether a move may proceed — the move's own `gather()` step
+/// reconciles and re-checks before it ever touches anything).
+fn source_is_idle(store: &Mutex<Store>, session_id: i64) -> Result<bool, IpcError> {
+    let s = lock(store)?;
+    let row = s.get_session_by_id(session_id)?.ok_or_else(|| {
+        IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
+    })?;
+    Ok(crate::service::tasks::session_satisfies(
+        &row,
+        crate::service::tasks::WaitCond::Idle,
+    ))
+}
+
+/// Move a session (see the module docs). Takes the store as an `Arc` because
+/// `when: idle` on a busy source spawns a waiter that must outlive this
+/// call — [`move_session_with`], the test-facing entry every fixture drives
+/// synchronously, never spawns anything and so never needs one.
 pub async fn move_session(
     args: MoveSessionArgs,
-    store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<MoveOutcome, IpcError> {
+    if args.when == When::Idle && !args.dry_run && !source_is_idle(store, args.session_id)? {
+        let (guard, deadline, waiting) = wait::begin_wait(&args, store)?;
+        let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
+        let mut now = args;
+        now.when = When::Now;
+        now.dry_run = false;
+        // The spawn lives here, not in `move_session_with`: this is the one
+        // entry point that owns `'static` `Arc`s it can hand to a detached
+        // task, and the only caller allowed to outlive its own call. Every
+        // test drives `move_session_with` directly against `FakeSsh` /
+        // `FakeHooks` borrowed for the duration of the `.await`, which a
+        // spawned task cannot do.
+        tokio::spawn(async move {
+            let hooks = RealHooks { ssh: &ssh };
+            // The guard lives as long as the task: dropping it deregisters
+            // the wait so `cancel_wait` and the startup sweep see it as
+            // resolved.
+            let token = guard.token().clone();
+            wait::run_wait(
+                now,
+                &store,
+                &*ssh,
+                &hooks,
+                MoveOptions::default(),
+                &token,
+                deadline,
+                WAIT_POLL,
+            )
+            .await;
+            drop(guard);
+        });
+        return Ok(MoveOutcome::Waiting(Box::new(waiting)));
+    }
     let hooks = RealHooks { ssh };
     move_session_with(args, store, &**ssh, &hooks, MoveOptions::default()).await
 }
@@ -1997,6 +2083,13 @@ fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcEr
 /// (`E_MOVE_PARTIAL`) is recorded on the timeline as [`EVENT_MOVE_PARTIAL`].
 /// `dry_run` short-circuits to a read-only [`preview::preview`] before any of
 /// that — no claim taken, no carry cleanup to run.
+///
+/// `when: cancel` short-circuits before even that: it never moves anything
+/// and never touches a host, so it is checked first. `when: now`, and
+/// `when: idle` once it reaches this far (a dry run previewing it, or the
+/// public [`move_session`] having already decided the source is not busy),
+/// are today's move — the waiting half of `idle` lives entirely in the
+/// public entry point, which is the only one that spawns.
 pub async fn move_session_with(
     args: MoveSessionArgs,
     store: &Mutex<Store>,
@@ -2004,6 +2097,19 @@ pub async fn move_session_with(
     hooks: &dyn MoveHooks,
     opts: MoveOptions,
 ) -> Result<MoveOutcome, IpcError> {
+    if args.when == When::Cancel {
+        if args.dry_run {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "there is nothing to preview about cancelling a wait",
+            ));
+        }
+        let was_waiting = wait::cancel_wait(store, args.session_id);
+        return Ok(MoveOutcome::WaitCancelled(Box::new(MoveWaitCancelled {
+            session_id: args.session_id,
+            was_waiting,
+        })));
+    }
     if args.dry_run {
         return preview::preview(&args, store, ssh, hooks)
             .await
@@ -2054,6 +2160,12 @@ pub(super) struct Gathered {
     pub id: String,
     pub state: SourceState,
     pub located: Located,
+    /// `true` only when this call skipped `require_source_idle` (a dry run
+    /// with `when: idle`) AND the source is in fact not idle — the preview's
+    /// second sanctioned divergence from the move (spec §4: `idle` defers
+    /// exactly this check). A real move never sets this: it never skips the
+    /// check in the first place.
+    pub busy: bool,
 }
 
 /// The move's opening checks, in the move's order, short-circuiting on the
@@ -2098,7 +2210,12 @@ async fn gather(
         p.start(MoveStep::Check);
     }
     // 0. The source Claude must be idle NOW: reconcile its host so the status
-    //    is fresh, then refuse a turn in progress or an unknown status.
+    //    is fresh, then refuse a turn in progress or an unknown status. A dry
+    //    run previewing `when: idle` defers exactly this refusal — that is
+    //    what `idle` means — so it only checks the status to report whether
+    //    the source is busy, never to refuse on it. A real move (`dry_run:
+    //    false`) always enforces it, whatever `when` says: only the public
+    //    `move_session` entry point ever turns `idle` into an actual wait.
     hooks.refresh_host(store, &src).await?;
     let status = {
         let s = lock(store)?;
@@ -2106,7 +2223,13 @@ async fn gather(
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?
             .claude_status
     };
-    require_source_idle(status.as_deref())?;
+    let idle_deferred = args.dry_run && args.when == When::Idle;
+    let busy = if idle_deferred {
+        require_source_idle(status.as_deref()).is_err()
+    } else {
+        require_source_idle(status.as_deref())?;
+        false
+    };
 
     // 1. Source git state: on its branch, nothing in progress — and what the
     //    carry has to take along (strict: today's clean + pushed refusals).
@@ -2188,6 +2311,7 @@ async fn gather(
         id,
         state,
         located,
+        busy,
     })
 }
 
@@ -2243,6 +2367,7 @@ async fn move_session_inner(
         id,
         state,
         located,
+        busy: _,
     } = gather(&args, store, ssh, hooks, Some(progress)).await?;
     let mut warnings: Vec<String> = Vec::new();
     let mut carried = carry::CarryReport {
@@ -3492,6 +3617,7 @@ mod tests {
             strict: false,
             clean_target: false,
             dry_run: false,
+            when: When::Now,
         }
     }
 
@@ -3501,7 +3627,7 @@ mod tests {
     fn expect_moved(out: MoveOutcome) -> MoveReport {
         match out {
             MoveOutcome::Moved(rep) => *rep,
-            MoveOutcome::Preview(_) => panic!("run/run_with never dry_run; got a Preview"),
+            other => panic!("run/run_with never dry_run or cancel; got {other:?}"),
         }
     }
 
@@ -6284,6 +6410,7 @@ mod tests {
             strict: false,
             clean_target: false,
             dry_run: false,
+            when: When::Now,
         };
         assert_eq!(
             move_session_with(same, &f.store, &f.fake, &hooks, fast())
@@ -7461,5 +7588,106 @@ mod tests {
         let w = wait_events(&f);
         let (_, ended) = w.last().unwrap();
         assert!(ended.as_deref().unwrap().contains("moved"), "{ended:?}");
+    }
+
+    // ── `when`, Task 3 ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn when_idle_on_an_idle_source_moves_at_once() {
+        let (f, _bus) = recorded_fixture(); // the fixture's source is idle
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.when = When::Idle;
+        let out = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap();
+        assert!(matches!(out, MoveOutcome::Moved(_)), "{out:?}");
+        assert!(wait_events(&f).is_empty(), "no wait was registered");
+    }
+
+    #[tokio::test]
+    async fn cancel_with_nothing_pending_says_so_and_moves_nothing() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.when = When::Cancel;
+        let out = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap();
+        let MoveOutcome::WaitCancelled(c) = out else {
+            panic!("{out:?}")
+        };
+        assert!(!c.was_waiting);
+        assert!(!events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+        assert!(f.fake.calls().is_empty(), "a cancel touches no host");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_cancel_is_refused() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.when = When::Cancel;
+        a.dry_run = true;
+        let err = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_for_idle_on_a_busy_source_previews_and_says_it_will_wait() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        a.when = When::Idle;
+        let out = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap();
+        let MoveOutcome::Preview(p) = out else {
+            panic!("{out:?}")
+        };
+        assert!(
+            p.unknowns.iter().any(|u| u.contains("busy")),
+            "{:?}",
+            p.unknowns
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_for_now_on_a_busy_source_is_still_the_moves_refusal() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true; // when defaults to Now
+        let err = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
+        assert!(err.message.contains(SOURCE_NOT_IDLE), "{}", err.message);
+    }
+
+    #[test]
+    fn every_outcome_round_trips_on_the_wire() {
+        for o in [
+            MoveOutcome::Waiting(Box::new(wait::MoveWaiting {
+                session_id: 7,
+                to_host: "beta".into(),
+                deadline_unix: 1_700_000_000,
+            })),
+            MoveOutcome::WaitCancelled(Box::new(MoveWaitCancelled {
+                session_id: 7,
+                was_waiting: true,
+            })),
+        ] {
+            let v = serde_json::to_value(&o).unwrap();
+            assert!(v["kind"].is_string(), "{v}");
+            let back: MoveOutcome = serde_json::from_value(v.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&back).unwrap(), v);
+        }
     }
 }
