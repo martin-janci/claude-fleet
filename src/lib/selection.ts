@@ -94,38 +94,41 @@ export function selectSession(s: SessionRow | null, opts: { follow?: boolean } =
   if (!opts.follow) for (const fn of openedListeners) fn(s);
 }
 
-// Set by `selectSessionExplicitly` for the id it just selected, and cleared
-// the first time Sidebar consumes it. A plain `selectSession` call (a
-// rename/recreate resync, a post-move follow reselect, the sessions-store
-// re-sync above) never touches this, so it never widens `hostFilter` — see
-// `consumeRevealRequest`.
-const revealRequested = writable<number | null>(null);
+// Monotonically increasing counter bumped by `selectSessionExplicitly`,
+// AFTER the selection itself has been applied. Deliberately NOT id-keyed:
+// - Sidebar can be unmounted (collapsed) when an explicit select happens, so
+//   a "consume once" flag would never be consumed and could go stale —
+//   `$effect` re-runs once whenever the tracked value differs from what it
+//   last saw, including a fresh mount, so re-mounting alone replays the most
+//   recent bump against whatever is selected right now (still correct: the
+//   currently-selected session should be revealed once the sidebar is back).
+// - Re-selecting the SAME session explicitly (no id change) must still
+//   reveal it; a counter bump is a distinct event even when the id repeats,
+//   where an id-keyed flag compared against `$selectedSession.id` would see
+//   no change and do nothing.
+// - Nothing can "replay" a stale reveal against an unrelated later
+//   selection: a non-explicit reselect never bumps this, so the sequence
+//   number the Sidebar effect reacts to only ever changes on an explicit
+//   pick, and it always reads the CURRENT `$selectedSession` at that moment
+//   rather than remembering which id the bump was "for".
+export const revealSeq = writable(0);
 
 /**
  * Select a session as a deliberate user action: a sidebar row click, the
- * quick switcher, restore-on-launch, or a fresh New-session create. Marks
- * the pick as reveal-worthy so Sidebar widens `hostFilter` to `all` if it
- * hides the session's host — a non-explicit reselect (a rename/recreate
- * resync, a completed move's follow reselect) must go through the plain
- * `selectSession` instead and stays silent.
+ * quick switcher, restore-on-launch, a fresh New-session create, or any
+ * other explicit "open this session" link (a related/background/task
+ * session, a review, a move's "open the new session"). Bumps `revealSeq` so
+ * Sidebar widens `hostFilter` to `all` if it hides the session's host — a
+ * non-explicit reselect (a rename/recreate resync, a completed move's
+ * follow reselect) must go through the plain `selectSession` instead and
+ * stays silent.
  */
 export function selectSessionExplicitly(
   s: SessionRow,
   opts: { follow?: boolean } = {},
 ): void {
   selectSession(s, opts);
-  revealRequested.set(s.id);
-}
-
-/**
- * Sidebar-only: true the first time it's called for `id` after an explicit
- * select, then clears itself so a later non-explicit id change never re-widens
- * the filter on this same id's behalf.
- */
-export function consumeRevealRequest(id: number): boolean {
-  if (get(revealRequested) !== id) return false;
-  revealRequested.set(null);
-  return true;
+  revealSeq.update((n) => n + 1);
 }
 
 /**

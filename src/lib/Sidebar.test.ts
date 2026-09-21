@@ -282,6 +282,58 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(get(hostFilter)).toBe('mefistos');
   });
 
+  it('an explicit re-select of the ALREADY-selected session still widens the filter', async () => {
+    // The reveal is keyed on `revealSeq`, not the selected id, precisely so
+    // this works: the id doesn't change on a re-select, but the user still
+    // asked to open it.
+    const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-local'), onMac]);
+    hostFilter.set('local');
+    render(Sidebar);
+    await tick(); await tick();
+
+    selectSessionExplicitly(onMac);
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('all');
+
+    // The user narrows the filter back down while `onMac` stays selected...
+    hostFilter.set('local');
+    await tick();
+    // ...then explicitly opens the very same session again (e.g. clicking
+    // it again from the quick switcher) — same id, but a fresh ask to see it.
+    selectSessionExplicitly(onMac);
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('all');
+  });
+
+  it('a non-explicit reselect that follows an earlier explicit one does NOT widen the filter', async () => {
+    // A bump can't be "replayed": once the explicit reveal for the first
+    // session has been applied, a later non-explicit id change (e.g. a
+    // rename resync) must not re-widen the filter on the new session's
+    // behalf just because a bump happened at some point in the past.
+    const onLocal = sessionFor(1, 'dev-local');
+    const onMefistos = { ...sessionFor(1, 'dev-mefistos'), host_alias: 'mefistos' };
+    const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
+    mockBackend(fakeProjects, [onLocal, onMefistos, onMac]);
+    hostFilter.set('local');
+    render(Sidebar);
+    await tick(); await tick();
+
+    // Explicit select onto `mefistos` — widens as expected.
+    selectSessionExplicitly(onMefistos);
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('all');
+
+    // The user narrows the filter back down...
+    hostFilter.set('mefistos');
+    await tick();
+    // ...then a non-explicit reselect (no `selectSessionExplicitly`) moves
+    // the selection to `mac` — must stay put, not widen again.
+    selectSession(onMac, { follow: true });
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('mefistos');
+  });
+
   it('clicking a session row selects it in the store', async () => {
     const sess = sessionFor(1, 'dev-foo');
     mockBackend(fakeProjects, [sess]);

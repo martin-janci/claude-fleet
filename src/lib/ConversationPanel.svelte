@@ -91,7 +91,7 @@
   import { pointInRect } from './geometry';
   import Markdown from './MarkdownView.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
-  import { selectSession } from './selection';
+  import { selectSessionExplicitly } from './selection';
   import { tasks } from './tasks';
 
   let {
@@ -666,7 +666,7 @@
    *  Shared by `openBackground` and the detail's worker-session link. */
   function goToSession(id: number): void {
     const row = $sessions.find((s) => s.id === id);
-    if (row) selectSession(row);
+    if (row) selectSessionExplicitly(row);
   }
 
   /** The entry a notification row belongs to: the call it named, which is

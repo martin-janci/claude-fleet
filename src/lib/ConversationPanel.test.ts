@@ -29,12 +29,12 @@ vi.mock('./sessions', async () => {
 });
 vi.mock('./selection', async () => {
   const actual = await vi.importActual<typeof import('./selection')>('./selection');
-  return { ...actual, selectSession: vi.fn() };
+  return { ...actual, selectSession: vi.fn(), selectSessionExplicitly: vi.fn() };
 });
 import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, sessions, type SessionRow } from './sessions';
-import { selectSession } from './selection';
+import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
 import { composerPresets, resetComposerPresets } from './composer_presets';
 import { composerDrafts } from './conversation';
@@ -64,7 +64,7 @@ const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
 const mockedAct = sessionActivity as unknown as ReturnType<typeof vi.fn>;
 const mockedList = listConversations as unknown as ReturnType<typeof vi.fn>;
 const mockedDetail = toolDetail as unknown as ReturnType<typeof vi.fn>;
-const selectSessionSpy = selectSession as unknown as ReturnType<typeof vi.fn>;
+const selectSessionExplicitlySpy = selectSessionExplicitly as unknown as ReturnType<typeof vi.fn>;
 
 function session(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -131,7 +131,7 @@ beforeEach(() => {
   mockedAct.mockReset();
   mockedList.mockReset();
   mockedDetail.mockReset();
-  selectSessionSpy.mockReset();
+  selectSessionExplicitlySpy.mockReset();
   mockedDetail.mockResolvedValue({
     ok: true,
     value: { id: 't1', name: 'Bash', input: '{}', edit: null, command: 'ls', result: 'out', is_error: false },
@@ -3040,7 +3040,7 @@ describe('ConversationPanel background switcher', () => {
     await fireEvent.click(getByTestId('conv-background-button'));
     await fireEvent.click(getAllByTestId('conv-background-item')[0]);
     await fireEvent.click(getByTestId('bg-detail-open-session'));
-    expect(selectSessionSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 4 }));
+    expect(selectSessionExplicitlySpy).toHaveBeenCalledWith(expect.objectContaining({ id: 4 }));
   });
 
   it('switches the app to a fleet child session rather than showing a detail', async () => {
@@ -3049,7 +3049,7 @@ describe('ConversationPanel background switcher', () => {
     });
     await fireEvent.click(getByTestId('conv-background-button'));
     await fireEvent.click(getAllByTestId('conv-background-item')[0]);
-    expect(selectSessionSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }));
+    expect(selectSessionExplicitlySpy).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }));
   });
 });
 

@@ -12,7 +12,7 @@
   import type { AccountUsageSnapshot } from './account_usage_store';
   import type { HostTokenInfo, TokenMode } from './mcp';
   import type { SessionRow } from './sessions';
-  import { selectSession } from './selection';
+  import { selectSessionExplicitly } from './selection';
   import { claudeStatusLabel, stuckKindLabel } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
   import { hideHostWithUndo, rotateToken, setTokenMode, showHost, viewHostSessions } from './host_actions';
@@ -231,7 +231,7 @@
               class="session"
               data-nav-row
               data-testid="detail-session"
-              onclick={() => selectSession(s)}
+              onclick={() => selectSessionExplicitly(s)}
             >
               <span class="s-name">{sessionName(s)}</span>
               <span class="muted">{sessionState(s)}</span>

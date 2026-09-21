@@ -14,7 +14,7 @@
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
   import { type ProjectRow } from './projects';
-  import { selectedSession, selectSession, selectSessionExplicitly, consumeRevealRequest } from './selection';
+  import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
   import { forgetSessionUi } from './session_ui';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
@@ -206,36 +206,69 @@
   // see their sessions immediately.
   let collapsed: Set<number> = $state(new Set());
 
-  // Reveal the selected session wherever the selection came from (quick
-  // switcher, restore-on-launch, a fresh New-session create, a click):
-  // expand its project if collapsed and scroll its row into view — always,
-  // since that's harmless regardless of what moved the selection. Widening
-  // the host filter is gated on `consumeRevealRequest`: only an *explicit*
-  // select (`selectSessionExplicitly`) marks the id as reveal-worthy, so a
-  // non-explicit id change (a rename/recreate resync, a completed move's
-  // follow reselect, the selection store's own re-sync) never resets the
-  // filter out from under the user. Keyed on the id so reconcile updates (a
-  // new row object every tick) neither re-scroll nor undo a later collapse
-  // or re-filter.
   let sidebarEl: HTMLElement | undefined = $state();
+
+  // Expand the session's project if collapsed, then scroll its row into
+  // view. Shared by both reveal effects below — always safe regardless of
+  // what moved the selection, so callers don't gate it on anything. Every
+  // caller wraps its call in `untrack` so reading `collapsed`/`sidebarEl`
+  // here doesn't become an extra tracked dependency of whichever effect is
+  // calling it.
+  function expandAndScrollTo(sess: SessionRow): void {
+    if (sess.project_id !== null && collapsed.has(sess.project_id)) {
+      const next = new Set(collapsed);
+      next.delete(sess.project_id);
+      collapsed = next;
+    }
+    void tick().then(() => {
+      const el = sidebarEl?.querySelector<HTMLElement>(`[data-session-id="${sess.id}"]`);
+      if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  // Whatever moved the selection — a click, the quick switcher, a
+  // rename/recreate resync, a completed move's follow reselect, the
+  // selection store's own re-sync: expand its project if collapsed and
+  // scroll its row into view. Keyed on the id so reconcile updates (a new
+  // row object every tick) neither re-scroll nor undo a later collapse.
   const revealId = $derived($selectedSession?.id ?? null);
   $effect(() => {
     const id = revealId;
     if (id === null) return;
-    const pid = untrack(() => $selectedSession?.project_id ?? null);
-    if (pid !== null && untrack(() => collapsed.has(pid))) {
-      const next = new Set(untrack(() => collapsed));
-      next.delete(pid);
-      collapsed = next;
-    }
-    if (consumeRevealRequest(id)) {
-      const host = untrack(() => $selectedSession?.host_alias ?? null);
-      const filter = untrack(() => $hostFilter);
-      if (host !== null && filter !== 'all' && filter !== host) hostFilter.set('all');
-    }
-    void tick().then(() => {
-      const el = sidebarEl?.querySelector<HTMLElement>(`[data-session-id="${id}"]`);
-      if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
+    untrack(() => {
+      const sess = $selectedSession;
+      if (sess) expandAndScrollTo(sess);
+    });
+  });
+
+  // Widening `hostFilter` is reserved for a deliberate "open this session"
+  // action. `selectSessionExplicitly` bumps `revealSeq` AFTER applying the
+  // selection; this effect tracks the SEQUENCE NUMBER rather than the
+  // session id:
+  //  - a non-explicit reselect (a rename/recreate resync, a move's follow
+  //    reselect, the selection store's own re-sync) never bumps it, so it
+  //    can never widen the filter — no matter how many times the id changes;
+  //  - re-selecting the SAME session explicitly still reveals it, even
+  //    though the id-keyed effect above wouldn't re-run for that (no id
+  //    change) — a bump is a distinct event regardless of the id it targets;
+  //  - a bump can never be replayed against a later, unrelated selection:
+  //    the effect always reads `$selectedSession` fresh (untracked) at the
+  //    moment it actually runs, rather than remembering which id the bump
+  //    was "for", and — since `$effect` always runs once on mount for
+  //    whatever its tracked value currently is — a bump that happened while
+  //    the Sidebar was unmounted (collapsed) still gets applied once it
+  //    remounts, instead of being lost.
+  $effect(() => {
+    const seq = $revealSeq;
+    // No explicit select has ever happened yet (a fresh module, or the
+    // selection was seeded by a non-explicit `selectSession` before this
+    // effect's first run) — nothing to reveal.
+    if (seq === 0) return;
+    untrack(() => {
+      const sess = $selectedSession;
+      if (!sess) return;
+      if ($hostFilter !== 'all' && $hostFilter !== sess.host_alias) hostFilter.set('all');
+      expandAndScrollTo(sess);
     });
   });
 
