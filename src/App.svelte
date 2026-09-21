@@ -12,7 +12,8 @@
   import AssetsPanel from './lib/AssetsPanel.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
-  import { loadHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
+  import { loadHosts, applyHostEvents, hosts } from './lib/hosts';
+  import { viewHostSessions } from './lib/host_actions';
   import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
@@ -35,6 +36,7 @@
     hostsChordLabel,
     hostsViewOpen,
     hostsViewRequest,
+    onHostsCloseRequested,
     openPathRequest,
     requestNewSessionOnHost,
     sessionViewChordLabel,
@@ -284,6 +286,10 @@
   // session row, a fresh create) means "go to it": leave the Hosts view so
   // the terminal shows that session.
   const unsubOpened = onSessionOpened(() => closeHosts());
+  // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
+  // HostDetail's header button) can't reach `closeHosts` directly — it asks
+  // through this signal instead, same shape as `onSessionOpened` above.
+  const unsubHostsClose = onHostsCloseRequested(() => closeHosts());
 
   onDestroy(() => {
     window.removeEventListener('focus', onFocus);
@@ -292,6 +298,7 @@
     window.removeEventListener('dragover', swallowDrag);
     window.removeEventListener('drop', swallowDrag);
     unsubOpened();
+    unsubHostsClose();
     unlistenEvents?.();
   });
 
@@ -476,7 +483,7 @@
 
   function onHostsFilterSidebar(alias: string) {
     sidebarCollapsed = false;
-    hostFilter.set(alias);
+    viewHostSessions(alias);
   }
   function onHostsNewSession(alias: string) {
     sidebarCollapsed = false;

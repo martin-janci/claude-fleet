@@ -15,7 +15,7 @@
   import { selectSession } from './selection';
   import { claudeStatusLabel, stuckKindLabel } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
-  import { hideHostWithUndo, rotateToken, setTokenMode, showHost } from './host_actions';
+  import { hideHostWithUndo, rotateToken, setTokenMode, showHost, viewHostSessions } from './host_actions';
   import { pushError, push } from './toasts';
   import { removeHostMessage, rotateTokenMessage, type HostAttention } from './hosts_view';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
@@ -152,6 +152,13 @@
         >{host.reachable ? '● online' : '○ offline'}</span
       >
       {#if host.hidden}<span class="muted">hidden</span>{/if}
+      <button
+        type="button"
+        class="small"
+        onclick={() => viewHostSessions(host.alias)}
+        data-testid="detail-view-sessions"
+        ><kbd>s</kbd> View sessions</button
+      >
       <button
         type="button"
         class="small"

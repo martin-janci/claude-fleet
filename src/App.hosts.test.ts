@@ -285,7 +285,7 @@ describe('App: the Hosts view', () => {
     expect(selected('tab-hosts')).toBe('false');
   });
 
-  it('s filters the sidebar to the host; the view stays open', async () => {
+  it('s filters the sidebar to the host and closes the Hosts overlay', async () => {
     await mountApp();
     await openSession(rows[0]);
     await cmdI(window);
@@ -293,7 +293,7 @@ describe('App: the Hosts view', () => {
     await fireEvent.keyDown(screen.getByTestId('hosts-list'), { key: 's' });
     await tick();
     expect(get(hostFilter)).toBe('mefistos');
-    expect(hostsView()).not.toBeNull();
+    expect(hostsView()).toBeNull();
   });
 
   it('n opens the project picker, then New session with that host preselected', async () => {
