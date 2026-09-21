@@ -54,11 +54,16 @@ pub fn normalize_prompt_body(prompt: &str) -> Result<String, IpcError> {
 ///    typing race;
 /// 3. `tmux paste-buffer -p -d` — bracketed paste when the pane asked for
 ///    it (Claude Code does), so the REPL sees one paste with an unambiguous
-///    end marker and internal newlines stay soft;
+///    end marker and internal newlines stay soft; on failure (e.g. a stale
+///    target) the buffer is explicitly deleted so it can't leak on the
+///    host, and the chain stops there — Enter never fires after a failed
+///    paste;
 /// 4. when `submit`, a short settle and ONE Enter.
 ///
 /// A single trailing newline is stripped so it cannot pre-submit the body.
-/// An empty body is a bare Enter (the Conversation tab's "Press Enter" chip).
+/// An empty body presses Enter only when `submit` is true (the Conversation
+/// tab's "Press Enter" chip); with `submit = false` an empty body is a
+/// no-op — nothing is typed and nothing is pressed.
 pub fn build_send_script(
     tmux_name: &str,
     pane_id: Option<&str>,
@@ -78,13 +83,20 @@ pub fn build_send_script(
         ));
     }
     if body.is_empty() {
-        script.push_str("tmux send-keys -t \"$t\" Enter");
+        if submit {
+            script.push_str("tmux send-keys -t \"$t\" Enter");
+        } else {
+            // Nothing to type and nothing to press: a no-op that still
+            // leaves the target-selection prefix as a syntactically valid
+            // script.
+            script.push(':');
+        }
         return script;
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
     let buf_q = quote(buffer);
     script.push_str(&format!(
-        "printf %s {} | base64 -d | tmux load-buffer -b {buf_q} - && tmux paste-buffer -p -d -b {buf_q} -t \"$t\"",
+        "printf %s {} | base64 -d | tmux load-buffer -b {buf_q} - && tmux paste-buffer -p -d -b {buf_q} -t \"$t\" || {{ tmux delete-buffer -b {buf_q}; false; }}",
         quote(&b64)
     ));
     if submit {

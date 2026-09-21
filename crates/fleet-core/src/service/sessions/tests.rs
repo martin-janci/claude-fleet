@@ -1368,15 +1368,14 @@ fn send_script_ships_the_body_base64_through_load_buffer_and_pastes_bracketed() 
     let s = build_send_script("dev-foo", None, "it's a test", "fleet-abc", true);
     assert!(
         s.contains(&format!(
-            "printf %s '{}' | base64 -d | tmux load-buffer -b 'fleet-abc' -",
+            "printf %s '{}' | base64 -d | tmux load-buffer -b 'fleet-abc' - && tmux paste-buffer -p -d -b 'fleet-abc' -t \"$t\" || {{ tmux delete-buffer -b 'fleet-abc'; false; }}",
             b64("it's a test")
         )),
         "{s}"
     );
-    assert!(
-        s.contains("tmux paste-buffer -p -d -b 'fleet-abc' -t \"$t\""),
-        "{s}"
-    );
+    // A failed paste deletes the buffer AND stops the chain before Enter.
+    assert!(s.contains("delete-buffer -b 'fleet-abc'"), "{s}");
+    assert!(s.contains("delete-buffer -b 'fleet-abc'; false; }"), "{s}");
     assert!(s.contains("sleep 0.15"), "{s}");
     assert!(
         s.trim_end().ends_with("tmux send-keys -t \"$t\" Enter"),
@@ -1419,6 +1418,13 @@ fn send_script_with_an_empty_body_is_a_bare_enter() {
         s.trim_end().ends_with("tmux send-keys -t \"$t\" Enter"),
         "{s}"
     );
+}
+
+#[test]
+fn send_script_with_an_empty_body_and_no_submit_presses_nothing() {
+    let s = build_send_script("dev-x", Some("%3"), "", "fleet-1", false);
+    assert!(!s.contains("Enter"), "{s}");
+    assert!(!s.contains("load-buffer"), "{s}");
 }
 
 // Paused clock: nothing here but timers, so virtual time is exact where a
