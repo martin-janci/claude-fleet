@@ -2196,6 +2196,18 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
     let pid = row.project_id.ok_or_else(|| {
         IpcError::new(codes::E_NOREPO, "session has no project; nothing to repair")
     })?;
+    // A system project (the UX agent's operator dir) is not a checkout on
+    // any host: there is no repository to probe, adopt or re-clone, and its
+    // `base_path` is the pane cwd verbatim. Declined the way an orphan is,
+    // so restart / recreate keep the plain cwd resolution
+    // (`sessions::cwd_source_for_session` → `CwdSource::Fixed`) — and
+    // before `resolve_remote_paths` would derive `<root>/<owner>/<repo>`.
+    if crate::service::sessions::fetch_system_base_path(s, pid)?.is_some() {
+        return Err(IpcError::new(
+            codes::E_NOREPO,
+            format!("project {pid} is a system project without a repository; nothing to repair"),
+        ));
+    }
     let (owner, repo) = crate::service::sessions::fetch_owner_repo(s, pid)?;
     let base_path = s
         .project_base_path(pid)?
@@ -4011,6 +4023,38 @@ mod tests {
             .unwrap();
         let (spec, _) = spec_for_session(&store, &ssh, sid).await.unwrap();
         assert!(spec.worktree.is_none());
+    }
+
+    /// The UX agent's operator dir is a system project: not a checkout, on
+    /// whatever host it lives. Repair must say `E_NOREPO` — the answer the
+    /// restart / recreate callers already treat as "keep the plain cwd" —
+    /// rather than derive `<root>/fleet/operator` and try to make it a repo.
+    /// Asserted on a REMOTE row without a reachable host: the refusal has to
+    /// come from the seed, before `resolve_remote_paths` touches SSH.
+    #[tokio::test]
+    async fn spec_for_session_declines_a_system_project_as_no_repo() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mefistos").unwrap();
+        let pid = s
+            .upsert_system_project("fleet", "operator", "/home/mjanci/.claude-fleet/operator")
+            .unwrap();
+        let sid = s
+            .upsert_session(
+                "fleet-operator",
+                "mefistos",
+                Some(pid),
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+        let ssh = Arc::new(SshClient::new());
+        let err = spec_for_session(&store, &ssh, sid).await.unwrap_err();
+        assert_eq!(err.code, codes::E_NOREPO, "{}", err.message);
+        assert!(err.message.contains("system"), "{}", err.message);
     }
 
     #[tokio::test]
