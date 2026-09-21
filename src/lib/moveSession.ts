@@ -80,9 +80,34 @@ export interface MoveReport {
   target: SessionRow;
 }
 
+/** `when` argument to `move_session` (mirrors `service::move_session::When`):
+ *  `now` moves at once (a busy source is refused), `idle` waits for the
+ *  source to go idle before moving, `cancel` ends a pending wait. */
+export type When = 'now' | 'idle' | 'cancel';
+
+/** What a pending wait reports back to its caller (mirrors
+ *  `service::move_session::wait::MoveWaiting`). */
+export interface MoveWaiting {
+  session_id: number;
+  to_host: string;
+  deadline_unix: number;
+}
+
+/** What `when: cancel` answers with (mirrors
+ *  `service::move_session::MoveWaitCancelled`). `was_waiting` is false when
+ *  there was nothing pending to cancel. */
+export interface MoveWaitCancelled {
+  session_id: number;
+  was_waiting: boolean;
+}
+
 /** What `move_session` answers. Internally tagged: a `moved` outcome is the
- *  `MoveReport` with one extra key. */
-export type MoveOutcome = ({ kind: 'moved' } & MoveReport) | ({ kind: 'preview' } & MovePreview);
+ *  `MoveReport` with one extra key, and so on for the other three. */
+export type MoveOutcome =
+  | ({ kind: 'moved' } & MoveReport)
+  | ({ kind: 'preview' } & MovePreview)
+  | ({ kind: 'waiting' } & MoveWaiting)
+  | ({ kind: 'wait_cancelled' } & MoveWaitCancelled);
 
 /** Move a work session to another host with its work as it is: transcript,
  *  unpushed commits, uncommitted and untracked files, small git-ignored files.
@@ -91,12 +116,14 @@ export type MoveOutcome = ({ kind: 'moved' } & MoveReport) | ({ kind: 'preview' 
  *  `E_MOVE_UNPUSHED`) instead of carrying it. Other refusals: `E_MOVE_MIDOP`,
  *  `E_MOVE_TARGET_DIRTY`, `E_MOVE_TOO_LARGE`, `E_MOVE_CARRY`; `E_MOVE_PARTIAL`
  *  leaves both sessions. `cleanTarget` replaces a stale attempt's leftovers on
- *  the target instead of refusing with `E_MOVE_TARGET_DIRTY` again. */
+ *  the target instead of refusing with `E_MOVE_TARGET_DIRTY` again.
+ *  `when` defaults to `'idle'` — an idle source moves at once, a busy one
+ *  yields a pending wait. Narrows to `moved | waiting`. */
 export async function moveSession(
   sessionId: number,
   targetHostAlias: string,
-  opts: { keepSource?: boolean; strict?: boolean; cleanTarget?: boolean } = {},
-): Promise<Result<MoveReport>> {
+  opts: { keepSource?: boolean; strict?: boolean; cleanTarget?: boolean; when?: 'now' | 'idle' } = {},
+): Promise<Result<({ kind: 'moved' } & MoveReport) | ({ kind: 'waiting' } & MoveWaiting)>> {
   const r = await invokeCmd<MoveOutcome>('move_session', {
     args: {
       session_id: sessionId,
@@ -105,23 +132,29 @@ export async function moveSession(
       strict: opts.strict ?? false,
       clean_target: opts.cleanTarget ?? false,
       dry_run: false,
+      when: opts.when ?? 'idle',
     },
   });
   if (!r.ok) return r;
-  if (r.value.kind !== 'moved') {
-    return {
-      ok: false,
-      error: { code: 'E_PARSE', message: 'move_session answered a preview, not a move' },
-    };
+  if (r.value.kind === 'moved') {
+    mergeSession(r.value.target);
+    return { ok: true, value: r.value };
   }
-  const { kind: _kind, ...report } = r.value;
-  mergeSession(report.target);
-  return { ok: true, value: report };
+  if (r.value.kind === 'waiting') {
+    return { ok: true, value: r.value };
+  }
+  return {
+    ok: false,
+    error: { code: 'E_PARSE', message: 'move_session answered a preview or a cancelled wait, not a move' },
+  };
 }
 
 /** A dry run: what this move would do, changing nothing. `Err` is the
  *  refusal the real move would return — same code, same message. The
- *  Transfer sheet never offers `strict`, so this always sends `strict: false`. */
+ *  Transfer sheet never offers `strict`, so this always sends `strict: false`.
+ *  Sends `when: 'idle'` too, so the preview matches what a real transfer will
+ *  do (spec §4: a busy source previews with a "will wait" line instead of
+ *  stopping at the refusal). */
 export async function previewMove(
   sessionId: number,
   targetHostAlias: string,
@@ -134,6 +167,7 @@ export async function previewMove(
       strict: false,
       clean_target: false,
       dry_run: true,
+      when: 'idle',
     },
   });
   if (!r.ok) return r;
@@ -145,6 +179,34 @@ export async function previewMove(
   }
   const { kind: _kind, ...preview } = r.value;
   return { ok: true, value: preview };
+}
+
+/** End a pending wait. Carries the wait's target host: the backend's access
+ *  checks name both hosts even for a cancel. */
+export async function cancelMoveWait(
+  sessionId: number,
+  targetHostAlias: string,
+): Promise<Result<MoveWaitCancelled>> {
+  const r = await invokeCmd<MoveOutcome>('move_session', {
+    args: {
+      session_id: sessionId,
+      target_host_alias: targetHostAlias,
+      keep_source: false,
+      strict: false,
+      clean_target: false,
+      dry_run: false,
+      when: 'cancel',
+    },
+  });
+  if (!r.ok) return r;
+  if (r.value.kind !== 'wait_cancelled') {
+    return {
+      ok: false,
+      error: { code: 'E_PARSE', message: 'move_session answered something other than a cancelled wait' },
+    };
+  }
+  const { kind: _kind, ...cancelled } = r.value;
+  return { ok: true, value: cancelled };
 }
 
 export type ResolveAction = 'finish' | 'undo';

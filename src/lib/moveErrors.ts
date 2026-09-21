@@ -175,10 +175,12 @@ function what(error: IpcError, toHost: string): { what: string; action: Action }
       if (error.message.includes('already in progress')) {
         return { what: 'This session is already being moved.', action: { kind: 'retry' } };
       }
-      // `require_source_idle`: the one refusal the user can simply wait out.
+      // `require_source_idle`: only reached with `when: 'now'` — Transfer
+      // itself now waits out a busy source, so this states the fact rather
+      // than telling the user to do what the button already does.
       if (error.message.includes('is not idle')) {
         return {
-          what: 'The source Claude is in the middle of a turn. Wait for it to finish, then transfer.',
+          what: 'The source Claude is in the middle of a turn.',
           action: { kind: 'retry' },
         };
       }

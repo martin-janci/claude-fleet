@@ -235,9 +235,16 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     // Same mechanism as `retryMove`. See `MoveRun.awaitingStart`.
     awaitingStart: replacing,
   });
-  void moveSession(session.id, toHost, { keepSource: opts.keepSource }).then((r) =>
-    settle(session.id, r),
-  );
+  void moveSession(session.id, toHost, { keepSource: opts.keepSource }).then((r) => {
+    // Task 6 made `moveSession` default to `when: 'idle'`, so a busy source
+    // now answers `waiting` instead of `moved`. Task 7 gives a `waiting` run
+    // its own status (`deadlineUnix`, Cancel); until then there is nothing to
+    // settle, so this run stays `running` rather than mis-settling as if a
+    // move had happened.
+    if (!r.ok) { settle(session.id, r); return; }
+    if (r.value.kind === 'waiting') return;
+    settle(session.id, { ok: true, value: r.value });
+  });
 }
 
 /** "1 warning" / "3 warnings". */
@@ -350,7 +357,12 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     // that does know carries the answer (`adoptPartial`).
     keepSource: run.keepSource ?? false,
     cleanTarget,
-  }).then((r) => settle(sessionId, r));
+  }).then((r) => {
+    // See the comment in `startMove`: Task 7 owns the `waiting` run status.
+    if (!r.ok) { settle(sessionId, r); return; }
+    if (r.value.kind === 'waiting') return;
+    settle(sessionId, { ok: true, value: r.value });
+  });
 }
 
 /** The TARGET session's id `resolve_move` needs, from whichever of the run's

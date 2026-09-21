@@ -46,7 +46,7 @@ describe('describeMoveError', () => {
         null,
         'the source Claude is not idle (claude_status "working"); moving now would lose the turn in progress — wait until it finishes, then retry',
       ).what,
-    ).toBe('The source Claude is in the middle of a turn. Wait for it to finish, then transfer.');
+    ).toBe('The source Claude is in the middle of a turn.');
     expect(failed('E_INVALID_STATE', null, 'something else entirely').what).toBe('something else entirely');
   });
 
