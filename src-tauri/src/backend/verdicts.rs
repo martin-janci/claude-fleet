@@ -71,6 +71,14 @@ impl Verdict {
 
 /// The verdict of `command`, or `None` when the table has no row for it —
 /// which the tests make unshippable.
+/// Why the whole attachment family is the same in both modes: the composer
+/// reads, measures and previews files on THIS machine's disk and copies them
+/// over THIS machine's ssh, exactly as `upload_to_session` does behind the
+/// terminal pane. They were `LocalOnly` on the premise that "a hub client has
+/// nothing local" — but a hub client is a desktop app with a disk; what belongs
+/// to the hub is the fleet's database and hosts, not this machine.
+const WHY_ATTACH: &str = "the same story as `upload_to_session`: this machine has the disk, the file dialog and the `ssh` that carries the bytes, and the session is addressed by the alias passed in, reading no state.db. Being a window onto a hub does not take this machine away";
+
 pub fn verdict(command: &str) -> Option<&'static Verdict> {
     VERDICTS
         .iter()
@@ -364,33 +372,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                   work wherever that pane attaches",
         },
     ),
-    (
-        "pick_attachments",
-        Verdict::LocalOnly {
-            instead: "the picker opens on this machine and the session's host is the hub's \
-                      to reach; pick the files from a standalone app instead",
-        },
-    ),
+    ("pick_attachments", Verdict::SameInBoth { why: WHY_ATTACH }),
     (
         "attachment_preview",
-        Verdict::LocalOnly {
-            instead: "the file is on this machine and a hub client has nothing local to \
-                      preview; open it from a standalone app instead",
-        },
+        Verdict::SameInBoth { why: WHY_ATTACH },
     ),
     (
         "attachment_describe",
-        Verdict::LocalOnly {
-            instead: "the file is on this machine and a hub client has nothing local to \
-                      measure; drop it on a standalone app instead",
-        },
+        Verdict::SameInBoth { why: WHY_ATTACH },
     ),
     (
         "upload_attachments",
-        Verdict::LocalOnly {
-            instead: "the bytes are on this machine and the session's host is the hub's to \
-                      reach; copy them there yourself, or drop them on a standalone app",
-        },
+        Verdict::SameInBoth { why: WHY_ATTACH },
     ),
     ("repo_log", Verdict::Routed { tool: "repo_log" }),
     (

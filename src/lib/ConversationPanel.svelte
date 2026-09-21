@@ -83,8 +83,7 @@
     type ConvGroup,
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
-  import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
-  import { hubConnection } from './hub_connection';
+  import { hubStatus, ownsTheFleet } from './hub';
   import { invokeCmd } from './result';
   import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, type Attachment, type PickedFile } from './attachments';
   import { withAttachments, tooLong } from './attach_prompt';
@@ -1113,12 +1112,6 @@
   let shellEl = $state<HTMLDivElement | null>(null);
   const dragging = $derived(dragDepth > 0 || dragOverShell);
 
-  /** Attaching exists to upload: gate the control on the command that does
-   *  the work, not on the picker that only feeds it. */
-  const attachBlocked = $derived(
-    hubActionBlocked('upload_attachments', $hubStatus, $hubConnection),
-  );
-
   /**
    * Every sentence the composer owes the user about attaching: the
    * rejections `addFiles` returned, plus the per-tile errors — a pasted
@@ -1177,7 +1170,6 @@
   }
 
   async function pickFiles() {
-    if (attachBlocked !== null) return;
     const r = await invokeCmd<PickedFile[]>('pick_attachments', {});
     if (r.ok) await attach(r.value ?? []);
     else attachErrors = [r.error.message];
@@ -1239,8 +1231,7 @@
   }
 
   function onDroppedPaths(paths: string[]) {
-    // The same refusal the attach button carries: nothing here could upload.
-    if (attachBlocked !== null || paths.length === 0) return;
+    if (paths.length === 0) return;
     // These paths are already on the Rust allow-list — `lib.rs` recorded them
     // from this very event before the webview heard about it.
     const real = paths.filter((p) => p !== '');
@@ -1750,8 +1741,7 @@
             class="btn btn--icon btn--quiet"
             data-testid="conv-attach-button"
             aria-label="Attach files"
-            title={attachBlocked ?? 'Attach files'}
-            aria-disabled={attachBlocked !== null}
+            title="Attach files"
             onclick={pickFiles}>⌾</button>
           <span class="composer-hint" id={COMPOSER_HINT_ID}>↵ send · ⇧↵ newline · ↑ history</span>
           <button
