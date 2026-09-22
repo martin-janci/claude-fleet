@@ -66,6 +66,10 @@ struct SshClientInner {
     /// [`SshClient::with_ssh_binary`] to drive mux-failure/retry behavior
     /// without a real host.
     ssh_bin: PathBuf,
+    /// Per-host [`HostToolchain`] cache: when it was resolved, and the
+    /// result. A positive result is kept for the process lifetime; a `None`
+    /// (both shells failed) is retried after [`TOOLCHAIN_RETRY_AFTER`].
+    toolchains: DashMap<String, (std::time::Instant, Option<HostToolchain>)>,
 }
 
 /// RAII decrement for `SshClientInner::in_flight`.
@@ -135,6 +139,7 @@ impl SshClient {
                 master_resets: DashMap::new(),
                 route,
                 ssh_bin,
+                toolchains: DashMap::new(),
             }),
         }
     }
@@ -789,12 +794,123 @@ impl SshClient {
                 .spawn();
         }
     }
+
+    /// The host's toolchain, resolved on first use and cached. `None` when
+    /// neither an interactive nor a login shell answered — callers fall back
+    /// to `bash -lc`; the miss itself is cached for
+    /// [`TOOLCHAIN_RETRY_AFTER`].
+    pub async fn toolchain(&self, host: &str) -> Option<HostToolchain> {
+        if let Some(entry) = self.inner.toolchains.get(host) {
+            let (at, tc) = entry.value();
+            if tc.is_some() || at.elapsed() < TOOLCHAIN_RETRY_AFTER {
+                return tc.clone();
+            }
+        }
+        let mut resolved = None;
+        for interactive in [true, false] {
+            let script = toolchain_script(interactive);
+            let args = ["sh", "-c", &crate::shell::quote(&script)];
+            if let Ok(out) = self.run(host, &args, Duration::from_secs(10)).await {
+                if out.status.success() {
+                    resolved = parse_toolchain(&String::from_utf8_lossy(&out.stdout));
+                    if resolved.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        match &resolved {
+            Some(tc) => {
+                tracing::info!(host = %host, path = %tc.path, tmux = ?tc.tmux, claude = ?tc.claude, "[ssh] toolchain resolved")
+            }
+            None => {
+                tracing::warn!(host = %host, "[ssh] toolchain could not be resolved; tmux calls stay on bash -lc")
+            }
+        }
+        self.inner.toolchains.insert(
+            host.to_string(),
+            (std::time::Instant::now(), resolved.clone()),
+        );
+        resolved
+    }
+
+    #[cfg(test)]
+    pub(crate) fn forget_toolchain_for_tests(&self, host: &str) {
+        self.inner.toolchains.remove(host);
+    }
 }
 
 impl Default for SshClient {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// What the user's own shell knows about a host, resolved once: the login
+/// `PATH` (Homebrew, `~/.local/bin`, nvm…), `$HOME`, and where `tmux` and
+/// `claude` are. Lets every tmux call run under `sh -c` with that PATH
+/// instead of paying for `bash -l` on each call, and lets a new pane inherit
+/// the same PATH.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostToolchain {
+    pub home: String,
+    pub path: String,
+    pub tmux: Option<String>,
+    pub claude: Option<String>,
+}
+
+pub const TOOLCHAIN_MARKER: &str = "FLEET-TC";
+/// A failed resolve is retried after this long, so one bad first contact
+/// does not pin a host to the slow path for the process lifetime.
+pub const TOOLCHAIN_RETRY_AFTER: Duration = Duration::from_secs(300);
+
+/// The script that prints the toolchain, run by the user's shell. The
+/// interactive variant (`-ilc`) sees `.zshrc`/`.bashrc` PATH additions, which
+/// is where Homebrew and `cl` usually live on a Mac; the login variant
+/// (`-lc`) is the fallback when an rc file misbehaves without a tty. Noise
+/// from rc files is harmless: only marked lines are read.
+pub fn toolchain_script(interactive: bool) -> String {
+    let flags = if interactive { "-ilc" } else { "-lc" };
+    let inner = format!(
+        "printf '{m} home=%s\\n{m} path=%s\\n{m} tmux=%s\\n{m} claude=%s\\n' \"$HOME\" \"$PATH\" \"$(command -v tmux 2>/dev/null || true)\" \"$(command -v claude 2>/dev/null || true)\"",
+        m = TOOLCHAIN_MARKER
+    );
+    format!(
+        "\"${{SHELL:-/bin/sh}}\" {flags} {} </dev/null 2>/dev/null",
+        crate::shell::quote(&inner)
+    )
+}
+
+pub fn parse_toolchain(stdout: &str) -> Option<HostToolchain> {
+    let mut home = None;
+    let mut path = None;
+    let mut tmux = None;
+    let mut claude = None;
+    for line in stdout.lines() {
+        let Some(rest) = line
+            .strip_prefix(TOOLCHAIN_MARKER)
+            .and_then(|r| r.strip_prefix(' '))
+        else {
+            continue;
+        };
+        let Some((k, v)) = rest.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().to_string();
+        match k {
+            "home" if !v.is_empty() => home = Some(v),
+            "path" if !v.is_empty() => path = Some(v),
+            "tmux" if v.starts_with('/') => tmux = Some(v),
+            "claude" if v.starts_with('/') => claude = Some(v),
+            _ => {}
+        }
+    }
+    Some(HostToolchain {
+        home: home?,
+        path: path?,
+        tmux,
+        claude,
+    })
 }
 
 /// Drain `stream` to EOF, keeping at most `cap` bytes (all of them for
@@ -971,6 +1087,16 @@ pub trait SshExec: Send + Sync {
     ) -> Result<(), IpcError>;
 
     async fn remote_home(&self, host: &str) -> Result<String, IpcError>;
+
+    /// The host's resolved toolchain (login `PATH`, `$HOME`, absolute
+    /// `tmux`/`claude`), or `None` when it either hasn't been resolved yet
+    /// or resolution failed. Default `None` keeps every existing
+    /// `FakeSsh`-driven test on the `bash -lc` shape; `SshClient` overrides
+    /// this with the cached resolve, and `FakeSsh` overrides it to return
+    /// whatever `set_toolchain` stored.
+    async fn toolchain(&self, _host: &str) -> Option<HostToolchain> {
+        None
+    }
 }
 
 // The inherent methods stay (so `Arc<SshClient>` callers in `commands/`,
@@ -1037,6 +1163,10 @@ impl SshExec for SshClient {
 
     async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
         SshClient::remote_home(self, host).await
+    }
+
+    async fn toolchain(&self, host: &str) -> Option<HostToolchain> {
+        SshClient::toolchain(self, host).await
     }
 }
 
@@ -1111,6 +1241,10 @@ impl<T: SshExec + ?Sized> SshExec for Arc<T> {
 
     async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
         (**self).remote_home(host).await
+    }
+
+    async fn toolchain(&self, host: &str) -> Option<HostToolchain> {
+        (**self).toolchain(host).await
     }
 }
 
@@ -1882,5 +2016,70 @@ mod tests {
             "exactly one attempt"
         );
         assert!(!c.master_reset_counts().contains_key("h-dead"));
+    }
+
+    #[test]
+    fn toolchain_script_asks_the_users_shell_and_marks_every_line() {
+        let s = toolchain_script(true);
+        assert!(s.starts_with("\"${SHELL:-/bin/sh}\" -ilc "), "{s}");
+        assert!(s.contains("FLEET-TC home=%s"), "{s}");
+        assert!(s.contains("command -v tmux 2>/dev/null || true"), "{s}");
+        assert!(s.contains("command -v claude 2>/dev/null || true"), "{s}");
+        assert!(s.ends_with("</dev/null 2>/dev/null"), "{s}");
+        assert!(toolchain_script(false).starts_with("\"${SHELL:-/bin/sh}\" -lc "));
+    }
+
+    #[test]
+    fn parse_toolchain_ignores_shell_noise_and_keeps_only_absolute_binaries() {
+        let out = "Welcome to fishbowl\nFLEET-TC home=/Users/u\nFLEET-TC path=/opt/homebrew/bin:/usr/bin:/bin\nFLEET-TC tmux=/opt/homebrew/bin/tmux\nFLEET-TC claude=claude: aliased to /Users/u/.local/bin/claude\n";
+        let tc = parse_toolchain(out).unwrap();
+        assert_eq!(tc.home, "/Users/u");
+        assert_eq!(tc.path, "/opt/homebrew/bin:/usr/bin:/bin");
+        assert_eq!(tc.tmux.as_deref(), Some("/opt/homebrew/bin/tmux"));
+        assert_eq!(tc.claude, None, "an alias text is not a path");
+        assert!(
+            parse_toolchain("FLEET-TC home=/u\n").is_none(),
+            "no PATH, no toolchain"
+        );
+        assert!(parse_toolchain("").is_none());
+    }
+
+    #[tokio::test]
+    async fn toolchain_is_resolved_once_and_a_failure_is_retried_after_the_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = dir.path().join("calls");
+        let bin = fake_ssh(dir.path(), &format!(
+            "echo x >> '{c}'\n\
+             n=$(wc -l < '{c}')\n\
+             if [ \"$n\" -le 2 ]; then exit 255; fi\n\
+             printf 'FLEET-TC home=/h\\nFLEET-TC path=/p/bin:/usr/bin\\nFLEET-TC tmux=/p/bin/tmux\\nFLEET-TC claude=\\n'",
+            c = count.display()
+        ));
+        let c = SshClient::with_ssh_binary(bin);
+        assert!(
+            c.toolchain("h").await.is_none(),
+            "interactive and login both failed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&count).unwrap().lines().count(),
+            2,
+            "one interactive + one login attempt"
+        );
+        assert!(
+            c.toolchain("h").await.is_none(),
+            "negative cache: no new call"
+        );
+        assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 2);
+        c.forget_toolchain_for_tests("h");
+        let tc = c.toolchain("h").await.expect("resolved");
+        assert_eq!(tc.path, "/p/bin:/usr/bin");
+        assert_eq!(tc.tmux.as_deref(), Some("/p/bin/tmux"));
+        let calls_after = std::fs::read_to_string(&count).unwrap().lines().count();
+        assert!(c.toolchain("h").await.is_some());
+        assert_eq!(
+            std::fs::read_to_string(&count).unwrap().lines().count(),
+            calls_after,
+            "positive cache: no new call"
+        );
     }
 }

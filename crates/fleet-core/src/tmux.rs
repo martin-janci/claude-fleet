@@ -400,32 +400,51 @@ pub struct RemoteTmux<C: SshExec = Arc<SshClient>> {
     pub host: String,
 }
 
+/// Cap on the combined stdout captured for one tmux call — a runaway pane
+/// capture or a chatty script must not let the app buffer unbounded remote
+/// output.
+pub const TMUX_OUTPUT_CAP: usize = 8 * 1024 * 1024;
+
 impl<C: SshExec> RemoteTmux<C> {
-    /// We always wrap remote tmux invocations in `bash -lc '…'` so the
-    /// remote user's login env (PATH, LANG, etc.) is sourced. sshd may have
+    /// One tmux call on the host. With a resolved toolchain: `sh -c 'export
+    /// PATH=<login PATH>; <script>'` — no login shell spawned per call.
+    /// Without one: `bash -lc '<script>'` as before, so the remote user's
+    /// login env (PATH, LANG, etc.) is still sourced. sshd may have
     /// `AcceptEnv` disabled which would silently drop SendEnv vars; the
     /// login shell route is portable.
     ///
-    /// CRITICAL: `ssh <host> bash -lc <script>` joins ALL trailing argv with
-    /// spaces before sending to the remote sshd. The remote shell then re-
-    /// tokenizes, so any spaces in `<script>` would break `bash -c` (it
-    /// would get just the first token as the script and everything else as
-    /// positional args). We therefore single-quote the WHOLE script via
-    /// `quote` so it crosses the ssh boundary as one shell word.
-    /// `quote` already escapes the embedded `'` characters used by
+    /// CRITICAL: `ssh <host> bash -lc <script>` (or `sh -c <script>`) joins
+    /// ALL trailing argv with spaces before sending to the remote sshd. The
+    /// remote shell then re-tokenizes, so any spaces in `<script>` would
+    /// break `bash -c` (it would get just the first token as the script and
+    /// everything else as positional args). We therefore single-quote the
+    /// WHOLE script via `quote` so it crosses the ssh boundary as one shell
+    /// word. `quote` already escapes the embedded `'` characters used by
     /// per-arg quoting inside `script`.
     ///
     /// The 10s here is ssh's `ConnectTimeout` only. `SshClient::run` bounds
     /// the whole command by `default_wall_clock(10s)` = 30s on top, so a tmux
     /// command that hangs after connect (wedged ControlMaster) surfaces as
-    /// `E_SSH_TIMEOUT` instead of blocking the caller forever.
-    async fn remote_bash(&self, script: &str) -> Result<std::process::Output, IpcError> {
-        let quoted = quote(script);
+    /// `E_SSH_TIMEOUT` instead of blocking the caller forever. Output is
+    /// capped at [`TMUX_OUTPUT_CAP`].
+    async fn remote_sh(&self, script: &str) -> Result<std::process::Output, IpcError> {
+        let connect = std::time::Duration::from_secs(10);
+        let args: Vec<String> = match self.client.toolchain(&self.host).await {
+            Some(tc) => vec![
+                "sh".into(),
+                "-c".into(),
+                quote(&format!("export PATH={}; {script}", quote(&tc.path))),
+            ],
+            None => vec!["bash".into(), "-lc".into(), quote(script)],
+        };
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         self.client
-            .run(
+            .run_bounded_capped(
                 &self.host,
-                &["bash", "-lc", &quoted],
-                std::time::Duration::from_secs(10),
+                &argv,
+                connect,
+                SshClient::default_wall_clock(connect),
+                TMUX_OUTPUT_CAP,
             )
             .await
     }
@@ -550,7 +569,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
 impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
         let script = format!("tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1");
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         let combined = String::from_utf8_lossy(&output.stdout).into_owned();
         if output.status.success() {
             return parse_sessions_checked(&combined);
@@ -578,9 +597,12 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             " -e LANG={}",
             quote(&std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
         ));
+        if let Some(tc) = self.client.toolchain(&self.host).await {
+            script.push_str(&format!(" -e PATH={}", quote(&tc.path)));
+        }
         script.push(' ');
         script.push_str(&quote(pane_cmd));
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -593,7 +615,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
 
     async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
         let script = format!("tmux kill-session -t {}", quote(&exact_session(name)));
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -626,7 +648,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             quote(&exact_session(old)),
             quote(trimmed)
         );
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -643,7 +665,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             quote(&exact_pane(name)),
             quote(pane_cmd)
         );
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -661,7 +683,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         pane_cmd: &str,
     ) -> Result<(), IpcError> {
         let script = respawn_pane_in_script(name, cwd, pane_cmd);
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -674,7 +696,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
 
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
         let script = format!("tmux capture-pane -t {} -p", quote(&exact_pane(name)));
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
@@ -689,7 +711,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             quote(&exact_pane(name)),
             quote(&start),
         );
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
@@ -699,7 +721,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     }
     async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
         let output = self
-            .remote_bash("claude agents --json 2>/dev/null")
+            .remote_sh("claude agents --json 2>/dev/null")
             .await
             .ok()?;
         if !output.status.success() {
@@ -716,10 +738,10 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         let Some(script) = transcript_mtimes_script(ids) else {
             return Some(std::collections::HashMap::new());
         };
-        // `remote_bash` bounds the call (its timeout surfaces as `Err`); an
+        // `remote_sh` bounds the call (its timeout surfaces as `Err`); an
         // unreachable host is ssh exiting 255 — both are failures, not "no
         // transcript".
-        match self.remote_bash(&script).await {
+        match self.remote_sh(&script).await {
             Ok(o) if o.status.success() => Some(parse_mtimes(&String::from_utf8_lossy(&o.stdout))),
             _ => None,
         }
@@ -729,7 +751,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         // script itself never fails (`|| true`), so a non-zero exit is ssh
         // (unreachable / timeout) — "could not tell", not "logged out".
         let output = self
-            .remote_bash(crate::service::hosts::OAUTH_ACCOUNT_SCRIPT)
+            .remote_sh(crate::service::hosts::OAUTH_ACCOUNT_SCRIPT)
             .await
             .ok()
             .filter(|o| o.status.success())?;
@@ -737,7 +759,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     }
     async fn host_identity(&self) -> Option<HostIdentity> {
         let out = self
-            .remote_bash(HOST_IDENTITY_SCRIPT)
+            .remote_sh(HOST_IDENTITY_SCRIPT)
             .await
             .ok()
             .filter(|o| o.status.success())?;
@@ -745,7 +767,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     }
     async fn probe_snapshot(&self, tail_lines: u32) -> ProbeSnapshot {
         let script = probe_snapshot_script(tail_lines);
-        match self.remote_bash(&script).await {
+        match self.remote_sh(&script).await {
             Err(e) => ProbeSnapshot {
                 identity: None,
                 sessions: Err(e),
@@ -1955,5 +1977,85 @@ mod tests {
         );
         assert_eq!(m.len(), 1);
         assert_eq!(m["44366faf-ae97-426a-91cd-beaf3c74f1d7"], 1_779_999_999);
+    }
+
+    #[tokio::test]
+    async fn remote_tmux_runs_under_sh_with_the_login_path_once_the_toolchain_is_known() {
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.set_toolchain(
+            "h",
+            crate::ssh::HostToolchain {
+                home: "/h".into(),
+                path: "/opt/homebrew/bin:/usr/bin".into(),
+                tmux: Some("/opt/homebrew/bin/tmux".into()),
+                claude: None,
+            },
+        );
+        fake.on_host(
+            "h",
+            crate::ssh_fake::Match::script_contains("tmux list-sessions"),
+            crate::ssh_fake::Reply::ok(""),
+        );
+        let t = RemoteTmux {
+            client: fake.clone(),
+            host: "h".into(),
+        };
+        let _ = t.list_sessions().await;
+        let call = fake.calls_for("h").pop().unwrap();
+        assert_eq!(
+            &call.args[..2],
+            &["sh".to_string(), "-c".to_string()],
+            "{:?}",
+            call.args
+        );
+        let body = crate::ssh_fake::unquote(&call.args[2]).unwrap();
+        assert!(
+            body.starts_with("export PATH='/opt/homebrew/bin:/usr/bin'; "),
+            "{body}"
+        );
+        assert!(
+            call.script().unwrap().starts_with("tmux list-sessions"),
+            "Call::script strips the export prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_tmux_falls_back_to_a_login_shell_without_a_toolchain() {
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.on_host(
+            "h",
+            crate::ssh_fake::Match::script_contains("tmux list-sessions"),
+            crate::ssh_fake::Reply::ok(""),
+        );
+        let t = RemoteTmux {
+            client: fake.clone(),
+            host: "h".into(),
+        };
+        let _ = t.list_sessions().await;
+        let call = fake.calls_for("h").pop().unwrap();
+        assert_eq!(&call.args[..2], &["bash".to_string(), "-lc".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn remote_new_session_forwards_the_login_path_into_the_pane() {
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.set_toolchain(
+            "h",
+            crate::ssh::HostToolchain {
+                home: "/h".into(),
+                path: "/a:/b".into(),
+                tmux: None,
+                claude: None,
+            },
+        );
+        let t = RemoteTmux {
+            client: fake.clone(),
+            host: "h".into(),
+        };
+        t.new_session("s", std::path::Path::new("/w"), "cl")
+            .await
+            .unwrap();
+        let script = fake.calls_for("h").pop().unwrap().script().unwrap();
+        assert!(script.contains(" -e PATH='/a:/b'"), "{script}");
     }
 }
