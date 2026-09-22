@@ -162,6 +162,15 @@ host (set its token mode to full) and restart the agent";
 /// 64 KiB of envelope `fleet_proto::MAX_FRAME_BYTES` leaves around one payload.
 const MIN_INBOUND_BYTES: usize = 64 * 1024;
 
+// An agent batches its `report` frames to `REPORT_FRAME_BYTES`; that cap is
+// only safe while it stays under the allowance this floor gives an idle
+// connection, because an oversize frame here is not truncated — it ends the
+// connection.
+const _: () = assert!(
+    fleet_proto::report::REPORT_FRAME_BYTES <= MIN_INBOUND_BYTES,
+    "an agent's report frame must fit the idle inbound allowance"
+);
+
 /// Extra time a request's budget outlives its own wall clock. The hub has
 /// stopped waiting by then; this only stops a slightly-late answer being
 /// judged against a budget that has already been reclaimed.

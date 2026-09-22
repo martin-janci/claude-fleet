@@ -14,6 +14,16 @@ pub const CONTEXT_MAX: usize = 4_096;
 pub const HTTP_BATCH_MAX: usize = 50;
 /// Reports per `AgentFrame::Report`.
 pub const FRAME_BATCH_MAX: usize = 16;
+/// The most an agent puts in one `report` frame, in encoded bytes.
+///
+/// Chosen to fit under the hub's smallest inbound allowance
+/// (`MIN_INBOUND_BYTES`, 64 KiB — the floor the hub decodes agent frames
+/// against when no `exec` is in flight), with headroom for the envelope.
+/// [`FRAME_BATCH_MAX`] reports at [`MESSAGE_MAX`] and [`CONTEXT_MAX`] are far
+/// larger than this, so a sender batches to fit it rather than to the count
+/// alone: a frame past the hub's allowance is not truncated, it closes the
+/// connection.
+pub const REPORT_FRAME_BYTES: usize = 56 * 1024;
 /// Reports a sender queues before dropping the oldest.
 pub const RING_CAP: usize = 256;
 /// Bytes of a `POST /report` body.
@@ -202,6 +212,45 @@ mod tests {
         assert_eq!(b.reports[1].message, "m4");
         assert_eq!(ring.len(), RING_CAP - 2);
         assert_eq!(ring.drain(1).dropped, 0, "the drop count resets");
+    }
+
+    /// A report at the caps, in a multi-byte alphabet: what the frame cap
+    /// has to survive.
+    fn fat() -> Report {
+        let mut x = r(&"\u{20ac}".repeat(MESSAGE_MAX));
+        x.context = Some(serde_json::json!({ "stack": "s".repeat(4_000 - 14) }));
+        x.clamp();
+        assert!(
+            !x.truncated,
+            "the fixture must sit under the caps, not over"
+        );
+        x
+    }
+
+    /// The hazard [`REPORT_FRAME_BYTES`] exists for: a full [`FRAME_BATCH_MAX`]
+    /// of clamped reports does NOT fit the hub's idle inbound allowance, so an
+    /// agent batching by count alone would have its connection closed. One
+    /// such report fits with room to spare.
+    #[test]
+    fn a_full_frame_batch_of_clamped_reports_overruns_the_frame_cap() {
+        let one = crate::AgentFrame::Report {
+            reports: vec![fat()],
+            dropped: 0,
+        };
+        let len = crate::encode_agent_frame(&one).unwrap().len();
+        assert!(
+            len < REPORT_FRAME_BYTES,
+            "one clamped report must fit ({len} bytes)"
+        );
+        let full = crate::AgentFrame::Report {
+            reports: (0..FRAME_BATCH_MAX).map(|_| fat()).collect(),
+            dropped: 0,
+        };
+        let len = crate::encode_agent_frame(&full).unwrap().len();
+        assert!(
+            len > REPORT_FRAME_BYTES,
+            "{FRAME_BATCH_MAX} clamped reports must overrun the cap ({len} bytes)"
+        );
     }
 
     #[test]
