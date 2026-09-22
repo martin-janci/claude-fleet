@@ -2,6 +2,11 @@
 # Local mirror of .github/workflows/ci.yml. Runs the same steps, in the same
 # order, so a green run here should mean a green run in CI:
 #
+#   version job:   scripts/check-version-consistency.sh — the six version
+#                  carriers, their Cargo.lock entries and fleet-core's
+#                  allowlisted 0.1.0. Runs in every mode: it takes seconds and
+#                  costs nothing, and it is what keeps a hand-edited carrier
+#                  from reaching a tag.
 #   rust job:      cargo fmt --all --check
 #                  cargo clippy --workspace --all-targets -- -D warnings
 #                  cargo test --workspace
@@ -157,6 +162,10 @@ run_frontend() {
   step "${PNPM[@]}" run build
   step "${PNPM[@]}" audit --audit-level=high
 }
+
+# Always, and first: ci.yml's version-consistency job. Cheap, and a mismatch
+# here is what turns a release tag into three different advertised versions.
+step scripts/check-version-consistency.sh
 
 [[ "$RUN_RUST" == 1 ]] && run_rust
 [[ "$RUN_FRONTEND" == 1 ]] && run_frontend
