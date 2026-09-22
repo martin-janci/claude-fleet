@@ -122,11 +122,13 @@ impl Store {
     /// `end_reason` (set by `close_conversation`) or `replaced`. The session
     /// row gets the new id, a transcript path that belongs to it (else NULL),
     /// the model, and `awaiting_rebind_at = NULL`; resetting sources zero the
-    /// context and clear `current_activity` / `last_prompt`, resume marks the
-    /// context stale. A same-id call upgrades a `start_source` of `unknown`
-    /// to `source` (a SessionStart arriving after the UserPromptSubmit that
-    /// opened the conversation). One transaction; emits `session:updated` and
-    /// `session:conversations` after commit.
+    /// context and clear `current_activity` / `last_prompt` / `pending_input`
+    /// (a dialog on the old conversation's pane is not one on the new
+    /// conversation's), resume marks the context stale. A same-id call
+    /// upgrades a `start_source` of `unknown` to `source` (a SessionStart
+    /// arriving after the UserPromptSubmit that opened the conversation).
+    /// One transaction; emits `session:updated` and `session:conversations`
+    /// after commit.
     ///
     /// Opens its own transaction, so it cannot run inside
     /// `Store::atomically` (SQLite has no nested `BEGIN`).
@@ -214,7 +216,8 @@ impl Store {
                context_at = ?5, context_stale = 0"
         } else if resets {
             ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
-               context_at = ?5, context_stale = 0, current_activity = NULL, last_prompt = NULL"
+               context_at = ?5, context_stale = 0, current_activity = NULL, last_prompt = NULL, \
+               pending_input = NULL"
         } else if matches!(
             source,
             StartSource::Resume | StartSource::Unknown | StartSource::Fork

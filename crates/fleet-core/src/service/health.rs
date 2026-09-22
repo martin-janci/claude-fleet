@@ -244,6 +244,7 @@ mod tests {
             tags: Vec::new(),
             usage: Default::default(),
             context: Default::default(),
+            pending_input: None,
         }
     }
 
@@ -473,7 +474,7 @@ mod tests {
         let h = health_from_store(&s);
         assert_eq!(h.version, crate::app_version::get());
         assert!(h.db_ready);
-        assert_eq!(h.schema_version, 39);
+        assert_eq!(h.schema_version, 40);
         // Empty store → empty roll-up.
         assert_eq!(h.sessions_total, 0);
         assert_eq!(h.hosts_total, 0);

@@ -586,6 +586,48 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     }
 }
 
+/// A key `send_prompt { keys }` may press. Closed on purpose: tmux's key
+/// names are a small language of their own and "press whatever you like"
+/// would be a second way to type into a pane, unmarked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NamedKey {
+    Enter,
+    Escape,
+    CtrlC,
+}
+
+impl NamedKey {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "Enter" => Some(Self::Enter),
+            "Escape" => Some(Self::Escape),
+            "C-c" => Some(Self::CtrlC),
+            _ => None,
+        }
+    }
+    pub fn tmux_name(self) -> &'static str {
+        match self {
+            Self::Enter => "Enter",
+            Self::Escape => "Escape",
+            Self::CtrlC => "C-c",
+        }
+    }
+}
+
+/// `tmux send-keys -t '=<session>:' <Key>` — one named key, no literal text.
+/// The target is an EXACT pane target (`exact_pane`, the same one
+/// `service::sessions::prompt::build_send_commands` uses for text): a bare
+/// `-t NAME` is a *lookup* that falls back to a unique prefix or an fnmatch
+/// pattern, so a key aimed at a dead/renamed session could otherwise land on
+/// an unrelated one whose name merely starts with it.
+pub fn send_named_key(tmux_name: &str, key: NamedKey) -> String {
+    format!(
+        "tmux send-keys -t {} {}",
+        quote(&exact_pane(tmux_name)),
+        key.tmux_name()
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TmuxSession {
     pub name: String,
@@ -1616,6 +1658,26 @@ mod tests {
             Some(std::collections::HashMap::new())
         );
         assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn named_keys_parse_exactly_and_build_a_send_keys_command() {
+        assert_eq!(NamedKey::parse("Enter"), Some(NamedKey::Enter));
+        assert_eq!(NamedKey::parse("Escape"), Some(NamedKey::Escape));
+        assert_eq!(NamedKey::parse("C-c"), Some(NamedKey::CtrlC));
+        assert_eq!(
+            NamedKey::parse("enter"),
+            None,
+            "case matters: the value is a tmux key name"
+        );
+        assert_eq!(NamedKey::parse("rm -rf"), None);
+        assert_eq!(
+            send_named_key("my session", NamedKey::Escape),
+            format!(
+                "tmux send-keys -t {} Escape",
+                crate::shell::quote(&exact_pane("my session"))
+            )
+        );
     }
 
     #[test]
