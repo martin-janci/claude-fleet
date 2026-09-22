@@ -359,6 +359,7 @@ mod tests {
             tags: Vec::new(),
             usage: Default::default(),
             context: Default::default(),
+            pending_input: None,
         }
     }
 
@@ -547,6 +548,7 @@ mod tests {
                 ci_status: None,
                 pr_observed: false,
                 tmux_pane_id: None,
+                pending_input: None,
             }],
             keep: &[name.to_string()],
             lost_ttl_cutoff: None,

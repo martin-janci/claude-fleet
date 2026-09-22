@@ -109,16 +109,29 @@ fn cfg() -> RemoteConfig {
     }
 }
 
+/// A hub client in its working state: its hub's `ready` frame has been
+/// judged in range on this launch (the event bridge reported `Connected`).
+/// `move_session`'s dry run is refused on any client that has not got this
+/// far — see `a_dry_run_is_refused_until_this_launch_has_confirmed_the_hub`.
 fn remote_backend(fake: &Arc<Fake>) -> FleetBackend {
+    let link = Arc::new(connection::HubConnectionStatus::remote(
+        Arc::new(Silent),
+        &cfg().token,
+    ));
+    link.report(connection::HubConnection::Connected);
     FleetBackend::remote_over(cfg(), fake.clone())
+        .watching(link as Arc<dyn connection::ConnectionView>)
 }
 
 /// A real on-disk store; `Store`'s in-memory constructor is fleet-core-test
-/// only.
-fn store() -> (tempfile::TempDir, Mutex<Store>) {
+/// only. An `Arc` because `move_session`'s routed helper takes one (Transfer
+/// 3c Task 3: `when: idle` on a busy source spawns a waiter that must
+/// outlive the call) — every other routed helper still takes `&Mutex<Store>`
+/// and gets there by deref coercion from `&Arc<Mutex<Store>>`.
+fn store() -> (tempfile::TempDir, Arc<Mutex<Store>>) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
-    (dir, Mutex::new(store))
+    (dir, Arc::new(Mutex::new(store)))
 }
 
 fn ssh() -> Arc<SshClient> {
@@ -142,9 +155,11 @@ const SESSION_PAYLOAD: &str = r#"{"id":42,"tmux_name":"from-the-hub","host_alias
 const HOST_PAYLOAD: &str =
     r#"{"alias":"trn","reachable":true,"hidden":false,"provisioned":true,"transport":"ssh"}"#;
 const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
-/// A complete `MoveReport`: all twelve fields are required on the wire, the
-/// last of them a whole `SessionRow` (the same one as [`SESSION_PAYLOAD`]).
-const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","tmux_name":"demo","claude_session_id":"abc","branch":"main","target_cwd":"/w/demo","transcript_bytes":1024,"source_killed":true,"warnings":[],"carried":{"commits":2,"bundle_bytes":1234,"dirty_entries":[{"status":" M","path":"src/lib.rs"}],"ignored_carried":[{"path":".env","bytes":4096}],"ignored_left_behind":[{"path":"node_modules/","bytes":null,"reason":"denylisted"}],"target_seeded":"existing","session_state":{"carried":[{"path":"subagents/agent-ab12.jsonl","bytes":2048}],"kept_target":[],"left_behind":[]},"memory":{"carried":[],"kept_target":["deploy.md"],"identical":3,"index_lines_added":0,"left_behind":[]}},"target":{"id":43,"tmux_name":"demo","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}}"#;
+/// A complete `MoveReport` wrapped as a `MoveOutcome::Moved` — all twelve
+/// report fields plus the internal tag `"kind":"moved"`, the last field a
+/// whole `SessionRow` (the same one as [`SESSION_PAYLOAD`]) whose own `kind`
+/// (the session kind) sits one level down, untouched by the outcome's tag.
+const MOVE_PAYLOAD: &str = r#"{"kind":"moved","source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","tmux_name":"demo","claude_session_id":"abc","branch":"main","target_cwd":"/w/demo","transcript_bytes":1024,"source_killed":true,"warnings":[],"carried":{"commits":2,"bundle_bytes":1234,"dirty_entries":[{"status":" M","path":"src/lib.rs"}],"ignored_carried":[{"path":".env","bytes":4096}],"ignored_left_behind":[{"path":"node_modules/","bytes":null,"reason":"denylisted"}],"target_seeded":"existing","session_state":{"carried":[{"path":"subagents/agent-ab12.jsonl","bytes":2048}],"kept_target":[],"left_behind":[]},"memory":{"carried":[],"kept_target":["deploy.md"],"identical":3,"index_lines_added":0,"left_behind":[]}},"target":{"id":43,"tmux_name":"demo","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}}"#;
 /// A complete `RepairReport` (`repair_session` uses `ok_json`, not the
 /// null-stripping `ok_json_compact`, so every `Option` is present as a real
 /// key — `null` included — and every non-`Option` field is required).
@@ -182,7 +197,7 @@ type Case = (
     &'static str,
     Value,
     &'static str,
-    Box<dyn Fn(&FleetBackend, &Mutex<Store>, &Arc<SshClient>) -> Result<(), IpcError>>,
+    Box<dyn Fn(&FleetBackend, &Arc<Mutex<Store>>, &Arc<SshClient>) -> Result<(), IpcError>>,
 );
 
 fn check(cases: Vec<Case>) {
@@ -710,7 +725,10 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "send_prompt",
             "send_prompt",
-            json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "go", "submit": true }),
+            // `prompt` must be empty alongside `keys` (the hub refuses text
+            // and a key press together, same as the local path) — this row
+            // still proves `keys` crosses the wire.
+            json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "", "submit": true, "keys": "Enter" }),
             r#"{"delivered":true}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::send_prompt(
@@ -718,8 +736,9 @@ fn routed_mutation_cases() -> Vec<Case> {
                     SendPromptArgs {
                         host_alias: "trn".into(),
                         tmux_name: "demo".into(),
-                        prompt: "go".into(),
+                        prompt: "".into(),
                         submit: true,
+                        keys: Some("Enter".into()),
                     },
                     s,
                     h,
@@ -964,7 +983,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "move_session",
             "move_session",
-            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true, "clean_target": false }),
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": true, "clean_target": false, "dry_run": true, "when": "now" }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::move_session::routed::move_session(
@@ -975,6 +994,8 @@ fn routed_mutation_cases() -> Vec<Case> {
                         keep_source: false,
                         strict: true,
                         clean_target: false,
+                        dry_run: true,
+                        when: fleet_core::service::move_session::When::Now,
                     },
                     s,
                     h,
@@ -989,7 +1010,7 @@ fn routed_mutation_cases() -> Vec<Case> {
         (
             "move_session",
             "move_session",
-            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": true, "strict": false, "clean_target": true }),
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": true, "strict": false, "clean_target": true, "dry_run": false, "when": "now" }),
             MOVE_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::move_session::routed::move_session(
@@ -1000,6 +1021,36 @@ fn routed_mutation_cases() -> Vec<Case> {
                         keep_source: true,
                         strict: false,
                         clean_target: true,
+                        dry_run: false,
+                        when: fleet_core::service::move_session::When::Now,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // A non-default `when`: Transfer 3c Task 4's own lesson (3d shipped
+        // a routed argument that reached the schema and the service but was
+        // never mapped into the wire args a hub actually receives) — pin
+        // that `when` itself, not just `dry_run`/`clean_target`, survives
+        // the trip onto the wire.
+        (
+            "move_session",
+            "move_session",
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": false, "clean_target": false, "dry_run": false, "when": "idle" }),
+            MOVE_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::move_session::routed::move_session(
+                    b,
+                    MoveSessionArgs {
+                        session_id: 7,
+                        target_host_alias: "hetzner".into(),
+                        keep_source: false,
+                        strict: false,
+                        clean_target: false,
+                        dry_run: false,
+                        when: fleet_core::service::move_session::When::Idle,
                     },
                     s,
                     h,
@@ -1119,6 +1170,46 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
     ]
+}
+
+/// A complete `MovePreview` (every field required — no `#[serde(default)]`,
+/// per the wire rule), wrapped as a `MoveOutcome::Preview` the way a hub
+/// answering a `dry_run: true` call actually does.
+const PREVIEW_PAYLOAD: &str = r#"{"kind":"preview","session_id":7,"from_host":"trn","to_host":"hetzner","branch":"main","source_cwd":"/w/demo","unpushed_commits":2,"commits_ahead":null,"dirty":[{"status":" M","path":"src/lib.rs"}],"ignored_carried":[{"path":".env","bytes":4096}],"ignored_left_behind":[{"path":"node_modules/","bytes":null,"reason":"denylisted"}],"transcript_bytes":1024,"session_state_files":2,"session_state_bytes":2048,"memory_files":1,"memory_bytes":128,"target_path":"/w/demo","target":{"state":"clean","head":"1111111111111111111111111111111111111111"},"unknowns":["bundle size is decided only by snapshotting"]}"#;
+
+/// `MoveOutcome::Preview` is otherwise untested anywhere: every routed
+/// `move_session` case above answers `MOVE_PAYLOAD` (`kind: "moved"`), so
+/// nothing proves the OTHER tag actually round-trips through the desktop's
+/// `routed::move_session` — a `dry_run: true` call sent to the hub and a
+/// `MovePreview` sent back.
+#[test]
+fn a_hub_answering_a_preview_deserialises_into_move_outcome_preview() {
+    use fleet_core::service::move_session::{MoveOutcome, MoveSessionArgs};
+
+    let fake = Fake::answering(PREVIEW_PAYLOAD);
+    let (_dir, st) = store();
+    let got = block_on(commands::move_session::routed::move_session(
+        &remote_backend(&fake),
+        MoveSessionArgs {
+            session_id: 7,
+            target_host_alias: "hetzner".into(),
+            keep_source: false,
+            strict: false,
+            clean_target: false,
+            dry_run: true,
+            when: fleet_core::service::move_session::When::Now,
+        },
+        &st,
+        &ssh(),
+    ))
+    .expect("a preview answer must deserialise as the command's return type");
+    match got {
+        MoveOutcome::Preview(p) => assert_eq!(p.session_id, 7),
+        other => panic!("expected MoveOutcome::Preview, got {other:?}"),
+    }
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "move_session");
+    assert_eq!(args["dry_run"], true);
 }
 
 /// The answer the UI gets in remote mode is the hub's, deserialised
@@ -1546,6 +1637,284 @@ fn a_hub_with_a_skewed_wire_contract_refuses_every_routed_command() {
         assert_eq!(err.code, codes::E_HUB_CONTRACT, "health_check: {err:?}");
         fake.was_not_called();
     }
+}
+
+// ── 2d. a dry run needs a hub this launch has CONFIRMED ─────────────────────
+
+fn dry_run_args(dry_run: bool) -> fleet_core::service::move_session::MoveSessionArgs {
+    fleet_core::service::move_session::MoveSessionArgs {
+        session_id: 7,
+        target_host_alias: "hetzner".into(),
+        keep_source: false,
+        strict: false,
+        clean_target: false,
+        dry_run,
+        when: fleet_core::service::move_session::When::Now,
+    }
+}
+
+/// A hub client whose link has not yet judged any `ready` frame.
+fn unconfirmed_backend(fake: &Arc<Fake>) -> FleetBackend {
+    let link = Arc::new(connection::HubConnectionStatus::remote(
+        Arc::new(Silent),
+        &cfg().token,
+    ));
+    FleetBackend::remote_over(cfg(), fake.clone())
+        .watching(link as Arc<dyn connection::ConnectionView>)
+}
+
+/// A hub built before `dry_run` existed ignores the flag and performs a REAL
+/// move. The contract gate only refuses such a hub once its `ready` frame has
+/// been judged; before that, "no verdict" means "never judged" as much as
+/// "in range". So a dry run is refused until this launch has positively seen
+/// an in-range `ready` frame — before the first frame, and on a backend with
+/// no link to consult at all — and the hub is never called.
+#[test]
+fn a_dry_run_is_refused_until_this_launch_has_confirmed_the_hub() {
+    for (what, backend_of) in [
+        (
+            "before any ready frame",
+            unconfirmed_backend as fn(&Arc<Fake>) -> FleetBackend,
+        ),
+        ("with no link to consult", |fake: &Arc<Fake>| {
+            FleetBackend::remote_over(cfg(), fake.clone())
+        }),
+    ] {
+        let fake = Fake::answering(PREVIEW_PAYLOAD);
+        let (_dir, st) = store();
+        let err = block_on(commands::move_session::routed::move_session(
+            &backend_of(&fake),
+            dry_run_args(true),
+            &st,
+            &ssh(),
+        ))
+        .expect_err(what);
+        assert_eq!(err.code, codes::E_HUB_CONTRACT, "{what}: {err:?}");
+        assert!(
+            err.message.contains("confirmed the hub's version"),
+            "{what}: {}",
+            err.message
+        );
+        fake.was_not_called();
+    }
+}
+
+#[test]
+fn a_dry_run_routes_once_an_in_range_ready_frame_has_been_seen() {
+    let fake = Fake::answering(PREVIEW_PAYLOAD);
+    let (_dir, st) = store();
+    let link = Arc::new(connection::HubConnectionStatus::remote(
+        Arc::new(Silent),
+        &cfg().token,
+    ));
+    let backend = FleetBackend::remote_over(cfg(), fake.clone())
+        .watching(Arc::clone(&link) as Arc<dyn connection::ConnectionView>);
+    link.report(connection::HubConnection::Connected);
+    block_on(commands::move_session::routed::move_session(
+        &backend,
+        dry_run_args(true),
+        &st,
+        &ssh(),
+    ))
+    .expect("a confirmed hub takes a dry run");
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "move_session");
+    assert_eq!(args["dry_run"], true);
+}
+
+/// I4: the event stream dropping withdraws the confirmation — the hub that
+/// answers the reconnect may be an older build — so a dry run is refused
+/// again until a new `ready` frame is judged in range.
+#[test]
+fn a_dry_run_is_refused_again_after_the_stream_drops() {
+    let fake = Fake::answering(PREVIEW_PAYLOAD);
+    let (_dir, st) = store();
+    let link = Arc::new(connection::HubConnectionStatus::remote(
+        Arc::new(Silent),
+        &cfg().token,
+    ));
+    let backend = FleetBackend::remote_over(cfg(), fake.clone())
+        .watching(Arc::clone(&link) as Arc<dyn connection::ConnectionView>);
+    link.report(connection::HubConnection::Connected);
+    link.report(connection::HubConnection::Reconnecting {
+        attempt: 1,
+        retry_in_secs: 1,
+        reason: "stream ended".into(),
+    });
+    let err = block_on(commands::move_session::routed::move_session(
+        &backend,
+        dry_run_args(true),
+        &st,
+        &ssh(),
+    ))
+    .expect_err("an unconfirmed reconnect");
+    assert_eq!(err.code, codes::E_HUB_CONTRACT, "{err:?}");
+    fake.was_not_called();
+}
+
+/// An out-of-range `ready` frame is already refused by the contract gate,
+/// and that refusal — which names both revisions and says what to update —
+/// is the one a dry run gets, not the vaguer "not yet confirmed".
+#[test]
+fn a_dry_run_against_a_skewed_hub_gets_the_contract_refusal() {
+    let fake = Fake::answering(PREVIEW_PAYLOAD);
+    let (_dir, st) = store();
+    let err = block_on(commands::move_session::routed::move_session(
+        &skewed_backend(
+            &fake,
+            connection::HubConnection::HubTooOld {
+                hub_contract: 1,
+                min_contract: 2,
+            },
+        ),
+        dry_run_args(true),
+        &st,
+        &ssh(),
+    ))
+    .expect_err("a skewed hub");
+    assert_eq!(err.code, codes::E_HUB_CONTRACT);
+    assert!(
+        err.message.contains("wire contract is revision 1"),
+        "{}",
+        err.message
+    );
+    fake.was_not_called();
+}
+
+/// The confirmation gates previews only: a real move before any `ready`
+/// frame routes exactly as it always has.
+#[test]
+fn a_real_move_is_not_gated_on_the_confirmation() {
+    let fake = Fake::answering(MOVE_PAYLOAD);
+    let (_dir, st) = store();
+    block_on(commands::move_session::routed::move_session(
+        &unconfirmed_backend(&fake),
+        dry_run_args(false),
+        &st,
+        &ssh(),
+    ))
+    .expect("a real move routes");
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "move_session");
+    assert_eq!(args["dry_run"], false);
+}
+
+// ── 2e. `when` widens the same guard a dry run uses ─────────────────────────
+
+fn when_args(
+    when: fleet_core::service::move_session::When,
+) -> fleet_core::service::move_session::MoveSessionArgs {
+    fleet_core::service::move_session::MoveSessionArgs {
+        session_id: 7,
+        target_host_alias: "hetzner".into(),
+        keep_source: false,
+        strict: false,
+        clean_target: false,
+        dry_run: false,
+        when,
+    }
+}
+
+/// A hub built before `when` existed ignores it and performs a REAL move —
+/// harmless for `idle` (a busy source is refused as today) but not for
+/// `cancel`: cancelling a wait would instead MOVE the session (spec §3,
+/// the hazard Task 4 exists to close). So `when != now` gets exactly the
+/// same "not yet confirmed" guard `dry_run` already has; `now` stays
+/// ungated (covered by `a_real_move_is_not_gated_on_the_confirmation`
+/// above).
+#[test]
+fn a_when_other_than_now_is_refused_until_this_launch_has_confirmed_the_hub() {
+    use fleet_core::service::move_session::When;
+    for when in [When::Idle, When::Cancel] {
+        let fake = Fake::answering(MOVE_PAYLOAD);
+        let (_dir, st) = store();
+        let err = block_on(commands::move_session::routed::move_session(
+            &unconfirmed_backend(&fake),
+            when_args(when),
+            &st,
+            &ssh(),
+        ))
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_HUB_CONTRACT, "{when:?}: {err:?}");
+        assert!(
+            err.message.contains("confirmed the hub's version"),
+            "{when:?}: {}",
+            err.message
+        );
+        // M3: a wait or a cancel is not a preview, and the refusal must not
+        // call it one; it names the actual hazard instead.
+        assert!(
+            !err.message.to_lowercase().contains("preview"),
+            "{when:?}: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("move the session"),
+            "{when:?}: {}",
+            err.message
+        );
+        fake.was_not_called();
+    }
+}
+
+/// Once this launch has seen an in-range `ready` frame, every `when` value
+/// routes — the guard exists only for the unconfirmed window.
+#[test]
+fn every_when_value_routes_once_an_in_range_ready_frame_has_been_seen() {
+    use fleet_core::service::move_session::When;
+    for when in [When::Now, When::Idle, When::Cancel] {
+        let fake = Fake::answering(MOVE_PAYLOAD);
+        let (_dir, st) = store();
+        let link = Arc::new(connection::HubConnectionStatus::remote(
+            Arc::new(Silent),
+            &cfg().token,
+        ));
+        let backend = FleetBackend::remote_over(cfg(), fake.clone())
+            .watching(Arc::clone(&link) as Arc<dyn connection::ConnectionView>);
+        link.report(connection::HubConnection::Connected);
+        block_on(commands::move_session::routed::move_session(
+            &backend,
+            when_args(when),
+            &st,
+            &ssh(),
+        ))
+        .unwrap_or_else(|e| panic!("{when:?}: {e:?}"));
+        let (tool, args) = fake.only_call();
+        assert_eq!(tool, "move_session");
+        assert_eq!(
+            args["when"],
+            serde_json::to_value(when).unwrap(),
+            "{when:?}"
+        );
+    }
+}
+
+const WAITING_PAYLOAD: &str =
+    r#"{"kind":"waiting","session_id":7,"to_host":"hetzner","deadline_unix":1234567890}"#;
+
+/// `MoveOutcome::Waiting` is otherwise untested anywhere: nothing else
+/// proves a hub's `when: idle` answer (deferring the move) round-trips
+/// through the desktop's `routed::move_session` into the right variant.
+#[test]
+fn a_hub_answering_a_wait_deserialises_into_move_outcome_waiting() {
+    use fleet_core::service::move_session::{MoveOutcome, When};
+
+    let fake = Fake::answering(WAITING_PAYLOAD);
+    let (_dir, st) = store();
+    let got = block_on(commands::move_session::routed::move_session(
+        &remote_backend(&fake),
+        when_args(When::Idle),
+        &st,
+        &ssh(),
+    ))
+    .expect("a waiting answer must deserialise as the command's return type");
+    match got {
+        MoveOutcome::Waiting(w) => assert_eq!(w.session_id, 7),
+        other => panic!("expected MoveOutcome::Waiting, got {other:?}"),
+    }
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "move_session");
+    assert_eq!(args["when"], "idle");
 }
 
 // ── 3. the local-only refusals ──────────────────────────────────────────────

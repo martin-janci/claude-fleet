@@ -22,4 +22,4 @@ END;
 -- the wire: read through `Store::prompt_ack_state`.
 ALTER TABLE sessions ADD COLUMN prompt_submit_seq INTEGER NOT NULL DEFAULT 0;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (40);
+INSERT OR IGNORE INTO schema_version (version) VALUES (42);

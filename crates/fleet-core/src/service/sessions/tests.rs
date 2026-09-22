@@ -217,6 +217,7 @@ fn row(
         tags: Vec::new(),
         usage: Default::default(),
         context: Default::default(),
+        pending_input: None,
     }
 }
 

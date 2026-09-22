@@ -229,6 +229,7 @@ impl Store {
         pr_observed: bool,
         probe_started_at: i64,
         tmux_pane_id: Option<&str>,
+        pending_input: Option<&str>,
         killed_at: Option<i64>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
@@ -265,6 +266,11 @@ impl Store {
         // (`excluded`), never each other's results.
         const NEW_STUCK: &str = "CASE WHEN ?16 THEN excluded.stuck_kind \
                                  ELSE COALESCE(excluded.stuck_kind, stuck_kind) END";
+        // The post-write pending_input: the same intel_observed gate as
+        // stuck_kind — authoritative (and a NULL clears a stale dialog) when
+        // the pane was captured this pass, preserved when it was not.
+        const NEW_PENDING: &str = "CASE WHEN ?16 THEN excluded.pending_input \
+                                   ELSE COALESCE(excluded.pending_input, pending_input) END";
         // The post-write claude_status. A Stop hook that landed at or after
         // this pass's probe STARTED (`last_stop_at >= ?20`) is fresher than
         // the pane the pass captured, so its `idle` must win over the pane
@@ -350,14 +356,15 @@ impl Store {
                                    worktree_key, lost_at,
                                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
                                    context_pct, stuck_kind, ci_status, idle_since, stuck_since,
-                                   tmux_pane_id, context_source, context_at)
+                                   tmux_pane_id, context_source, context_at, pending_input)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, {guarded_id}, ?10, ?11, ?12, ?13,
                      ?14, ?15, ?17,
                      CASE WHEN ?10 IN ('idle','completed','stopped') THEN ?19 ELSE NULL END,
                      CASE WHEN ?15 IS NULL THEN NULL ELSE ?19 END,
                      ?21,
                      CASE WHEN ?14 IS NULL THEN NULL ELSE 'pane' END,
-                     CASE WHEN ?14 IS NULL THEN NULL ELSE ?19 END)
+                     CASE WHEN ?14 IS NULL THEN NULL ELSE ?19 END,
+                     ?22)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                last_activity_at=excluded.last_activity_at,
@@ -410,9 +417,11 @@ impl Store {
                stuck_since=CASE WHEN ({new_stuck}) IS NULL THEN NULL
                                 WHEN ({new_stuck}) IS stuck_kind THEN COALESCE(stuck_since, ?19)
                                 ELSE ?19 END,
-               idle_since={idle}
+               idle_since={idle},
+               pending_input={new_pending}
              WHERE {not_stale}",
             new_stuck = NEW_STUCK,
+            new_pending = NEW_PENDING,
             new_status = NEW_STATUS,
             idle = idle_since_sql(NEW_STATUS, "?19"),
             guarded_id = GUARDED_ID,
@@ -444,14 +453,15 @@ impl Store {
                 pr_observed,
                 now_unix(),
                 probe_started_at,
-                tmux_pane_id
+                tmux_pane_id,
+                pending_input
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
             match prior {
                 None => out.push(RowChange::SessionCreated(row)),
                 // Every wire field identical (modulo `row_version`, which the
-                // migration 040 trigger bumps on every physical UPDATE, no-op
+                // migration 042 trigger bumps on every physical UPDATE, no-op
                 // or not — see `eq_ignoring_row_version`) ⇒ a no-op pass;
                 // emit nothing.
                 Some(ref before) if before.eq_ignoring_row_version(&row) => {}
@@ -667,6 +677,7 @@ impl Store {
                 let mut project_touch: std::collections::HashMap<i64, i64> =
                     std::collections::HashMap::new();
                 for sess in spec.sessions {
+                    let pending_input_json = encode_pending_input(sess.pending_input.as_ref());
                     Self::upsert_session_in_tx(
                         tx,
                         sess.tmux_name,
@@ -689,6 +700,7 @@ impl Store {
                         sess.pr_observed,
                         spec.probe_started_at,
                         sess.tmux_pane_id.as_deref(),
+                        pending_input_json.as_deref(),
                         kills.get(sess.tmux_name).copied(),
                         &mut out,
                     )?;
@@ -829,6 +841,7 @@ mod tests {
             tags: Vec::new(),
             usage: Default::default(),
             context: Default::default(),
+            pending_input: None,
         }
     }
 
@@ -987,6 +1000,7 @@ mod tests {
                         None,
                         false,
                         0,
+                        None,
                         None,
                         None,
                         &mut out,
@@ -1274,6 +1288,68 @@ mod tests {
             stuck_of(&store),
             None,
             "must clear stuck_kind when the pane was observed and shows no stuck state"
+        );
+    }
+
+    #[test]
+    fn reconcile_clears_pending_input_only_when_pane_observed() {
+        let (mut store, _bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+
+        let pi = PendingInput {
+            kind: "permission".into(),
+            question: Some("Do it?".into()),
+            options: vec![PendingOption {
+                n: 1,
+                label: "Yes".into(),
+                selected: true,
+            }],
+        };
+        let pass = |store: &mut Store, pending: Option<PendingInput>, observed: bool| {
+            let sessions = vec![ReconcileSession {
+                tmux_name: "s1",
+                project_id: Some(pid),
+                created_at: 1,
+                last_activity_at: 1,
+                pending_input: pending,
+                intel_observed: observed,
+                ..Default::default()
+            }];
+            store
+                .apply_host_reconcile(HostReconcile {
+                    sessions: &sessions,
+                    keep: &["s1".to_string()],
+                    ..empty_probe("alpha", 1)
+                })
+                .unwrap();
+        };
+        let pending_of = |store: &Store| {
+            store
+                .get_session("s1", "alpha")
+                .unwrap()
+                .unwrap()
+                .pending_input
+        };
+
+        // Observed pane, dialog detected → stored.
+        pass(&mut store, Some(pi.clone()), true);
+        assert_eq!(pending_of(&store), Some(pi.clone()));
+
+        // Capture FAILED (pane not observed), no dialog → prior value preserved.
+        pass(&mut store, None, false);
+        assert_eq!(
+            pending_of(&store),
+            Some(pi),
+            "must preserve pending_input when the pane was not observed"
+        );
+
+        // Observed pane, dialog no longer present → CLEARED.
+        pass(&mut store, None, true);
+        assert_eq!(
+            pending_of(&store),
+            None,
+            "must clear pending_input when the pane was observed and shows no dialog"
         );
     }
 
@@ -2320,6 +2396,7 @@ mod tests {
                     None,
                     false,
                     probe_started_at,
+                    None,
                     None,
                     None,
                     &mut out,

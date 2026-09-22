@@ -137,6 +137,7 @@
     "pty_open",
     "pty_resize",
     "pty_write",
+    "report_client_error",
     "upload_attachments",
     "upload_to_session"
   ]

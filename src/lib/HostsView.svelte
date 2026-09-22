@@ -362,7 +362,7 @@
     ['←  Esc', 'back to the list (Esc in the list closes Hosts)'],
     ['r', 're-probe the host'],
     ['u', "refresh the account's usage (at most every 5 min)"],
-    ['s', 'filter the sidebar to this host'],
+    ['s', "view this host's sessions (closes Hosts)"],
     ['n', 'new session on this host'],
     ['e', 'edit the account nickname'],
     ['/', 'filter hosts'],

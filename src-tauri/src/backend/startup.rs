@@ -56,6 +56,14 @@ pub trait FleetTasks {
     /// hub client runs, and a standalone app must not run it — there is no hub
     /// to subscribe to, and its own event bus already drives the stores.
     fn start_event_bridge(&self);
+    /// The error-report flusher: a hub client's only other background task;
+    /// off with `CLAUDE_FLEET_HUB_REPORTS=0`.
+    fn start_report_flusher(&self);
+}
+
+/// `CLAUDE_FLEET_HUB_REPORTS`: unset or anything but `0`/`false` means on.
+pub fn report_flusher_wanted(env: Option<&str>) -> bool {
+    !env.is_some_and(|v| v == "0" || v.eq_ignore_ascii_case("false"))
 }
 
 /// Start exactly the background tasks this backend is entitled to run.
@@ -86,6 +94,11 @@ pub fn start_background_tasks(backend: &Backend, tasks: &dyn FleetTasks) {
             // changes: the local event bus has nothing to emit, because
             // nothing local mutates.
             tasks.start_event_bridge();
+            if report_flusher_wanted(std::env::var("CLAUDE_FLEET_HUB_REPORTS").ok().as_deref()) {
+                tasks.start_report_flusher();
+            } else {
+                tracing::info!("CLAUDE_FLEET_HUB_REPORTS is off: not reporting errors to the hub");
+            }
         }
         Backend::Unavailable(hub) => {
             // The final review's F1. This used to be `Local`, which starts

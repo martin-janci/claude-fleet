@@ -110,10 +110,18 @@ export interface SessionRow {
   context_stale: boolean;
   /** tmux pane id (`%17`) reconcile last saw for this row. */
   tmux_pane_id: string | null;
-  /** Bumped by the backend on every write (migration 040); orders a
+  /** Bumped by the backend on every write (migration 042); orders a
    *  command's return value against a row event. Absent on rows built
    *  client-side and on rows from a hub older than the column. */
   row_version?: number;
+  // Pane dialog (migration 040): the permission/question dialog a blocked
+  // pane is showing, derived alongside current_activity. Null whenever the
+  // pane shows no such dialog.
+  pending_input: {
+    kind: 'permission' | 'input';
+    question: string | null;
+    options: { n: number; label: string; selected: boolean }[];
+  } | null;
 }
 
 type UsageFields = Partial<

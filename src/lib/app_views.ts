@@ -22,6 +22,24 @@ export function requestHostsView(host: string | null = null): void {
   hostsViewRequest.set({ host });
 }
 
+// "Close the Hosts view" — the flip side of `onSessionOpened` in
+// selection.ts. `viewHostSessions` (host_actions.ts) fires this after
+// jumping the sidebar filter to a host so a click deep in the Hosts overlay
+// (HostDetail's "View sessions" button, the `s` key) can close the overlay
+// without importing App.svelte. App is the only listener in practice,
+// mirroring `closeHosts()` on `onSessionOpened`.
+const hostsCloseListeners = new Set<() => void>();
+
+/** Subscribe to "close the Hosts view" requests; returns the unsubscribe. */
+export function onHostsCloseRequested(fn: () => void): () => void {
+  hostsCloseListeners.add(fn);
+  return () => hostsCloseListeners.delete(fn);
+}
+
+export function requestCloseHosts(): void {
+  for (const fn of hostsCloseListeners) fn();
+}
+
 /** Settings dialog visibility (mounted by the Sidebar; ⌘, sets it). */
 export const settingsOpen = writable(false);
 

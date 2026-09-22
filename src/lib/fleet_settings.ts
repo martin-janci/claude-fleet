@@ -26,9 +26,12 @@ export const SETTING_KEYS = {
   moveIgnoredEntryKb: 'move.ignored_entry_kb',
   moveIgnoredTotalMb: 'move.ignored_total_mb',
   moveMaxSessionStateMb: 'move.max_session_state_mb',
+  moveWaitMaxMins: 'move.wait_max_mins',
   usageEnabled: 'usage.enabled',
   usageIntervalSecs: 'usage.interval_secs',
   usagePricesJson: 'usage.prices_json',
+  reportsMaxRows: 'reports.max_rows',
+  reportsMaxAgeSecs: 'reports.max_age_secs',
 } as const;
 
 /** Derived, read-only entry in the `get_fleet_settings` map: JSON object of
@@ -60,6 +63,12 @@ export const MOVE_IGNORED_TOTAL_MB_MAX = 1024;
 /** Mirror of `settings::MOVE_MAX_SESSION_STATE_MB_MAX` (`Kind::Int { min: 1, max }`). */
 export const MOVE_MAX_SESSION_STATE_MB_MAX = 4096;
 
+/** Mirror of the `reports.max_rows` bounds (`Kind::Int { min: 100, max }`). */
+export const REPORTS_MAX_ROWS_MIN = 100;
+export const REPORTS_MAX_ROWS_MAX = 100_000;
+/** Mirror of `settings::MOVE_WAIT_MAX_MINS_MAX` (`Kind::Int { min: 1, max }`): a week. */
+export const MOVE_WAIT_MAX_MINS_MAX = 10_080;
+
 export type ProjectsLayout = 'github' | 'flat';
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -86,9 +95,12 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'move.ignored_entry_kb': '1024',
   'move.ignored_total_mb': '20',
   'move.max_session_state_mb': '200',
+  'move.wait_max_mins': '240',
   'usage.enabled': 'true',
   'usage.interval_secs': '300',
   'usage.prices_json': '{}',
+  'reports.max_rows': '5000',
+  'reports.max_age_secs': '604800',
 };
 
 export type FleetSettings = Record<string, string>;

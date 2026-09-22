@@ -114,6 +114,8 @@ pub const MOVE_IGNORED_ENTRY_KB_MAX: u64 = 1_048_576;
 pub const MOVE_IGNORED_TOTAL_MB_MAX: u64 = 1024;
 /// Upper bound for [`MOVE_MAX_SESSION_STATE_MB`]: one transfer's payload.
 pub const MOVE_MAX_SESSION_STATE_MB_MAX: u64 = 4096;
+/// Upper bound for [`MOVE_WAIT_MAX_MINS`]: a week.
+pub const MOVE_WAIT_MAX_MINS_MAX: u64 = 10_080;
 
 /// Largest git bundle (MiB) `move_session` relays (`E_MOVE_TOO_LARGE` above it).
 pub const MOVE_MAX_BUNDLE_MB: &str = crate::service::move_session::carry::SETTING_MAX_BUNDLE_MB;
@@ -129,6 +131,10 @@ pub const MOVE_IGNORED_TOTAL_MB: &str =
 pub const MOVE_MAX_SESSION_STATE_MB: &str =
     crate::service::move_session::claude_state::SETTING_MAX_SESSION_STATE_MB;
 
+/// Longest a "transfer when it finishes" wait runs before it is given up on
+/// (minutes), counted from when the wait began.
+pub const MOVE_WAIT_MAX_MINS: &str = "move.wait_max_mins";
+
 /// Collect per-session token usage from Claude transcripts (Wave 5 G1).
 pub const USAGE_ENABLED: &str = "usage.enabled";
 /// Seconds between usage passes (one batched script per host). `0` stops
@@ -137,6 +143,11 @@ pub const USAGE_INTERVAL_SECS: &str = "usage.interval_secs";
 /// Per-model price overrides for the estimated cost; see
 /// `service::usage::BUILTIN_PRICES`.
 pub const USAGE_PRICES_JSON: &str = "usage.prices_json";
+
+/// Newest `error_reports` rows kept; pruned on every insert.
+pub const REPORTS_MAX_ROWS: &str = "reports.max_rows";
+/// Rows older than this are swept on the tick; `0` disables the age sweep.
+pub const REPORTS_MAX_AGE_SECS: &str = "reports.max_age_secs";
 
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
@@ -251,6 +262,14 @@ pub const SPECS: &[Spec] = &[
         },
     },
     Spec {
+        key: MOVE_WAIT_MAX_MINS,
+        default: "240",
+        kind: Kind::Int {
+            min: 1,
+            max: MOVE_WAIT_MAX_MINS_MAX,
+        },
+    },
+    Spec {
         key: USAGE_ENABLED,
         default: "true",
         kind: Kind::Bool,
@@ -264,6 +283,19 @@ pub const SPECS: &[Spec] = &[
         key: USAGE_PRICES_JSON,
         default: "{}",
         kind: Kind::PriceMap,
+    },
+    Spec {
+        key: REPORTS_MAX_ROWS,
+        default: "5000",
+        kind: Kind::Int {
+            min: 100,
+            max: 100_000,
+        },
+    },
+    Spec {
+        key: REPORTS_MAX_AGE_SECS,
+        default: "604800",
+        kind: Kind::Secs,
     },
 ];
 
@@ -580,6 +612,17 @@ mod tests {
         assert!(validate(MOVE_MAX_SESSION_STATE_MB, "4096").is_ok());
         assert!(validate(MOVE_MAX_SESSION_STATE_MB, "4097").is_err());
         assert_eq!(resolve(MOVE_MAX_SESSION_STATE_MB, Some("50")), "50");
+    }
+
+    #[test]
+    fn wait_max_mins_has_a_spec_a_default_and_a_week_bound() {
+        assert_eq!(spec(MOVE_WAIT_MAX_MINS).unwrap().default, "240");
+        assert!(validate(MOVE_WAIT_MAX_MINS, "1").is_ok());
+        assert!(validate(MOVE_WAIT_MAX_MINS, "0").is_err());
+        assert!(validate(MOVE_WAIT_MAX_MINS, "10080").is_ok());
+        assert!(validate(MOVE_WAIT_MAX_MINS, "10081").is_err());
+        assert_eq!(resolve(MOVE_WAIT_MAX_MINS, None), "240");
+        assert_eq!(resolve(MOVE_WAIT_MAX_MINS, Some("60")), "60");
     }
 
     #[test]

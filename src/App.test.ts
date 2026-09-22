@@ -150,6 +150,29 @@ describe('App layout', () => {
     expect(cmds).toEqual(expect.arrayContaining(['list_projects', 'list_sessions']));
   });
 
+  // Transfer fix wave I1(d): a wait's end missed while the window was away is
+  // found again from the session's timeline when it regains focus.
+  it('re-checks a waiting transfer against its timeline when the window regains focus', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const { putRunForTest, resetMovesForTest } = await import('./lib/moves');
+    const { MOVE_STEPS } = await import('./lib/moveProgress');
+    putRunForTest({
+      sessionId: 77, sessionName: 's', fromHost: 'alpha', toHost: 'beta', keepSource: null,
+      origin: 'local', steps: MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null })),
+      status: 'waiting', report: null, error: null, resolveError: null, startedAt: 1, settledAt: null,
+      cleanTarget: false, attempt: 1, resolving: false, awaitingStart: false,
+      deadlineUnix: 2_000_000_000, waitEnded: null, waitRefusal: null,
+    });
+    try {
+      render(App);
+      await fireEvent(window, new FocusEvent('focus'));
+      const calls = (invoke as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls).toContainEqual(['session_history', { args: { session_id: 77, limit: null } }]);
+    } finally {
+      resetMovesForTest();
+    }
+  });
+
   it('marks only the Assets tab active (not Session) when Assets is open', async () => {
     const { getByTestId } = render(App);
     await fireEvent.click(getByTestId('tab-assets'));

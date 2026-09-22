@@ -29,7 +29,7 @@ use fleet_proto::{
 };
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -307,6 +307,10 @@ pub struct Agent {
     /// How many `exec`s are running or queued, so `stop` knows when the
     /// last child is gone.
     running: tokio::sync::watch::Sender<usize>,
+    /// `config.report_errors` (`run`, via [`Agent::with_report_errors`]).
+    /// Gates the heartbeat flush in `serve` only — `crate::report::ring()`
+    /// fills from the installed layer regardless.
+    pub report_errors: bool,
 }
 
 /// One `exec` counted in [`Agent::running`] for as long as it lives.
@@ -320,14 +324,25 @@ impl Drop for Running {
 
 impl Agent {
     /// `home` is where children start and relative uploads land — `$HOME`,
-    /// the directory an ssh remote command starts in.
+    /// the directory an ssh remote command starts in. `report_errors` is on.
     pub fn new(home: Option<PathBuf>, concurrency: usize) -> Arc<Self> {
+        Self::with_report_errors(home, concurrency, true)
+    }
+
+    /// [`Agent::new`], with an explicit `report_errors` — how `run` wires in
+    /// `config.report_errors`.
+    pub fn with_report_errors(
+        home: Option<PathBuf>,
+        concurrency: usize,
+        report_errors: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             seen: Mutex::new(SeenIds::new(exec::SEEN_IDS)),
             slots: Arc::new(Semaphore::new(concurrency.max(1))),
             home,
             stopping: tokio::sync::watch::Sender::new(false),
             running: tokio::sync::watch::Sender::new(0),
+            report_errors,
         })
     }
 
@@ -505,6 +520,11 @@ where
     // `SessionEnd::VersionRefused`, which `run_with` backs off on at the
     // maximum interval instead of dialling this hub again right away.
     let mut welcomed = false;
+    // Reports drained from the ring that did not fit the last frame. Consumed
+    // before the ring on the next beat, so order is preserved: a `report`
+    // frame is bounded by `REPORT_FRAME_BYTES`, not by `FRAME_BATCH_MAX`
+    // alone, and what a beat cannot send it keeps rather than drops.
+    let mut carry: VecDeque<fleet_proto::report::Report> = VecDeque::new();
 
     let end = loop {
         tokio::select! {
@@ -593,6 +613,11 @@ where
                 if let Some(ack) = ack {
                     let _ = ack.send(alive);
                 }
+                if alive && welcomed && agent.report_errors {
+                    if let Some(text) = next_report_frame(&mut carry) {
+                        let _ = out.send(Out::Frame(text));
+                    }
+                }
                 if !alive {
                     break SessionEnd::HubSilent;
                 }
@@ -621,6 +646,56 @@ where
         }
     }
     Served { end, heard_any }
+}
+
+/// The next `report` frame to send, if there is anything to send: `carry`
+/// first (what the previous beat could not fit), then the ring, in order.
+///
+/// The frame is encoded against [`REPORT_FRAME_BYTES`], not
+/// [`MAX_FRAME_BYTES`]: the hub decodes an agent frame against the allowance
+/// of whatever it has in flight, which on an idle connection is its
+/// 64 KiB floor, and a frame past that allowance is not truncated — the hub
+/// closes the connection. So a batch that does not fit sheds its last report
+/// back onto the front of `carry` and is encoded again; the shed reports go
+/// out on the following beats, in order. The sender's `dropped` count rides
+/// on the first frame that goes out.
+///
+/// [`REPORT_FRAME_BYTES`]: fleet_proto::report::REPORT_FRAME_BYTES
+fn next_report_frame(carry: &mut VecDeque<fleet_proto::report::Report>) -> Option<String> {
+    use fleet_proto::report::{Report, FRAME_BATCH_MAX, REPORT_FRAME_BYTES};
+
+    let room = FRAME_BATCH_MAX.saturating_sub(carry.len());
+    let drained = crate::report::ring().drain(room);
+    let dropped = drained.dropped;
+    let mut reports: Vec<Report> = carry.drain(..).chain(drained.reports).collect();
+
+    loop {
+        if reports.is_empty() && dropped == 0 {
+            return None;
+        }
+        let frame = AgentFrame::Report { reports, dropped };
+        match encode_agent_frame_within(&frame, REPORT_FRAME_BYTES) {
+            Ok(text) => return Some(text),
+            Err(e) => {
+                let AgentFrame::Report { reports: back, .. } = frame else {
+                    unreachable!("the frame was just built as a Report")
+                };
+                reports = back;
+                match reports.pop() {
+                    // Shed one and try again; it goes out on the next beat.
+                    Some(last) if !reports.is_empty() => carry.push_front(last),
+                    // A single report that does not fit — only reachable if
+                    // the caps ever stop agreeing. Dropped, once, loudly.
+                    Some(last) => tracing::warn!(
+                        error = %e,
+                        component = %last.component,
+                        "[agent] one report does not fit a report frame; dropped"
+                    ),
+                    None => return None,
+                }
+            }
+        }
+    }
 }
 
 /// What a WebSocket close means for this connection: a version refusal (the
@@ -1056,9 +1131,10 @@ where
 pub async fn run(config: crate::config::Config) -> Result<(), String> {
     let endpoint = Endpoint::parse(&config.hub, config.insecure)?;
     let dialer = Dialer::new(endpoint, config.token, config.ca_file.as_deref())?;
-    let agent = Agent::new(
+    let agent = Agent::with_report_errors(
         std::env::var_os("HOME").map(PathBuf::from),
         exec::MAX_CONCURRENT,
+        config.report_errors,
     );
     let notifier = Notifier::from_env();
     let stop = shutdown_signal()?;
@@ -1336,7 +1412,36 @@ mod tests {
     }
 
     async fn pair() -> Pair {
-        pair_with(Agent::new(None, crate::exec::MAX_CONCURRENT)).await
+        pair_with(quiet_agent(None, crate::exec::MAX_CONCURRENT)).await
+    }
+
+    /// A test agent with the heartbeat report flush OFF.
+    ///
+    /// `crate::report::ring()` is process-global and this binary's tests run
+    /// in parallel, so any pair that flushed would race every other one for
+    /// the same queue and swallow reports meant for another test's hub. The
+    /// tests about the error channel itself opt in with [`reporting_pair`],
+    /// serialised on [`REPORT_LOCK`]; everything else stays quiet.
+    fn quiet_agent(home: Option<PathBuf>, concurrency: usize) -> Arc<Agent> {
+        Agent::with_report_errors(home, concurrency, false)
+    }
+
+    /// Held for the whole of a test that drives the report ring — see
+    /// [`quiet_agent`]. Async-aware because it is held across the awaits
+    /// those tests are made of; `tokio::sync` primitives are not tied to one
+    /// runtime, so a `#[tokio::test]` waiting here is woken by whichever
+    /// other test's runtime releases it.
+    static REPORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A pair whose agent DOES flush reports. Take [`REPORT_LOCK`] first,
+    /// and empty the ring of whatever earlier tests left in it.
+    async fn reporting_pair() -> Pair {
+        pair_with(Agent::with_report_errors(
+            None,
+            crate::exec::MAX_CONCURRENT,
+            true,
+        ))
+        .await
     }
 
     /// [`pair_with`], but the fake hub never sends `welcome` — what a hub
@@ -1508,7 +1613,7 @@ mod tests {
     async fn the_hello_names_this_agent() {
         let fake = FakeHub::new().await;
         let dialer = fake.dialer();
-        let agent = Agent::new(None, 1);
+        let agent = quiet_agent(None, 1);
         let (_beats, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let ws = dialer.dial().await.unwrap();
@@ -1589,6 +1694,97 @@ mod tests {
         );
     }
 
+    /// An error queued before the handshake is flushed on the first beat
+    /// after `welcome` — the case the channel exists for.
+    #[tokio::test]
+    async fn queued_reports_are_flushed_on_a_beat_once_welcomed() {
+        let _lock = REPORT_LOCK.lock().await;
+        crate::report::ring().drain(usize::MAX);
+        crate::report::ring().push(fleet_proto::report::Report::error(
+            "fleet_agent::conn",
+            "earlier dial refused",
+        ));
+        let mut p = reporting_pair().await;
+        assert!(p.beat().await);
+        // Skip anything that is not our report, bounded so a genuine
+        // regression still fails the test.
+        let mut reports = None;
+        for _ in 0..5 {
+            match next_frame(&mut p.hub).await.map(|f| f.0) {
+                Some(AgentFrame::Report { reports: r, .. }) => {
+                    reports = Some(r);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        let reports =
+            reports.unwrap_or_else(|| panic!("no report frame within 5 frames after the beat"));
+        assert!(reports.iter().any(|r| r.message == "earlier dial refused"));
+    }
+
+    /// A full ring of reports at the caps does not fit one frame the hub
+    /// would accept, so the flush batches by BYTES: every frame stays under
+    /// `REPORT_FRAME_BYTES` (the hub's idle inbound allowance is 64 KiB, and
+    /// an oversize frame there closes the connection, it is not truncated),
+    /// and what one beat sheds goes out on the next — all of them, once
+    /// each, in order.
+    #[tokio::test]
+    async fn report_frames_stay_under_the_frame_cap_and_carry_the_rest_over() {
+        use fleet_proto::report::{Report, FRAME_BATCH_MAX, MESSAGE_MAX, REPORT_FRAME_BYTES};
+
+        let _lock = REPORT_LOCK.lock().await;
+        crate::report::ring().drain(usize::MAX);
+        // Each one sits just under the clamp, in a 3-byte alphabet: sixteen
+        // of them are several times the hub's allowance.
+        for i in 0..FRAME_BATCH_MAX {
+            let tail = "\u{20ac}".repeat(MESSAGE_MAX - 9);
+            let mut r = Report::error("fleet_agent::conn", &format!("carry-{i:02} {tail}"));
+            r.context = Some(serde_json::json!({ "stack": "s".repeat(4_000 - 14) }));
+            r.clamp();
+            assert!(!r.truncated, "the fixture must sit under the caps");
+            crate::report::ring().push(r);
+        }
+
+        let mut p = reporting_pair().await;
+        let mut seen: Vec<String> = Vec::new();
+        // Bounded: sixteen reports cannot need more beats than this, and a
+        // regression that stopped carrying them over must still fail.
+        for round in 0..FRAME_BATCH_MAX {
+            if seen.len() == FRAME_BATCH_MAX {
+                break;
+            }
+            // The agent gives up on a hub after `SILENT_BEATS` beats with
+            // nothing heard, and answering the ping is also the barrier that
+            // puts the beat AFTER it in the agent's single-threaded loop.
+            let id = format!("keepalive-{round}");
+            send(&mut p.hub, &HubFrame::Ping { id: id.clone() }).await;
+            loop {
+                match next_frame(&mut p.hub).await {
+                    Some((AgentFrame::Pong { id: got }, _)) if got == id => break,
+                    Some(_) => continue,
+                    None => panic!("the agent closed the socket"),
+                }
+            }
+            assert!(p.beat().await);
+            match next_frame(&mut p.hub).await {
+                Some((AgentFrame::Report { reports, .. }, len)) => {
+                    assert!(
+                        len <= REPORT_FRAME_BYTES,
+                        "a report frame of {len} bytes would be refused by the hub"
+                    );
+                    assert!(!reports.is_empty(), "an empty report frame is not sent");
+                    seen.extend(reports.iter().map(|r| r.message[..8].to_string()));
+                }
+                other => panic!("expected a report frame, got {other:?}"),
+            }
+        }
+        let want: Vec<String> = (0..FRAME_BATCH_MAX)
+            .map(|i| format!("carry-{i:02}"))
+            .collect();
+        assert_eq!(seen, want, "every report exactly once, in order");
+    }
+
     /// A replayed id runs nothing and answers nothing: the first run's answer
     /// is the only one, and answering the replay under the same id could hand
     /// it to the wrong caller.
@@ -1600,7 +1796,7 @@ mod tests {
         // One slot, on this single-threaded runtime: requests run in the
         // order they arrived, so "later" finishing proves the replay was
         // either run before it or refused.
-        let mut p = pair_with(Agent::new(None, 1)).await;
+        let mut p = pair_with(quiet_agent(None, 1)).await;
         send(&mut p.hub, &exec("dup", &["bash", "-c", &script], None)).await;
         result_for(&mut p.hub, "dup").await;
         send(&mut p.hub, &exec("dup", &["bash", "-c", &script], None)).await;
@@ -1687,7 +1883,7 @@ mod tests {
             bytes_b64: encode_b64(body),
         };
         // One slot on this single-threaded runtime: see the exec twin above.
-        let mut p = pair_with(Agent::new(None, 1)).await;
+        let mut p = pair_with(quiet_agent(None, 1)).await;
         send(&mut p.hub, &upload(b"first")).await;
         result_for(&mut p.hub, "up").await;
         send(&mut p.hub, &upload(b"replayed")).await;
@@ -1845,7 +2041,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("pid");
         let script = format!("echo $$ > {}; exec sleep 1000", pidfile.display());
-        let agent = Agent::new(None, 4);
+        let agent = quiet_agent(None, 4);
         let mut p = pair_with(Arc::clone(&agent)).await;
         send(&mut p.hub, &exec("hung", &["bash", "-c", &script], None)).await;
         let pid = wait_for_pid(&pidfile).await;
@@ -1892,7 +2088,7 @@ mod tests {
     async fn a_lost_connection_is_dialled_again_with_a_growing_backoff() {
         let fake = FakeHub::new().await;
         let dialer = fake.dialer();
-        let agent = Agent::new(None, 1);
+        let agent = quiet_agent(None, 1);
         let delays = Arc::new(Mutex::new(Vec::<Duration>::new()));
         let record = Arc::clone(&delays);
         let (beat_keep, _) = mpsc::unbounded_channel::<oneshot::Sender<bool>>();
@@ -1986,7 +2182,7 @@ mod tests {
     /// `SessionEnd::Closed`.
     #[tokio::test]
     async fn an_incompatible_hub_is_refused_by_the_agent_with_the_version_code() {
-        let mut p = pair_before_welcome(Agent::new(None, crate::exec::MAX_CONCURRENT)).await;
+        let mut p = pair_before_welcome(quiet_agent(None, crate::exec::MAX_CONCURRENT)).await;
         p.hub
             .send(Message::Text(
                 encode_hub_frame(&HubFrame::Welcome {
@@ -2183,7 +2379,7 @@ mod tests {
     /// `VersionRefused` and the command is never acted on.
     #[tokio::test]
     async fn a_command_before_welcome_ends_the_session_without_running_it() {
-        let mut p = pair_before_welcome(Agent::new(None, crate::exec::MAX_CONCURRENT)).await;
+        let mut p = pair_before_welcome(quiet_agent(None, crate::exec::MAX_CONCURRENT)).await;
         send(&mut p.hub, &exec("premature", &["true"], None)).await;
 
         // The hub closes it with the version-refused code, and — critically
@@ -2216,7 +2412,7 @@ mod tests {
     /// clock fires the one beat by hand.
     #[tokio::test]
     async fn silence_past_one_heartbeat_with_no_welcome_ends_the_session() {
-        let mut p = pair_before_welcome(Agent::new(None, crate::exec::MAX_CONCURRENT)).await;
+        let mut p = pair_before_welcome(quiet_agent(None, crate::exec::MAX_CONCURRENT)).await;
         assert!(
             !p.beat().await,
             "one heartbeat with no welcome must not survive"
@@ -2262,7 +2458,7 @@ mod tests {
     async fn a_version_refusal_forces_the_maximum_backoff() {
         let fake = FakeHub::new().await;
         let dialer = fake.dialer();
-        let agent = Agent::new(None, 1);
+        let agent = quiet_agent(None, 1);
         let delays = Arc::new(Mutex::new(Vec::<Duration>::new()));
         let record = Arc::clone(&delays);
         let (beat_keep, _) = mpsc::unbounded_channel::<oneshot::Sender<bool>>();
@@ -2383,7 +2579,7 @@ mod tests {
         .unwrap();
         let server = tokio::spawn(serve_one(acceptor.clone(), listener));
         let ws = dialer.dial().await.expect("a trusted TLS dial");
-        let agent = Agent::new(None, 1);
+        let agent = quiet_agent(None, 1);
         let (_b, rx) = mpsc::unbounded_channel();
         let client = tokio::spawn(async move { serve(ws, &agent, Beats::Manual(rx)).await });
         let (listener, got_hello) = tokio::time::timeout(PATIENCE, server)

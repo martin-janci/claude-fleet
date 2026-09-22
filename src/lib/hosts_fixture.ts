@@ -118,6 +118,7 @@ export function session(hostAlias: string, name: string, over: Partial<SessionRo
     context_at: null,
     context_stale: false,
     tmux_pane_id: null,
+    pending_input: null,
     ...over,
   };
 }
