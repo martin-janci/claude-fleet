@@ -25,10 +25,12 @@ download is always traceable to the release it came from.
 ### Verify what you downloaded
 
 Each release attaches a `SHA256SUMS` asset covering **every** asset on that
-release — desktop bundles included — and a release is not published unless
-that file is complete (`verify-release` in `.github/workflows/release.yml`).
-Nothing here is code-signed (see below), so this checksum is the only
-integrity check available; it is worth the ten seconds.
+release — desktop bundles included. If that file is incomplete, or any asset
+the manifest declares is missing, the release run fails (`verify-release` in
+`.github/workflows/release.yml`); the draft is still published by hand, so
+treat a red release run as a reason not to trust the draft. Nothing here is
+code-signed (see below), so this checksum is the only integrity check
+available; it is worth the ten seconds.
 
 From the directory you downloaded into, with `v0.3.0` replaced by the release
 you took:
