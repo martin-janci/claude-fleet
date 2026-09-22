@@ -14,7 +14,7 @@
   // send-keys into the REPL), so anything typed here is what the terminal
   // would have received. bg / external rows have no REPL to type into, so
   // they stay read-only.
-  import { untrack, tick, setContext } from 'svelte';
+  import { untrack, tick, setContext, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, sessions, type SessionRow } from './sessions';
   import { hintAnchor } from './hints';
@@ -95,7 +95,6 @@
     type ConvGroup,
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
-  import { hubStatus, ownsTheFleet } from './hub';
   import { invokeCmd } from './result';
   import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, type Attachment, type PickedFile } from './attachments';
   import { withAttachments, tooLong } from './attach_prompt';
@@ -112,18 +111,32 @@
     onOpenTerminal,
     // Find is Cmd+F on macOS (Ctrl+F moves the caret there), Ctrl+F elsewhere.
     isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator),
-    // Opt-out for a host that brings its own composer over this same
-    // session (AgentPanel: the context chip's prefix has to go through a
-    // composer that knows about it). Two composers sending independently
-    // into one tmux REPL is the interleaved-paste failure this flag exists
-    // to prevent — a host that sets this false owns being the only sender.
+    // Opt-out for a host that renders its own prompt UI over this same
+    // session. Two composers sending independently into one tmux REPL is the
+    // interleaved-paste failure this flag exists to prevent — a host that
+    // sets this false owns being the only sender, and owns everything that
+    // goes with that (see `promptPrefix`).
     showComposer = true,
+    // Text prepended to every prompt this composer sends (AgentPanel's
+    // context chip). A prefix is a reason to feed THIS composer, not to
+    // build a second one: `pending`, `optimistic` and the immediate refetch
+    // are all set in `send()` and nowhere else, so a host that sends around
+    // it gets a sheet that shows nothing until the next quiet tick — 15 s
+    // later — with no indicator in between. A slash command is exempt: the
+    // REPL reads the line exactly as typed.
+    promptPrefix = null,
+    // Rendered directly above the composer, inside the panel's own layout
+    // (AgentPanel's removable context chip). Only shown when there IS a
+    // composer to sit above.
+    composerAbove,
   }: {
     session: SessionRow;
     visible: boolean;
     onOpenTerminal?: () => void;
     isMac?: boolean;
     showComposer?: boolean;
+    promptPrefix?: string | null;
+    composerAbove?: Snippet;
   } = $props();
 
   let conv = $state<Conversation | null>(null);
@@ -851,15 +864,16 @@
   // once, then on the interval. `probeLive` is a boolean derived, so a fresh
   // probe (which yields a new `indicator` object) never restarts the timer.
   // bg / external rows have no pane: the backend would reject every probe.
-  // `session_activity` is also local-only in remote mode (the hub's pane
-  // reads answer a different shape) — a hub client must not poll it every 2s
-  // only to drop an E_LOCAL_ONLY every time.
+  //
+  // A hub client probes too. It used to be excluded — `session_activity` was
+  // local-only, so the call could only ever have returned E_LOCAL_ONLY — and
+  // the cost was that a remote desktop had NO live signal at all between one
+  // row status change and the next: no spinner, no activity line, nothing
+  // moving for the length of a turn. The command routes to the hub's own
+  // tool now, which reads the pane over the ssh connection that can actually
+  // reach the host.
   const probeLive = $derived(
-    visible &&
-      !hasNoPane(session) &&
-      indicator !== null &&
-      viewing === null &&
-      ownsTheFleet($hubStatus),
+    visible && !hasNoPane(session) && indicator !== null && viewing === null,
   );
   $effect(() => {
     if (!probeLive) return;
@@ -1076,7 +1090,11 @@
       paths = up.value;
     }
 
-    const body = withAttachments(text, paths);
+    // The prefix rides in front of the attachment line, and never in front
+    // of a slash command: `/clear` with a paragraph glued to its nose is not
+    // a command the REPL runs.
+    const prefixed = promptPrefix && !text.startsWith('/') ? `${promptPrefix}\n\n${text}` : text;
+    const body = withAttachments(prefixed, paths);
     // A remote send is quoted twice (see attach_prompt.ts's header comment
     // for why that compounds rather than doubles), so the bound applied
     // here must match the host the prompt is actually going to.
@@ -1647,6 +1665,18 @@
                   {/if}
                 </div>
               {/if}
+              {#if turn.reminders?.length}
+                <details class="reminders" data-testid="conv-reminders">
+                  <summary
+                    >{turn.reminders.length === 1
+                      ? 'system reminder'
+                      : `${turn.reminders.length} system reminders`}</summary
+                  >
+                  {#each turn.reminders as r, k (k)}
+                    <pre class="reminder-body" data-testid="conv-reminder-body">{r}</pre>
+                  {/each}
+                </details>
+              {/if}
               <div class="reply">
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
@@ -1696,6 +1726,30 @@
                         {/if}
                       {/if}
                     </div>
+                  {:else if g.kind === 'bash'}
+                    {@const bashKey = `bash:${turnKey(turn, i)}:${j}`}
+                    {@const out = [g.stdout, g.stderr].filter((o) => o !== null).join('\n')}
+                    {@const longOut = out !== '' && isLongOutput(out)}
+                    <div class="command" data-testid="conv-bash">
+                      <code><span class="bang">!</span>{g.command}</code>
+                      {#if out !== ''}
+                        <pre
+                          class="command-out"
+                          class:err={g.stdout === null && g.stderr !== null}
+                          class:clamped={longOut && !expanded.has(bashKey)}
+                          style:--clamp-lines={CMD_CLAMP_LINES}>{out}</pre>
+                        {#if longOut}
+                          <button type="button" class="linkish" data-testid="conv-bash-toggle" onclick={() => togglePrompt(bashKey)}
+                            >{expanded.has(bashKey) ? 'Show less' : 'Show more'}</button
+                          >
+                        {/if}
+                      {/if}
+                    </div>
+                  {:else if g.kind === 'harness'}
+                    <details class="harness" data-testid="conv-harness">
+                      <summary>{g.tag}</summary>
+                      <pre class="harness-body">{g.body}</pre>
+                    </details>
                   {:else if g.kind === 'interrupt'}
                     <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
                   {:else if g.kind === 'notification'}
@@ -1799,6 +1853,9 @@
     {/if}
   {/if}
   </div>
+  {#if composerAbove && showComposer && canPrompt && bgEntry === null}
+    <div class="composer-above">{@render composerAbove()}</div>
+  {/if}
   {#if showComposer && canPrompt && bgEntry === null}
     <form
       class="composer"
@@ -1966,6 +2023,12 @@
 </div>
 
 <style>
+  .composer-above {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    padding: 0 var(--chat-inset);
+  }
   .conversation-panel {
     /* The reading column every part of the thread lines up with: the turns,
        the sticky header, the chips, the slash menu and the composer. */
@@ -2572,6 +2635,45 @@
        line-height and 0.7rem its vertical padding. */
     max-height: calc(var(--clamp-lines) * 1.45em + 0.7rem);
     overflow: hidden;
+  }
+  .command-out.err {
+    color: var(--usage-crit);
+  }
+  .command .bang {
+    opacity: 0.6;
+    margin-right: 0.15rem;
+  }
+  /* A system reminder and an unrecognised harness block are both noise the
+     harness added, not the human's words: folded to one quiet line, opened
+     only when someone wants to see what was in it. */
+  .reminders,
+  .harness {
+    margin: 0.25rem 0 0.4rem;
+    font-size: 0.72rem;
+  }
+  .reminders > summary,
+  .harness > summary {
+    cursor: pointer;
+    display: inline-block;
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--fg-muted);
+    background: var(--bg-pane);
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  }
+  .reminder-body,
+  .harness-body {
+    margin: 0.3rem 0 0;
+    padding: 0.35rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-pane);
+    color: var(--fg-muted);
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .interrupt {
     margin: 0.3rem 0 0.5rem;

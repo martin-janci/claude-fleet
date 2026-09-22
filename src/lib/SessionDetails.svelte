@@ -19,8 +19,8 @@
     discardKillSession,
   } from './sessions';
   import { canMoveSession, moveBlockedReason } from './moveEligibility';
-  import { transferSheetFor, startMove, adoptPartial } from './moves';
-  import { moveOrigin, unresolvedPartial, type SessionEvent } from './timeline';
+  import { transferSheetFor, startMove, adoptPartial, adoptWait } from './moves';
+  import { moveOrigin, unresolvedPartial, unresolvedWait, type SessionEvent } from './timeline';
   import { projectById } from './projects';
   import { selectSession, selectSessionExplicitly, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
@@ -180,7 +180,18 @@
     if (!r.ok) pushError(r.error, 'Remove failed');
   }
 
+  // Restart stops the running claude and loses whatever it was mid-way
+  // through. Kill and Recreate beside it both confirm; this did not, and it
+  // wears the same `↻` the app uses for a harmless Refresh.
+  let confirmingRestart = $state(false);
+  function askRestart() {
+    confirmingRestart = true;
+  }
+  function cancelRestart() {
+    confirmingRestart = false;
+  }
   async function onRestart() {
+    confirmingRestart = false;
     const r = await restartSession(session.host_alias, session.tmux_name);
     if (!r.ok) pushError(r.error, 'Restart failed');
   }
@@ -368,6 +379,12 @@
     return stillThere ? null : origin;
   });
   const unresolvedMove = $derived(unresolvedPartial(timelineEvents));
+  /** A pending wait for a busy source to go idle, recorded on this session's
+   *  own timeline — the wait's `session_move_waiting` is only ever written
+   *  to the source's own row, so this only ever finds one on the source's
+   *  own panel, the same way `unresolvedMove` only ever names a partial on
+   *  a row involved in it. */
+  const unresolvedWaitRec = $derived(unresolvedWait(timelineEvents));
 
   function openMoveBack() {
     if (!moveBackOrigin) return;
@@ -384,6 +401,16 @@
     if (!unresolvedMove) return;
     adoptPartial(unresolvedMove, session.tmux_name);
     transferSheetFor.set(unresolvedMove.sourceSessionId ?? session.id);
+  }
+
+  /** Same recovery shape as `openFinishOrUndo`, for a wait instead of a
+   *  partial: `adoptWait` rebuilds the run from the recorded event (a no-op
+   *  if a live one already exists), then the sheet opens on it — Cancel and
+   *  the reason it ended live there, not in this panel. */
+  function openWait() {
+    if (!unresolvedWaitRec) return;
+    adoptWait(unresolvedWaitRec, session.tmux_name);
+    transferSheetFor.set(unresolvedWaitRec.sessionId);
   }
 
   async function doRecreate() {
@@ -619,7 +646,7 @@
       </button>
       <button
         class="ghost"
-        onclick={onRestart}
+        onclick={askRestart}
         disabled={restartBlocked !== null}
         title={restartBlocked ?? ''}
         data-testid="restart-from-details"
@@ -676,6 +703,11 @@
         </button>
         <button class="ghost" onclick={openFinishOrUndo} data-testid="details-undo-move">
           Undo the move
+        </button>
+      {/if}
+      {#if unresolvedWaitRec}
+        <button class="ghost" onclick={openWait} data-testid="details-resume-wait">
+          ⇄ Waiting to move to {unresolvedWaitRec.toHost}
         </button>
       {/if}
       {#if isInactiveAgent(session)}
@@ -739,6 +771,21 @@
 
 {#if reviewOpen}
   <ReviewDialog source={session} onClose={() => (reviewOpen = false)} />
+{/if}
+
+{#if confirmingRestart}
+  <ConfirmDialog
+    title="Restart claude?"
+    confirmLabel="Restart"
+    danger
+    onconfirm={onRestart}
+    oncancel={cancelRestart}
+    confirmTestId="confirm-restart-details"
+  >
+    This stops the claude process in <code>{session.tmux_name}</code> on
+    <code>{session.host_alias}</code> and starts a fresh one. Anything it is working
+    on right now is lost; the tmux session and the worktree are kept. Continue?
+  </ConfirmDialog>
 {/if}
 
 {#if confirmingKill}

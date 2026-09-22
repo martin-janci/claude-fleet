@@ -37,6 +37,9 @@ export interface SessionRow {
   reviews_session_id: number | null;
   worktree_key: string | null;
   lost_at: number | null;
+  /** Why the row was marked lost: "host_reboot" | "tmux_server_gone" |
+   *  "missing" | "killed" | null (never lost, or still live). */
+  lost_reason?: string | null;
   // Claude agent fields — null when claude CLI not installed or session not managed by Claude Code
   claude_session_id: string | null;
   claude_status: ClaudeStatus | null;
@@ -110,6 +113,10 @@ export interface SessionRow {
   context_stale: boolean;
   /** tmux pane id (`%17`) reconcile last saw for this row. */
   tmux_pane_id: string | null;
+  /** Bumped by the backend on every write (migration 042); orders a
+   *  command's return value against a row event. Absent on rows built
+   *  client-side and on rows from a hub older than the column. */
+  row_version?: number;
   // Pane dialog (migration 040): the permission/question dialog a blocked
   // pane is showing, derived alongside current_activity. Null whenever the
   // pane shows no such dialog.
@@ -157,16 +164,40 @@ export function formatCostMicros(micros: number | null | undefined): string {
   return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
+// Monotonic guard: a payload carrying a lower row_version than the row we
+// hold is a stale snapshot (a command return value that raced a newer
+// `session:updated`). Equal versions still apply. A payload without one is
+// never rejected for it — only a KNOWN older version is. Shared by the
+// `rows` store's `isStale` option and by `loadSessions`'s own list/event
+// reconciliation below, so both use exactly the same rule.
+function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
+  return (
+    incoming.row_version !== undefined &&
+    current.row_version !== undefined &&
+    incoming.row_version < current.row_version
+  );
+}
+
+/** Human label for a ghost row's `lost_reason`, or null when the reason has
+ *  no dedicated wording (e.g. "missing", "killed", or none recorded). */
+export function lostReasonLabel(reason: string | null | undefined): string | null {
+  switch (reason) {
+    case 'host_reboot':
+      return 'host rebooted';
+    case 'tmux_server_gone':
+      return 'tmux server stopped';
+    default:
+      return null;
+  }
+}
+
 const rows = createRowStore<SessionRow, number>({
   key: (s) => s.id,
   // Both the optimistic `removeSession()` and the `session:killed` event
   // delete a row; a `session:updated` still in flight for that id would
   // otherwise re-insert the dead row ("ghost session").
   tombstoneMs: 5000,
-  // Monotonic guard: don't let a staler payload (e.g. a command return value
-  // that raced a newer `session:updated` event) clobber a fresher row. Equal
-  // timestamps still apply — they may carry a status change.
-  isStale: (incoming, current) => incoming.last_activity_at < current.last_activity_at,
+  isStale: sessionIsStale,
 });
 export const sessions = rows.store;
 export const resetTombstonesForTests = rows.resetTombstonesForTests;
@@ -203,7 +234,21 @@ showRowDetails.subscribe((v) => writePref('rows.details', v));
 export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
   if (r.ok) {
-    sessions.set(r.value);
+    // The list owns ORDER (the backend's `ORDER BY last_activity_at DESC`);
+    // events own CONTENT. Rebuilding from the current store's position would
+    // freeze every row at wherever it first landed — position has to be
+    // taken from the list every time, and content still has to lose to a
+    // `session:updated` that raced this call and is strictly newer.
+    sessions.update((cur) => {
+      const byId = new Map(cur.map((s) => [s.id, s] as const));
+      const next: SessionRow[] = [];
+      for (const listed of r.value) {
+        if (rows.isTombstoned(listed.id)) continue;
+        const current = byId.get(listed.id);
+        next.push(current && sessionIsStale(listed, current) ? current : listed);
+      }
+      return next;
+    });
     sessionsLoaded.set(true);
   }
   return r;
@@ -403,6 +448,12 @@ export interface NewSessionArgs {
    * `dev-<owner>-<repo>--…` slug.
    */
   friendly_name?: string | null;
+  /**
+   * Resume this Claude conversation id instead of minting a fresh one (from
+   * discover_lost_sessions). Rejected for a shell session and when a session
+   * on the host already holds that conversation.
+   */
+  resume_claude_session_id?: string;
 }
 
 export async function newSessionAbortable(
@@ -516,6 +567,94 @@ export async function recreateSession(sessionId: number): Promise<Result<Session
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;
+}
+
+/** Mirrors `service::sessions::restore::RestorePlanEntry`: one planned restore
+ *  action. `action` is `"restore"` for a session the batch will attempt to
+ *  resume, `"skip"` (with `reason` set) for one an explicit `sessionIds`
+ *  request named that cannot be restored. */
+export interface RestorePlanEntry {
+  session_id: number;
+  tmux_name: string | null;
+  cwd: string | null;
+  claude_session_id: string | null;
+  friendly_name: string | null;
+  action: 'restore' | 'skip';
+  reason: string | null;
+}
+
+/** Mirrors `service::sessions::restore::RestoreOutcome`: the result of one
+ *  restore attempt. */
+export interface RestoreOutcome {
+  session_id: number;
+  tmux_name: string;
+  ok: boolean;
+  error: string | null;
+}
+
+/** Mirrors `service::sessions::restore::RestoreReport`. */
+export interface RestoreReport {
+  host_alias: string;
+  dry_run: boolean;
+  plan: RestorePlanEntry[];
+  results: RestoreOutcome[];
+}
+
+/** Batch-restore a host's sessions lost to a reboot or a tmux server restart,
+ *  over `recreate_session`. Pass `dryRun: true` first to get the plan (no
+ *  ssh, no writes); `sessionIds` restricts the batch to those fleet session
+ *  ids instead of every lost, resumable session on the host. The backend
+ *  emits `session:updated` row events for anything it restores, so nothing
+ *  is merged into the sessions store here. */
+export async function restoreHostSessions(
+  hostAlias: string,
+  opts: { dryRun?: boolean; sessionIds?: number[] } = {},
+): Promise<Result<RestoreReport>> {
+  return invokeCmd<RestoreReport>('restore_host_sessions', {
+    args: {
+      host_alias: hostAlias,
+      dry_run: opts.dryRun ?? false,
+      session_ids: opts.sessionIds ?? null,
+    },
+  });
+}
+
+/** Mirrors `service::sessions::discover::LostCandidate`: one transcript the
+ *  host has (possibly already held by a fleet row — `existing_session_id`),
+ *  ranked and enriched from the store. `rank_hint` is relative to the host's
+ *  last boot. `resumable` is true only when `new_session` would start the
+ *  pane in exactly `cwd` (a registered worktree or the project root) —
+ *  anywhere else `claude --resume` misses the transcript and a new, empty
+ *  conversation starts instead. `derived_tmux_name` is set only when
+ *  `resumable`, and is a hint for `new_session`'s `name` — it may already be
+ *  taken by a second session on the same worktree. Restore a resumable
+ *  candidate with `new_session({ hostAlias, projectId, worktreeId, name:
+ *  derivedTmuxName, resumeClaudeSessionId: claudeSessionId })`. */
+export interface LostCandidate {
+  cwd: string;
+  git_branch: string | null;
+  claude_session_id: string;
+  transcript_mtime: number;
+  derived_tmux_name: string | null;
+  project_id: number | null;
+  worktree_id: number | null;
+  existing_session_id: number | null;
+  rank_hint: 'before_boot' | 'after_boot' | 'stale' | 'unknown';
+  resumable: boolean;
+}
+
+/** Scan a host's Claude transcripts (`~/.claude/projects`) for lost
+ *  conversations (one a fleet row already holds is flagged via
+ *  `existing_session_id`) and rank/enrich them from the store. Read-only: no
+ *  writes, nothing to merge into the sessions store. `limit` caps how many
+ *  transcripts (newest first) are read; omit for the backend default (50). */
+export async function discoverLostSessions(
+  hostAlias: string,
+  limit?: number,
+): Promise<Result<LostCandidate[]>> {
+  return invokeCmd<LostCandidate[]>('discover_lost_sessions', {
+    args: { host_alias: hostAlias, limit: limit ?? null },
+  });
 }
 
 export async function dismissGhostSession(sessionId: number): Promise<Result<void>> {

@@ -32,6 +32,14 @@ pub struct NewSessionArgs {
     /// in-session agent can refine it later via the `set_friendly_name`
     /// MCP tool.
     pub friendly_name: Option<String>,
+    /// Resume this Claude conversation id instead of minting a fresh one (a
+    /// conversation found by `discover_lost_sessions`). Must be a lowercase
+    /// UUID not already held by a session on the host; rejected for a
+    /// `"shell"` session. The pane starts in `worktree_id` / the project root,
+    /// which must be the transcript's cwd for `claude --resume` to find it
+    /// (see `LostCandidate::resumable`).
+    #[serde(default)]
+    pub resume_claude_session_id: Option<String>,
 }
 
 /// An existing worktree to make sure is present on a remote host, ahead of
@@ -168,7 +176,11 @@ pub(super) fn ensure_remote_project_script(
     let root = quote(project_root);
     let mut script = format!(
         "set -e\n\
-         if [ ! -d {root}/.git ]; then mkdir -p \"$(dirname -- {root})\" && git clone {url} {root}; fi\n",
+         if [ ! -d {root}/.git ]; then \
+           mkdir -p \"$(dirname -- {root})\"; \
+           tmp=\"$(dirname -- {root})/.fleet-clone-$$\"; rm -rf \"$tmp\"; \
+           git clone {url} \"$tmp\" && {{ [ ! -e {root} ] || rmdir {root}; }} && mv \"$tmp\" {root} || {{ rm -rf \"$tmp\"; exit 1; }}; \
+         fi\n",
         url = quote(clone_url),
     );
     if let Some(wt) = worktree {
@@ -313,6 +325,17 @@ pub async fn new_session(
     if let Some(fname) = args.friendly_name.as_deref() {
         crate::validate::friendly_name(fname)?;
     }
+    if let Some(id) = args.resume_claude_session_id.as_deref() {
+        crate::validate::claude_session_id(id)?;
+        if args.kind.as_deref() == Some("shell") {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "resume_claude_session_id applies to Claude sessions, not shell sessions",
+            ));
+        }
+        reject_held_conversation(&*lock(store)?, &args.host_alias, id)?;
+    }
+    reject_lost_session_name(&*lock(store)?, &args.host_alias, &args.name)?;
 
     if let Some(name) = args.new_worktree.as_deref() {
         crate::validate::git_ref(name)?;
@@ -341,6 +364,73 @@ pub async fn new_session(
     let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
 
     new_session_inner(args, store, ssh, token).await
+}
+
+/// Refuse a name that belongs to a lost session with a resumable
+/// conversation: reconcile's upsert (ON CONFLICT host_alias, tmux_name) would
+/// revive that row and `set_claude_session_id` would overwrite its id, losing
+/// the conversation `restore_host_sessions` could bring back. Runs before any
+/// tmux call and before the work/shell split.
+pub(crate) fn reject_lost_session_name(
+    s: &Store,
+    host_alias: &str,
+    name: &str,
+) -> Result<(), IpcError> {
+    match s.lost_resumable_session_named(host_alias, name)? {
+        Some(row) => Err(IpcError::new(
+            codes::E_EXISTS,
+            format!(
+                "{name} belongs to a lost session (id {}); restore it with restore_host_sessions or dismiss it first",
+                row.id
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Refuse to resume a conversation some session on the host already holds
+/// (live or lost): two panes on one transcript would interleave, and a lost
+/// holder should be brought back by `restore_host_sessions` instead.
+pub(crate) fn reject_held_conversation(
+    s: &Store,
+    host_alias: &str,
+    claude_id: &str,
+) -> Result<(), IpcError> {
+    match s.session_with_claude_id(host_alias, claude_id)? {
+        Some(row) => Err(IpcError::new(
+            codes::E_EXISTS,
+            format!(
+                "conversation {claude_id} already belongs to session {} ({}); restore it with restore_host_sessions instead",
+                row.id, row.tmux_name
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The Claude conversation id a new session runs under, and its pane command.
+/// Work/review sessions get an app-minted id so a later recreate/restart
+/// resumes THIS conversation, not "most recent for the cwd" — or, with
+/// `resume_claude_session_id`, the given conversation, launched exactly as
+/// `recreate_pane_command` would. A shell session has no id.
+pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, String) {
+    if args.kind.as_deref() == Some("shell") {
+        return (
+            None,
+            crate::tmux::shell_pane_command(args.start_command.as_deref()),
+        );
+    }
+    match args.resume_claude_session_id.as_deref() {
+        Some(id) => (
+            Some(id.to_string()),
+            recreate_pane_command("work", Some(id), &args.name),
+        ),
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            let pane = crate::tmux::pane_command_for(Some(&id), &args.name);
+            (Some(id), pane)
+        }
+    }
 }
 
 /// Mint a tmux name for a `new_session` call that left `name` empty.
@@ -375,10 +465,16 @@ pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<Stri
     } else {
         None
     };
-    let deterministic = tmux_safe(&match &wt {
-        Some(w) => format!("{base}--{w}{term}"),
-        None => format!("{base}{term}"),
-    });
+    // `derive_tmux_name` (`discover.rs`) mints the same `dev-<owner>-<repo>`
+    // / `dev-<owner>-<repo>--<worktree>` shape from a worktree key, "main"
+    // meaning the repo root — the same convention `wt: None` encodes here.
+    // `tmux_safe` is idempotent (it only ever removes `.`/`:`), so applying
+    // it again after appending `term` is safe.
+    let worktree_key = wt.as_deref().unwrap_or("main");
+    let deterministic = tmux_safe(&format!(
+        "{}{term}",
+        derive_tmux_name(&owner, &repo, worktree_key)
+    ));
     let on_host = s.list_sessions_for_host(&args.host_alias)?;
     if !on_host.iter().any(|r| r.tmux_name == deterministic) {
         return Ok(deterministic);
@@ -595,18 +691,7 @@ pub(super) async fn new_session_inner(
     // A "shell" session runs a plain login shell in the pane instead of
     // Claude Code. Any other value (incl. None) is treated as a "work" session.
     let is_shell = args.kind.as_deref() == Some("shell");
-    // Work/review sessions get an app-minted Claude session id so a later
-    // recreate/restart resumes THIS conversation, not "most recent for the cwd".
-    let claude_id: Option<String> = if is_shell {
-        None
-    } else {
-        Some(uuid::Uuid::new_v4().to_string())
-    };
-    let pane_cmd: String = if is_shell {
-        crate::tmux::shell_pane_command(args.start_command.as_deref())
-    } else {
-        crate::tmux::pane_command_for(claude_id.as_deref(), &args.name)
-    };
+    let (claude_id, pane_cmd) = claude_id_and_pane_cmd(&args);
 
     // Automatic self-repair for an EXISTING worktree row / main checkout: the
     // row may point at a directory that was deleted since it was written.
@@ -670,68 +755,52 @@ pub(super) async fn new_session_inner(
             )
         })?;
 
-    // PROD-5: the fleet created this session now. Soft-fail (cosmetic).
-    if let Err(e) = s.set_started_at(row.id, now_unix()) {
-        tracing::warn!(
-            session = %args.name,
-            error = %e,
-            "[new_session] storing started_at failed"
-        );
-    }
-
-    // Deterministic friendly name: trust an explicit user value, otherwise
-    // derive from the branch so the sidebar never shows the raw slug. Soft-
-    // fail like the claude_session_id write below — a missing label is
-    // cosmetic, the session is live.
     let derived_friendly = derive_friendly_name(&s, &args, row.worktree_id)?;
-    if let Some(ref value) = derived_friendly {
-        if let Err(e) = s.set_friendly_name(&args.host_alias, &args.name, Some(value)) {
-            tracing::warn!(
-                session = %args.name,
-                error = %e,
-                "[new_session] storing friendly_name failed"
-            );
-        }
-    }
+    finalize_new_session(
+        &s,
+        row.id,
+        &args.host_alias,
+        &args.name,
+        derived_friendly.as_deref(),
+        claude_id.as_deref(),
+        is_shell,
+    )
+}
 
-    // Reconcile inserts every session as kind="work"; tag shell sessions
-    // afterwards. The session upsert preserves `kind` on re-reconcile.
+/// The writes `new_session` makes after the session exists, then ONE re-read
+/// so the returned row is the row as of the last write (the frontend merges
+/// it optimistically and orders it by `row_version`). Soft-fails the
+/// cosmetic writes (`started_at`, friendly name, claude id) with a warning;
+/// the `kind` tag and the final read are hard failures.
+pub(super) fn finalize_new_session(
+    s: &Store,
+    row_id: i64,
+    host_alias: &str,
+    name: &str,
+    friendly_name: Option<&str>,
+    claude_id: Option<&str>,
+    is_shell: bool,
+) -> Result<SessionRow, IpcError> {
+    // PROD-5: the fleet created this session now.
+    if let Err(e) = s.set_started_at(row_id, now_unix()) {
+        tracing::warn!(session = %name, error = %e, "[new_session] storing started_at failed");
+    }
+    if let Some(value) = friendly_name {
+        if let Err(e) = s.set_friendly_name(host_alias, name, Some(value)) {
+            tracing::warn!(session = %name, error = %e, "[new_session] storing friendly_name failed");
+        }
+    }
     if is_shell {
-        s.set_session_kind(row.id, "shell", None)?;
-        return s
-            .get_session(&args.name, &args.host_alias)?
-            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after kind tag"));
-    }
-    // Persist the minted Claude session id. Soft-fail: the session is live; a
-    // failed write just means a future recreate falls back to `cl --continue`.
-    let mut row = row;
-    if let Some(ref cid) = claude_id {
-        if let Err(e) = s.set_claude_session_id(row.id, cid) {
-            tracing::warn!(
-                session = %args.name,
-                error = %e,
-                "[new_session] storing claude_session_id failed"
-            );
-        } else {
-            row.claude_session_id = Some(cid.clone());
-            // The rebind reset the context; return what the event carried.
-            if let Ok(Some(fresh)) = s.get_session_by_id(row.id) {
-                row.context = fresh.context;
-                row.context_pct = fresh.context_pct;
-                row.current_activity = fresh.current_activity;
-                row.last_prompt = fresh.last_prompt;
-            }
+        s.set_session_kind(row_id, "shell", None)?;
+    } else if let Some(cid) = claude_id {
+        // Soft-fail: the session is live; a failed write just means a future
+        // recreate falls back to `cl --continue`.
+        if let Err(e) = s.set_claude_session_id(row_id, cid) {
+            tracing::warn!(session = %name, error = %e, "[new_session] storing claude_session_id failed");
         }
     }
-    if derived_friendly.is_some() {
-        // The set_friendly_name call above emitted a session_updated row
-        // event already; we refresh in-memory so the value returned to the
-        // caller matches what the sidebar will display.
-        if let Some(refreshed) = s.get_session(&args.name, &args.host_alias)? {
-            row.friendly_name = refreshed.friendly_name;
-        }
-    }
-    Ok(row)
+    s.get_session_by_id(row_id)?
+        .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after creation"))
 }
 
 /// Resolve the friendly name to persist for a freshly created session:
@@ -950,7 +1019,10 @@ pub(super) async fn kill_session_with(
             .unwrap_or_else(|| args.name.trim_start_matches("bg:").to_string());
         let status = claude_status.as_deref();
         let agents = if bg_kill_needs_listing(&kind, status) {
-            exec_for(&args.host_alias, ssh).list_claude_agents().await
+            exec_for(&args.host_alias, ssh)
+                .list_claude_agents()
+                .await
+                .unwrap_or_default()
         } else {
             Vec::new()
         };

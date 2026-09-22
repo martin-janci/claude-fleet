@@ -56,6 +56,8 @@ use params::CancelTaskParams;
 use params::*;
 use support::*;
 
+pub use support::tool_deadline;
+
 /// The MCP server handler. Cloned per session by the streamable-HTTP service;
 /// every clone shares the same backend state via the `Arc`s.
 #[derive(Clone)]
@@ -69,7 +71,143 @@ pub struct FleetTools {
     /// Per-caller cap on concurrent bounded waits (S4). Created once in
     /// `new`; every per-MCP-session clone shares it.
     long_polls: Arc<guard::LongPollLimiter>,
+    /// `send_prompt` results by `(caller label, client_msg_id)`, so a
+    /// retried call delivers once. Created once in `new`; every per-MCP-
+    /// session clone shares it.
+    recent_sends: Arc<std::sync::Mutex<RecentSends>>,
     tool_router: ToolRouter<FleetTools>,
+}
+
+/// Where one `client_msg_id` stands.
+///
+/// The `Pending` arm is the whole point: a dedupe cache that is only written
+/// AFTER the send has returned cannot dedupe the window a retry actually
+/// lands in. A prompt takes an SSH round trip plus up to 1.5 s of ack wait,
+/// and the caller that gives up and retries does so DURING that, not after —
+/// so a write-on-success cache delivers twice and then reports one result.
+#[derive(Debug)]
+pub(super) enum SendOutcome {
+    /// Reserved by a send that has not finished. Nothing was returned yet.
+    Pending,
+    /// The result the first send returned; every repeat gets this back.
+    Done(serde_json::Value),
+}
+
+/// What [`RecentSends::reserve`] found for a key.
+#[derive(Debug)]
+pub(super) enum Reservation {
+    /// Nobody holds this key: the caller now does, and MUST end it with
+    /// [`RecentSends::complete`] or [`RecentSends::release`].
+    Fresh,
+    /// A send with this key is still running.
+    Pending,
+    /// It already ran; this is what it returned.
+    Done(serde_json::Value),
+}
+
+/// Bounded, TTL'd memory of `send_prompt` keys and results (S-dedupe).
+#[derive(Default)]
+pub(super) struct RecentSends {
+    entries: std::collections::HashMap<(String, String), (std::time::Instant, SendOutcome)>,
+}
+
+/// How long a completed result is replayed to a repeat of its id.
+pub(super) const RECENT_SENDS_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long a reservation may be held before the sweep takes it back. A send
+/// is bounded by its SSH timeout plus the ack wait, well under this; anything
+/// still `Pending` after it is a task that died between `reserve` and its
+/// `complete`/`release`, and it must not pin the key for the result TTL.
+pub(super) const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+pub(super) const RECENT_SENDS_MAX: usize = 1024;
+
+impl RecentSends {
+    /// Claim `id` for `caller`, or say who already has it.
+    pub(super) fn reserve(&mut self, caller: &str, id: &str) -> Reservation {
+        self.sweep();
+        let key = (caller.to_string(), id.to_string());
+        match self.entries.get(&key) {
+            Some((_, SendOutcome::Done(v))) => return Reservation::Done(v.clone()),
+            Some((_, SendOutcome::Pending)) => return Reservation::Pending,
+            None => {}
+        }
+        self.make_room();
+        self.entries
+            .insert(key, (std::time::Instant::now(), SendOutcome::Pending));
+        Reservation::Fresh
+    }
+
+    /// The reserved send returned `value`: replay it to every repeat.
+    pub(super) fn complete(&mut self, caller: &str, id: &str, value: serde_json::Value) {
+        self.entries.insert(
+            (caller.to_string(), id.to_string()),
+            (std::time::Instant::now(), SendOutcome::Done(value)),
+        );
+    }
+
+    /// The reserved send failed, so nothing happened under this key and a
+    /// retry with it must be allowed to deliver — which is the one thing
+    /// `client_msg_id` is for.
+    pub(super) fn release(&mut self, caller: &str, id: &str) {
+        self.entries.remove(&(caller.to_string(), id.to_string()));
+    }
+
+    /// Keep the map bounded under a chatty client: drop the oldest COMPLETED
+    /// entry, and only when there is none, the oldest entry of any kind.
+    /// Evicting a live reservation costs the dedupe guarantee for that key,
+    /// so it is the last resort rather than the first.
+    fn make_room(&mut self) {
+        if self.entries.len() < RECENT_SENDS_MAX {
+            return;
+        }
+        let oldest_done = self
+            .entries
+            .iter()
+            .filter(|(_, (_, out))| matches!(out, SendOutcome::Done(_)))
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(k, _)| k.clone());
+        let victim = oldest_done.or_else(|| {
+            self.entries
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+        });
+        if let Some(k) = victim {
+            self.entries.remove(&k);
+        }
+    }
+
+    fn sweep(&mut self) {
+        let now = std::time::Instant::now();
+        self.entries.retain(|_, (at, out)| {
+            let ttl = match out {
+                SendOutcome::Done(_) => RECENT_SENDS_TTL,
+                SendOutcome::Pending => PENDING_TTL,
+            };
+            now.duration_since(*at) < ttl
+        });
+    }
+
+    /// Age an entry, for the sweep's tests: `Instant` cannot be constructed
+    /// in the past and this map is not on a clock a test can pause.
+    #[cfg(test)]
+    pub(super) fn backdate(&mut self, caller: &str, id: &str, by: std::time::Duration) {
+        if let Some((at, _)) = self.entries.get_mut(&(caller.to_string(), id.to_string())) {
+            *at = at.checked_sub(by).expect("test durations are small");
+        }
+    }
+}
+
+/// Lock `recent_sends` tolerating poison.
+///
+/// The map is a cache, not a consistency boundary: a panic somewhere between
+/// `reserve` and `complete` leaves one key `Pending`, which the sweep takes
+/// back within [`PENDING_TTL`]. Refusing every later send because of that —
+/// which is what `.unwrap()` would do, by panicking again — is strictly worse
+/// than carrying on with a slightly stale cache.
+pub(super) fn lock_sends(
+    m: &std::sync::Mutex<RecentSends>,
+) -> std::sync::MutexGuard<'_, RecentSends> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Server-level instructions handed to every MCP client on `initialize`.
@@ -107,6 +245,7 @@ impl FleetTools {
             tunnels,
             guards,
             long_polls: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            recent_sends: Arc::new(std::sync::Mutex::new(RecentSends::default())),
             tool_router: Self::tool_router(),
         }
     }

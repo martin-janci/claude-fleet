@@ -40,8 +40,9 @@ use fleet_core::service::safe_kill::{
     self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
 };
 use fleet_core::service::sessions::{
-    self, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
-    RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, SendPromptArgs,
+    self, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs, LostCandidate,
+    NewSessionArgs, RecreateSessionArgs, RelatedSessionsArgs, RenameSessionArgs,
+    RestartSessionArgs, RestoreHostSessionsArgs, RestoreReport, SendPromptArgs,
     SetFriendlyNameArgs, SpawnReviewArgs,
 };
 use fleet_core::ssh::SshClient;
@@ -189,6 +190,30 @@ pub async fn recreate_session(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     routed::recreate_session(&backend, args, &store, &ssh).await
+}
+
+/// Batch-restore a host's sessions lost to a reboot or a tmux server
+/// restart, over `recreate_session`. Logic lives in `service::sessions::restore`.
+#[tauri::command]
+pub async fn restore_host_sessions(
+    args: RestoreHostSessionsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<RestoreReport, IpcError> {
+    routed::restore_host_sessions(&backend, args, &store, &ssh).await
+}
+
+/// Scan a host's Claude transcripts for lost conversations (rows that already
+/// hold one are flagged via `existing_session_id`) and rank/enrich them. Read-only. Logic lives in `service::sessions::discover`.
+#[tauri::command]
+pub async fn discover_lost_sessions(
+    args: DiscoverLostSessionsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<Vec<LostCandidate>, IpcError> {
+    routed::discover_lost_sessions(&backend, args, &store, &ssh).await
 }
 
 #[tauri::command]
@@ -446,8 +471,7 @@ pub async fn session_activity(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<sessions::ActivityProbe, IpcError> {
-    backend.refuse_local_only("session_activity")?;
-    sessions::session_activity(&store, &ssh, args.session_id).await
+    routed::session_activity(&backend, args, &store, &ssh).await
 }
 
 /// The routing, away from `tauri::State` so the tests can drive it.
@@ -605,6 +629,30 @@ pub(crate) mod routed {
         }
     }
 
+    pub async fn restore_host_sessions(
+        backend: &FleetBackend,
+        args: RestoreHostSessionsArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<RestoreReport, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("restore_host_sessions", &args).await,
+            None => sessions::restore_host_sessions(args, store, ssh).await,
+        }
+    }
+
+    pub async fn discover_lost_sessions(
+        backend: &FleetBackend,
+        args: DiscoverLostSessionsArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<Vec<LostCandidate>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("discover_lost_sessions", &args).await,
+            None => sessions::discover_lost_sessions(args, store, ssh).await,
+        }
+    }
+
     pub async fn dismiss_ghost_session(
         backend: &FleetBackend,
         args: DismissGhostSessionArgs,
@@ -715,6 +763,22 @@ pub(crate) mod routed {
     }
 
     /// The `limit` clamp applies to both backends, like `session_history`.
+    /// The probe is the Conversation tab's only live signal between the
+    /// row's own status changes: without it a hub client saw nothing move
+    /// for the whole of a turn. The hub reads the pane over ITS ssh, which
+    /// is the only machine that can reach the host anyway.
+    pub async fn session_activity(
+        backend: &FleetBackend,
+        args: SessionActivityArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<sessions::ActivityProbe, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.session_activity(args.session_id).await,
+            None => sessions::session_activity(store, ssh, args.session_id).await,
+        }
+    }
+
     pub async fn session_conversations(
         backend: &FleetBackend,
         args: SessionConversationsArgs,

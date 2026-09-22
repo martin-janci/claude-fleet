@@ -8,6 +8,16 @@ use super::*;
 const END_COMPACTING: &str = ", current_activity = CASE WHEN current_activity = 'compacting' \
      THEN NULL ELSE current_activity END";
 
+/// What a sender needs to know to wait for the REPL's acknowledgement of a
+/// prompt: the submit counter to watch, and whether this row has EVER been
+/// stamped by a hook (a host without hooks can never ack, so the sender must
+/// not wait for one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptAckState {
+    pub prompt_submit_seq: i64,
+    pub hooks_seen: bool,
+}
+
 impl Store {
     // ---- Private fetch helpers used after writes to produce emit payloads ----
     //
@@ -253,10 +263,11 @@ impl Store {
     /// A row fleet itself killed carries `lost_reason = 'killed'`
     /// ([`Self::mark_session_killed`]): fleet knows that loss is not
     /// ambiguous, so it is never reclassified. Same kind
-    /// filter and same BE-3 guard as the main mark. Reclassified rows do not
-    /// change on the wire (`lost_reason` is not a `SessionRow` field), so no
-    /// event is emitted for them; they are logged with the distinct
-    /// lifecycle kind `"reclassified"`.
+    /// filter and same BE-3 guard as the main mark. Reclassified rows DO
+    /// change on the wire (`lost_reason` is a `SessionRow` field), so a
+    /// `SessionUpdated` is emitted for each of them too, after the tx
+    /// commits, the same way `marked` rows are; they are also logged with
+    /// the distinct lifecycle kind `"reclassified"`.
     ///
     /// Mirrors [`Self::ghost_and_clean_bg_sessions`]'s shape: its own
     /// `unchecked_transaction`, collect the affected rows, commit, and only
@@ -335,9 +346,11 @@ impl Store {
         };
         tx.commit()?;
         for row in &out.reclassified {
-            // Not a wire change, so no event — but the reboot forensics
-            // still need the line. A distinct kind, NOT "lost": the row was
-            // already logged "lost" when Phase 1 ghosted it.
+            // `lost_reason` is on the wire now, so this IS a change the
+            // frontend sees — emit it, re-reading the committed row the same
+            // way every other mutation here announces itself. A distinct
+            // lifecycle kind, NOT "lost": the row was already logged "lost"
+            // when Phase 1 ghosted it.
             tracing::info!(
                 lifecycle = "reclassified",
                 session_id = row.id,
@@ -347,6 +360,7 @@ impl Store {
                 reason,
                 "[session] reclassified"
             );
+            let _ = self.emit_session(row.id);
         }
         for row in &out.marked {
             let change = RowChange::SessionUpdated(row.clone());
@@ -577,6 +591,41 @@ impl Store {
         )?;
         self.emit_session(id)?;
         Ok(())
+    }
+
+    /// The lost row (`lost_at` set) named `tmux_name` on `host_alias` that
+    /// still carries a Claude conversation id — i.e. one `restore_host_sessions`
+    /// could bring back. `new_session` refuses such a name: reconcile's upsert
+    /// would revive the lost row and overwrite its conversation id.
+    pub fn lost_resumable_session_named(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+    ) -> rusqlite::Result<Option<SessionRow>> {
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions
+                 WHERE host_alias=?1 AND tmux_name=?2
+                   AND lost_at IS NOT NULL AND claude_session_id IS NOT NULL"
+            ))?
+            .query_row(rusqlite::params![host_alias, tmux_name], map_session_row)
+            .optional()
+    }
+
+    /// The session on `host_alias` (live or lost) holding Claude conversation
+    /// `claude_id`, if any. `new_session` refuses to resume a held conversation.
+    pub fn session_with_claude_id(
+        &self,
+        host_alias: &str,
+        claude_id: &str,
+    ) -> rusqlite::Result<Option<SessionRow>> {
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions
+                 WHERE host_alias=?1 AND claude_session_id=?2 LIMIT 1"
+            ))?
+            .query_row(rusqlite::params![host_alias, claude_id], map_session_row)
+            .optional()
     }
 
     /// Record the Claude Code session id fleet launched this session with
@@ -812,12 +861,15 @@ impl Store {
     }
 
     /// Stamp when fleet created this session (migration 019). Only sets the
-    /// value once — a re-create keeps the original start.
+    /// value once — a re-create keeps the original start. Emits
+    /// `session_updated` so the sidebar's elapsed label does not wait for a
+    /// re-list.
     pub fn set_started_at(&self, id: i64, at: i64) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE sessions SET started_at=COALESCE(started_at, ?1) WHERE id=?2",
             rusqlite::params![at, id],
         )?;
+        self.emit_session(id)?;
         Ok(())
     }
 
@@ -975,7 +1027,8 @@ impl Store {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
-                     last_hook_at = ?2, pending_input = NULL{END_COMPACTING} WHERE id = ?1"
+                     last_hook_at = ?2, prompt_submit_seq = prompt_submit_seq + 1, \
+                     pending_input = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
@@ -983,6 +1036,25 @@ impl Store {
             return Ok(None);
         }
         Ok(self.emit_session(row_id)?)
+    }
+
+    /// Read [`PromptAckState`] for a row: `prompt_submit_seq` to watch, and
+    /// whether a hook has EVER stamped `last_hook_at` on it. `None` when the
+    /// row is gone.
+    pub fn prompt_ack_state(&self, row_id: i64) -> Result<Option<PromptAckState>, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT prompt_submit_seq, last_hook_at IS NOT NULL FROM sessions WHERE id = ?1",
+                rusqlite::params![row_id],
+                |r| {
+                    Ok(PromptAckState {
+                        prompt_submit_seq: r.get(0)?,
+                        hooks_seen: r.get::<_, i64>(1)? != 0,
+                    })
+                },
+            )
+            .optional()
     }
 
     /// The SessionEnd hook's write: the Claude process is gone. Sets
@@ -1348,6 +1420,69 @@ mod tests {
     }
 
     #[test]
+    fn lost_resumable_session_named_needs_lost_and_a_claude_id() {
+        let s = store();
+        let id_of = |name: &str| s.get_session(name, "local").unwrap().unwrap().id;
+        for name in ["live", "lost-with", "lost-without"] {
+            s.upsert_session(name, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        s.set_claude_session_id(id_of("live"), "u-live").unwrap();
+        s.set_claude_session_id(id_of("lost-with"), "u-lost")
+            .unwrap();
+        s.mark_session_killed(id_of("lost-with"), 50).unwrap();
+        s.mark_session_killed(id_of("lost-without"), 50).unwrap();
+
+        let hit = s
+            .lost_resumable_session_named("local", "lost-with")
+            .unwrap()
+            .expect("lost row with a conversation");
+        assert_eq!(hit.id, id_of("lost-with"));
+        assert!(s
+            .lost_resumable_session_named("local", "lost-without")
+            .unwrap()
+            .is_none());
+        assert!(s
+            .lost_resumable_session_named("local", "live")
+            .unwrap()
+            .is_none());
+        assert!(s
+            .lost_resumable_session_named("other", "lost-with")
+            .unwrap()
+            .is_none());
+        assert!(s
+            .lost_resumable_session_named("local", "nope")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn session_with_claude_id_matches_only_its_host() {
+        let s = store();
+        s.upsert_host("other").unwrap();
+        s.upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.upsert_session("b", "other", None, None, 1, 1, "running", None)
+            .unwrap();
+        let a = s.get_session("a", "local").unwrap().unwrap().id;
+        let b = s.get_session("b", "other").unwrap().unwrap().id;
+        s.set_claude_session_id(a, "u-a").unwrap();
+        s.set_claude_session_id(b, "u-b").unwrap();
+        s.mark_session_killed(a, 50).unwrap();
+
+        let hit = s.session_with_claude_id("local", "u-a").unwrap();
+        assert_eq!(hit.map(|r| r.id), Some(a), "a lost holder still matches");
+        assert!(s.session_with_claude_id("local", "u-b").unwrap().is_none());
+        assert!(s.session_with_claude_id("other", "u-a").unwrap().is_none());
+        assert_eq!(
+            s.session_with_claude_id("other", "u-b")
+                .unwrap()
+                .map(|r| r.id),
+            Some(b)
+        );
+    }
+
+    #[test]
     fn upsert_bg_session_writes_kind_and_flips_a_misfiled_row() {
         let s = store();
         s.upsert_bg_session("local", "bg:u1", None, "u1", Some("idle"), 1, "bg", 1)
@@ -1376,8 +1511,9 @@ mod tests {
         assert!(s.get_session("bg:e1", "local").unwrap().is_none());
     }
 
-    /// `lost_reason` deliberately has no field on `SessionRow` yet (PR 2) —
-    /// read it straight off the connection.
+    /// `lost_reason` is also on `SessionRow` now, but most of these tests
+    /// predate that and read it straight off the connection; kept as a
+    /// terser assertion helper than `get_session_by_id(id)...lost_reason`.
     fn lost_reason_of(s: &Store, id: i64) -> Option<String> {
         s.conn_ref()
             .query_row(
@@ -1555,6 +1691,42 @@ mod tests {
         assert_eq!(lost_reason_of(&s, r), Some("host_reboot".to_string()));
         assert_eq!(s.get_session_by_id(r).unwrap().unwrap().lost_at, Some(300));
         assert_eq!(lost_reason_of(&s, f), Some("killed".to_string()));
+    }
+
+    #[test]
+    fn reclassifying_a_missing_ghost_emits_an_update() {
+        // `lost_reason` is on the wire now, so upgrading a `missing` ghost's
+        // reason to a verdict must announce it — the sidebar's "host
+        // rebooted" label depends on this event, not just a future refetch.
+        let (s, bus) = store_with_recorder();
+        s.upsert_host("h").unwrap();
+        let a = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        set_ghost(&s, a, 400, "missing");
+        bus.take(); // drain the create/ghost setup
+
+        let out = s
+            .mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+        assert_eq!(
+            out.reclassified.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![a]
+        );
+
+        let evts = bus.take();
+        assert!(
+            evts.contains(&format!("session:updated:{a}")),
+            "reclassification must emit session:updated; got {evts:?}"
+        );
+        assert_eq!(
+            s.get_session_by_id(a)
+                .unwrap()
+                .unwrap()
+                .lost_reason
+                .as_deref(),
+            Some("host_reboot")
+        );
     }
 
     #[test]
@@ -2390,6 +2562,37 @@ mod tests {
     }
 
     #[test]
+    fn lost_reason_is_on_the_row() {
+        // PR 2: `lost_reason` is now a `SessionRow` field, not just a raw
+        // column — assert on it directly, the way the frontend will read it
+        // off the wire.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let id = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "abc").unwrap();
+
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+        assert_eq!(
+            s.get_session_by_id(id)
+                .unwrap()
+                .unwrap()
+                .lost_reason
+                .as_deref(),
+            Some("host_reboot")
+        );
+
+        s.restore_session(id).unwrap();
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().lost_reason,
+            None,
+            "a restored row carries no lost_reason"
+        );
+    }
+
+    #[test]
     fn set_session_kind_marks_review_and_survives_reupsert() {
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("alpha").unwrap();
@@ -2867,5 +3070,68 @@ mod tests {
             detail: None,
         });
         assert_eq!(bus.take(), vec!["move:progress:7:git:done"]);
+    }
+
+    #[test]
+    fn row_version_bumps_on_every_update_and_rides_the_row() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let v0 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        s.set_friendly_name("local", "sess", Some("one")).unwrap();
+        let v1 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        s.set_started_at(id, 99).unwrap();
+        let v2 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        assert!(v1 > v0, "an UPDATE must bump row_version ({v0} -> {v1})");
+        assert!(v2 > v1, "every UPDATE bumps it ({v1} -> {v2})");
+        // The upsert's DO UPDATE arm is an UPDATE too.
+        s.upsert_session("sess", "local", None, None, 1, 2, "running", None)
+            .unwrap();
+        let v3 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        assert!(
+            v3 > v2,
+            "an upsert of an existing row bumps it ({v2} -> {v3})"
+        );
+    }
+
+    #[test]
+    fn prompt_submit_seq_counts_submits_and_reports_whether_hooks_were_ever_seen() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let st = s.prompt_ack_state(id).unwrap().expect("row exists");
+        assert_eq!(st.prompt_submit_seq, 0);
+        assert!(!st.hooks_seen, "no hook has stamped this row yet");
+        s.record_prompt_submit_hook_for_row(id).unwrap();
+        s.record_prompt_submit_hook_for_row(id).unwrap();
+        let st = s.prompt_ack_state(id).unwrap().unwrap();
+        assert_eq!(st.prompt_submit_seq, 2);
+        assert!(st.hooks_seen);
+        assert!(s.prompt_ack_state(999_999).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_started_at_emits_session_updated() {
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        bus.take();
+        s.set_started_at(id, 42).unwrap();
+        assert!(
+            bus.names().contains(&"session:updated"),
+            "started_at must reach the UI by event, not only by re-list: {:?}",
+            bus.names()
+        );
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().started_at,
+            Some(42)
+        );
     }
 }

@@ -663,15 +663,22 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryByTestId('rename-input')).toBeNull();
   });
 
-  it('restart button invokes restart_session', async () => {
+  // Restart kills the running claude and loses its in-flight work, so it
+  // confirms like its neighbours Kill and Recreate do — it used to fire on
+  // the first click, wearing the same glyph as a harmless Refresh.
+  it('restart asks first and only then invokes restart_session', async () => {
     mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
     render(Sidebar);
     await tick(); await tick();
     const sessRow = await screen.findByTestId('sess-row');
     const restartBtn = sessRow.querySelector('button[aria-label="Restart"]') as HTMLButtonElement;
     await fireEvent.click(restartBtn);
-    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls.some((c) => c[0] === 'restart_session')).toBe(true);
+    await tick();
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    expect(inv.mock.calls.some((c) => c[0] === 'restart_session')).toBe(false);
+    await fireEvent.click(await screen.findByTestId('confirm-restart'));
+    await tick(); await tick();
+    expect(inv.mock.calls.some((c) => c[0] === 'restart_session')).toBe(true);
   });
 
   it('hides the owner when repo name is unique', async () => {

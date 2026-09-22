@@ -93,6 +93,13 @@ pub struct NewSessionParams {
     /// Optional sidebar label. Omit / empty to derive one from the branch.
     #[serde(default)]
     pub friendly_name: Option<String>,
+    /// Resume this Claude conversation instead of starting a new one (a
+    /// resumable candidate from discover_lost_sessions). `worktree_id` must
+    /// be exactly the transcript's cwd, or an empty conversation starts under
+    /// this id. Rejected for shell sessions and for a conversation a session
+    /// on the host already holds (use restore_host_sessions).
+    #[serde(default)]
+    pub resume_claude_session_id: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -257,6 +264,16 @@ pub struct SendPromptParams {
     /// marked. Default false.
     #[serde(default)]
     pub raw: bool,
+    /// Deliver even when the session is blocked on a dialog or stuck. Off by
+    /// default: Enter on a permission prompt selects the highlighted answer.
+    #[serde(default)]
+    pub force: bool,
+    /// Caller-chosen id, unique per send for this caller. A repeat within
+    /// ten minutes replays the first result (E_IN_FLIGHT while it still
+    /// runs). The key does not include the session, so reusing an id for a
+    /// different session returns the earlier result without delivering.
+    #[serde(default)]
+    pub client_msg_id: Option<String>,
     /// Press a key instead of typing text: `Enter`, `Escape` or `C-c`. Never
     /// marked (a key is not text) and never recorded as a prompt. `prompt`
     /// must be empty with it.
@@ -297,6 +314,12 @@ pub struct CaptureSessionParams {
     /// capture are kept. Default 200; pass 0 for no cap. When the capture is
     /// longer than the cap the result starts with a one-line truncation note.
     pub max_lines: Option<u32>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionActivityParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -640,10 +663,17 @@ pub struct MoveSessionParams {
     /// Replace what an earlier attempt left in the target worktree.
     #[serde(default)]
     pub clean_target: bool,
+    /// Preview; no changes.
+    #[serde(default)]
+    pub dry_run: bool,
     /// Nonce from a previous E_CONFIRM_REQUIRED, once approved on the
     /// desktop (only when mcp.confirm_destructive is on).
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// When to move: `now` (default), `idle` (wait, then move), `cancel`
+    /// (end a pending wait).
+    #[serde(default)]
+    pub when: crate::service::move_session::When,
 }
 
 impl MoveSessionParams {
@@ -662,6 +692,8 @@ impl MoveSessionParams {
             keep_source: self.keep_source,
             strict: self.strict,
             clean_target: self.clean_target,
+            dry_run: self.dry_run,
+            when: self.when,
         }
     }
 }

@@ -4,6 +4,7 @@ mod config;
 mod demo;
 mod out;
 mod pair;
+mod reports;
 mod serve;
 mod tls;
 
@@ -118,6 +119,23 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
+    /// Show the error reports the hub has collected from its participants, newest first. Needs a running hub.
+    Reports {
+        /// Rows to show (1-1000). [default: 100]
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        /// Only rows received since: 30m, 2h, 3d or a unix timestamp.
+        #[arg(long)]
+        since: Option<String>,
+        /// Only rows from this origin: client:<name>, host:<alias> or hub.
+        #[arg(long)]
+        origin: Option<String>,
+        /// Print the rows as JSON (includes each report's context).
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
     /// Print this hub's SSH public key (generated on first use; derived when only the private key exists).
     SshKey,
     /// Exit 0 when a hub answers HTTP on 127.0.0.1 (for Docker HEALTHCHECK). Does not open the database.
@@ -187,6 +205,13 @@ async fn main() -> ExitCode {
             ClientCmd::Trust { name } => pair::client_trust(&opts, &env, &name, true).await,
             ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
         },
+        Cmd::Reports {
+            limit,
+            since,
+            origin,
+            json,
+            opts,
+        } => reports::run(&opts, &env, limit, since, origin, json).await,
         Cmd::DemoSeed {
             hosts,
             clear,
@@ -450,6 +475,33 @@ mod tests {
         };
         assert!(matches!(cmd, ClientCmd::Untrust { name } if name == "desk"));
         assert!(Cli::try_parse_from(["fleet-hub", "client", "trust"]).is_err());
+        let Cmd::Reports {
+            limit,
+            since,
+            origin,
+            json,
+            ..
+        } = Cli::try_parse_from([
+            "fleet-hub",
+            "reports",
+            "--limit",
+            "5",
+            "--since",
+            "2h",
+            "--origin",
+            "hub",
+            "--json",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("reports did not parse")
+        };
+        assert_eq!(
+            (limit, since.as_deref(), origin.as_deref(), json),
+            (5, Some("2h"), Some("hub"), true)
+        );
+        Cli::try_parse_from(["fleet-hub", "reports"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "ssh-key"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "healthcheck"]).unwrap();
         let Cmd::Healthcheck { port, tls } = Cli::try_parse_from([

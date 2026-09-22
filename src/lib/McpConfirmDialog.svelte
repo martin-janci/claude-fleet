@@ -20,6 +20,7 @@
     MCP_CONFIRM_EVENT,
     type ConfirmRequest,
   } from './mcp';
+  import { pushError } from './toasts';
 
   let queue = $state<ConfirmRequest[]>([]);
   let busy = $state(false);
@@ -34,8 +35,15 @@
     if (!current || busy) return;
     busy = true;
     const nonce = current.nonce;
-    await mcpConfirm(nonce, approved);
+    const r = await mcpConfirm(nonce, approved);
     busy = false;
+    // A verdict that never reached the backend must not look like one that
+    // did: keep the request queued and say so. Silently dropping a failed
+    // DENY would leave the user believing they refused the agent.
+    if (!r.ok) {
+      pushError(r.error, `${approved ? 'Approving' : 'Denying'} ${current?.tool ?? 'the call'} failed`);
+      return;
+    }
     queue = queue.filter((q) => q.nonce !== nonce);
   }
 
@@ -75,10 +83,10 @@
         <p class="muted">{queue.length - 1} more waiting</p>
       {/if}
       <div class="actions">
-        <button class="deny" disabled={busy} onclick={() => answer(false)} data-testid="mcp-confirm-deny">
+        <button class="deny" disabled={busy} onclick={() => answer(false)} data-testid="mcp-confirm-deny" data-autofocus>
           Deny
         </button>
-        <button class="approve" disabled={busy} onclick={() => answer(true)} data-testid="mcp-confirm-approve" data-autofocus>
+        <button class="approve" disabled={busy} onclick={() => answer(true)} data-testid="mcp-confirm-approve">
           Approve
         </button>
       </div>

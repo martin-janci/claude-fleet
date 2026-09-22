@@ -172,22 +172,27 @@ pub async fn send_message(
     let mut delivered_to_pane = false;
     let mut deliver_error: Option<String> = None;
     if args.deliver {
-        let header = pane_header(id, &from_row.tmux_name, &from_row.host_alias, &args.body);
-        match sessions::send_prompt(
-            sessions::SendPromptArgs {
-                host_alias: to_row.host_alias.clone(),
-                tmux_name: to_row.tmux_name.clone(),
-                prompt: header,
-                submit: args.submit,
-                keys: None,
-            },
-            store,
-            ssh,
-        )
-        .await
-        {
-            Ok(()) => delivered_to_pane = true,
-            Err(e) => deliver_error = Some(e.message),
+        if to_row.claude_status.as_deref() == Some("blocked") || to_row.stuck_kind.is_some() {
+            deliver_error = Some(format!(
+                "session {} is waiting on {}; the message is in its inbox but was not typed into the dialog",
+                to_row.id,
+                to_row.stuck_kind.as_deref().unwrap_or("a dialog")
+            ));
+        } else {
+            let header = pane_header(id, &from_row.tmux_name, &from_row.host_alias, &args.body);
+            match sessions::send_system_prompt(
+                &to_row.host_alias,
+                &to_row.tmux_name,
+                &header,
+                args.submit,
+                store,
+                ssh,
+            )
+            .await
+            {
+                Ok(()) => delivered_to_pane = true,
+                Err(e) => deliver_error = Some(e.message),
+            }
         }
     }
 
@@ -263,7 +268,7 @@ pub fn peer_status(session_id: i64, store: &Mutex<Store>) -> Result<PeerStatus, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::sessions::build_send_commands;
+    use crate::service::sessions::{build_send_script, normalize_prompt_body};
 
     fn seed(s: &Store, name: &str) -> i64 {
         s.upsert_host("local").unwrap();
@@ -322,19 +327,21 @@ mod tests {
     }
 
     #[test]
-    fn deliver_payload_is_the_header_as_a_literal_send_keys_then_enter() {
+    fn deliver_payload_is_the_header_pasted_via_load_buffer_then_enter() {
         // The transport (`send_prompt` → bash/ssh + tmux) is not exercised
         // here; this pins the tmux payload the deliver path hands to it.
         let header = pane_header(7, "alpha", "local", "it's done; $HOME `ok`");
-        let cmds = build_send_commands("beta", &header, true);
-        assert_eq!(cmds.len(), 3);
-        assert_eq!(
-            cmds[0],
-            "tmux send-keys -t '=beta:' -l '[msg #7 from alpha@local]: it'\\''s done; $HOME `ok`'"
+        let body = normalize_prompt_body(&header).unwrap();
+        let s = build_send_script("beta", None, &body, "buf", true);
+        assert!(s.starts_with("set -o pipefail; t='=beta:'; "), "{s}");
+        assert!(s.contains("load-buffer -b 'buf' -"), "{s}");
+        assert!(s.contains("paste-buffer -p -d -b 'buf' -t \"$t\""), "{s}");
+        assert!(
+            s.trim_end().ends_with("tmux send-keys -t \"$t\" Enter"),
+            "{s}"
         );
-        assert_eq!(cmds[2], "tmux send-keys -t '=beta:' Enter");
         // submit=false stages the text without pressing Enter.
-        assert_eq!(build_send_commands("beta", &header, false).len(), 1);
+        assert!(!build_send_script("beta", None, &body, "buf", false).contains("Enter"));
     }
 
     // ---- send_message validation ----
@@ -433,6 +440,32 @@ mod tests {
             received[0].detail.as_deref(),
             Some(format!("from={a} ping").as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn deliver_to_a_blocked_recipient_lands_in_the_inbox_but_is_not_typed() {
+        let (store, ssh, a, b) = fixture();
+        {
+            let s = store.lock().unwrap();
+            s.record_notification_hook_for_row(
+                b,
+                crate::service::pane_intel::ClaudeStatus::Blocked,
+                None,
+            )
+            .unwrap();
+        }
+        let mut a_args = args(a, b, "ping");
+        a_args.deliver = true;
+        let res = send_message(a_args, &store, &ssh).await.unwrap();
+
+        assert!(!res.delivered_to_pane);
+        let err = res.deliver_error.expect("blocked recipient reports why");
+        assert!(err.contains("inbox"), "{err}");
+
+        let s = store.lock().unwrap();
+        let inbox = s.list_inbox(b, false, 10).unwrap();
+        assert_eq!(inbox.len(), 1, "the message still lands in the inbox");
+        assert_eq!(inbox[0].body, "ping");
     }
 
     #[tokio::test]

@@ -143,7 +143,7 @@ impl FleetTools {
         let _permit = self.long_poll_permit(&caller, "run_prompt")?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
         let before = row.turn_seq;
-        self.deliver_prompt(&row, prompt, true).await?;
+        self.deliver_prompt(&row, prompt, true, false).await?;
         let out = tasks::wait_for_session(
             &self.store,
             row.id,
@@ -236,6 +236,7 @@ impl FleetTools {
                         kind: None,
                         start_command: None,
                         friendly_name: None,
+                        resume_claude_session_id: None,
                     },
                     &self.store,
                     &self.ssh,
@@ -266,7 +267,7 @@ impl FleetTools {
             tasks::wait_for_repl_ready(&self.ssh, &worker.host_alias, &worker.tmux_name).await;
         }
         let body = task_delivery_body(&p.prompt, &task.nonce, &caller, p.raw)?;
-        match self.deliver_prompt(&worker, body, true).await {
+        match self.deliver_prompt(&worker, body, true, false).await {
             Ok(_) => {}
             Err(e) => {
                 if let Ok(s) = self.store.lock() {

@@ -7,7 +7,7 @@
 //! worth asserting is in the function underneath.
 
 use super::logic;
-use super::HubPairArgs;
+use super::{report_client_error_logic, HubPairArgs, ReportClientErrorArgs};
 use crate::backend::pairing::{PairTransport, PairedClient};
 use crate::backend::remote::HubResponse;
 use crate::backend::token_store::{InMemoryTokenStore, TokenStore};
@@ -860,4 +860,46 @@ fn nothing_about_a_stranded_token_carries_the_token() {
     assert!(!format!("{answer:?}").contains("cl_s3cret"));
     // The whole return type is a bool, so there is nowhere for it to ride.
     let _: bool = answer;
+}
+
+#[test]
+fn a_frontend_error_is_queued_clamped_with_its_code() {
+    // The ring is process-global and this binary's tests run in parallel, so
+    // this one owns only its own report: it is tagged, and found by that tag
+    // rather than by a position or an exact count.
+    let tag = format!(
+        "frontend-error-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let before = fleet_core::logging::report_ring().len();
+    report_client_error_logic(ReportClientErrorArgs {
+        level: "error".into(),
+        component: "frontend:unhandled".into(),
+        code: Some("E_PARSE".into()),
+        message: format!("{tag} {}", "x".repeat(5000)),
+        context: Some(serde_json::json!({ "url": "app://index" })),
+    })
+    .unwrap();
+    assert!(fleet_core::logging::report_ring().len() > before);
+    let r = fleet_core::logging::report_ring()
+        .drain(usize::MAX)
+        .reports
+        .into_iter()
+        .find(|r| r.message.starts_with(&tag))
+        .expect("the queued report");
+    assert_eq!(r.code.as_deref(), Some("E_PARSE"));
+    assert!(r.truncated);
+    assert_eq!(r.component, "frontend:unhandled");
+    let e = report_client_error_logic(ReportClientErrorArgs {
+        level: "debug".into(),
+        component: "frontend".into(),
+        code: None,
+        message: "m".into(),
+        context: None,
+    })
+    .unwrap_err();
+    assert_eq!(e.code, fleet_core::ipc_error::codes::E_VALIDATE);
 }

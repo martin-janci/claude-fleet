@@ -34,6 +34,9 @@
     MOVE_IGNORED_ENTRY_KB_MAX,
     MOVE_IGNORED_TOTAL_MB_MAX,
     MOVE_MAX_SESSION_STATE_MB_MAX,
+    REPORTS_MAX_ROWS_MIN,
+    REPORTS_MAX_ROWS_MAX,
+    MOVE_WAIT_MAX_MINS_MAX,
     PROJECTS_LOCAL_ENV_KEY,
     settingPathMap,
     settingLayout,
@@ -888,6 +891,26 @@
         <span class="hook-desc" id="limit-lost-ttl-desc">hours a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost (0 = off: removed on the next pass like any vanished session)</span>
       </div>
       <div class="mcp-field">
+        <label class="lbl" for="restore-batch-size">restore batch</label>
+        <input class="port" id="restore-batch-size" type="number" min="1" max="16" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.restoreBatchSize)}
+          disabled={limitsBusy}
+          aria-describedby="restore-batch-size-desc"
+          data-testid="restore-batch-size"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.restoreBatchSize, 'Concurrent restores', e)} />
+        <span class="hook-desc" id="restore-batch-size-desc">Sessions resumed in parallel by Restore lost sessions</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="restore-stagger-ms">restore delay</label>
+        <input class="port" id="restore-stagger-ms" type="number" min="0" max="60000" step="500"
+          value={settingInt($fleetSettings, SETTING_KEYS.restoreStaggerMs)}
+          disabled={limitsBusy}
+          aria-describedby="restore-stagger-ms-desc"
+          data-testid="restore-stagger-ms"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.restoreStaggerMs, 'Delay between restores (ms)', e)} />
+        <span class="hook-desc" id="restore-stagger-ms-desc">Pause between starting each resumed session</span>
+      </div>
+      <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>
         <input class="port" id="limit-move-mb" type="number" min="1" max={MOVE_MAX_TRANSCRIPT_MB_MAX} step="1"
           value={settingInt($fleetSettings, SETTING_KEYS.moveMaxTranscriptMb)}
@@ -938,6 +961,16 @@
         <span class="hook-desc" id="limit-move-session-state-desc">largest per-session Claude directory (MiB, 1–{MOVE_MAX_SESSION_STATE_MB_MAX}: subagent transcripts, tool results) Move to host… carries; above it the biggest files stay behind</span>
       </div>
       <div class="mcp-field">
+        <label class="lbl" for="limit-move-wait-max-mins">transfer wait</label>
+        <input class="port" id="limit-move-wait-max-mins" type="number" min="1" max={MOVE_WAIT_MAX_MINS_MAX} step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.moveWaitMaxMins)}
+          disabled={limitsBusy}
+          aria-describedby="limit-move-wait-max-mins-desc"
+          data-testid="move-wait-max-mins"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveWaitMaxMins, 'Move wait timeout', e)} />
+        <span class="hook-desc" id="limit-move-wait-max-mins-desc">minutes (1–{MOVE_WAIT_MAX_MINS_MAX}) "Transfer when it finishes" waits for the session to go idle before giving up</span>
+      </div>
+      <div class="mcp-field">
         <label class="lbl" for="usage-enabled">usage</label>
         <input id="usage-enabled" type="checkbox"
           checked={settingBool($fleetSettings, SETTING_KEYS.usageEnabled)}
@@ -966,6 +999,26 @@
           data-testid="usage-prices-json"
           onchange={onUsagePricesChange}></textarea>
         <span class="hook-desc" id="usage-prices-desc">per-model price overrides for the estimated cost, USD per million tokens, e.g. {'{"opus-4-1":{"input":15,"output":75,"cache_write":30,"cache_read":1.5}}'} ({'{}'} = built-in prices only)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="reports-max-rows">error reports</label>
+        <input class="port" id="reports-max-rows" type="number" min={REPORTS_MAX_ROWS_MIN} max={REPORTS_MAX_ROWS_MAX} step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.reportsMaxRows)}
+          disabled={limitsBusy}
+          aria-describedby="reports-max-rows-desc"
+          data-testid="reports-max-rows"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.reportsMaxRows, 'Error reports row cap', e)} />
+        <span class="hook-desc" id="reports-max-rows-desc">newest error/warn reports kept ({REPORTS_MAX_ROWS_MIN}–{REPORTS_MAX_ROWS_MAX}); pruned on every insert</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="reports-max-age-hours">error reports age</label>
+        <input class="port" id="reports-max-age-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.reportsMaxAgeSecs))}
+          disabled={limitsBusy}
+          aria-describedby="reports-max-age-desc"
+          data-testid="reports-max-age-hours"
+          onchange={(e) => onLimitHoursChange(SETTING_KEYS.reportsMaxAgeSecs, 'Error reports max age', e)} />
+        <span class="hook-desc" id="reports-max-age-desc">hours an error/warn report is kept before the age sweep deletes it (0 = never)</span>
       </div>
       {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
     </section>

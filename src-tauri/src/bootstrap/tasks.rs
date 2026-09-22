@@ -16,6 +16,7 @@ use crate::app_events::AppHandleEventBus;
 use crate::backend::connection::{ConnectionReporter, ConnectionView, HubConnectionStatus};
 use crate::backend::events::{spawn_event_bridge, EventBridge, HubResync, HubSse, RealDelay};
 use crate::backend::remote::HubBackend;
+use crate::backend::report::{spawn_report_flusher, ReportFlusher};
 use crate::backend::startup::FleetTasks;
 use crate::backend::RemoteConfig;
 use crate::bootstrap::mcp::maybe_start_mcp;
@@ -55,7 +56,25 @@ pub(crate) struct RealFleetTasks {
 impl FleetTasks for RealFleetTasks {
     /// Start the MCP control API if the user has enabled it (off by default).
     /// Reuses the same Store / SshClient / registry as the UI.
+    ///
+    /// Task 5: closes every unresolved `session_move_waiting` as
+    /// `hub_restarted` first — a waiter lives only in this process's memory,
+    /// so a reopened desktop cannot still be honouring one from before this
+    /// launch. This is the first of the three `Backend::Local` starts
+    /// (`start_background_tasks` calls this method, then
+    /// `start_reconcile_tick`, then `start_account_usage_tick`), and
+    /// `maybe_start_mcp` below binds and starts serving the control API
+    /// synchronously before returning — so the sweep must run before this
+    /// call, not merely before this method returns, or a tool call landing
+    /// the instant the listener binds could register a new wait the sweep
+    /// then races. Logged, never fatal: a poisoned store here is a
+    /// pre-existing problem the rest of startup already has to tolerate.
     fn start_control_api(&self) {
+        match fleet_core::service::move_session::wait::sweep_unresolved_waits(&self.store) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("closed {n} stale move-wait(s) as hub_restarted at startup"),
+            Err(e) => tracing::warn!("sweep_unresolved_waits at startup failed: {e}"),
+        }
         maybe_start_mcp(
             &self.app,
             &self.store,
@@ -147,5 +166,20 @@ impl FleetTasks for RealFleetTasks {
         // answers from.
         .reporting_to(Arc::clone(&self.hub_link) as Arc<dyn ConnectionReporter>);
         spawn_event_bridge(bridge);
+    }
+
+    /// Flush `fleet_core::logging::report_ring()` to the hub's `POST
+    /// /report`. The only other background task a hub client runs;
+    /// `start_background_tasks` gates it behind `CLAUDE_FLEET_HUB_REPORTS`.
+    fn start_report_flusher(&self) {
+        let Some(cfg) = self.remote.clone() else {
+            tracing::error!("[report] asked to flush reports with no hub configured");
+            return;
+        };
+        let transport = HubBackend::new(cfg.clone()).transport();
+        spawn_report_flusher(
+            ReportFlusher::new(cfg, transport, fleet_core::logging::report_ring()),
+            self.shutdown.clone(),
+        );
     }
 }

@@ -269,6 +269,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
+        name: "session_activity",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
         name: "recreate_session",
         access: Access::Client,
         readonly: false,
@@ -696,6 +703,28 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         readonly: false,
         confirm: false,
         deadline: Deadline::Quick,
+    },
+    // Host-reboot recovery. `discover_lost_sessions` scans a host's Claude
+    // transcripts and enriches the candidates from the store — no ssh writes
+    // and no store writes, so a readonly token may call it; it walks a
+    // directory over ssh, so it is not Quick. `restore_host_sessions`
+    // respawns panes for a host's lost rows, so it mutates — but it is
+    // `recreate_session` in bulk, and destroys nothing, so it is not
+    // confirm-gated any more than that one is; `dry_run: true` is the
+    // preview, and the desktop confirms the plan it returns.
+    ToolPolicy {
+        name: "discover_lost_sessions",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
+        name: "restore_host_sessions",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
     },
 ];
 

@@ -159,9 +159,19 @@ paths.
 The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
 over SSH, paired-client access for phones/browsers, and hub-client mode
 (pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Host
-reboot survival is landed (sessions are recovered by boot identity rather than
-declared lost on a restart), per
-`docs/superpowers/specs/2026-09-17-host-reboot-session-survival-design.md`.
+reboot handling is landed in both halves, per
+`docs/superpowers/specs/2026-09-17-host-reboot-session-survival-design.md` and
+`docs/superpowers/plans/2026-09-19-host-reboot-recovery.md`: **survival**
+(sessions are recovered by boot identity rather than declared lost on a
+restart, migration 036 + `lost_reason`) and **recovery** —
+`restore_host_sessions` batch-resumes a host's lost sessions over
+`recreate_session`, `discover_lost_sessions` scans a host's Claude transcripts
+for conversations fleet has no row for, and `new_session` takes a
+`resume_claude_session_id`; the UI for both is in `HostDetail`. Recovery
+reached `main` only on 2026-09-22: PR #161 was merged into the stacked branch
+`feat/host-reboot-survival`, which was never re-merged after PR 1/2 (#135)
+landed on its own, so for three days this paragraph described half a feature.
+When a stacked PR says MERGED, check what it was merged INTO.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

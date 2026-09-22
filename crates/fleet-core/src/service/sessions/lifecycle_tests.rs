@@ -195,6 +195,7 @@ async fn an_unknown_project_id_is_not_found_not_a_raw_sqlite_error() {
         kind: Some("shell".into()),
         start_command: None,
         friendly_name: None,
+        resume_claude_session_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -219,6 +220,7 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
         kind: Some("shell".into()),
         start_command: None,
         friendly_name: None,
+        resume_claude_session_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -450,4 +452,327 @@ fn item_source_stops_at_the_function_it_was_asked_for() {
     );
     let b = item_source(src, "fn b(");
     assert!(b.contains("neighbour()") && !b.contains("mine()"), "{b:?}");
+}
+
+/// The row `new_session` hands back is the row as of its LAST write — not a
+/// snapshot from before `set_started_at` / `set_friendly_name` /
+/// `set_claude_session_id` that the frontend would then merge over fresher
+/// state (its guard is `row_version`, and a stale snapshot has the lower one).
+#[test]
+fn finalize_new_session_returns_the_row_as_of_its_last_write() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let s = crate::store::Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("f4final", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let before = s.get_session_by_id(id).unwrap().unwrap();
+    let row = finalize_new_session(
+        &s,
+        id,
+        "local",
+        "f4final",
+        Some("Nice Name"),
+        Some("uuid-9"),
+        false,
+    )
+    .unwrap();
+    assert!(
+        row.started_at.is_some(),
+        "started_at is on the returned row"
+    );
+    assert_eq!(row.friendly_name.as_deref(), Some("Nice Name"));
+    assert_eq!(row.claude_session_id.as_deref(), Some("uuid-9"));
+    assert!(
+        row.row_version > before.row_version,
+        "the returned row is the fresh one"
+    );
+    let latest = s.get_session_by_id(id).unwrap().unwrap();
+    assert_eq!(row, latest, "returned == stored");
+}
+
+#[test]
+fn finalize_new_session_tags_a_shell_session() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("f4shell", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let row = finalize_new_session(&s, id, "local", "f4shell", None, None, true).unwrap();
+    assert_eq!(row.kind, "shell");
+    assert!(row.started_at.is_some());
+}
+
+/// A cancelled or killed clone must not leave a half `.git` that the
+/// `[ ! -d root/.git ]` guard then treats as "already cloned" forever: the
+/// clone lands in a sibling temp dir and is moved into place only when it
+/// finished.
+#[test]
+fn ensure_script_clones_into_a_temp_dir_and_moves_it_into_place() {
+    let script = ensure_remote_project_script(
+        "/home/u/projects/github.com/o/r",
+        "git@github.com:o/r.git",
+        None,
+    );
+    assert!(
+        script.contains("tmp=\"$(dirname -- '/home/u/projects/github.com/o/r')/.fleet-clone-$$\""),
+        "{script}"
+    );
+    assert!(
+        script.contains(
+            "git clone 'git@github.com:o/r.git' \"$tmp\" && { [ ! -e '/home/u/projects/github.com/o/r' ] || rmdir '/home/u/projects/github.com/o/r'; } && mv \"$tmp\" '/home/u/projects/github.com/o/r'"
+        ),
+        "{script}"
+    );
+    assert!(
+        script.contains("|| { rm -rf \"$tmp\"; exit 1; }"),
+        "{script}"
+    );
+    assert!(
+        script.contains("rm -rf \"$tmp\";"),
+        "a stale temp dir from an earlier attempt is cleared first: {script}"
+    );
+}
+
+/// The move must land AS the root, not inside it: `mv tmp root` onto an
+/// existing directory moves `tmp` into it, so a root left behind empty (a
+/// failed earlier attempt, a hand-made directory) would leave no `.git` at
+/// the root and every later ensure would clone again. Runs the real script.
+#[test]
+fn ensure_script_clones_onto_an_existing_empty_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let git = |args: &[&str], dir: &std::path::Path| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    std::fs::create_dir(&src).unwrap();
+    git(&["init", "-q"], &src);
+    git(
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "i",
+        ],
+        &src,
+    );
+    let root = tmp.path().join("projects").join("r");
+    std::fs::create_dir_all(&root).unwrap();
+    let script = ensure_remote_project_script(root.to_str().unwrap(), src.to_str().unwrap(), None);
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{script}\n{out:?}");
+    assert!(root.join(".git").is_dir(), "cloned AS the root: {script}");
+}
+
+// ---- Task 6: resume a given conversation; never reuse a lost session's name ----
+
+const RESUME_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+fn args_named(name: &str, resume: Option<&str>) -> NewSessionArgs {
+    NewSessionArgs {
+        host_alias: "local".into(),
+        project_id: 4242,
+        worktree_id: None,
+        name: name.into(),
+        call_id: None,
+        new_worktree: None,
+        base_branch: None,
+        kind: None,
+        start_command: None,
+        friendly_name: None,
+        resume_claude_session_id: resume.map(str::to_string),
+    }
+}
+
+/// A `local` row named `name`, ghosted as killed, optionally carrying a
+/// Claude conversation id. Returns its id.
+fn lost_row(s: &crate::store::Store, name: &str, claude_id: Option<&str>) -> i64 {
+    s.upsert_host("local").unwrap();
+    s.upsert_session(name, "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let id = s.get_session(name, "local").unwrap().unwrap().id;
+    if let Some(cid) = claude_id {
+        s.set_claude_session_id(id, cid).unwrap();
+    }
+    s.mark_session_killed(id, 100).unwrap().expect("ghosted");
+    id
+}
+
+#[tokio::test]
+async fn a_lost_session_with_a_conversation_blocks_its_name() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let id = lost_row(&store.lock().unwrap(), "dev-x", Some(RESUME_ID));
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-x", None), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+    assert_eq!(
+        err.message,
+        format!(
+            "dev-x belongs to a lost session (id {id}); restore it with restore_host_sessions or dismiss it first"
+        )
+    );
+    let row = store
+        .lock()
+        .unwrap()
+        .get_session_by_id(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_session_id.as_deref(), Some(RESUME_ID));
+}
+
+/// A lost row with no conversation has nothing to resume, so the name is
+/// free: the call gets past the guard and fails later on the unknown project.
+#[tokio::test]
+async fn a_lost_session_without_a_conversation_does_not_block() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    lost_row(&store.lock().unwrap(), "dev-x", None);
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-x", None), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+}
+
+/// Shell sessions are guarded too: the check runs before the kind split.
+#[tokio::test]
+async fn the_lost_name_guard_applies_to_shell_sessions() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    lost_row(&store.lock().unwrap(), "dev-x", Some(RESUME_ID));
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let mut args = args_named("dev-x", None);
+    args.kind = Some("shell".into());
+    let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+}
+
+#[tokio::test]
+async fn an_invalid_resume_id_is_rejected() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-y", Some("x; rm -rf")), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_INVALID);
+}
+
+/// `new_session_inner` threads the pair this returns into BOTH the pane
+/// command and `set_claude_session_id`; driving the whole path needs a real
+/// tmux, so the choice itself is pinned here.
+#[test]
+fn a_resume_id_is_used_for_both_the_pane_command_and_the_stored_id() {
+    let (cid, pane) = claude_id_and_pane_cmd(&args_named("dev-z", Some(RESUME_ID)));
+    assert_eq!(cid.as_deref(), Some(RESUME_ID));
+    assert!(
+        pane.contains(&format!("--resume '{RESUME_ID}'")),
+        "got: {pane}"
+    );
+    assert_eq!(
+        pane,
+        recreate_pane_command("work", Some(RESUME_ID), "dev-z")
+    );
+}
+
+#[test]
+fn without_a_resume_id_a_fresh_uuid_is_minted() {
+    let (cid, pane) = claude_id_and_pane_cmd(&args_named("dev-z", None));
+    let cid = cid.expect("work session gets an id");
+    assert_ne!(cid, RESUME_ID);
+    assert!(crate::validate::claude_session_id(&cid).is_ok());
+    assert!(pane.contains(&format!("--resume '{cid}'")), "got: {pane}");
+}
+
+#[test]
+fn a_shell_session_has_no_claude_id() {
+    let mut args = args_named("dev-z", None);
+    args.kind = Some("shell".into());
+    let (cid, pane) = claude_id_and_pane_cmd(&args);
+    assert_eq!(cid, None);
+    assert_eq!(pane, crate::tmux::shell_pane_command(None));
+}
+
+#[tokio::test]
+async fn a_resume_id_on_a_shell_session_is_rejected() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let mut args = args_named("dev-y", Some(RESUME_ID));
+    args.kind = Some("shell".into());
+    let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_INVALID);
+    assert_eq!(
+        err.message,
+        "resume_claude_session_id applies to Claude sessions, not shell sessions"
+    );
+}
+
+/// Resuming a conversation a session on the host already holds — lost or
+/// live — is refused; the lost holder is restored instead.
+#[tokio::test]
+async fn a_resume_id_held_by_a_lost_session_is_refused() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let id = lost_row(&store.lock().unwrap(), "dev-x", Some(RESUME_ID));
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-new", Some(RESUME_ID)), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+    assert_eq!(
+        err.message,
+        format!(
+            "conversation {RESUME_ID} already belongs to session {id} (dev-x); restore it with restore_host_sessions instead"
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_resume_id_held_by_a_live_session_is_refused() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-live", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let id = s.get_session("dev-live", "local").unwrap().unwrap().id;
+        s.set_claude_session_id(id, RESUME_ID).unwrap();
+    }
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-new", Some(RESUME_ID)), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+}
+
+/// An unheld resume id passes both checks and fails later on the unknown
+/// project — the guards do not over-block.
+#[tokio::test]
+async fn an_unheld_resume_id_gets_past_the_guards() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let err = new_session(args_named("dev-new", Some(RESUME_ID)), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
 }

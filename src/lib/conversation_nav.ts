@@ -27,6 +27,10 @@ function itemTexts(it: ConvItem): (string | null)[] {
       return [it.summary];
     case 'notification':
       return [it.summary, it.event];
+    case 'bash':
+      return [it.command, it.stdout, it.stderr];
+    case 'harness':
+      return [it.tag, it.body];
     case 'interrupt':
       return [];
   }

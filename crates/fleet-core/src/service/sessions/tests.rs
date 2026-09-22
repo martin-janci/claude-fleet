@@ -26,6 +26,42 @@ fn known_agent_status_keeps_vocabulary_and_drops_the_rest() {
     assert_eq!(known_agent_status("dev", None), None);
 }
 
+#[test]
+fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
+    use crate::service::pane_intel::ClaudeStatus;
+    // Agents NOT asked this pass (cadence-skipped or unanswerable): a weak
+    // pane guess must not overwrite the stored status — only `Blocked` (a
+    // real dialog / stuck pane) is strong enough to surface immediately.
+    assert_eq!(
+        status_candidate(false, None, Some(ClaudeStatus::Working)),
+        None
+    );
+    assert_eq!(
+        status_candidate(false, None, Some(ClaudeStatus::Idle)),
+        None
+    );
+    assert_eq!(status_candidate(false, None, None), None);
+    assert_eq!(
+        status_candidate(false, None, Some(ClaudeStatus::Blocked)),
+        Some(ClaudeStatus::Blocked)
+    );
+
+    // Agents WERE asked this pass: unchanged pre-cadence behaviour — the
+    // authoritative agent status wins, falling back to the pane only when
+    // the agent gave nothing.
+    assert_eq!(
+        status_candidate(true, Some(ClaudeStatus::Working), Some(ClaudeStatus::Idle)),
+        Some(ClaudeStatus::Working),
+        "the agent status wins over the pane"
+    );
+    assert_eq!(
+        status_candidate(true, None, Some(ClaudeStatus::Idle)),
+        Some(ClaudeStatus::Idle),
+        "falls back to the pane when the agent gave nothing"
+    );
+    assert_eq!(status_candidate(true, None, None), None);
+}
+
 fn job_agent(session_id: &str, job_id: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
     crate::claude_agents::ClaudeAgentRow {
         session_id: Some(session_id.into()),
@@ -142,6 +178,7 @@ fn row(
 ) -> SessionRow {
     SessionRow {
         id,
+        row_version: 0,
         tmux_name: tmux.into(),
         host_alias: host.into(),
         project_id,
@@ -155,6 +192,7 @@ fn row(
         reviews_session_id: None,
         worktree_key: None,
         lost_at: None,
+        lost_reason: None,
         claude_session_id: None,
         claude_status: claude_status.map(|s| s.to_string()),
         effort_level: None,
@@ -223,6 +261,32 @@ fn select_targets_filters_by_project() {
         ..Default::default()
     };
     assert_eq!(select_targets(&s, &f, None, None), vec![3]);
+}
+
+#[test]
+fn select_targets_skips_blocked_and_stuck_sessions_unless_asked_for_them() {
+    let mut s = sample_sessions();
+    s[0].claude_status = Some("blocked".into());
+    s[1].stuck_kind = Some("auth_menu".into());
+    let f = BroadcastFilter::default();
+    let picked = select_targets(&s, &f, None, None);
+    assert!(
+        !picked.contains(&1),
+        "a blocked session would get Enter on its dialog: {picked:?}"
+    );
+    assert!(
+        !picked.contains(&2),
+        "a stuck session would get Enter on its menu: {picked:?}"
+    );
+    let f = BroadcastFilter {
+        status: Some("blocked".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        select_targets(&s, &f, None, None),
+        vec![1],
+        "an explicit status filter is the operator's choice"
+    );
 }
 
 #[test]
@@ -930,8 +994,8 @@ impl TmuxExec for AgentsTmux {
     async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
         Ok(String::new())
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        self.agents.clone()
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(self.agents.clone())
     }
     async fn transcript_mtimes(
         &self,
@@ -971,6 +1035,7 @@ async fn probe_reads_transcript_mtimes_for_background_agents_only() {
         Box::new(tmux),
         std::time::Duration::from_secs(5),
         None,
+        true,
     )
     .await;
     assert_eq!(*calls.lock().unwrap(), vec![vec![BG_ID.to_string()]]);
@@ -995,6 +1060,7 @@ async fn probe_reads_transcript_mtimes_for_background_agents_only() {
         Box::new(tmux),
         std::time::Duration::from_secs(5),
         None,
+        true,
     )
     .await;
     assert!(calls.lock().unwrap().is_empty());
@@ -1019,10 +1085,115 @@ async fn probe_reports_a_failed_mtime_call_as_none() {
         Box::new(tmux),
         std::time::Duration::from_secs(5),
         None,
+        true,
     )
     .await;
     assert_eq!(calls.lock().unwrap().len(), 1);
     assert_eq!(probe.agent_mtimes, None);
+}
+
+/// A `claude agents --json` that could not be asked (ssh 255, timeout) is
+/// `None`, and a `None` never reaches the pruner: every bg row survives.
+#[tokio::test]
+async fn an_unanswerable_agents_call_keeps_every_bg_row() {
+    struct NoAgentsAnswer;
+    #[async_trait::async_trait]
+    impl TmuxExec for NoAgentsAnswer {
+        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+            Ok(Vec::new())
+        }
+        async fn new_session(&self, _: &str, _: &std::path::Path, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn restart_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn capture_pane_scrollback(&self, _: &str, _: u32) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            None
+        }
+    }
+    let host = host_row("h");
+    let probe = probe_with_timeout(
+        host,
+        Box::new(NoAgentsAnswer),
+        std::time::Duration::from_secs(5),
+        None,
+        true,
+    )
+    .await;
+    assert!(probe.result.is_ok());
+    assert!(
+        probe.agent_rows.is_none(),
+        "an unanswered call is None, not an empty list"
+    );
+    assert!(probe.agent_mtimes.is_none());
+}
+
+#[tokio::test]
+async fn agents_are_not_asked_when_the_cadence_says_no() {
+    struct CountingAgents(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl TmuxExec for CountingAgents {
+        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+            Ok(Vec::new())
+        }
+        async fn new_session(&self, _: &str, _: &std::path::Path, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn restart_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn capture_pane_scrollback(&self, _: &str, _: u32) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(Vec::new())
+        }
+    }
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let host = host_row("h");
+    let probe = probe_with_timeout(
+        host.clone(),
+        Box::new(CountingAgents(calls.clone())),
+        std::time::Duration::from_secs(5),
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(probe.agent_rows.is_none());
+    let probe = probe_with_timeout(
+        host,
+        Box::new(CountingAgents(calls.clone())),
+        std::time::Duration::from_secs(5),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(probe.agent_rows, Some(Vec::new()));
 }
 
 /// Scriptable executor for the identity probe tests: a fixed session list
@@ -1064,12 +1235,54 @@ impl TmuxExec for IdentityTmux {
     async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
         Ok(String::new())
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        self.agents.clone()
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(self.agents.clone())
     }
     async fn host_identity(&self) -> Option<crate::tmux::HostIdentity> {
         self.identity.clone()
     }
+}
+
+/// `ReconcileDeps` built by hand (not `ReconcileDeps::fake`, which forces
+/// `agents_every` to zero) so a test can set its own agents cadence.
+fn deps_with_cadence_for_tests() -> ReconcileDeps {
+    ReconcileDeps {
+        exec: Box::new(|_alias| Box::new(IdentityTmux::default())),
+        probe_timeout: std::time::Duration::from_secs(5),
+        shell: Arc::new(NoHostShell),
+        pr_cache: Arc::new(crate::service::outcome::PrProbeCache::new(
+            crate::service::outcome::PR_PROBE_TTL,
+        )),
+        local_home: None,
+        local_host: true,
+        agents_every: std::time::Duration::from_secs(60),
+        last_agents: dashmap::DashMap::new(),
+    }
+}
+
+#[test]
+fn agents_due_fires_on_first_contact_then_only_after_the_cadence() {
+    let deps = ReconcileDeps::fake(
+        |_| Box::new(IdentityTmux::default()),
+        std::time::Duration::from_secs(5),
+    );
+    // `fake` sets agents_every = 0 → always due.
+    let t0 = std::time::Instant::now();
+    assert!(agents_due(&deps, "h", t0));
+    assert!(agents_due(&deps, "h", t0));
+    let deps = deps_with_cadence_for_tests();
+    assert!(agents_due(&deps, "h", t0), "first contact is due");
+    assert!(!agents_due(
+        &deps,
+        "h",
+        t0 + std::time::Duration::from_secs(20)
+    ));
+    assert!(agents_due(
+        &deps,
+        "h",
+        t0 + std::time::Duration::from_secs(61)
+    ));
+    assert!(agents_due(&deps, "other", t0), "per host");
 }
 
 #[tokio::test]
@@ -1087,6 +1300,7 @@ async fn a_probe_records_the_host_identity_only_when_the_list_succeeded() {
         }),
         std::time::Duration::from_secs(5),
         None,
+        true,
     )
     .await;
     assert_eq!(probe.identity, Some(id));
@@ -1129,8 +1343,8 @@ async fn a_probe_drops_the_host_identity_when_list_sessions_fails() {
         async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
             Ok(String::new())
         }
-        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-            vec![]
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
         }
         async fn host_identity(&self) -> Option<crate::tmux::HostIdentity> {
             self.identity.clone()
@@ -1146,6 +1360,7 @@ async fn a_probe_drops_the_host_identity_when_list_sessions_fails() {
         }),
         std::time::Duration::from_secs(5),
         None,
+        true,
     )
     .await;
     assert!(probe.result.is_err());
@@ -1332,49 +1547,120 @@ fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
     );
 }
 
-#[test]
-fn build_send_commands_emits_literal_text_then_enter() {
-    let cmds = build_send_commands("dev-foo", "hello world", true);
-    assert_eq!(cmds.len(), 3);
-    assert!(cmds[0].starts_with("tmux send-keys -t "));
-    assert!(cmds[0].contains(" -l "));
-    assert!(cmds[0].contains("'hello world'"));
-    assert!(cmds.last().unwrap().ends_with(" Enter"));
+fn b64(s: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
 }
 
 #[test]
-fn build_send_commands_escapes_embedded_quotes() {
-    let cmds = build_send_commands("dev-foo", "it's a test", true);
-    // quote uses the '\''..  dance for embedded singles.
-    assert!(cmds[0].contains("'it'\\''s a test'"));
+fn normalize_prompt_body_folds_crlf_and_lone_cr_into_lf() {
+    assert_eq!(normalize_prompt_body("a\r\nb\r\n").unwrap(), "a\nb\n");
+    assert_eq!(normalize_prompt_body("a\rb").unwrap(), "a\nb");
+    assert_eq!(normalize_prompt_body("tab\there\n").unwrap(), "tab\there\n");
+    assert_eq!(normalize_prompt_body("čšž é 🚀").unwrap(), "čšž é 🚀");
 }
 
 #[test]
-fn build_send_commands_quotes_session_name_with_dashes() {
-    let cmds = build_send_commands("dev-with-dashes", "x", true);
-    // Quoted AND exact: a bare name would let tmux prefix-match another session.
-    assert!(cmds[0].contains("'=dev-with-dashes:'"), "got: {}", cmds[0]);
+fn normalize_prompt_body_refuses_control_bytes_that_are_keystrokes() {
+    for bad in ["\x03", "esc \x1b[200~", "bell\x07", "\x00"] {
+        let e = normalize_prompt_body(bad).unwrap_err();
+        assert_eq!(e.code, "E_VALIDATE", "{bad:?}");
+        assert!(e.message.contains("control"), "{}", e.message);
+    }
 }
 
 #[test]
-fn send_commands_strip_trailing_newline_and_submit_once() {
-    let cmds = build_send_commands("dev-x", "line1\nline2\n", true);
-    // body preserves the internal newline, trailing newline stripped
-    assert!(cmds
-        .iter()
-        .any(|c| c.contains("-l") && c.contains("line1") && c.contains("line2")));
-    // the literal body must not carry the trailing newline
-    assert!(!cmds.iter().any(|c| c.contains("line2\n")));
-    // exactly one Enter/submit, with a settle before it
-    let enters = cmds.iter().filter(|c| c.ends_with("Enter")).count();
-    assert_eq!(enters, 1);
-    assert!(cmds.iter().any(|c| c.contains("sleep")));
+fn normalize_prompt_body_caps_the_size_and_names_the_cap() {
+    let big = "x".repeat(MAX_PROMPT_BYTES + 1);
+    let e = normalize_prompt_body(&big).unwrap_err();
+    assert_eq!(e.code, "E_VALIDATE");
+    assert!(e.message.contains("65536"), "{}", e.message);
+    assert!(normalize_prompt_body(&"x".repeat(MAX_PROMPT_BYTES)).is_ok());
 }
 
 #[test]
-fn send_commands_no_submit_when_submit_false() {
-    let cmds = build_send_commands("dev-x", "stage me", false);
-    assert!(cmds.iter().all(|c| !c.ends_with("Enter")));
+fn send_script_ships_the_body_base64_through_load_buffer_and_pastes_bracketed() {
+    let s = build_send_script("dev-foo", None, "it's a test", "fleet-abc", true);
+    assert!(
+        s.contains(&format!(
+            "printf %s '{}' | base64 -d | tmux load-buffer -b 'fleet-abc' - && tmux paste-buffer -p -d -b 'fleet-abc' -t \"$t\" || {{ tmux delete-buffer -b 'fleet-abc' 2>/dev/null; false; }}",
+            b64("it's a test")
+        )),
+        "{s}"
+    );
+    // A failed paste deletes the buffer AND stops the chain before Enter.
+    assert!(s.contains("delete-buffer -b 'fleet-abc'"), "{s}");
+    assert!(
+        s.contains("delete-buffer -b 'fleet-abc' 2>/dev/null; false; }"),
+        "{s}"
+    );
+    assert!(s.contains("sleep 0.15"), "{s}");
+    assert!(
+        s.trim_end().ends_with("tmux send-keys -t \"$t\" Enter"),
+        "{s}"
+    );
+    // The raw body never appears in the script: no quoting problem can.
+    assert!(!s.contains("it's"), "{s}");
+}
+
+#[test]
+fn send_script_targets_the_known_pane_id_and_falls_back_to_the_exact_session() {
+    let s = build_send_script("dev-foo", Some("%17"), "x", "fleet-1", true);
+    assert!(s.starts_with("set -o pipefail; t='=dev-foo:'; if [ \"$(tmux display-message -p -t '%17' '#{session_name}' 2>/dev/null)\" = 'dev-foo' ]; then t='%17'; fi; "), "{s}");
+    let s = build_send_script("dev-foo", None, "x", "fleet-1", true);
+    assert!(s.starts_with("set -o pipefail; t='=dev-foo:'; "), "{s}");
+    assert!(!s.contains("display-message"), "{s}");
+}
+
+/// Minor 8: without `pipefail`, `printf … | base64 -d | tmux load-buffer -`
+/// reports only the LAST command's status. A `base64` that dies part-way
+/// (a truncated argv, an OOM) still leaves `load-buffer` succeeding on the
+/// bytes it did get, and a TRUNCATED prompt is pasted and submitted. The
+/// prompt body is the one thing in this script that must never be delivered
+/// in part.
+#[test]
+fn send_script_fails_the_whole_pipeline_when_base64_dies_mid_stream() {
+    let s = build_send_script("dev-x", None, "body", "fleet-1", true);
+    assert!(s.starts_with("set -o pipefail; "), "{s}");
+    // And the cleanup's own noise ("no buffer fleet-1") must not become the
+    // E_TMUX message in place of the real failure.
+    assert!(
+        s.contains("|| { tmux delete-buffer -b 'fleet-1' 2>/dev/null; false; }"),
+        "{s}"
+    );
+}
+
+#[test]
+fn send_script_strips_one_trailing_newline_and_submits_once() {
+    let s = build_send_script("dev-x", None, "line1\nline2\n", "fleet-1", true);
+    assert!(s.contains(&b64("line1\nline2")), "{s}");
+    assert!(!s.contains(&b64("line1\nline2\n")), "{s}");
+    assert_eq!(s.matches(" Enter").count(), 1, "{s}");
+}
+
+#[test]
+fn send_script_without_submit_pastes_but_never_presses_enter() {
+    let s = build_send_script("dev-x", None, "stage me", "fleet-1", false);
+    assert!(s.contains("paste-buffer"), "{s}");
+    assert!(!s.contains("Enter"), "{s}");
+    assert!(!s.contains("sleep"), "{s}");
+}
+
+#[test]
+fn send_script_with_an_empty_body_is_a_bare_enter() {
+    let s = build_send_script("dev-x", Some("%3"), "", "fleet-1", true);
+    assert!(!s.contains("load-buffer"), "{s}");
+    assert!(
+        s.trim_end().ends_with("tmux send-keys -t \"$t\" Enter"),
+        "{s}"
+    );
+}
+
+#[test]
+fn send_script_with_an_empty_body_and_no_submit_presses_nothing() {
+    let s = build_send_script("dev-x", Some("%3"), "", "fleet-1", false);
+    assert!(!s.contains("Enter"), "{s}");
+    assert!(!s.contains("load-buffer"), "{s}");
 }
 
 // Paused clock: nothing here but timers, so virtual time is exact where a
@@ -1422,8 +1708,8 @@ async fn parallel_reconcile_does_not_serialise_on_slow_host() {
         ) -> Result<String, IpcError> {
             Ok(String::new())
         }
-        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-            vec![]
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
         }
     }
 
@@ -1484,8 +1770,8 @@ async fn wedged_host_probe_times_out_into_unreachable() {
         async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
             Ok(String::new())
         }
-        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-            vec![]
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
         }
     }
 
@@ -1501,8 +1787,14 @@ async fn wedged_host_probe_times_out_into_unreachable() {
 
     let start = std::time::Instant::now();
     let before = now_unix();
-    let probe =
-        probe_with_timeout(host, Box::new(HangingTmux), Duration::from_millis(80), None).await;
+    let probe = probe_with_timeout(
+        host,
+        Box::new(HangingTmux),
+        Duration::from_millis(80),
+        None,
+        true,
+    )
+    .await;
     let elapsed = start.elapsed();
 
     assert_eq!(
@@ -1513,7 +1805,7 @@ async fn wedged_host_probe_times_out_into_unreachable() {
         probe.result.is_err(),
         "wedged probe must surface as Err → unreachable"
     );
-    assert!(probe.agent_rows.is_empty());
+    assert!(probe.agent_rows.is_none());
     assert!(probe.intel.is_empty());
     assert!(
         probe.started_at >= before && probe.started_at <= now_unix(),
@@ -1522,6 +1814,18 @@ async fn wedged_host_probe_times_out_into_unreachable() {
     assert!(
         elapsed < Duration::from_secs(2),
         "must return at ~the cap, not the 3600s hang; took {elapsed:?}",
+    );
+}
+
+#[test]
+fn host_probe_timeout_covers_twice_the_ssh_wall_clock_plus_the_agents_call() {
+    // The batched probe is one ssh call (bounded by the ssh-layer wall
+    // clock, which already resets a wedged master); `claude agents --json`
+    // is a second. HOST_PROBE_TIMEOUT is the safety net above both.
+    assert!(
+        HOST_PROBE_TIMEOUT
+            >= crate::ssh::SshClient::default_wall_clock(std::time::Duration::from_secs(10)) * 2
+                + std::time::Duration::from_secs(5)
     );
 }
 
@@ -1564,8 +1868,8 @@ impl TmuxExec for ScriptedTmux {
     async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
         Ok(String::new())
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        vec![]
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(vec![])
     }
 }
 
@@ -1743,8 +2047,8 @@ impl TmuxExec for AccountTmux {
     async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
         Ok(String::new())
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        vec![]
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(vec![])
     }
     async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
         self.account.clone()
@@ -1998,7 +2302,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
     let stale = HostProbe {
         host: host.clone(),
         result: Ok(Vec::new()),
-        agent_rows: Vec::new(),
+        agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
@@ -2045,7 +2349,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
     let later = HostProbe {
         host,
         result: Ok(Vec::new()),
-        agent_rows: Vec::new(),
+        agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
@@ -2167,8 +2471,8 @@ async fn wait_for_repl_ready_returns_once_prompt_appears() {
         ) -> Result<String, IpcError> {
             Ok(String::new())
         }
-        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-            vec![]
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
         }
     }
 
@@ -2621,7 +2925,7 @@ fn reconcile_linking(
             path: PathBuf::from(cwd),
             pane_id: None,
         }]),
-        agent_rows: Vec::new(),
+        agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
@@ -3254,7 +3558,7 @@ fn marked_prompt_records_the_body_not_the_marker() {
     }
     let body = "Rewrite the auth flow!";
     let marked = crate::mcp::guard::mark_untrusted(body, "session 12 on mefistos");
-    record_prompt_outcome(&store, "local", "dev-marked", &marked);
+    record_prompt_outcome(&store, "local", "dev-marked", &marked, true);
     {
         let s = store.lock().unwrap();
         let row = s.get_session("dev-marked", "local").unwrap().unwrap();
@@ -3264,7 +3568,7 @@ fn marked_prompt_records_the_body_not_the_marker() {
     // An unmarked prompt is recorded verbatim, and a body that merely opens
     // with similar words keeps every character.
     let lookalike = "[claude-fleet: message from me] ship it";
-    record_prompt_outcome(&store, "local", "dev-marked", lookalike);
+    record_prompt_outcome(&store, "local", "dev-marked", lookalike, true);
     let s = store.lock().unwrap();
     let row = s.get_session("dev-marked", "local").unwrap().unwrap();
     assert_eq!(row.last_prompt.as_deref(), Some(lookalike));
@@ -3313,6 +3617,7 @@ fn prompt_derived_name_replaces_only_the_branch_default() {
         "local",
         "dev-o-r--fix-login",
         "Rewrite the auth flow!",
+        true,
     );
     {
         let s = store.lock().unwrap();
@@ -3326,7 +3631,13 @@ fn prompt_derived_name_replaces_only_the_branch_default() {
         s.set_friendly_name("local", "dev-o-r--fix-login", Some("My label"))
             .unwrap();
     }
-    record_prompt_outcome(&store, "local", "dev-o-r--fix-login", "Another prompt here");
+    record_prompt_outcome(
+        &store,
+        "local",
+        "dev-o-r--fix-login",
+        "Another prompt here",
+        true,
+    );
     let s = store.lock().unwrap();
     let row = s
         .get_session("dev-o-r--fix-login", "local")
@@ -3334,6 +3645,156 @@ fn prompt_derived_name_replaces_only_the_branch_default() {
         .unwrap();
     assert_eq!(row.friendly_name.as_deref(), Some("My label"));
     assert_eq!(row.last_prompt.as_deref(), Some("Another prompt here"));
+}
+
+/// UX-05, the shape of the bug: under the old rule the FIRST prompt through
+/// fleet won permanently, so a session answered with `yes` stayed `yes`
+/// forever. Now a rejected prompt writes nothing, the row keeps its branch
+/// default, and the next real prompt names it.
+#[test]
+fn a_rejected_prompt_leaves_the_default_for_the_next_real_one() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let default = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let wid = s
+            .upsert_worktree(
+                pid,
+                "fix-login",
+                "/p/o/r/.worktrees/fix-login",
+                Some("dev-o-r--fix-login"),
+            )
+            .unwrap();
+        s.upsert_session(
+            "dev-o-r--fix-login",
+            "local",
+            Some(pid),
+            Some(wid),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+        let id = s
+            .get_session("dev-o-r--fix-login", "local")
+            .unwrap()
+            .unwrap()
+            .id;
+        let default = s
+            .default_friendly_name(id)
+            .unwrap()
+            .expect("branch default");
+        s.set_friendly_name("local", "dev-o-r--fix-login", Some(&default))
+            .unwrap();
+        default
+    };
+    for junk in ["/clear", "yes", "push"] {
+        record_prompt_outcome(&store, "local", "dev-o-r--fix-login", junk, true);
+        let s = store.lock().unwrap();
+        let row = s
+            .get_session("dev-o-r--fix-login", "local")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.friendly_name.as_deref(),
+            Some(default.as_str()),
+            "{junk:?} must not name the session"
+        );
+        // The prompt is still recorded: only the label is refused.
+        assert_eq!(row.last_prompt.as_deref(), Some(junk));
+    }
+    record_prompt_outcome(
+        &store,
+        "local",
+        "dev-o-r--fix-login",
+        "Fix the login redirect loop",
+        true,
+    );
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session("dev-o-r--fix-login", "local")
+            .unwrap()
+            .unwrap()
+            .friendly_name
+            .as_deref(),
+        Some("fix the login redirect loop")
+    );
+}
+
+/// A label the OLD rule derived from a junk prompt is replaced once, so the
+/// sessions already called `yes` in a live fleet heal themselves. A label a
+/// human chose is never the five-word reduction of the stored prompt, so it
+/// survives.
+#[test]
+fn a_legacy_junk_label_heals_but_a_chosen_one_survives() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        for name in ["dev-junk", "dev-chosen"] {
+            s.upsert_session(name, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        // What the pre-UX-05 rule left behind: name == 5-word reduction of
+        // the prompt that produced it.
+        s.set_last_prompt(
+            s.get_session("dev-junk", "local").unwrap().unwrap().id,
+            "yes",
+        )
+        .unwrap();
+        s.set_friendly_name("local", "dev-junk", Some("yes"))
+            .unwrap();
+        // A human label over the same junk prompt.
+        s.set_last_prompt(
+            s.get_session("dev-chosen", "local").unwrap().unwrap().id,
+            "yes",
+        )
+        .unwrap();
+        s.set_friendly_name("local", "dev-chosen", Some("PR review"))
+            .unwrap();
+    }
+    for name in ["dev-junk", "dev-chosen"] {
+        record_prompt_outcome(&store, "local", name, "Rewrite the auth flow", true);
+    }
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session("dev-junk", "local")
+            .unwrap()
+            .unwrap()
+            .friendly_name
+            .as_deref(),
+        Some("rewrite the auth flow")
+    );
+    assert_eq!(
+        s.get_session("dev-chosen", "local")
+            .unwrap()
+            .unwrap()
+            .friendly_name
+            .as_deref(),
+        Some("PR review")
+    );
+}
+
+/// A prompt fleet composed (safe-kill, an inbox header, a review seed) or
+/// fanned out over N sessions describes fleet's request, not the user's
+/// work: `label: false` records it without naming anything.
+#[test]
+fn a_system_prompt_records_without_naming() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-sys", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+    }
+    let body = crate::service::safe_kill::build_safe_kill_prompt("abc123");
+    record_prompt_outcome(&store, "local", "dev-sys", &body, false);
+    let s = store.lock().unwrap();
+    let row = s.get_session("dev-sys", "local").unwrap().unwrap();
+    assert_eq!(row.friendly_name, None);
+    assert!(row.last_prompt.is_some());
 }
 
 #[test]
@@ -3361,22 +3822,93 @@ fn find_session_by_tmux_name_returns_the_single_match_or_lists_candidates() {
 // ── Wave 2 Track D: naming + PR probe ──
 
 #[test]
-fn friendly_name_from_prompt_takes_five_lowercase_words_without_punctuation() {
+fn label_from_prompt_takes_five_lowercase_words_without_punctuation() {
     assert_eq!(
-        friendly_name_from_prompt("Fix the login bug, then add tests for it!").as_deref(),
+        label_from_prompt("Fix the login bug, then add tests for it!").as_deref(),
         Some("fix the login bug then")
     );
     assert_eq!(
-        friendly_name_from_prompt("  Refactor   SSH   layer  ").as_deref(),
+        label_from_prompt("  Refactor   SSH   layer  ").as_deref(),
         Some("refactor ssh layer")
     );
-    assert_eq!(friendly_name_from_prompt("!!! ... ---"), None);
-    assert_eq!(friendly_name_from_prompt(""), None);
+    assert_eq!(label_from_prompt("!!! ... ---"), None);
+    assert_eq!(label_from_prompt(""), None);
     // Unicode letters survive, symbols do not.
     assert_eq!(
-        friendly_name_from_prompt("Oprav chybu v prihlásení (rýchlo)").as_deref(),
+        label_from_prompt("Oprav chybu v prihlásení (rýchlo)").as_deref(),
         Some("oprav chybu v prihlásení rýchlo")
     );
+}
+
+/// UX-05: a slash command, a bash-mode line, a memory note and fleet's own
+/// message header are commands, not descriptions of work — a Conversation
+/// quick-action chip sending `/clear` must not name the session `clear`.
+#[test]
+fn label_from_prompt_rejects_commands_and_machine_headers() {
+    for prompt in [
+        "/clear",
+        "/compact",
+        "/status",
+        "!ls -la",
+        "#remember the port is 3100",
+        "[msg #42 from dev-foo@hetzner]: hello there",
+        "<system-reminder>do the thing</system-reminder>",
+        "> quoted text here",
+    ] {
+        assert_eq!(label_from_prompt(prompt), None, "should reject {prompt:?}");
+    }
+}
+
+/// UX-05: an acknowledgement is the single most common prompt in a live
+/// session and the least informative label there is.
+#[test]
+fn label_from_prompt_rejects_acknowledgements() {
+    for prompt in [
+        "yes",
+        "ok, ship it",
+        "Sure, go ahead with that",
+        "thanks that worked",
+        "Continue where you left off.",
+        "ano, sprav to tak",
+        "Ďakujem, to stačí",
+    ] {
+        assert_eq!(label_from_prompt(prompt), None, "should reject {prompt:?}");
+    }
+    // The same words inside a sentence stay informative.
+    assert_eq!(
+        label_from_prompt("push the release branch").as_deref(),
+        Some("push the release branch")
+    );
+    // `please` is deliberately NOT a stop word.
+    assert_eq!(
+        label_from_prompt("please fix the login redirect").as_deref(),
+        Some("please fix the login redirect")
+    );
+}
+
+#[test]
+fn label_from_prompt_requires_three_words_and_a_letter() {
+    assert_eq!(label_from_prompt("push"), None);
+    assert_eq!(label_from_prompt("go on"), None);
+    assert_eq!(label_from_prompt("2"), None);
+    assert_eq!(label_from_prompt("👍"), None);
+    assert_eq!(label_from_prompt("1 2 3 4"), None);
+    assert_eq!(
+        label_from_prompt("rerun the failing test").as_deref(),
+        Some("rerun the failing test")
+    );
+}
+
+/// A multi-line prompt is judged by its opening line, so a one-word first
+/// line is not rescued by the paragraph under it — and a real task is not
+/// polluted by the detail block that follows.
+#[test]
+fn label_from_prompt_reads_only_the_first_non_empty_line() {
+    assert_eq!(
+        label_from_prompt("\n\nFix the parser.\n\nDetails: it chokes on tabs").as_deref(),
+        Some("fix the parser")
+    );
+    assert_eq!(label_from_prompt("yes\n\nand rewrite the auth flow"), None);
 }
 
 /// A host shell that answers the PR probe with canned stdout and counts
@@ -3501,7 +4033,7 @@ fn ensure_remote_project_script_clones_only_without_a_worktree() {
     assert!(script.starts_with("set -e\n"), "{script}");
     assert!(
         script.contains(
-            "if [ ! -d '/home/u/projects/github.com/o/r'/.git ]; then mkdir -p \"$(dirname -- '/home/u/projects/github.com/o/r')\" && git clone 'git@github.com:o/r.git' '/home/u/projects/github.com/o/r'; fi"
+            "if [ ! -d '/home/u/projects/github.com/o/r'/.git ]; then mkdir -p \"$(dirname -- '/home/u/projects/github.com/o/r')\"; tmp=\"$(dirname -- '/home/u/projects/github.com/o/r')/.fleet-clone-$$\"; rm -rf \"$tmp\"; git clone 'git@github.com:o/r.git' \"$tmp\" && { [ ! -e '/home/u/projects/github.com/o/r' ] || rmdir '/home/u/projects/github.com/o/r'; } && mv \"$tmp\" '/home/u/projects/github.com/o/r' || { rm -rf \"$tmp\"; exit 1; }; fi"
         ),
         "guarded clone: {script}"
     );
@@ -4350,7 +4882,7 @@ async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
     let probe = HostProbe {
         host: host.clone(),
         result: Ok(Vec::new()),
-        agent_rows: Vec::new(),
+        agent_rows: Some(Vec::new()),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
@@ -4827,7 +5359,7 @@ fn pair_pass(
     let probe = HostProbe {
         host,
         result: Ok(live),
-        agent_rows: agents,
+        agent_rows: Some(agents),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
@@ -4964,4 +5496,14 @@ fn pair_session_agents_rejects_an_id_another_session_claims() {
     let anon = [anon];
     let got = pair_session_agents(&live_b, &anon, &stored(&[]), false);
     assert!(got.is_empty(), "{got:?}");
+}
+
+#[test]
+fn scrollback_lines_are_clamped() {
+    assert_eq!(clamp_scrollback(Some(5)), Some(5));
+    assert_eq!(
+        clamp_scrollback(Some(4_000_000_000)),
+        Some(MAX_SCROLLBACK_LINES)
+    );
+    assert_eq!(clamp_scrollback(None), None);
 }

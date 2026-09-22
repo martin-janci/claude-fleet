@@ -30,6 +30,9 @@ impl FleetTasks for Recorder {
     fn start_event_bridge(&self) {
         self.0.lock().unwrap().push("event_bridge");
     }
+    fn start_report_flusher(&self) {
+        self.0.lock().unwrap().push("report_flusher");
+    }
 }
 
 fn remote() -> Backend {
@@ -52,13 +55,22 @@ fn a_hub_client_starts_none_of_the_three() {
     start_background_tasks(&remote(), &recorder);
     assert_eq!(
         recorder.started(),
-        vec!["event_bridge"],
+        vec!["event_bridge", "report_flusher"],
         "a desktop pointed at a hub started a fleet-owning background task. \
          Two processes reconciling one fleet is the failure this whole mode \
          exists to prevent — and unlike most bugs it is silent, because both \
          halves appear to work. The event bridge is the one task a client DOES \
          run: it only reads the hub's stream."
     );
+}
+
+#[test]
+fn the_report_flusher_is_off_with_the_env_var() {
+    assert!(report_flusher_wanted(None));
+    assert!(report_flusher_wanted(Some("1")));
+    assert!(!report_flusher_wanted(Some("0")));
+    assert!(!report_flusher_wanted(Some("false")));
+    assert!(!report_flusher_wanted(Some("FALSE")));
 }
 
 /// The other half: standalone behaviour must not change. A guard that
@@ -98,6 +110,7 @@ fn lib_rs_cannot_start_a_background_task_behind_this_modules_back() {
         "spawn_account_usage_tick(",
         "maybe_start_mcp(",
         "spawn_event_bridge(",
+        "spawn_report_flusher(",
     ] {
         assert!(
             !lib.contains(forbidden),
@@ -129,6 +142,7 @@ fn the_real_tasks_module_spawns_each_of_the_three_exactly_once() {
         ("spawn_account_usage_tick(", "the account-usage poll"),
         ("maybe_start_mcp(", "the embedded control API"),
         ("spawn_event_bridge(", "the hub event bridge"),
+        ("spawn_report_flusher(", "the error-report flusher"),
     ] {
         assert_eq!(
             tasks.matches(call).count(),

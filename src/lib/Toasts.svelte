@@ -1,12 +1,20 @@
 <script lang="ts">
-  import { toasts, dismiss, runToastAction } from './toasts';
+  import { toasts, dismiss, clearToasts, runToastAction } from './toasts';
 </script>
 
 <!-- Polite live region: screen readers announce new toasts without
      interrupting; errors stay until dismissed, info auto-clears. -->
 <div class="toasts" aria-live="polite" role="status" data-testid="toasts">
+  {#if $toasts.length > 1}
+    <button class="dismiss-all" onclick={() => clearToasts()} data-testid="toast-dismiss-all">
+      Dismiss all ({$toasts.length})
+    </button>
+  {/if}
   {#each $toasts as t (t.id)}
-    <div class="toast {t.kind}" role={t.kind === 'error' ? 'alert' : undefined} data-testid="toast" data-kind={t.kind}>
+    <!-- No nested live region: an assertive role="alert" inside this polite
+         role="status" is undefined behaviour and screen readers either
+         double-announce it or drop one. The container announces. -->
+    <div class="toast {t.kind}" data-testid="toast" data-kind={t.kind}>
       {#if t.code}
         <code class="code" data-testid="toast-code">{t.code}</code>
       {/if}
@@ -23,10 +31,27 @@
 </div>
 
 <style>
+  /* Errors are sticky, so N failing sessions leave N toasts and the only
+     way out was N individual × clicks. */
+  .dismiss-all {
+    pointer-events: auto;
+    align-self: flex-end;
+    font: inherit;
+    font-size: 0.72rem;
+    padding: 0.15rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-pane);
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  .dismiss-all:hover { color: var(--fg); border-color: var(--accent); }
   .toasts {
     position: fixed;
     right: 0.75rem;
-    bottom: 2rem; /* above the 24px status footer */
+    /* Above the status footer AND the agent FAB: a toast must never cover
+       the app's only documented entry point to the agent. */
+    bottom: calc(var(--status-h) + var(--fab-size) + var(--layer-gap) * 2);
     display: flex;
     flex-direction: column;
     gap: 0.4rem;

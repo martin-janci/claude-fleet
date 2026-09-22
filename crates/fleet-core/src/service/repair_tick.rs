@@ -1451,8 +1451,8 @@ mod tests {
         async fn capture_pane_scrollback(&self, _: &str, _: u32) -> Result<String, IpcError> {
             Ok(String::new())
         }
-        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-            Vec::new()
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(Vec::new())
         }
     }
 

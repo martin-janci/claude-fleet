@@ -201,6 +201,9 @@
     'E_HUB_CONTRACT',
     'E_HUB_UNREACHABLE',
     'E_HUB_UNAVAILABLE',
+    // A scan the hub never answered says nothing about the host's worktrees
+    // either; the red error line would blame the scan for a slow hub.
+    'E_HUB_TIMEOUT',
   ];
   let hostWorktrees = $state<HostWorktreesState>(
     untrack(() => ({ status: 'ready', rows: project.worktrees, cloned: true })),

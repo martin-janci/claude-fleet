@@ -6,6 +6,8 @@
 //! as usual) + `tracing-appender` (hourly rotation, newest `MAX_LOG_FILES`
 //! kept). `log` records from dependencies (tauri, tao, …) are bridged in by
 //! `tracing-log`, so either macro family ends up in the same file.
+//! `ReportLayer` copies every `ERROR` event into `report_ring()` for the hub
+//! error channel (spec 2026-09-21).
 //!
 //! Why hourly: `tracing-appender` 0.2 has no size-based cap, so with daily
 //! rotation a `RUST_LOG=debug` run could grow one day's file without bound.
@@ -259,6 +261,143 @@ pub fn redact_secrets(input: &str, secrets: &[String]) -> String {
     out
 }
 
+/// The process-wide queue of error-level events, fed by [`ReportLayer`] and
+/// drained by whoever reports to a hub (the desktop's flusher, the hub's own
+/// tick). Bounded at `RING_CAP`; in a process nothing drains it just wraps.
+pub fn report_ring() -> &'static fleet_proto::report::ReportRing {
+    static RING: LazyLock<fleet_proto::report::ReportRing> =
+        LazyLock::new(fleet_proto::report::ReportRing::new);
+    &RING
+}
+
+/// Flatten one event's fields into a [`Report`](fleet_proto::report::Report):
+/// `message` is the message, `code` is the code, everything else is
+/// appended as ` key=value`.
+#[derive(Default)]
+struct ReportVisitor {
+    message: String,
+    code: Option<String>,
+    rest: String,
+}
+
+impl tracing::field::Visit for ReportVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        match field.name() {
+            "message" => self.message = format!("{value:?}"),
+            "code" => self.code = Some(format!("{value:?}").trim_matches('"').to_string()),
+            name => {
+                use std::fmt::Write as _;
+                let _ = write!(self.rest, " {name}={value:?}");
+            }
+        }
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "message" => self.message = value.to_string(),
+            "code" => self.code = Some(value.to_string()),
+            name => {
+                use std::fmt::Write as _;
+                let _ = write!(self.rest, " {name}={value}");
+            }
+        }
+    }
+}
+
+/// An `ERROR` event as a clamped report, or `None` for any other level.
+pub fn report_from_event(event: &tracing::Event<'_>) -> Option<fleet_proto::report::Report> {
+    if *event.metadata().level() != tracing::Level::ERROR {
+        return None;
+    }
+    let mut v = ReportVisitor::default();
+    event.record(&mut v);
+    let mut r = fleet_proto::report::Report::error(
+        event.metadata().target(),
+        &format!("{}{}", v.message, v.rest),
+    );
+    r.code = v.code;
+    r.clamp();
+    Some(r)
+}
+
+/// Dependency `ERROR` events that say nothing this app can act on, as
+/// `(target, message prefix)` pairs.
+///
+/// `rmcp` logs at ERROR when an MCP client hangs up before it reads the
+/// response it asked for: `fail to response message error=channel closed`. A
+/// control-API client closing its pipe is ordinary. Those lines were the
+/// *only* ERRORs in five days of desktop logs, so `grep ERROR` found nothing
+/// but them, and [`ReportLayer`] shipped each one to the hub as an error
+/// report — a dependency's shrug filed as this app's fault.
+///
+/// Dropped here rather than in [`DEFAULT_FILTER`], which can only silence a
+/// target wholesale and would take rmcp's real errors with it. Keep the
+/// message prefixes narrow for the same reason.
+const DEPENDENCY_NOISE: &[(&str, &str)] = &[("rmcp", "fail to response message")];
+
+/// Whether `target` is `t` or a module under it.
+fn target_matches(target: &str, t: &str) -> bool {
+    target
+        .strip_prefix(t)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+}
+
+/// Whether a `(target, message)` pair matches [`DEPENDENCY_NOISE`]. The
+/// level is the caller's to check.
+fn is_dependency_noise(target: &str, message: &str) -> bool {
+    DEPENDENCY_NOISE
+        .iter()
+        .any(|(t, m)| target_matches(target, t) && message.starts_with(m))
+}
+
+/// [`is_dependency_noise`] for a live event: `ERROR` only, and the target is
+/// checked before the message so no non-matching event pays for a visit.
+pub fn event_is_dependency_noise(event: &tracing::Event<'_>) -> bool {
+    if *event.metadata().level() != tracing::Level::ERROR {
+        return false;
+    }
+    let target = event.metadata().target();
+    if !DEPENDENCY_NOISE
+        .iter()
+        .any(|(t, _)| target_matches(target, t))
+    {
+        return false;
+    }
+    let mut v = ReportVisitor::default();
+    event.record(&mut v);
+    is_dependency_noise(target, &v.message)
+}
+
+/// Drops [`event_is_dependency_noise`] events for every layer in the stack:
+/// `Layered::event_enabled` ANDs its layers, so one `false` here keeps the
+/// line out of the file, out of stderr and out of [`report_ring`] alike.
+pub struct NoiseFilter;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for NoiseFilter {
+    fn event_enabled(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        !event_is_dependency_noise(event)
+    }
+}
+
+/// Pushes every `ERROR` event into [`report_ring`]. Never logs: a layer that
+/// logs re-enters the subscriber.
+pub struct ReportLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReportLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if let Some(r) = report_from_event(event) {
+            report_ring().push(r);
+        }
+    }
+}
+
 /// An `io::Write` adapter that redacts each buffer before forwarding it.
 /// `tracing-subscriber`'s fmt layer formats a whole event into one buffer and
 /// writes it with a single `write_all`, so every call sees complete lines.
@@ -354,8 +493,10 @@ pub fn init_in_with(log_dir: &Path, force_stderr: bool) -> Result<PathBuf, Strin
 
     tracing_subscriber::registry()
         .with(filter)
+        .with(NoiseFilter)
         .with(file_layer)
         .with(stderr_layer)
+        .with(ReportLayer)
         .try_init()
         .map_err(|e| format!("install log subscriber: {e}"))?;
 
@@ -382,17 +523,117 @@ pub fn init_stderr_fallback() {
     let (filter, _) = env_filter();
     let _ = tracing_subscriber::registry()
         .with(filter)
+        .with(NoiseFilter)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(RedactingMakeWriter(std::io::stderr))
                 .with_target(true),
         )
+        .with(ReportLayer)
         .try_init();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_event_becomes_a_report_and_a_warn_does_not() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        // The ring is process-global and fleet-core's tests run in parallel
+        // threads, so a length assertion would be racy; instead push a
+        // unique message and find *this* report after draining everything.
+        let unique = format!(
+            "refused-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let before = report_ring().len();
+        let sub = tracing_subscriber::registry().with(ReportLayer);
+        tracing::subscriber::with_default(sub, || {
+            tracing::error!(target: "fleet_core::ssh", code = "E_SSH", host = "box", "ssh failed: {}", unique);
+            tracing::warn!(target: "fleet_core::ssh", "ignored");
+        });
+        assert!(report_ring().len() > before);
+        let b = report_ring().drain(usize::MAX);
+        let r = b
+            .reports
+            .iter()
+            .find(|r| r.message.starts_with(&format!("ssh failed: {unique}")))
+            .unwrap_or_else(|| panic!("no report with our unique message in {:?}", b.reports));
+        assert_eq!(r.component, "fleet_core::ssh");
+        assert_eq!(r.code.as_deref(), Some("E_SSH"));
+        assert!(
+            r.message.starts_with(&format!("ssh failed: {unique}")),
+            "{}",
+            r.message
+        );
+        assert!(r.message.contains("host=box"), "{}", r.message);
+        assert_eq!(r.level, "error");
+    }
+
+    #[test]
+    fn rmcp_hang_up_errors_are_noise_and_real_ones_are_not() {
+        // The line that filled the ERROR budget, and its whole module tree.
+        assert!(is_dependency_noise(
+            "rmcp::service",
+            "fail to response message error=channel closed"
+        ));
+        assert!(is_dependency_noise("rmcp", "fail to response message"));
+        // A different rmcp error still reaches the log and the hub.
+        assert!(!is_dependency_noise("rmcp::service", "response error id=9"));
+        // Our own targets are never noise, whatever they say.
+        assert!(!is_dependency_noise(
+            "fleet_core::mcp",
+            "fail to response message error=channel closed"
+        ));
+        // A target that merely starts with the same letters is not that target.
+        assert!(!is_dependency_noise(
+            "rmcpx::service",
+            "fail to response message"
+        ));
+    }
+
+    #[test]
+    fn a_noise_error_never_reaches_the_layers_below_the_filter() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        /// Records what `on_event` is actually handed. A local ring, so this
+        /// test does not race fleet-core's other threads over the global one.
+        struct Capture(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut v = ReportVisitor::default();
+                event.record(&mut v);
+                self.0.lock().unwrap().push(v.message);
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::registry()
+            .with(NoiseFilter)
+            .with(Capture(Arc::clone(&seen)));
+        tracing::subscriber::with_default(sub, || {
+            // Dropped: rmcp's client-hung-up shrug.
+            tracing::error!(target: "rmcp::service", "fail to response message error=channel closed");
+            // Kept: an rmcp error that is not on the list.
+            tracing::error!(target: "rmcp::service", "response error id=9");
+            // Kept: the same words at a level the filter does not consider.
+            tracing::warn!(target: "rmcp::service", "fail to response message error=channel closed");
+        });
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[0].starts_with("response error id=9"), "{seen:?}");
+        assert!(seen[1].starts_with("fail to response message"), "{seen:?}");
+    }
 
     #[test]
     fn stderr_layer_is_forced_or_debug_or_env_opt_in() {

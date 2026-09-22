@@ -15,6 +15,7 @@ mod hosts_accounts;
 mod layers;
 mod projects;
 mod reconcile;
+mod reports;
 mod rows;
 mod schema;
 mod sessions;
@@ -29,7 +30,9 @@ pub use clients::{
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
+pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
+pub use sessions::PromptAckState;
 
 pub struct Store {
     conn: Connection,

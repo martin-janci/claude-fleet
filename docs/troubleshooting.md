@@ -48,12 +48,20 @@ in the Hosts panel to refresh the status.
 
 ### `claude` or `tmux` missing on a host (`E_CLAUDE_CLI`)
 
-The probe runs a non-interactive SSH command, so only the `PATH` configured in
-the remote shell's non-interactive startup files (e.g. `~/.bashrc`, not
-`~/.bash_profile`) is visible. If `claude` or `tmux` was installed via a
-version manager (nvm, rbenv, mise, etc.), ensure those managers initialise in
-`~/.bashrc` (or the equivalent for the remote shell), or create a symlink in a
-standard `PATH` directory such as `/usr/local/bin`.
+On first contact with a host, fleet asks the user's own login shell for its
+`PATH` and the absolute paths of `tmux` and `claude` — an interactive login
+shell (`"$SHELL" -ilc`) first, a plain login shell (`-lc`) as fallback — and
+caches the answer for as long as the app (or hub) runs. tmux calls then run
+under `sh -c` with that `PATH`, and a new session's pane inherits it, so a
+version manager initialised in `~/.zshrc` or `~/.bash_profile` is seen too.
+The log says `[ssh] toolchain resolved` with what it found.
+
+When the resolve fails (`[ssh] toolchain could not be resolved; tmux calls
+stay on bash -lc`), it is retried after five minutes, and until then only the
+`PATH` of bash's non-interactive login startup files is visible. If `claude`
+or `tmux` was installed via a version manager (nvm, rbenv, mise, etc.), make
+sure it initialises there, or create a symlink in a standard `PATH` directory
+such as `/usr/local/bin`.
 
 ### Provisioning failed (`E_PROVISION`)
 
@@ -256,6 +264,14 @@ sockets in `~/.cache/claude-fleet/cm-<host>.sock`) go silent. On wake:
 3. After such a timeout the client resets that host's master (`ssh -O exit`),
    but only if no other command is using it and `ssh -O check` gets no answer.
    A slow command on a healthy connection keeps the master.
+4. A command whose master died UNDER it (ssh exits 255 with a mux error such
+   as `mux_client_request_session`, `Control socket` or `Broken pipe`) gets
+   one second chance: the master is reset and the command retried once, with
+   what is left of its wall clock.
+
+The terminal view has its own master (`cm-<host>-tty.sock`, keepalive
+15 s × 3), so a probe that resets the host's master does not drop an attached
+terminal, and a brief stall of an attached terminal does not kill it.
 
 Expect hosts to show **offline** for a pass or two after wake, then recover
 without any action. Reverse tunnels restart on their own (backoff up to

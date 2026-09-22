@@ -222,6 +222,10 @@ pub mod codes {
     /// app shows the last snapshot and a banner; it never falls back to
     /// managing the fleet itself, which would make two brains for one fleet.
     pub const E_HUB_UNREACHABLE: &str = "E_HUB_UNREACHABLE";
+    /// Remote (hub-client) mode: the hub took the request and did not answer
+    /// within the client's bound. Unlike `E_HUB_UNREACHABLE`, the operation
+    /// may have run — a mutation must not be blindly retried; re-list first.
+    pub const E_HUB_TIMEOUT: &str = "E_HUB_TIMEOUT";
     /// Remote (hub-client) mode: a hub is configured, but this launch could
     /// not use it — no stored client token, a keychain that would not open,
     /// plain `http://` without the opt-in, a URL that does not parse. The app

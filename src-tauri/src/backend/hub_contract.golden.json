@@ -1,5 +1,5 @@
 {
-  "revision": 1,
+  "revision": 3,
   "types": {
     "AccountRow": [
       "display_name",
@@ -102,7 +102,8 @@
       "at",
       "ended_at",
       "items",
-      "prompt"
+      "prompt",
+      "reminders"
     ],
     "Conversation": [
       "context",
@@ -235,6 +236,7 @@
       "last_stop_at",
       "last_turn_at",
       "lost_at",
+      "lost_reason",
       "model",
       "notes",
       "parent_session_id",
@@ -242,6 +244,7 @@
       "pr_url",
       "project_id",
       "reviews_session_id",
+      "row_version",
       "safe_kill_detail",
       "safe_kill_nonce",
       "safe_kill_requested_at",

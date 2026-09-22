@@ -346,7 +346,7 @@ impl FleetTools {
         Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, \
         E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both \
         sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts \
-        (in practice the master). Returns a MoveReport with the new row as target."
+        (in practice the master). Returns a moved report, a preview or a wait."
     )]
     // `clean_target`'s prose lives on the parameter itself rather than in the
     // sentence above: the served tool surface is capped
@@ -357,11 +357,20 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<MoveSessionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let dry_run = p.dry_run;
+        let when = p.when;
         audit(
             "move_session",
             &format!(
-                "session_id={} target={} keep_source={} strict={} clean_target={}",
-                p.session_id, p.target_host_alias, p.keep_source, p.strict, p.clean_target
+                "session_id={} target={} keep_source={} strict={} clean_target={} dry_run={} \
+                 when_is={:?}",
+                p.session_id,
+                p.target_host_alias,
+                p.keep_source,
+                p.strict,
+                p.clean_target,
+                dry_run,
+                when
             ),
         );
         crate::validate::host_alias(&p.target_host_alias).map_err(to_mcp_err)?;
@@ -373,25 +382,36 @@ impl FleetTools {
             "the session to move",
         )?;
         require_move_hosts(&caller, &row.host_alias, &p.target_host_alias)?;
-        self.confirm_gate(
-            "move_session",
-            p.confirm_nonce.as_deref(),
-            &format!(
-                "session_id={} from={} to={} keep_source={} strict={} clean_target={}",
-                row.id,
-                row.host_alias,
-                p.target_host_alias,
-                p.keep_source,
-                p.strict,
-                p.clean_target
-            ),
-            &caller,
-        )?;
-        let rep =
+        // `dry_run` changes nothing, and a `when` of `cancel` PREVENTS a
+        // move — for both, asking the user to confirm would put a dialog
+        // between them and the safe action. A `when` of `idle` is a
+        // (deferred) move and keeps the gate. Safe to skip either way only
+        // because `into_args` below maps these same fields onto
+        // `MoveSessionArgs`: a preview still reveals the source's file list
+        // and the target's state, and a cancel still needs to know which
+        // host it targets, so the access checks above stay unconditional
+        // regardless.
+        if !dry_run && when != crate::service::move_session::When::Cancel {
+            self.confirm_gate(
+                "move_session",
+                p.confirm_nonce.as_deref(),
+                &format!(
+                    "session_id={} from={} to={} keep_source={} strict={} clean_target={}",
+                    row.id,
+                    row.host_alias,
+                    p.target_host_alias,
+                    p.keep_source,
+                    p.strict,
+                    p.clean_target
+                ),
+                &caller,
+            )?;
+        }
+        let outcome =
             crate::service::move_session::move_session(p.into_args(row.id), &self.store, &self.ssh)
                 .await
                 .map_err(to_mcp_err)?;
-        ok_json(&rep)
+        ok_json(&outcome)
     }
 
     #[tool(

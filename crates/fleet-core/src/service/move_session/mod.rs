@@ -66,8 +66,11 @@
 pub mod carry;
 pub mod claude_state;
 mod finalise;
+pub mod preview;
+pub mod probe;
 mod progress;
 pub mod resolve;
+pub mod wait;
 
 use crate::events::MoveStep;
 use crate::ipc_error::lock;
@@ -91,6 +94,11 @@ pub const EVENT_MOVED: &str = "session_moved";
 /// partial move (Task 6): the target is killed, the source is left as-is.
 pub const EVENT_MOVE_UNDONE: &str = "session_move_undone";
 
+/// Leading sentence of [`require_source_idle`]'s refusal — how [`wait`]'s
+/// `run_wait` tells "the source went busy again" (resume the wait) from
+/// every other refusal (`Err(e) if e.message.contains(SOURCE_NOT_IDLE)`).
+pub const SOURCE_NOT_IDLE: &str = "the source Claude is not idle";
+
 const LOCAL: &str = "local";
 
 /// ssh connect timeout for the git / probe scripts (`run` bounds the whole
@@ -112,6 +120,36 @@ const NO_WORKTREE: &str = "__CF_NO_WORKTREE__";
 const NO_CWD: &str = "__CF_NO_CWD__";
 const DIVERGED: &str = "__CF_DIVERGED__";
 
+/// When a move happens (Transfer slice 3c). `now` (default) is today's move:
+/// a busy source is refused outright. `idle` waits, in-process, for the
+/// source to go idle and then runs the move (the public [`move_session`]
+/// spawns the wait; [`move_session_with`] treats `idle` exactly like `now`
+/// once it has decided not to defer — see that function's doc). `cancel`
+/// ends a pending wait instead of moving anything.
+///
+/// `JsonSchema` (Task 4): `MoveSessionParams` uses this type directly for
+/// the MCP `when` parameter, so the client needs a schema for it too. This
+/// module (unlike `mcp::tools`, which imports `rmcp::schemars` as
+/// `schemars`) has no such alias, so the derive and its crate path are
+/// spelled out in full, matching `service::hosts`/`service::repo` et al.
+/// `#[schemars(description = ..)]` overrides this whole doc comment for the
+/// served schema — schemars otherwise serialises it verbatim into
+/// `$defs.When.description`, which would put this internal reasoning (and
+/// its own byte cost) in front of every MCP client instead of the tool
+/// parameter's own slim one-clause-per-value doc on
+/// `MoveSessionParams::when`.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[schemars(crate = "rmcp::schemars", description = "now, idle, or cancel a wait")]
+pub enum When {
+    #[default]
+    Now,
+    Idle,
+    Cancel,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveSessionArgs {
     pub session_id: i64,
@@ -129,6 +167,15 @@ pub struct MoveSessionArgs {
     /// false.
     #[serde(default)]
     pub clean_target: bool,
+    /// Report what this move would do and change nothing (see `preview`).
+    /// Default false.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// When to move: `now` (default — a busy source is refused), `idle`
+    /// (wait for the source and return `Waiting`), `cancel` (end a pending
+    /// wait).
+    #[serde(default)]
+    pub when: When,
 }
 
 /// What a completed move did.
@@ -152,6 +199,30 @@ pub struct MoveReport {
     /// What travelled besides the transcript.
     pub carried: carry::CarryReport,
     pub target: SessionRow,
+}
+
+/// What `move_session` did. Internally tagged, so a `Moved` outcome is the
+/// `MoveReport` object with one extra key, `"kind": "moved"` — every field a
+/// caller already reads stays where it was. Both variants are boxed only to
+/// keep the enum from ballooning to the larger one's size
+/// (`clippy::large_enum_variant`); serde serialises through a box
+/// transparently, so the wire shape is unaffected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MoveOutcome {
+    Moved(Box<MoveReport>),
+    Preview(Box<preview::MovePreview>),
+    Waiting(Box<wait::MoveWaiting>),
+    WaitCancelled(Box<MoveWaitCancelled>),
+}
+
+/// What `when: cancel` answers with — never a move. `was_waiting` is `false`
+/// when there was nothing pending to cancel (already resolved, or never
+/// started).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveWaitCancelled {
+    pub session_id: i64,
+    pub was_waiting: bool,
 }
 
 /// Bounds for the "target is running" confirmation.
@@ -292,14 +363,114 @@ impl MoveHooks for RealHooks<'_> {
     }
 }
 
-/// Move a session (see the module docs).
+/// Poll interval for [`wait::run_wait`]'s retry loop — the same cadence
+/// [`crate::service::tasks::wait_for_session`] long-polls at.
+const WAIT_POLL: Duration = crate::service::tasks::POLL_INTERVAL;
+
+/// Whether the source is idle right now, read fresh from the store (no
+/// reconcile: this only decides whether `move_session` needs to spawn a
+/// waiter, not whether a move may proceed — the move's own `gather()` step
+/// reconciles and re-checks before it ever touches anything).
+fn source_is_idle(store: &Mutex<Store>, session_id: i64) -> Result<bool, IpcError> {
+    let s = lock(store)?;
+    let row = s.get_session_by_id(session_id)?.ok_or_else(|| {
+        IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
+    })?;
+    Ok(crate::service::tasks::session_satisfies(
+        &row,
+        crate::service::tasks::WaitCond::Idle,
+    ))
+}
+
+/// Move a session (see the module docs). Takes the store as an `Arc` because
+/// `when: idle` on a busy source spawns a waiter that must outlive this
+/// call — [`move_session_with`], the test-facing entry every fixture drives
+/// synchronously, never spawns anything and so never needs one.
 pub async fn move_session(
     args: MoveSessionArgs,
-    store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
-) -> Result<MoveReport, IpcError> {
+) -> Result<MoveOutcome, IpcError> {
     let hooks = RealHooks { ssh };
-    move_session_with(args, store, &**ssh, &hooks, MoveOptions::default()).await
+    let (task_store, task_ssh) = (Arc::clone(store), Arc::clone(ssh));
+    move_or_wait(
+        args,
+        Arc::clone(store),
+        &**ssh,
+        &hooks,
+        MoveOptions::default(),
+        move |guard, now, deadline| {
+            // The spawn lives here, not in `move_or_wait`: this is the one
+            // entry point that owns `'static` `Arc`s it can hand to a
+            // detached task, and the only caller allowed to outlive its own
+            // call. Tests drive `move_or_wait` with a recording closure
+            // instead, against `FakeSsh` / `FakeHooks` borrowed for the
+            // duration of the `.await`, which a spawned task cannot do.
+            tokio::spawn(async move {
+                let hooks = RealHooks { ssh: &task_ssh };
+                // The guard lives as long as the task: dropping it
+                // deregisters the wait so `cancel_wait` and the startup
+                // sweep see it as resolved.
+                let token = guard.token().clone();
+                wait::run_wait(
+                    now,
+                    &task_store,
+                    &*task_ssh,
+                    &hooks,
+                    MoveOptions::default(),
+                    &token,
+                    deadline,
+                    WAIT_POLL,
+                )
+                .await;
+                drop(guard);
+            });
+        },
+    )
+    .await
+}
+
+/// The public entry's branching, with the waiter's spawn injected as
+/// `start_wait(guard, args_to_run, deadline_unix)` so tests can drive it.
+///
+/// `when: idle` (not a dry run) on a busy source registers a wait and
+/// answers `Waiting` — also when the store said idle but the move's own
+/// fresh check refused the source as busy (`SOURCE_NOT_IDLE`); every other
+/// request is [`move_session_with`].
+/// `start_wait` gets the move to run once idle: the original arguments with
+/// `when: now` and `dry_run: false`, which [`wait::run_wait`] requires.
+async fn move_or_wait<S, F>(
+    args: MoveSessionArgs,
+    store: S,
+    ssh: &dyn SshExec,
+    hooks: &dyn MoveHooks,
+    opts: MoveOptions,
+    start_wait: F,
+) -> Result<MoveOutcome, IpcError>
+where
+    S: std::ops::Deref<Target = Mutex<Store>>,
+    F: FnOnce(wait::WaitGuard<S>, MoveSessionArgs, i64),
+{
+    if args.when == When::Idle && !args.dry_run {
+        if source_is_idle(&store, args.session_id)? {
+            // The stored status can be stale: the move's own `gather()`
+            // reconciles and re-checks before touching anything, and may
+            // find the source busy after all. `idle` means "wait for
+            // exactly that", so that refusal becomes a wait (I5a); anything
+            // else — a move, or any other refusal — is the answer.
+            match move_session_with(args.clone(), &store, ssh, hooks, opts).await {
+                Err(e) if e.message.contains(SOURCE_NOT_IDLE) => {}
+                other => return other,
+            }
+        }
+        let (guard, deadline, waiting) = wait::begin_wait(&args, store)?;
+        let mut now = args;
+        now.when = When::Now;
+        now.dry_run = false;
+        start_wait(guard, now, deadline);
+        return Ok(MoveOutcome::Waiting(Box::new(waiting)));
+    }
+    move_session_with(args, &store, ssh, hooks, opts).await
 }
 
 // ── pure helpers ────────────────────────────────────────────────────────────
@@ -366,6 +537,10 @@ pub struct SourceState {
     pub remote_sha: Option<String>,
     /// Commits in HEAD not on the origin branch; -1 when unknown.
     pub ahead: i64,
+    /// `ahead` is unknown because origin's tip is not in the source's object
+    /// store and the inspection did not fetch it — only ever true of a dry
+    /// run's inspection ([`inspect_script_with`] with `fetch: false`).
+    pub origin_tip_not_local: bool,
     /// An operation in progress (`merge`, `rebase`, `cherry-pick`, `revert`,
     /// `bisect`); its state is not carried, so the move is refused.
     pub midop: Option<String>,
@@ -391,6 +566,7 @@ pub fn parse_inspection(stdout: &str) -> Result<SourceState, IpcError> {
         current_branch: parts[3].trim().to_string(),
         remote_sha: (!remote.is_empty()).then(|| remote.to_string()),
         ahead: parts[5].trim().parse().unwrap_or(-1),
+        origin_tip_not_local: parts[5].trim() == ORIGIN_TIP_NOT_LOCAL,
         midop: Some(parts[6].trim())
             .filter(|m| !m.is_empty())
             .map(str::to_string),
@@ -535,6 +711,62 @@ pub fn parse_target_prep(stdout: &str, claude_id: &str) -> Result<TargetPrep, Ip
 /// replay, so a difference between the two hosts' git configs must not be
 /// able to fail a good move.
 pub fn inspect_script(tmux_name: &str, hint: Option<&str>, branch: &str) -> String {
+    inspect_script_with(tmux_name, hint, branch, true)
+}
+
+/// What [`inspect_script_with`] prints in the ahead field when `fetch` is
+/// off and origin's tip is not in the source's object store: the unpushed
+/// count needs that tip, and a dry run does not fetch it. Parses as
+/// `ahead == -1` (unknown) with [`SourceState::origin_tip_not_local`] set.
+pub const ORIGIN_TIP_NOT_LOCAL: &str = "origin-tip-not-local";
+
+/// [`inspect_script`], with the fetch of origin's tip optional.
+///
+/// `fetch: true` is the real move's inspection, byte for byte what it has
+/// always been: when origin's tip for `branch` is not in the source's object
+/// store it fetches it (objects, `FETCH_HEAD`, the tracking ref) so the
+/// unpushed count is exact.
+///
+/// `fetch: false` is a dry run's, and writes nothing: in that corner it
+/// prints [`ORIGIN_TIP_NOT_LOCAL`] instead of a count, and every git call
+/// runs under `GIT_OPTIONAL_LOCKS=0` so `git status` leaves the index's stat
+/// cache alone (its output is the same either way).
+///
+/// The real move's calls deliberately do NOT carry `GIT_OPTIONAL_LOCKS=0`.
+/// Its `git status` rewrite of the index is load-bearing: writing the index
+/// smudges racily-clean entries, and the snapshot that follows reads a COPY
+/// of that index (`carry::snapshot_script`), whose newer file mtime would
+/// otherwise make a same-size edit made in the index's own second look
+/// clean, so `git add -A` would skip it and the move would drop it.
+/// `hosts_that_disagree_about_quote_path_still_produce_a_matching_porcelain`
+/// fails intermittently when the prefix is applied here.
+pub fn inspect_script_with(
+    tmux_name: &str,
+    hint: Option<&str>,
+    branch: &str,
+    fetch: bool,
+) -> String {
+    let (g, missing_tip) = if fetch {
+        (
+            "",
+            r#"git -C "$wt" cat-file -e "$rsha^{commit}" 2>/dev/null || git -C "$wt" fetch -q origin "refs/heads/$br" >/dev/null 2>&1
+  ahead=$(git -C "$wt" rev-list --count "$rsha..HEAD" 2>/dev/null)
+  if [ -z "$ahead" ]; then ahead=-1; fi"#
+                .to_string(),
+        )
+    } else {
+        (
+            "GIT_OPTIONAL_LOCKS=0 ",
+            format!(
+                r#"if GIT_OPTIONAL_LOCKS=0 git -C "$wt" cat-file -e "$rsha^{{commit}}" 2>/dev/null; then
+    ahead=$(GIT_OPTIONAL_LOCKS=0 git -C "$wt" rev-list --count "$rsha..HEAD" 2>/dev/null)
+    if [ -z "$ahead" ]; then ahead=-1; fi
+  else
+    ahead={ORIGIN_TIP_NOT_LOCAL}
+  fi"#
+            ),
+        )
+    };
     format!(
         r#"# cf-move:inspect
 set +e
@@ -544,23 +776,21 @@ br={br}
 wt=''
 if [ -n "$name" ]; then
   c=$(tmux display-message -p -t "=$name:" '#{{pane_current_path}}' 2>/dev/null)
-  if [ -n "$c" ] && git -C "$c" rev-parse --git-dir >/dev/null 2>&1; then wt="$c"; fi
+  if [ -n "$c" ] && {g}git -C "$c" rev-parse --git-dir >/dev/null 2>&1; then wt="$c"; fi
 fi
-if [ -z "$wt" ] && [ -n "$hint" ] && git -C "$hint" rev-parse --git-dir >/dev/null 2>&1; then wt="$hint"; fi
+if [ -z "$wt" ] && [ -n "$hint" ] && {g}git -C "$hint" rev-parse --git-dir >/dev/null 2>&1; then wt="$hint"; fi
 if [ -z "$wt" ]; then printf '{NO_WORKTREE}\n' >&2; exit 3; fi
-top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)
+top=$({g}git -C "$wt" rev-parse --show-toplevel 2>/dev/null)
 if [ -n "$top" ]; then wt="$top"; fi
-porcelain=$(git -C "$wt" {status} 2>/dev/null)
-head=$(git -C "$wt" rev-parse HEAD 2>/dev/null)
-cur=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
-rsha=$(git -C "$wt" ls-remote --heads origin "refs/heads/$br" 2>/dev/null | cut -f1 | head -n1)
+porcelain=$({g}git -C "$wt" {status} 2>/dev/null)
+head=$({g}git -C "$wt" rev-parse HEAD 2>/dev/null)
+cur=$({g}git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
+rsha=$({g}git -C "$wt" ls-remote --heads origin "refs/heads/$br" 2>/dev/null | cut -f1 | head -n1)
 ahead=-1
 if [ -n "$rsha" ]; then
-  git -C "$wt" cat-file -e "$rsha^{{commit}}" 2>/dev/null || git -C "$wt" fetch -q origin "refs/heads/$br" >/dev/null 2>&1
-  ahead=$(git -C "$wt" rev-list --count "$rsha..HEAD" 2>/dev/null)
-  if [ -z "$ahead" ]; then ahead=-1; fi
+  {missing_tip}
 fi
-gd=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)
+gd=$({g}git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)
 midop=''
 if [ -n "$gd" ]; then
   if [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ]; then midop=rebase
@@ -642,7 +872,7 @@ pub fn require_source_idle(status: Option<&str>) -> Result<(), IpcError> {
         other => Err(IpcError::new(
             codes::E_INVALID_STATE,
             format!(
-                "the source Claude is not idle (claude_status {}); moving now would lose the turn in progress — wait until it finishes, then retry",
+                "{SOURCE_NOT_IDLE} (claude_status {}); moving now would lose the turn in progress — wait until it finishes, then retry",
                 other
                     .map(|s| format!("{s:?}"))
                     .unwrap_or_else(|| "unknown".into())
@@ -1401,29 +1631,29 @@ async fn carry_memory(
 // ── the move ────────────────────────────────────────────────────────────────
 
 /// Everything the move reads from the store, taken under one lock.
-struct Snapshot {
-    row: SessionRow,
-    claude_id: String,
-    branch: String,
-    project_id: i64,
-    worktree_id: i64,
-    worktree_name: String,
-    worktree_path: Option<String>,
-    owner: String,
-    repo: String,
-    project_base: Option<String>,
-    stored_transcript: Option<String>,
-    cap: u64,
-    bundle_cap: u64,
-    ignored_entry_kb: u64,
-    ignored_total_kb: u64,
-    session_state_cap: u64,
-    target_projects_root: String,
-    layout: crate::projects::Layout,
-    target_taken: Vec<String>,
+pub(super) struct Snapshot {
+    pub(super) row: SessionRow,
+    pub(super) claude_id: String,
+    pub(super) branch: String,
+    pub(super) project_id: i64,
+    pub(super) worktree_id: i64,
+    pub(super) worktree_name: String,
+    pub(super) worktree_path: Option<String>,
+    pub(super) owner: String,
+    pub(super) repo: String,
+    pub(super) project_base: Option<String>,
+    pub(super) stored_transcript: Option<String>,
+    pub(super) cap: u64,
+    pub(super) bundle_cap: u64,
+    pub(super) ignored_entry_kb: u64,
+    pub(super) ignored_total_kb: u64,
+    pub(super) session_state_cap: u64,
+    pub(super) target_projects_root: String,
+    pub(super) layout: crate::projects::Layout,
+    pub(super) target_taken: Vec<String>,
     /// `(project root, worktree dir)` by the local projects root and layout:
     /// the fallback when a `local` target has no project / worktree row path.
-    local_layout_paths: (String, String),
+    pub(super) local_layout_paths: (String, String),
 }
 
 fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
@@ -1911,13 +2141,40 @@ fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcEr
 
 /// [`move_session`] over any transport and hooks. A partial move
 /// (`E_MOVE_PARTIAL`) is recorded on the timeline as [`EVENT_MOVE_PARTIAL`].
+/// `dry_run` short-circuits to a read-only [`preview::preview`] before any of
+/// that — no claim taken, no carry cleanup to run.
+///
+/// `when: cancel` short-circuits before even that: it never moves anything
+/// and never touches a host, so it is checked first. `when: now`, and
+/// `when: idle` once it reaches this far (a dry run previewing it, or the
+/// public [`move_session`] having already decided the source is not busy),
+/// are today's move — the waiting half of `idle` lives entirely in the
+/// public entry point, which is the only one that spawns.
 pub async fn move_session_with(
     args: MoveSessionArgs,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     hooks: &dyn MoveHooks,
     opts: MoveOptions,
-) -> Result<MoveReport, IpcError> {
+) -> Result<MoveOutcome, IpcError> {
+    if args.when == When::Cancel {
+        if args.dry_run {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "there is nothing to preview about cancelling a wait",
+            ));
+        }
+        let was_waiting = wait::cancel_wait(store, args.session_id);
+        return Ok(MoveOutcome::WaitCancelled(Box::new(MoveWaitCancelled {
+            session_id: args.session_id,
+            was_waiting,
+        })));
+    }
+    if args.dry_run {
+        return preview::preview(&args, store, ssh, hooks)
+            .await
+            .map(|p| MoveOutcome::Preview(Box::new(p)));
+    }
     let source_id = args.session_id;
     let to_host = args.target_host_alias.clone();
     move_session_steps(args, store, ssh, hooks, opts)
@@ -1927,6 +2184,7 @@ pub async fn move_session_with(
                 record_partial(store, source_id, &to_host, e);
             }
         })
+        .map(|rep| MoveOutcome::Moved(Box::new(rep)))
 }
 
 /// The move's steps, with the carry cleanup always run afterwards — on
@@ -1952,21 +2210,47 @@ async fn move_session_steps(
     result
 }
 
-/// The move's steps (see the module docs).
-async fn move_session_inner(
-    args: MoveSessionArgs,
+/// What the move's opening sequence established. Everything a dry run reports
+/// about the source comes from here, so it cannot disagree with the move.
+pub(super) struct Gathered {
+    pub snap: Snapshot,
+    pub src: String,
+    pub target: String,
+    /// The Claude conversation id (`snap.claude_id`).
+    pub id: String,
+    pub state: SourceState,
+    pub located: Located,
+    /// `true` only when this call skipped `require_source_idle` (a dry run
+    /// with `when: idle`) AND the source is in fact not idle — the preview's
+    /// second sanctioned divergence from the move (spec §4: `idle` defers
+    /// exactly this check). A real move never sets this: it never skips the
+    /// check in the first place.
+    pub busy: bool,
+}
+
+/// The move's opening checks, in the move's order, short-circuiting on the
+/// first problem exactly as the move does. `progress` is `Some` for a real
+/// move — it emits the `check` and `transcript` step boundaries at the points
+/// the move always has — and `None` for a dry run, which emits nothing.
+/// Does NOT take the move claim: the caller does, when it is a real move.
+///
+/// Not `pub(super)`: its `progress` parameter names `progress::Progress`,
+/// which is itself only visible inside this module (`mod progress;` is
+/// private) — a wider visibility here than that would trip the
+/// private-interfaces lint under `-D warnings` for no actual gain, since
+/// nothing outside `move_session` can name that type anyway. Any submodule
+/// of `move_session` (e.g. a future `preview.rs`, alongside `finalise.rs`)
+/// already sees this without a `pub` qualifier.
+async fn gather(
+    args: &MoveSessionArgs,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     hooks: &dyn MoveHooks,
-    opts: MoveOptions,
-    cleanup: &mut CarryCleanup,
-    progress: &mut progress::Progress<'_>,
-) -> Result<MoveReport, IpcError> {
-    crate::validate::host_alias(&args.target_host_alias)?;
-    let _claim = MoveClaim::acquire(store, args.session_id)?;
+    mut progress: Option<&mut progress::Progress<'_>>,
+) -> Result<Gathered, IpcError> {
     let snap = {
         let s = lock(store)?;
-        let snap = snapshot(&s, &args)?;
+        let snap = snapshot(&s, args)?;
         crate::service::operator::refuse_if_operator(
             &s,
             &snap.row.host_alias,
@@ -1981,11 +2265,17 @@ async fn move_session_inner(
     crate::service::hub::ensure_local_allowed(&src)?;
     let target = args.target_host_alias.clone();
     let id = snap.claude_id.clone();
-    let mut warnings: Vec<String> = Vec::new();
 
-    progress.start(MoveStep::Check);
+    if let Some(p) = progress.as_mut() {
+        p.start(MoveStep::Check);
+    }
     // 0. The source Claude must be idle NOW: reconcile its host so the status
-    //    is fresh, then refuse a turn in progress or an unknown status.
+    //    is fresh, then refuse a turn in progress or an unknown status. A dry
+    //    run previewing `when: idle` defers exactly this refusal — that is
+    //    what `idle` means — so it only checks the status to report whether
+    //    the source is busy, never to refuse on it. A real move (`dry_run:
+    //    false`) always enforces it, whatever `when` says: only the public
+    //    `move_session` entry point ever turns `idle` into an actual wait.
     hooks.refresh_host(store, &src).await?;
     let status = {
         let s = lock(store)?;
@@ -1993,15 +2283,28 @@ async fn move_session_inner(
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?
             .claude_status
     };
-    require_source_idle(status.as_deref())?;
+    let idle_deferred = args.dry_run && args.when == When::Idle;
+    let busy = if idle_deferred {
+        require_source_idle(status.as_deref()).is_err()
+    } else {
+        require_source_idle(status.as_deref())?;
+        false
+    };
 
     // 1. Source git state: on its branch, nothing in progress — and what the
     //    carry has to take along (strict: today's clean + pushed refusals).
+    //    A dry run's inspection never fetches (it writes nothing to either
+    //    host); the move's does, when origin's tip is not local.
     let hint = hooks.source_cwd_hint(store, &snap.row).await;
     let out = sh(
         ssh,
         &src,
-        &inspect_script(&snap.row.tmux_name, hint.as_deref(), &snap.branch),
+        &inspect_script_with(
+            &snap.row.tmux_name,
+            hint.as_deref(),
+            &snap.branch,
+            !args.dry_run,
+        ),
         GIT_TIMEOUT,
     )
     .await?;
@@ -2017,17 +2320,26 @@ async fn move_session_inner(
         return Err(IpcError::new(codes::E_GIT, msg));
     }
     let state = parse_inspection(&String::from_utf8_lossy(&out.stdout))?;
-    if args.strict {
+    if args.strict && args.dry_run && state.origin_tip_not_local {
+        // The move would fetch origin's tip here and then refuse only if the
+        // source has commits it lacks. Without the fetch that half cannot be
+        // decided, so decide every other strict refusal exactly as the move
+        // does and leave that one to `preview()`'s `unknowns` — neither a
+        // refusal the move might not raise, nor a pass it might not give.
+        let decidable = SourceState {
+            ahead: 0,
+            ..state.clone()
+        };
+        preflight_verdict(&decidable, &snap.branch)?;
+    } else if args.strict {
         preflight_verdict(&state, &snap.branch)?;
     } else {
         carry_verdict(&state, &snap.branch)?;
     }
-    let mut carried = carry::CarryReport {
-        dirty_entries: state.dirty.clone(),
-        ..Default::default()
-    };
 
-    progress.start(MoveStep::Transcript);
+    if let Some(p) = progress.as_mut() {
+        p.start(MoveStep::Transcript);
+    }
     // 2. Transcript: locate, cap, read (whole lines only).
     let out = sh(
         ssh,
@@ -2052,6 +2364,76 @@ async fn move_session_inner(
     if located.size > snap.cap {
         return Err(too_large(located.size, snap.cap));
     }
+    Ok(Gathered {
+        snap,
+        src,
+        target,
+        id,
+        state,
+        located,
+        busy,
+    })
+}
+
+/// Where the move would put the target's clone and worktree: `(project_root,
+/// cwd_hint)`. Read-only — a `remote_home` lookup and path arithmetic,
+/// nothing that creates either. The move's own step 3 derives this
+/// immediately before `carry::seed_script`, the first write; a dry run stops
+/// here. The caller maps a `remote_home` failure with its own
+/// `before_target("resolving the target $HOME", e)` — that error mapping
+/// stays at the call site, not here, since a preview reports it differently
+/// than a move does.
+pub(super) async fn target_paths(
+    snap: &Snapshot,
+    target: &str,
+    ssh: &dyn SshExec,
+) -> Result<(String, String), IpcError> {
+    if target == LOCAL {
+        // The rows' own paths when present, else the layout-derived ones.
+        let (layout_root, layout_cwd) = snap.local_layout_paths.clone();
+        Ok((
+            snap.project_base.clone().unwrap_or(layout_root),
+            snap.worktree_path.clone().unwrap_or(layout_cwd),
+        ))
+    } else {
+        let home = ssh.remote_home(target).await?;
+        let root = crate::service::projects::expand_home(&snap.target_projects_root, &home);
+        Ok(crate::service::sessions::remote_project_path(
+            &root,
+            snap.layout,
+            &snap.owner,
+            &snap.repo,
+            Some(&snap.worktree_name),
+        ))
+    }
+}
+
+/// The move's steps (see the module docs).
+async fn move_session_inner(
+    args: MoveSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    hooks: &dyn MoveHooks,
+    opts: MoveOptions,
+    cleanup: &mut CarryCleanup,
+    progress: &mut progress::Progress<'_>,
+) -> Result<MoveReport, IpcError> {
+    crate::validate::host_alias(&args.target_host_alias)?;
+    let _claim = MoveClaim::acquire(store, args.session_id)?;
+    let Gathered {
+        snap,
+        src,
+        target,
+        id,
+        state,
+        located,
+        busy: _,
+    } = gather(&args, store, ssh, hooks, Some(progress)).await?;
+    let mut warnings: Vec<String> = Vec::new();
+    let mut carried = carry::CarryReport {
+        dirty_entries: state.dirty.clone(),
+        ..Default::default()
+    };
     // Exactly the located bytes: the end-of-move check compares against
     // this size / mtime, so the copy and the check describe the same file.
     let out = sh(
@@ -2086,27 +2468,9 @@ async fn move_session_inner(
     progress.start(MoveStep::Workspace);
     // 3. Target workspace: refresh origin/<branch>, create/repair the
     //    worktree, fast-forward to the source HEAD, resolve the transcript path.
-    let (project_root, cwd_hint) = if target == LOCAL {
-        // The rows' own paths when present, else the layout-derived ones.
-        let (layout_root, layout_cwd) = snap.local_layout_paths.clone();
-        (
-            snap.project_base.clone().unwrap_or(layout_root),
-            snap.worktree_path.clone().unwrap_or(layout_cwd),
-        )
-    } else {
-        let home = ssh
-            .remote_home(&target)
-            .await
-            .map_err(|e| before_target("resolving the target $HOME", e))?;
-        let root = crate::service::projects::expand_home(&snap.target_projects_root, &home);
-        crate::service::sessions::remote_project_path(
-            &root,
-            snap.layout,
-            &snap.owner,
-            &snap.repo,
-            Some(&snap.worktree_name),
-        )
-    };
+    let (project_root, cwd_hint) = target_paths(&snap, &target, ssh)
+        .await
+        .map_err(|e| before_target("resolving the target $HOME", e))?;
     // 3a. Seed: the target needs a main clone before anything can be fetched
     //     into it. Never prompts; falls back to `git init` without origin.
     let clone_url = crate::repo_url::clone_url_for(&snap.owner, &snap.repo);
@@ -2820,6 +3184,7 @@ mod tests {
     use super::*;
     use crate::ssh_fake::{FakeSsh, Match, Reply};
     use crate::tmux::{RemoteTmux, TmuxExec};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
     const HEAD: &str = "1111111111111111111111111111111111111111";
@@ -2984,6 +3349,18 @@ mod tests {
         /// `refresh_host` fails when reconciling the target — the earliest
         /// partial call site, before any target row exists.
         refresh_target_fails: bool,
+        /// When set, the *next* `refresh_host` for the source host flips its
+        /// Claude status to `working` before returning (a turn slipping in
+        /// while a wait's retry re-checks idle), then clears itself — so it
+        /// fires exactly once.
+        busy_once_on_refresh: AtomicBool,
+        /// When set, the *next* `refresh_host` for the source host — which a
+        /// wait's real move reaches only once it has started — asks
+        /// `cancel_wait` and `begin_wait` about these args, then clears
+        /// itself. What they answered lands in `mid_move_answers`.
+        probe_wait_mid_move: Mutex<Option<MoveSessionArgs>>,
+        /// `(cancel_wait's answer, begin_wait's refusal code)` from the probe.
+        mid_move_answers: Mutex<Option<(bool, Option<String>)>>,
         /// Whether `session_moved` was already on the source when the kill
         /// ran (`None` = no kill).
         moved_at_kill: Mutex<Option<bool>>,
@@ -3002,6 +3379,9 @@ mod tests {
                 grow_source_on_start: false,
                 grow_source_on_kill: false,
                 refresh_target_fails: false,
+                busy_once_on_refresh: AtomicBool::new(false),
+                probe_wait_mid_move: Mutex::new(None),
+                mid_move_answers: Mutex::new(None),
                 moved_at_kill: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
@@ -3009,6 +3389,18 @@ mod tests {
         }
         fn log(&self) -> Vec<String> {
             self.log.lock().unwrap().clone()
+        }
+        /// `(host, tmux_name)` of every `start_target` call.
+        fn started(&self) -> Vec<(String, String)> {
+            self.started.lock().unwrap().clone()
+        }
+        /// Whether `kill_tmux_session` ran at all.
+        fn killed_any(&self) -> bool {
+            self.log().iter().any(|l| l.starts_with("kill "))
+        }
+        /// Whether `ensure_target_workspace` ran at all.
+        fn ensured_any(&self) -> bool {
+            self.log().iter().any(|l| l.starts_with("ensure "))
         }
     }
 
@@ -3057,6 +3449,23 @@ mod tests {
         async fn refresh_host(&self, store: &Mutex<Store>, host: &str) -> Result<(), IpcError> {
             if self.refresh_target_fails && host != "alpha" {
                 return Err(IpcError::new(codes::E_SSH, "refresh failed"));
+            }
+            if host == "alpha" && self.busy_once_on_refresh.swap(false, Ordering::SeqCst) {
+                store
+                    .lock()
+                    .unwrap()
+                    .set_claude_status_by_session_id(SID, "working")
+                    .unwrap();
+            }
+            let probe = if host == "alpha" {
+                self.probe_wait_mid_move.lock().unwrap().take()
+            } else {
+                None
+            };
+            if let Some(a) = probe {
+                let cancelled = wait::cancel_wait(store, a.session_id);
+                let second = wait::begin_wait(&a, store).err().map(|e| e.code);
+                *self.mid_move_answers.lock().unwrap() = Some((cancelled, second));
             }
             let started = self.started.lock().unwrap().clone();
             let s = store.lock().unwrap();
@@ -3286,6 +3695,18 @@ mod tests {
             keep_source,
             strict: false,
             clean_target: false,
+            dry_run: false,
+            when: When::Now,
+        }
+    }
+
+    /// A real move's `MoveOutcome` is always `Moved` — `run`/`run_with` never
+    /// take `dry_run`, so a `Preview` here would mean the branch in
+    /// `move_session_with` took the wrong turn.
+    fn expect_moved(out: MoveOutcome) -> MoveReport {
+        match out {
+            MoveOutcome::Moved(rep) => *rep,
+            other => panic!("run/run_with never dry_run or cancel; got {other:?}"),
         }
     }
 
@@ -3298,11 +3719,15 @@ mod tests {
     ) -> Result<MoveReport, IpcError> {
         let mut a = args(f, false);
         edit(&mut a);
-        move_session_with(a, &f.store, &f.fake, hooks, fast()).await
+        move_session_with(a, &f.store, &f.fake, hooks, fast())
+            .await
+            .map(expect_moved)
     }
 
     async fn run(f: &Fixture, hooks: &FakeHooks, keep: bool) -> Result<MoveReport, IpcError> {
-        move_session_with(args(f, keep), &f.store, &f.fake, hooks, fast()).await
+        move_session_with(args(f, keep), &f.store, &f.fake, hooks, fast())
+            .await
+            .map(expect_moved)
     }
 
     #[tokio::test]
@@ -3333,6 +3758,38 @@ mod tests {
                 "handoff:done",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_moved_outcome_keeps_every_report_field_at_the_top_level() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        // A real report from a real (faked) move, never one built field by field.
+        let rep = run(&f, &hooks, false).await.expect("the fixture moves");
+        let v = serde_json::to_value(MoveOutcome::Moved(Box::new(rep.clone()))).unwrap();
+        assert_eq!(v["kind"], "moved");
+        assert_eq!(v["target_session_id"], rep.target_session_id);
+        // The session row's own `kind` sits under `target`, untouched by the tag.
+        assert_eq!(v["target"]["kind"], rep.target.kind);
+        let back: MoveOutcome = serde_json::from_value(v).unwrap();
+        assert!(matches!(back, MoveOutcome::Moved(_)));
+    }
+
+    #[tokio::test]
+    async fn dry_run_returns_a_preview_and_the_real_move_is_unchanged() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        let out = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .expect("a dry run");
+        assert!(matches!(out, MoveOutcome::Preview(_)), "{out:?}");
+        // The same session can still be moved for real afterwards — the dry run
+        // took no claim and left nothing behind.
+        let rep = run(&f, &hooks, false).await.expect("the real move");
+        assert!(rep.source_killed);
     }
 
     #[tokio::test]
@@ -5983,6 +6440,27 @@ mod tests {
         assert!(MoveClaim::acquire(&f.store, f.source_id).is_ok());
     }
 
+    /// `gather()` with no progress sink emits no `move:progress` event and takes
+    /// no claim — the two properties Task 3's dry run depends on.
+    #[tokio::test]
+    async fn gather_without_progress_emits_nothing_and_takes_no_claim() {
+        let (f, bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        // Held alive across the second acquire below: a claim carried OUT of
+        // gather() in its result (e.g. a field of `Gathered`) would still be
+        // held at this point and would fail that acquire. A claim taken and
+        // released entirely inside gather() blocks nothing, so it is
+        // correctly not this assertion's concern.
+        let g = gather(&a, &f.store, &f.fake, &hooks, None)
+            .await
+            .expect("the fixture's opening sequence succeeds");
+        assert!(progress_of(&f, &bus).is_empty(), "no move:progress event");
+        // No claim was taken: a real move of the same session can still start.
+        MoveClaim::acquire(&f.store, a.session_id).expect("the claim is free");
+        drop(g);
+    }
+
     #[tokio::test]
     async fn preflight_refuses_wrong_kinds_and_offline_or_unprovisioned_targets() {
         let f = fixture();
@@ -6010,6 +6488,8 @@ mod tests {
             keep_source: false,
             strict: false,
             clean_target: false,
+            dry_run: false,
+            when: When::Now,
         };
         assert_eq!(
             move_session_with(same, &f.store, &f.fake, &hooks, fast())
@@ -6222,6 +6702,29 @@ mod tests {
         }
     }
 
+    /// The dry run's inspection runs every git call under
+    /// `GIT_OPTIONAL_LOCKS=0`; the move's runs none of them that way, on
+    /// purpose (see [`inspect_script_with`]: its index rewrite is what the
+    /// snapshot's copied index relies on).
+    #[test]
+    fn only_the_dry_runs_inspection_disables_optional_locks() {
+        let dry = inspect_script_with("n", Some("/h"), "feat", false);
+        let calls = dry.matches("git -C").count();
+        assert!(calls >= 9, "{dry}");
+        assert_eq!(
+            dry.matches("GIT_OPTIONAL_LOCKS=0 git -C").count(),
+            calls,
+            "a git call in the dry run's inspection can take optional locks:\n{dry}"
+        );
+        assert!(!dry.contains("fetch"), "{dry}");
+        let real = inspect_script("n", Some("/h"), "feat");
+        assert!(!real.contains("GIT_OPTIONAL_LOCKS"), "{real}");
+        assert!(
+            real.contains(r#"fetch -q origin "refs/heads/$br""#),
+            "{real}"
+        );
+    }
+
     /// Runs the generated `inspect_script` through real `git`/`bash` against a
     /// temp repo that is genuinely mid-merge (two branches editing the same
     /// line, `git merge` left conflicted), then again after `git merge
@@ -6302,6 +6805,117 @@ mod tests {
         assert_eq!(probe().midop, None);
     }
 
+    /// A source whose `origin/<br>` has moved on since it last fetched: the
+    /// case where the move's inspection fetches origin's tip to count the
+    /// unpushed commits. A dry run's inspection must not — no objects, no
+    /// FETCH_HEAD, no moved tracking ref — and must not rewrite the index's
+    /// stat cache through `git status` either. The count it cannot make is
+    /// reported as unknown (`ahead == -1`), never guessed.
+    #[test]
+    fn a_dry_run_inspection_writes_nothing_when_origin_has_moved_on() {
+        use carry::tests::{bash, git};
+        if !carry::tests::require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let origin = tmp.path().join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "--bare", "-b", "feat"]);
+        let seed = tmp.path().join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git(&seed, &["init", "-q", "-b", "feat"]);
+        std::fs::write(seed.join("a.txt"), "a\n").unwrap();
+        git(&seed, &["add", "a.txt"]);
+        git(&seed, &["commit", "-q", "-m", "a"]);
+        git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&seed, &["push", "-q", "origin", "feat"]);
+        let src = tmp.path().join("src");
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                src.to_str().unwrap(),
+            ],
+        );
+        // Origin moves on; the source never hears about it.
+        std::fs::write(seed.join("b.txt"), "b\n").unwrap();
+        git(&seed, &["add", "b.txt"]);
+        git(&seed, &["commit", "-q", "-m", "b"]);
+        git(&seed, &["push", "-q", "origin", "feat"]);
+        let origin_tip = git(&seed, &["rev-parse", "HEAD"]).trim().to_string();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", src.to_str().unwrap(), "cat-file", "-e"])
+                .arg(format!("{origin_tip}^{{commit}}"))
+                .output()
+                .is_ok_and(|o| !o.status.success()),
+            "the fixture must leave origin's tip out of the source's object store"
+        );
+        // The racily-clean setup `probe.rs`'s writes-nothing test uses: a
+        // settled index, then a tracked file's mtime bumped with its content
+        // unchanged, so a `git status` without GIT_OPTIONAL_LOCKS=0 rewrites
+        // the index's stat cache.
+        git(&src, &["update-index", "-q", "--refresh"]);
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        std::fs::File::open(src.join("a.txt"))
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+
+        let gd = src.join(".git");
+        let fetch_head = || std::fs::read(gd.join("FETCH_HEAD")).ok();
+        let tracking = || git(&src, &["rev-parse", "refs/remotes/origin/feat"]);
+        let objects = || git(&src, &["count-objects", "-v"]);
+        let index = || std::fs::read(gd.join("index")).unwrap();
+        let before = (fetch_head(), tracking(), objects(), index());
+
+        let out = bash(
+            &inspect_script_with("", Some(src.to_str().unwrap()), "feat", false),
+            &home,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let mut wrote = Vec::new();
+        if fetch_head() != before.0 {
+            wrote.push("FETCH_HEAD".to_string());
+        }
+        if tracking() != before.1 {
+            wrote.push(format!(
+                "refs/remotes/origin/feat ({} -> {})",
+                before.1.trim(),
+                tracking().trim()
+            ));
+        }
+        if objects() != before.2 {
+            wrote.push(format!("objects:\n{}\n->\n{}", before.2, objects()));
+        }
+        if index() != before.3 {
+            wrote.push("the index".to_string());
+        }
+        assert!(
+            wrote.is_empty(),
+            "the dry run's inspection wrote: {wrote:#?}"
+        );
+        let st = parse_inspection(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert_eq!(st.remote_sha.as_deref(), Some(origin_tip.as_str()));
+        assert_eq!(
+            st.ahead, -1,
+            "an unpushed count it could not make, not a guess"
+        );
+        assert!(st.origin_tip_not_local, "and it says why");
+    }
+
     #[test]
     fn scripts_quote_every_interpolated_value() {
         let evil = "x'; rm -rf / #";
@@ -6364,5 +6978,1015 @@ mod tests {
             .unwrap();
         assert_eq!(out.status.code(), Some(4));
         assert!(String::from_utf8_lossy(&out.stderr).contains(NO_TRANSCRIPT));
+    }
+
+    // ── preview (dry run) ──
+
+    use super::preview::{preview, TargetState};
+
+    /// Every marker the move's own scripts can print, scraped from the
+    /// source text rather than copied by hand — so a newly added
+    /// `# cf-carry:` / `# cf-move:` script is caught by the writes-nothing
+    /// test below even if nobody remembers to add it to a literal list.
+    /// `# cf-probe:*` markers are the preview's own reads, never the move's,
+    /// and the pattern excludes them by construction.
+    fn all_move_script_markers() -> std::collections::BTreeSet<String> {
+        let re = regex::Regex::new(r"# cf-(?:carry|move):[a-z-]+").unwrap();
+        [
+            include_str!("mod.rs"),
+            include_str!("carry.rs"),
+            include_str!("claude_state.rs"),
+        ]
+        .iter()
+        .flat_map(|src| re.find_iter(src).map(|m| m.as_str().to_string()))
+        .collect()
+    }
+
+    /// The read-only markers a dry run legitimately sends: the move's own
+    /// opening checks (`gather`, unconditionally) plus the preview's own
+    /// source-side listings (step 2/3). Every other marker the move can
+    /// print belongs to the write/carry flow — including ones that are
+    /// arguably reads in isolation (`haves`, `chunk`, `read`, `size`,
+    /// `verify`, `prep`) but that the move only ever sends from inside that
+    /// flow, so their presence here would mean a dry run started carrying.
+    const READ_ONLY_MARKERS: &[&str] = &[
+        "# cf-move:inspect",
+        "# cf-move:locate",
+        "# cf-carry:ignored-list",
+        "# cf-carry:state-list",
+        "# cf-carry:memory-list",
+    ];
+
+    /// [`all_move_script_markers`] minus [`READ_ONLY_MARKERS`]: every script
+    /// marker a dry run must never send.
+    fn writing_markers() -> Vec<String> {
+        let markers: Vec<String> = all_move_script_markers()
+            .into_iter()
+            .filter(|m| !READ_ONLY_MARKERS.contains(&m.as_str()))
+            .collect();
+        // A regex that stopped matching anything (a doc-comment reformat, a
+        // marker syntax change) would make the writes-nothing test pass
+        // vacuously; guard against that silently happening.
+        assert!(
+            markers.len() >= 15,
+            "the marker scan found suspiciously few writing scripts: {markers:?}"
+        );
+        markers
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_writes_nothing_on_either_host() {
+        let (f, bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        let markers = writing_markers();
+        for host in ["alpha", "beta"] {
+            for m in &markers {
+                assert!(
+                    scripts_with(&f, host, m).is_empty(),
+                    "a dry run sent {m} to {host}"
+                );
+            }
+            // Starting the target is not a `# cf-*` script at all (it's a
+            // bare `tmux new-session` over the same bash -lc transport), so
+            // the marker scan above cannot see it.
+            assert!(
+                scripts_with(&f, host, "tmux new-session").is_empty(),
+                "a dry run sent a tmux new-session to {host}"
+            );
+        }
+        // `# cf-move:inspect` is on the read-only list only because a dry
+        // run's copy of it cannot fetch: the move's own copy runs `git fetch`
+        // when origin's tip is not in the source's object store, which writes
+        // objects, FETCH_HEAD and the remote-tracking ref. Asserted on the
+        // script text the fake recorded, not on the marker alone.
+        let inspects = scripts_with(&f, "alpha", "# cf-move:inspect");
+        assert!(
+            !inspects.is_empty(),
+            "the dry run never inspected the source"
+        );
+        for s in &inspects {
+            assert!(
+                !s.contains("fetch"),
+                "a dry run's source inspection can fetch from origin:\n{s}"
+            );
+        }
+        // No upload of any kind (the transcript copy is an upload).
+        assert!(
+            f.fake.calls().iter().all(|c| !c.is_upload()),
+            "a dry run uploaded something"
+        );
+        assert!(
+            hooks.started().is_empty(),
+            "a dry run started a target session"
+        );
+        assert!(!hooks.killed_any(), "a dry run killed a session");
+        assert!(
+            !hooks.ensured_any(),
+            "a dry run created or repaired a workspace"
+        );
+        assert!(
+            progress_of(&f, &bus).is_empty(),
+            "a dry run emitted move:progress"
+        );
+        // Nor a timeline row: a preview in the durable record 3d leans on would
+        // be noise, and would read as a move that happened.
+        assert!(
+            events(&f, f.source_id).is_empty(),
+            "a dry run recorded a timeline event"
+        );
+    }
+
+    /// The preview cannot drift from the move: run both over ONE fixture and
+    /// compare, rather than asserting two hand-written expectations that could
+    /// drift together.
+    #[tokio::test]
+    async fn the_preview_reports_exactly_what_the_move_carries() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let p = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        let rep = run(&f, &hooks, false).await.expect("the real move");
+        assert_eq!(p.dirty, rep.carried.dirty_entries);
+        assert!(
+            !p.dirty.is_empty(),
+            "the fixture must exercise a non-empty case"
+        );
+        assert_eq!(p.ignored_carried, rep.carried.ignored_carried);
+        assert!(
+            !p.ignored_carried.is_empty(),
+            "the fixture must exercise a non-empty case"
+        );
+        assert_eq!(p.ignored_left_behind, rep.carried.ignored_left_behind);
+        assert!(
+            !p.ignored_left_behind.is_empty(),
+            "the fixture's denylisted node_modules/ must show up as left-behind on both sides, \
+             or this comparison is empty-vs-empty and proves nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_the_error_the_move_would_return() {
+        // A mid-operation source: gather() refuses before any carry step.
+        let (f, _bus) = recorded_fixture();
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection_midop("", "", "0", "merge")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let from_preview = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .unwrap_err();
+        let from_move = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(from_preview.code, from_move.code);
+        assert_eq!(from_preview.message, from_move.message);
+    }
+
+    /// What a dry run's inspection prints in the ahead field when origin's
+    /// tip is not in the source's object store and it did not fetch it.
+    const NOT_LOCAL: &str = ORIGIN_TIP_NOT_LOCAL;
+
+    /// The dry run cannot count the unpushed commits when origin has commits
+    /// the source never fetched — so it says so, rather than reporting 0 (or
+    /// a count against an older tip).
+    #[tokio::test]
+    async fn a_dry_run_names_an_unpushed_count_it_could_not_make_without_fetching() {
+        let (f, _bus) = recorded_fixture();
+        let moved_on = "2".repeat(40);
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection("", &moved_on, NOT_LOCAL)),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        let p = preview(&a, &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        assert_eq!(p.unpushed_commits, None);
+        assert!(
+            p.unknowns
+                .iter()
+                .any(|u| u.contains("has not fetched") && u.contains("origin/feat")),
+            "{:?}",
+            p.unknowns
+        );
+    }
+
+    /// A strict move fetches origin's tip and then refuses only if the source
+    /// has commits origin lacks. A dry run that did not fetch cannot decide
+    /// that half, so it must neither refuse on it (the move might not) nor
+    /// pass silently (the move might refuse): it decides everything else and
+    /// names the half it could not decide.
+    #[tokio::test]
+    async fn a_strict_dry_run_names_the_unpushed_verdict_it_cannot_decide() {
+        let (f, _bus) = recorded_fixture();
+        let moved_on = "2".repeat(40);
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection("", &moved_on, NOT_LOCAL)),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        a.strict = true;
+        let p = preview(&a, &f.store, &f.fake, &hooks)
+            .await
+            .expect("undecidable is not a refusal");
+        assert!(
+            p.unknowns
+                .iter()
+                .any(|u| u.contains("strict") && u.contains("E_MOVE_UNPUSHED")),
+            "{:?}",
+            p.unknowns
+        );
+
+        // Everything the strict verdict CAN decide without the fetch is still
+        // decided: a dirty source is refused exactly as a strict move refuses
+        // it.
+        let (f, _bus) = recorded_fixture();
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:inspect"),
+            Reply::ok(&inspection(" M a.rs", &moved_on, NOT_LOCAL)),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = preview(&a, &f.store, &f.fake, &hooks).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_DIRTY);
+    }
+
+    /// The other half of the dry run's fetch-free inspection: the real move
+    /// still fetches origin's tip when the source lacks it, exactly as before.
+    #[tokio::test]
+    async fn the_real_move_still_fetches_origins_tip_when_the_source_lacks_it() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        run(&f, &hooks, false).await.expect("the real move");
+        let inspects = scripts_with(&f, "alpha", "# cf-move:inspect");
+        assert!(!inspects.is_empty(), "the move never inspected the source");
+        for s in &inspects {
+            assert!(
+                s.contains(r#"fetch -q origin "refs/heads/$br""#),
+                "the move's inspection no longer fetches origin's tip:\n{s}"
+            );
+        }
+    }
+
+    // Spec test 3 asked for every store-level refusal class. Under correction 4
+    // that holds by construction — the preview's refusal IS `gather()`'s error,
+    // the same value the move returns — so one representative (above) plus the
+    // alias-validation and target-$HOME tests (below) pin the mechanism rather
+    // than re-testing each refusal a second time.
+
+    #[tokio::test]
+    async fn a_malformed_target_alias_is_the_same_refusal_as_the_move() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.target_host_alias = "-bad".into();
+        let from_preview = preview(&a, &f.store, &f.fake, &hooks).await.unwrap_err();
+        let from_move = move_session_with(a.clone(), &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
+        assert_eq!(from_preview.code, from_move.code);
+        assert_eq!(from_preview.message, from_move.message);
+    }
+
+    /// `target_paths` fails on exactly one thing: the target's `$HOME`
+    /// lookup. The move wraps that with `before_target(...)`; the preview
+    /// must wrap it the same way, or the two errors share a code but not a
+    /// message.
+    #[tokio::test]
+    async fn a_target_home_lookup_failure_is_the_same_refusal_as_the_move() {
+        let (f, _bus) = recorded_fixture();
+        // Overrides the fixture's blanket `with_home` reply for "beta" only —
+        // the most recently added matching rule wins.
+        f.fake.on_host(
+            "beta",
+            Match::prefix("printenv HOME"),
+            Reply::fail(1, "no such user"),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let from_preview = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .unwrap_err();
+        let from_move = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(from_preview.code, from_move.code);
+        assert_eq!(from_preview.message, from_move.message);
+    }
+
+    #[tokio::test]
+    async fn commits_ahead_is_unknown_without_a_target_clone() {
+        let (f, _bus) = recorded_fixture();
+        // The target has no clone: its tip lookup answers nothing.
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-probe:tip"),
+            Reply::ok(&out("")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let p = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        assert_eq!(p.commits_ahead, None, "unknown, not zero");
+    }
+
+    #[tokio::test]
+    async fn an_absent_target_worktree_is_reported_as_absent() {
+        let (f, _bus) = recorded_fixture();
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-probe:target"),
+            Reply::ok(&out("absent\n")),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let p = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        assert!(matches!(p.target, TargetState::Absent), "{:?}", p.target);
+        assert!(!p.target_path.is_empty(), "it says which path it looked at");
+        assert!(
+            p.unknowns.iter().any(|u| u.contains("does not exist yet")),
+            "{:?}",
+            p.unknowns
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_target_probe_is_unknown_not_a_refusal() {
+        let (f, _bus) = recorded_fixture();
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-probe:target"),
+            Reply::fail(255, "ssh: connection reset"),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let p = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a probe failure must not fail the preview");
+        assert!(matches!(p.target, TargetState::Unknown), "{:?}", p.target);
+        assert!(
+            p.unknowns
+                .iter()
+                .any(|u| u.contains("ssh: connection reset")),
+            "the probe's own failure reason should be in unknowns: {:?}",
+            p.unknowns
+        );
+    }
+
+    /// `strict` is a read-only verdict `gather()` evaluates itself: a strict
+    /// dry run over a dirty, unpushed source must refuse exactly like a
+    /// strict move — nothing about `strict` is ignored by a preview.
+    #[tokio::test]
+    async fn a_strict_preview_refuses_dirty_work_exactly_like_a_strict_move() {
+        let (f, _bus) = recorded_fixture();
+        dirty_unpushed_carry(&f);
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.strict = true;
+        let from_preview = preview(&a, &f.store, &f.fake, &hooks).await.unwrap_err();
+        let from_move = run_with(&f, &hooks, |a| a.strict = true).await.unwrap_err();
+        assert_eq!(from_preview.code, from_move.code);
+        assert_eq!(from_preview.message, from_move.message);
+    }
+
+    #[tokio::test]
+    async fn the_bundle_size_and_clean_target_are_named_as_unknowns() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let baseline = preview(&args(&f, false), &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        let mut a = args(&f, false);
+        a.clean_target = true;
+        let with_clean_target = preview(&a, &f.store, &f.fake, &hooks)
+            .await
+            .expect("a preview");
+        let all = with_clean_target.unknowns.join(" | ");
+        assert!(all.contains("bundle"), "{all}");
+        assert!(all.contains("clean_target"), "{all}");
+        // Worded as what it actually does, not merely "ignored": it only
+        // acts in the write phase a dry run never reaches.
+        assert!(all.contains("write phase"), "{all}");
+        // clean_target changes nothing else in the preview: it adds exactly
+        // one unknowns line and nothing about the computed state.
+        assert_eq!(
+            with_clean_target.unknowns.len(),
+            baseline.unknowns.len() + 1
+        );
+        assert_eq!(with_clean_target.dirty, baseline.dirty);
+        assert_eq!(with_clean_target.ignored_carried, baseline.ignored_carried);
+        assert_eq!(
+            with_clean_target.ignored_left_behind,
+            baseline.ignored_left_behind
+        );
+        assert_eq!(with_clean_target.target_path, baseline.target_path);
+        assert_eq!(
+            format!("{:?}", with_clean_target.target),
+            format!("{:?}", baseline.target)
+        );
+        assert_eq!(with_clean_target.commits_ahead, baseline.commits_ahead);
+    }
+
+    // ── wait.rs (Transfer slice 3c, Task 2) ─────────────────────────────
+
+    /// Set the fixture's source Claude status.
+    fn set_status(f: &Fixture, status: &str) {
+        f.store
+            .lock()
+            .unwrap()
+            .set_claude_status_by_session_id(SID, status)
+            .unwrap();
+    }
+
+    /// The wait-related events on the source, oldest first — `events()`
+    /// itself is newest-first (it mirrors `list_session_events`), so this
+    /// reverses the filtered slice to read the way the tests below want to:
+    /// `first()` is the wait's own opening `session_move_waiting`, `last()`
+    /// is however it ended.
+    fn wait_events(f: &Fixture) -> Vec<(String, Option<String>)> {
+        let mut v: Vec<_> = events(f, f.source_id)
+            .into_iter()
+            .filter(|(k, _)| k == wait::EVENT_MOVE_WAITING || k == wait::EVENT_MOVE_WAIT_ENDED)
+            .collect();
+        v.reverse();
+        v
+    }
+
+    const POLL: Duration = Duration::from_millis(10);
+
+    #[tokio::test]
+    async fn a_wait_moves_the_session_once_it_goes_idle() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).expect("registered");
+        let (end, ()) = tokio::join!(
+            wait::run_wait(
+                a,
+                &f.store,
+                &f.fake,
+                &hooks,
+                fast(),
+                guard.token(),
+                deadline,
+                POLL
+            ),
+            async {
+                tokio::time::sleep(POLL * 5).await;
+                set_status(&f, "idle");
+            },
+        );
+        assert_eq!(end, wait::WaitEnd::Moved);
+        assert!(
+            events(&f, f.source_id)
+                .iter()
+                .any(|(k, _)| k == EVENT_MOVED),
+            "the move happened"
+        );
+        let w = wait_events(&f);
+        assert_eq!(
+            w.first().map(|(k, _)| k.as_str()),
+            Some(wait::EVENT_MOVE_WAITING)
+        );
+        let (_, ended) = w.last().unwrap();
+        assert!(ended.as_deref().unwrap().contains("moved"), "{ended:?}");
+    }
+
+    #[tokio::test]
+    async fn blocked_is_not_idle_and_does_not_end_the_wait() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "blocked");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let (end, ()) = tokio::join!(
+            wait::run_wait(
+                a,
+                &f.store,
+                &f.fake,
+                &hooks,
+                fast(),
+                guard.token(),
+                deadline,
+                POLL
+            ),
+            async {
+                tokio::time::sleep(POLL * 5).await;
+                // Still waiting after a while spent blocked: no move yet.
+                assert!(!events(&f, f.source_id)
+                    .iter()
+                    .any(|(k, _)| k == EVENT_MOVED));
+                set_status(&f, "idle");
+            },
+        );
+        assert_eq!(end, wait::WaitEnd::Moved);
+    }
+
+    #[tokio::test]
+    async fn the_deadline_ends_the_wait_without_a_move() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let deadline = wait::now_unix() - 1;
+        let end = wait::run_wait(
+            a,
+            &f.store,
+            &f.fake,
+            &hooks,
+            fast(),
+            guard.token(),
+            deadline,
+            POLL,
+        )
+        .await;
+        assert_eq!(end, wait::WaitEnd::TimedOut);
+        assert!(!events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+    }
+
+    /// I3: the deadline is wall-clock. macOS's monotonic clock stops while
+    /// the machine sleeps, so a deadline kept as a `tokio::time::Instant`
+    /// fires hours late after a lid close. Here the injected wall clock jumps
+    /// past the deadline while almost no monotonic time passes: the wait must
+    /// notice within one slice and end `timed_out`.
+    #[tokio::test]
+    async fn the_wall_clock_passing_the_deadline_ends_the_wait_even_if_monotonic_time_did_not() {
+        use std::sync::atomic::AtomicI64;
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        const T0: i64 = 1_800_000_000;
+        let wall = AtomicI64::new(T0);
+        let clock = || wall.load(Ordering::SeqCst);
+        let run = async {
+            let (end, ()) = tokio::join!(
+                wait::run_wait_with(
+                    a,
+                    &f.store,
+                    &f.fake,
+                    &hooks,
+                    fast(),
+                    guard.token(),
+                    T0 + 3600,
+                    POLL,
+                    POLL * 2,
+                    &clock,
+                ),
+                async {
+                    tokio::time::sleep(POLL * 3).await;
+                    // The machine "slept" for an hour and a bit.
+                    wall.store(T0 + 3600, Ordering::SeqCst);
+                },
+            );
+            end
+        };
+        let end = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("the wait must end on the wall-clock deadline, not an hour of monotonic time");
+        assert_eq!(end, wait::WaitEnd::TimedOut);
+        assert!(!events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_the_wait_without_a_move() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let (end, cancelled) = tokio::join!(
+            wait::run_wait(
+                a,
+                &f.store,
+                &f.fake,
+                &hooks,
+                fast(),
+                guard.token(),
+                deadline,
+                POLL
+            ),
+            async {
+                tokio::time::sleep(POLL * 3).await;
+                wait::cancel_wait(&f.store, f.source_id)
+            },
+        );
+        assert!(cancelled, "a pending wait was found and cancelled");
+        assert_eq!(end, wait::WaitEnd::Cancelled);
+        assert!(!events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+        // Once the guard that backed the registration is dropped, there is
+        // nothing left to cancel.
+        drop(guard);
+        assert!(!wait::cancel_wait(&f.store, f.source_id));
+    }
+
+    /// M2: once the waiter has started the real move, there is no wait
+    /// left to cancel — `cancel_wait` must say so (`was_waiting: false`)
+    /// rather than claim a cancel the move will ignore. A second wait is
+    /// still refused while that move is in flight.
+    #[tokio::test]
+    async fn a_cancel_that_arrives_once_the_move_has_started_answers_not_waiting() {
+        let (f, _bus) = recorded_fixture(); // idle: the move starts at once
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        *hooks.probe_wait_mid_move.lock().unwrap() = Some(a.clone());
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let end = wait::run_wait(
+            a,
+            &f.store,
+            &f.fake,
+            &hooks,
+            fast(),
+            guard.token(),
+            deadline,
+            POLL,
+        )
+        .await;
+        assert_eq!(end, wait::WaitEnd::Moved);
+        let (cancelled, second) = hooks
+            .mid_move_answers
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the probe ran during the move");
+        assert!(!cancelled, "the move had started: nothing was waiting");
+        assert_eq!(
+            second.as_deref(),
+            Some(codes::E_INVALID_STATE),
+            "a second wait is refused while the move is in flight"
+        );
+    }
+
+    /// M4: a waiter dropped (or panicked) without recording its end still
+    /// closes its `session_move_waiting` — at once, not at the next startup.
+    #[test]
+    fn a_waiter_dropped_without_an_end_records_one() {
+        let (f, _bus) = recorded_fixture();
+        let a = args(&f, false);
+        let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        drop(guard);
+        let w = wait_events(&f);
+        let ended: Vec<_> = w
+            .iter()
+            .filter(|(k, _)| k == wait::EVENT_MOVE_WAIT_ENDED)
+            .collect();
+        assert_eq!(ended.len(), 1, "{w:?}");
+        assert!(
+            ended[0].1.as_deref().unwrap().contains("hub_restarted"),
+            "{ended:?}"
+        );
+    }
+
+    /// M4's other half: a waiter that recorded its own end writes nothing
+    /// more when its guard drops.
+    #[tokio::test]
+    async fn a_waiter_that_recorded_its_end_records_nothing_more_on_drop() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let end = wait::run_wait(
+            a,
+            &f.store,
+            &f.fake,
+            &hooks,
+            fast(),
+            guard.token(),
+            wait::now_unix() - 1,
+            POLL,
+        )
+        .await;
+        assert_eq!(end, wait::WaitEnd::TimedOut);
+        drop(guard);
+        let ended: Vec<_> = wait_events(&f)
+            .into_iter()
+            .filter(|(k, _)| k == wait::EVENT_MOVE_WAIT_ENDED)
+            .collect();
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert!(ended[0].1.as_deref().unwrap().contains("timed_out"));
+    }
+
+    #[tokio::test]
+    async fn a_second_wait_for_the_same_session_is_refused() {
+        let (f, _bus) = recorded_fixture();
+        let a = args(&f, false);
+        let _first = wait::begin_wait(&a, &f.store).unwrap();
+        let err = wait::begin_wait(&a, &f.store).err().expect("refused");
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+    }
+
+    #[tokio::test]
+    async fn a_wait_is_refused_while_a_move_of_the_session_is_in_flight() {
+        let (f, _bus) = recorded_fixture();
+        let a = args(&f, false);
+        let _claim = MoveClaim::acquire(&f.store, a.session_id).unwrap();
+        let err = wait::begin_wait(&a, &f.store).err().expect("refused");
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+    }
+
+    #[test]
+    fn the_startup_sweep_closes_waits_nothing_is_honouring() {
+        let (f, _bus) = recorded_fixture();
+        // A previous process recorded the wait and died: no guard's drop
+        // ran (a dropped guard now closes its own wait, see
+        // `a_waiter_dropped_without_an_end_records_one`), no entry is
+        // registered here, only the event is left.
+        f.store
+            .lock()
+            .unwrap()
+            .insert_session_event(f.source_id, wait::EVENT_MOVE_WAITING, Some("{}"))
+            .unwrap();
+        assert_eq!(wait::sweep_unresolved_waits(&f.store).unwrap(), 1);
+        let (_, ended) = wait_events(&f).last().cloned().unwrap();
+        assert!(ended.unwrap().contains("hub_restarted"));
+        assert_eq!(
+            wait::sweep_unresolved_waits(&f.store).unwrap(),
+            0,
+            "idempotent"
+        );
+    }
+
+    #[test]
+    fn the_startup_sweep_never_closes_a_wait_still_registered() {
+        let (f, _bus) = recorded_fixture();
+        let a = args(&f, false);
+        // Not dropped: this wait is still live in this process.
+        let (_guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        assert_eq!(
+            wait::sweep_unresolved_waits(&f.store).unwrap(),
+            0,
+            "a live wait must never be marked hub_restarted"
+        );
+        assert!(
+            wait_events(&f)
+                .iter()
+                .all(|(k, _)| k != wait::EVENT_MOVE_WAIT_ENDED),
+            "no ended event for a wait nothing has abandoned"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_session_disappearing_mid_wait_ends_it_as_session_gone() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let (end, ()) = tokio::join!(
+            wait::run_wait(
+                a,
+                &f.store,
+                &f.fake,
+                &hooks,
+                fast(),
+                guard.token(),
+                deadline,
+                POLL
+            ),
+            async {
+                tokio::time::sleep(POLL * 3).await;
+                f.store.lock().unwrap().delete_session(f.source_id).unwrap();
+            },
+        );
+        assert_eq!(end, wait::WaitEnd::SessionGone);
+    }
+
+    #[tokio::test]
+    async fn busy_again_refuses_the_retry_and_the_wait_resumes_until_a_later_idle_moves_it() {
+        let (f, _bus) = recorded_fixture();
+        // The fixture's source starts idle: the wait's first check succeeds
+        // at once and the move attempt runs immediately, where `refresh_host`
+        // flips the source back to `working` exactly once.
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.busy_once_on_refresh.store(true, Ordering::SeqCst);
+        let a = args(&f, false);
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).expect("registered");
+        let (end, ()) = tokio::join!(
+            wait::run_wait(
+                a,
+                &f.store,
+                &f.fake,
+                &hooks,
+                fast(),
+                guard.token(),
+                deadline,
+                POLL
+            ),
+            async {
+                // Give the busy-again refusal time to land and the wait to
+                // observe the (still) non-idle status at least once before
+                // it goes idle again for good.
+                tokio::time::sleep(POLL * 5).await;
+                set_status(&f, "idle");
+            },
+        );
+        assert_eq!(end, wait::WaitEnd::Moved);
+        assert!(events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+        // The busy-again refusal must never appear as the wait's own ending.
+        let w = wait_events(&f);
+        let (_, ended) = w.last().unwrap();
+        assert!(ended.as_deref().unwrap().contains("moved"), "{ended:?}");
+    }
+
+    // ── `when`, Task 3 ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn when_idle_on_an_idle_source_moves_at_once() {
+        let (f, _bus) = recorded_fixture(); // the fixture's source is idle
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.when = When::Idle;
+        let out = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap();
+        assert!(matches!(out, MoveOutcome::Moved(_)), "{out:?}");
+        assert!(wait_events(&f).is_empty(), "no wait was registered");
+    }
+
+    #[tokio::test]
+    async fn cancel_with_nothing_pending_says_so_and_moves_nothing() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.when = When::Cancel;
+        let out = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap();
+        let MoveOutcome::WaitCancelled(c) = out else {
+            panic!("{out:?}")
+        };
+        assert!(!c.was_waiting);
+        assert!(!events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+        assert!(f.fake.calls().is_empty(), "a cancel touches no host");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_cancel_is_refused() {
+        let (f, _bus) = recorded_fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.when = When::Cancel;
+        a.dry_run = true;
+        let err = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_for_idle_on_a_busy_source_previews_and_says_it_will_wait() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        a.when = When::Idle;
+        let out = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap();
+        let MoveOutcome::Preview(p) = out else {
+            panic!("{out:?}")
+        };
+        assert!(
+            p.unknowns.iter().any(|u| u.contains("busy")),
+            "{:?}",
+            p.unknowns
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_for_now_on_a_busy_source_is_still_the_moves_refusal() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true; // when defaults to Now
+        let err = move_session_with(a, &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap_err();
+        assert!(err.message.contains(SOURCE_NOT_IDLE), "{}", err.message);
+    }
+
+    // ── the public branch (`move_or_wait`), fix wave I5 ──────────────────
+
+    type Started<'a> =
+        std::cell::RefCell<Option<(wait::WaitGuard<&'a Mutex<Store>>, MoveSessionArgs, i64)>>;
+
+    /// I5b: a dry run of `when: idle` on a busy source is a preview, through
+    /// the public branch too — never a wait, and no `session_move_waiting`.
+    #[tokio::test]
+    async fn the_public_branch_previews_a_dry_run_idle_on_a_busy_source_without_waiting() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        a.when = When::Idle;
+        let started: Started = Default::default();
+        let out = move_or_wait(a, &f.store, &f.fake, &hooks, fast(), |g, a, d| {
+            *started.borrow_mut() = Some((g, a, d));
+        })
+        .await
+        .unwrap();
+        assert!(matches!(out, MoveOutcome::Preview(_)), "{out:?}");
+        assert!(started.borrow().is_none(), "no waiter was started");
+        assert!(wait_events(&f).is_empty(), "{:?}", wait_events(&f));
+    }
+
+    /// I5b: `when: idle` on a busy source answers `Waiting`, touches no
+    /// host, and hands the waiter a plain `when: now` move to run.
+    #[tokio::test]
+    async fn the_public_branch_waits_for_idle_on_a_busy_source() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.when = When::Idle;
+        let started: Started = Default::default();
+        let out = move_or_wait(a, &f.store, &f.fake, &hooks, fast(), |g, a, d| {
+            *started.borrow_mut() = Some((g, a, d));
+        })
+        .await
+        .unwrap();
+        let MoveOutcome::Waiting(w) = out else {
+            panic!("{out:?}")
+        };
+        assert_eq!(w.session_id, f.source_id);
+        let started = started.borrow();
+        let (_, run, deadline) = started.as_ref().expect("a waiter was started");
+        assert_eq!(run.when, When::Now);
+        assert!(!run.dry_run);
+        assert_eq!(*deadline, w.deadline_unix);
+        assert!(f.fake.calls().is_empty(), "waiting touches no host");
+        assert_eq!(
+            wait_events(&f).first().map(|(k, _)| k.as_str()),
+            Some(wait::EVENT_MOVE_WAITING)
+        );
+    }
+
+    /// I5a: the store said idle (stale), so the move ran — and its own
+    /// fresh check found the source busy. `when: idle` means wait for
+    /// exactly that, so the refusal becomes a wait instead of an error.
+    #[tokio::test]
+    async fn the_public_branch_waits_when_a_stale_idle_source_is_found_busy() {
+        let (f, _bus) = recorded_fixture(); // stored status: idle
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.busy_once_on_refresh.store(true, Ordering::SeqCst);
+        let mut a = args(&f, false);
+        a.when = When::Idle;
+        let started: Started = Default::default();
+        let out = move_or_wait(a, &f.store, &f.fake, &hooks, fast(), |g, a, d| {
+            *started.borrow_mut() = Some((g, a, d));
+        })
+        .await;
+        let out = out.expect("a wait, not the busy refusal");
+        assert!(matches!(out, MoveOutcome::Waiting(_)), "{out:?}");
+        assert!(started.borrow().is_some(), "a waiter was started");
+        assert!(!events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+    }
+
+    #[test]
+    fn every_outcome_round_trips_on_the_wire() {
+        for o in [
+            MoveOutcome::Waiting(Box::new(wait::MoveWaiting {
+                session_id: 7,
+                to_host: "beta".into(),
+                deadline_unix: 1_700_000_000,
+            })),
+            MoveOutcome::WaitCancelled(Box::new(MoveWaitCancelled {
+                session_id: 7,
+                was_waiting: true,
+            })),
+        ] {
+            let v = serde_json::to_value(&o).unwrap();
+            assert!(v["kind"].is_string(), "{v}");
+            let back: MoveOutcome = serde_json::from_value(v.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&back).unwrap(), v);
+        }
     }
 }

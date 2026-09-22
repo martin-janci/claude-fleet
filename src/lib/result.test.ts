@@ -35,4 +35,60 @@ describe('invokeCmd', () => {
       expect(r.error.message).toContain('explode');
     }
   });
+
+  // The `fleet:outcome-unknown` broadcast makes every listener re-fetch the
+  // whole fleet. A hub timeout on a READ changes nothing on the hub, and a
+  // refresh that itself times out would broadcast again — the amplification
+  // the final review found. Only a timed-out MUTATION (which the backend
+  // marks `outcome_unknown: true`) may fire it.
+  describe('fleet:outcome-unknown', () => {
+    async function dispatchesFor(error: unknown): Promise<number> {
+      let fired = 0;
+      const onEvent = () => {
+        fired += 1;
+      };
+      window.addEventListener('fleet:outcome-unknown', onEvent);
+      try {
+        (mockedInvoke as ReturnType<typeof vi.fn>).mockRejectedValueOnce(error);
+        await invokeCmd<unknown>('some_cmd');
+      } finally {
+        window.removeEventListener('fleet:outcome-unknown', onEvent);
+      }
+      return fired;
+    }
+
+    it('fires for a timed-out mutation (outcome_unknown: true)', async () => {
+      expect(
+        await dispatchesFor({
+          code: 'E_HUB_TIMEOUT',
+          message: 'no answer within 40s',
+          details: { outcome_unknown: true },
+        }),
+      ).toBe(1);
+    });
+
+    it('stays silent for a timed-out read (outcome_unknown: false)', async () => {
+      expect(
+        await dispatchesFor({
+          code: 'E_HUB_TIMEOUT',
+          message: 'no answer within 40s',
+          details: { outcome_unknown: false },
+        }),
+      ).toBe(0);
+    });
+
+    it('stays silent for an E_HUB_TIMEOUT carrying no details at all', async () => {
+      expect(await dispatchesFor({ code: 'E_HUB_TIMEOUT', message: 'no answer within 40s' })).toBe(0);
+    });
+
+    it('stays silent for E_HUB_UNREACHABLE', async () => {
+      expect(
+        await dispatchesFor({
+          code: 'E_HUB_UNREACHABLE',
+          message: 'refused',
+          details: { outcome_unknown: true },
+        }),
+      ).toBe(0);
+    });
+  });
 });

@@ -757,6 +757,22 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         .await
         .map_err(|e| format!("could not bind {addr}: {e}"))?;
 
+    // Task 5: close every unresolved `session_move_waiting` as
+    // `hub_restarted` before the listener below can serve a single request —
+    // a waiter lives only in this process's memory, so a wait this restarted
+    // process cannot possibly still be honouring must not linger for a
+    // reopened desktop to show. Must run before `mcp::start_with_listener`,
+    // not merely before `serve` returns: that call hands the bound
+    // `listener` to the axum server and awaits only its setup, not a client
+    // — a request can be served the instant it returns. Logged, never fatal:
+    // a store this broken already fails `persist`/`ensure_master_token`
+    // above.
+    match fleet_core::service::move_session::wait::sweep_unresolved_waits(&store) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("closed {n} stale move-wait(s) as hub_restarted at startup"),
+        Err(e) => tracing::warn!("sweep_unresolved_waits at startup failed: {e}"),
+    }
+
     let (shutdown, serve_task) = mcp::start_with_listener(
         Arc::clone(&store),
         Arc::clone(&ssh),

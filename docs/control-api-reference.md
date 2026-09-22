@@ -25,7 +25,7 @@ Parameters: `confirm_nonce`, `force_partial`, `plan_id`
 
 ### `broadcast_prompt`
 
-Send the same prompt to every matching work session (excludes the controller). Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked as untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Send the same prompt to every matching work session (excludes the controller), skipping blocked or stuck ones unless status="blocked". Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked as untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
 Parameters: `confirm_nonce`, `host`, `project_id`, `prompt`, `raw`, `status`, `submit`
 
@@ -50,6 +50,12 @@ Parameters: `confirm_nonce`, `force`, `worktree_id`
 ### `discover_hosts`
 
 Discover SSH hosts from the user's ~/.ssh/config. These are candidates for add_host. Returns JSON.
+
+### `discover_lost_sessions`
+
+Read-only: scan ~/.claude/projects on a host for Claude conversations fleet has no live pane for, ranked against the host's boot (rank_hint: before_boot | after_boot | stale | unknown) and enriched with project_id, worktree_id and existing_session_id — the last set when a fleet row (live or lost) already holds that conversation, which restore_host_sessions handles, not this. resumable is true only when the pane would start in exactly the transcript's cwd; anywhere else claude --resume silently starts an empty conversation instead, so do not resume it. Resume one with new_session { host_alias, project_id, worktree_id, name: derived_tmux_name (a hint), resume_claude_session_id }. limit: newest first, default 50, max 500.
+
+Parameters: `host_alias`, `limit`
 
 ### `dismiss_ghost_session`
 
@@ -155,9 +161,9 @@ Parameters: `host_alias`, `limit`, `project_id`, `summary`
 
 ### `move_session`
 
-Move a work session to another host, carrying its work as it is: the Claude transcript, unpushed commits, staged/modified/untracked files and small git-ignored files (.env); also the session's Claude directory (subagent transcripts, tool results) and the project's Claude memory, added to the target without replacing anything there (these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the same conversation and the source is killed only once the target runs (keep_source=true leaves it). strict=true refuses instead of carrying: E_MOVE_DIRTY, E_MOVE_UNPUSHED. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts (in practice the master). Returns a MoveReport with the new row as target.
+Move a work session to another host, carrying its work as it is: the Claude transcript, unpushed commits, staged/modified/untracked files and small git-ignored files (.env); also the session's Claude directory (subagent transcripts, tool results) and the project's Claude memory, added to the target without replacing anything there (these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the same conversation and the source is killed only once the target runs (keep_source=true leaves it). strict=true refuses instead of carrying: E_MOVE_DIRTY, E_MOVE_UNPUSHED. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts (in practice the master). Returns a moved report, a preview or a wait.
 
-Parameters: `clean_target`, `confirm_nonce`, `keep_source`, `session_id`, `strict`, `target_host_alias`
+Parameters: `clean_target`, `confirm_nonce`, `dry_run`, `keep_source`, `session_id`, `strict`, `target_host_alias`, `when`
 
 ### `new_bg_session`
 
@@ -169,7 +175,7 @@ Parameters: `host_alias`, `name`, `prompt`, `requester_session_id`
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree). Pass new_worktree to fork a fresh worktree+branch (optional base_branch). Auto-clones the repo on remote hosts. Optional kind="shell" runs a plain interactive shell instead (see new_shell_session for the same thing with start_command); optional friendly_name sets the sidebar label (omit / empty to derive one from the branch).
 
-Parameters: `base_branch`, `friendly_name`, `host_alias`, `kind`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
+Parameters: `base_branch`, `friendly_name`, `host_alias`, `kind`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -321,6 +327,12 @@ Restart a tmux session (kill and recreate it in the same place). Use when the Cl
 
 Parameters: `force`, `host_alias`, `name`, `session_id`
 
+### `restore_host_sessions`
+
+Restore sessions a host lost to a reboot or tmux restart: resume each one's Claude conversation in its original worktree under its original name. dry_run=true returns the plan (no ssh, no writes) — call it first, and again after a timeout to see what is still lost. One failing session never fails the others; the result lists every outcome. One restore per host at a time (E_INVALID_STATE otherwise); a lost fleet controller is skipped (recreate_session force=true). Paced by restore.batch_size / restore.stagger_ms.
+
+Parameters: `dry_run`, `host_alias`, `session_ids`
+
 ### `revoke_client`
 
 Revoke a paired client's token by name. Its next request is refused (the auth layer only resolves live rows) and the name becomes free to pair again; the row itself is kept, revoked, for the audit trail. E_NOTFOUND when no live client holds that name. Master token only. Returns the revoked row as JSON.
@@ -347,15 +359,21 @@ Parameters: `host_alias`
 
 ### `send_message`
 
-Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails. Returns JSON with the new message id and the delivery outcome. Pass reply_to (an inbox message id) to thread an answer. A per-host token must send from a session on its own host (E_FORBIDDEN). The body is prefixed with an untrusted-content marker line unless raw=true (master token only).
+Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails or is refused into a blocked recipient. Returns JSON with the new message id and the delivery outcome. Pass reply_to (an inbox message id) to thread an answer. A per-host token must send from a session on its own host (E_FORBIDDEN). The body is prefixed with an untrusted-content marker line unless raw=true (master token only).
 
 Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `submit`, `to_session_id`
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only) or the caller is a trusted client. keys=Enter|Escape|C-c presses a key instead (unmarked). Returns JSON { delivered, session_id, turn_seq_before }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three).
+Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one Enter). The first prompt to a still-unnamed session also becomes its friendly name. Marked untrusted unless raw=true (master only) or a trusted client. keys=Enter|Escape|C-c presses a key instead (unmarked). Returns JSON { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working session queues it (queued=true). acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable. Repeat a client_msg_id to retry without delivering twice.
 
-Parameters: `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
+Parameters: `client_msg_id`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
+
+### `session_activity`
+
+What the session's pane shows right now: claude_status, stuck_kind, current_activity, waiting_for and the spinner line. One capture, nothing stored — the cheap read behind a live indicator, where capture_session is the whole pane. E_INVALID_STATE outside tmux. JSON.
+
+Parameters: `session_id`
 
 ### `session_conversation`
 
@@ -480,6 +498,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`
+- `commands::sessions::restore_host_sessions`
+- `commands::sessions::discover_lost_sessions`
 - `commands::move_session::move_session`
 - `commands::resolve_move::resolve_move`
 - `commands::sessions::dismiss_ghost_session`
@@ -540,6 +560,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hub::hub_disconnect`
 - `commands::hub::hub_connection`
 - `commands::hub::hub_stranded_token`
+- `commands::hub::report_client_error`
 - `commands::onboarding::check_local_prereqs`
 - `commands::onboarding::tunnel_status`
 - `commands::assets::catalog_config`

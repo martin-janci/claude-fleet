@@ -320,6 +320,7 @@ mod tests {
     ) -> SessionRow {
         SessionRow {
             id,
+            row_version: 0,
             tmux_name: name.into(),
             host_alias: "local".into(),
             project_id: None,
@@ -333,6 +334,7 @@ mod tests {
             reviews_session_id: None,
             worktree_key: None,
             lost_at: None,
+            lost_reason: None,
             claude_session_id: None,
             claude_status: None,
             effort_level: None,

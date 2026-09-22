@@ -15,6 +15,7 @@ pub mod events;
 mod fleet_e2e_tests;
 pub mod humanize;
 pub mod ipc_error;
+pub mod json;
 pub mod logging;
 pub mod mcp;
 #[cfg(test)]

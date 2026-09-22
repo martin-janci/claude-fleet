@@ -240,7 +240,7 @@ async fn find_launched_id(
         if attempt > 0 {
             tokio::time::sleep(LAUNCH_LOOKUP_DELAY).await;
         }
-        let agents = tmux.list_claude_agents().await;
+        let agents = tmux.list_claude_agents().await.unwrap_or_default();
         if let Some(id) = pick_launched_id(None, &agents, name, launch_started) {
             return Some(id);
         }
@@ -263,7 +263,10 @@ fn stamp_bg_row(
     let _ = s.set_started_at(row.id, now);
     let _ = s.set_last_prompt(row.id, prompt);
     if row.friendly_name.is_none() {
-        if let Some(name) = crate::service::sessions::friendly_name_from_prompt(prompt) {
+        // The launch prompt may carry the untrusted MCP marker as its first
+        // line; the label must be derived from the body (D8 / Q2).
+        let body = crate::mcp::guard::strip_marker(prompt);
+        if let Some(name) = crate::service::sessions::label_from_prompt(body) {
             let _ = s.set_friendly_name(&row.host_alias, &row.tmux_name, Some(&name));
         }
     }

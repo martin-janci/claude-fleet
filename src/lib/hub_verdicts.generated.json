@@ -64,7 +64,6 @@
     "repo_stage",
     "repo_unstage",
     "rotate_host_token",
-    "session_activity",
     "session_tool_detail",
     "set_account_nickname",
     "set_fleet_setting",
@@ -74,6 +73,7 @@
   "routed": [
     "cancel_task",
     "delete_worktree",
+    "discover_lost_sessions",
     "dismiss_ghost_session",
     "ensure_operator",
     "health_check",
@@ -104,8 +104,10 @@
     "repo_tree",
     "resolve_move",
     "restart_session",
+    "restore_host_sessions",
     "safe_kill_session",
     "send_prompt",
+    "session_activity",
     "session_conversation",
     "session_conversations",
     "session_history",
@@ -137,6 +139,7 @@
     "pty_open",
     "pty_resize",
     "pty_write",
+    "report_client_error",
     "upload_attachments",
     "upload_to_session"
   ]

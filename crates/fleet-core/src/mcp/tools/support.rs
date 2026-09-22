@@ -271,6 +271,115 @@ pub(super) fn run_prompt_ready(row: &crate::store::SessionRow) -> Result<(), Mcp
     }
 }
 
+/// How long a send waits for the REPL's `UserPromptSubmit` hook before
+/// reporting `acked: false`, and how often it looks.
+pub(super) const ACK_WAIT: std::time::Duration = std::time::Duration::from_millis(1_500);
+pub(super) const ACK_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// May a prompt be delivered to this row now? `Err(E_INVALID_STATE)` for a
+/// session that is `blocked` or has a `stuck_kind` (Enter would answer its
+/// dialog) unless `force`. `Ok(queued)`: true when the session is `working`
+/// and the prompt will be submitted, so Claude Code queues it behind the
+/// running turn.
+pub(super) fn delivery_gate(
+    row: &crate::store::SessionRow,
+    force: bool,
+    submit: bool,
+) -> Result<bool, McpError> {
+    let blocked_on = match (row.claude_status.as_deref(), row.stuck_kind.as_deref()) {
+        (_, Some(kind)) => Some(kind.to_string()),
+        (Some("blocked"), None) => Some("a dialog".to_string()),
+        _ => None,
+    };
+    if let (Some(what), false) = (blocked_on, force) {
+        return Err(mcp_err(
+            "E_INVALID_STATE",
+            format!(
+                "session {} is waiting on {what}; Enter would answer it — resolve it in the \
+                 terminal, or pass force: true to type into it anyway",
+                row.id
+            ),
+            None,
+        ));
+    }
+    Ok(submit && row.claude_status.as_deref() == Some("working"))
+}
+
+/// Poll `prompt_submit_seq` until it passes `seq_before` (the REPL took the
+/// prompt) or `wait` elapses. Lock, read, unlock — never across the sleep.
+pub(super) async fn await_prompt_ack(
+    store: &Mutex<crate::store::Store>,
+    row_id: i64,
+    seq_before: i64,
+    wait: std::time::Duration,
+) -> Result<bool, McpError> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let seq = {
+            let s = lock(store).map_err(to_mcp_err)?;
+            s.prompt_ack_state(row_id)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .map(|st| st.prompt_submit_seq)
+        };
+        match seq {
+            None => return Ok(false),
+            Some(seq) if seq > seq_before => return Ok(true),
+            Some(_) => {}
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(ACK_POLL.min(deadline - now)).await;
+    }
+}
+
+/// The turn number a caller waits past to collect THIS prompt's reply. A
+/// prompt queued behind a running turn is answered by the turn after it;
+/// one that was acked now (the `working` status was stale) is the next turn.
+pub(super) fn turn_seq_before(turn_seq: i64, queued: bool, acked: Option<bool>) -> i64 {
+    if queued && acked != Some(true) {
+        turn_seq + 1
+    } else {
+        turn_seq
+    }
+}
+
+/// Whether this delivery can produce a meaningful `acked` at all.
+///
+/// Three things make it unknowable, and none of them is a failure:
+/// nothing was submitted (`submit: false` stages text, no hook fires), the
+/// prompt was QUEUED behind a running turn (Claude Code fires
+/// `UserPromptSubmit` when the queued prompt STARTS, which is whenever that
+/// turn ends — not within [`ACK_WAIT`]), or no hook has ever reached this
+/// row (an un-provisioned host: nothing will ever stamp it). Waiting in
+/// those cases buys a guaranteed `false`, which reads as "the send failed".
+pub(super) fn ack_knowable(submit: bool, queued: bool, hooks_seen: bool) -> bool {
+    submit && !queued && hooks_seen
+}
+
+/// Whether this body is a bare Enter rather than a prompt — the one delivery
+/// that walks past [`delivery_gate`].
+///
+/// The gate refuses a `blocked` or stuck session because Enter would ANSWER
+/// its dialog. Pressing Enter is exactly what the Conversation tab's "Press
+/// Enter" chip (and `stuck_kind: press_enter`) is for, so the gate's own
+/// reason for refusing is the caller's reason for calling: an empty body has
+/// to bypass it, or a session stuck on a Press-Enter prompt cannot be
+/// unstuck from a hub client at all.
+///
+/// It reads the body AFTER [`apply_marker`], because that is what
+/// [`FleetTools::deliver_prompt`] is handed. An empty prompt from an
+/// untrusted caller arrives as the marker line and nothing else, so
+/// [`guard::strip_marker`] is what makes "empty" recognisable on both paths;
+/// a marked non-empty prompt keeps its body and is not affected.
+///
+/// Only an EMPTY body qualifies. Whitespace is text: it would be typed into
+/// the REPL, so the gate still owns it.
+pub(super) fn bypasses_gate(body: &str) -> bool {
+    guard::strip_marker(body).is_empty()
+}
+
 /// The text a task worker receives (S8): the requester's prompt behind the
 /// untrusted-content marker and closed by [`guard::UNTRUSTED_END`], THEN the
 /// fleet-authored completion instruction outside that block. A master
@@ -383,7 +492,22 @@ pub(super) fn persist_audit(
     } else {
         format!("{tool} by {}: {summary}", caller.label())
     };
-    let _ = s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)));
+    // A read is written but not announced. The timeline and `session_history`
+    // still carry it; what goes away is one `session:event` frame per read to
+    // every connected client — measured at ~720 an hour from the desktop's
+    // own conversation poll alone, each 253 B, and each one telling a
+    // read-only paired phone what the operator was doing. A write keeps its
+    // announcement: those are the events a client is watching for.
+    let _ = if guard::READONLY_TOOLS.contains(&tool) {
+        s.insert_session_event_quietly(
+            session_id,
+            None,
+            "mcp_call",
+            Some(&guard::scrub_line(&detail)),
+        )
+    } else {
+        s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)))
+    };
 }
 
 /// Describe the origin of a delivered prompt for the untrusted-content marker.
@@ -538,22 +662,11 @@ pub(super) fn ok_json_compact<T: serde::Serialize>(value: &T) -> Result<CallTool
     Ok(CallToolResult::success(vec![text_content(json)]))
 }
 
-pub(super) fn strip_nulls(v: &mut serde_json::Value) {
-    match v {
-        serde_json::Value::Object(map) => {
-            map.retain(|_, val| !val.is_null());
-            for val in map.values_mut() {
-                strip_nulls(val);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for val in arr.iter_mut() {
-                strip_nulls(val);
-            }
-        }
-        _ => {}
-    }
-}
+// One home, because the hub's `/events` broadcast strips the same rows for
+// the same clients (see `crate::json`): a divergence here would mean
+// `list_sessions` and the `session:updated` frame for one of its rows
+// disagreeing about what a null field looks like on the wire.
+pub(super) use crate::json::strip_nulls;
 
 /// A `SessionRow` augmented with the controller flag for the `list_sessions`
 /// MCP output. `#[serde(flatten)]` keeps every original SessionRow field at the
@@ -838,27 +951,92 @@ impl FleetTools {
     }
 
     /// Deliver a (already marked) prompt to a resolved session and return
-    /// `{ delivered, session_id, turn_seq_before }`.
+    /// `{ delivered, session_id, turn_seq_before, queued, acked }`.
+    ///
+    /// `acked` is `true` once the session's `UserPromptSubmit` hook stamped
+    /// the row after the send, `false` when it did not within [`ACK_WAIT`],
+    /// and `null` when it cannot be known ([`ack_knowable`]).
+    ///
+    /// **`false` is not "the send failed".** It is "not confirmed within
+    /// 1.5 s": the text is in the pane either way, and a slow hook, a busy
+    /// host or a REPL that took the paste without firing all look the same
+    /// from here. A caller that needs certainty reads the pane
+    /// (`capture_session`); a caller that believes Enter did not land sends
+    /// an EMPTY prompt, which is a bare Enter and nothing else.
+    ///
+    /// There is deliberately no automatic Enter retry. It existed, and it
+    /// cannot be made safe: the only evidence available is a 1.5 s
+    /// non-answer, and between that read and the retry the session may have
+    /// opened a permission dialog — into which the retry presses Enter,
+    /// choosing whatever is highlighted. A missing Enter costs a round trip;
+    /// an Enter into a dialog approves something nobody approved.
+    ///
+    /// An EMPTY body ([`bypasses_gate`]) is that bare Enter, and it skips
+    /// [`delivery_gate`] entirely — pressing Enter into a stuck session is
+    /// the whole point of it, so the gate's reason for refusing is the
+    /// caller's reason for calling. Nothing is typed, nothing is queued, and
+    /// there is no ack to wait for. An empty body with `submit: false` is
+    /// the one combination that types nothing AND presses nothing, so it is
+    /// refused up front with `E_VALIDATE` instead of silently no-opping.
     pub(super) async fn deliver_prompt(
         &self,
         row: &crate::store::SessionRow,
         prompt: String,
         submit: bool,
+        force: bool,
     ) -> Result<serde_json::Value, McpError> {
-        let args = sessions::SendPromptArgs {
-            host_alias: row.host_alias.clone(),
-            tmux_name: row.tmux_name.clone(),
-            prompt,
-            submit,
-            keys: None,
+        let send = |prompt: String| {
+            sessions::send_prompt(
+                sessions::SendPromptArgs {
+                    host_alias: row.host_alias.clone(),
+                    tmux_name: row.tmux_name.clone(),
+                    prompt,
+                    submit,
+                    keys: None,
+                },
+                &self.store,
+                &self.ssh,
+            )
         };
-        sessions::send_prompt(args, &self.store, &self.ssh)
-            .await
-            .map_err(to_mcp_err)?;
+        let bare = bypasses_gate(&prompt);
+        if bare && !submit {
+            return Err(mcp_err(
+                "E_VALIDATE",
+                "nothing to deliver: an empty prompt with submit: false types nothing and presses nothing",
+                None,
+            ));
+        }
+        if bare {
+            // The marker line is dropped with the rest: what goes to the pane
+            // is the key press, not a sentence about where it came from.
+            send(String::new()).await.map_err(to_mcp_err)?;
+            return Ok(serde_json::json!({
+                "delivered": true,
+                "session_id": row.id,
+                "turn_seq_before": row.turn_seq,
+                "queued": false,
+                "acked": serde_json::Value::Null,
+            }));
+        }
+        let queued = delivery_gate(row, force, submit)?;
+        let before = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.prompt_ack_state(row.id)
+                .map_err(|e| to_mcp_err(e.into()))?
+        };
+        send(prompt).await.map_err(to_mcp_err)?;
+        let acked = match before {
+            Some(st) if ack_knowable(submit, queued, st.hooks_seen) => {
+                Some(await_prompt_ack(&self.store, row.id, st.prompt_submit_seq, ACK_WAIT).await?)
+            }
+            _ => None,
+        };
         Ok(serde_json::json!({
             "delivered": true,
             "session_id": row.id,
-            "turn_seq_before": row.turn_seq,
+            "turn_seq_before": turn_seq_before(row.turn_seq, queued, acked),
+            "queued": queued,
+            "acked": acked,
         }))
     }
 
@@ -952,7 +1130,7 @@ pub(super) const QUICK_CAP: std::time::Duration = std::time::Duration::from_secs
 /// in [`guard::TOOL_POLICIES`]. An unknown name gets the quick cap; the
 /// exhaustiveness test in `tools::tests` guarantees every served tool has a
 /// row.
-pub(super) fn tool_deadline(tool: &str) -> std::time::Duration {
+pub fn tool_deadline(tool: &str) -> std::time::Duration {
     match guard::policy(tool) {
         Some(p) => {
             let work = match p.deadline {

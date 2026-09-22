@@ -93,6 +93,18 @@ fn client_tokens_has_trusted_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 042: `sessions` already has its
+/// `row_version` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn sessions_has_row_version(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'row_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -332,6 +344,16 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/040_pending_input.sql"),
         already_applied: Some(sessions_has_pending_input),
     },
+    // `CREATE TABLE IF NOT EXISTS` plus two `CREATE INDEX IF NOT EXISTS`,
+    // safe to re-run.
+    Migration::plain(41, include_str!("../../migrations/041_error_reports.sql")),
+    // `sessions.row_version` (+ trigger) and `sessions.prompt_submit_seq`;
+    // ADD COLUMN, so the same guard as 038/039/040.
+    Migration {
+        version: 42,
+        sql: include_str!("../../migrations/042_row_version_and_prompt_ack.sql"),
+        already_applied: Some(sessions_has_row_version),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -546,6 +568,7 @@ mod tests {
         "sync_runs",
         "client_tokens",
         "conversations",
+        "error_reports",
     ];
 
     #[test]

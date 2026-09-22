@@ -259,10 +259,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "session_activity",
-        Verdict::LocalOnly {
-            instead: "it captures the session's pane over this machine's SSH connection; the \
-                      hub's pane reads answer a different shape, so the live indicator is off \
-                      in remote mode",
+        Verdict::Routed {
+            tool: "session_activity",
         },
     ),
     (
@@ -287,6 +285,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "recreate_session",
         Verdict::Routed {
             tool: "recreate_session",
+        },
+    ),
+    (
+        "restore_host_sessions",
+        Verdict::Routed {
+            tool: "restore_host_sessions",
+        },
+    ),
+    (
+        "discover_lost_sessions",
+        Verdict::Routed {
+            tool: "discover_lost_sessions",
         },
     ),
     (
@@ -653,6 +663,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "asks THIS machine's own token store whether a pairing that crashed before \
                   writing its URL left a credential behind. There is no hub to ask — the \
                   whole state is that no hub is configured",
+        },
+    ),
+    (
+        "report_client_error",
+        Verdict::SameInBoth {
+            why: "queues a frontend error in THIS process's report ring; in standalone \
+                  nothing drains it, so the push is a no-op rather than a refusal",
         },
     ),
     // ── onboarding ──────────────────────────────────────────────────────────

@@ -18,7 +18,9 @@
 //! `printenv HOME` through the log like the real client and caches per host.
 
 use crate::ipc_error::{codes, IpcError};
-use crate::ssh::{home_from_output, wall_clock_error, SshClient, SshExec, UPLOAD_WALL_CLOCK};
+use crate::ssh::{
+    home_from_output, wall_clock_error, HostToolchain, SshClient, SshExec, UPLOAD_WALL_CLOCK,
+};
 use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -43,13 +45,31 @@ impl Call {
         self.args.join(" ")
     }
 
-    /// For a `bash -lc '<script>'` call: the script with the outer
-    /// `shell::quote` undone. `None` for any other argv shape.
+    /// For a `bash -lc '<script>'` call, or a `sh -c 'export PATH=…; <script>'`
+    /// call (a toolchain-aware tmux call), the script with the outer
+    /// `shell::quote` undone and the PATH export stripped. `None` for any
+    /// other argv shape.
     pub fn script(&self) -> Option<String> {
         match self.args.as_slice() {
             [b, l, s] if b == "bash" && l == "-lc" => unquote(s),
+            [b, l, s] if b == "sh" && l == "-c" => {
+                let body = unquote(s)?;
+                Some(match body.strip_prefix("export PATH=") {
+                    Some(rest) => rest
+                        .split_once("; ")
+                        .map(|(_, script)| script.to_string())
+                        .unwrap_or(body.clone()),
+                    None => body,
+                })
+            }
             _ => None,
         }
+    }
+
+    /// Whether this call was an `upload_file` (the only call shape that ever
+    /// carries `stdin`): `run` / `run_bounded` / `run_cancellable` never do.
+    pub fn is_upload(&self) -> bool {
+        self.stdin.is_some()
     }
 
     /// The uploaded bytes as text (`upload_file` calls only).
@@ -179,6 +199,7 @@ struct State {
     default: Option<Reply>,
     homes: HashMap<String, String>,
     wall_clock: Option<Duration>,
+    toolchains: HashMap<String, HostToolchain>,
 }
 
 /// Cheaply cloneable; clones share the rules and the call log, so a test can
@@ -268,6 +289,14 @@ impl FakeSsh {
             Match::prefix("printenv HOME"),
             Reply::ok(&format!("{home}\n")),
         )
+    }
+
+    /// Make `toolchain(host)` answer `tc`, as if it had already been
+    /// resolved. Without this, `toolchain` returns `None` and every tmux
+    /// call built through this host stays on the `bash -lc` fallback.
+    pub fn set_toolchain(&self, host: &str, tc: HostToolchain) -> &Self {
+        self.lock().toolchains.insert(host.to_string(), tc);
+        self
     }
 
     // ── inspection ─────────────────────────────────────────────────────────
@@ -511,6 +540,10 @@ impl SshExec for FakeSsh {
         let home = home_from_output(host, &out)?;
         self.lock().homes.insert(host.to_string(), home.clone());
         Ok(home)
+    }
+
+    async fn toolchain(&self, host: &str) -> Option<HostToolchain> {
+        self.lock().toolchains.get(host).cloned()
     }
 }
 

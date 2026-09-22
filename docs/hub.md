@@ -174,6 +174,13 @@ untouched. The previous file is saved as `settings.json.fleet-bak` first.
 **After provisioning, restart Claude Code on each host** to pick up the new
 MCP server entry (the skill files and hooks are picked up live).
 
+**What a host needs for prompt delivery.** A prompt rides to the pane as
+`base64 -d` piped into `tmux load-buffer -`, so each managed host needs
+`base64(1)` with `-d` (GNU coreutils and the BSD/macOS build both have it) and
+**tmux 3.0 or newer** (`load-buffer -` reads from stdin only from 3.0). A host
+missing either one fails every send with `E_TMUX` carrying the shell's own
+complaint — `base64: illegal option` or `load-buffer: invalid option`.
+
 ## A host that cannot be reached
 
 The hub normally reaches every host over SSH. A laptop behind a home router,
@@ -290,6 +297,9 @@ no reverse tunnel for it.
      loopback (`localhost`, `127.0.0.0/8`, `::1`). It exists for a test on
      one machine. Anywhere else it is refused, because the token would cross
      the network in clear.
+   - **`"report_errors": true`** (the default, no install flag) sends this
+     agent's own error-level log events to the hub's error channel — see
+     *Error reports*. Set it to `false` in the written config to turn it off.
 5. **Check it,** on the host with `fleet-agent status [--user]`, or from any
    client with `agent_status`. `fleet-agent status` exits `0` when the
    service is running and connected, and `3` otherwise. It reads the
@@ -618,6 +628,44 @@ free to pair again:
 revoked phone (paired 2026-09-17 09:12Z); its next request is refused and the name is free again
 ```
 
+## `/mcp/json` — the same tools, a body a proxy can compress
+
+`POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
+`data:` line. That framing is load-bearing for the long polls
+(`wait_for_session`, `run_prompt`), whose 15-second keep-alives are what hold
+a reverse tunnel open — but it also means the answer is never compressed,
+because Caddy's `encode` matcher and Cloudflare both skip
+`text/event-stream`, correctly: compressing a stream would buffer it.
+
+`POST /mcp/json` is the same tool surface, behind the same bearer token, with
+the framing taken off. It answers `application/json`, so a reverse proxy
+compresses it like any other body:
+
+```bash
+curl -s --compressed https://fleet.example.com/mcp/json \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fleet_health","arguments":{}}}'
+```
+
+(The `Accept` header still offers both types — rmcp requires the pair on
+either mount.)
+
+What it is worth, measured on a 44-session fleet: `list_sessions`
+`{summary:false}` is 51 968 B unframed and 7 767 B gzipped, `list_projects`
+7 660 → 1 308 B, `list_hosts` 1 707 → 475 B. A phone's cold start is those
+three calls: **61 335 B today, about 9 550 B over `/mcp/json` behind a proxy
+that compresses** — and one fewer full JSON re-parse on the device, since the
+body is no longer a JSON document inside a JSON string.
+
+Use `/mcp` for anything long-polling; use `/mcp/json` for ordinary calls from
+a client on a metered or slow link. Existing clients need no change:
+`/mcp` is untouched, and the wire-contract revision does not move for a new
+path. `deploy/hub/Caddyfile` ships with `encode zstd gzip`; a bare-binary
+deployment with no reverse proxy in front gets the unframed body but no
+compression.
+
 ## Events
 
 A client that has listed what it needs does not have to poll for changes:
@@ -656,6 +704,80 @@ The stream sits behind the same bearer token as `/mcp` (a change stream names
 sessions, hosts, projects and prompts), and a caller may hold eight of them at
 once. A subscriber that falls far enough behind gets one `lagged` frame and
 the stream closes — reconnect and re-list rather than assume continuity.
+
+## Error reports
+
+The hub is also the one place its participants' errors are collected. The
+desktop paired to this hub, every `fleet-agent`, and the hub itself send
+their **error-level** log events here; the hub keeps a bounded, redacted
+table of them, and:
+
+```bash
+fleet-hub reports                      # the newest 100
+fleet-hub reports --since 2h --origin host:build-box
+fleet-hub reports --limit 500 --json   # with each report's context
+```
+
+```
+RECEIVED           ORIGIN            LEVEL  COMPONENT                 CODE     MESSAGE
+2026-09-21 10:41Z  host:build-box    error  fleet_agent::conn         -        dial https://fleet.example.com: connection refused
+2026-09-21 10:40Z  client:mac-desk   error  frontend:unhandled        -        TypeError: Cannot read properties of undefined  [trunc]
+2026-09-21 10:38Z  hub               error  fleet_core::ssh           E_SSH    ssh mefistos: Host key verification failed
+```
+
+Every accepted report is also one `warn` line in the hub's own log, under
+the target `fleet_core::report`, so `journalctl -u fleet-hub | grep report`
+works too. `--origin` takes any client name, percent-encoded on the way out,
+so an origin with spaces or punctuation (a client name, a host alias) filters
+correctly.
+
+**Who sends what.** Only `error`-level `tracing` events, never warnings
+(the reconcile tick warns per unreachable host per pass). Each sender keeps
+a queue of 256 and drops the oldest, counted, when it is full; nothing ever
+waits on the hub. The desktop sends every 5 s (or at 20 queued) to
+`POST /report`, splitting a drain so a single POST body never crosses 64 KB;
+it stops for the run when the hub answers `404` (it predates this route) or
+refuses the client (`401`/`403`), and **discards** — one `warn`, never the
+body — a batch the hub refuses with any other `4xx` (`400` from validation,
+`413` from the hub's own body-size limit) rather than retrying it forever,
+which would wedge every report behind it. `CLAUDE_FLEET_HUB_REPORTS=0` in the
+desktop's environment turns it off. An agent sends up to 16 per heartbeat in
+a `report` frame, including errors from *before* it managed to connect —
+which is the case the channel exists for; `"report_errors": false` in its
+config turns it off. The hub's own errors join the table on the reconcile
+tick under origin `hub`, and a caller holding the *master* token that posts
+to `POST /report` is stored under origin `master`. (A standalone desktop —
+one that owns its own fleet rather than pairing to a hub — reports nowhere,
+but it runs the same tick, so its own error-level events land in its own
+local `error_reports` table under origin `hub`, under the same two bounds
+below; nothing reads them yet beyond the database.)
+
+**Bounds.** `reports.max_rows` (default 5000) newest rows are kept, pruned
+on every insert; rows older than `reports.max_age_secs` (default 604800,
+seven days; `0` never) are swept on the reconcile tick. An origin may store
+60 reports a minute — an empty batch, one that reports only drops, counts as
+one of them — and a batch that would cross that is refused whole with `429`. A message is at most 2048 characters, a context 4 KB, a body 64 KB.
+
+**Privacy.** Every string is run through the same redaction the log gets
+(bearer tokens, `?token=` values, 64-hex strings) before it is stored. No
+prompt, transcript or pane text has a path here: `tracing` never logs
+bodies, and a frontend report carries the toast's message and, for a crash,
+a stack. `GET /reports` is master-token only, since the rows hold every
+client's messages.
+
+**For a phone or any client:** `POST /report` with the client's own bearer
+token (`readonly` included), body
+
+```json
+{ "reports": [ { "at": 1790000000, "level": "error", "component": "screen:sessions",
+                 "code": "E_PARSE", "message": "…", "context": { "…": "…" } } ],
+  "dropped": 0 }
+```
+
+at most 50 reports per call; `204` stored, `400` malformed or a level other
+than `error`/`warn`, `413` over 64 KB, `429` over budget (nothing stored).
+The origin is taken from the token, never from the body: `client:<name>` for
+a paired client, `host:<alias>` for an agent, `master` for the master token.
 
 ## Bare binary
 
@@ -810,6 +932,11 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--tls off\|auto\|cert` | `FLEET_HUB_TLS` | `hub.tls` | `off` (`auto` is refused — see above) |
 | `--tls-cert` | `FLEET_HUB_TLS_CERT` | `hub.tls_cert` | unset (required by `--tls cert`) |
 | `--tls-key` | `FLEET_HUB_TLS_KEY` | `hub.tls_key` | unset (required by `--tls cert`) |
+| — | — | `reports.max_rows` | `5000` |
+| — | — | `reports.max_age_secs` | `604800` |
+
+The two `reports.*` settings have no flag: set them over the API with
+`set_setting`.
 
 `--allow-plaintext` permits a non-loopback bind that is not fronted by an
 `https://` public URL — one with an `http://` public URL or with none at all
@@ -1009,6 +1136,9 @@ standalone exactly as before.
   embedded control API in the desktop; two brains for one fleet is the failure
   this mode exists to prevent. The footer's version, database and schema are
   the hub's too — the badge beside them says whose.
+- **Its errors reach the hub.** Error-level events and frontend crashes are
+  queued and posted to the hub's `/report` every few seconds — see *Error
+  reports*; `CLAUDE_FLEET_HUB_REPORTS=0` turns it off.
 - **A prompt sent from the desktop reaches the agent marked *untrusted*,**
   exactly as one typed on a phone does, unless the hub's operator has
   **trusted** this client (`fleet-hub pair --trusted` when pairing it, or
@@ -1065,7 +1195,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 130 commands, 39 route to a hub tool, 1 routes except for one argument shape, 70 refuse, and 20 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 133 commands, 42 route to a hub tool, 1 routes except for one argument shape, 69 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1134,7 +1264,6 @@ Of the 130 commands, 39 route to a hub tool, 1 routes except for one argument sh
 | `repo_stage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_unstage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
-| `session_activity` | it captures the session's pane over this machine's SSH connection; the hub's pane reads answer a different shape, so the live indicator is off in remote mode |
 | `session_tool_detail` | the hub exposes no tool for one tool call's input and result; the Conversation tab's tool lines still come from session_conversation |
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
 | `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub |
@@ -1171,9 +1300,44 @@ sockets: a hub whose event stream is down, or behind a flapping proxy, can
 still answer calls, and its row shapes have not changed because a socket
 dropped. So only a hello frame moves the verdict — a desktop that has not
 finished a handshake yet (`connecting`) calls, because nothing has been
-learned; a stream that is merely down (`reconnecting`, `offline`) changes
-nothing either way; and the first `ready` frame that classifies the hub back
-in range opens all of it again, with no restart.
+learned; a stream that ended, or that answered anything other than 200,
+changes nothing either way for calls; and the first `ready` frame that
+classifies the hub back in range opens all of it again, with no restart.
+
+One narrower thing does short-circuit a call, and only to save it waiting:
+after **two consecutive failures to even CONNECT** to the hub — no socket at
+all, not a hub that answered a 503 or closed the stream — a call is refused
+immediately with `E_HUB_UNREACHABLE` instead of spending its own bound
+discovering the same thing. The event bridge's reconnect is already probing;
+the user's click need not probe again. Anything that got an answer out of the
+hub leaves calls alone, because `GET /events` and `POST /mcp` are separate
+sockets and a hub whose stream is unhappy can still serve every call.
+
+**Upgrade a desktop and its hub together from contract revision 3.**
+Revision 2 is the release where `move_session` answers a tagged result
+(`kind: moved | preview`) and honours `dry_run`. Revision 3 adds a `when`
+argument (`now` | `idle` | `cancel`): `idle` waits for the source to go idle
+before moving, `cancel` ends a pending wait instead of moving anything. Both
+ends require the current revision: a new desktop refuses an older hub
+(revision 0, 1 or 2, "update the hub"), and an older desktop refuses a newer
+hub ("update this app"). There is no mixed window in which the two work
+together.
+
+Two things wait for more than the absence of a skew: a Transfer preview
+(`move_session` with `dry_run: true`) and a call whose `when` is not `now`. A
+hub from before revision 3 ignores both `dry_run` and `when`, so it performs a
+real move regardless of what either one asked for. For `dry_run` and `when:
+idle` that only means the desktop refuses to ask something it could not trust
+the answer to; for `when: cancel` it is the reason the guard exists at all —
+an old hub sees an ordinary move request and moves the session, so cancelling
+a wait would perform the very move it was meant to stop. Either way the
+desktop refuses with `E_HUB_CONTRACT` until the current connection's
+`ready` frame has been judged in range — not merely "no mismatch recorded
+yet", which is also what a desktop still connecting sees. A dropped event
+stream withdraws that judgement until the next `ready` frame: the hub that
+answers the reconnect may be an older build. These calls become available
+once the desktop has confirmed the hub's version; a plain move (`when: now`,
+not a dry run) is not held back by this.
 
 ### Parity or refusal
 
@@ -1350,3 +1514,7 @@ deliberately.
   finalizes)** — the host cannot reach the hub's public URL. From the host
   itself, run `curl -sI https://fleet.example.com/mcp` and confirm it
   connects; check DNS, firewalls, and that Caddy has a valid certificate.
+- **`fleet-hub reports` is empty** — the hub predates the route (the desktop
+  logs `no /report route` once), the desktop was started with
+  `CLAUDE_FLEET_HUB_REPORTS=0`, the agent's config has
+  `report_errors: false`, or the sender's `RUST_LOG` silences `error`.

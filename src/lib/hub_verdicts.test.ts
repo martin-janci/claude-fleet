@@ -187,11 +187,6 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // AddHostPicker.svelte only mounts inside the Add-host dialog, whose
   // opener (`+ Add host`) is disabled via `hubBlock('add_host', …)`.
   gatedByAddHostDialog: ['probe_ssh_alias'],
-  // Guarded directly with `ownsTheFleet($hubStatus)` at the call site
-  // instead of `hubBlock`/`REASONS`: the call is skipped and a safe
-  // substitute used in its place (ConversationPanel.svelte's `probeLive`
-  // simply never becomes true, so the pane is never polled).
-  guardedDirectlyWithOwnsTheFleet: ['session_activity'],
   // Reachable and attempted even on a hub client — ToolLine.svelte fetches
   // it when a tool row is expanded — but handled per-click with an inline,
   // non-retryable `E_LOCAL_ONLY` message (`loadRetryable = r.error.code !==

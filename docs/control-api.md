@@ -270,8 +270,23 @@ Index by area (names only; see the reference for details):
   committed for you (`strict: true` restores the old clean + pushed
   refusals) — then `--resume` on the target and the source killed once the
   target runs; master token only, since the caller must be allowed on both
-  hosts), `resolve_move` (finish or undo a partial move left with both
-  sessions alive).
+  hosts; `dry_run: true` previews instead — writes nothing to either host,
+  needs no confirmation, and answers what would travel plus `unknowns`, or
+  the same refusal the real move would raise; the result is tagged
+  `kind: "moved"` (the move report) or `kind: "preview"`),
+  `resolve_move` (finish or undo a partial move left with both sessions
+  alive),
+  `restore_host_sessions` (batch resume a host's sessions lost to a reboot or
+  tmux server restart over `recreate_session`; call with `dry_run: true` first
+  for the plan — no ssh, no writes — then without it to run; paced by
+  `restore.batch_size` / `restore.stagger_ms`, one failure never stops the
+  rest), `discover_lost_sessions` (read-only: scan a host's
+  `~/.claude/projects` for Claude conversations fleet has no row for — e.g.
+  right after a reboot, before `restore_host_sessions` has anything to work
+  with — rank them against the host's boot, and enrich each with
+  `project_id`/`worktree_id`/`existing_session_id`/`derived_tmux_name` where
+  inferable; restore a candidate with `new_session`'s
+  `resume_claude_session_id`).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
   `repo_commit_diff`.
@@ -376,7 +391,8 @@ return slim summary rows by default and accept `limit`; `list_worktrees`
 answers `{total, worktrees}` with slim rows, at most 100 of them (`limit`,
 0 = no cap — what the desktop asks for in hub-client mode), filtered by
 `project_id` / `host_alias`; `capture_session` returns plain text
-capped to the last 200 lines (`max_lines`, 0 = no cap); `repo_log` returns 50
+capped to the last 200 lines (`max_lines`, 0 = no cap), and reads at most
+20 000 rows of scrollback however large `scrollback_lines` is; `repo_log` returns 50
 commits by default (`limit`, `skip`); `session_history`, `inbox` and
 `list_tasks` default to 50 rows; `session_transcript` / `run_prompt` return at
 most `max_chars` characters (default 8000, max 64000).
@@ -415,7 +431,41 @@ are distinguishable from "busy". A turn that ends in an API error fires
 type, so `run_prompt` / `wait_for_session` return and `session_history` shows
 why. A hook-stamped status that is newer than a reconcile pass's pane
 observation is never overwritten by the pane heuristic.
-`send_prompt` returns `{ delivered, session_id, turn_seq_before }`;
+`send_prompt` returns `{ delivered, session_id, turn_seq_before, queued, acked }`.
+It refuses a `blocked` or stuck session with `E_INVALID_STATE` (Enter would
+answer its dialog) unless `force: true`; to a `working` session the prompt is
+queued behind the running turn (`queued: true`, and `turn_seq_before` already
+points past that turn). `acked` is `true` once the session's `UserPromptSubmit`
+hook confirmed the prompt, `false` when it did not within 1.5 s, and `null`
+when it cannot be known — nothing was submitted, no hook has ever reached the
+row, or the prompt was QUEUED (the hook fires when the queued prompt starts,
+which is whenever the running turn ends, so there is nothing to wait for).
+
+`acked: false` is **not** "the send failed": the text is in the pane either
+way, and a slow hook, a busy host and a REPL that took the paste without
+firing all look identical from the outside. Read the pane with
+`capture_session` when you need certainty, or `session_activity` for just
+the status/spinner slice of the same pane. There is deliberately no automatic
+Enter retry — the only evidence available is a 1.5 s non-answer, and between
+that and a retry the session may have opened a permission dialog, into which
+Enter would select the highlighted answer. **To press Enter yourself, send an
+EMPTY prompt**: an empty body is a bare Enter, it skips the blocked/stuck
+refusal (pressing Enter into a stuck session is the point of it), and it
+returns `queued: false, acked: null` with `turn_seq_before` unchanged.
+
+Pass a `client_msg_id` to make a retry return the first
+result instead of delivering twice (10-minute memory). The key is reserved
+before delivery, so a retry sent while the first call is still running is
+refused with `E_IN_FLIGHT` rather than delivered a second time; a send that
+failed releases its key, so retrying after an error does deliver. The key is
+`(caller, client_msg_id)` and does not include the target session — reusing an
+id for a different session returns the earlier result without delivering.
+Bodies are limited to
+64 KiB; `\r\n` is folded to `\n` and any other control character is refused
+(`E_VALIDATE`). The text lands in the pane reconcile last saw Claude in, or
+the session's active pane when that is unknown. An empty prompt with
+`submit: false` is refused (`E_VALIDATE`); an empty prompt with `submit: true`
+is a bare Enter that bypasses the blocked-session check.
 `wait_for_session { session_id, until: "idle" | "turn_gt", turn?, timeout_s? }`
 is a bounded long-poll (500 ms polls, default 120 s, max 600 s) returning
 `{ status: satisfied | timeout, claude_status, turn_seq, last_stop_at,
@@ -613,7 +663,7 @@ automatically on app start.
   before agents broadcast, kill sessions, delete worktrees or write the
   clipboard"** (`mcp.confirm_destructive`, off by default) makes
   `broadcast_prompt`, `kill_session`, `delete_worktree`, `set_clipboard`,
-  `repair_session`, `cancel_task` and `move_session` return `E_CONFIRM_REQUIRED` with a one-time `confirm_nonce`;
+  `repair_session`, `cancel_task` and `move_session` (not its `dry_run`) return `E_CONFIRM_REQUIRED` with a one-time `confirm_nonce`;
   approve the request in the desktop dialog, then retry the call with that
   nonce. The nonce is bound to the call's arguments — for `set_clipboard` and
   `broadcast_prompt` including a digest of the content / prompt — so an

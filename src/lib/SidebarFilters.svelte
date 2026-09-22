@@ -145,7 +145,10 @@
       title="Counts what is waiting on you now: blocked, stuck, failed, lost, safe-remove pending/failed. Toggling also shows sessions idle > {$attentionIdleMinutes} min."
       onclick={() => (needsYouOnly = !needsYouOnly)}
     >
-      ⚠ Needs you ({needsYouCount})
+      <!-- At zero there is nothing to warn about: the ⚠ and the "(0)" were
+           permanent chrome that read as an alert. The pill stays so the
+           filter remains reachable. -->
+      {#if needsYouCount > 0}⚠ Needs you ({needsYouCount}){:else}Needs you{/if}
     </button>
     <button
       class="pill"

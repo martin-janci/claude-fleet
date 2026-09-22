@@ -16,7 +16,23 @@ export async function invokeCmd<T>(
     const value = await invoke<T>(cmd, args);
     return { ok: true, value };
   } catch (raw) {
-    return { ok: false, error: toIpcError(raw) };
+    const error = toIpcError(raw);
+    // Only a timed-out MUTATION leaves an unknown outcome worth a fleet-wide
+    // re-fetch, and only the backend knows which calls those are: it marks
+    // them `details.outcome_unknown` (`backend::remote::call_text`). A
+    // timed-out READ changed nothing on the hub, and broadcasting for one
+    // would amplify: the refresh this event triggers is itself two routed
+    // reads, each of which can time out and broadcast again.
+    if (
+      error.code === 'E_HUB_TIMEOUT' &&
+      (error.details as { outcome_unknown?: unknown } | null | undefined)?.outcome_unknown ===
+        true &&
+      typeof window !== 'undefined'
+    ) {
+      // The hub may have done it anyway: whoever owns the lists re-fetches.
+      window.dispatchEvent(new CustomEvent('fleet:outcome-unknown', { detail: { cmd } }));
+    }
+    return { ok: false, error };
   }
 }
 

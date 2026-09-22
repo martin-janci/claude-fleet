@@ -114,14 +114,8 @@ impl Fake {
     }
 }
 
-#[async_trait::async_trait]
-impl HubTransport for Fake {
-    async fn post_json(
-        &self,
-        url: &str,
-        bearer: &str,
-        body: String,
-    ) -> Result<HubResponse, String> {
+impl Fake {
+    fn answer(&self, url: &str, bearer: &str, body: String) -> Result<HubResponse, String> {
         self.seen
             .lock()
             .unwrap()
@@ -131,6 +125,18 @@ impl HubTransport for Fake {
             .unwrap()
             .pop()
             .unwrap_or_else(|| panic!("the fake transport ran out of answers"))
+    }
+}
+
+#[async_trait::async_trait]
+impl HubTransport for Fake {
+    async fn post_json(
+        &self,
+        url: &str,
+        bearer: &str,
+        body: String,
+    ) -> Result<HubResponse, String> {
+        self.answer(url, bearer, body)
     }
 }
 
@@ -156,6 +162,28 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 }
 
 // --- the request -------------------------------------------------------------
+
+/// `restore_host_sessions` and `discover_lost_sessions` run a batch on the
+/// hub that outlasts an ordinary exchange: the desktop must wait for the
+/// hub's own 300 s cap rather than report a failure while the hub is still
+/// restoring — which invited a retry that raced the first call. They earn
+/// that bound by being `Deadline::Lifecycle` tools, so the rule is checked
+/// where the bound is computed rather than through a transport hook of their
+/// own (see `the_client_timeout_dominates_the_hub_deadline_for_every_routed_tool`).
+#[test]
+fn the_restore_and_discover_calls_get_the_hubs_full_batch_deadline() {
+    for tool in ["restore_host_sessions", "discover_lost_sessions"] {
+        assert!(
+            call_timeout(tool) >= std::time::Duration::from_secs(300),
+            "{tool}: client bound {:?} gives up before the hub's 300 s cap",
+            call_timeout(tool)
+        );
+        assert!(
+            call_timeout(tool) > call_timeout("list_hosts"),
+            "{tool} must outlast an ordinary read"
+        );
+    }
+}
 
 #[test]
 fn a_call_is_a_jsonrpc_tools_call_to_the_hubs_mcp_endpoint() {
@@ -364,6 +392,7 @@ fn sample_session_row() -> SessionRow {
         reviews_session_id: None,
         worktree_key: Some("trn:/home/dev/p/.worktrees/hub".into()),
         lost_at: None,
+        lost_reason: None,
         claude_session_id: Some("0f3a9c1e-1111-4222-8333-444455556666".into()),
         claude_status: Some("working".into()),
         effort_level: None,
@@ -387,6 +416,7 @@ fn sample_session_row() -> SessionRow {
         last_stop_at: None,
         parent_session_id: None,
         tags: vec!["review".into()],
+        row_version: 0,
         usage: fleet_core::store::SessionUsage {
             usage_input_tokens: 1200,
             usage_output_tokens: 800,
@@ -917,43 +947,169 @@ fn no_error_and_no_debug_output_ever_carries_the_token() {
 
 // --- how long a call may take ------------------------------------------------
 
-/// F1: one bound for every tool cut a hub-routed `move_session` off after
-/// 30 s and reported a failure while the hub was still moving the session —
-/// a move copies a repository, a transcript and the Claude state between two
-/// hosts (`COPY_TIMEOUT` 120 s, `GIT_TIMEOUT` 40 s per step, a 60 s confirm,
-/// a chunked bundle download), which is minutes, not seconds. Only that one
-/// tool gets the long bound; everything else keeps the short one, so a hub
-/// that has stopped answering is still noticed quickly.
+/// The client must never give up before the hub does: a lifecycle tool the
+/// hub bounds at 300 s answered "did not answer" at 30 s while the hub kept
+/// creating the session, and the user's retry made two. Every routed tool's
+/// client bound is the hub's own deadline plus a margin.
 #[test]
-fn only_move_session_gets_the_long_call_timeout() {
-    assert_eq!(
-        call_timeout("move_session"),
-        std::time::Duration::from_secs(15 * 60)
-    );
-    for tool in [
-        "list_sessions",
-        "kill_session",
-        "session_transcript",
-        "repair_session",
-        "",
-    ] {
-        assert_eq!(
+fn the_client_timeout_dominates_the_hub_deadline_for_every_routed_tool() {
+    let margin = std::time::Duration::from_secs(10);
+    for (cmd, verdict) in crate::backend::verdicts::VERDICTS {
+        let Some(tool) = verdict.tool() else { continue };
+        let hub = fleet_core::mcp::tool_deadline(tool);
+        assert!(
+            call_timeout(tool) >= hub + margin,
+            "{cmd} -> {tool}: client {:?} must be >= hub {:?} + {margin:?}",
             call_timeout(tool),
-            std::time::Duration::from_secs(30),
-            "{tool} must keep the ordinary bound"
+            hub
         );
     }
+    assert!(call_timeout("move_session") >= std::time::Duration::from_secs(15 * 60));
+}
+
+/// A timed-out exchange is NOT "unreachable": the hub may well have taken the
+/// request. The code and the words say the outcome is unknown.
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_call_says_the_outcome_is_unknown() {
+    struct Silent;
+    #[async_trait::async_trait]
+    impl HubTransport for Silent {
+        async fn post_json(&self, _: &str, _: &str, _: String) -> Result<HubResponse, String> {
+            std::future::pending().await
+        }
+    }
+    let b = HubBackend::with_transport(cfg(), Arc::new(Silent));
+    let e = b.list_sessions(false).await.expect_err("never answers");
+    assert_eq!(e.code, codes::E_HUB_TIMEOUT);
+    assert!(e.message.contains("may still complete"), "{}", e.message);
+    assert!(!e.message.contains("cl_s3cret-token"), "{}", e.message);
+}
+
+/// While the event bridge has already failed twice to even CONNECT, a call is
+/// refused at once instead of hanging its full bound: the bridge's reconnect
+/// is the probe, and the user's click is not.
+#[test]
+fn a_call_while_the_link_is_known_offline_is_refused_before_the_transport_is_touched() {
+    let fake = Fake::answering(Ok(ok("[]")));
+    let status = link(HubConnection::Offline {
+        attempt: 2,
+        retry_in_secs: 7,
+        reason: "connect 127.0.0.1:4180: connection refused".into(),
+    });
+    let err = block_on(watched(&fake, &status).list_sessions(false)).expect_err("refused");
+    assert_eq!(err.code, codes::E_HUB_UNREACHABLE);
+    assert!(err.message.contains("retrying in 7"), "{}", err.message);
+    nothing_was_sent(&fake);
+    // The first failed attempt is not yet a verdict: the call still goes out.
+    let status = link(HubConnection::Offline {
+        attempt: 1,
+        retry_in_secs: 1,
+        reason: "connect 127.0.0.1:4180: connection refused".into(),
+    });
+    let fake = Fake::answering(Ok(ok("[]")));
+    block_on(watched(&fake, &status).list_sessions(false)).expect("still tried");
+    assert_eq!(fake.seen.lock().unwrap().len(), 1);
+}
+
+/// The prefixes [`is_connect_failure`] matches are not guessed: they are the
+/// ones [`connect`] itself produces. Loopback port 1 refuses (or, on a box
+/// that filters it, times out) — both arms are `connect …`, so this pins the
+/// spelling either way, and it opens no outward socket.
+#[tokio::test]
+async fn a_real_failed_connect_is_recognised_as_a_connect_failure() {
+    let at = Endpoint::parse("http://127.0.0.1:1/mcp").expect("parses");
+    let reason = connect(&at).await.err().expect("nothing listens on port 1");
+    assert!(
+        is_connect_failure(&reason),
+        "connect() said {reason:?}, which the breaker would not recognise"
+    );
+}
+
+/// The breaker is about a hub that cannot be REACHED. A hub that answered —
+/// with a 504, a 503 on `/events`, or a close after the head — is reachable,
+/// and its `/mcp` socket is a different one from the event stream's: refusing
+/// calls there turns one unhappy stream into a window that cannot do anything
+/// at all, and the refusal (`E_HUB_UNREACHABLE`) is not even true.
+#[test]
+fn an_answered_but_unhappy_event_stream_never_refuses_a_call() {
+    for reason in [
+        "the hub answered 504 Gateway Timeout to GET /events",
+        "the hub answered 503 to GET /events: events are not enabled on this server",
+        "the hub closed the connection before answering",
+        "read from fleet.example.com:443: connection reset by peer",
+    ] {
+        let fake = Fake::answering(Ok(ok("[]")));
+        let status = link(HubConnection::Offline {
+            attempt: 3,
+            retry_in_secs: 7,
+            reason: reason.into(),
+        });
+        block_on(watched(&fake, &status).list_sessions(false))
+            .unwrap_or_else(|e| panic!("{reason:?} must still reach the hub: {e:?}"));
+        assert_eq!(fake.seen.lock().unwrap().len(), 1, "{reason:?}");
+    }
+}
+
+/// `Reconnecting` is a stream that opened and then ended: the hub answered,
+/// so it never arms the breaker however many attempts have gone by.
+#[test]
+fn a_reconnecting_link_never_refuses_a_call() {
+    for attempt in [1u32, 2, 9] {
+        let fake = Fake::answering(Ok(ok("[]")));
+        let status = link(HubConnection::Reconnecting {
+            attempt,
+            retry_in_secs: 4,
+            reason: "connect 127.0.0.1:4180: connection refused".into(),
+        });
+        block_on(watched(&fake, &status).list_sessions(false))
+            .unwrap_or_else(|e| panic!("attempt {attempt} must still reach the hub: {e:?}"));
+        assert_eq!(fake.seen.lock().unwrap().len(), 1, "attempt {attempt}");
+    }
+}
+
+/// A timed-out call says whether the hub may have CHANGED anything. Only a
+/// mutation leaves an unknown outcome; a read that never answered changed
+/// nothing, and the frontend's fleet-wide re-fetch (`fleet:outcome-unknown`)
+/// is itself made of reads, so broadcasting for one amplifies.
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_read_is_not_outcome_unknown_but_a_timed_out_mutation_is() {
+    struct Silent;
+    #[async_trait::async_trait]
+    impl HubTransport for Silent {
+        async fn post_json(&self, _: &str, _: &str, _: String) -> Result<HubResponse, String> {
+            std::future::pending().await
+        }
+    }
+    let b = HubBackend::with_transport(cfg(), Arc::new(Silent));
+    let unknown = |e: &fleet_core::ipc_error::IpcError| {
+        e.details
+            .as_ref()
+            .and_then(|d| d.get("outcome_unknown"))
+            .cloned()
+    };
+    let e = b
+        .call_text("list_sessions", json!({}))
+        .await
+        .expect_err("never answers");
+    assert_eq!(e.code, codes::E_HUB_TIMEOUT);
+    assert_eq!(unknown(&e), Some(json!(false)), "{:?}", e.details);
+    let e = b
+        .call_text("kill_session", json!({ "session_id": 1 }))
+        .await
+        .expect_err("never answers");
+    assert_eq!(e.code, codes::E_HUB_TIMEOUT);
+    assert_eq!(unknown(&e), Some(json!(true)), "{:?}", e.details);
 }
 
 /// The table above says which duration each tool gets; this says the bound is
 /// real. A hub that accepts the request and then says nothing must still end
 /// the call — the timeout moved out of the transport into
-/// [`HubBackend::call_text`] (F1), and a timeout nobody applies is worse than
+/// [`HubBackend::call_text`], and a timeout nobody applies is worse than
 /// none, because the window would wait forever.
 ///
 /// `start_paused` (the `test-util` feature already in this crate's
 /// dev-dependencies) auto-advances the clock whenever every task is idle, so
-/// this reaches the 30 s deadline without waiting 30 s.
+/// this reaches the deadline without waiting for it.
 #[tokio::test(start_paused = true)]
 async fn a_hub_that_accepts_the_request_and_then_says_nothing_still_ends_the_call() {
     struct Silent;
@@ -968,7 +1124,7 @@ async fn a_hub_that_accepts_the_request_and_then_says_nothing_still_ends_the_cal
         .list_sessions(false)
         .await
         .expect_err("a hub that never answers cannot produce rows");
-    assert_eq!(e.code, codes::E_HUB_UNREACHABLE);
+    assert_eq!(e.code, codes::E_HUB_TIMEOUT);
     assert!(e.message.contains("no answer within"), "{}", e.message);
     assert!(!e.message.contains("cl_s3cret-token"), "{}", e.message);
 }

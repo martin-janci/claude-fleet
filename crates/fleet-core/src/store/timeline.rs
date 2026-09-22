@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// Whether a timeline write also announces itself on the event bus.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Announce {
+    Yes,
+    No,
+}
+
 impl Store {
     /// Append one row to the per-session event timeline (migration 013). The
     /// timeline is append-only; callers must treat a write failure as
@@ -13,6 +20,32 @@ impl Store {
     /// background reconcile tick can otherwise grow one session's timeline
     /// without bound (observed: ~200k `status_change` rows per session); the
     /// prune is a cheap indexed subselect and keeps the table bounded.
+    ///
+    /// `kind` is free text (no DB-level enum), but every caller in the
+    /// codebase draws from one vocabulary, grouped by the subsystem that
+    /// writes it:
+    /// - reconcile (`service::sessions::reconcile`): `status_change`, `stuck`,
+    ///   `lost` (detail is the `lost_reason`, e.g. `host_reboot`).
+    /// - lifecycle (`service::sessions::lifecycle` / `prompt`):  `killed`,
+    ///   `recreated`, `prompt_sent`.
+    /// - host-reboot restore (`service::sessions::restore`, Task 3):
+    ///   `session_restored`, `session_restore_failed` (detail is the error
+    ///   message).
+    /// - workspace repair (`service::repair::{EVENT_REPAIRED,
+    ///   EVENT_REPAIR_FAILED}`): `workspace_repaired`, `workspace_repair_failed`.
+    /// - move_session (`service::move_session::{EVENT_MOVED,
+    ///   EVENT_MOVE_PARTIAL}`): `session_moved`, `session_move_partial`.
+    /// - tasks (`service::tasks`): `task_dispatched`, `task_started`,
+    ///   `task_done`, `task_failed`, `task_cancelled`.
+    /// - inter-session messages (`service::messages`): `message_sent`,
+    ///   `message_received`.
+    /// - safe kill (`service::safe_kill`): `safe_kill_requested`,
+    ///   `safe_kill_send_failed`, `safe_kill_failed`, `safe_kill_ready`,
+    ///   `safe_kill_discarded`.
+    /// - GC sweeper (`service::gc`): `gc_killed`, `gc_failed`.
+    /// - hooks (`service::hooks`): `notification`.
+    /// - playbooks (`Store::record_playbook_applied` et al.): `playbook_applied`.
+    /// - MCP call audit (`mcp::tools::support`): `mcp_call`.
     pub fn insert_session_event(
         &self,
         session_id: i64,
@@ -31,6 +64,39 @@ impl Store {
         kind: &str,
         detail: Option<&str>,
     ) -> Result<(), crate::ipc_error::IpcError> {
+        self.write_session_event(session_id, claude_session_id, kind, detail, Announce::Yes)
+    }
+
+    /// [`Self::insert_session_event_for`] that writes the row and stays quiet.
+    ///
+    /// For an event whose only audience is the timeline when somebody next
+    /// opens it. The audit row for a *read* is the case this exists for: on a
+    /// fleet with a desktop and a phone attached, the desktop's 5 s
+    /// conversation poll alone produced ~720 `session:event` frames an hour,
+    /// each one fanned out to every connected client — 253 B apiece to a
+    /// phone, to say that somebody else had just read something. Worse, a
+    /// read-only paired client learned from them what the operator was doing.
+    ///
+    /// The row is still written, so the timeline and `session_history` are
+    /// unchanged: this drops the live announcement, not the audit.
+    pub fn insert_session_event_quietly(
+        &self,
+        session_id: i64,
+        claude_session_id: Option<&str>,
+        kind: &str,
+        detail: Option<&str>,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.write_session_event(session_id, claude_session_id, kind, detail, Announce::No)
+    }
+
+    fn write_session_event(
+        &self,
+        session_id: i64,
+        claude_session_id: Option<&str>,
+        kind: &str,
+        detail: Option<&str>,
+        announce: Announce,
+    ) -> Result<(), crate::ipc_error::IpcError> {
         let at = now_unix();
         self.conn.execute(
             "INSERT INTO session_events (session_id, at, kind, detail, claude_session_id) \
@@ -44,14 +110,16 @@ impl Store {
                    ORDER BY at DESC, id DESC LIMIT ?2)",
             rusqlite::params![session_id, SESSION_EVENTS_CAP],
         )?;
-        self.bus.session_event_added(&SessionEvent {
-            id,
-            session_id,
-            at,
-            kind: kind.to_string(),
-            detail: detail.map(String::from),
-            claude_session_id: claude_session_id.map(String::from),
-        });
+        if announce == Announce::Yes {
+            self.bus.session_event_added(&SessionEvent {
+                id,
+                session_id,
+                at,
+                kind: kind.to_string(),
+                detail: detail.map(String::from),
+                claude_session_id: claude_session_id.map(String::from),
+            });
+        }
         Ok(())
     }
 
@@ -169,6 +237,31 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Every event of kind `opened` that no LATER event of kind `closed` on
+    /// the same session has resolved, oldest first: `(session_id, event_id,
+    /// detail)`. Generic over the two kinds — the store stays ignorant of
+    /// what "opened"/"closed" mean to a caller (e.g. a move's wait-for-idle).
+    pub fn unresolved_events(
+        &self,
+        opened: &str,
+        closed: &str,
+    ) -> Result<Vec<(i64, i64, Option<String>)>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT w.session_id, w.id, w.detail \
+               FROM session_events w \
+              WHERE w.kind = ?1 \
+                AND NOT EXISTS (SELECT 1 FROM session_events c \
+                                 WHERE c.session_id = w.session_id \
+                                   AND c.kind = ?2 \
+                                   AND c.id > w.id) \
+              ORDER BY w.id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![opened, closed], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Mark a set of inbox messages as read. Only rows whose `to_session_id`
     /// matches `recipient` are updated — never mark someone else's mail.
     /// Returns the number of rows that flipped from unread to read.
@@ -194,6 +287,34 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unresolved_events_are_the_opened_ones_no_later_close_resolved() {
+        let s = Store::open_in_memory().unwrap();
+        // Events take bare session ids, as the file's other tests use them.
+        let (a, b) = (7_i64, 99_i64);
+        s.insert_session_event(a, "open", Some("a1")).unwrap(); // resolved below
+        s.insert_session_event(a, "close", None).unwrap();
+        s.insert_session_event(a, "open", Some("a2")).unwrap(); // NOT resolved
+        s.insert_session_event(b, "open", Some("b1")).unwrap(); // NOT resolved
+        s.insert_session_event(b, "other", None).unwrap(); // not a close
+        let got: Vec<String> = s
+            .unresolved_events("open", "close")
+            .unwrap()
+            .into_iter()
+            .map(|(_, _, d)| d.unwrap())
+            .collect();
+        assert_eq!(got, vec!["a2".to_string(), "b1".to_string()]);
+    }
+
+    #[test]
+    fn a_close_on_another_session_resolves_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        let (a, b) = (7_i64, 99_i64);
+        s.insert_session_event(a, "open", Some("a1")).unwrap();
+        s.insert_session_event(b, "close", None).unwrap();
+        assert_eq!(s.unresolved_events("open", "close").unwrap().len(), 1);
+    }
 
     #[test]
     fn session_events_insert_then_list_newest_first_with_limit() {
@@ -227,6 +348,38 @@ mod tests {
         let other = s.list_session_events(99, 50).unwrap();
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].detail, None);
+    }
+
+    /// A read is audited, and says nothing on the bus. The row is what the
+    /// timeline is for; the frame was 253 B to every connected client telling
+    /// it somebody else had just read something.
+    #[test]
+    fn a_quiet_timeline_write_is_stored_but_not_announced() {
+        let (s, bus) = test_support::store_with_recorder();
+        let sid = 7;
+
+        s.insert_session_event(sid, "mcp_call", Some("send_prompt by controller"))
+            .unwrap();
+        s.insert_session_event_quietly(
+            sid,
+            None,
+            "mcp_call",
+            Some("list_sessions by client:phone"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            bus.names(),
+            vec!["session:event"],
+            "the write announced itself; the read did not"
+        );
+        let rows = s.list_session_events(sid, 10).unwrap();
+        assert_eq!(rows.len(), 2, "both are on the timeline either way");
+        assert!(
+            rows.iter()
+                .any(|r| r.detail.as_deref() == Some("list_sessions by client:phone")),
+            "the quiet one is still audited: {rows:?}"
+        );
     }
 
     #[test]
