@@ -274,9 +274,10 @@ pub struct SendPromptParams {
     /// different session returns the earlier result without delivering.
     #[serde(default)]
     pub client_msg_id: Option<String>,
-    /// Press a key instead of typing text: `Enter`, `Escape` or `C-c`. Never
-    /// marked (a key is not text) and never recorded as a prompt. `prompt`
-    /// must be empty with it.
+    /// Press a key instead of typing text: `Enter`, `Escape`, `C-c`, or
+    /// `1`-`9` to pick that option of `pending_input`. Never marked (a key
+    /// is not text) and never recorded as a prompt. `prompt` must be empty
+    /// with it.
     #[serde(default)]
     pub keys: Option<String>,
 }

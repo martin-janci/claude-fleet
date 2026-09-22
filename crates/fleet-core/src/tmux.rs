@@ -836,15 +836,57 @@ pub enum NamedKey {
     Enter,
     Escape,
     CtrlC,
+    /// One of `1`..`9` — the keystroke that answers a numbered permission /
+    /// question dialog. Typing the ordinal as *text* would not do: the text
+    /// path pastes through `paste-buffer -p`, and the REPL has bracketed
+    /// paste on (DECSET 2004), so the pane receives
+    /// `ESC [ 2 0 0 ~ 3 ESC [ 2 0 1 ~` — the first key the dialog sees is
+    /// ESC, which cancels it. `send-keys 3` delivers one raw `3`.
+    Digit(DigitKey),
+}
+
+/// An ordinal a dialog can be answered with: `1`..`9`, and nothing else.
+///
+/// A dialog may carry up to `PENDING_OPTIONS_MAX` (16) options, but the REPL
+/// has no keystroke for a two-digit ordinal — there is no way to press "10"
+/// that a select dialog will not read as "1". So option 10 and up simply has
+/// no key, and [`new`](Self::new) is the only way in: the field is private,
+/// which is what makes the `1..=9` indexing in [`NamedKey::tmux_name`] sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DigitKey(u8);
+
+const DIGIT_NAMES: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+impl DigitKey {
+    /// `Some` for `1..=9`, `None` for anything else.
+    pub fn new(n: u8) -> Option<Self> {
+        (1..=9).contains(&n).then_some(Self(n))
+    }
+
+    /// The ordinal, for a caller that needs the number back.
+    pub fn get(self) -> u8 {
+        self.0
+    }
 }
 
 impl NamedKey {
+    /// Every accepted value, in the words a refusal shows the caller. Both
+    /// `send_prompt` paths (the service function and the MCP tool) print
+    /// this, so the message can never fall behind [`parse`](Self::parse).
+    pub const VOCABULARY: &'static str = "Enter, Escape, C-c or a digit 1-9";
+
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "Enter" => Some(Self::Enter),
             "Escape" => Some(Self::Escape),
             "C-c" => Some(Self::CtrlC),
-            _ => None,
+            // Exactly one ASCII digit. `str::parse::<u8>` would accept
+            // "+1", " 1" and "007"; a dialog answer must be the literal
+            // keystroke or nothing.
+            _ => match s.as_bytes() {
+                [b @ b'0'..=b'9'] => DigitKey::new(b - b'0').map(Self::Digit),
+                _ => None,
+            },
         }
     }
     pub fn tmux_name(self) -> &'static str {
@@ -852,6 +894,9 @@ impl NamedKey {
             Self::Enter => "Enter",
             Self::Escape => "Escape",
             Self::CtrlC => "C-c",
+            // Sound by construction: `DigitKey`'s field is private and
+            // `DigitKey::new` admits only 1..=9.
+            Self::Digit(d) => DIGIT_NAMES[(d.get() - 1) as usize],
         }
     }
 }
@@ -2174,6 +2219,49 @@ mod tests {
                 crate::shell::quote(&exact_pane("my session"))
             )
         );
+    }
+
+    #[test]
+    fn the_keys_vocabulary_names_every_accepted_key() {
+        // The refusal message both `send_prompt` paths print comes from this
+        // one constant, so a key the parser accepts can never go unnamed.
+        let v = NamedKey::VOCABULARY;
+        for accepted in ["Enter", "Escape", "C-c", "1-9"] {
+            assert!(v.contains(accepted), "{v:?} must mention {accepted}");
+        }
+    }
+
+    #[test]
+    fn digit_keys_answer_a_numbered_dialog() {
+        // Answering a permission/question dialog is one literal digit
+        // keystroke — the text path pastes (bracketed paste) and would then
+        // press Enter into the REPL, which a select dialog does not survive.
+        for n in 1..=9u8 {
+            let s = n.to_string();
+            let key = NamedKey::parse(&s).unwrap_or_else(|| panic!("digit {n} must parse"));
+            assert_eq!(key.tmux_name(), s, "digit {n} keeps its own tmux key name");
+        }
+        assert_eq!(
+            send_named_key("my session", NamedKey::parse("3").expect("3")),
+            format!(
+                "tmux send-keys -t {} 3",
+                crate::shell::quote(&exact_pane("my session"))
+            )
+        );
+    }
+
+    #[test]
+    fn digit_keys_outside_one_to_nine_are_rejected() {
+        // A dialog may carry up to PENDING_OPTIONS_MAX (16) options, but the
+        // REPL has no keystroke for a two-digit ordinal — better no key than
+        // a "1" that silently answers option 1 for a click on option 10.
+        for bad in ["0", "10", "16", "-1", " 1", "1 ", "1.", "a"] {
+            assert_eq!(NamedKey::parse(bad), None, "{bad:?} is not a digit key");
+        }
+        assert_eq!(DigitKey::new(0), None);
+        assert_eq!(DigitKey::new(10), None);
+        assert!(DigitKey::new(1).is_some());
+        assert!(DigitKey::new(9).is_some());
     }
 
     #[test]

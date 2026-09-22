@@ -2625,6 +2625,7 @@ fn the_served_definition_budget_stays_bounded() {
     // length of a turn). The budget is a ratchet against description creep,
     // not against tools that earn their place — so it moves with a reason
     // written down, and only that far.
+    //
     // Raised again from 59_400 for host-reboot recovery's two tools,
     // `restore_host_sessions` and `discover_lost_sessions`: after a reboot
     // there is no other way back to a host's conversations, and every
@@ -2635,6 +2636,18 @@ fn the_served_definition_budget_stays_bounded() {
     // what is left is the part a caller gets wrong without it, above all
     // that resuming outside the transcript's own cwd silently starts an
     // EMPTY conversation. 61_746 measured, plus ~100 bytes of headroom.
+    //
+    // Raised from 59_400 to 59_500, on its own branch, when `keys` grew the
+    // `1`-`9` digits that answer a `pending_input` dialog: that surface had
+    // 11 bytes of headroom left, so no wording could have paid for it (the
+    // clause is a fragment in both places it appears), and a client that can
+    // see a dialog's options but not press one is the state it replaced.
+    //
+    // NOT raised again where the digits met main's reboot-recovery raise,
+    // though each side was measured without the other: the digits' clause is
+    // 66 bytes and the raise above already carried ~100 of headroom, so the
+    // merged surface fits inside it. 61,826 measured; 24 bytes left. The next
+    // clause to land here has to pay for itself.
     const BUDGET_BYTES: usize = 61_850;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
