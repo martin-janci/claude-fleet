@@ -11,10 +11,18 @@
   import type { AccountRow } from './accounts';
   import type { AccountUsageSnapshot } from './account_usage_store';
   import type { HostTokenInfo, TokenMode } from './mcp';
-  import type { SessionRow } from './sessions';
+  import {
+    restoreHostSessions,
+    discoverLostSessions,
+    newSessionAbortable,
+    type RestorePlanEntry,
+    type LostCandidate,
+    type SessionRow,
+  } from './sessions';
   import { selectSessionExplicitly } from './selection';
   import { claudeStatusLabel, stuckKindLabel } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
+  import { timeAgo } from './session_status';
   import { hideHostWithUndo, rotateToken, setTokenMode, showHost, viewHostSessions } from './host_actions';
   import { pushError, push } from './toasts';
   import { removeHostMessage, rotateTokenMessage, type HostAttention } from './hosts_view';
@@ -68,10 +76,81 @@
     onrefreshusage: () => void;
   } = $props();
 
-  let confirm = $state<'rotate' | 'remove' | null>(null);
+  let confirm = $state<'rotate' | 'remove' | 'restore' | null>(null);
   let busy = $state(false);
 
   const isLocal = $derived(host.alias === 'local');
+
+  // Sessions the backend marked lost (host reboot / tmux server restart) that
+  // still carry a Claude conversation to resume. `bg`/`external` rows have no
+  // fleet-managed tmux pane to restore into.
+  const restorable = $derived(
+    hostSessions.filter((s) => s.lost_at !== null && s.claude_session_id && s.kind !== 'bg' && s.kind !== 'external'),
+  );
+
+  let restorePlan = $state<RestorePlanEntry[] | null>(null);
+  let restoreError = $state<string | null>(null);
+  let restoreSummary = $state<{ ok: number; total: number; failures: { name: string; error: string }[] } | null>(
+    null,
+  );
+
+  // Find lost conversations: transcripts the host has that fleet has no row
+  // for (discover_lost_sessions), each optionally resumable into a new
+  // fleet-managed session (new_session with resume_claude_session_id).
+  let discoverBusy = $state(false);
+  let discoverError = $state<string | null>(null);
+  let discoverList = $state<LostCandidate[] | null>(null);
+  let resumingId = $state<string | null>(null);
+  let resumedIds = $state<Set<string>>(new Set());
+  let resumeErrors = $state<Record<string, string>>({});
+
+  function rankLabel(hint: LostCandidate['rank_hint']): string | null {
+    switch (hint) {
+      case 'before_boot':
+        return 'before reboot';
+      case 'after_boot':
+        return 'since boot';
+      case 'stale':
+        return 'older';
+      default:
+        return null;
+    }
+  }
+
+  async function onDiscoverClick() {
+    discoverError = null;
+    discoverList = null;
+    resumedIds = new Set();
+    resumeErrors = {};
+    discoverBusy = true;
+    const r = await discoverLostSessions(host.alias);
+    discoverBusy = false;
+    if (!r.ok) {
+      discoverError = r.error.message;
+      return;
+    }
+    discoverList = r.value;
+  }
+
+  async function onResumeCandidate(c: LostCandidate) {
+    if (!c.resumable || c.project_id === null || c.derived_tmux_name === null) return;
+    const { [c.claude_session_id]: _dropped, ...rest } = resumeErrors;
+    resumeErrors = rest;
+    resumingId = c.claude_session_id;
+    const r = await newSessionAbortable({
+      host_alias: host.alias,
+      project_id: c.project_id,
+      worktree_id: c.worktree_id,
+      name: c.derived_tmux_name,
+      resume_claude_session_id: c.claude_session_id,
+    });
+    resumingId = null;
+    if (r.ok) {
+      resumedIds = new Set(resumedIds).add(c.claude_session_id);
+    } else {
+      resumeErrors = { ...resumeErrors, [c.claude_session_id]: r.error.message };
+    }
+  }
 
   // Hiding, removing and re-tokening a host are fleet administration, which
   // the hub refuses to a paired client (`enforce_admin`) and which this app
@@ -90,6 +169,16 @@
   // true there — without this, the empty-token line below would show "…"
   // forever instead of a real answer.
   const hostTokensBlocked = $derived(hubBlock('host_tokens', $hubStatus));
+
+  // Resume is a `new_session` carrying `resume_claude_session_id`, and
+  // `new_session` ROUTES: a paired desktop resumes through the hub like any
+  // other routed mutation, so the only thing that can block it is the live
+  // link being down — the same gate `reprobeBlocked` uses.
+  const resumeBlocked = $derived(hubActionBlocked('new_session', $hubStatus, $hubConnection));
+
+  // The restore plan may hold only skips (e.g. the fleet controller, which
+  // needs an explicit forced recreate): then there is nothing to confirm.
+  const restoreCount = $derived((restorePlan ?? []).filter((e) => e.action === 'restore').length);
 
   function sessionName(s: SessionRow): string {
     return s.friendly_name?.trim() || s.tmux_name;
@@ -133,6 +222,47 @@
     confirm = null;
     if (r.ok) push({ kind: 'info', message: `${alias} removed.` });
     else pushError(r.error, `Remove ${alias} failed`);
+  }
+
+  async function onRestoreClick() {
+    restoreError = null;
+    restoreSummary = null;
+    busy = true;
+    const r = await restoreHostSessions(host.alias, { dryRun: true });
+    busy = false;
+    if (!r.ok) {
+      restoreError = r.error.message;
+      return;
+    }
+    restorePlan = r.value.plan;
+    confirm = 'restore';
+  }
+
+  function cancelRestore() {
+    confirm = null;
+    restorePlan = null;
+  }
+
+  async function confirmRestore() {
+    const alias = host.alias;
+    const ids = (restorePlan ?? []).filter((e) => e.action === 'restore').map((e) => e.session_id);
+    busy = true;
+    const r = await restoreHostSessions(alias, { sessionIds: ids });
+    busy = false;
+    confirm = null;
+    restorePlan = null;
+    if (r.ok) {
+      const results = r.value.results;
+      restoreSummary = {
+        ok: results.filter((x) => x.ok).length,
+        total: results.length,
+        failures: results
+          .filter((x) => !x.ok)
+          .map((x) => ({ name: x.tmux_name, error: x.error ?? 'unknown error' })),
+      };
+    } else {
+      restoreError = r.error.message;
+    }
   }
 </script>
 
@@ -219,7 +349,90 @@
 
   <!-- 3. Sessions -->
   <section class="block" aria-label="Sessions on {host.alias}">
-    <h3>Sessions <span class="muted">{hostSessions.length}</span></h3>
+    <div class="section-head">
+      <h3>Sessions <span class="muted">{hostSessions.length}</span></h3>
+      <div class="actions">
+        {#if restorable.length > 0}
+          <button
+            type="button"
+            class="small"
+            disabled={busy}
+            data-testid="restore-lost"
+            onclick={onRestoreClick}
+            >Restore {restorable.length} lost session{restorable.length === 1 ? '' : 's'}…</button
+          >
+        {/if}
+        {#if host.reachable}
+          <button
+            type="button"
+            class="small"
+            disabled={discoverBusy}
+            data-testid="discover-lost"
+            onclick={onDiscoverClick}
+            >{discoverBusy ? 'searching…' : 'Find lost conversations…'}</button
+          >
+        {/if}
+      </div>
+    </div>
+    {#if restoreError}
+      <p class="error" data-testid="restore-error">{restoreError}</p>
+    {/if}
+    {#if restoreSummary}
+      <p data-testid="restore-summary">
+        Restored {restoreSummary.ok} of {restoreSummary.total}
+        {#each restoreSummary.failures as f (f.name)}<br />{f.name}: {f.error}{/each}
+      </p>
+    {/if}
+    {#if discoverError}
+      <p class="error" data-testid="discover-error">{discoverError}</p>
+    {/if}
+    {#if discoverList}
+      <div data-testid="discover-list">
+        {#if discoverList.length === 0}
+          <p class="muted">No Claude conversations found on {host.alias}.</p>
+        {:else}
+          {#if resumeBlocked}
+            <p class="muted" data-testid="discover-hub-note">Resume is unavailable right now: {resumeBlocked}</p>
+          {/if}
+          <ul class="discover-items">
+            {#each discoverList as c (c.claude_session_id)}
+              <li class="discover-item">
+                <div class="d-main">
+                  <span class="d-cwd">{c.cwd}</span>
+                  {#if c.git_branch}<span class="muted">{c.git_branch}</span>{/if}
+                  <span class="muted">{timeAgo(c.transcript_mtime, now * 1000)}</span>
+                  {#if rankLabel(c.rank_hint)}<span class="badge">{rankLabel(c.rank_hint)}</span>{/if}
+                  {#if c.derived_tmux_name}<span class="muted">{c.derived_tmux_name}</span>{/if}
+                </div>
+                {#if c.existing_session_id !== null}
+                  <span class="muted">already in fleet</span>
+                {:else if resumedIds.has(c.claude_session_id)}
+                  <span class="muted">resumed</span>
+                {:else if c.resumable && c.project_id !== null && c.derived_tmux_name !== null && resumeBlocked}
+                  <span class="muted" title={resumeBlocked}>resume unavailable</span>
+                {:else if c.resumable && c.project_id !== null && c.derived_tmux_name !== null}
+                  <button
+                    type="button"
+                    class="small"
+                    data-testid="discover-resume"
+                    disabled={resumingId === c.claude_session_id}
+                    onclick={() => onResumeCandidate(c)}
+                    >{resumingId === c.claude_session_id ? 'resuming…' : 'Resume'}</button
+                  >
+                  {#if resumeErrors[c.claude_session_id]}
+                    <p class="error" data-testid="discover-item-error">{resumeErrors[c.claude_session_id]}</p>
+                  {/if}
+                {:else if c.project_id !== null}
+                  <span class="muted" title="Resume starts Claude in the project root or a registered worktree; this conversation ran elsewhere, so resuming would start a new, empty one">path is not a fleet worktree</span>
+                {:else}
+                  <span class="muted">no fleet project for this path</span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    {/if}
     {#if hostSessions.length === 0}
       <p class="muted">No sessions on this host. Press <kbd>n</kbd> to start one.</p>
     {:else}
@@ -331,6 +544,31 @@
     onconfirm={confirmRemove}
     oncancel={() => (confirm = null)}
   />
+{:else if confirm === 'restore'}
+  <ConfirmDialog
+    title="Restore lost sessions on {host.alias}?"
+    confirmLabel="Restore"
+    {busy}
+    confirmDisabled={restoreCount === 0}
+    confirmTestId="confirm-restore"
+    onconfirm={confirmRestore}
+    oncancel={cancelRestore}
+  >
+    <ul class="restore-plan">
+      {#each restorePlan ?? [] as entry (entry.session_id)}
+        <li>
+          <span class="name">{entry.friendly_name ?? entry.tmux_name}</span>
+          {#if entry.cwd}<span class="muted">{entry.cwd}</span>{/if}
+          {#if entry.action === 'skip'}<span class="skip">skipped — {entry.reason}</span>{/if}
+        </li>
+      {/each}
+    </ul>
+    {#if restoreCount === 0}
+      <p class="note" data-testid="restore-nothing">Nothing here can be restored.</p>
+    {:else}
+      <p class="note">Each session resumes its Claude conversation. Any first-run prompt waits for you.</p>
+    {/if}
+  </ConfirmDialog>
 {/if}
 
 <style>
@@ -372,6 +610,32 @@
   .block { border-top: 1px solid var(--border); padding-top: 0.6rem; }
   .account-line { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.4rem; min-width: 0; }
   .label { color: var(--fg-muted); min-width: 3.5rem; }
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }
+  .section-head h3 { margin: 0; }
+  .error { color: var(--usage-crit); margin: 0.4rem 0; }
+  .restore-plan { list-style: none; margin: 0.4rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+  .restore-plan li { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .restore-plan .skip { color: var(--usage-warn); }
+  .note { margin: 0.4rem 0 0; color: var(--fg-muted); }
+  .discover-items { list-style: none; margin: 0.4rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+  .discover-item {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .d-main { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; flex: 1; min-width: 0; }
+  .d-cwd { font-variant-numeric: tabular-nums; }
+  .badge {
+    font-size: 0.7rem;
+    padding: 0 0.35rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--fg-muted);
+  }
   .sessions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
   .session {
     display: flex;

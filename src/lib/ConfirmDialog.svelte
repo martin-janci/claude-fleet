@@ -11,6 +11,7 @@
     cancelLabel = 'Cancel',
     danger = false,
     busy = false,
+    confirmDisabled = false,
     onconfirm,
     oncancel,
     confirmTestId,
@@ -24,6 +25,8 @@
     danger?: boolean;
     /** Disables both buttons while the action is in flight. */
     busy?: boolean;
+    /** Disables only the confirm button: there is nothing to confirm. */
+    confirmDisabled?: boolean;
     onconfirm: () => void;
     oncancel: () => void;
     confirmTestId?: string;
@@ -49,7 +52,7 @@
       class:danger
       class:primary={!danger}
       onclick={onconfirm}
-      disabled={busy}
+      disabled={busy || confirmDisabled}
       data-autofocus={danger ? undefined : ''}
       data-testid={confirmTestId}
     >{confirmLabel}</button>

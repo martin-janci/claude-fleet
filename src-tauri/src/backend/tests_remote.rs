@@ -114,14 +114,8 @@ impl Fake {
     }
 }
 
-#[async_trait::async_trait]
-impl HubTransport for Fake {
-    async fn post_json(
-        &self,
-        url: &str,
-        bearer: &str,
-        body: String,
-    ) -> Result<HubResponse, String> {
+impl Fake {
+    fn answer(&self, url: &str, bearer: &str, body: String) -> Result<HubResponse, String> {
         self.seen
             .lock()
             .unwrap()
@@ -131,6 +125,18 @@ impl HubTransport for Fake {
             .unwrap()
             .pop()
             .unwrap_or_else(|| panic!("the fake transport ran out of answers"))
+    }
+}
+
+#[async_trait::async_trait]
+impl HubTransport for Fake {
+    async fn post_json(
+        &self,
+        url: &str,
+        bearer: &str,
+        body: String,
+    ) -> Result<HubResponse, String> {
+        self.answer(url, bearer, body)
     }
 }
 
@@ -156,6 +162,28 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 }
 
 // --- the request -------------------------------------------------------------
+
+/// `restore_host_sessions` and `discover_lost_sessions` run a batch on the
+/// hub that outlasts an ordinary exchange: the desktop must wait for the
+/// hub's own 300 s cap rather than report a failure while the hub is still
+/// restoring — which invited a retry that raced the first call. They earn
+/// that bound by being `Deadline::Lifecycle` tools, so the rule is checked
+/// where the bound is computed rather than through a transport hook of their
+/// own (see `the_client_timeout_dominates_the_hub_deadline_for_every_routed_tool`).
+#[test]
+fn the_restore_and_discover_calls_get_the_hubs_full_batch_deadline() {
+    for tool in ["restore_host_sessions", "discover_lost_sessions"] {
+        assert!(
+            call_timeout(tool) >= std::time::Duration::from_secs(300),
+            "{tool}: client bound {:?} gives up before the hub's 300 s cap",
+            call_timeout(tool)
+        );
+        assert!(
+            call_timeout(tool) > call_timeout("list_hosts"),
+            "{tool} must outlast an ordinary read"
+        );
+    }
+}
 
 #[test]
 fn a_call_is_a_jsonrpc_tools_call_to_the_hubs_mcp_endpoint() {
@@ -364,6 +392,7 @@ fn sample_session_row() -> SessionRow {
         reviews_session_id: None,
         worktree_key: Some("trn:/home/dev/p/.worktrees/hub".into()),
         lost_at: None,
+        lost_reason: None,
         claude_session_id: Some("0f3a9c1e-1111-4222-8333-444455556666".into()),
         claude_status: Some("working".into()),
         effort_level: None,

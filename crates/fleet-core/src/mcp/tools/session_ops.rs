@@ -196,6 +196,7 @@ impl FleetTools {
             // Omit / empty -> the service derives one from the branch via
             // `humanize::humanize_branch`.
             friendly_name: p.friendly_name,
+            resume_claude_session_id: p.resume_claude_session_id,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
@@ -234,6 +235,7 @@ impl FleetTools {
             start_command: p.start_command,
             // Let the service derive a humanised label from the branch.
             friendly_name: None,
+            resume_claude_session_id: None,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
@@ -344,6 +346,58 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(
+        description = "Restore sessions a host lost to a reboot or tmux restart: resume each \
+        one's Claude conversation in its original worktree under its original name. dry_run=true \
+        returns the plan (no ssh, no writes) — call it first, and again after a timeout to see \
+        what is still lost. One failing session never fails the others; the result lists every \
+        outcome. One restore per host at a time (E_INVALID_STATE otherwise); a lost fleet \
+        controller is skipped (recreate_session force=true). Paced by restore.batch_size / \
+        restore.stagger_ms."
+    )]
+    pub(super) async fn restore_host_sessions(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<sessions::RestoreHostSessionsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "restore_host_sessions",
+            &format!("host={} dry_run={}", args.host_alias, args.dry_run),
+        );
+        require_host(&caller, &args.host_alias, "the lost sessions")?;
+        let report = sessions::restore_host_sessions(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&report)
+    }
+
+    #[tool(
+        description = "Read-only: scan ~/.claude/projects on a host for Claude conversations \
+        fleet has no live pane for, ranked against the host's boot (rank_hint: before_boot | \
+        after_boot | stale | unknown) and enriched with project_id, worktree_id and \
+        existing_session_id — the last set when a fleet row (live or lost) already holds that \
+        conversation, which restore_host_sessions handles, not this. resumable is true only when \
+        the pane would start in exactly the transcript's cwd; anywhere else claude --resume \
+        silently starts an empty conversation instead, so do not resume it. Resume one with \
+        new_session { host_alias, project_id, worktree_id, name: derived_tmux_name (a hint), \
+        resume_claude_session_id }. limit: newest first, default 50, max 500."
+    )]
+    pub(super) async fn discover_lost_sessions(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<sessions::DiscoverLostSessionsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "discover_lost_sessions",
+            &format!("host={} limit={:?}", args.host_alias, args.limit),
+        );
+        require_host(&caller, &args.host_alias, "the lost sessions")?;
+        let candidates = sessions::discover_lost_sessions(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&candidates)
     }
 
     #[tool(description = "Dismiss a ghost session (lost from tmux): permanently \

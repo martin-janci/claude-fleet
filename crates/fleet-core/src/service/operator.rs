@@ -419,6 +419,7 @@ impl OperatorHost for LiveHost {
                 worktree_id: None,
                 name: OPERATOR_TMUX_NAME.to_string(),
                 call_id: None,
+                resume_claude_session_id: None,
                 new_worktree: None,
                 base_branch: None,
                 kind: Some("work".to_string()),

@@ -236,6 +236,7 @@ impl FleetTools {
                         kind: None,
                         start_command: None,
                         friendly_name: None,
+                        resume_claude_session_id: None,
                     },
                     &self.store,
                     &self.ssh,

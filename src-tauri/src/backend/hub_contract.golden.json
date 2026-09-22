@@ -236,6 +236,7 @@
       "last_stop_at",
       "last_turn_at",
       "lost_at",
+      "lost_reason",
       "model",
       "notes",
       "parent_session_id",
