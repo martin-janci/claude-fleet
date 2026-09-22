@@ -21,6 +21,31 @@ name: release
 # draft for the same tag on a re-run) and passes its id to the three build
 # legs, so concurrent legs never race to create duplicate drafts.
 #
+# WHAT THIS RUN IS ALLOWED TO BE GREEN WITH — the continue-on-error split.
+# Two different things are being protected and they pull in opposite
+# directions, so they are separated deliberately:
+#
+#   * per-LEG isolation (kept, unchanged): `fail-fast: false` on both
+#     matrices, and `continue-on-error: true` on `agent-hub-binaries` and
+#     `checksums`. One arch failing must never cancel another arch, delay the
+#     desktop bundles, or block the draft.
+#   * per-RELEASE completeness (new): `verify-release`, the final job, is NOT
+#     `continue-on-error`. It enumerates the release's ACTUAL assets by id and
+#     fails the run unless the complete expected set is present and every
+#     asset has a SHA256SUMS line.
+#
+# So a leg may still fail without dragging the others down — and the run
+# still goes red, at the end, in one place, naming exactly which assets are
+# missing. Before this job existed, six releases shipped an unversioned
+# `.app.tar.gz` and a SHA256SUMS covering 4 of 11 assets, on green runs.
+#
+# `plan` is where the shape of the release is decided: it runs
+# `scripts/release-assets.sh`, the single asset manifest, and emits both
+# build matrices from it. That same manifest names the assets
+# `package-linux-release.sh` must produce, the name
+# `rename-updater-asset.sh` renames tauri-action's output to, and the set
+# `verify-release.sh` requires — one table, with no second list to drift.
+#
 # CODE SIGNING IS INTENTIONALLY ABSENT. There is no Apple Developer ID
 # (and no Windows certificate) for this project yet, so nothing here is
 # signed or notarized. Consequences:
@@ -69,6 +94,33 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: scripts/check-version-consistency.sh --expect-tag "$REF_NAME"
 
+  # The one place that decides what this release consists of. Both build
+  # matrices below are generated here from scripts/release-assets.sh rather
+  # than written out in YAML, so the list of legs and the list of expected
+  # asset names cannot disagree: they are the same table. Adding a target is
+  # a one-line edit to that script.
+  plan:
+    if: github.ref_type == 'tag'
+    needs: version-consistency
+    runs-on: ubuntu-24.04
+    outputs:
+      desktop: ${{ steps.matrices.outputs.desktop }}
+      bins: ${{ steps.matrices.outputs.bins }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Derive the build matrices from the release asset manifest
+        id: matrices
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          {
+            echo "desktop=$(scripts/release-assets.sh matrix desktop)"
+            echo "bins=$(scripts/release-assets.sh matrix bins)"
+          } >>"$GITHUB_OUTPUT"
+          echo "Assets this release must end up with:"
+          scripts/release-assets.sh assets "${REF_NAME#v}"
+
   create-release:
     if: github.ref_type == 'tag'
     needs: version-consistency
@@ -88,6 +140,10 @@ jobs:
             const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
             const existing = releases.find(r => r.tag_name === tag && r.draft);
             if (existing) {
+              // The body is deliberately left alone on reuse: the tag pins
+              // the commit, so the build sha recorded below is still the
+              // right one, and a re-run must not clobber notes the owner has
+              // already edited into the draft.
               core.info(`Reusing existing draft release ${existing.id} for ${tag}`);
               return existing.id;
             }
@@ -101,6 +157,20 @@ jobs:
               `Right-click → **Open** does not help here: that is the bypass for a signed-but-unnotarized app. Full instructions: [Installing a release build](https://github.com/${owner}/${repo}/blob/${tag}/README.md#installing-a-release-build).`,
               '',
               `Release notes: see the matching section of [CHANGELOG.md](https://github.com/${owner}/${repo}/blob/${tag}/CHANGELOG.md).`,
+              '',
+              `Verify a download against the \`SHA256SUMS\` asset attached below — it covers **every** asset on this release:`,
+              '',
+              '```bash',
+              `curl -LO https://github.com/${owner}/${repo}/releases/download/${tag}/SHA256SUMS`,
+              'sha256sum -c SHA256SUMS --ignore-missing',
+              '```',
+              '',
+              // The commit, not just the tag: a tag can be deleted and
+              // re-cut at a different commit, and nothing else on the
+              // release records which tree these bundles came from. The
+              // fleet-agent/fleet-hub tarballs carry the same sha in their
+              // README.txt (scripts/package-linux-release.sh).
+              `Built from commit \`${context.sha}\` (https://github.com/${owner}/${repo}/commit/${context.sha}).`,
             ].join('\n');
             const { data } = await github.rest.repos.createRelease({
               owner, repo,
@@ -118,21 +188,14 @@ jobs:
     # version-consistency named explicitly, not just inherited through
     # create-release: this leg's bundle filenames come from tauri.conf.json, so
     # the tag-vs-carrier assertion is a direct precondition of it.
-    needs: [version-consistency, create-release]
-    name: bundle (${{ matrix.os }}${{ matrix.target && format(', {0}', matrix.target) || '' }})
+    needs: [version-consistency, create-release, plan]
+    name: bundle (${{ matrix.leg }})
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            args: '--target aarch64-apple-darwin'
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            args: '--target x86_64-apple-darwin'
-          - os: ubuntu-24.04
-            target: ''
-            args: '--bundles appimage,deb'
+      # Generated by the `plan` job from scripts/release-assets.sh — the same
+      # table that names the assets verify-release requires. Do not inline a
+      # second copy of it here.
+      matrix: ${{ fromJSON(needs.plan.outputs.desktop) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -170,6 +233,23 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+      # tauri-action names the macOS updater bundle `claude-fleet_<arch>
+      # .app.tar.gz` — the one asset on the release with no version in its
+      # filename, which is why v0.2.21/.23/.26/.32/.33/.34 all published
+      # byte-different files under two identical names. The bundler
+      # hard-codes that name, so it is fixed after the fact, by renaming the
+      # uploaded asset through the releases API (the action's own build and
+      # upload are untouched). Data-driven and safe on every leg: the script
+      # exits 0 for a leg whose manifest entry declares no `.app.tar.gz`,
+      # which is how the Linux leg passes through it.
+      - name: Give the macOS updater bundle its version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAG: ${{ github.ref_name }}
+          LEG: ${{ matrix.leg }}
+        run: scripts/rename-updater-asset.sh
 
   # fleet-agent and a bare fleet-hub, packaged for a Linux host with no
   # Tauri toolchain and no `cargo` of its own. Independent of `build` above —
@@ -197,17 +277,16 @@ jobs:
     # status; it does NOT weaken the gate — a failed `needs` skips this job
     # outright, so the tarballs (named from ${TAG#v}) are never built for a
     # tag the gate rejected.
-    needs: [version-consistency, create-release]
+    needs: [version-consistency, create-release, plan]
     continue-on-error: true
     name: agent/hub binaries (${{ matrix.target }})
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04-arm
+      # Same single source as the desktop matrix above: the runner labels and
+      # target triples here come from scripts/release-assets.sh, which also
+      # declares the four tarball names this leg must write (asserted by
+      # scripts/package-linux-release.sh) and that verify-release requires.
+      matrix: ${{ fromJSON(needs.plan.outputs.bins) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -228,13 +307,16 @@ jobs:
       # only its OWN checksums, to `dist/SHA256SUMS.<target>` — never a
       # plain `dist/SHA256SUMS` two legs would both produce and race to
       # upload (whichever finishes last would silently overwrite the
-      # other's, covering 2 of 4 tarballs). `agent-hub-checksums` below
+      # other's, covering 2 of 4 tarballs). the `checksums` job below
       # combines both legs' files into the one SHA256SUMS the release gets.
       - name: Package the tarballs and this leg's checksums
         env:
           TARGET: ${{ matrix.target }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
+          # Recorded in each tarball's README.txt. The tag alone cannot
+          # identify a build (a tag can be moved); the commit can.
+          GIT_SHA: ${{ github.sha }}
         run: scripts/package-linux-release.sh
       # Uploaded BY NUMERIC RELEASE ID, not by tag: see
       # scripts/upload-release-asset.sh for why (a draft is not resolvable
@@ -251,9 +333,11 @@ jobs:
           for f in dist/*.tar.gz; do
             scripts/upload-release-asset.sh "$f"
           done
-      # This leg's own checksums travel to `agent-hub-checksums` as a
-      # workflow artifact, distinctly named per target so two legs' files
-      # never collide.
+      # This leg's own checksums travel to the `checksums` job as a workflow
+      # artifact, distinctly named per target so two legs' files never
+      # collide. They are no longer the *source* of SHA256SUMS (that is the
+      # release itself) — they are the cross-check that the bytes GitHub
+      # serves are the bytes this runner built.
       - uses: actions/upload-artifact@v4
         with:
           name: sha256sums-${{ matrix.target }}
@@ -261,22 +345,30 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Combines the two agent-hub-binaries legs' per-target checksums into the
-  # one SHA256SUMS the release actually needs (see scripts/merge-sha256sums.sh
-  # for why each leg can't just upload its own file directly). Runs even if
-  # a leg failed (`if: !cancelled()`, plus `continue-on-error: true` like
-  # the matrix it depends on) so it still publishes a correct PARTIAL
-  # SHA256SUMS for whichever assets a leg failure left on the release —
-  # never blocking or being blocked by the desktop bundles either.
+  # Publishes the one `SHA256SUMS` asset, covering EVERY asset on the release
+  # — desktop bundles included. It therefore `needs: build` as well as
+  # `agent-hub-binaries`: it can only checksum what has already been
+  # uploaded. The assets are enumerated and downloaded from the release by id
+  # (scripts/download-release-assets.sh), hashed
+  # (scripts/merge-sha256sums.sh), and the per-target files the build legs
+  # produced are used to assert that what GitHub serves matches what was
+  # built.
+  #
+  # Runs even if a leg failed (`if: !cancelled()`, plus `continue-on-error:
+  # true` like the matrices it depends on) so it still publishes a correct
+  # PARTIAL SHA256SUMS for whatever the release does carry. Deciding that a
+  # partial release is unacceptable is NOT this job's business — that is
+  # `verify-release` below, which is the one job here without
+  # `continue-on-error`.
   #
   # `!cancelled()` overrides the default "all needs succeeded" condition, so
   # the gate has to be re-stated here by hand: without the explicit
   # `needs['version-consistency'].result == 'success'` this job would still run
-  # after the gate failed (it deliberately tolerates a failed
-  # agent-hub-binaries leg, which is a different thing).
-  agent-hub-checksums:
+  # after the gate failed (it deliberately tolerates a failed build leg,
+  # which is a different thing).
+  checksums:
     if: github.ref_type == 'tag' && !cancelled() && needs['version-consistency'].result == 'success'
-    needs: [version-consistency, create-release, agent-hub-binaries]
+    needs: [version-consistency, create-release, build, agent-hub-binaries]
     continue-on-error: true
     runs-on: ubuntu-24.04
     steps:
@@ -287,18 +379,22 @@ jobs:
           pattern: sha256sums-*
           merge-multiple: true
         continue-on-error: true
-      # Exit 0 with an empty SHA256SUMS.tmp means "no per-target sums files
-      # at all" (both legs failed before packaging) — nothing to publish,
-      # not a failure of this job. A non-empty result but the wrong names
-      # (scripts/merge-sha256sums.sh's own check) exits 1 and fails this
-      # step for real, via `set -e`.
-      - name: Merge the per-target checksums
-        id: merge
+      - name: Download every asset currently on the release
         env:
-          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: scripts/download-release-assets.sh assets
+      # An empty SHA256SUMS.tmp means the release has no assets at all (every
+      # leg failed before uploading) — nothing to publish, not a failure of
+      # this job. A build-vs-release digest disagreement, or a per-target file
+      # naming something the release does not carry, exits 1 and fails this
+      # step for real, via `set -e`.
+      - name: Checksum them
+        id: merge
         run: |
           set -euo pipefail
-          scripts/merge-sha256sums.sh sums >SHA256SUMS.tmp
+          scripts/merge-sha256sums.sh assets sums >SHA256SUMS.tmp
           if [ -s SHA256SUMS.tmp ]; then
             mv SHA256SUMS.tmp SHA256SUMS
             echo "wrote=1" >>"$GITHUB_OUTPUT"
@@ -306,25 +402,36 @@ jobs:
             rm -f SHA256SUMS.tmp
             echo "wrote=0" >>"$GITHUB_OUTPUT"
           fi
-      # Cross-checked against the assets ACTUALLY on the release (by
-      # numeric id, same reasoning as upload-release-asset.sh) rather than
-      # trusted from the merge alone: this is the belt to that script's
-      # suspenders — a SHA256SUMS entry for a tarball that never actually
-      # made it onto the release must never be published.
-      - name: Cross-check against the release's actual assets, then upload
+      - name: Upload SHA256SUMS
         if: steps.merge.outputs.wrote == '1'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
-        run: |
-          set -euo pipefail
-          actual="$(gh api "repos/$REPO/releases/$RELEASE_ID" --jq '.assets[].name' | sort)"
-          listed="$(awk '{print $2}' SHA256SUMS | sed 's#^\./##' | sort)"
-          only_in_sums="$(comm -23 <(echo "$listed") <(echo "$actual") || true)"
-          if [ -n "$only_in_sums" ]; then
-            echo "SHA256SUMS names an asset that was never uploaded to the release:" >&2
-            echo "$only_in_sums" >&2
-            exit 1
-          fi
-          scripts/upload-release-asset.sh SHA256SUMS
+        run: scripts/upload-release-asset.sh SHA256SUMS
+
+  # THE GATE ON THE RELEASE AS A WHOLE — deliberately the only job here with
+  # no `continue-on-error`. Per-leg isolation above means a failed leg does
+  # not turn the run red by itself; this job makes sure an *incomplete
+  # release* does. It enumerates the release's actual assets by id and fails
+  # unless every asset scripts/release-assets.sh declares for this version is
+  # present, nothing unexpected is attached, and SHA256SUMS has a line for
+  # each one. See scripts/verify-release.sh.
+  #
+  # `!cancelled()` for the same reason as `checksums`: this job must run
+  # precisely when an upstream leg failed, which is when the default
+  # needs-succeeded condition would skip it — and a skipped gate is not a
+  # gate. The version-consistency result is therefore re-stated by hand.
+  verify-release:
+    if: github.ref_type == 'tag' && !cancelled() && needs['version-consistency'].result == 'success'
+    needs: [version-consistency, create-release, build, agent-hub-binaries, checksums]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert the release is complete and fully checksummed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAG: ${{ github.ref_name }}
+        run: scripts/verify-release.sh
