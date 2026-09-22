@@ -23,6 +23,18 @@ export interface MoveFailure {
  *  would collide the day the backend mints its own. */
 export const UNDONE = 'MOVE_UNDONE';
 
+/** `begin_wait`'s refusal of a second wait for a session
+ *  (`crates/fleet-core/src/service/move_session/wait.rs`: "session {id} is
+ *  already waiting to move"). `moves.ts` follows the recorded wait instead of
+ *  failing on it when it can. */
+export const ALREADY_WAITING = 'already waiting to move';
+
+/** `require_confirmed_contract`'s refusal before the hub's first `ready`
+ *  frame (`src-tauri/src/backend/remote.rs`: "this app has not yet confirmed
+ *  {url}'s version"). The other `E_HUB_CONTRACT` refusals are a version
+ *  skew, which only an update fixes. */
+const CONTRACT_UNCONFIRMED = 'not yet confirmed';
+
 const CARRY_STEP: Record<string, string> = {
   seed: 'The target could not be given a clone of the repository to receive the work into.',
   haves: 'The target could not say which commits it already has.',
@@ -171,7 +183,23 @@ function what(error: IpcError, toHost: string): { what: string; action: Action }
         what: 'This desktop is a window onto a hub, and the hub refused the move.',
         action: null,
       };
+    case 'E_HUB_CONTRACT':
+      if (error.message.includes(CONTRACT_UNCONFIRMED)) {
+        return {
+          what: "The hub hasn't confirmed its version yet — try again in a moment, or update the hub.",
+          action: { kind: 'retry' },
+        };
+      }
+      // A skew: the message already says which side to update.
+      return { what: error.message, action: null };
     case 'E_INVALID_STATE':
+      if (error.message.includes(ALREADY_WAITING)) {
+        return {
+          what:
+            'This session is already waiting to finish its turn before a transfer. Cancel that wait before starting another.',
+          action: null,
+        };
+      }
       if (error.message.includes('already in progress')) {
         return { what: 'This session is already being moved.', action: { kind: 'retry' } };
       }
