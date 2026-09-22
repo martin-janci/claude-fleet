@@ -842,6 +842,16 @@ impl HubBackend {
         self.route("session_conversation", &args).await
     }
 
+    /// `commands::sessions::session_activity` — one pane probe for the
+    /// Conversation tab's live indicator, read over the hub's own ssh.
+    pub async fn session_activity(
+        &self,
+        session_id: i64,
+    ) -> Result<fleet_core::service::sessions::ActivityProbe, IpcError> {
+        self.route("session_activity", &json!({ "session_id": session_id }))
+            .await
+    }
+
     /// `commands::sessions::session_conversations`. `limit` is the clamp the
     /// command applied.
     pub async fn session_conversations(

@@ -446,8 +446,7 @@ pub async fn session_activity(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<sessions::ActivityProbe, IpcError> {
-    backend.refuse_local_only("session_activity")?;
-    sessions::session_activity(&store, &ssh, args.session_id).await
+    routed::session_activity(&backend, args, &store, &ssh).await
 }
 
 /// The routing, away from `tauri::State` so the tests can drive it.
@@ -715,6 +714,22 @@ pub(crate) mod routed {
     }
 
     /// The `limit` clamp applies to both backends, like `session_history`.
+    /// The probe is the Conversation tab's only live signal between the
+    /// row's own status changes: without it a hub client saw nothing move
+    /// for the whole of a turn. The hub reads the pane over ITS ssh, which
+    /// is the only machine that can reach the host anyway.
+    pub async fn session_activity(
+        backend: &FleetBackend,
+        args: SessionActivityArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<sessions::ActivityProbe, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.session_activity(args.session_id).await,
+            None => sessions::session_activity(store, ssh, args.session_id).await,
+        }
+    }
+
     pub async fn session_conversations(
         backend: &FleetBackend,
         args: SessionConversationsArgs,

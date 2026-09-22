@@ -290,6 +290,33 @@ impl FleetTools {
         )]))
     }
 
+    #[tool(
+        description = "What the session's pane shows right now: claude_status, \
+        stuck_kind, current_activity, waiting_for and the spinner line. One capture, \
+        nothing stored — the cheap read behind a live indicator, where \
+        capture_session is the whole pane. E_INVALID_STATE outside tmux. JSON."
+    )]
+    pub(super) async fn session_activity(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionActivityParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("session_activity", &format!("session_id={}", p.session_id));
+        // The probe carries a slice of pane intel, so it is gated exactly
+        // like `capture_session`: a per-host token reads only its own host.
+        self.resolve_target(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            "the session to probe",
+        )?;
+        let probe = sessions::session_activity(&self.store, &self.ssh, p.session_id)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&probe)
+    }
+
     #[tool(description = "Recreate a session: kill its tmux session and rebuild \
         it fresh in the same worktree, resuming the same Claude conversation. \
         Use when the session is frozen, OOM-killed or out of context, or to \

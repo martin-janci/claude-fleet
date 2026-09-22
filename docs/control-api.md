@@ -433,7 +433,8 @@ which is whenever the running turn ends, so there is nothing to wait for).
 `acked: false` is **not** "the send failed": the text is in the pane either
 way, and a slow hook, a busy host and a REPL that took the paste without
 firing all look identical from the outside. Read the pane with
-`capture_session` when you need certainty. There is deliberately no automatic
+`capture_session` when you need certainty, or `session_activity` for just
+the status/spinner slice of the same pane. There is deliberately no automatic
 Enter retry — the only evidence available is a 1.5 s non-answer, and between
 that and a retry the session may have opened a permission dialog, into which
 Enter would select the highlighted answer. **To press Enter yourself, send an

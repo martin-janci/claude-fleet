@@ -1,8 +1,9 @@
 <script lang="ts">
-  // The agent's sheet: a compact conversation over the operator session, a
-  // composer, and the removable context chip. Everything that renders turns
-  // is ConversationPanel's job; what lives here is the frame, the chip, and
-  // the three states where the agent cannot simply be talked to.
+  // The agent's sheet: a compact conversation over the operator session, the
+  // removable context chip, and nothing else. Everything that renders turns
+  // — and everything that sends — is ConversationPanel's job; what lives
+  // here is the frame, the chip, and the four states where the agent cannot
+  // simply be talked to.
   //
   // Only two of the four blocked states get a button (`blockedCopy`'s own
   // rule): `absent` -> openAgent() wakes it, `lost` -> restartOperator()
@@ -10,12 +11,15 @@
   // only — their fixes live outside this panel (Settings, the sidebar), so
   // there is nothing here to wire a click to.
   //
-  // ConversationPanel carries its own composer, but it does not know about
-  // the context chip's prefix — so it is mounted with `showComposer={false}`
-  // and this panel is the only thing that ever calls `sendPrompt` for the
-  // operator session. Two composers sending independently into one tmux
-  // REPL is exactly the interleaved-paste failure `showComposer` exists to
-  // prevent.
+  // This sheet used to own a composer of its own, because the chip's prefix
+  // had to be glued onto the prompt and ConversationPanel knew nothing about
+  // it. That bought a second sender and cost every live signal the panel
+  // had: `pending`, `optimistic` (which is what keeps the transcript on the
+  // 5 s cadence instead of the 15 s quiet one) and the refetch-on-send are
+  // all set inside ConversationPanel's `send()`. Sending around it meant a
+  // prompt that vanished, no working indicator, and a reply that appeared
+  // up to fifteen seconds after it existed. The prefix is a prop now, and
+  // there is exactly one composer again.
   import ConversationPanel from './ConversationPanel.svelte';
   import {
     agentPanelOpen,
@@ -29,14 +33,9 @@
     type OperatorBlocked,
   } from './operator';
   import { agentContext, type AgentContextInput } from './agent_context';
-  import { sendPrompt } from './sessions';
-  import { composerStatus } from './conversation';
 
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
 
-  let draft = $state('');
-  let sending = $state(false);
-  let sendError = $state<string | null>(null);
   // Which context's chip the person dismissed, by label rather than a bare
   // boolean: "not this context" outlives the click, but only for as long as
   // it stays the SAME context. The moment `agentContext(...)` describes
@@ -44,18 +43,10 @@
   // derived state, no effect required to bring it back.
   let droppedLabel = $state<string | null>(null);
 
-  // The LIVE row, not the snapshot `ensure_operator` returned: `busy`, the
-  // `stuck_kind` line and ConversationPanel's own `$effect` on rowStatus all
-  // hang off this, and all three are worthless if it cannot change. See
-  // `operatorRow` in operator.ts.
+  // The LIVE row, not the snapshot `ensure_operator` returned: the composer's
+  // busy gate and the `stuck_kind` line all hang off this, and they are
+  // worthless if it cannot change. See `operatorRow` in operator.ts.
   const session = $derived($operatorRow);
-  // Same "is the agent busy" signal ConversationPanel's own composer reads
-  // (stuck_kind first, then claude_status === 'working') — one shared
-  // definition so the two composers can never disagree about it.
-  const statusNote = $derived(
-    session ? composerStatus({ claude_status: session.claude_status, stuck_kind: session.stuck_kind }) : null,
-  );
-  const busy = $derived(statusNote !== null);
   const rawCtx = $derived(contextInput ? agentContext(contextInput) : null);
   const ctx = $derived(rawCtx && rawCtx.chipLabel !== droppedLabel ? rawCtx : null);
 
@@ -75,26 +66,6 @@
         : null,
   );
 
-  async function send() {
-    if (!session || busy || sending || !draft.trim()) return;
-    const s = session;
-    const id = s.id;
-    sending = true;
-    sendError = null;
-    const body = ctx ? `${ctx.prefix}\n\n${draft}` : draft;
-    const r = await sendPrompt(s.host_alias, s.tmux_name, body);
-    sending = false;
-    // The operator session moved on while the send was on the wire (or the
-    // panel was reopened onto a different one) — the prompt landed wherever
-    // it landed, but none of this component's state belongs to it any more.
-    if (session?.id !== id) return;
-    if (!r.ok) {
-      sendError = r.error.message;
-      return;
-    }
-    draft = '';
-  }
-
   // Escape closes the sheet, INCLUDING from inside the composer. This is a
   // non-modal overlay, so it is not a <dialog> and gets no `cancel` event
   // from the browser (Modal.svelte's route); and App.svelte's window-level
@@ -109,6 +80,17 @@
     closeAgent();
   }
 </script>
+
+{#snippet chip()}
+  <button
+    class="chip"
+    data-testid="agent-context-chip"
+    onclick={() => (droppedLabel = ctx!.chipLabel)}
+    title="Send without this context"
+  >
+    {ctx!.chipLabel} ✕
+  </button>
+{/snippet}
 
 {#if $agentPanelOpen}
   <!-- A non-modal dialog: `role="dialog"` on a div (a <section> is a
@@ -140,30 +122,13 @@
       {#if blocked.action && blockedAction}
         <button onclick={blockedAction}>{blocked.action}</button>
       {/if}
-    {:else}
-      {#if session}
-        <ConversationPanel {session} visible={true} showComposer={false} />
-      {/if}
-      {#if ctx}
-        <button
-          class="chip"
-          data-testid="agent-context-chip"
-          onclick={() => (droppedLabel = ctx.chipLabel)}
-          title="Send without this context"
-        >
-          {ctx.chipLabel} ✕
-        </button>
-      {/if}
-      <div class="composer">
-        <textarea bind:value={draft} placeholder="Ask the agent…" rows="2"></textarea>
-        <button onclick={() => void send()} disabled={busy || sending || !session}>Send</button>
-      </div>
-      {#if sendError}
-        <p class="error" data-testid="agent-composer-error">{sendError}</p>
-      {/if}
-      {#if statusNote}
-        <p class="busy" class:stuck={!!session?.stuck_kind}>{statusNote}</p>
-      {/if}
+    {:else if session}
+      <ConversationPanel
+        {session}
+        visible={true}
+        promptPrefix={ctx?.prefix ?? null}
+        composerAbove={ctx ? chip : undefined}
+      />
     {/if}
   </div>
 {/if}
@@ -216,19 +181,6 @@
     margin: 0;
     color: var(--fg-muted);
   }
-  .busy {
-    margin: 0;
-    color: var(--fg-muted);
-    font-size: 0.8rem;
-  }
-  .busy.stuck {
-    color: var(--usage-crit);
-  }
-  .error {
-    margin: 0;
-    color: var(--usage-crit);
-    font-size: 0.8rem;
-  }
   .chip {
     align-self: flex-start;
     border: 1px solid var(--border);
@@ -242,20 +194,5 @@
   .chip:hover {
     color: var(--fg);
     border-color: var(--accent);
-  }
-  .composer {
-    display: flex;
-    gap: 0.5rem;
-    align-items: flex-end;
-  }
-  .composer textarea {
-    flex: 1;
-    resize: vertical;
-    background: var(--bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    font: inherit;
-    padding: 0.4rem;
   }
 </style>

@@ -1,11 +1,11 @@
 // AgentPanel.test.ts mocks ConversationPanel down to a stub, which proves
 // AgentPanel's own frame but nothing about what happens when the two
 // components are actually stacked. This file mounts the REAL
-// ConversationPanel underneath AgentPanel — the arrangement App.svelte will
-// use — to prove the fix for the duplicate-composer defect: exactly one
-// Send button reaches the page, because ConversationPanel is told
-// `showComposer={false}` and only AgentPanel's own composer sends.
-import { render, screen } from '@testing-library/svelte';
+// ConversationPanel underneath AgentPanel — the arrangement App.svelte uses
+// — to prove that exactly one composer reaches the page and that it is
+// ConversationPanel's own, so everything the sheet sends goes through the
+// send path that owns the panel's live state.
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
@@ -28,9 +28,10 @@ vi.mock('./sessions', async () => {
 });
 
 import AgentPanel from './AgentPanel.svelte';
+import { get } from 'svelte/store';
 import { agentPanelOpen, operatorState, operatorSession } from './operator';
 import { sessionConversation, sessionActivity, listConversations, toolDetail } from './conversation';
-import { sendPrompt, type SessionRow } from './sessions';
+import { sendPrompt, sessions, applySessionEvents, type SessionRow } from './sessions';
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedAct = sessionActivity as unknown as ReturnType<typeof vi.fn>;
@@ -96,20 +97,179 @@ beforeEach(() => {
   agentPanelOpen.set(true);
   operatorState.set('ready');
   operatorSession.set(row());
+  sessions.set([row()]);
 });
 
 describe('AgentPanel with the real ConversationPanel underneath', () => {
-  it('renders exactly one composer — ConversationPanel is told not to bring its own', async () => {
+  it('renders exactly one composer — ConversationPanel\'s, and the sheet adds none', async () => {
     render(AgentPanel);
     await tick();
     await Promise.resolve();
     await tick();
 
-    // AgentPanel's own composer.
-    expect(screen.getAllByRole('button', { name: /^send$/i })).toHaveLength(1);
-    // ConversationPanel's composer never mounted at all.
-    expect(screen.queryByTestId('conv-composer')).toBeNull();
-    expect(screen.queryByTestId('conv-composer-send')).toBeNull();
+    expect(screen.getAllByTestId('conv-composer')).toHaveLength(1);
+    expect(screen.getAllByTestId('conv-composer-send')).toHaveLength(1);
+    // The sheet's own textarea is gone for good: it is what sent around
+    // ConversationPanel's live state in the first place.
+    expect(screen.queryByPlaceholderText(/ask the agent/i)).toBeNull();
     expect(screen.queryByTestId('conv-readonly')).toBeNull();
+  });
+});
+
+// The defect these cover: AgentPanel used to own its own composer and call
+// `sendPrompt` itself, bypassing ConversationPanel's send path entirely. All
+// of ConversationPanel's liveness state — the pending turn, the `optimistic`
+// flag that keeps the 5 s transcript cadence off the 15 s quiet one, and the
+// immediate refetch — is set in that path and nowhere else, so a prompt sent
+// from the agent sheet showed nothing, said nothing, and appeared whenever
+// the next quiet tick happened to land. One composer, fed the chip's prefix,
+// is the fix.
+describe('the agent sheet sends through ConversationPanel, not around it', () => {
+  async function settle() {
+    for (let i = 0; i < 4; i++) {
+      await tick();
+      await Promise.resolve();
+    }
+  }
+
+  it('shows what was just sent as a pending turn, before any transcript read carries it', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(AgentPanel);
+    await settle();
+
+    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'co sa deje' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await waitFor(() => expect(screen.getByTestId('conv-pending')).toBeTruthy());
+    expect(screen.getByTestId('conv-pending').textContent).toContain('co sa deje');
+  });
+
+  it('carries the context chip prefix into the one composer that sends', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(AgentPanel, {
+      contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null },
+    });
+    await settle();
+
+    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await waitFor(() => expect(mockedSend).toHaveBeenCalled());
+    const body = mockedSend.mock.calls[0][2] as string;
+    expect(body).toContain('beta');
+    expect(body).toContain('hello');
+  });
+
+  it('leaves a slash command exactly as typed — the REPL reads it, not Claude', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(AgentPanel, {
+      contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null },
+    });
+    await settle();
+
+    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '/clear' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await waitFor(() => expect(mockedSend).toHaveBeenCalled());
+    expect(mockedSend.mock.calls[0][2]).toBe('/clear');
+  });
+
+  it('still renders exactly one composer — the sheet no longer brings a second', async () => {
+    render(AgentPanel);
+    await settle();
+    expect(screen.getAllByTestId('conv-composer')).toHaveLength(1);
+    expect(screen.queryByPlaceholderText(/ask the agent/i)).toBeNull();
+  });
+});
+
+// Moved here from AgentPanel.test.ts when the sheet lost its own composer:
+// these are about the sheet's state reaching ConversationPanel's composer,
+// so they need the real component, not a stub.
+describe('the sheet feeds the one composer its live state', () => {
+  async function settle() {
+    for (let i = 0; i < 4; i++) {
+      await tick();
+      await Promise.resolve();
+    }
+  }
+
+  it('the busy note MOVES on a row event, not only when the panel was opened', async () => {
+    render(AgentPanel);
+    await settle();
+    expect(screen.queryByTestId('conv-composer-status')).toBeNull();
+
+    applySessionEvents([
+      { type: 'updated', row: row({ claude_status: 'working', last_activity_at: 200 }) },
+    ]);
+    await waitFor(() =>
+      expect(screen.getByTestId('conv-composer-status').textContent).toMatch(/working/i),
+    );
+
+    applySessionEvents([
+      { type: 'updated', row: row({ claude_status: 'idle', last_activity_at: 300 }) },
+    ]);
+    await waitFor(() => expect(screen.queryByTestId('conv-composer-status')).toBeNull());
+  });
+
+  it('surfaces a stuck_kind that arrives after the panel opened', async () => {
+    render(AgentPanel);
+    await settle();
+    applySessionEvents([
+      {
+        type: 'updated',
+        row: row({ claude_status: 'working', stuck_kind: 'trust_prompt', last_activity_at: 200 }),
+      },
+    ]);
+    await waitFor(() =>
+      expect(screen.getByTestId('conv-composer-status').textContent).toMatch(/trust/i),
+    );
+  });
+
+  it('a dropped chip comes back when the context changes, and its prefix is sent again', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    const { rerender } = render(AgentPanel, {
+      contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null },
+    });
+    await settle();
+    expect(screen.getByTestId('agent-context-chip').textContent).toContain('alpha');
+
+    await fireEvent.click(screen.getByTestId('agent-context-chip'));
+    expect(screen.queryByTestId('agent-context-chip')).toBeNull();
+
+    // Same context re-rendered — the drop persists, this is not a one-shot toggle.
+    await rerender({ contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null } });
+    expect(screen.queryByTestId('agent-context-chip')).toBeNull();
+
+    // A different context — the chip returns on its own, no re-click needed.
+    await rerender({ contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null } });
+    expect(screen.getByTestId('agent-context-chip').textContent).toContain('beta');
+
+    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await waitFor(() => expect(mockedSend).toHaveBeenCalled());
+    expect(mockedSend.mock.calls[0][2]).toContain('beta');
+  });
+
+  it('a dropped chip sends nothing in front of the prompt', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(AgentPanel, {
+      contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null },
+    });
+    await settle();
+    await fireEvent.click(screen.getByTestId('agent-context-chip'));
+
+    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'bare' } });
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await waitFor(() => expect(mockedSend).toHaveBeenCalled());
+    expect(mockedSend.mock.calls[0][2]).toBe('bare');
+  });
+
+  it('closes on Escape from inside the composer, where a window-level handler would not', async () => {
+    render(AgentPanel);
+    await settle();
+    await fireEvent.keyDown(screen.getByPlaceholderText(/send a prompt/i), { key: 'Escape' });
+    expect(get(agentPanelOpen)).toBe(false);
   });
 });
