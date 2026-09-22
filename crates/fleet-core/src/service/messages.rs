@@ -180,14 +180,11 @@ pub async fn send_message(
             ));
         } else {
             let header = pane_header(id, &from_row.tmux_name, &from_row.host_alias, &args.body);
-            match sessions::send_prompt(
-                sessions::SendPromptArgs {
-                    host_alias: to_row.host_alias.clone(),
-                    tmux_name: to_row.tmux_name.clone(),
-                    prompt: header,
-                    submit: args.submit,
-                    keys: None,
-                },
+            match sessions::send_system_prompt(
+                &to_row.host_alias,
+                &to_row.tmux_name,
+                &header,
+                args.submit,
                 store,
                 ssh,
             )

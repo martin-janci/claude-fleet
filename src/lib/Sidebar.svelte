@@ -7,6 +7,7 @@
     loadSessions,
     killSession,
     recreateSession,
+    restartSession,
     purgeProject,
     showBgAgents,
     sameSession,
@@ -131,6 +132,7 @@
   let committingRename = false;
   let pendingKill: SessionRow | null = $state(null);
   let pendingRecreate: SessionRow | null = $state(null);
+  let pendingRestart: SessionRow | null = $state(null);
 
   // ── Triage (FE-3 / FE-4, now P13 / T1) ──
   // One ranked queue. The "Needs you" pill counts and filters the rows that
@@ -626,6 +628,28 @@
     pendingRecreate = sess;
   }
 
+  // Restart kills the running claude process and loses whatever it was in
+  // the middle of. Its two neighbours in the same hover strip (Recreate,
+  // Kill) both confirm, and its glyph is the same `↻` the sidebar and Files
+  // use for a harmless Refresh — so unguarded it was the easiest destructive
+  // action in the app to fire by accident.
+  function askRestart(sess: SessionRow, e?: Event) {
+    e?.stopPropagation();
+    pendingRestart = sess;
+  }
+
+  function cancelRestart() {
+    pendingRestart = null;
+  }
+
+  async function confirmRestart() {
+    if (!pendingRestart) return;
+    const sess = pendingRestart;
+    pendingRestart = null;
+    const r = await restartSession(sess.host_alias, sess.tmux_name);
+    if (!r.ok) pushError(r.error, 'Restart failed');
+  }
+
   function cancelRecreate() {
     pendingRecreate = null;
   }
@@ -709,6 +733,7 @@
       {onRenameKey}
       {commitRename}
       {askRecreate}
+      {askRestart}
       {askKill}
     />
   {/snippet}
@@ -922,6 +947,21 @@
   <BulkPromptDialog targets={selectedRows} onClose={() => (bulkPromptOpen = false)} />
 {/if}
 
+{#if pendingRestart}
+  <ConfirmDialog
+    title="Restart claude?"
+    confirmLabel="Restart"
+    danger
+    onconfirm={confirmRestart}
+    oncancel={cancelRestart}
+    confirmTestId="confirm-restart"
+  >
+    This stops the claude process in <code>{pendingRestart.tmux_name}</code> on
+    <code>{pendingRestart.host_alias}</code> and starts a fresh one. Anything it is
+    working on right now is lost; the tmux session and the worktree are kept. Continue?
+  </ConfirmDialog>
+{/if}
+
 {#if pendingRecreate}
   <ConfirmDialog
     title="Recreate session?"
@@ -1031,6 +1071,13 @@
     user-select: none;
   }
   .proj-row:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  /* A tabbable role="button" with no visible focus was the whole project
+     tree's WCAG 2.4.7 gap. Drawn inward: the sidebar list clips. */
+  .proj-row:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
+  }
+  .proj-row:focus-within .purge-btn { opacity: 0.6; }
   .caret {
     color: var(--fg-muted);
     font-size: 0.65rem;
@@ -1127,10 +1174,16 @@
     transition: opacity 0.15s;
     color: var(--color-error, #f44336);
   }
+  /* UX-04: `.icon-btn:disabled { opacity: 0.6 }` outranks `opacity: 0` here,
+     so before this rule the purge button was INVISIBLE exactly when it
+     worked and permanently visible when it did not (hub mode). A blocked
+     destructive action must not be the most prominent thing in the row. */
+  .purge-btn:disabled { opacity: 0; }
+  .proj-row:hover .purge-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .proj-row:hover .purge-btn {
     opacity: 0.6;
   }
-  .purge-btn:hover { opacity: 1 !important; }
+  .purge-btn:hover:not(:disabled) { opacity: 1 !important; }
   .theme-toggle {
     width: 100%;
     text-align: left;

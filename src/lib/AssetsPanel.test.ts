@@ -62,6 +62,25 @@ describe('AssetsPanel', () => {
     expect(screen.queryByTestId('assets-setup')).toBeNull();
   });
 
+  // `catalog` is only ever set on success, so a failed load used to render
+  // the error line AND a permanent "Loading…" at the same time, with no way
+  // to try again but the panel header's ↻.
+  it('offers a retry instead of a permanent Loading when the catalog fails to load', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { code: 'E_GIT', message: 'not a checkout' },
+    });
+    render(AssetsPanel);
+    const failed = await screen.findByTestId('assets-load-failed');
+    expect(failed).toBeTruthy();
+    expect(screen.queryByText('Loading…')).toBeNull();
+    // The retry re-runs the load rather than leaving the header's ↻ as the
+    // only way out.
+    invoke.mockClear();
+    await fireEvent.click(screen.getByTestId('assets-retry'));
+    await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'catalog_load')).toBe(true));
+  });
+
   it('lists assets grouped by kind with state chips, unmanaged group and problems badge', async () => {
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'abcdef1234567890', last_loaded_at: 1 }, catalog_load: { head: 'abcdef1234567890', loaded_at: 1, asset_count: 2, problem_count: 1 }, catalog_list_assets: listing, assets_inventory: [] });
     render(AssetsPanel);

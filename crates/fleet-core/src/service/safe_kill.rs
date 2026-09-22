@@ -186,14 +186,11 @@ pub async fn safe_kill_session(
     let prompt = build_safe_kill_prompt(&nonce);
     // Reuse the existing send-keys path. send_prompt validates inputs again
     // (harmless) and records a `prompt_sent` timeline entry.
-    if let Err(e) = crate::service::sessions::send_prompt(
-        crate::service::sessions::SendPromptArgs {
-            host_alias: args.host_alias.clone(),
-            tmux_name: args.tmux_name.clone(),
-            prompt,
-            submit: true,
-            keys: None,
-        },
+    if let Err(e) = crate::service::sessions::send_system_prompt(
+        &args.host_alias,
+        &args.tmux_name,
+        &prompt,
+        true,
         store,
         ssh,
     )
