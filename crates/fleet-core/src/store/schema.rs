@@ -332,6 +332,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/040_pending_input.sql"),
         already_applied: Some(sessions_has_pending_input),
     },
+    // `CREATE TABLE IF NOT EXISTS` plus two `CREATE INDEX IF NOT EXISTS`,
+    // safe to re-run.
+    Migration::plain(41, include_str!("../../migrations/041_error_reports.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -546,6 +549,7 @@ mod tests {
         "sync_runs",
         "client_tokens",
         "conversations",
+        "error_reports",
     ];
 
     #[test]

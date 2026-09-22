@@ -25,6 +25,11 @@ import type { SessionEvent } from './timeline';
 
 const invoked = invokeCmd as ReturnType<typeof vi.fn>;
 
+// A refused retry/resolve still goes through `pushError`, which now also
+// fires a `report_client_error` telemetry call — not a move-related IPC.
+// Counts below track only the latter.
+const moveCallCount = () => invoked.mock.calls.filter((c) => c[0] !== 'report_client_error').length;
+
 const row = (over: Partial<SessionRow>): SessionRow =>
   ({
     id: 5, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: 1, worktree_id: 10,
@@ -654,14 +659,14 @@ describe('retryMove', () => {
     invoked.mockReturnValueOnce(new Promise((r) => (resolveIt = r)));
     startMove(session, 'beta', { keepSource: false });
     await flush();
-    const calls = invoked.mock.calls.length;
+    const calls = moveCallCount();
     retryMove(7);
-    expect(invoked.mock.calls.length).toBe(calls);
+    expect(moveCallCount()).toBe(calls);
     resolveIt(err('E_MOVE_PARTIAL', 'partial', { step: 'killing the source s on alpha', target_session_id: 8 }));
     await flush();
     expect(get(moves).get(7)!.status).toBe('partial');
     retryMove(7);
-    expect(invoked.mock.calls.length).toBe(calls); // unchanged
+    expect(moveCallCount()).toBe(calls); // unchanged
   });
 
   // Fix round 1, Finding 1: `move:progress` carries only the session id, so

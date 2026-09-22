@@ -14,6 +14,7 @@ pub mod config;
 pub mod conn;
 pub mod exec;
 pub mod install;
+pub mod report;
 
 /// Helpers the unit tests share.
 #[cfg(test)]

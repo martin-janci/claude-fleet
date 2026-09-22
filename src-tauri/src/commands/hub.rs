@@ -162,6 +162,40 @@ pub fn hub_disconnect(
     logic::disconnect(&backend, &store, tokens.inner().as_ref())
 }
 
+/// A frontend error to queue for the hub error channel.
+#[derive(Debug, Deserialize)]
+pub struct ReportClientErrorArgs {
+    pub level: String,
+    pub component: String,
+    pub code: Option<String>,
+    pub message: String,
+    pub context: Option<serde_json::Value>,
+}
+
+pub fn report_client_error_logic(args: ReportClientErrorArgs) -> Result<(), IpcError> {
+    use fleet_core::ipc_error::codes;
+    if args.level != "error" && args.level != "warn" {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            "level must be error or warn",
+        ));
+    }
+    let mut r = fleet_proto::report::Report::error(&args.component, &args.message);
+    r.level = args.level;
+    r.code = args.code;
+    r.context = args.context;
+    r.clamp();
+    fleet_core::logging::report_ring().push(r);
+    Ok(())
+}
+
+/// Queue a frontend error for the hub error channel. Same in both modes: the
+/// push is local; in standalone nothing drains the ring, so it is a no-op.
+#[tauri::command]
+pub fn report_client_error(args: ReportClientErrorArgs) -> Result<(), IpcError> {
+    report_client_error_logic(args)
+}
+
 pub(crate) mod logic {
     use super::*;
     use crate::backend::{

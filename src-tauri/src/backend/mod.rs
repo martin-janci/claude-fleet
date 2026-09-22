@@ -25,6 +25,7 @@ pub mod events;
 mod http1;
 pub mod pairing;
 pub mod remote;
+pub mod report;
 pub mod routing;
 pub mod startup;
 pub mod token_store;

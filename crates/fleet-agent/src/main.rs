@@ -37,12 +37,19 @@ fn config_home() -> Option<PathBuf> {
 
 fn run(args: cli::RunArgs) -> ExitCode {
     // The journal adds its own timestamps; tracing adds levels and targets.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let fmt = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    // The config is read after the subscriber is up (it logs its own
+    // refusals), so the layer is installed unconditionally and
+    // `report_errors` gates the FLUSH instead (`conn::serve`); a disabled
+    // agent's ring wraps at RING_CAP and costs nothing.
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt)
+        .with(fleet_agent::report::ReportLayer)
         .init();
     // With no flags: the user's own config if there is one, else the system's.
     let default_config = config_home()

@@ -15,6 +15,7 @@ pub mod guard;
 pub mod hooks;
 mod listener;
 pub mod pairing;
+pub mod report_route;
 pub mod settings;
 mod tools;
 pub mod wire;
@@ -254,14 +255,16 @@ async fn healthz() -> impl axum::response::IntoResponse {
     )
 }
 
-/// Build the axum app: `/mcp` and `/mcp/json` (rmcp services) and `/hook`
-/// behind [`authorize`], plus the unauthenticated `/healthz` liveness and
-/// `/pair` exchange routes. Shared by `start` and the routing test.
+/// Build the axum app: `/mcp` and `/mcp/json` (rmcp services), `/hook`,
+/// `/report` and `/reports` behind [`authorize`], plus the unauthenticated
+/// `/healthz` liveness and `/pair` exchange routes. Shared by `start` and the
+/// routing test.
 ///
 /// `mcp_json_service` is the same tool surface answering unframed
 /// `application/json` instead of SSE — see [`streamable_service`] for why
 /// that is a second mount rather than a flag on the first. `None` leaves the
 /// path unrouted, which is what every test that does not exercise it passes.
+#[allow(clippy::too_many_arguments)]
 fn build_app(
     mcp_service: axum::routing::MethodRouter<hooks::HookState>,
     mcp_json_service: Option<axum::routing::MethodRouter<hooks::HookState>>,
@@ -270,6 +273,7 @@ fn build_app(
     pair_state: pairing::PairState,
     events_state: EventsState,
     agent_state: crate::agent::ws::AgentWsState,
+    report_state: report_route::ReportState,
 ) -> axum::Router {
     // The MCP streamable-HTTP service is mounted with `route_service` at the
     // exact `/mcp` path — NOT `nest_service("/", …)` under `nest("/mcp", …)`.
@@ -307,6 +311,18 @@ fn build_app(
             axum::Router::new()
                 .route("/agent", axum::routing::get(crate::agent::ws::handle_agent))
                 .with_state(agent_state),
+        )
+        // `/report` and `/reports` carry their own state and sit behind
+        // `authorize` like `/events`: a phone posts its errors with its own
+        // token; only the master reads them. The body cap is the spec's.
+        .merge(
+            axum::Router::new()
+                .route("/report", axum::routing::post(report_route::handle_report))
+                .route("/reports", axum::routing::get(report_route::handle_reports))
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    fleet_proto::report::BODY_MAX,
+                ))
+                .with_state(report_state),
         )
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize));
     // `/healthz` and `/pair` are registered on a SEPARATE router merged after
@@ -370,6 +386,7 @@ pub(crate) fn test_app(
         ),
         EventsState::disabled(),
         agent_state,
+        report_route::ReportState::new(Arc::clone(&store)),
     )
 }
 
@@ -578,6 +595,9 @@ pub async fn start_with_listener<A: TlsAcceptor>(
         let agent_registry = ssh.agent_registry().cloned();
         // Each live agent connection's token is re-checked against the store.
         let agents_store = Arc::clone(&store);
+        // Likewise taken before `store` is moved into `FleetTools`: `/report`
+        // and `/reports` keep their own handle to the store.
+        let reports_store = Arc::clone(&store);
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
@@ -620,6 +640,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             // to. `None` on an SSH-only client (the desktop): `/agent` then
             // answers 503 rather than upgrading a socket nothing would read.
             crate::agent::ws::AgentWsState::new(agent_registry.map(|r| (r, agents_store))),
+            report_route::ReportState::new(reports_store),
         );
 
         let scheme = if tls.is_some() { "https" } else { "http" };
@@ -742,6 +763,7 @@ mod tests {
             pair_state,
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
+            report_route::ReportState::new(Arc::clone(&store)),
         );
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -1116,6 +1138,7 @@ mod tests {
             ),
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
+            report_route::ReportState::new(Arc::clone(&store)),
         );
         let listener2 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1160,6 +1183,7 @@ mod tests {
             allowed_hosts: Arc::new(vec![]),
         };
         let limited_pairings = Arc::new(pairing::PendingPairings::new());
+        let report_state3 = report_route::ReportState::new(Arc::clone(&store));
         let app3 = build_app(
             any(|| async { "MCP_OK" }),
             None,
@@ -1173,6 +1197,7 @@ mod tests {
             ),
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
+            report_state3,
         );
         let listener3 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1263,6 +1288,7 @@ mod tests {
             Arc::clone(&guards.rate),
             "https://fleet.example.com".to_string(),
         );
+        let report_state = report_route::ReportState::new(Arc::clone(&store));
         let tools = FleetTools::new(
             store,
             Arc::new(SshClient::new()),
@@ -1293,6 +1319,7 @@ mod tests {
             pair_state,
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
+            report_state,
         );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1566,6 +1593,7 @@ mod tests {
             pair_state,
             events_state.clone(),
             crate::agent::ws::AgentWsState::disabled(),
+            report_route::ReportState::new(Arc::clone(&store)),
         );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await

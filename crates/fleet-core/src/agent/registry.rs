@@ -430,7 +430,7 @@ pub(crate) fn frame_id(frame: &HubFrame) -> &str {
 fn agent_frame_id(frame: &AgentFrame) -> Option<&str> {
     match frame {
         AgentFrame::Result { id, .. } | AgentFrame::Pong { id } => Some(id),
-        AgentFrame::Hello { .. } => None,
+        AgentFrame::Hello { .. } | AgentFrame::Report { .. } => None,
     }
 }
 
