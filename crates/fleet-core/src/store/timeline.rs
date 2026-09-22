@@ -164,11 +164,23 @@ impl Store {
         reply_to: Option<i64>,
     ) -> Result<i64, crate::ipc_error::IpcError> {
         let at = now_unix();
+        let from_p = self.ensure_participant_for_session(from_session_id)?;
+        let to_p = self.ensure_participant_for_session(to_session_id)?;
         self.conn.execute(
             "INSERT INTO session_messages \
-                   (from_session_id, to_session_id, body, kind, sent_at, reply_to) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![from_session_id, to_session_id, body, kind, at, reply_to],
+               (from_session_id, to_session_id, from_participant_id, to_participant_id, \
+                body, kind, sent_at, reply_to) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                from_session_id,
+                to_session_id,
+                from_p,
+                to_p,
+                body,
+                kind,
+                at,
+                reply_to
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -256,11 +268,136 @@ impl Store {
         let params = params_then(rusqlite::params![at, recipient], ids);
         Ok(self.conn.execute(&sql, params.as_slice())?)
     }
+
+    /// Messages waiting to be handed to `session_id`'s next hook response,
+    /// OLDEST first — delivery replays conversation order, where the inbox
+    /// shows the newest first.
+    ///
+    /// Resolved through the participant, not `to_session_id`, so a message
+    /// addressed before a `move_session` still reaches the moved session.
+    pub fn list_undelivered_for_session(
+        &self,
+        session_id: i64,
+        limit: i64,
+    ) -> Result<Vec<SessionMessage>, crate::ipc_error::IpcError> {
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM session_messages \
+             WHERE to_participant_id = (SELECT id FROM participants WHERE session_id = ?1) \
+               AND delivered_at IS NULL \
+             ORDER BY sent_at ASC, id ASC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![session_id, limit], map_message_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Stamp `delivered_at` on rows that do not have it yet. "Handed to a hook
+    /// response", never "the model read it" — there is no ack. Returns how
+    /// many rows flipped, so a second call reports 0.
+    pub fn mark_messages_delivered(
+        &self,
+        ids: &[i64],
+    ) -> Result<usize, crate::ipc_error::IpcError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let at = now_unix();
+        let sql = format!(
+            "UPDATE session_messages SET delivered_at = ?1 \
+             WHERE delivered_at IS NULL AND id IN ({phs})",
+            phs = in_clause(ids.len())
+        );
+        let params = params_then(rusqlite::params![at], ids);
+        Ok(self.conn.execute(&sql, params.as_slice())?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seed(s: &Store, name: &str) -> i64 {
+        s.upsert_host("local").unwrap();
+        s.upsert_session(name, "local", None, None, 0, 0, "running", None)
+            .unwrap()
+    }
+
+    #[test]
+    fn undelivered_is_oldest_first_and_excludes_delivered_rows() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        s.ensure_participant_for_session(b).unwrap();
+        let m1 = s.insert_message(a, b, "one", "message", None).unwrap();
+        let m2 = s.insert_message(a, b, "two", "message", None).unwrap();
+
+        let got = s.list_undelivered_for_session(b, 10).unwrap();
+        assert_eq!(
+            got.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![m1, m2],
+            "delivery order is oldest first, unlike the newest-first inbox"
+        );
+
+        assert_eq!(s.mark_messages_delivered(&[m1]).unwrap(), 1);
+        let got = s.list_undelivered_for_session(b, 10).unwrap();
+        assert_eq!(got.iter().map(|m| m.id).collect::<Vec<_>>(), vec![m2]);
+    }
+
+    #[test]
+    fn marking_delivered_does_not_mark_read() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        s.ensure_participant_for_session(b).unwrap();
+        let m = s.insert_message(a, b, "hi", "message", None).unwrap();
+        s.mark_messages_delivered(&[m]).unwrap();
+        let row = s.get_message(m).unwrap().unwrap();
+        assert_eq!(row.read_at, None, "delivered is not read");
+        assert_eq!(
+            s.list_inbox(b, true, 10).unwrap().len(),
+            1,
+            "a delivered message is still unread in the inbox"
+        );
+    }
+
+    #[test]
+    fn mark_delivered_is_idempotent() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        s.ensure_participant_for_session(b).unwrap();
+        let m = s.insert_message(a, b, "hi", "message", None).unwrap();
+        assert_eq!(s.mark_messages_delivered(&[m]).unwrap(), 1);
+        assert_eq!(
+            s.mark_messages_delivered(&[m]).unwrap(),
+            0,
+            "a second stamp changes nothing"
+        );
+    }
+
+    #[test]
+    fn insert_message_fills_the_participant_columns() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let m = s.insert_message(a, b, "hi", "message", None).unwrap();
+        let (from_p, to_p): (Option<i64>, Option<i64>) = s
+            .conn
+            .query_row(
+                "SELECT from_participant_id, to_participant_id FROM session_messages WHERE id=?1",
+                rusqlite::params![m],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            from_p,
+            Some(s.participant_for_session(a).unwrap().unwrap().id)
+        );
+        assert_eq!(
+            to_p,
+            Some(s.participant_for_session(b).unwrap().unwrap().id)
+        );
+    }
 
     #[test]
     fn unresolved_events_are_the_opened_ones_no_later_close_resolved() {
