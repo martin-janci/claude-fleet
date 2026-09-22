@@ -392,7 +392,7 @@ pub async fn move_session(
     ssh: &Arc<SshClient>,
 ) -> Result<MoveOutcome, IpcError> {
     if args.when == When::Idle && !args.dry_run && !source_is_idle(store, args.session_id)? {
-        let (guard, deadline, waiting) = wait::begin_wait(&args, store)?;
+        let (guard, deadline, waiting) = wait::begin_wait(&args, Arc::clone(store))?;
         let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
         let mut now = args;
         now.when = When::Now;
@@ -3309,6 +3309,13 @@ mod tests {
         /// while a wait's retry re-checks idle), then clears itself — so it
         /// fires exactly once.
         busy_once_on_refresh: AtomicBool,
+        /// When set, the *next* `refresh_host` for the source host — which a
+        /// wait's real move reaches only once it has started — asks
+        /// `cancel_wait` and `begin_wait` about these args, then clears
+        /// itself. What they answered lands in `mid_move_answers`.
+        probe_wait_mid_move: Mutex<Option<MoveSessionArgs>>,
+        /// `(cancel_wait's answer, begin_wait's refusal code)` from the probe.
+        mid_move_answers: Mutex<Option<(bool, Option<String>)>>,
         /// Whether `session_moved` was already on the source when the kill
         /// ran (`None` = no kill).
         moved_at_kill: Mutex<Option<bool>>,
@@ -3328,6 +3335,8 @@ mod tests {
                 grow_source_on_kill: false,
                 refresh_target_fails: false,
                 busy_once_on_refresh: AtomicBool::new(false),
+                probe_wait_mid_move: Mutex::new(None),
+                mid_move_answers: Mutex::new(None),
                 moved_at_kill: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
@@ -3402,6 +3411,16 @@ mod tests {
                     .unwrap()
                     .set_claude_status_by_session_id(SID, "working")
                     .unwrap();
+            }
+            let probe = if host == "alpha" {
+                self.probe_wait_mid_move.lock().unwrap().take()
+            } else {
+                None
+            };
+            if let Some(a) = probe {
+                let cancelled = wait::cancel_wait(store, a.session_id);
+                let second = wait::begin_wait(&a, store).err().map(|e| e.code);
+                *self.mid_move_answers.lock().unwrap() = Some((cancelled, second));
             }
             let started = self.started.lock().unwrap().clone();
             let s = store.lock().unwrap();
@@ -7534,6 +7553,93 @@ mod tests {
         assert!(!wait::cancel_wait(&f.store, f.source_id));
     }
 
+    /// M2: once the waiter has started the real move, there is no wait
+    /// left to cancel — `cancel_wait` must say so (`was_waiting: false`)
+    /// rather than claim a cancel the move will ignore. A second wait is
+    /// still refused while that move is in flight.
+    #[tokio::test]
+    async fn a_cancel_that_arrives_once_the_move_has_started_answers_not_waiting() {
+        let (f, _bus) = recorded_fixture(); // idle: the move starts at once
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        *hooks.probe_wait_mid_move.lock().unwrap() = Some(a.clone());
+        let (guard, deadline, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let end = wait::run_wait(
+            a,
+            &f.store,
+            &f.fake,
+            &hooks,
+            fast(),
+            guard.token(),
+            deadline,
+            POLL,
+        )
+        .await;
+        assert_eq!(end, wait::WaitEnd::Moved);
+        let (cancelled, second) = hooks
+            .mid_move_answers
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the probe ran during the move");
+        assert!(!cancelled, "the move had started: nothing was waiting");
+        assert_eq!(
+            second.as_deref(),
+            Some(codes::E_INVALID_STATE),
+            "a second wait is refused while the move is in flight"
+        );
+    }
+
+    /// M4: a waiter dropped (or panicked) without recording its end still
+    /// closes its `session_move_waiting` — at once, not at the next startup.
+    #[test]
+    fn a_waiter_dropped_without_an_end_records_one() {
+        let (f, _bus) = recorded_fixture();
+        let a = args(&f, false);
+        let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        drop(guard);
+        let w = wait_events(&f);
+        let ended: Vec<_> = w
+            .iter()
+            .filter(|(k, _)| k == wait::EVENT_MOVE_WAIT_ENDED)
+            .collect();
+        assert_eq!(ended.len(), 1, "{w:?}");
+        assert!(
+            ended[0].1.as_deref().unwrap().contains("hub_restarted"),
+            "{ended:?}"
+        );
+    }
+
+    /// M4's other half: a waiter that recorded its own end writes nothing
+    /// more when its guard drops.
+    #[tokio::test]
+    async fn a_waiter_that_recorded_its_end_records_nothing_more_on_drop() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        let end = wait::run_wait(
+            a,
+            &f.store,
+            &f.fake,
+            &hooks,
+            fast(),
+            guard.token(),
+            wait::now_unix() - 1,
+            POLL,
+        )
+        .await;
+        assert_eq!(end, wait::WaitEnd::TimedOut);
+        drop(guard);
+        let ended: Vec<_> = wait_events(&f)
+            .into_iter()
+            .filter(|(k, _)| k == wait::EVENT_MOVE_WAIT_ENDED)
+            .collect();
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert!(ended[0].1.as_deref().unwrap().contains("timed_out"));
+    }
+
     #[tokio::test]
     async fn a_second_wait_for_the_same_session_is_refused() {
         let (f, _bus) = recorded_fixture();
@@ -7555,9 +7661,15 @@ mod tests {
     #[test]
     fn the_startup_sweep_closes_waits_nothing_is_honouring() {
         let (f, _bus) = recorded_fixture();
-        let a = args(&f, false);
-        let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
-        drop(guard); // the process "restarted": the waiter is gone, the event is not
+        // A previous process recorded the wait and died: no guard's drop
+        // ran (a dropped guard now closes its own wait, see
+        // `a_waiter_dropped_without_an_end_records_one`), no entry is
+        // registered here, only the event is left.
+        f.store
+            .lock()
+            .unwrap()
+            .insert_session_event(f.source_id, wait::EVENT_MOVE_WAITING, Some("{}"))
+            .unwrap();
         assert_eq!(wait::sweep_unresolved_waits(&f.store).unwrap(), 1);
         let (_, ended) = wait_events(&f).last().cloned().unwrap();
         assert!(ended.unwrap().contains("hub_restarted"));

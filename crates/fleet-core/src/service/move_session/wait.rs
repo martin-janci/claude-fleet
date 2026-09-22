@@ -26,6 +26,7 @@ use crate::ssh::SshExec;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -58,8 +59,11 @@ pub enum WaitEnd {
     TimedOut,
     /// The source session row was deleted while the wait was pending.
     SessionGone,
-    /// The hub restarted while this wait was pending and nothing was left to
-    /// honour it; closed by [`sweep_unresolved_waits`] at the next startup.
+    /// Nothing was left to honour this wait: the hub restarted while it was
+    /// pending (closed by [`sweep_unresolved_waits`] at the next startup), or
+    /// its waiter was dropped or panicked before recording an end (closed by
+    /// [`WaitGuard`]'s drop at once — the same state the sweep would find,
+    /// recorded one restart earlier, so no new reason for the UI to learn).
     HubRestarted,
 }
 
@@ -77,7 +81,21 @@ pub struct MoveWaiting {
 /// [`super::moves_in_flight`] — `(store address, session id)` — so parallel
 /// tests on separate in-memory stores cannot collide.
 type WaitKey = (usize, i64);
-type WaitRegistry = Mutex<HashMap<WaitKey, CancellationToken>>;
+type WaitRegistry = Mutex<HashMap<WaitKey, WaitEntry>>;
+
+/// One pending wait's registry entry.
+struct WaitEntry {
+    token: CancellationToken,
+    /// The waiter has started the real move: there is no wait left to
+    /// cancel (a running move is not cancellable), so `cancel_wait` answers
+    /// `false` — but the entry stays, so a second `begin_wait` is still
+    /// refused while the move runs. Cleared again if the move is refused
+    /// because the source went busy (the wait resumes).
+    moving: bool,
+    /// `session_move_wait_ended` was recorded for this wait — the guard's
+    /// drop must not record a second one.
+    ended: bool,
+}
 
 fn waits() -> &'static WaitRegistry {
     static WAITS: std::sync::OnceLock<WaitRegistry> = std::sync::OnceLock::new();
@@ -90,21 +108,42 @@ fn key_for(store: &Mutex<Store>, session_id: i64) -> WaitKey {
 
 /// Held for as long as a wait is pending; dropping it deregisters — the
 /// startup sweep relies on this to tell a live wait from an orphaned one.
-pub(super) struct WaitGuard {
+///
+/// Holds the store (a borrow in tests, an `Arc` in the spawned waiter) so a
+/// waiter dropped or panicking before [`run_wait`] recorded its end still
+/// closes its `session_move_waiting`, as [`WaitEnd::HubRestarted`].
+pub(super) struct WaitGuard<S: Deref<Target = Mutex<Store>>> {
     key: WaitKey,
+    session_id: i64,
     token: CancellationToken,
+    store: S,
 }
 
-impl WaitGuard {
+impl<S: Deref<Target = Mutex<Store>>> WaitGuard<S> {
     pub(super) fn token(&self) -> &CancellationToken {
         &self.token
     }
 }
 
-impl Drop for WaitGuard {
+impl<S: Deref<Target = Mutex<Store>>> Drop for WaitGuard<S> {
     fn drop(&mut self) {
-        if let Ok(mut reg) = waits().lock() {
-            reg.remove(&self.key);
+        // A poisoned registry cannot tell us whether the end was recorded;
+        // leave it to the startup sweep rather than risk writing it twice.
+        let Ok(mut reg) = waits().lock() else { return };
+        let entry = reg.remove(&self.key);
+        drop(reg);
+        if entry.is_some_and(|e| !e.ended) {
+            // Synchronous and short: one insert under the store's sync lock.
+            write_wait_ended(&self.store, self.session_id, WaitEnd::HubRestarted, None);
+        }
+    }
+}
+
+/// Flag this session's registry entry (if any) as mid-move or not.
+fn set_moving(key: WaitKey, moving: bool) {
+    if let Ok(mut reg) = waits().lock() {
+        if let Some(e) = reg.get_mut(&key) {
+            e.moving = moving;
         }
     }
 }
@@ -136,11 +175,11 @@ fn wait_max_mins(s: &Store) -> u64 {
 /// currently in flight (queried, per [`super::moves_in_flight`] — the claim
 /// itself is never taken here; the real move takes it on each retry inside
 /// [`run_wait`]'s loop).
-pub(super) fn begin_wait(
+pub(super) fn begin_wait<S: Deref<Target = Mutex<Store>>>(
     args: &MoveSessionArgs,
-    store: &Mutex<Store>,
-) -> Result<(WaitGuard, i64, MoveWaiting), IpcError> {
-    let key = key_for(store, args.session_id);
+    store: S,
+) -> Result<(WaitGuard<S>, i64, MoveWaiting), IpcError> {
+    let key = key_for(&store, args.session_id);
 
     {
         let flight = moves_in_flight().lock().map_err(|_| IpcError::lock())?;
@@ -164,11 +203,17 @@ pub(super) fn begin_wait(
                 format!("session {} is already waiting to move", args.session_id),
             ));
         }
-        reg.insert(key, token.clone());
+        reg.insert(
+            key,
+            WaitEntry {
+                token: token.clone(),
+                moving: false,
+                ended: false,
+            },
+        );
     }
-    let guard = WaitGuard { key, token };
 
-    let mins = match lock(store) {
+    let mins = match lock(&store) {
         Ok(s) => wait_max_mins(&s),
         Err(e) => {
             if let Ok(mut reg) = waits().lock() {
@@ -203,10 +248,18 @@ pub(super) fn begin_wait(
             );
         }
     }
+    let guard = WaitGuard {
+        key,
+        session_id: args.session_id,
+        token,
+        store,
+    };
     Ok((guard, deadline_unix, waiting))
 }
 
-/// Cancel a pending wait. `true` if there was one registered.
+/// Cancel a pending wait. `true` if there was one registered and still
+/// waiting — `false` once its waiter has started the real move (which a
+/// cancel does not stop) or recorded its end.
 ///
 /// Only fires the token — the registry entry is removed by the waiting
 /// [`WaitGuard`]'s own drop once `run_wait` observes the cancellation and
@@ -218,11 +271,11 @@ pub(super) fn cancel_wait(store: &Mutex<Store>, session_id: i64) -> bool {
         return false;
     };
     match reg.get(&key) {
-        Some(token) => {
-            token.cancel();
+        Some(e) if !e.moving && !e.ended => {
+            e.token.cancel();
             true
         }
-        None => false,
+        _ => false,
     }
 }
 
@@ -300,8 +353,13 @@ pub(super) async fn run_wait_with(
             Ok(_) => {}
         }
         // Idle: run the real move. A cancel from here on lets it finish —
-        // cancelling a running move is out of scope.
-        match move_session_with(args.clone(), store, ssh, hooks, opts).await {
+        // cancelling a running move is out of scope — so the entry is marked
+        // moving first, and `cancel_wait` answers `was_waiting: false`.
+        let key = key_for(store, args.session_id);
+        set_moving(key, true);
+        let moved = move_session_with(args.clone(), store, ssh, hooks, opts).await;
+        set_moving(key, false);
+        match moved {
             Ok(MoveOutcome::Moved(_)) => break WaitEnd::Moved,
             // `args` is forced to `when: Now, dry_run: false` by the only
             // caller that spawns this loop, so `move_session_with` can only
@@ -332,10 +390,26 @@ pub(super) async fn run_wait_with(
     end
 }
 
-/// Best-effort: record why a wait ended. Never `?` — the wait itself is
+/// Best-effort: record why a wait ended, and flag its registry entry so the
+/// guard's drop does not record it again. Never `?` — the wait itself is
 /// already over by the time this runs, so a store failure here must not
 /// change what the caller gets back.
 fn record_wait_ended(
+    store: &Mutex<Store>,
+    session_id: i64,
+    end: WaitEnd,
+    refusal: Option<&IpcError>,
+) {
+    if let Ok(mut reg) = waits().lock() {
+        if let Some(e) = reg.get_mut(&key_for(store, session_id)) {
+            e.ended = true;
+        }
+    }
+    write_wait_ended(store, session_id, end, refusal);
+}
+
+/// Insert one `session_move_wait_ended`; logs, never fails.
+fn write_wait_ended(
     store: &Mutex<Store>,
     session_id: i64,
     end: WaitEnd,
@@ -348,7 +422,15 @@ fn record_wait_ended(
             detail["message"] = serde_json::Value::String(e.message.clone());
         }
     }
-    let Ok(s) = store.lock() else { return };
+    let Ok(s) = store.lock() else {
+        tracing::warn!(
+            kind = EVENT_MOVE_WAIT_ENDED,
+            session_id,
+            reason = ?end,
+            "[event] store lock poisoned; wait end not recorded"
+        );
+        return;
+    };
     if let Err(err) =
         s.insert_session_event(session_id, EVENT_MOVE_WAIT_ENDED, Some(&detail.to_string()))
     {
