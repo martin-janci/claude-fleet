@@ -1,13 +1,28 @@
 <script lang="ts">
+  import { fmtBytes } from './attachments';
   import Modal from './Modal.svelte';
   import { hosts } from './hosts';
   import { hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { moveBlockedReason, moveTargetsFor } from './moveEligibility';
   import { describeMoveError } from './moveErrors';
+  import { preflightAge, preflightFor, preflights, PREFLIGHT_STALE_MS, requestPreflight } from './preflight';
   import type { ResolveAction } from './moveSession';
   import { stepLabel } from './moveProgress';
-  import { dismissMove, displaySteps, moves, resolveMoveRun, retryMove, startMove, transferSheetFor } from './moves';
+  import {
+    cancelWait,
+    dismissMove,
+    displaySteps,
+    moves,
+    resolveMoveRun,
+    retryMove,
+    startMove,
+    transferSheetFor,
+    UNKNOWN_WAIT_END,
+    waitIsStale,
+    type MoveRun,
+  } from './moves';
+  import { formatDuration } from './account_usage';
   import { selectSessionExplicitly } from './selection';
   import { sessions } from './sessions';
 
@@ -30,6 +45,35 @@
   // Which destructive action is one click from happening. Cleared whenever the
   // sheet's session changes, like `showDetails`.
   let confirming = $state<'clean' | 'finish' | 'undo' | null>(null);
+  /** Ticks while the setup view is open, so a stale preview's age display
+   *  keeps counting up rather than freezing at the moment it was rendered. */
+  let now = $state(Date.now());
+
+  /** A hub built before dry_run existed would silently treat a preview
+   *  request as a real move. The desktop refuses such a hub, but only once
+   *  its `ready` frame has been read and its wire contract checked
+   *  (`src-tauri/src/backend/events.rs`); before that the state is
+   *  `connecting` (or `reconnecting`/`offline`), and a request could still
+   *  reach an old hub. So a preview is only ever asked for with no hub at
+   *  all, or once the link is fully up. */
+  const preflightAllowed = $derived(
+    $hubConnection.state === 'standalone' || $hubConnection.state === 'connected',
+  );
+  /** The preview for the currently selected target, once one exists — only
+   *  meaningful on the setup view (no run yet). */
+  const preflightEntry = $derived(
+    id !== null && !run && target ? preflightFor($preflights, id, target) : undefined,
+  );
+  /** Narrows `preflightEntry.preview` for the template, the same way
+   *  `cleanAction` narrows `failure.action` above — Svelte cannot carry a
+   *  `.status === 'ready'` check on one expression into `.preview` on
+   *  another inside an `{#if}`. */
+  const preview = $derived(
+    preflightEntry && preflightEntry.status === 'ready' ? preflightEntry.preview : null,
+  );
+  const targetDirty = $derived(
+    preview && preview.target.state === 'dirty' ? preview.target : null,
+  );
 
   // A fresh setup each time the sheet opens on a session.
   $effect(() => {
@@ -47,17 +91,79 @@
   $effect(() => {
     if (id !== null && !run && !session) transferSheetFor.set(null);
   });
+  // Ask for a preview of the selected target. Debounced per session inside
+  // `requestPreflight` itself, so a burst of target changes collapses to one
+  // call. Transfer's own `disabled` never reads any of this — see `transfer`.
+  $effect(() => {
+    if (id !== null && !run && target && preflightAllowed) requestPreflight(id, target);
+  });
+  // The age ticker: the setup view's preflight age, and a waiting run's
+  // countdown to its deadline — both live displays, nothing else needs it.
+  $effect(() => {
+    if (id === null || (run && run.status !== 'waiting')) return;
+    const timer = setInterval(() => {
+      now = Date.now();
+    }, 1000);
+    return () => clearInterval(timer);
+  });
 
   // What the steps list shows: a settled run completes its own picture at
   // render time rather than by rewriting what its events reported.
   const shown = $derived(run ? displaySteps(run) : []);
   /** The last step that is not pending: how far the move actually got. */
   const reached = $derived(shown.findLast((s) => s.state !== 'pending')?.step ?? null);
+
+  /** Why a `waiting` run's wait ended without a move ever starting — in
+   *  plain words, one per `WaitEnd` reason (`crates/fleet-core/src/service/
+   *  move_session/wait.rs`). A reason this build does not know still renders
+   *  a fixed fallback sentence rather than nothing. `refused` is handled
+   *  separately (`refusedWaitText`, below) since it may carry an actual
+   *  refusal to show instead of this bare fallback. */
+  const WAIT_END_TEXT: Record<string, string> = {
+    cancelled: 'You cancelled the wait.',
+    timed_out: 'The wait timed out after the limit.',
+    session_gone: 'The session disappeared while fleet was waiting for it to finish.',
+    refused: 'The source finished, but the move itself was refused.',
+    // Written by the startup sweep and by a waiter that stopped without
+    // ending its wait — in local mode too, where there is no hub.
+    hub_restarted: 'The wait was interrupted (the app or the hub restarted).',
+    [UNKNOWN_WAIT_END]:
+      'The wait is no longer pending, and this window could not tell how it ended — the session timeline has the record.',
+  };
+  /** `refused` with a usable `waitRefusal`: the same wording the ordinary
+   *  failure view would use for that code, when the code is one this build
+   *  recognises; `describeMoveError`'s own fallback for an unknown code is
+   *  the raw message, so this only needs its own fallback for the gaps that
+   *  leaves — an empty message, or no `waitRefusal` at all (an older
+   *  backend's detail, or one `waitEndRefusal` could not parse). */
+  function refusedWaitText(run: MoveRun): string {
+    const r = run.waitRefusal;
+    if (!r) return WAIT_END_TEXT.refused;
+    const text = describeMoveError({ code: r.code, message: r.message, details: null }, 'failed', run.toHost, null)
+      .what;
+    return text.trim() !== '' ? text : WAIT_END_TEXT.refused;
+  }
+  /** Set only for a `failed` run whose wait ended without ever starting a
+   *  move — a distinct view from an ordinary failure (below), since there is
+   *  no error, no steps, and nothing was ever copied anywhere. */
+  const waitEndedText = $derived(
+    run && run.status === 'failed' && run.waitEnded !== null
+      ? run.waitEnded === 'refused'
+        ? refusedWaitText(run)
+        : (WAIT_END_TEXT[run.waitEnded] ?? 'The wait ended without a move.')
+      : null,
+  );
   const failure = $derived(
-    run && (run.status === 'failed' || run.status === 'partial')
+    run && waitEndedText === null && (run.status === 'failed' || run.status === 'partial')
       ? describeMoveError(run.error, run.status, run.toHost, reached)
       : null,
   );
+  /** A `waiting` run's countdown to `deadlineUnix`, ticking with `now`. */
+  const deadlineText = $derived.by(() => {
+    if (!run || run.status !== 'waiting' || run.deadlineUnix === null) return null;
+    const secs = run.deadlineUnix - Math.floor(now / 1000);
+    return secs > 0 ? `in ${formatDuration(secs)}` : 'any moment now';
+  });
   const carried = $derived(run?.report?.carried ?? null);
   /** Narrows `failure.action` for the template, which otherwise cannot keep
    *  `.paths` in scope across the `{#if}` that tests `.kind`. */
@@ -123,7 +229,7 @@
   const n = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
   const REASON = {
     denylisted: 'never carried (secrets, caches, build output)',
-    over_cap: 'over the size cap',
+    over_cap: 'too large to carry (over the size cap)',
     unsupported_name: 'a file name that cannot be carried safely',
   } as const;
 
@@ -166,7 +272,9 @@
         ? `Moving to ${run.toHost}`
         : run.status === 'done'
           ? `Moved to ${run.toHost}`
-          : 'The move did not finish',
+          : run.status === 'waiting'
+            ? `Waiting to move to ${run.toHost}`
+            : 'The move did not finish',
   );
 </script>
 
@@ -203,6 +311,96 @@
           <input type="checkbox" bind:checked={keepSource} data-testid="move-keep-source" />
           Keep this session running
         </label>
+        <div class="details" data-testid="transfer-preflight">
+          {#if !preflightAllowed}
+            <p class="note">The preview will appear once connected.</p>
+          {:else if !preflightEntry || preflightEntry.status === 'loading'}
+            <p class="note">Checking what would travel…</p>
+          {:else if preflightEntry.status === 'refused'}
+            <p class="note" data-testid="transfer-preflight-refusal">
+              {describeMoveError(preflightEntry.error, 'failed', target, null).what}
+            </p>
+          {:else if preview}
+            {#if preflightAge(preflightEntry, now) !== null && preflightAge(preflightEntry, now)! > PREFLIGHT_STALE_MS}
+              <p class="muted" data-testid="transfer-preflight-age">
+                From {Math.round((preflightAge(preflightEntry, now) ?? 0) / 1000)}s ago
+              </p>
+            {/if}
+            <ul class="summary">
+              <li>
+                {#if preview.unpushed_commits === null}
+                  <span class="muted">Unpushed commits unknown</span>
+                {:else}
+                  {n(preview.unpushed_commits, 'unpushed commit')}
+                {/if}
+                {#if preview.commits_ahead !== null}
+                  <span class="muted">· target lacks {n(preview.commits_ahead, 'commit')}</span>
+                {/if}
+              </li>
+              {#if preview.dirty.length > 0}
+                <li>
+                  {n(preview.dirty.length, 'uncommitted entry', 'uncommitted entries')}
+                  <ul class="clean-paths">
+                    {#each preview.dirty as d, i (i)}
+                      <li><code>{d.path}</code></li>
+                    {/each}
+                  </ul>
+                </li>
+              {/if}
+              <li>
+                {n(preview.ignored_carried.length, 'ignored file')} carried
+                {#if preview.ignored_carried.length > 0}
+                  <ul class="clean-paths">
+                    {#each preview.ignored_carried as f, i (i)}
+                      <li><code>{f.path}</code> <span class="muted">({fmtBytes(f.bytes)})</span></li>
+                    {/each}
+                  </ul>
+                {/if}
+                {#if preview.ignored_left_behind.length > 0}
+                  <span class="muted">· {preview.ignored_left_behind.length} left behind</span>
+                  <ul class="clean-paths">
+                    {#each preview.ignored_left_behind as f, i (i)}
+                      <li><code>{f.path}</code> — {REASON[f.reason] ?? f.reason}</li>
+                    {/each}
+                  </ul>
+                {/if}
+              </li>
+              <li>{fmtBytes(preview.transcript_bytes)} of conversation</li>
+              <li>
+                {n(preview.session_state_files, 'session file')}
+                <span class="muted">({fmtBytes(preview.session_state_bytes)})</span>
+              </li>
+              <li>
+                {n(preview.memory_files, 'memory note')}
+                <span class="muted">({fmtBytes(preview.memory_bytes)})</span>
+              </li>
+            </ul>
+            <p class="note">
+              Target path <code>{preview.target_path}</code>
+              {#if preview.target.state === 'absent'}
+                would be created.
+              {:else if preview.target.state === 'unknown'}
+                could not be checked.
+              {:else if preview.target.state === 'clean'}
+                is clean at <code>{preview.target.head}</code>.
+              {:else if targetDirty}
+                has uncommitted work at <code>{targetDirty.head}</code>:
+              {/if}
+            </p>
+            {#if targetDirty}
+              <ul class="clean-paths">
+                {#each targetDirty.entries as e, i (i)}
+                  <li><code>{e.path}</code></li>
+                {/each}
+              </ul>
+            {/if}
+            {#if preview.unknowns.length > 0}
+              <p class="muted" data-testid="transfer-preflight-unknowns">
+                Cannot know: {preview.unknowns.join('; ')}
+              </p>
+            {/if}
+          {/if}
+        </div>
       {/if}
       <p class="note">
         Uncommitted and unpushed work, small ignored files, subagents and project memory travel
@@ -303,6 +501,10 @@
           <p class="note">
             The connection to the hub was lost during the move, so this window has no report for it.
           </p>
+        {:else if run.waitEnded === 'moved'}
+          <p class="note" data-testid="transfer-moved-after-wait">
+            {`${run.sessionName} finished its turn and was moved to ${run.toHost}. This window has no report for it; the session timeline has the record.`}
+          </p>
         {:else}
           <p class="note">Started elsewhere — this window has no report for it.</p>
         {/if}
@@ -319,6 +521,32 @@
         {#if run.fromHost && moveBackTarget}
           <button onclick={moveBack} data-testid="transfer-move-back">Move back to {run.fromHost}</button>
         {/if}
+        <button onclick={done} data-testid="transfer-done">Done</button>
+      </div>
+    {:else if run && run.status === 'waiting'}
+      <p class="note" data-testid="transfer-waiting">
+        Waiting for {run.sessionName} to finish — will transfer to {run.toHost}
+      </p>
+      {#if deadlineText}
+        <p class="muted" data-testid="transfer-wait-deadline">Gives up {deadlineText}</p>
+      {/if}
+      <div class="buttons">
+        {#if waitIsStale(run, now)}
+          <!-- Past its deadline (or never given one): its end may have been
+               missed, and a run that can never settle would block every
+               later Transfer of this session. -->
+          <button onclick={done} data-testid="transfer-wait-dismiss">Stop following</button>
+        {/if}
+        <button onclick={() => cancelWait(run.sessionId)} data-testid="transfer-cancel-wait">Cancel</button>
+      </div>
+    {:else if run && waitEndedText}
+      <div data-testid="transfer-wait-ended">
+        <p class="what">{waitEndedText}</p>
+      </div>
+      <div class="buttons">
+        <button onclick={() => retryMove(run.sessionId)} data-testid="transfer-wait-retry">
+          Transfer again
+        </button>
         <button onclick={done} data-testid="transfer-done">Done</button>
       </div>
     {:else if run && failure}

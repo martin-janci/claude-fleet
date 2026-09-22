@@ -46,8 +46,40 @@ describe('describeMoveError', () => {
         null,
         'the source Claude is not idle (claude_status "working"); moving now would lose the turn in progress — wait until it finishes, then retry',
       ).what,
-    ).toBe('The source Claude is in the middle of a turn. Wait for it to finish, then transfer.');
+    ).toBe('The source Claude is in the middle of a turn.');
     expect(failed('E_INVALID_STATE', null, 'something else entirely').what).toBe('something else entirely');
+  });
+
+  // Fix wave M5: `begin_wait`'s refusal of a second wait
+  // (crates/fleet-core/src/service/move_session/wait.rs). A Retry could only
+  // be refused again, so none is offered.
+  it('says a session is already waiting to move in plain words, with no Retry', () => {
+    const d = failed('E_INVALID_STATE', null, 'session 7 is already waiting to move');
+    expect(d.what).toBe(
+      'This session is already waiting to finish its turn before a transfer. Cancel that wait before starting another.',
+    );
+    expect(d.action).toBeNull();
+  });
+
+  // Fix wave M3: every hub-mode Transfer is refused until the hub's first
+  // `ready` frame (src-tauri/src/backend/remote.rs,
+  // `require_confirmed_contract`).
+  it('says the hub has not confirmed its version yet, and offers a retry', () => {
+    const d = failed(
+      'E_HUB_CONTRACT',
+      null,
+      "This transfer request was not run: this app has not yet confirmed https://hub.example's version, and a hub older than this app would ignore what it asks and move the session at once. It becomes available once the desktop has confirmed the hub's version.",
+    );
+    expect(d.what).toBe("The hub hasn't confirmed its version yet — try again in a moment, or update the hub.");
+    expect(d.action).toEqual({ kind: 'retry' });
+  });
+
+  it('keeps a contract skew refusal as the backend wrote it, with no Retry', () => {
+    const message =
+      "This transfer request was not run: https://hub.example's wire contract is revision 2, older than the 3 this app requires. Update the hub.";
+    const d = failed('E_HUB_CONTRACT', { hub_contract: 2, min_contract: 3 }, message);
+    expect(d.what).toBe(message);
+    expect(d.action).toBeNull();
   });
 
   it('falls back to the backend message for an unknown code and an unknown carry step', () => {

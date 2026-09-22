@@ -70,7 +70,7 @@ Scope sketch: `Retry` on the failure view (same target, same options);
 text that names the leftovers precisely. Non-goals: cancelling a running move
 (needs cancel-safe cleanup — see debts), bulk moves.
 
-### 3b — Preflight (next)
+### 3b — Preflight (in review: PR #219)
 
 Before the move starts, the setup view shows what WOULD travel and what would
 be refused: commits and dirty entries, ignored files with sizes and the ones
@@ -84,7 +84,7 @@ surface is byte-budgeted — default to no); how stale a preflight may be when
 Transfer is pressed (the move re-checks everything anyway — the preflight is
 advice, never a gate).
 
-### 3c — Wait for idle
+### 3c — Wait for idle (built on 3b's branch; spec `docs/superpowers/specs/2026-09-21-transfer-wait-idle-design.md`)
 
 Today a busy source is refused ("The source Claude is in the middle of a
 turn"). 3c turns that into "Transfer when it finishes": the run sits in a
@@ -148,6 +148,31 @@ From slice 3d's reviews — decided, not forgotten:
 - `finalise.rs`'s `extra_detail` merge skips a colliding key with a
   `debug_assert!`; in release a collision is silently skipped rather than
   reported.
+
+From slice 3c's reviews — decided, not forgotten:
+- A slow re-check (`recheckWaitingRuns`, and the Cancel answering
+  `was_waiting: false`) can land after a NEWER wait of the same session began
+  and settle it from the older one's end. Recoverable (a later Transfer
+  follows the live wait), but a run identity captured before the `await`
+  would close it.
+- A run settled "ended, reason unknown" keeps its watcher, so another actor's
+  `check:failed` on that session can revive it as a ghost `waiting`.
+- The I5a fall-through (stale idle found busy) leaves a failed `check` step on
+  the local run; a waiter move finishing before the `waiting` answer would then
+  settle as failed. Practically unreachable.
+- Microsecond windows remain around the waiter's `moving` mark (a Cancel can
+  answer `true` for a move that still runs, or for a wait that just ended), and
+  a source found idle while waking past its deadline can still move within one
+  60 s poll slice.
+- A lost `check:failed` leaves the chip at "moving 1/9" until the next attempt,
+  the wait's end or the deadline; Dismiss still works.
+- `session_move_waiting` can age out of the 500-event cap (or the timeline's
+  200-event window) during a long wait on a busy session, after which a reopen
+  cannot find the wait. Needs a cap exemption for unresolved waits.
+- A dropped or panicked waiter records `hub_restarted`, the spec having no
+  reason for "aborted"; the sheet's copy covers both.
+- The desktop accepts only hub contract revision 3: ship 3b and 3c in one
+  release so hubs are upgraded once.
 
 From slices 1–2:
 - A real move through the app followed by `cl --resume` on the target — needs
