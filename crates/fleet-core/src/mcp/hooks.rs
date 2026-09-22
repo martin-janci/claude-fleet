@@ -24,6 +24,11 @@ use super::auth::Caller;
 use crate::ssh::SshClient;
 use crate::store::Store;
 
+/// Claude Code's `Stop` hook `reason` character cap, well under the packer's
+/// `CTX_MAX_CHARS` (8000): the block path truncates `packed.text` down to
+/// this on a char boundary so a multi-byte body is never split.
+const REASON_MAX_CHARS: usize = 2000;
+
 /// Axum router state for the `/hook` endpoint.
 #[derive(Clone)]
 pub struct HookState {
@@ -133,7 +138,50 @@ pub async fn handle_hook(
             // the body is discarded. See the phase-2b exception in
             // docs/superpowers/specs/2026-09-22-fleet-mesh-addressing-and-delivery-design.md
             let event = payload.hook_event_name.as_deref().unwrap_or("");
-            if !matches!(event, "UserPromptSubmit" | "Stop") {
+            if event == "Stop" {
+                return match crate::service::hooks::take_pending_stop_delivery(
+                    &state.store,
+                    &payload,
+                    &ctx,
+                ) {
+                    Some((packed, crate::service::delivery::StopAction::Block))
+                        if !packed.text.is_empty() =>
+                    {
+                        tracing::debug!(
+                            event,
+                            delivered = packed.included.len(),
+                            remaining = packed.remaining,
+                            "[hook] blocking Stop for a pending question"
+                        );
+                        // `reason` is capped by Claude Code at 2000 chars,
+                        // against the packer's 8000; truncate on a char
+                        // boundary so a multi-byte body is never split.
+                        let reason: String = packed.text.chars().take(REASON_MAX_CHARS).collect();
+                        axum::Json(serde_json::json!({
+                            "decision": "block",
+                            "reason": reason,
+                        }))
+                        .into_response()
+                    }
+                    Some((packed, _)) if !packed.text.is_empty() => {
+                        tracing::debug!(
+                            event,
+                            delivered = packed.included.len(),
+                            remaining = packed.remaining,
+                            "[hook] carrying a delivery"
+                        );
+                        axum::Json(serde_json::json!({
+                            "hookSpecificOutput": {
+                                "hookEventName": event,
+                                "additionalContext": packed.text,
+                            }
+                        }))
+                        .into_response()
+                    }
+                    _ => StatusCode::NO_CONTENT.into_response(),
+                };
+            }
+            if event != "UserPromptSubmit" {
                 return StatusCode::NO_CONTENT.into_response();
             }
             match crate::service::hooks::take_pending_delivery(&state.store, &payload, &ctx) {
@@ -575,5 +623,189 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(ctx.contains("stop-time ping"), "{ctx}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_event_with_a_question_blocks_the_turn() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            let a = seed(&s, "alpha");
+            let b = seed(&s, "beta");
+            s.insert_message(a, b, "need an answer", "question", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
+                    rusqlite::params![b],
+                )
+                .unwrap();
+        }
+        let state = HookState {
+            store: store.clone(),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let payload = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("Stop".into()),
+            ..Default::default()
+        };
+        let res = handle_hook(
+            State(state),
+            Extension(Caller::master()),
+            axum::http::HeaderMap::new(),
+            Json(payload),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["decision"], "block");
+        assert!(v["reason"].as_str().unwrap().contains("need an answer"));
+    }
+
+    /// `STOP_BLOCK_STREAK_MAX` (3): a remote sender must never be able to
+    /// trap a session in a never-ending turn by always sending a fresh
+    /// question. The fourth consecutive question in a row must fall back to
+    /// `additionalContext`, and the trip must reset the streak.
+    #[tokio::test]
+    async fn the_stop_block_streak_caps_at_three_in_a_row() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let (a, b) = {
+            let s = store.lock().unwrap();
+            let a = seed(&s, "alpha");
+            let b = seed(&s, "beta");
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
+                    rusqlite::params![b],
+                )
+                .unwrap();
+            (a, b)
+        };
+        let state = HookState {
+            store: store.clone(),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let payload = || HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("Stop".into()),
+            ..Default::default()
+        };
+        for i in 0..3 {
+            {
+                let s = store.lock().unwrap();
+                s.insert_message(a, b, &format!("question {i}"), "question", None)
+                    .unwrap();
+            }
+            let res = handle_hook(
+                State(state.clone()),
+                Extension(Caller::master()),
+                axum::http::HeaderMap::new(),
+                Json(payload()),
+            )
+            .await
+            .into_response();
+            assert_eq!(res.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["decision"], "block", "block #{i}");
+        }
+        {
+            let s = store.lock().unwrap();
+            assert_eq!(s.stop_block_streak(b).unwrap(), 3);
+        }
+        // The fourth question arrives while the streak sits at the cap: it
+        // must not block a fourth time.
+        {
+            let s = store.lock().unwrap();
+            s.insert_message(a, b, "question 4", "question", None)
+                .unwrap();
+        }
+        let res = handle_hook(
+            State(state.clone()),
+            Extension(Caller::master()),
+            axum::http::HeaderMap::new(),
+            Json(payload()),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            v.get("decision").is_none(),
+            "cap reached: must not block again: {v}"
+        );
+        assert!(v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("question 4"));
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.stop_block_streak(b).unwrap(),
+            0,
+            "hitting the cap must reset the streak"
+        );
+    }
+
+    /// `reason` is capped by Claude Code at 2000 characters, well under the
+    /// packer's 8000-char budget. The block path must truncate on a char
+    /// boundary so a multi-byte body is never split mid-codepoint.
+    #[tokio::test]
+    async fn a_long_reason_is_truncated_at_2000_chars_on_a_char_boundary() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            let a = seed(&s, "alpha");
+            let b = seed(&s, "beta");
+            let body: String = "🦀".repeat(3000);
+            s.insert_message(a, b, &body, "question", None).unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
+                    rusqlite::params![b],
+                )
+                .unwrap();
+        }
+        let state = HookState {
+            store: store.clone(),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let payload = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("Stop".into()),
+            ..Default::default()
+        };
+        let res = handle_hook(
+            State(state),
+            Extension(Caller::master()),
+            axum::http::HeaderMap::new(),
+            Json(payload),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let reason = v["reason"].as_str().unwrap();
+        assert!(
+            reason.chars().count() <= 2000,
+            "chars={}",
+            reason.chars().count()
+        );
+        assert!(
+            reason.chars().all(|c| c == '🦀' || c.is_ascii()),
+            "no split codepoint in the truncated reason"
+        );
     }
 }

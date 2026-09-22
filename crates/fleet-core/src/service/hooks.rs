@@ -302,6 +302,49 @@ pub fn take_pending_delivery(
     Some(packed)
 }
 
+/// As [`take_pending_delivery`], plus what a `Stop` should do about it, and
+/// the streak bookkeeping that keeps a block from repeating forever.
+pub fn take_pending_stop_delivery(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<(
+    crate::service::delivery::Packed,
+    crate::service::delivery::StopAction,
+)> {
+    use crate::service::delivery::stop_action;
+    let (row_id, streak, pending) = {
+        let s = lock(store).ok()?;
+        let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
+        let pending = s
+            .list_undelivered_for_session(row.id, DELIVERY_SCAN_LIMIT)
+            .ok()?;
+        let streak = s.stop_block_streak(row.id).unwrap_or(0);
+        (row.id, streak, pending)
+    };
+    if pending.is_empty() {
+        let s = lock(store).ok()?;
+        let _ = s.reset_stop_block_streak(row_id);
+        return None;
+    }
+    let action = stop_action(&pending, streak);
+    let packed = take_pending_delivery(store, payload, ctx)?;
+    let s = lock(store).ok()?;
+    match action {
+        crate::service::delivery::StopAction::Block => {
+            let _ = s.bump_stop_block_streak(row_id);
+            let _ = s.insert_session_event(row_id, "stop_blocked_for_message", None);
+        }
+        crate::service::delivery::StopAction::Context => {
+            if streak >= crate::service::delivery::STOP_BLOCK_STREAK_MAX {
+                let _ = s.insert_session_event(row_id, "stop_block_cap_reached", None);
+            }
+            let _ = s.reset_stop_block_streak(row_id);
+        }
+    }
+    Some((packed, action))
+}
+
 /// May a hook that reached `row` through its PANE move it onto a new id?
 /// Any `claude` started in the pane — a Bash-tool `claude -p` included —
 /// inherits `$TMUX_PANE`, so the pane alone does not prove the payload's

@@ -132,6 +132,41 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// Consecutive `Stop` blocks this session currently sits behind.
+    pub fn stop_block_streak(&self, session_id: i64) -> Result<u32, crate::ipc_error::IpcError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COALESCE(stop_block_streak, 0) FROM sessions WHERE id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u32)
+    }
+
+    pub fn bump_stop_block_streak(
+        &self,
+        session_id: i64,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE sessions SET stop_block_streak = COALESCE(stop_block_streak, 0) + 1 \
+             WHERE id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Called when a turn ends without a block, so a later question is not
+    /// punished for an earlier streak.
+    pub fn reset_stop_block_streak(
+        &self,
+        session_id: i64,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE sessions SET stop_block_streak = 0 WHERE id = ?1 AND stop_block_streak <> 0",
+            rusqlite::params![session_id],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

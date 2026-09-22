@@ -92,6 +92,35 @@ pub fn pack(messages: &[SessionMessage], sender_label: &dyn Fn(i64) -> String) -
     }
 }
 
+/// Most consecutive `Stop` blocks one session may be held by. Without a cap a
+/// remote sender could shut a session inside a never-ending turn — a denial of
+/// service against one's own fleet, and reachable in a full mesh where every
+/// endpoint can address every other.
+pub const STOP_BLOCK_STREAK_MAX: u32 = 3;
+
+/// What a `Stop` hook should do about the pending messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopAction {
+    /// Add `additionalContext`; the turn ends normally.
+    Context,
+    /// `decision: "block"` with the messages as the `reason`, so Claude keeps
+    /// working and answers.
+    Block,
+}
+
+/// PURE: block only for a message that genuinely wants an answer, and only
+/// while under [`STOP_BLOCK_STREAK_MAX`].
+pub fn stop_action(pending: &[SessionMessage], streak: u32) -> StopAction {
+    if streak >= STOP_BLOCK_STREAK_MAX {
+        return StopAction::Context;
+    }
+    if pending.iter().any(|m| m.kind == "question") {
+        StopAction::Block
+    } else {
+        StopAction::Context
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +286,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn question(id: i64) -> SessionMessage {
+        SessionMessage {
+            kind: "question".into(),
+            ..msg(id, "answer me")
+        }
+    }
+
+    #[test]
+    fn a_plain_message_never_blocks_a_stop() {
+        assert_eq!(stop_action(&[msg(1, "fyi")], 0), StopAction::Context);
+    }
+
+    #[test]
+    fn a_question_blocks_a_stop_while_under_the_cap() {
+        assert_eq!(stop_action(&[question(1)], 0), StopAction::Block);
+        assert_eq!(
+            stop_action(&[question(1)], STOP_BLOCK_STREAK_MAX - 1),
+            StopAction::Block
+        );
+    }
+
+    #[test]
+    fn at_the_cap_even_a_question_only_adds_context() {
+        assert_eq!(
+            stop_action(&[question(1)], STOP_BLOCK_STREAK_MAX),
+            StopAction::Context
+        );
+        assert_eq!(
+            stop_action(&[question(1)], STOP_BLOCK_STREAK_MAX + 7),
+            StopAction::Context
+        );
+    }
+
+    #[test]
+    fn nothing_pending_never_blocks() {
+        assert_eq!(stop_action(&[], 0), StopAction::Context);
     }
 }
