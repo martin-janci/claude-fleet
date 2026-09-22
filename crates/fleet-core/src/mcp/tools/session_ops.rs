@@ -154,15 +154,27 @@ impl FleetTools {
         Parameters(p): Parameters<WhoamiParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("whoami", &format!("tmux={}", p.tmux_name));
-        let s = lock(&self.store).map_err(to_mcp_err)?;
-        let row = sessions::find_session_by_tmux_name(&s, &p.tmux_name).map_err(to_mcp_err)?;
-        let controller = s
-            .get_controller()
-            .map_err(|e| to_mcp_err(IpcError::from(e)))?;
-        let is_controller = controller
-            .as_ref()
-            .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
-        ok_json(&SessionWithController { is_controller, row })
+        // Scoped so the store guard is released before `local_fleet_id`
+        // takes it again below — `Store` is a plain (non-reentrant)
+        // `std::sync::Mutex`.
+        let (row, is_controller) = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let row = sessions::find_session_by_tmux_name(&s, &p.tmux_name).map_err(to_mcp_err)?;
+            let controller = s
+                .get_controller()
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?;
+            let is_controller = controller
+                .as_ref()
+                .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
+            (row, is_controller)
+        };
+        let fleet_id = crate::service::address::local_fleet_id(&self.store).map_err(to_mcp_err)?;
+        let mut payload = serde_json::to_value(SessionWithController { is_controller, row })
+            .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+        if let serde_json::Value::Object(map) = &mut payload {
+            map.insert("fleet_id".to_string(), serde_json::Value::String(fleet_id));
+        }
+        ok_json(&payload)
     }
 
     #[tool(description = "Create a Claude Code tmux session on a host, in a \

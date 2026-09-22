@@ -110,9 +110,28 @@ pub fn is_foreign(a: &Addr, local_fleet: &str) -> bool {
     fleet.as_deref().is_some_and(|f| f != local_fleet)
 }
 
+/// Settings key holding this fleet's identity.
+pub const FLEET_ID_KEY: &str = "fleet.id";
+
+/// This fleet's id, minted on first call and stable thereafter. Kept in
+/// `settings` rather than a column: it is one value per store, and a
+/// migration for it would buy nothing.
+pub fn local_fleet_id(store: &std::sync::Mutex<crate::store::Store>) -> Result<String, IpcError> {
+    let s = crate::ipc_error::lock(store)?;
+    if let Some(existing) = s.get_setting(FLEET_ID_KEY)? {
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    s.set_setting(FLEET_ID_KEY, &id)?;
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Store;
 
     #[test]
     fn parses_the_three_shapes_with_an_implicit_local_fleet() {
@@ -202,5 +221,16 @@ mod tests {
         );
         assert!(!is_foreign(&same, "abc"));
         assert!(is_foreign(&other, "abc"));
+    }
+
+    #[test]
+    fn fleet_id_is_minted_once_and_then_stable() {
+        let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
+        let a = local_fleet_id(&store).unwrap();
+        let b = local_fleet_id(&store).unwrap();
+        assert_eq!(a, b, "the fleet id must not be re-minted");
+        assert_eq!(a.len(), 36, "a uuid v4 in hyphenated form");
+        // It parses as the fleet segment of an address.
+        assert!(!is_foreign(&parse(&format!("{a}/hub")).unwrap(), &a));
     }
 }
