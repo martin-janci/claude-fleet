@@ -48,7 +48,11 @@ pub(crate) mod routed {
                 // on this launch. A plain move (`when: now`, not a dry run)
                 // stays ungated.
                 if args.dry_run || args.when != move_session::When::Now {
-                    hub.require_confirmed_contract("move_session (dry run or when != now)")?;
+                    hub.require_confirmed_contract(
+                        "This transfer request",
+                        "a hub older than this app would ignore what it asks and move the \
+                         session at once",
+                    )?;
                 }
                 hub.route("move_session", &args).await
             }

@@ -1834,6 +1834,18 @@ fn a_when_other_than_now_is_refused_until_this_launch_has_confirmed_the_hub() {
             "{when:?}: {}",
             err.message
         );
+        // M3: a wait or a cancel is not a preview, and the refusal must not
+        // call it one; it names the actual hazard instead.
+        assert!(
+            !err.message.to_lowercase().contains("preview"),
+            "{when:?}: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("move the session"),
+            "{when:?}: {}",
+            err.message
+        );
         fake.was_not_called();
     }
 }
