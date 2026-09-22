@@ -169,6 +169,31 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Every event of kind `opened` that no LATER event of kind `closed` on
+    /// the same session has resolved, oldest first: `(session_id, event_id,
+    /// detail)`. Generic over the two kinds — the store stays ignorant of
+    /// what "opened"/"closed" mean to a caller (e.g. a move's wait-for-idle).
+    pub fn unresolved_events(
+        &self,
+        opened: &str,
+        closed: &str,
+    ) -> Result<Vec<(i64, i64, Option<String>)>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT w.session_id, w.id, w.detail \
+               FROM session_events w \
+              WHERE w.kind = ?1 \
+                AND NOT EXISTS (SELECT 1 FROM session_events c \
+                                 WHERE c.session_id = w.session_id \
+                                   AND c.kind = ?2 \
+                                   AND c.id > w.id) \
+              ORDER BY w.id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![opened, closed], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Mark a set of inbox messages as read. Only rows whose `to_session_id`
     /// matches `recipient` are updated — never mark someone else's mail.
     /// Returns the number of rows that flipped from unread to read.
@@ -194,6 +219,34 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unresolved_events_are_the_opened_ones_no_later_close_resolved() {
+        let s = Store::open_in_memory().unwrap();
+        // Events take bare session ids, as the file's other tests use them.
+        let (a, b) = (7_i64, 99_i64);
+        s.insert_session_event(a, "open", Some("a1")).unwrap(); // resolved below
+        s.insert_session_event(a, "close", None).unwrap();
+        s.insert_session_event(a, "open", Some("a2")).unwrap(); // NOT resolved
+        s.insert_session_event(b, "open", Some("b1")).unwrap(); // NOT resolved
+        s.insert_session_event(b, "other", None).unwrap(); // not a close
+        let got: Vec<String> = s
+            .unresolved_events("open", "close")
+            .unwrap()
+            .into_iter()
+            .map(|(_, _, d)| d.unwrap())
+            .collect();
+        assert_eq!(got, vec!["a2".to_string(), "b1".to_string()]);
+    }
+
+    #[test]
+    fn a_close_on_another_session_resolves_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        let (a, b) = (7_i64, 99_i64);
+        s.insert_session_event(a, "open", Some("a1")).unwrap();
+        s.insert_session_event(b, "close", None).unwrap();
+        assert_eq!(s.unresolved_events("open", "close").unwrap().len(), 1);
+    }
 
     #[test]
     fn session_events_insert_then_list_newest_first_with_limit() {

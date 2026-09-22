@@ -1,5 +1,5 @@
 {
-  "revision": 1,
+  "revision": 3,
   "types": {
     "AccountRow": [
       "display_name",

@@ -215,6 +215,42 @@ impl HubBackend {
         Some(IpcError::new(codes::E_HUB_CONTRACT, message).with_details(details))
     }
 
+    /// Refuse a call that must only reach a hub whose wire contract the
+    /// current connection has confirmed in range — `move_session`'s dry run
+    /// or `when`, which a hub built before them ignores, performing a real
+    /// move. `what` names the call; `reason` completes "and …" with what an
+    /// older hub would do with it instead.
+    ///
+    /// The launch's own refusal comes first and the contract gate's second,
+    /// exactly as in [`Self::call_text`], so a hub already judged out of
+    /// range gets the refusal that names both revisions. Only then is "not
+    /// yet confirmed" the answer: no `ready` frame judged in range (still
+    /// connecting, or no link to consult at all).
+    pub fn require_confirmed_contract(&self, what: &str, reason: &str) -> Result<(), IpcError> {
+        if let Some(refused) = self.unavailable_error(what) {
+            return Err(refused);
+        }
+        if let Some(refused) = self.contract_error(what) {
+            return Err(refused);
+        }
+        let confirmed = self
+            .link
+            .as_ref()
+            .is_some_and(|link| link.contract_confirmed());
+        if confirmed {
+            return Ok(());
+        }
+        Err(IpcError::new(
+            codes::E_HUB_CONTRACT,
+            format!(
+                "{what} was not run: this app has not yet confirmed {}'s version, and \
+                 {reason}. It becomes available once the desktop has confirmed the hub's \
+                 version.",
+                self.cfg.base_url
+            ),
+        ))
+    }
+
     pub fn config(&self) -> &RemoteConfig {
         &self.cfg
     }

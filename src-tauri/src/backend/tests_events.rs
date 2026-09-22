@@ -232,21 +232,31 @@ impl EventStreamBody for ScriptedBody {
     }
 }
 
+/// The hello frame used everywhere a test just wants "a normal, in-range
+/// hub" — this build's own current contract revision, so bumping
+/// `MIN_HUB_CONTRACT`/`MAX_HUB_CONTRACT` (or `CONTRACT_REVISION`) never
+/// turns every other test in this file into a skew test by accident.
 fn ready() -> String {
-    frame(
-        READY_FRAME,
-        &json!({"version": "0.2.20", "now": 1, "kinds": ["session"]}),
-    )
+    ready_with_contract(fleet_core::wire_contract::CONTRACT_REVISION)
 }
 
 /// A `ready` frame naming an explicit wire-contract revision — what a hub
-/// built with `fleet_core::wire_contract` sends, as opposed to [`ready`]'s
-/// shape, which is what every hub released before that field existed sent
-/// (and still sends: the field is additive, never required).
+/// built with `fleet_core::wire_contract` sends, as opposed to
+/// [`ready_with_no_contract_field`]'s shape.
 fn ready_with_contract(contract: u32) -> String {
     frame(
         READY_FRAME,
         &json!({"version": "0.2.20", "now": 1, "kinds": ["session"], "contract": contract}),
+    )
+}
+
+/// What every hub released before the wire-contract mechanism existed sends
+/// (and still sends: the field is additive, never required) — read as
+/// revision `0` by [`hub_contract_revision`](crate::backend::contract::hub_contract_revision).
+fn ready_with_no_contract_field() -> String {
+    frame(
+        READY_FRAME,
+        &json!({"version": "0.2.20", "now": 1, "kinds": ["session"]}),
     )
 }
 
@@ -835,23 +845,77 @@ async fn a_connection_that_only_says_ready_does_not_reset_the_backoff() {
 // does not trust that hub's rows: no resync, no row event applied, and a
 // connection state naming both revisions and which side to update.
 //
-// `MIN_HUB_CONTRACT` is `0` today, so "too old" cannot be reached through a
-// live `u32` here — `backend::contract::tests` covers both directions of
-// `classify_hub_contract` directly as a pure function instead. These tests
-// cover what only the bridge can prove: that a skewed connection actually
+// `MIN_HUB_CONTRACT` moved to `2` when `move_session` started answering a
+// tagged `MoveOutcome` (wire_contract's revision-2 entry), so "too old" is
+// now reachable through a live `u32` here too — both directions are
+// exercised below, on top of `backend::contract::tests` covering
+// `classify_hub_contract` directly as a pure function. These tests cover
+// what only the bridge can prove: that a skewed connection actually
 // suppresses application, and that a later, in-range reconnect recovers.
 
 #[tokio::test]
-async fn a_ready_frame_with_no_contract_field_is_revision_zero_and_in_range() {
+async fn a_ready_frame_with_no_contract_field_is_revision_zero_and_too_old() {
     use crate::backend::connection::HubConnection as C;
     let (sink, states, resync) = drive_watched(vec![Connection::Delivers(vec![
-        ready(),
+        ready_with_no_contract_field(),
         frame_for(&RowChange::SessionKilled(1)),
     ])])
     .await;
-    assert_eq!(states.first(), Some(&C::Connected), "{states:?}");
-    assert_eq!(resync.count(), 1);
-    assert_eq!(sink.names(), vec!["session:killed"]);
+    match states.first() {
+        Some(C::HubTooOld {
+            hub_contract,
+            min_contract,
+        }) => {
+            assert_eq!(*hub_contract, 0);
+            assert_eq!(*min_contract, crate::backend::contract::MIN_HUB_CONTRACT);
+        }
+        other => panic!("expected HubTooOld first, got {other:?} in {states:?}"),
+    }
+    assert_eq!(
+        resync.count(),
+        0,
+        "no backfill from a hub this build cannot trust"
+    );
+    assert!(
+        sink.events().is_empty(),
+        "a row from a too-old hub must not reach the frontend: {:?}",
+        sink.events()
+    );
+}
+
+/// The direction reachable through today's real bounds: a hub behind
+/// `MIN_HUB_CONTRACT` — still on revision 1, one below the current minimum.
+/// Neither the row that follows nor a resync must reach the frontend.
+#[tokio::test]
+async fn a_hub_below_the_minimum_contract_is_too_old_and_suppresses_everything() {
+    use crate::backend::connection::HubConnection as C;
+    let killed = RowChange::SessionKilled(1);
+    let too_old = crate::backend::contract::MIN_HUB_CONTRACT - 1;
+    let (sink, states, resync) = drive_watched(vec![Connection::Delivers(vec![
+        ready_with_contract(too_old),
+        frame_for(&killed),
+    ])])
+    .await;
+    assert!(
+        sink.events().is_empty(),
+        "a row from a too-old hub must not reach the frontend: {:?}",
+        sink.events()
+    );
+    assert_eq!(
+        resync.count(),
+        0,
+        "no backfill from a hub this build cannot trust"
+    );
+    match states.first() {
+        Some(C::HubTooOld {
+            hub_contract,
+            min_contract,
+        }) => {
+            assert_eq!(*hub_contract, too_old);
+            assert_eq!(*min_contract, crate::backend::contract::MIN_HUB_CONTRACT);
+        }
+        other => panic!("expected HubTooOld first, got {other:?} in {states:?}"),
+    }
 }
 
 #[tokio::test]

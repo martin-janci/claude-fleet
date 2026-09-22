@@ -917,15 +917,44 @@ fn a_hub_at_either_edge_of_the_range_is_in_range() {
 }
 
 #[test]
-fn todays_bounds_accept_a_hub_with_no_contract_field_and_this_builds_own_hub() {
-    // The concrete claim MIN_HUB_CONTRACT/MAX_HUB_CONTRACT exist to make
-    // true: an old hub (read as revision 0, see `hub_contract_revision` above)
-    // and this build's own hub (`fleet_core::wire_contract::CONTRACT_REVISION`)
-    // are both inside `[MIN_HUB_CONTRACT, MAX_HUB_CONTRACT]` today.
+fn a_hub_with_no_contract_field_or_still_on_revision_1_is_now_too_old() {
+    // `move_session` answering a tagged `MoveOutcome` and honouring
+    // `dry_run` (wire_contract's revision-2 entry) raised MIN_HUB_CONTRACT
+    // past 0 and past 1: a hub sending no `contract` field at all (read as
+    // revision 0, see `hub_contract_revision` above) or one still on
+    // revision 1 no longer round-trips this build's assumptions, so both
+    // must now be refused rather than trusted with a silent default. This
+    // is also the "too old" edge exercised through the LIVE bounds, not
+    // just the pure classifier above — `MIN_HUB_CONTRACT` used to be `0`,
+    // which nothing on a `u32` can fall below.
     assert_eq!(
         classify_hub_contract(0, MIN_HUB_CONTRACT, MAX_HUB_CONTRACT),
-        ContractFit::InRange
+        ContractFit::TooOld
     );
+    assert_eq!(
+        classify_hub_contract(1, MIN_HUB_CONTRACT, MAX_HUB_CONTRACT),
+        ContractFit::TooOld
+    );
+}
+
+#[test]
+fn a_hub_still_on_revision_2_is_now_too_old_too() {
+    // Transfer 3c Task 4: `move_session` gained a `when` argument
+    // (`now` | `idle` | `cancel`), and an older hub ignoring it would
+    // perform a real move for `when: cancel` — cancelling a wait would
+    // MOVE the session. That raised MIN_HUB_CONTRACT past 2, same as the
+    // revision-2 bump raised it past 0 and 1 above: this is the live-bounds
+    // edge for the new minimum, kept alongside (not instead of) the
+    // revision-1 case, per the same "never delete a pin, only extend it"
+    // rule that test follows.
+    assert_eq!(
+        classify_hub_contract(2, MIN_HUB_CONTRACT, MAX_HUB_CONTRACT),
+        ContractFit::TooOld
+    );
+}
+
+#[test]
+fn todays_bounds_accept_this_builds_own_hub() {
     assert_eq!(
         classify_hub_contract(
             fleet_core::wire_contract::CONTRACT_REVISION,

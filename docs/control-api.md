@@ -270,8 +270,12 @@ Index by area (names only; see the reference for details):
   committed for you (`strict: true` restores the old clean + pushed
   refusals) — then `--resume` on the target and the source killed once the
   target runs; master token only, since the caller must be allowed on both
-  hosts), `resolve_move` (finish or undo a partial move left with both
-  sessions alive).
+  hosts; `dry_run: true` previews instead — writes nothing to either host,
+  needs no confirmation, and answers what would travel plus `unknowns`, or
+  the same refusal the real move would raise; the result is tagged
+  `kind: "moved"` (the move report) or `kind: "preview"`),
+  `resolve_move` (finish or undo a partial move left with both sessions
+  alive).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
   `repo_commit_diff`.
@@ -613,7 +617,7 @@ automatically on app start.
   before agents broadcast, kill sessions, delete worktrees or write the
   clipboard"** (`mcp.confirm_destructive`, off by default) makes
   `broadcast_prompt`, `kill_session`, `delete_worktree`, `set_clipboard`,
-  `repair_session`, `cancel_task` and `move_session` return `E_CONFIRM_REQUIRED` with a one-time `confirm_nonce`;
+  `repair_session`, `cancel_task` and `move_session` (not its `dry_run`) return `E_CONFIRM_REQUIRED` with a one-time `confirm_nonce`;
   approve the request in the desktop dialog, then retry the call with that
   nonce. The nonce is bound to the call's arguments — for `set_clipboard` and
   `broadcast_prompt` including a digest of the content / prompt — so an

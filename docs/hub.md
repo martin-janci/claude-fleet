@@ -1175,6 +1175,32 @@ learned; a stream that is merely down (`reconnecting`, `offline`) changes
 nothing either way; and the first `ready` frame that classifies the hub back
 in range opens all of it again, with no restart.
 
+**Upgrade a desktop and its hub together from contract revision 3.**
+Revision 2 is the release where `move_session` answers a tagged result
+(`kind: moved | preview`) and honours `dry_run`. Revision 3 adds a `when`
+argument (`now` | `idle` | `cancel`): `idle` waits for the source to go idle
+before moving, `cancel` ends a pending wait instead of moving anything. Both
+ends require the current revision: a new desktop refuses an older hub
+(revision 0, 1 or 2, "update the hub"), and an older desktop refuses a newer
+hub ("update this app"). There is no mixed window in which the two work
+together.
+
+Two things wait for more than the absence of a skew: a Transfer preview
+(`move_session` with `dry_run: true`) and a call whose `when` is not `now`. A
+hub from before revision 3 ignores both `dry_run` and `when`, so it performs a
+real move regardless of what either one asked for. For `dry_run` and `when:
+idle` that only means the desktop refuses to ask something it could not trust
+the answer to; for `when: cancel` it is the reason the guard exists at all —
+an old hub sees an ordinary move request and moves the session, so cancelling
+a wait would perform the very move it was meant to stop. Either way the
+desktop refuses with `E_HUB_CONTRACT` until the current connection's
+`ready` frame has been judged in range — not merely "no mismatch recorded
+yet", which is also what a desktop still connecting sees. A dropped event
+stream withdraws that judgement until the next `ready` frame: the hub that
+answers the reconnect may be an older build. These calls become available
+once the desktop has confirmed the hub's version; a plain move (`when: now`,
+not a dry run) is not held back by this.
+
 ### Parity or refusal
 
 A desktop mutation is routed to the hub **only where the desktop's arguments

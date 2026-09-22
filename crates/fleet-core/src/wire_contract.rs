@@ -37,4 +37,26 @@
 //! `src-tauri/src/backend/contract.rs`) and, outside that range, does not
 //! trust the hub's rows at all rather than risk showing a stuck or lost
 //! session as healthy.
-pub const CONTRACT_REVISION: u32 = 1;
+//!
+//! # Revision history
+//!
+//! - **1** — the mechanism's own introduction (#148): no prior revision to
+//!   compare against, so this is the bootstrap value every hub and this
+//!   build started at together.
+//! - **2** — `move_session` answers a tagged `MoveOutcome`
+//!   (`{"kind": "moved" | "preview", ...}`) instead of a bare `MoveReport`,
+//!   and honours a `dry_run` argument. An older hub's answer has no `kind`,
+//!   which this build can no longer parse for a real move (`E_PARSE` after
+//!   the move already happened); and an older hub's `MoveSessionParams`
+//!   silently ignores an unknown `dry_run` field and runs a real move where
+//!   this build asked for a read-only preview. Both are exactly what this
+//!   mechanism exists to refuse instead of risking.
+//! - **3** — `move_session` takes a `when` argument (`now` | `idle` |
+//!   `cancel`) and can answer `MoveOutcome::Waiting` or `WaitCancelled` in
+//!   addition to `Moved`/`Preview`. An older hub ignores `when` entirely: for
+//!   `idle` that is harmless (it sees no such field and refuses a busy
+//!   source exactly as it always has), but for `cancel` it is not — the old
+//!   hub sees an ordinary move request and MOVES the session, so cancelling
+//!   a wait would perform the very move it was meant to stop. That is the
+//!   one case this bump exists to refuse instead of risking.
+pub const CONTRACT_REVISION: u32 = 3;
