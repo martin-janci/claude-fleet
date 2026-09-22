@@ -49,12 +49,12 @@ const NOT_RUNNING: &str = "start fleet-hub serve first";
 const MAX_RESPONSE: u64 = 1024 * 1024;
 
 /// Where to reach the running hub, and with what.
-struct HubConn {
-    addr: SocketAddr,
-    token: String,
+pub(crate) struct HubConn {
+    pub(crate) addr: SocketAddr,
+    pub(crate) token: String,
     /// Whether the hub terminates TLS itself (`--tls cert`), resolved the
     /// same way `hub_conn` resolves `addr`'s port.
-    tls: bool,
+    pub(crate) tls: bool,
 }
 
 /// Read the master token out of the data dir and work out which port the
@@ -75,7 +75,10 @@ struct HubConn {
 /// CLI built from a newer commit than the running `fleet-hub serve` would
 /// otherwise apply its own migrations to the live database under the daemon,
 /// and nothing here needs more than two `settings` rows.
-fn hub_conn(opts: &HubOptions, env: &HashMap<String, String>) -> Result<HubConn, String> {
+pub(crate) fn hub_conn(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<HubConn, String> {
     let db = existing_db(&resolve_data_dir(opts, env))?;
     let store = fleet_core::store::Store::open_read_only(&db)
         .map_err(|e| format!("failed to read the hub database at {}: {e}", db.display()))?;
@@ -167,7 +170,7 @@ async fn call_tool(
 /// network error when the read itself fails, even if some bytes already
 /// arrived: a truncated response would otherwise surface as a confusing
 /// downstream JSON-RPC parse failure instead of naming the reset.
-async fn exchange(addr: SocketAddr, tls: bool, request: &str) -> Result<String, String> {
+pub(crate) async fn exchange(addr: SocketAddr, tls: bool, request: &str) -> Result<String, String> {
     let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::ConnectionRefused {
             format!("no hub is answering on {addr} — {NOT_RUNNING}")
@@ -269,7 +272,7 @@ pub fn fmt_time(ts: Option<i64>) -> String {
 /// `unicode-width` table is not worth a dependency here (the only consumer is
 /// one CLI table), so this covers the ranges a name realistically lands in
 /// and falls back to one column, which is what every terminal assumes.
-fn display_width(s: &str) -> usize {
+pub(crate) fn display_width(s: &str) -> usize {
     s.chars().map(char_width).sum()
 }
 
