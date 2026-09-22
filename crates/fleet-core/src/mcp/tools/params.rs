@@ -93,6 +93,13 @@ pub struct NewSessionParams {
     /// Optional sidebar label. Omit / empty to derive one from the branch.
     #[serde(default)]
     pub friendly_name: Option<String>,
+    /// Resume this Claude conversation instead of starting a new one (a
+    /// resumable candidate from discover_lost_sessions). `worktree_id` must
+    /// be exactly the transcript's cwd, or an empty conversation starts under
+    /// this id. Rejected for shell sessions and for a conversation a session
+    /// on the host already holds (use restore_host_sessions).
+    #[serde(default)]
+    pub resume_claude_session_id: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

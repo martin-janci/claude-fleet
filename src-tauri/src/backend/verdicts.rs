@@ -288,6 +288,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "restore_host_sessions",
+        Verdict::Routed {
+            tool: "restore_host_sessions",
+        },
+    ),
+    (
+        "discover_lost_sessions",
+        Verdict::Routed {
+            tool: "discover_lost_sessions",
+        },
+    ),
+    (
         "move_session",
         Verdict::Routed {
             tool: "move_session",

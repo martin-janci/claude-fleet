@@ -891,6 +891,26 @@
         <span class="hook-desc" id="limit-lost-ttl-desc">hours a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost (0 = off: removed on the next pass like any vanished session)</span>
       </div>
       <div class="mcp-field">
+        <label class="lbl" for="restore-batch-size">restore batch</label>
+        <input class="port" id="restore-batch-size" type="number" min="1" max="16" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.restoreBatchSize)}
+          disabled={limitsBusy}
+          aria-describedby="restore-batch-size-desc"
+          data-testid="restore-batch-size"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.restoreBatchSize, 'Concurrent restores', e)} />
+        <span class="hook-desc" id="restore-batch-size-desc">Sessions resumed in parallel by Restore lost sessions</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="restore-stagger-ms">restore delay</label>
+        <input class="port" id="restore-stagger-ms" type="number" min="0" max="60000" step="500"
+          value={settingInt($fleetSettings, SETTING_KEYS.restoreStaggerMs)}
+          disabled={limitsBusy}
+          aria-describedby="restore-stagger-ms-desc"
+          data-testid="restore-stagger-ms"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.restoreStaggerMs, 'Delay between restores (ms)', e)} />
+        <span class="hook-desc" id="restore-stagger-ms-desc">Pause between starting each resumed session</span>
+      </div>
+      <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>
         <input class="port" id="limit-move-mb" type="number" min="1" max={MOVE_MAX_TRANSCRIPT_MB_MAX} step="1"
           value={settingInt($fleetSettings, SETTING_KEYS.moveMaxTranscriptMb)}
