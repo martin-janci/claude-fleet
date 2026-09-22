@@ -14,6 +14,9 @@ import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 
 const inv = () => mockedInvoke as ReturnType<typeof vi.fn>;
+// A refusal still goes through `pushError`, which also fires a
+// `report_client_error` telemetry call — not the rename IPC under test.
+const ipcCalls = () => inv().mock.calls.filter((c) => c[0] !== 'report_client_error');
 
 const remote: HubStatus = {
   remote: true,
@@ -47,7 +50,7 @@ describe('applySessionRename, label mode (set_friendly_name)', () => {
     hubStatus.set(remote);
     hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
     const outcome = await applySessionRename(target, 'label', 'new label');
-    expect(inv()).not.toHaveBeenCalled();
+    expect(ipcCalls()).toHaveLength(0);
     expect(outcome.kind).toBe('error');
     if (outcome.kind === 'error') expect(outcome.error.message.toLowerCase()).toContain('unreachable');
   });
@@ -74,7 +77,7 @@ describe('applySessionRename, tmux mode (rename_session)', () => {
     hubStatus.set(remote);
     hubConnection.set({ state: 'connecting' });
     const outcome = await applySessionRename(target, 'tmux', 'new-name');
-    expect(inv()).not.toHaveBeenCalled();
+    expect(ipcCalls()).toHaveLength(0);
     expect(outcome.kind).toBe('error');
   });
 

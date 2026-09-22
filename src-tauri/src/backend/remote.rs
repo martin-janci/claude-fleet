@@ -97,6 +97,13 @@ impl HubBackend {
         }
     }
 
+    /// The transport, so the report flusher can post through the same
+    /// `HubTransport` implementation as the tool calls (a test injects a
+    /// recorded one).
+    pub fn transport(&self) -> Arc<dyn HubTransport> {
+        Arc::clone(&self.transport)
+    }
+
     /// Consult `link` before every call, so that a hub whose wire contract
     /// this build does not read is refused rather than deserialised.
     ///

@@ -6,6 +6,8 @@
 //! as usual) + `tracing-appender` (hourly rotation, newest `MAX_LOG_FILES`
 //! kept). `log` records from dependencies (tauri, tao, …) are bridged in by
 //! `tracing-log`, so either macro family ends up in the same file.
+//! `ReportLayer` copies every `ERROR` event into `report_ring()` for the hub
+//! error channel (spec 2026-09-21).
 //!
 //! Why hourly: `tracing-appender` 0.2 has no size-based cap, so with daily
 //! rotation a `RUST_LOG=debug` run could grow one day's file without bound.
@@ -259,6 +261,80 @@ pub fn redact_secrets(input: &str, secrets: &[String]) -> String {
     out
 }
 
+/// The process-wide queue of error-level events, fed by [`ReportLayer`] and
+/// drained by whoever reports to a hub (the desktop's flusher, the hub's own
+/// tick). Bounded at `RING_CAP`; in a process nothing drains it just wraps.
+pub fn report_ring() -> &'static fleet_proto::report::ReportRing {
+    static RING: LazyLock<fleet_proto::report::ReportRing> =
+        LazyLock::new(fleet_proto::report::ReportRing::new);
+    &RING
+}
+
+/// Flatten one event's fields into a [`Report`](fleet_proto::report::Report):
+/// `message` is the message, `code` is the code, everything else is
+/// appended as ` key=value`.
+#[derive(Default)]
+struct ReportVisitor {
+    message: String,
+    code: Option<String>,
+    rest: String,
+}
+
+impl tracing::field::Visit for ReportVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        match field.name() {
+            "message" => self.message = format!("{value:?}"),
+            "code" => self.code = Some(format!("{value:?}").trim_matches('"').to_string()),
+            name => {
+                use std::fmt::Write as _;
+                let _ = write!(self.rest, " {name}={value:?}");
+            }
+        }
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "message" => self.message = value.to_string(),
+            "code" => self.code = Some(value.to_string()),
+            name => {
+                use std::fmt::Write as _;
+                let _ = write!(self.rest, " {name}={value}");
+            }
+        }
+    }
+}
+
+/// An `ERROR` event as a clamped report, or `None` for any other level.
+pub fn report_from_event(event: &tracing::Event<'_>) -> Option<fleet_proto::report::Report> {
+    if *event.metadata().level() != tracing::Level::ERROR {
+        return None;
+    }
+    let mut v = ReportVisitor::default();
+    event.record(&mut v);
+    let mut r = fleet_proto::report::Report::error(
+        event.metadata().target(),
+        &format!("{}{}", v.message, v.rest),
+    );
+    r.code = v.code;
+    r.clamp();
+    Some(r)
+}
+
+/// Pushes every `ERROR` event into [`report_ring`]. Never logs: a layer that
+/// logs re-enters the subscriber.
+pub struct ReportLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReportLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if let Some(r) = report_from_event(event) {
+            report_ring().push(r);
+        }
+    }
+}
+
 /// An `io::Write` adapter that redacts each buffer before forwarding it.
 /// `tracing-subscriber`'s fmt layer formats a whole event into one buffer and
 /// writes it with a single `write_all`, so every call sees complete lines.
@@ -356,6 +432,7 @@ pub fn init_in_with(log_dir: &Path, force_stderr: bool) -> Result<PathBuf, Strin
         .with(filter)
         .with(file_layer)
         .with(stderr_layer)
+        .with(ReportLayer)
         .try_init()
         .map_err(|e| format!("install log subscriber: {e}"))?;
 
@@ -387,12 +464,50 @@ pub fn init_stderr_fallback() {
                 .with_writer(RedactingMakeWriter(std::io::stderr))
                 .with_target(true),
         )
+        .with(ReportLayer)
         .try_init();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_event_becomes_a_report_and_a_warn_does_not() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        // The ring is process-global and fleet-core's tests run in parallel
+        // threads, so a length assertion would be racy; instead push a
+        // unique message and find *this* report after draining everything.
+        let unique = format!(
+            "refused-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let before = report_ring().len();
+        let sub = tracing_subscriber::registry().with(ReportLayer);
+        tracing::subscriber::with_default(sub, || {
+            tracing::error!(target: "fleet_core::ssh", code = "E_SSH", host = "box", "ssh failed: {}", unique);
+            tracing::warn!(target: "fleet_core::ssh", "ignored");
+        });
+        assert!(report_ring().len() > before);
+        let b = report_ring().drain(usize::MAX);
+        let r = b
+            .reports
+            .iter()
+            .find(|r| r.message.starts_with(&format!("ssh failed: {unique}")))
+            .unwrap_or_else(|| panic!("no report with our unique message in {:?}", b.reports));
+        assert_eq!(r.component, "fleet_core::ssh");
+        assert_eq!(r.code.as_deref(), Some("E_SSH"));
+        assert!(
+            r.message.starts_with(&format!("ssh failed: {unique}")),
+            "{}",
+            r.message
+        );
+        assert!(r.message.contains("host=box"), "{}", r.message);
+        assert_eq!(r.level, "error");
+    }
 
     #[test]
     fn stderr_layer_is_forced_or_debug_or_env_opt_in() {

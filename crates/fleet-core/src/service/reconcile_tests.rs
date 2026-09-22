@@ -283,7 +283,7 @@ async fn status_transitions_emit_session_events_and_stamp_lifecycle_columns() {
     );
 
     // Pass 2 — nothing changed: identical row, zero events of either kind.
-    // `row_version` (migration 041) is excluded: the trigger bumps it on
+    // `row_version` (migration 042) is excluded: the trigger bumps it on
     // every physical UPDATE, no-op or not, so it is not part of "identical".
     f.pass().await;
     assert!(

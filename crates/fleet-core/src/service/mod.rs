@@ -40,6 +40,7 @@ pub mod repair_tick;
 pub mod repo;
 pub mod repo_mutate;
 pub mod repo_read;
+pub mod reports;
 pub mod safe_kill;
 pub mod sessions;
 pub mod settings;

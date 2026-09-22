@@ -144,6 +144,11 @@ pub const USAGE_INTERVAL_SECS: &str = "usage.interval_secs";
 /// `service::usage::BUILTIN_PRICES`.
 pub const USAGE_PRICES_JSON: &str = "usage.prices_json";
 
+/// Newest `error_reports` rows kept; pruned on every insert.
+pub const REPORTS_MAX_ROWS: &str = "reports.max_rows";
+/// Rows older than this are swept on the tick; `0` disables the age sweep.
+pub const REPORTS_MAX_AGE_SECS: &str = "reports.max_age_secs";
+
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
     Spec {
@@ -278,6 +283,19 @@ pub const SPECS: &[Spec] = &[
         key: USAGE_PRICES_JSON,
         default: "{}",
         kind: Kind::PriceMap,
+    },
+    Spec {
+        key: REPORTS_MAX_ROWS,
+        default: "5000",
+        kind: Kind::Int {
+            min: 100,
+            max: 100_000,
+        },
+    },
+    Spec {
+        key: REPORTS_MAX_AGE_SECS,
+        default: "604800",
+        kind: Kind::Secs,
     },
 ];
 

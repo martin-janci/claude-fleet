@@ -160,6 +160,7 @@ pub fn run_config(
                 token: read_token(args.token.as_deref(), args.token_file.as_deref(), stdin)?,
                 insecure: args.insecure,
                 ca_file: args.ca_file.clone(),
+                report_errors: config::default_report_errors(),
             };
             config::check_token(&config.token).map_err(|e| e.to_string())?;
             config
@@ -202,6 +203,7 @@ pub fn install_plan(
         token,
         insecure: args.insecure,
         ca_file: args.ca_file.clone(),
+        report_errors: config::default_report_errors(),
     };
     let (scope, mut layout, owner) = if args.user {
         let home = env

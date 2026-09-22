@@ -116,7 +116,7 @@ pub(super) const KIND_PANE_LESS: &str = "kind IN ('bg','external')";
 /// `PartialEq` covers every wire field including `row_version`. For the
 /// no-op-reconcile-pass check `upsert_session_in_tx` wants (a real change vs.
 /// a pass that observed exactly what is already stored), use
-/// [`SessionRow::eq_ignoring_row_version`] instead: the migration 041 trigger
+/// [`SessionRow::eq_ignoring_row_version`] instead: the migration 042 trigger
 /// bumps `row_version` on every physical UPDATE, no-op or not, so plain `==`
 /// would make every pass look like a change.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -210,7 +210,7 @@ pub struct SessionRow {
     /// (NULL ⇒ empty) and always surfaced as a list on the wire.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Bumped by a trigger on every UPDATE (migration 041). The frontend's
+    /// Bumped by a trigger on every UPDATE (migration 042). The frontend's
     /// merge guard orders a command's return value against a row event by
     /// it. `#[serde(default)]`: a hub older than the column sends none.
     #[serde(default)]
@@ -236,7 +236,7 @@ impl SessionRow {
     /// this row carry the same user-visible content.
     ///
     /// See the note above the `PartialEq` derive: plain `==` cannot answer
-    /// that question, because migration 041's trigger bumps `row_version` on
+    /// that question, because migration 042's trigger bumps `row_version` on
     /// every physical UPDATE regardless of whether any other field changed.
     ///
     /// The equal-version case — every no-op reconcile pass, which is what

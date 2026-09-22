@@ -461,7 +461,7 @@ impl Store {
             match prior {
                 None => out.push(RowChange::SessionCreated(row)),
                 // Every wire field identical (modulo `row_version`, which the
-                // migration 041 trigger bumps on every physical UPDATE, no-op
+                // migration 042 trigger bumps on every physical UPDATE, no-op
                 // or not — see `eq_ignoring_row_version`) ⇒ a no-op pass;
                 // emit nothing.
                 Some(ref before) if before.eq_ignoring_row_version(&row) => {}

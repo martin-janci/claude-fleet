@@ -123,6 +123,16 @@ pub fn spawn_reconcile_tick(
                         Err(e) => tracing::warn!("reconcile tick: task sweep failed: {e}"),
                     }
                 }
+                // Error reports (spec 2026-09-21): the hub's own ERROR events
+                // join the table, and rows past `reports.max_age_secs` go.
+                {
+                    let now = fleet_proto::report::now_unix();
+                    let _ = service::reports::drain_own_ring(store, now);
+                    let swept = service::reports::sweep_by_age(store, now);
+                    if swept > 0 {
+                        tracing::info!("reconcile tick: swept {swept} old error report(s)");
+                    }
+                }
                 // Opt-in (`repair.auto_on_tick`): re-add vanished worktrees with
                 // the create-only automatic policy. Detached and rate-limited.
                 service::repair_tick::maybe_run(store, ssh);

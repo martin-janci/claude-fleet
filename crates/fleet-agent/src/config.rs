@@ -20,6 +20,14 @@ pub struct Config {
     /// with a private CA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_file: Option<PathBuf>,
+    /// Send this agent's error-level log events to the hub on each
+    /// heartbeat.
+    #[serde(default = "default_report_errors")]
+    pub report_errors: bool,
+}
+
+pub fn default_report_errors() -> bool {
+    true
 }
 
 /// Why a config was refused.
@@ -292,6 +300,7 @@ mod tests {
             token: "t0k3n".into(),
             insecure: false,
             ca_file: None,
+            report_errors: true,
         }
     }
 
@@ -498,5 +507,15 @@ mod tests {
         c.token = "has space".into();
         write(&path, &c, None).unwrap();
         assert!(matches!(load(&path), Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn report_errors_defaults_on_and_reads_back() {
+        let c: Config = serde_json::from_str(r#"{"hub":"https://h","token":"t"}"#).unwrap();
+        assert!(c.report_errors);
+        let c: Config =
+            serde_json::from_str(r#"{"hub":"https://h","token":"t","report_errors":false}"#)
+                .unwrap();
+        assert!(!c.report_errors);
     }
 }

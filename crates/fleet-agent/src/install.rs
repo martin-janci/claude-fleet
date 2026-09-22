@@ -371,6 +371,7 @@ mod tests {
             token: TOKEN.into(),
             insecure: false,
             ca_file: None,
+            report_errors: true,
         }
     }
 

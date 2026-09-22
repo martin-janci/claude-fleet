@@ -1,10 +1,19 @@
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
+import { invoke } from '@tauri-apps/api/core';
+import { resetErrorReportingForTests } from './error_report';
 import { toasts, push, dismiss, clearToasts, pushError, pushResultError, runToastAction, INFO_TIMEOUT_MS, ACTION_TIMEOUT_MS } from './toasts';
+
+const inv = () => invoke as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.useFakeTimers();
   clearToasts();
+  inv().mockReset();
+  inv().mockResolvedValue(undefined);
+  resetErrorReportingForTests();
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -72,6 +81,13 @@ describe('toasts store', () => {
   it('pushError keeps the IpcError code and prefixes the context', () => {
     pushError({ code: 'E_SSH', message: 'connection refused' }, 'Kill failed');
     expect(get(toasts)[0]).toMatchObject({ kind: 'error', code: 'E_SSH', message: 'Kill failed: connection refused' });
+  });
+
+  it('pushError also reports to the hub error channel', () => {
+    pushError({ code: 'E_SSH', message: 'ssh refused' }, 'Opening terminal');
+    const reported = inv().mock.calls.filter((c) => c[0] === 'report_client_error');
+    expect(reported).toHaveLength(1);
+    expect((reported[0][1] as { args: { code: string; component: string } }).args).toMatchObject({ code: 'E_SSH', component: 'frontend' });
   });
 
   it('pushResultError is a no-op on Ok and surfaces Err', () => {
