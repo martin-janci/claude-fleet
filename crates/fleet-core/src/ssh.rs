@@ -285,10 +285,13 @@ impl SshClient {
     ///
     /// When the command instead exits 255 because the ControlMaster died
     /// under it (laptop sleep, roaming, the remote sshd restarting — see
-    /// [`is_mux_failure`]), the master is reset and the command is retried
-    /// exactly once, with whatever remains of `wall_clock` (floored at 5s).
-    /// A dead host (255 for any other reason) is returned as-is, not
-    /// retried.
+    /// [`is_mux_failure`]), the command is retried exactly once, with
+    /// whatever remains of `wall_clock` (floored at 5s). Before retrying, the
+    /// master is checked (`ssh -O check`): only if it does NOT answer is it
+    /// reset — a mux failure on this command does not mean a sibling command
+    /// multiplexed through the same master is also dead, so a still-healthy
+    /// master is left alone. A dead host (255 for any other reason) is
+    /// returned as-is, not retried.
     pub async fn run_bounded(
         &self,
         host: &str,
@@ -587,9 +590,14 @@ impl SshClient {
         }
     }
 
-    /// Spawn `build()` under the wall clock; on a mux failure reset the
-    /// master (counted) and run it once more with what is left of the wall
-    /// clock (at least 5 s).
+    /// Spawn `build()` under the wall clock; on a mux failure, check whether
+    /// the master is actually still alive (`ssh -O check`) before touching
+    /// it — a mux failure on ONE command does not mean the shared
+    /// ControlMaster is dead, and a sibling command may be mid-flight
+    /// through it right now. If the master still answers, it is left alone
+    /// and the command is simply retried; only when it does NOT answer is
+    /// it reset (counted). Either way the command runs once more with what
+    /// is left of the wall clock (at least 5 s).
     async fn run_with_mux_retry(
         &self,
         host: &str,
@@ -613,16 +621,20 @@ impl SshClient {
         if !is_mux_failure(&first) {
             return Ok(first);
         }
-        tracing::warn!(
-            host = %host,
-            "[ssh] the ControlMaster died under a command; resetting it and retrying once"
-        );
-        *self
-            .inner
-            .master_resets
-            .entry(host.to_string())
-            .or_insert(0) += 1;
-        self.reset_master(host).await;
+        if self.master_alive(host).await {
+            tracing::debug!(host = %host, "[ssh] master answers; retrying without a reset");
+        } else {
+            tracing::warn!(
+                host = %host,
+                "[ssh] the ControlMaster died under a command; resetting it and retrying once"
+            );
+            *self
+                .inner
+                .master_resets
+                .entry(host.to_string())
+                .or_insert(0) += 1;
+            self.reset_master(host).await;
+        }
         let left = wall_clock
             .saturating_sub(started.elapsed())
             .max(Duration::from_secs(5));
@@ -1365,7 +1377,11 @@ pub(crate) fn is_mux_failure(out: &Output) -> bool {
         "mux_client_request_session",
         "Control socket",
         "read from master failed",
-        "Broken pipe",
+        // ssh's own wording for a dropped control/session channel — not the
+        // bare "Broken pipe", which a REMOTE command's own stderr can emit
+        // (e.g. a remote `foo | head` hitting SIGPIPE) and which must not
+        // trigger a reset+retry of what may be a non-idempotent command.
+        "send disconnect: Broken pipe",
         "Connection closed by remote host",
     ]
     .iter()
@@ -1760,16 +1776,21 @@ mod tests {
             )),
             "only 255"
         );
+        assert!(
+            !is_mux_failure(&out(255, "sort: write failed: Broken pipe")),
+            "a REMOTE command's own SIGPIPE (e.g. `foo | head`) is not a mux failure"
+        );
     }
 
     #[tokio::test]
     async fn a_mux_failure_resets_the_master_and_retries_once() {
+        // `-O check` answers 1 (dead) so the master is actually reset.
         let dir = tempfile::tempdir().unwrap();
         let mark = dir.path().join("first-call-done");
         let bin = fake_ssh(
             dir.path(),
             &format!(
-                "case \"$*\" in *'-O exit'*|*'-O check'*) exit 0;; esac\n\
+                "case \"$*\" in *'-O check'*) exit 1;; *'-O exit'*) exit 0;; esac\n\
              if [ ! -f '{m}' ]; then touch '{m}'; echo 'mux_client_request_session: read from master failed' >&2; exit 255; fi\n\
              echo ok",
                 m = mark.display()
@@ -1785,14 +1806,46 @@ mod tests {
         assert_eq!(
             c.master_reset_counts().get("h-retry"),
             Some(&1),
-            "the master was reset before the retry"
+            "the dead master was reset before the retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mux_failure_on_a_live_master_retries_without_resetting() {
+        // `-O check` answers 0 (alive): a mux failure on this command does
+        // not mean the shared master is dead — a sibling command may be
+        // mid-flight through it — so the retry must NOT reset it.
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("first-call-done");
+        let bin = fake_ssh(
+            dir.path(),
+            &format!(
+                "case \"$*\" in *'-O check'*) exit 0;; *'-O exit'*) exit 0;; esac\n\
+             if [ ! -f '{m}' ]; then touch '{m}'; echo 'mux_client_request_session: read from master failed' >&2; exit 255; fi\n\
+             echo ok",
+                m = mark.display()
+            ),
+        );
+        let c = SshClient::with_ssh_binary(bin);
+        let out = c
+            .run("h-live", &["true"], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(out.status.success(), "the retry answers: {out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+        assert!(
+            !c.master_reset_counts().contains_key("h-live"),
+            "a live master must not be reset"
         );
     }
 
     #[tokio::test]
     async fn a_mux_failure_is_retried_only_once() {
+        // Always fails, and the master never answers `-O check` (dead), so
+        // exactly one reset happens before the one retry — whose own
+        // failure is returned as-is.
         let dir = tempfile::tempdir().unwrap();
-        let bin = fake_ssh(dir.path(), "case \"$*\" in *'-O exit'*|*'-O check'*) exit 0;; esac\necho 'mux_client_request_session: read from master failed' >&2; exit 255");
+        let bin = fake_ssh(dir.path(), "case \"$*\" in *'-O check'*) exit 1;; *'-O exit'*) exit 0;; esac\necho 'mux_client_request_session: read from master failed' >&2; exit 255");
         let c = SshClient::with_ssh_binary(bin);
         let out = c
             .run("h-twice", &["true"], Duration::from_secs(1))
