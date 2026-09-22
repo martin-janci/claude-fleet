@@ -2532,6 +2532,19 @@ fn move_session_params_carry_clean_target_into_the_service_args() {
 /// same lesson as `clean_target`/`dry_run` above, and the one 3d shipped a
 /// regression of: a routed argument that is on the schema but not mapped in
 /// `into_args` never reaches the service or the hub.
+/// M7: `when: idle` can answer a pending wait, so the tool's own summary
+/// of what it returns must say so, not only "a moved report or a preview".
+#[test]
+fn move_session_description_names_the_wait_it_can_answer() {
+    let tool = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .find(|t| t.name == "move_session")
+        .expect("move_session is served");
+    let d = tool.description.as_deref().unwrap_or_default();
+    assert!(d.contains("or a wait"), "{d}");
+}
+
 #[test]
 fn move_session_params_carry_when_into_the_service_args() {
     let p: super::params::MoveSessionParams = serde_json::from_value(serde_json::json!({
