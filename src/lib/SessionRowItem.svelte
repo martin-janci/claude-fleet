@@ -1,6 +1,5 @@
 <script lang="ts">
   import {
-    restartSession,
     recreateSession,
     dismissGhostSession,
     dismissAgentSession,
@@ -55,6 +54,7 @@
     onRenameKey,
     commitRename,
     askRecreate,
+    askRestart,
     askKill,
   }: {
     sess: SessionRow;
@@ -80,6 +80,7 @@
     onRenameKey: (e: KeyboardEvent) => void;
     commitRename: () => unknown;
     askRecreate: (sess: SessionRow, e?: Event) => void;
+    askRestart: (sess: SessionRow, e?: Event) => void;
     askKill: (sess: SessionRow, e?: Event) => void;
   } = $props();
 
@@ -99,12 +100,6 @@
     if (sess.worktree_key && !sess.tmux_name.endsWith(`--${sess.worktree_key}`)) return sess.worktree_key;
     return null;
   });
-
-  async function doRestart(sess: SessionRow, e?: Event) {
-    e?.stopPropagation();
-    const r = await restartSession(sess.host_alias, sess.tmux_name);
-    if (!r.ok) pushError(r.error, 'Restart failed');
-  }
 
   async function doRecreate(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
@@ -307,7 +302,8 @@
             {/if}
             <button
               class="icon-btn small"
-              onclick={(e) => doRestart(sess, e)}
+              data-testid="restart-session"
+              onclick={(e) => askRestart(sess, e)}
               disabled={restartBlocked !== null}
               title={restartBlocked ?? 'Restart claude in this session'}
               aria-label="Restart"
@@ -502,11 +498,20 @@
   .sess-row:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .sess-row.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
   .sess-row.renaming { background: var(--bg-pane); }
+  /* The row is the app's primary navigation surface and is a tabbable
+     role="button". Without this a keyboard user tabbing the session list
+     sees nothing move at all (WCAG 2.4.7). Drawn inward: the row is inside
+     a scrolling list that clips an outset ring. */
+  .sess-row:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
+  }
   .sess-row .row-actions {
     display: none;
     gap: 0.05rem;
   }
   .sess-row:hover .row-actions,
+  .sess-row:focus-within .row-actions,
   .sess-row.selected .row-actions { display: flex; }
 
   /* Line 1's actions must never take flex width: reserving space for them
@@ -533,9 +538,11 @@
     width: 1rem;
     background: linear-gradient(to right, transparent, var(--bg-pane));
   }
+  .sess-row:focus-within .sess-line1 .row-actions,
   .sess-row:hover .sess-line1 .row-actions {
     background: color-mix(in srgb, var(--accent) 10%, var(--bg-pane));
   }
+  .sess-row:focus-within .sess-line1 .row-actions::before,
   .sess-row:hover .sess-line1 .row-actions::before {
     background: linear-gradient(to right, transparent, color-mix(in srgb, var(--accent) 10%, var(--bg-pane)));
   }

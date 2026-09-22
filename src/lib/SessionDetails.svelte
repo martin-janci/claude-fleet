@@ -180,7 +180,18 @@
     if (!r.ok) pushError(r.error, 'Remove failed');
   }
 
+  // Restart stops the running claude and loses whatever it was mid-way
+  // through. Kill and Recreate beside it both confirm; this did not, and it
+  // wears the same `↻` the app uses for a harmless Refresh.
+  let confirmingRestart = $state(false);
+  function askRestart() {
+    confirmingRestart = true;
+  }
+  function cancelRestart() {
+    confirmingRestart = false;
+  }
   async function onRestart() {
+    confirmingRestart = false;
     const r = await restartSession(session.host_alias, session.tmux_name);
     if (!r.ok) pushError(r.error, 'Restart failed');
   }
@@ -635,7 +646,7 @@
       </button>
       <button
         class="ghost"
-        onclick={onRestart}
+        onclick={askRestart}
         disabled={restartBlocked !== null}
         title={restartBlocked ?? ''}
         data-testid="restart-from-details"
@@ -760,6 +771,21 @@
 
 {#if reviewOpen}
   <ReviewDialog source={session} onClose={() => (reviewOpen = false)} />
+{/if}
+
+{#if confirmingRestart}
+  <ConfirmDialog
+    title="Restart claude?"
+    confirmLabel="Restart"
+    danger
+    onconfirm={onRestart}
+    oncancel={cancelRestart}
+    confirmTestId="confirm-restart-details"
+  >
+    This stops the claude process in <code>{session.tmux_name}</code> on
+    <code>{session.host_alias}</code> and starts a fresh one. Anything it is working
+    on right now is lost; the tmux session and the worktree are kept. Continue?
+  </ConfirmDialog>
 {/if}
 
 {#if confirmingKill}

@@ -11,7 +11,8 @@
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
   import { push, pushError } from './toasts';
-  import { repairSession, hasNoPane } from './sessions';
+  import { repairSession, hasNoPane, showFriendlyNames } from './sessions';
+  import { displayName } from './attention';
   import { keyToBytes, detectMac } from './terminal_keys';
   import { createDrainLoop } from './terminal_drain';
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
@@ -1097,7 +1098,14 @@
       </div>
     {/if}
     <div class="header" data-testid="terminal-header" use:hintAnchor={{ id: 'terminal-header' }}>
-      <span class="name">{$selectedSession.tmux_name}</span>
+      <!-- One name policy: the header names the session the same way the
+           sidebar row directly beside it does (attention.ts displayName).
+           It used to render the tmux name unconditionally, so with the
+           default settings the two disagreed about what you were looking
+           at. The tmux name stays reachable in the tooltip. -->
+      <span class="name" title={$selectedSession.tmux_name}
+        >{displayName($selectedSession, $showFriendlyNames)}</span
+      >
       <TransferChip session={$selectedSession} />
       <span class="size" data-testid="terminal-size">
         {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}

@@ -106,6 +106,7 @@ pub async fn spawn_review(
         &review_name,
         &args.prompt,
         true,
+        false,
     )
     .await
     {

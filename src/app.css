@@ -43,6 +43,16 @@
   --ring-w: 2px;
   --ring-offset: 1px;
 
+  /* The bottom-right corner stacks three independent fixed layers: the
+     status footer, the agent FAB above it, and the toast stack above that.
+     Before these tokens the FAB covered the footer's usage button (the only
+     way into Hosts at an over-quota account) and any toast covered the FAB,
+     so the agent's single entry point was unclickable while a toast was up.
+     One column, measured off one source. */
+  --status-h: 24px;
+  --fab-size: 48px;
+  --layer-gap: 8px;
+
   /* --border is 1.26:1 against --bg: it may SEPARATE things, but it can
      never be the only signal for a state. Use --control-border-strong
      (3.14:1) or --accent for anything that has to be read. */
