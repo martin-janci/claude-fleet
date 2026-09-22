@@ -278,6 +278,7 @@ fn sample_conversation() -> Conversation {
             prompt: Some("hello".into()),
             at: Some("2026-09-18T10:00:00Z".into()),
             ended_at: Some("2026-09-18T10:00:05Z".into()),
+            reminders: vec!["the harness stapled this on".into()],
             items: vec![
                 ConvItem::Text {
                     text: "hi back".into(),

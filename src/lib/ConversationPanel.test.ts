@@ -454,6 +454,83 @@ describe('ConversationPanel', () => {
     expect(container.textContent).not.toContain('**one**');
   });
 
+  it('folds a system reminder into a chip instead of printing it as XML', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: 'UI nereflektuje',
+              at: null,
+              ended_at: null,
+              items: [{ kind: 'text', text: 'ok' }],
+              reminders: ['You are operating in a git worktree.'],
+            },
+          ],
+        }),
+      ),
+    );
+    const { container } = render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(container.textContent).not.toContain('<system-reminder>');
+    const chip = screen.getByTestId('conv-reminders');
+    expect(chip.querySelector('summary')?.textContent).toBe('system reminder');
+    expect(screen.getByTestId('conv-reminder-body').textContent).toBe('You are operating in a git worktree.');
+    expect(screen.getByTestId('conv-prompt').textContent).toContain('UI nereflektuje');
+  });
+
+  it('renders a `!` bash line as command + output, not raw XML', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: null,
+              at: null,
+              ended_at: null,
+              items: [{ kind: 'bash', command: 'git pull --ff-only', stdout: 'Already up to date.', stderr: null }],
+            },
+          ],
+        }),
+      ),
+    );
+    const { container } = render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const row = screen.getByTestId('conv-bash');
+    expect(row.querySelector('code')?.textContent).toBe('!git pull --ff-only');
+    expect(row.querySelector('.command-out')?.textContent).toBe('Already up to date.');
+    expect(container.textContent).not.toContain('bash-input');
+  });
+
+  it('folds an unknown harness block under its tag instead of printing the XML', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: null,
+              at: null,
+              ended_at: null,
+              items: [{ kind: 'harness', tag: 'ci-monitor-event', body: 'PR #12 checks failed' }],
+            },
+          ],
+        }),
+      ),
+    );
+    const { container } = render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const block = screen.getByTestId('conv-harness');
+    expect(block.querySelector('summary')?.textContent).toBe('ci-monitor-event');
+    expect(block.querySelector('.harness-body')?.textContent).toBe('PR #12 checks failed');
+    expect(container.textContent).not.toContain('<ci-monitor-event>');
+  });
+
   it('folds consecutive tool calls into one expandable group; a single call stays a line', async () => {
     mockedConv.mockReturnValue(
       ok(

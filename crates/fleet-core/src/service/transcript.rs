@@ -309,6 +309,11 @@ pub struct ConvTurn {
     pub ended_at: Option<String>,
     #[serde(default)]
     pub items: Vec<ConvItem>,
+    /// `<system-reminder>` bodies that rode this turn's prompt entry (or
+    /// arrived alone just before it). Harness noise, never the human's
+    /// words — the panel folds them into a chip instead of printing them.
+    #[serde(default)]
+    pub reminders: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -427,6 +432,22 @@ pub enum ConvItem {
         /// one's — a joined block must take its finish time from here.
         #[serde(default)]
         at: Option<String>,
+    },
+    /// A `!` bash line the user ran in the REPL: one entry carrying
+    /// `<bash-input>` and its `<bash-stdout>` / `<bash-stderr>`.
+    Bash {
+        command: String,
+        #[serde(default)]
+        stdout: Option<String>,
+        #[serde(default)]
+        stderr: Option<String>,
+    },
+    /// A user entry that is nothing but one harness `<tag>…</tag>` block we
+    /// have no dedicated item for. Folded so the panel never prints raw XML
+    /// at the reader; `tag` labels it, `body` is the text inside.
+    Harness {
+        tag: String,
+        body: String,
     },
     /// `[Request interrupted by user]` (`during_tool`: "… for tool use").
     Interrupt {
@@ -556,6 +577,93 @@ fn prompt_text(content: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
+/// Split off every `<system-reminder>…</system-reminder>` block: the text
+/// the human actually wrote, and the reminder bodies in order. The harness
+/// appends these to a prompt (and sometimes sends one alone), so printing
+/// them verbatim turns a one-line prompt into a screen of XML.
+fn split_reminders(text: &str) -> (String, Vec<String>) {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+    let mut rest = String::new();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while let Some(off) = text[i..].find(OPEN) {
+        let start = i + off;
+        let body_at = start + OPEN.len();
+        let Some(off) = text[body_at..].find(CLOSE) else {
+            break;
+        };
+        let end = body_at + off;
+        rest.push_str(&text[i..start]);
+        let body = text[body_at..end].trim();
+        if !body.is_empty() {
+            found.push(body.to_string());
+        }
+        i = end + CLOSE.len();
+    }
+    rest.push_str(&text[i..]);
+    (rest, found)
+}
+
+/// Unwrap `<pasted_content …>…</pasted_content …>` to the text inside.
+/// Both tags carry attributes and the close tag is **not** well formed
+/// (`</pasted_content id="8f92">`), so this scans for the delimiters rather
+/// than using [`tag_text`].
+fn unwrap_pasted(text: &str) -> String {
+    const OPEN: &str = "<pasted_content";
+    const CLOSE: &str = "</pasted_content";
+    let mut out = String::new();
+    let mut i = 0;
+    while let Some(off) = text[i..].find(OPEN) {
+        let open_at = i + off;
+        let Some(off) = text[open_at..].find('>') else {
+            break;
+        };
+        let body_at = open_at + off + 1;
+        let Some(off) = text[body_at..].find(CLOSE) else {
+            break;
+        };
+        let close_at = body_at + off;
+        let Some(off) = text[close_at..].find('>') else {
+            break;
+        };
+        out.push_str(&text[i..open_at]);
+        out.push_str(text[body_at..close_at].trim());
+        i = close_at + off + 1;
+    }
+    out.push_str(&text[i..]);
+    out
+}
+
+/// A user entry that is nothing but one `<tag …>…</tag>` element — the
+/// harness talking, not the human. Returns the tag name and the text inside.
+///
+/// Deliberately narrow: the element must be the whole entry, and the tag
+/// must be kebab- or snake-cased. A pasted HTML snippet (`<div>`, `<p>`)
+/// and a prompt that merely *mentions* a tag both stay prompts.
+fn lone_block(text: &str) -> Option<(String, String)> {
+    let t = text.trim();
+    let rest = t.strip_prefix('<')?;
+    let name_end = rest.find(|c: char| c == '>' || c.is_whitespace())?;
+    let tag = &rest[..name_end];
+    let named = !tag.is_empty()
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && (tag.contains('-') || tag.contains('_'));
+    if !named {
+        return None;
+    }
+    let open_len = 1 + rest.find('>')? + 1;
+    let close = format!("</{tag}>");
+    let body = t.strip_suffix(&close)?.get(open_len..)?;
+    // A second copy of the close tag means this was not one lone element.
+    if body.contains(&close) {
+        return None;
+    }
+    Some((tag.to_string(), body.trim().to_string()))
+}
+
 /// Split a transcript (JSONL text; a leading partial line is tolerated)
 /// into turns. A turn starts at every human `user` prompt (a string body,
 /// or a content array without `tool_result` blocks); every `assistant`
@@ -573,6 +681,10 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
     }
     let mut turns: Vec<ConvTurn> = Vec::new();
     let mut current: Option<ConvTurn> = None;
+    // `<system-reminder>` bodies seen but not yet attached: they ride the
+    // turn their entry opens, or — when the harness sent one alone — the
+    // next turn to open (the last one, if none follows).
+    let mut pending_reminders: Vec<String> = Vec::new();
     // tool_use id → index of its item in `current`, so a later tool_result
     // carrying `is_error` can flag the line. Results always land inside the
     // turn that issued the call, so the map resets with the turn.
@@ -600,6 +712,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     prompt: None,
                     at: at(),
                     ended_at: None,
+                    reminders: std::mem::take(&mut pending_reminders),
                     items: vec![ConvItem::Compact {
                         trigger: meta
                             .and_then(|m| m.get("trigger"))
@@ -682,7 +795,19 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     }
                     continue;
                 }
-                if let Some(text) = user_text(content) {
+                // The human's words, with every `<system-reminder>` block
+                // lifted out: the harness staples those onto a prompt (and
+                // sometimes sends one on its own), and printed verbatim they
+                // bury the prompt under a screen of XML.
+                let mut stripped: Option<String> = None;
+                if let Some(raw) = user_text(content) {
+                    let (text, reminders) = split_reminders(&raw);
+                    let had_reminder = !reminders.is_empty();
+                    pending_reminders.extend(reminders);
+                    // A reminder-only entry is not a turn; it rides the next.
+                    if had_reminder && text.trim().is_empty() {
+                        continue;
+                    }
                     // Only an entry that *starts* with the tag is a command
                     // (or its output); a human prompt that merely contains
                     // one (a pasted transcript) stays a prompt.
@@ -720,6 +845,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 prompt: None,
                                 at: at(),
                                 ended_at: None,
+                                reminders: std::mem::take(&mut pending_reminders),
                                 items: Vec::new(),
                             });
                         }
@@ -742,6 +868,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             prompt: None,
                             at: at(),
                             ended_at: None,
+                            reminders: std::mem::take(&mut pending_reminders),
                             items: vec![ConvItem::Command {
                                 name,
                                 args: tag_text(&text, "command-args"),
@@ -768,6 +895,46 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         }
                         continue;
                     }
+                    // A `!` bash line: one entry carrying the command and
+                    // its output. Like a slash command, it opens its own turn.
+                    if head.starts_with("<bash-input>") {
+                        if let Some(command) = tag_text(&text, "bash-input") {
+                            push(&mut turns, current.take());
+                            tool_items.clear();
+                            current = Some(ConvTurn {
+                                prompt: None,
+                                at: at(),
+                                ended_at: None,
+                                reminders: std::mem::take(&mut pending_reminders),
+                                items: vec![ConvItem::Bash {
+                                    command,
+                                    stdout: tag_text(&text, "bash-stdout")
+                                        .map(|o| cap_chars(&o, COMMAND_OUTPUT_MAX_CHARS)),
+                                    stderr: tag_text(&text, "bash-stderr")
+                                        .map(|o| cap_chars(&o, COMMAND_OUTPUT_MAX_CHARS)),
+                                }],
+                            });
+                            continue;
+                        }
+                    }
+                    // Anything else that is one lone harness block: folded
+                    // under its tag rather than printed as raw XML.
+                    if let Some((tag, body)) = lone_block(&text) {
+                        push(&mut turns, current.take());
+                        tool_items.clear();
+                        current = Some(ConvTurn {
+                            prompt: None,
+                            at: at(),
+                            ended_at: None,
+                            reminders: std::mem::take(&mut pending_reminders),
+                            items: vec![ConvItem::Harness {
+                                tag,
+                                body: cap_chars(&body, COMMAND_OUTPUT_MAX_CHARS),
+                            }],
+                        });
+                        continue;
+                    }
+                    stripped = Some(unwrap_pasted(&text));
                     if text
                         .trim_start()
                         .starts_with("[Request interrupted by user")
@@ -777,6 +944,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             at: at(),
                             ended_at: None,
                             items: Vec::new(),
+                            reminders: Vec::new(),
                         });
                         turn.items.push(ConvItem::Interrupt {
                             during_tool: text.contains("for tool use"),
@@ -784,7 +952,10 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         continue;
                     }
                 }
-                if let Some(prompt) = prompt_text(content) {
+                if let Some(prompt) = stripped
+                    .map(|t| t.trim().to_string())
+                    .or_else(|| prompt_text(content))
+                {
                     push(&mut turns, current.take());
                     tool_items.clear();
                     current = Some(ConvTurn {
@@ -793,6 +964,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         at: at(),
                         ended_at: None,
                         items: Vec::new(),
+                        reminders: std::mem::take(&mut pending_reminders),
                     });
                 }
             }
@@ -803,6 +975,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         at: at(),
                         ended_at: None,
                         items: Vec::new(),
+                        reminders: std::mem::take(&mut pending_reminders),
                     });
                     if let Some(ts) = at() {
                         turn.ended_at = Some(ts);
@@ -870,6 +1043,11 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
         }
     }
     push(&mut turns, current);
+    if !pending_reminders.is_empty() {
+        if let Some(last) = turns.last_mut() {
+            last.reminders.append(&mut pending_reminders);
+        }
+    }
     join_notifications(&mut turns);
     turns
 }
@@ -1002,6 +1180,10 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
                         "[notification] {}",
                         one_line(summary.as_deref().unwrap_or(""))
                     ),
+                    ConvItem::Bash { command, .. } => format!("[bash] {command}"),
+                    ConvItem::Harness { tag, body } => {
+                        format!("[{tag}] {}", one_line(body))
+                    }
                     ConvItem::Interrupt { .. } => "[interrupted]".to_string(),
                 })
                 .collect::<Vec<_>>()
@@ -1042,6 +1224,16 @@ fn item_chars(item: &ConvItem) -> usize {
                 + result.as_deref().map_or(0, |s| s.chars().count())
                 + event.as_deref().map_or(0, |s| s.chars().count())
         }
+        ConvItem::Bash {
+            command,
+            stdout,
+            stderr,
+        } => {
+            command.chars().count()
+                + stdout.as_deref().map_or(0, |s| s.chars().count())
+                + stderr.as_deref().map_or(0, |s| s.chars().count())
+        }
+        ConvItem::Harness { tag, body } => tag.chars().count() + body.chars().count(),
         ConvItem::Interrupt { .. } => 0,
     }
 }
@@ -1615,6 +1807,8 @@ mod tests {
             ConvItem::Compact { .. } => "compact",
             ConvItem::Command { .. } => "command",
             ConvItem::Notification { .. } => "notification",
+            ConvItem::Bash { .. } => "bash",
+            ConvItem::Harness { .. } => "harness",
             ConvItem::Interrupt { .. } => "interrupt",
         }
     }
@@ -1670,6 +1864,15 @@ mod tests {
                 args: None,
                 output: None,
             },
+            ConvItem::Bash {
+                command: String::new(),
+                stdout: None,
+                stderr: None,
+            },
+            ConvItem::Harness {
+                tag: String::new(),
+                body: String::new(),
+            },
             ConvItem::Interrupt { during_tool: false },
         ];
 
@@ -1684,8 +1887,10 @@ mod tests {
         assert_eq!(
             tags,
             [
+                "bash",
                 "command",
                 "compact",
+                "harness",
                 "interrupt",
                 "notification",
                 "subagent",
@@ -2986,6 +3191,7 @@ mod tests {
             prompt: Some(p.into()),
             at: None,
             ended_at: None,
+            reminders: Vec::new(),
             items: vec![ConvItem::Text {
                 text: "x".repeat(n),
             }],
@@ -3027,6 +3233,7 @@ mod tests {
                 prompt: None,
                 at: Some("2026-09-13T10:00:00Z".into()),
                 ended_at: None,
+                reminders: Vec::new(),
                 items: vec![
                     ConvItem::Text { text: "hi".into() },
                     tool_item("Bash(command=ls)", false),
@@ -3038,7 +3245,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
-            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"items":[
+            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"reminders":[],"items":[
                 {"kind":"text","text":"hi"},
                 {"kind":"tool","summary":"Bash(command=ls)","error":false,"id":null,"name":"","target":null,"at":null,"ended_at":null,"done":false}]}],
                 "truncated":false,"context":null,"events":[]})
@@ -3062,6 +3269,7 @@ mod tests {
             prompt: Some("p".repeat(10)),
             at: None,
             ended_at: None,
+            reminders: Vec::new(),
             items: vec![
                 ConvItem::Text {
                     text: "a".repeat(10),
@@ -3103,6 +3311,7 @@ mod tests {
             prompt: Some("q".into()),
             at: None,
             ended_at: None,
+            reminders: Vec::new(),
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -3124,6 +3333,7 @@ mod tests {
             prompt: Some("old".into()),
             at: None,
             ended_at: None,
+            reminders: Vec::new(),
             items: vec![ConvItem::Text {
                 text: "earlier".into(),
             }],
@@ -3132,6 +3342,7 @@ mod tests {
             prompt: Some(format!("HEAD{}", "p".repeat(70_000))),
             at: None,
             ended_at: None,
+            reminders: Vec::new(),
             items: vec![
                 tool_item("Bash(command=ls)", false),
                 ConvItem::Text {
@@ -3160,6 +3371,7 @@ mod tests {
             prompt: Some(format!("HEAD{}", "p".repeat(100))),
             at: None,
             ended_at: None,
+            reminders: Vec::new(),
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -3178,6 +3390,7 @@ mod tests {
             prompt: Some("long prompt".into()),
             at: None,
             ended_at: None,
+            reminders: Vec::new(),
             items: vec![ConvItem::Text { text: "abc".into() }],
         };
         let c = trim_conversation(vec![tiny], 10, 1);
@@ -3770,5 +3983,145 @@ mod tests {
         );
         assert!(miss.status.success(), "a missing id is not a shell failure");
         assert!(miss.stdout.is_empty());
+    }
+
+    // ─── Harness XML in a user entry (system-reminder / pasted_content /
+    //     bash mode / unknown blocks) ──────────────────────────────────────
+
+    const WORKTREE_REMINDER: &str = "<system-reminder>\n\
+         You are operating in a git worktree.\n\
+         Worktree path: /Users/x/p/.claude/worktrees/w\n\
+         </system-reminder>";
+
+    #[test]
+    fn a_system_reminder_is_stripped_from_the_prompt_and_carried_beside_it() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!(format!(
+                "{WORKTREE_REMINDER}\n\nUI nereflektuje"
+            ))),
+            asst("ok"),
+        ]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(
+            t[0].prompt.as_deref(),
+            Some("UI nereflektuje"),
+            "the reminder never shows up as prompt text"
+        );
+        assert_eq!(t[0].reminders.len(), 1, "it is carried for the chip");
+        assert!(t[0].reminders[0].starts_with("You are operating in a git worktree."));
+        assert!(
+            !t[0].reminders[0].contains("<system-reminder>"),
+            "the chip carries the body, not the tag"
+        );
+    }
+
+    #[test]
+    fn a_reminder_only_entry_opens_no_turn_and_rides_the_next_prompt() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!(WORKTREE_REMINDER)),
+            user(serde_json::json!("go")),
+            asst("ok"),
+        ]));
+        assert_eq!(t.len(), 1, "the reminder alone is not a turn");
+        assert_eq!(t[0].prompt.as_deref(), Some("go"));
+        assert_eq!(t[0].reminders.len(), 1);
+    }
+
+    #[test]
+    fn a_trailing_reminder_only_entry_rides_the_turn_it_follows() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            asst("ok"),
+            user(serde_json::json!(WORKTREE_REMINDER)),
+        ]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(
+            t[0].reminders.len(),
+            1,
+            "no turn left to open, so it lands here"
+        );
+    }
+
+    #[test]
+    fn several_reminders_in_one_entry_are_all_carried() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!(format!(
+                "{WORKTREE_REMINDER}\nhello\n<system-reminder>second</system-reminder>"
+            ))),
+            asst("ok"),
+        ]));
+        assert_eq!(t[0].prompt.as_deref(), Some("hello"));
+        assert_eq!(t[0].reminders.len(), 2);
+        assert_eq!(t[0].reminders[1], "second");
+    }
+
+    #[test]
+    fn pasted_content_is_unwrapped_even_with_the_broken_close_tag() {
+        // Claude Code emits `</pasted_content id="8f92">` — not a well-formed
+        // close tag, so a naive `tag_text` misses it.
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!(
+                "UI nereflektuje \n\n<pasted_content id=\"8f92\">\naasd\n</pasted_content id=\"8f92\"> \
+                 funkcionalita nie je dokoncena"
+            )),
+            asst("ok"),
+        ]));
+        let p = t[0].prompt.clone().unwrap();
+        assert!(!p.contains("pasted_content"), "no wrapper survives: {p}");
+        assert!(p.contains("aasd"), "the pasted text itself is kept: {p}");
+        assert!(p.starts_with("UI nereflektuje"), "{p}");
+        assert!(p.ends_with("funkcionalita nie je dokoncena"), "{p}");
+    }
+
+    #[test]
+    fn bash_mode_becomes_a_bash_item_not_a_prompt() {
+        let t = parse_conversation(&jl(&[user(serde_json::json!(
+            "<bash-input>git pull --ff-only</bash-input>\
+             <bash-stdout>Already up to date.</bash-stdout><bash-stderr></bash-stderr>"
+        ))]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt, None, "a `!` line is never a prompt");
+        assert_eq!(
+            t[0].items,
+            vec![ConvItem::Bash {
+                command: "git pull --ff-only".into(),
+                stdout: Some("Already up to date.".into()),
+                stderr: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unknown_harness_block_is_a_neutral_item_not_raw_xml() {
+        let t = parse_conversation(&jl(&[user(serde_json::json!(
+            "<ci-monitor-event>\nPR #12 checks failed\n</ci-monitor-event>"
+        ))]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt, None);
+        assert_eq!(
+            t[0].items,
+            vec![ConvItem::Harness {
+                tag: "ci-monitor-event".into(),
+                body: "PR #12 checks failed".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_prompt_that_merely_contains_a_tag_stays_a_prompt() {
+        let text = "look at this: <ci-monitor-event>x</ci-monitor-event> — why?";
+        let t = parse_conversation(&jl(&[user(serde_json::json!(text)), asst("ok")]));
+        assert_eq!(
+            t[0].prompt.as_deref(),
+            Some(text),
+            "only a lone block folds"
+        );
+    }
+
+    #[test]
+    fn a_pasted_html_snippet_is_not_mistaken_for_a_harness_block() {
+        let text = "<div class=\"row\">hi</div>";
+        let t = parse_conversation(&jl(&[user(serde_json::json!(text)), asst("ok")]));
+        assert_eq!(t[0].prompt.as_deref(), Some(text), "html stays a prompt");
     }
 }

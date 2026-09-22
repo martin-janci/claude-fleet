@@ -43,6 +43,8 @@ export type ConvItem =
       event: string | null;
       at: string | null;
     }
+  | { kind: 'bash'; command: string; stdout: string | null; stderr: string | null }
+  | { kind: 'harness'; tag: string; body: string }
   | { kind: 'interrupt'; during_tool: boolean };
 
 export interface ConvTurn {
@@ -51,6 +53,10 @@ export interface ConvTurn {
   /** When the reply last advanced; null for a prompt with no reply yet. */
   ended_at: string | null;
   items: ConvItem[];
+  /** `<system-reminder>` bodies the harness stapled onto this turn's prompt.
+   *  Never the human's words — the panel folds them into a chip. Optional on
+   *  the wire, so an older hub still decodes. */
+  reminders?: string[];
 }
 
 /** Current-conversation context size, read from the same transcript tail. */
@@ -235,6 +241,8 @@ export type ConvGroup =
       event: string | null;
       at: string | null;
     }
+  | { kind: 'bash'; command: string; stdout: string | null; stderr: string | null }
+  | { kind: 'harness'; tag: string; body: string }
   | { kind: 'interrupt'; during_tool: boolean };
 
 /** Fold consecutive tool one-liners into one group; text items stay apart;
