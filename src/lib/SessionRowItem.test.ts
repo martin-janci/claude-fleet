@@ -40,6 +40,7 @@ function baseProps(sess: SessionRow) {
     onRenameKey: noop,
     commitRename: noop,
     askRecreate: noop,
+    askRestart: noop,
     askKill: noop,
   };
 }
