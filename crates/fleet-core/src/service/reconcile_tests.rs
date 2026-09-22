@@ -1,10 +1,12 @@
 //! Reconcile behaviour through the REAL reconcile path (W4 F1 / BE-7).
 //!
 //! Every test drives `reconcile_sessions_with` over `RemoteTmux<FakeSsh>`, so
-//! the production probe (`list-sessions` → `claude agents --json` → one
-//! `capture-pane` per live session), the pane-intel analyzer, the transition
-//! detector in `reconcile_write_one_host`, `Store::apply_host_reconcile` and
-//! the bg-agent pruner all run exactly as they do in the app. Only ssh is
+//! the production probe (ONE delimited `---FLEET:` script per host —
+//! identity, session list, oauth account, one pane capture per live
+//! session — followed by a separate `claude agents --json` call), the
+//! pane-intel analyzer, the transition detector in
+//! `reconcile_write_one_host`, `Store::apply_host_reconcile` and the
+//! bg-agent pruner all run exactly as they do in the app. Only ssh is
 //! scripted.
 //!
 //! Covered here (and deliberately NOT in `fleet_e2e_tests`, which owns the
@@ -29,13 +31,9 @@ use crate::service::sessions::{
 use crate::ssh_fake::{FakeSsh, Match, Reply};
 use crate::store::{SessionRow, Store};
 use crate::tmux::{RemoteTmux, TmuxExec};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-/// The exact list script `RemoteTmux::list_sessions` emits (kept in step
-/// with `fleet_e2e_tests::LIST_SCRIPT`; a drift makes every test here fail
-/// loudly, since the fake would answer the default empty reply).
-const LIST_SCRIPT: &str = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}' 2>&1";
 
 /// Pane tails, each chosen to hit exactly one `pane_intel::analyze` branch.
 const IDLE: &str = "All done.\n❯ \n? for shortcuts\n";
@@ -62,12 +60,25 @@ async fn next_unix_second() {
     }
 }
 
+/// One host's scripted probe pieces, replayed onto ONE delimited
+/// `---FLEET:` script reply every time a helper method changes them
+/// (`FakeSsh`: later registrations win). `sessions: None` renders as tmux's
+/// own "no server running" (rc=1); `Some(lines)` renders as a successful
+/// list (rc=0), including an empty `lines` for "reachable, zero sessions".
+#[derive(Default, Clone)]
+struct Pieces {
+    sessions: Option<String>,
+    panes: Vec<(String, String)>,
+    account: String,
+}
+
 /// A store with a recording bus, a scripted fleet and real reconcile deps.
 struct Fleet {
     store: Mutex<Store>,
     bus: Arc<RecordingEventBus>,
     fake: FakeSsh,
     deps: Arc<ReconcileDeps>,
+    pieces: Mutex<HashMap<String, Pieces>>,
 }
 
 impl Fleet {
@@ -81,15 +92,6 @@ impl Fleet {
             store.upsert_host(h).unwrap();
         }
         let fake = FakeSsh::new();
-        fake.on_host(
-            "local",
-            Match::script(LIST_SCRIPT),
-            Reply::Exit {
-                code: 1,
-                stdout: b"no server running on /tmp/tmux-1000/default\n".to_vec(),
-                stderr: Vec::new(),
-            },
-        );
         let exec_fake = fake.clone();
         let deps = ReconcileDeps::fake(
             move |alias| {
@@ -101,12 +103,26 @@ impl Fleet {
             Duration::from_secs(5),
         );
         bus.take();
-        Self {
+        let f = Self {
             store: Mutex::new(store),
             bus,
             fake,
             deps,
-        }
+            pieces: Mutex::new(HashMap::new()),
+        };
+        // `local` always answers "no tmux server" until a test overrides it.
+        f.rebuild("local");
+        f
+    }
+
+    /// Like `new`, but the agents probe follows `agents_every` instead of
+    /// `fake`'s always-due zero cadence — for a test that must make a later
+    /// pass skip `claude agents --json` (`agents_due` returns false because
+    /// the previous pass's ask is still within the window).
+    fn new_with_agents_cadence(hosts: &[&str], agents_every: Duration) -> Self {
+        let mut f = Self::new(hosts);
+        f.deps = f.deps.with_agents_every(agents_every);
+        f
     }
 
     async fn pass(&self) {
@@ -115,10 +131,55 @@ impl Fleet {
             .expect("the pass completes");
     }
 
+    /// Rebuild `host`'s ONE combined `---FLEET:` probe reply from its
+    /// current `Pieces` and re-register it (later registrations win in
+    /// `FakeSsh`).
+    fn rebuild(&self, host: &str) {
+        let p = self
+            .pieces
+            .lock()
+            .unwrap()
+            .get(host)
+            .cloned()
+            .unwrap_or_default();
+        let mut text = String::from(
+            "---FLEET:identity\nboot=boot-1\ntmuxrc=0\ntmuxout=100\n---FLEET:sessions\n",
+        );
+        match &p.sessions {
+            Some(lines) => {
+                text.push_str("rc=0\n");
+                text.push_str(lines);
+                text.push('\n');
+            }
+            None => text.push_str("rc=1\nno server running on /tmp/tmux-1000/default\n"),
+        }
+        text.push_str("---FLEET:account\n");
+        text.push_str(if p.account.is_empty() {
+            "{}"
+        } else {
+            &p.account
+        });
+        text.push_str("\n---FLEET:panes\n");
+        for (name, tail) in &p.panes {
+            text.push_str(&format!("---FLEET:pane {name}\n{tail}\n"));
+        }
+        text.push_str("---FLEET:end\n");
+        self.fake.on_host(
+            host,
+            Match::script_contains("---FLEET:end"),
+            Reply::ok(&text),
+        );
+    }
+
     /// Script `host`'s `tmux list-sessions` output (later calls win).
     fn list(&self, host: &str, lines: &str) {
-        self.fake
-            .on_host(host, Match::script(LIST_SCRIPT), Reply::ok(lines));
+        self.pieces
+            .lock()
+            .unwrap()
+            .entry(host.to_string())
+            .or_default()
+            .sessions = Some(lines.to_string());
+        self.rebuild(host);
     }
 
     /// Script `host`'s `claude agents --json` output.
@@ -132,11 +193,26 @@ impl Fleet {
 
     /// Script the pane tail captured for `name` on `host`.
     fn pane(&self, host: &str, name: &str, tail: &str) {
-        self.fake.on_host(
-            host,
-            Match::script_contains(&format!("tmux capture-pane -t '={name}:'")),
-            Reply::ok(tail),
-        );
+        let mut g = self.pieces.lock().unwrap();
+        let p = g.entry(host.to_string()).or_default();
+        p.panes.retain(|(n, _)| n != name);
+        p.panes.push((name.to_string(), tail.to_string()));
+        drop(g);
+        self.rebuild(host);
+    }
+
+    /// Script `host`'s `~/.claude.json` `oauthAccount` (compact JSON). No
+    /// current test in this file exercises account linking (that lives in
+    /// `fleet_e2e_tests`), kept for parity with `list`/`pane`/`agents`.
+    #[allow(dead_code)]
+    fn account(&self, host: &str, json: &str) {
+        self.pieces
+            .lock()
+            .unwrap()
+            .entry(host.to_string())
+            .or_default()
+            .account = json.to_string();
+        self.rebuild(host);
     }
 
     /// Wait until the fake has recorded a call on `host` whose command
@@ -247,6 +323,7 @@ impl Fleet {
             bus,
             fake,
             deps,
+            pieces: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -405,11 +482,10 @@ async fn failed_pane_capture_preserves_status_and_stuck_flag() {
     assert_eq!(f.timeline(before.id).len(), 2, "status_change + stuck");
     f.session_row_events();
 
-    f.fake.on_host(
-        "alpha",
-        Match::script_contains("tmux capture-pane -t '=work:'"),
-        Reply::fail(1, "can't find pane: work"),
-    );
+    // A pane capture that fails (`tmux capture-pane` exits non-zero) is
+    // swallowed by the script's `2>/dev/null`, so it renders as an empty
+    // tail — exactly like `f.pane(.., "")`.
+    f.pane("alpha", "work", "");
     next_unix_second().await;
     f.pass().await;
     let after = f.row("work", "alpha");
@@ -507,6 +583,56 @@ async fn no_phantom_status_change_when_the_last_hook_at_guard_wins() {
     );
 }
 
+#[tokio::test]
+async fn a_skipped_agents_pass_keeps_the_stored_status() {
+    // A cadence-skipped (or unanswerable) agents pass must not let the pane
+    // heuristic overwrite the stored `claude_status` — only a real
+    // `Blocked` pane verdict (a dialog) is strong enough to surface
+    // without a fresh agents read. See `status_candidate`.
+    let f = Fleet::new_with_agents_cadence(&["alpha"], Duration::from_secs(60));
+    f.list("alpha", "work|1|2|0|/tmp/w\n");
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"t1","name":"work","status":"working","cwd":"/tmp/w"}]"#,
+    );
+
+    // Pass 1 — first contact: agents are always asked regardless of
+    // cadence (`agents_due`'s first-sighting rule), so the authoritative
+    // status wins.
+    f.pass().await;
+    let r1 = f.row("work", "alpha");
+    let id = r1.id;
+    assert_eq!(r1.claude_status.as_deref(), Some("working"));
+
+    // Pass 2 — still inside the 60 s cadence window: agents are NOT asked
+    // this pass. The pane now reads idle, but the stored `working` must
+    // survive, and no status_change is recorded.
+    f.pane("alpha", "work", IDLE);
+    f.pass().await;
+    assert_eq!(
+        f.row("work", "alpha").claude_status.as_deref(),
+        Some("working"),
+        "a skipped-agents pass must not flip the status to a pane guess"
+    );
+    assert!(
+        !f.timeline(id)
+            .iter()
+            .any(|(kind, _)| kind == "status_change"),
+        "no status_change from a skipped-agents pass: {:?}",
+        f.timeline(id)
+    );
+
+    // Pass 3 — still skipped, but the pane now shows a real permission
+    // dialog: `Blocked` is strong enough evidence to surface immediately,
+    // even without a fresh agents read.
+    f.pane("alpha", "work", TRUST);
+    f.pass().await;
+    assert_eq!(
+        f.row("work", "alpha").claude_status.as_deref(),
+        Some("blocked")
+    );
+}
+
 // ── 1b. conversations (fallback rebind, spec §1.4) ──────────────────────────
 
 impl Fleet {
@@ -589,20 +715,30 @@ async fn a_pass_that_probed_before_a_hook_rebind_does_not_undo_it() {
     let r = f.row("work", "alpha");
     assert_eq!(r.claude_session_id.as_deref(), Some("aaa"));
 
-    // Pass 2 has read `claude agents` (still reporting `aaa`) and stalls on
-    // the pane capture while the /clear hooks land: SessionEnd(clear)
-    // closes `aaa`, SessionStart(clear) rebinds the row to `bbb` and stamps
-    // `last_hook_at`.
+    // Pass 2: alpha's whole probe (batched script + the separate `claude
+    // agents` call, still reporting `aaa`) answers fast and real — it is
+    // fully computed, `claude_session_id: Some("aaa")` included, well before
+    // any write happens. What stalls is a DIFFERENT host: every host's probe
+    // runs as its own spawned task (`JoinSet`), and `reconcile_sessions_with`
+    // does not start writing ANY host until every task in the set has
+    // finished — so hanging `local`'s probe holds the whole pass at the
+    // collection step while the /clear hooks land on alpha's row:
+    // SessionEnd(clear) closes `aaa`, SessionStart(clear) rebinds it to
+    // `bbb` and stamps `last_hook_at`. By the time the reconcile WRITE
+    // finally runs for alpha (after `local`'s hang resolves),
+    // `last_hook_at >= probe.started_at` — the `NEW_ID` in-flight guard in
+    // `store/reconcile.rs` must keep the row's id at `bbb`, not the `aaa`
+    // this pass actually read.
     f.fake.on_host(
-        "alpha",
-        Match::script_contains("tmux capture-pane -t 'work'"),
+        "local",
+        Match::script_contains("---FLEET:end"),
         Reply::Hang {
             for_: Duration::from_millis(300),
         },
     );
     f.fake.clear_calls();
     let hook = async {
-        f.called("alpha", "capture-pane").await;
+        f.called("local", "---FLEET:end").await;
         let s = f.store.lock().unwrap();
         s.close_conversation(r.id, "aaa", "clear").unwrap();
         s.rebind_conversation(
@@ -803,12 +939,14 @@ async fn dismissing_a_ghost_reaps_its_session_events() {
 
 #[tokio::test]
 async fn stale_probe_does_not_ghost_a_row_stamped_after_it_started() {
-    // BE-3 through the real fan-out: alpha's `list-sessions` is slow and
-    // answers "no sessions". While it is in flight, a concurrent writer
-    // (standing in for `new_session`'s own single-host reconcile) creates and
-    // stamps `fresh`. The stale pass must ghost the genuinely stale `old`
-    // row but leave `fresh` alone.
+    // BE-3 through the real fan-out: alpha's batched `---FLEET:` probe
+    // answers "no sessions" right away, but the SEPARATE `claude agents`
+    // call that follows it is slow. While it is in flight, a concurrent
+    // writer (standing in for `new_session`'s own single-host reconcile)
+    // creates and stamps `fresh`. The stale pass must ghost the genuinely
+    // stale `old` row but leave `fresh` alone.
     let f = Fleet::new(&["alpha"]);
+    f.list("alpha", "");
     f.agents("alpha", "[]\n");
     {
         let s = f.store.lock().unwrap();
@@ -819,15 +957,16 @@ async fn stale_probe_does_not_ghost_a_row_stamped_after_it_started() {
     }
     f.fake.on_host(
         "alpha",
-        Match::script(LIST_SCRIPT),
+        Match::script_contains("claude agents --json"),
         Reply::Hang {
             for_: Duration::from_millis(600),
         },
     );
     f.fake.clear_calls();
     let concurrent_create = async {
-        // The probe has taken `started_at` and is blocked in list-sessions.
-        f.called("alpha", "tmux list-sessions").await;
+        // The probe has taken `started_at`, read the batched script (0
+        // sessions), and is now blocked in `claude agents --json`.
+        f.called("alpha", "claude agents --json").await;
         let s = f.store.lock().unwrap();
         s.upsert_session("fresh", "alpha", None, None, 1, 1, "running", None)
             .unwrap();
@@ -930,6 +1069,42 @@ async fn bg_agents_surface_prune_and_filter_unknown_statuses() {
         f.session_row_events()
             .contains(&format!("session:killed:{bg1_id}")),
         "the prune is announced to the frontend"
+    );
+}
+
+/// One unreachable `claude agents --json` (ssh 255) must not ghost a single
+/// background row: the pruner is skipped, not fed an empty list.
+#[tokio::test]
+async fn a_failed_agents_call_does_not_ghost_bg_rows() {
+    let f = Fleet::new(&["alpha"]);
+    f.list("alpha", "");
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"bg1","name":"nightly","status":"working","cwd":"/tmp/bg"}]"#,
+    );
+    f.pass().await;
+    let before = {
+        let s = f.store.lock().unwrap();
+        s.list_sessions_for_host("alpha").unwrap()
+    };
+    assert!(
+        !before.is_empty(),
+        "the bg row exists after the first pass: {before:?}"
+    );
+    f.fake.on_host(
+        "alpha",
+        Match::script_contains("claude agents --json"),
+        Reply::Unreachable,
+    );
+    f.pass().await;
+    let after = {
+        let s = f.store.lock().unwrap();
+        s.list_sessions_for_host("alpha").unwrap()
+    };
+    assert_eq!(
+        after.iter().filter(|r| r.status != "ghost").count(),
+        before.len(),
+        "no row was ghosted: {after:?}"
     );
 }
 
@@ -1073,15 +1248,13 @@ async fn multi_host_pass_isolates_timeout_and_garbage_hosts_and_frees_the_gate()
     for id in [gamma_before.id, delta_before.id] {
         assert_eq!(f.raw_event_count(id), 0);
     }
-    // A failed list skips the pane captures on the broken hosts.
+    // A failed probe never fans out into a separate `claude agents` call:
+    // exactly the one batched `---FLEET:` script is sent (its own literal
+    // text always names `capture-pane`, whether or not any session existed
+    // to capture — the loop that would run it simply iterates zero times
+    // on the real host), and nothing more.
     for host in ["gamma", "delta"] {
-        assert!(
-            f.fake
-                .calls_for(host)
-                .iter()
-                .all(|c| !c.command().contains("capture-pane")),
-            "{host}"
-        );
+        assert_eq!(f.fake.calls_for(host).len(), 1, "{host}");
     }
 }
 
@@ -1140,15 +1313,7 @@ async fn garbage_list_output_with_exit_zero_does_not_ghost_host_rows() {
 #[tokio::test]
 async fn reconcile_without_local_host_never_creates_or_probes_local() {
     let f = Fleet::new_without_local(&["mefistos"]);
-    f.fake.on_host(
-        "mefistos",
-        Match::script(LIST_SCRIPT),
-        Reply::Exit {
-            code: 1,
-            stdout: b"no server running\n".to_vec(),
-            stderr: Vec::new(),
-        },
-    );
+    f.list("mefistos", "");
     reconcile_sessions_with(&f.store, &f.deps).await.unwrap();
     let hosts = f.store.lock().unwrap().list_hosts().unwrap();
     assert!(
@@ -1167,15 +1332,7 @@ async fn reconcile_without_local_host_skips_a_copied_local_row() {
     // A state.db copied from a desktop carries a `local` row; the daemon
     // leaves it alone and never probes it.
     let f = Fleet::new_without_local(&["local", "mefistos"]);
-    f.fake.on_host(
-        "mefistos",
-        Match::script(LIST_SCRIPT),
-        Reply::Exit {
-            code: 1,
-            stdout: b"no server running\n".to_vec(),
-            stderr: Vec::new(),
-        },
-    );
+    f.list("mefistos", "");
     reconcile_sessions_with(&f.store, &f.deps).await.unwrap();
     assert!(f.fake.calls().iter().all(|c| c.host != "local"));
     let hosts = f.store.lock().unwrap().list_hosts().unwrap();

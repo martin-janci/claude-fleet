@@ -61,6 +61,15 @@ struct SshClientInner {
     /// wrapper. `None` is the desktop; a hub builds one with
     /// [`SshClient::with_agents`].
     route: Option<Arc<crate::agent::HostRouter>>,
+    /// The `ssh` binary to spawn. `"ssh"` (resolved via `$PATH`) in
+    /// production; tests point this at a fake script via
+    /// [`SshClient::with_ssh_binary`] to drive mux-failure/retry behavior
+    /// without a real host.
+    ssh_bin: PathBuf,
+    /// Per-host [`HostToolchain`] cache: when it was resolved, and the
+    /// result. A positive result is kept for the process lifetime; a `None`
+    /// (both shells failed) is retried after [`TOOLCHAIN_RETRY_AFTER`].
+    toolchains: DashMap<String, (std::time::Instant, Option<HostToolchain>)>,
 }
 
 /// RAII decrement for `SshClientInner::in_flight`.
@@ -118,6 +127,10 @@ impl SshClient {
     }
 
     fn build(route: Option<Arc<crate::agent::HostRouter>>) -> Self {
+        Self::build_with(route, PathBuf::from("ssh"))
+    }
+
+    fn build_with(route: Option<Arc<crate::agent::HostRouter>>, ssh_bin: PathBuf) -> Self {
         Self {
             inner: Arc::new(SshClientInner {
                 seen: DashMap::new(),
@@ -125,8 +138,25 @@ impl SshClient {
                 in_flight: DashMap::new(),
                 master_resets: DashMap::new(),
                 route,
+                ssh_bin,
+                toolchains: DashMap::new(),
             }),
         }
+    }
+
+    /// An SSH-only client (no agent routing) that spawns `path` instead of
+    /// `ssh`. For tests: point it at a fake `ssh` script to exercise
+    /// mux-failure detection and the one-retry-after-reset path without a
+    /// real host.
+    pub fn with_ssh_binary(path: impl Into<PathBuf>) -> Self {
+        Self::build_with(None, path.into())
+    }
+
+    /// A fresh `Command` for the configured ssh binary (`"ssh"` in
+    /// production, a fake script under test — see
+    /// [`SshClient::with_ssh_binary`]).
+    fn ssh_command(&self) -> tokio::process::Command {
+        tokio::process::Command::new(&self.inner.ssh_bin)
     }
 
     /// The registry this client routes agent hosts through, if it has one.
@@ -224,6 +254,35 @@ impl SshClient {
         ]
     }
 
+    /// The attached terminal's own ControlPath: a probe's master reset must
+    /// never take the user's terminal down with it.
+    pub fn control_path_for_pty(&self, host: &str) -> PathBuf {
+        self.control_path(host)
+            .with_file_name(format!("cm-{host}-tty.sock"))
+    }
+
+    /// `mux_opts` for the interactive attach: its own socket, and a keepalive
+    /// that tolerates a 45s stall (Wi-Fi roam, VPN rekey) instead of 10s.
+    ///
+    /// Rewrites `mux_opts`'s `-o`/value pairs in place, so it relies on every
+    /// entry there being exactly that shape (`chunks_mut(2)`) — true today
+    /// (see `mux_opts`) and worth re-checking if that function's option list
+    /// ever grows a bare flag.
+    pub fn mux_opts_for_pty(&self, host: &str, timeout: Duration) -> Vec<String> {
+        let mut opts = self.mux_opts(host, timeout);
+        for pair in opts.chunks_mut(2) {
+            match pair[1].as_str() {
+                s if s.starts_with("ControlPath=") => {
+                    pair[1] = format!("ControlPath={}", self.control_path_for_pty(host).display())
+                }
+                "ServerAliveInterval=5" => pair[1] = "ServerAliveInterval=15".into(),
+                "ServerAliveCountMax=2" => pair[1] = "ServerAliveCountMax=3".into(),
+                _ => {}
+            }
+        }
+        opts
+    }
+
     /// Wall-clock bound applied to `run` / `run_cancellable` when the caller
     /// gives only a connect timeout. `ConnectTimeout` covers ONLY the initial
     /// TCP/SSH handshake of a fresh master; a command that hangs AFTER connect
@@ -257,6 +316,16 @@ impl SshClient {
     /// exit (best effort, so the next call rebuilds a fresh one instead of
     /// multiplexing onto the wedged master again), and `E_SSH_TIMEOUT` is
     /// returned.
+    ///
+    /// When the command instead exits 255 because the ControlMaster died
+    /// under it (laptop sleep, roaming, the remote sshd restarting — see
+    /// [`is_mux_failure`]), the command is retried exactly once, with
+    /// whatever remains of `wall_clock` (floored at 5s). Before retrying, the
+    /// master is checked (`ssh -O check`): only if it does NOT answer is it
+    /// reset — a mux failure on this command does not mean a sibling command
+    /// multiplexed through the same master is also dead, so a still-healthy
+    /// master is left alone. A dead host (255 for any other reason) is
+    /// returned as-is, not retried.
     pub async fn run_bounded(
         &self,
         host: &str,
@@ -271,14 +340,19 @@ impl SshClient {
                 .await;
         }
         self.inner.seen.insert(host.to_string(), ());
-        let mut cmd = tokio::process::Command::new("ssh");
-        for opt in self.mux_opts(host, connect_timeout) {
-            cmd.arg(opt);
-        }
-        // `--` ends option parsing — the host can never be read as an ssh
-        // option even if validation upstream were bypassed.
-        cmd.arg("--").arg(host).args(args);
-        self.run_child(host, cmd, wall_clock, None, "E_SSH").await
+        let mux_opts = self.mux_opts(host, connect_timeout);
+        let build = || {
+            let mut cmd = self.ssh_command();
+            for opt in &mux_opts {
+                cmd.arg(opt);
+            }
+            // `--` ends option parsing — the host can never be read as an
+            // ssh option even if validation upstream were bypassed.
+            cmd.arg("--").arg(host).args(args);
+            cmd
+        };
+        self.run_with_mux_retry(host, build, wall_clock, None, "E_SSH", None)
+            .await
     }
 
     /// `run_bounded` with stdout and stderr each capped at `max_output`
@@ -301,12 +375,16 @@ impl SshClient {
                 .await;
         }
         self.inner.seen.insert(host.to_string(), ());
-        let mut cmd = tokio::process::Command::new("ssh");
-        for opt in self.mux_opts(host, connect_timeout) {
-            cmd.arg(opt);
-        }
-        cmd.arg("--").arg(host).args(args);
-        self.run_child_capped(host, cmd, wall_clock, None, "E_SSH", Some(max_output))
+        let mux_opts = self.mux_opts(host, connect_timeout);
+        let build = || {
+            let mut cmd = self.ssh_command();
+            for opt in &mux_opts {
+                cmd.arg(opt);
+            }
+            cmd.arg("--").arg(host).args(args);
+            cmd
+        };
+        self.run_with_mux_retry(host, build, wall_clock, None, "E_SSH", Some(max_output))
             .await
     }
 
@@ -333,12 +411,16 @@ impl SshClient {
                 .await;
         }
         self.inner.seen.insert(host.to_string(), ());
-        let mut cmd = tokio::process::Command::new("ssh");
-        for opt in self.mux_opts(host, connect_timeout) {
-            cmd.arg(opt);
-        }
-        cmd.arg("--").arg(host).args(args);
-        self.run_child(host, cmd, wall_clock, Some(token), "E_SSH")
+        let mux_opts = self.mux_opts(host, connect_timeout);
+        let build = || {
+            let mut cmd = self.ssh_command();
+            for opt in &mux_opts {
+                cmd.arg(opt);
+            }
+            cmd.arg("--").arg(host).args(args);
+            cmd
+        };
+        self.run_with_mux_retry(host, build, wall_clock, Some(token), "E_SSH", None)
             .await
     }
 
@@ -366,17 +448,22 @@ impl SshClient {
                 .await;
         }
         self.inner.seen.insert(host.to_string(), ());
-        let mut cmd = tokio::process::Command::new("ssh");
-        for opt in self.mux_opts(host, timeout) {
-            cmd.arg(opt);
-        }
-        cmd.arg("--").arg(host).args(args);
-        self.run_child(
+        let mux_opts = self.mux_opts(host, timeout);
+        let build = || {
+            let mut cmd = self.ssh_command();
+            for opt in &mux_opts {
+                cmd.arg(opt);
+            }
+            cmd.arg("--").arg(host).args(args);
+            cmd
+        };
+        self.run_with_mux_retry(
             host,
-            cmd,
+            build,
             Self::default_wall_clock(timeout),
             Some(token),
             "E_SSH",
+            None,
         )
         .await
     }
@@ -406,7 +493,7 @@ impl SshClient {
                 format!("open {}: {e}", local_path.display()),
             )
         })?;
-        let mut cmd = tokio::process::Command::new("ssh");
+        let mut cmd = self.ssh_command();
         for opt in self.mux_opts(host, timeout) {
             cmd.arg(opt);
         }
@@ -537,6 +624,58 @@ impl SshClient {
         }
     }
 
+    /// Spawn `build()` under the wall clock; on a mux failure, check whether
+    /// the master is actually still alive (`ssh -O check`) before touching
+    /// it — a mux failure on ONE command does not mean the shared
+    /// ControlMaster is dead, and a sibling command may be mid-flight
+    /// through it right now. If the master still answers, it is left alone
+    /// and the command is simply retried; only when it does NOT answer is
+    /// it reset (counted). Either way the command runs once more with what
+    /// is left of the wall clock (at least 5 s).
+    async fn run_with_mux_retry(
+        &self,
+        host: &str,
+        build: impl Fn() -> tokio::process::Command,
+        wall_clock: Duration,
+        token: Option<CancellationToken>,
+        spawn_code: &str,
+        max_output: Option<usize>,
+    ) -> Result<Output, IpcError> {
+        let started = tokio::time::Instant::now();
+        let first = self
+            .run_child_capped(
+                host,
+                build(),
+                wall_clock,
+                token.clone(),
+                spawn_code,
+                max_output,
+            )
+            .await?;
+        if !is_mux_failure(&first) {
+            return Ok(first);
+        }
+        if self.master_alive(host).await {
+            tracing::debug!(host = %host, "[ssh] master answers; retrying without a reset");
+        } else {
+            tracing::warn!(
+                host = %host,
+                "[ssh] the ControlMaster died under a command; resetting it and retrying once"
+            );
+            *self
+                .inner
+                .master_resets
+                .entry(host.to_string())
+                .or_insert(0) += 1;
+            self.reset_master(host).await;
+        }
+        let left = wall_clock
+            .saturating_sub(started.elapsed())
+            .max(Duration::from_secs(5));
+        self.run_child_capped(host, build(), left, token, spawn_code, max_output)
+            .await
+    }
+
     /// Number of `run_child` calls currently live on `host` (excluding any
     /// the caller has already dropped its guard for).
     fn others_in_flight(&self, host: &str) -> usize {
@@ -566,9 +705,10 @@ impl SshClient {
     /// Skipped while other commands are live on the host (they would lose
     /// their channels) and when the master still answers `ssh -O check`
     /// within `MASTER_RESET_TIMEOUT` (the timed-out command was slow, not
-    /// the transport). The `-O check` also covers channels this client does
-    /// not count — the user's attached PTY in `pty.rs` multiplexes over the
-    /// same ControlPath.
+    /// the transport). The user's attached PTY in `pty.rs` has its OWN
+    /// ControlPath (`control_path_for_pty`, via `mux_opts_for_pty`) and is
+    /// deliberately outside this `-O check` and this reset — a probe's
+    /// master dying must never take the attached terminal down with it.
     async fn maybe_reset_master(&self, host: &str) -> bool {
         if self.others_in_flight(host) > 0 {
             // warn: a timeout is a failure path, and this is its only log line
@@ -601,7 +741,7 @@ impl SshClient {
     /// exit or a hang all count as "not alive".
     async fn master_alive(&self, host: &str) -> bool {
         let path = self.control_path(host);
-        let mut cmd = tokio::process::Command::new("ssh");
+        let mut cmd = self.ssh_command();
         cmd.args([
             "-o",
             &format!("ControlPath={}", path.display()),
@@ -635,7 +775,7 @@ impl SshClient {
     /// a dead master that never answered the exit request.
     pub(crate) async fn reset_master(&self, host: &str) {
         let path = self.control_path(host);
-        let mut cmd = tokio::process::Command::new("ssh");
+        let mut cmd = self.ssh_command();
         cmd.args([
             "-o",
             &format!("ControlPath={}", path.display()),
@@ -669,20 +809,65 @@ impl SshClient {
     pub fn shutdown_all(&self) {
         let hosts: Vec<String> = self.inner.seen.iter().map(|e| e.key().clone()).collect();
         for host in hosts {
-            let path = self.control_path(&host);
-            let _ = std::process::Command::new("ssh")
-                .args([
-                    "-o",
-                    &format!("ControlPath={}", path.display()),
-                    "-O",
-                    "exit",
-                    "--",
-                    &host,
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            for path in [self.control_path(&host), self.control_path_for_pty(&host)] {
+                let _ = std::process::Command::new(&self.inner.ssh_bin)
+                    .args([
+                        "-o",
+                        &format!("ControlPath={}", path.display()),
+                        "-O",
+                        "exit",
+                        "--",
+                        &host,
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
         }
+    }
+
+    /// The host's toolchain, resolved on first use and cached. `None` when
+    /// neither an interactive nor a login shell answered — callers fall back
+    /// to `bash -lc`; the miss itself is cached for
+    /// [`TOOLCHAIN_RETRY_AFTER`].
+    pub async fn toolchain(&self, host: &str) -> Option<HostToolchain> {
+        if let Some(entry) = self.inner.toolchains.get(host) {
+            let (at, tc) = entry.value();
+            if tc.is_some() || at.elapsed() < TOOLCHAIN_RETRY_AFTER {
+                return tc.clone();
+            }
+        }
+        let mut resolved = None;
+        for interactive in [true, false] {
+            let script = toolchain_script(interactive);
+            let args = ["sh", "-c", &crate::shell::quote(&script)];
+            if let Ok(out) = self.run(host, &args, Duration::from_secs(10)).await {
+                if out.status.success() {
+                    resolved = parse_toolchain(&String::from_utf8_lossy(&out.stdout));
+                    if resolved.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        match &resolved {
+            Some(tc) => {
+                tracing::info!(host = %host, path = %tc.path, tmux = ?tc.tmux, claude = ?tc.claude, "[ssh] toolchain resolved")
+            }
+            None => {
+                tracing::warn!(host = %host, "[ssh] toolchain could not be resolved; tmux calls stay on bash -lc")
+            }
+        }
+        self.inner.toolchains.insert(
+            host.to_string(),
+            (std::time::Instant::now(), resolved.clone()),
+        );
+        resolved
+    }
+
+    #[cfg(test)]
+    pub(crate) fn forget_toolchain_for_tests(&self, host: &str) {
+        self.inner.toolchains.remove(host);
     }
 }
 
@@ -690,6 +875,73 @@ impl Default for SshClient {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// What the user's own shell knows about a host, resolved once: the login
+/// `PATH` (Homebrew, `~/.local/bin`, nvm…), `$HOME`, and where `tmux` and
+/// `claude` are. Lets every tmux call run under `sh -c` with that PATH
+/// instead of paying for `bash -l` on each call, and lets a new pane inherit
+/// the same PATH.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostToolchain {
+    pub home: String,
+    pub path: String,
+    pub tmux: Option<String>,
+    pub claude: Option<String>,
+}
+
+pub const TOOLCHAIN_MARKER: &str = "FLEET-TC";
+/// A failed resolve is retried after this long, so one bad first contact
+/// does not pin a host to the slow path for the process lifetime.
+pub const TOOLCHAIN_RETRY_AFTER: Duration = Duration::from_secs(300);
+
+/// The script that prints the toolchain, run by the user's shell. The
+/// interactive variant (`-ilc`) sees `.zshrc`/`.bashrc` PATH additions, which
+/// is where Homebrew and `cl` usually live on a Mac; the login variant
+/// (`-lc`) is the fallback when an rc file misbehaves without a tty. Noise
+/// from rc files is harmless: only marked lines are read.
+pub fn toolchain_script(interactive: bool) -> String {
+    let flags = if interactive { "-ilc" } else { "-lc" };
+    let inner = format!(
+        "printf '{m} home=%s\\n{m} path=%s\\n{m} tmux=%s\\n{m} claude=%s\\n' \"$HOME\" \"$PATH\" \"$(command -v tmux 2>/dev/null || true)\" \"$(command -v claude 2>/dev/null || true)\"",
+        m = TOOLCHAIN_MARKER
+    );
+    format!(
+        "\"${{SHELL:-/bin/sh}}\" {flags} {} </dev/null 2>/dev/null",
+        crate::shell::quote(&inner)
+    )
+}
+
+pub fn parse_toolchain(stdout: &str) -> Option<HostToolchain> {
+    let mut home = None;
+    let mut path = None;
+    let mut tmux = None;
+    let mut claude = None;
+    for line in stdout.lines() {
+        let Some(rest) = line
+            .strip_prefix(TOOLCHAIN_MARKER)
+            .and_then(|r| r.strip_prefix(' '))
+        else {
+            continue;
+        };
+        let Some((k, v)) = rest.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().to_string();
+        match k {
+            "home" if !v.is_empty() => home = Some(v),
+            "path" if !v.is_empty() => path = Some(v),
+            "tmux" if v.starts_with('/') => tmux = Some(v),
+            "claude" if v.starts_with('/') => claude = Some(v),
+            _ => {}
+        }
+    }
+    Some(HostToolchain {
+        home: home?,
+        path: path?,
+        tmux,
+        claude,
+    })
 }
 
 /// Drain `stream` to EOF, keeping at most `cap` bytes (all of them for
@@ -866,6 +1118,16 @@ pub trait SshExec: Send + Sync {
     ) -> Result<(), IpcError>;
 
     async fn remote_home(&self, host: &str) -> Result<String, IpcError>;
+
+    /// The host's resolved toolchain (login `PATH`, `$HOME`, absolute
+    /// `tmux`/`claude`), or `None` when it either hasn't been resolved yet
+    /// or resolution failed. Default `None` keeps every existing
+    /// `FakeSsh`-driven test on the `bash -lc` shape; `SshClient` overrides
+    /// this with the cached resolve, and `FakeSsh` overrides it to return
+    /// whatever `set_toolchain` stored.
+    async fn toolchain(&self, _host: &str) -> Option<HostToolchain> {
+        None
+    }
 }
 
 // The inherent methods stay (so `Arc<SshClient>` callers in `commands/`,
@@ -932,6 +1194,10 @@ impl SshExec for SshClient {
 
     async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
         SshClient::remote_home(self, host).await
+    }
+
+    async fn toolchain(&self, host: &str) -> Option<HostToolchain> {
+        SshClient::toolchain(self, host).await
     }
 }
 
@@ -1006,6 +1272,10 @@ impl<T: SshExec + ?Sized> SshExec for Arc<T> {
 
     async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
         (**self).remote_home(host).await
+    }
+
+    async fn toolchain(&self, host: &str) -> Option<HostToolchain> {
+        (**self).toolchain(host).await
     }
 }
 
@@ -1260,6 +1530,29 @@ impl SshExec for LocalExec {
     }
 }
 
+/// ssh exiting 255 because its ControlMaster died under it (laptop sleep,
+/// roaming, the remote sshd restarting) — as opposed to 255 because the host
+/// is down. The former deserves a fresh master and one more try.
+pub(crate) fn is_mux_failure(out: &Output) -> bool {
+    if out.status.code() != Some(255) {
+        return false;
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    [
+        "mux_client_request_session",
+        "Control socket",
+        "read from master failed",
+        // ssh's own wording for a dropped control/session channel — not the
+        // bare "Broken pipe", which a REMOTE command's own stderr can emit
+        // (e.g. a remote `foo | head` hitting SIGPIPE) and which must not
+        // trigger a reset+retry of what may be a non-idempotent command.
+        "send disconnect: Broken pipe",
+        "Connection closed by remote host",
+    ]
+    .iter()
+    .any(|needle| stderr.contains(needle))
+}
+
 fn cache_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home).join(".cache").join("claude-fleet");
@@ -1287,6 +1580,31 @@ mod tests {
     fn shutdown_when_no_hosts_seen_is_noop() {
         let c = SshClient::new();
         c.shutdown_all(); // must not panic when no host has been touched
+    }
+
+    #[test]
+    fn pty_mux_opts_use_their_own_socket_and_a_gentler_keepalive() {
+        let c = SshClient::new();
+        let opts = c.mux_opts_for_pty("h", Duration::from_secs(5)).join(" ");
+        assert!(
+            opts.contains("ControlPath=") && opts.contains("cm-h-tty.sock"),
+            "{opts}"
+        );
+        assert!(
+            opts.contains("ServerAliveInterval=15") && opts.contains("ServerAliveCountMax=3"),
+            "{opts}"
+        );
+        assert!(
+            opts.contains("ControlMaster=auto")
+                && opts.contains("BatchMode=yes")
+                && opts.contains("ConnectTimeout=5"),
+            "{opts}"
+        );
+        let probe = c.mux_opts("h", Duration::from_secs(5)).join(" ");
+        assert!(
+            probe.contains("ServerAliveInterval=5") && probe.contains("cm-h.sock"),
+            "the probe master is unchanged: {probe}"
+        );
     }
 
     #[test]
@@ -1604,5 +1922,220 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("child pid {pid} still alive 1s after cancel — kill+wait failed to reap");
+    }
+
+    fn fake_ssh(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("ssh");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[test]
+    fn mux_failures_are_exit_255_with_a_master_message() {
+        let out = |code: i32, stderr: &str| Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        use std::os::unix::process::ExitStatusExt;
+        assert!(is_mux_failure(&out(
+            255,
+            "mux_client_request_session: read from master failed"
+        )));
+        assert!(is_mux_failure(&out(
+            255,
+            "Control socket connect(/x/cm.sock): Connection refused"
+        )));
+        assert!(is_mux_failure(&out(
+            255,
+            "client_loop: send disconnect: Broken pipe"
+        )));
+        assert!(
+            !is_mux_failure(&out(
+                255,
+                "ssh: connect to host h port 22: No route to host"
+            )),
+            "a dead host is not a mux failure"
+        );
+        assert!(
+            !is_mux_failure(&out(
+                1,
+                "mux_client_request_session: read from master failed"
+            )),
+            "only 255"
+        );
+        assert!(
+            !is_mux_failure(&out(255, "sort: write failed: Broken pipe")),
+            "a REMOTE command's own SIGPIPE (e.g. `foo | head`) is not a mux failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mux_failure_resets_the_master_and_retries_once() {
+        // `-O check` answers 1 (dead) so the master is actually reset.
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("first-call-done");
+        let bin = fake_ssh(
+            dir.path(),
+            &format!(
+                "case \"$*\" in *'-O check'*) exit 1;; *'-O exit'*) exit 0;; esac\n\
+             if [ ! -f '{m}' ]; then touch '{m}'; echo 'mux_client_request_session: read from master failed' >&2; exit 255; fi\n\
+             echo ok",
+                m = mark.display()
+            ),
+        );
+        let c = SshClient::with_ssh_binary(bin);
+        let out = c
+            .run("h-retry", &["true"], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(out.status.success(), "the retry answers: {out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+        assert_eq!(
+            c.master_reset_counts().get("h-retry"),
+            Some(&1),
+            "the dead master was reset before the retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mux_failure_on_a_live_master_retries_without_resetting() {
+        // `-O check` answers 0 (alive): a mux failure on this command does
+        // not mean the shared master is dead — a sibling command may be
+        // mid-flight through it — so the retry must NOT reset it.
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("first-call-done");
+        let bin = fake_ssh(
+            dir.path(),
+            &format!(
+                "case \"$*\" in *'-O check'*) exit 0;; *'-O exit'*) exit 0;; esac\n\
+             if [ ! -f '{m}' ]; then touch '{m}'; echo 'mux_client_request_session: read from master failed' >&2; exit 255; fi\n\
+             echo ok",
+                m = mark.display()
+            ),
+        );
+        let c = SshClient::with_ssh_binary(bin);
+        let out = c
+            .run("h-live", &["true"], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(out.status.success(), "the retry answers: {out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+        assert!(
+            !c.master_reset_counts().contains_key("h-live"),
+            "a live master must not be reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mux_failure_is_retried_only_once() {
+        // Always fails, and the master never answers `-O check` (dead), so
+        // exactly one reset happens before the one retry — whose own
+        // failure is returned as-is.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_ssh(dir.path(), "case \"$*\" in *'-O check'*) exit 1;; *'-O exit'*) exit 0;; esac\necho 'mux_client_request_session: read from master failed' >&2; exit 255");
+        let c = SshClient::with_ssh_binary(bin);
+        let out = c
+            .run("h-twice", &["true"], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(255),
+            "the second failure is returned, not retried again"
+        );
+        assert_eq!(c.master_reset_counts().get("h-twice"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn a_dead_host_is_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = dir.path().join("calls");
+        let bin = fake_ssh(
+            dir.path(),
+            &format!(
+                "echo x >> '{c}'; echo 'ssh: connect to host h port 22: No route to host' >&2; exit 255",
+                c = count.display()
+            ),
+        );
+        let c = SshClient::with_ssh_binary(bin);
+        let out = c
+            .run("h-dead", &["true"], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(out.status.code(), Some(255));
+        assert_eq!(
+            std::fs::read_to_string(&count).unwrap().lines().count(),
+            1,
+            "exactly one attempt"
+        );
+        assert!(!c.master_reset_counts().contains_key("h-dead"));
+    }
+
+    #[test]
+    fn toolchain_script_asks_the_users_shell_and_marks_every_line() {
+        let s = toolchain_script(true);
+        assert!(s.starts_with("\"${SHELL:-/bin/sh}\" -ilc "), "{s}");
+        assert!(s.contains("FLEET-TC home=%s"), "{s}");
+        assert!(s.contains("command -v tmux 2>/dev/null || true"), "{s}");
+        assert!(s.contains("command -v claude 2>/dev/null || true"), "{s}");
+        assert!(s.ends_with("</dev/null 2>/dev/null"), "{s}");
+        assert!(toolchain_script(false).starts_with("\"${SHELL:-/bin/sh}\" -lc "));
+    }
+
+    #[test]
+    fn parse_toolchain_ignores_shell_noise_and_keeps_only_absolute_binaries() {
+        let out = "Welcome to fishbowl\nFLEET-TC home=/Users/u\nFLEET-TC path=/opt/homebrew/bin:/usr/bin:/bin\nFLEET-TC tmux=/opt/homebrew/bin/tmux\nFLEET-TC claude=claude: aliased to /Users/u/.local/bin/claude\n";
+        let tc = parse_toolchain(out).unwrap();
+        assert_eq!(tc.home, "/Users/u");
+        assert_eq!(tc.path, "/opt/homebrew/bin:/usr/bin:/bin");
+        assert_eq!(tc.tmux.as_deref(), Some("/opt/homebrew/bin/tmux"));
+        assert_eq!(tc.claude, None, "an alias text is not a path");
+        assert!(
+            parse_toolchain("FLEET-TC home=/u\n").is_none(),
+            "no PATH, no toolchain"
+        );
+        assert!(parse_toolchain("").is_none());
+    }
+
+    #[tokio::test]
+    async fn toolchain_is_resolved_once_and_a_failure_is_retried_after_the_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = dir.path().join("calls");
+        let bin = fake_ssh(dir.path(), &format!(
+            "echo x >> '{c}'\n\
+             n=$(wc -l < '{c}')\n\
+             if [ \"$n\" -le 2 ]; then exit 255; fi\n\
+             printf 'FLEET-TC home=/h\\nFLEET-TC path=/p/bin:/usr/bin\\nFLEET-TC tmux=/p/bin/tmux\\nFLEET-TC claude=\\n'",
+            c = count.display()
+        ));
+        let c = SshClient::with_ssh_binary(bin);
+        assert!(
+            c.toolchain("h").await.is_none(),
+            "interactive and login both failed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&count).unwrap().lines().count(),
+            2,
+            "one interactive + one login attempt"
+        );
+        assert!(
+            c.toolchain("h").await.is_none(),
+            "negative cache: no new call"
+        );
+        assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 2);
+        c.forget_toolchain_for_tests("h");
+        let tc = c.toolchain("h").await.expect("resolved");
+        assert_eq!(tc.path, "/p/bin:/usr/bin");
+        assert_eq!(tc.tmux.as_deref(), Some("/p/bin/tmux"));
+        let calls_after = std::fs::read_to_string(&count).unwrap().lines().count();
+        assert!(c.toolchain("h").await.is_some());
+        assert_eq!(
+            std::fs::read_to_string(&count).unwrap().lines().count(),
+            calls_after,
+            "positive cache: no new call"
+        );
     }
 }

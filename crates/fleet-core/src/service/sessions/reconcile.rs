@@ -19,12 +19,16 @@ pub(super) const PANE_TAIL_LINES: u32 = 8;
 /// before `list_sessions` can return, one hung host would block the whole load
 /// path and leave the sidebar empty for ALL hosts, including the healthy
 /// `local` one. On elapse we synthesize a probe error, routing the host through
-/// the existing "unreachable, keep last-known sessions" branch. Set generously
-/// so a healthy host with many sessions (each pane capture is a sequential
-/// round-trip) never false-trips; on a real wedge the ssh-layer wall clock
-/// (`SshClient::run` → `E_SSH_TIMEOUT`) usually fires first and resets the
-/// master.
-pub(crate) const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// the existing "unreachable, keep last-known sessions" branch.
+///
+/// Safety net above the per-call wall clock: the batched probe is one call
+/// (30 s wall clock, which already resets a wedged master), agents a second;
+/// 2 × 30 + 5.
+pub(crate) const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(65);
+
+/// Production cadence for `claude agents --json` per host (a node cold
+/// start): once per minute, not every reconcile pass. See `agents_due`.
+pub(crate) const AGENTS_CADENCE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Default cadence (seconds) for the background reconcile tick, and the
 /// freshness window `list_sessions` serves cached rows within when the tick
@@ -175,7 +179,9 @@ pub(super) const PR_PROBE_BATCH: usize = 12;
 pub(super) struct HostProbe {
     pub(super) host: HostRow,
     pub(super) result: Result<Vec<crate::tmux::TmuxSession>, IpcError>,
-    pub(super) agent_rows: Vec<crate::claude_agents::ClaudeAgentRow>,
+    /// `None`: not asked this pass (cadence) or unanswerable — the bg
+    /// pruner is skipped.
+    pub(super) agent_rows: Option<Vec<crate::claude_agents::ClaudeAgentRow>>,
     /// `sessionId → transcript mtime (unix s)` for this pass's `Background`
     /// agents (one extra host call, only when there is at least one; no bg
     /// agent ⇒ `Some` empty map). `None` when that call failed (spawn error,
@@ -236,6 +242,11 @@ pub(crate) struct ReconcileDeps {
     /// created, an existing one is never probed, and the local Claude
     /// account is not read.
     pub(super) local_host: bool,
+    /// How often `claude agents --json` (a node cold start) is asked per
+    /// host. `0` = every pass (tests).
+    pub(super) agents_every: std::time::Duration,
+    /// When each host was last asked.
+    pub(super) last_agents: dashmap::DashMap<String, std::time::Instant>,
 }
 
 /// `host alias → tmux executor` factory used by `ReconcileDeps`.
@@ -255,6 +266,8 @@ impl ReconcileDeps {
             pr_cache: crate::service::outcome::pr_probe_cache(),
             local_home: local_host.then(crate::service::hosts::local_home_dir),
             local_host,
+            agents_every: AGENTS_CADENCE,
+            last_agents: dashmap::DashMap::new(),
         })
     }
 
@@ -283,6 +296,10 @@ impl ReconcileDeps {
             )),
             local_home: None,
             local_host: true,
+            // Tests want the agents probe on every pass unless they build
+            // their own `ReconcileDeps` with an explicit cadence.
+            agents_every: std::time::Duration::ZERO,
+            last_agents: dashmap::DashMap::new(),
         })
     }
 
@@ -314,6 +331,29 @@ impl ReconcileDeps {
         Arc::get_mut(&mut deps).expect("fresh Arc").local_host = false;
         deps
     }
+
+    /// Override the agents cadence on a freshly built `Arc<ReconcileDeps>`
+    /// (e.g. `ReconcileDeps::fake(..).with_agents_every(Duration::from_secs(60))`),
+    /// for a test that must make `agents_due` say "not yet" on a later pass
+    /// instead of `fake`'s always-due zero cadence.
+    #[cfg(test)]
+    pub(crate) fn with_agents_every(self: Arc<Self>, every: std::time::Duration) -> Arc<Self> {
+        let mut deps = self;
+        Arc::get_mut(&mut deps).expect("fresh Arc").agents_every = every;
+        deps
+    }
+}
+
+/// Whether this pass asks `host` for its agents; records the ask.
+pub(super) fn agents_due(deps: &ReconcileDeps, alias: &str, now: std::time::Instant) -> bool {
+    let due = match deps.last_agents.get(alias) {
+        Some(last) => now.duration_since(*last) >= deps.agents_every,
+        None => true,
+    };
+    if due {
+        deps.last_agents.insert(alias.to_string(), now);
+    }
+    due
 }
 
 /// Shared overlap guard + freshness marker for the fleet-wide reconcile.
@@ -402,30 +442,16 @@ pub fn reconcile_gate() -> &'static ReconcileGate {
     &GATE
 }
 
-/// Capture and analyze the pane tail for every live session on a host. Runs
-/// off-lock inside the probe task. A failed capture for one session is skipped
-/// (no map entry) rather than aborting — reconcile must be robust to a session
-/// whose pane just vanished.
-pub(super) async fn capture_pane_intel(
-    tmux: &dyn TmuxExec,
-    sessions: &[crate::tmux::TmuxSession],
-) -> PaneIntelMap {
-    let mut map = PaneIntelMap::new();
-    for sess in sessions {
-        match tmux
-            .capture_pane_scrollback(&sess.name, PANE_TAIL_LINES)
-            .await
-        {
-            Ok(tail) if !tail.is_empty() => {
-                map.insert(
-                    sess.name.clone(),
-                    crate::service::pane_intel::analyze(&tail),
-                );
-            }
-            _ => {}
-        }
-    }
-    map
+/// Analyze the pane tail captured for every live session on a host by the
+/// batched probe. A tail absent (capture failed) or empty is skipped (no map
+/// entry) rather than aborting — reconcile must be robust to a session whose
+/// pane just vanished.
+pub(super) fn intel_from_tails(tails: &std::collections::HashMap<String, String>) -> PaneIntelMap {
+    tails
+        .iter()
+        .filter(|(_, t)| !t.is_empty())
+        .map(|(name, t)| (name.clone(), crate::service::pane_intel::analyze(t)))
+        .collect()
 }
 
 pub(crate) fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
@@ -494,7 +520,12 @@ pub(super) fn reconcile_write_one_host(
 ) -> Result<(), IpcError> {
     let host = &probe.host;
     let paths = HostPaths::for_host(s, &host.alias);
-    let agent_rows = &probe.agent_rows;
+    // `None` (not asked this pass, or unanswerable) reads as "no agents"
+    // for pairing/status purposes ONLY — the pruner below is gated
+    // separately on `probe.agent_rows` itself, so a `None` never ghosts a
+    // bg row.
+    let agent_rows: &[crate::claude_agents::ClaudeAgentRow] =
+        probe.agent_rows.as_deref().unwrap_or(&[]);
     let intel = &probe.intel;
     match &probe.result {
         Ok(live) => {
@@ -568,11 +599,20 @@ pub(super) fn reconcile_write_one_host(
                 let pr = probe.pr_info.get(&sess.name);
                 let agent_status =
                     known_agent_status(&sess.name, agent.and_then(|a| a.status.as_deref()));
+                // Already vocabulary-checked (and logged when dropped) by
+                // `known_agent_status` above, so the reparse can't fail.
+                let agent_status_typed = agent_status
+                    .as_deref()
+                    .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok());
+                let pane_status = pane.and_then(|p| p.derived_status);
                 // Prefer the authoritative `claude agents` status; fall back to
-                // the status derived from the pane tail only when it is absent
-                // (or outside the documented vocabulary).
-                let claude_status = agent_status
-                    .or_else(|| pane.and_then(|p| p.derived_status).map(|s| s.to_string()));
+                // the pane heuristic per `status_candidate` — full weight when
+                // this pass actually asked, `Blocked`-only otherwise (a
+                // cadence-skipped or unanswerable pass must not let a weak
+                // pane guess overwrite the stored status every time).
+                let claude_status =
+                    status_candidate(probe.agent_rows.is_some(), agent_status_typed, pane_status)
+                        .map(|s| s.as_str().to_string());
                 let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
                 // Transition-detection: remember the PRIOR stored values (the
                 // upsert below overwrites them). A first sighting skips the
@@ -782,16 +822,18 @@ pub(super) fn reconcile_write_one_host(
             // instead they are pruned inside `reconcile_agent_rows` against
             // the current `claude agents --json` result, so dead agents can't
             // accumulate.
-            reconcile_agent_rows(
-                s,
-                &host.alias,
-                live,
-                projects,
-                agent_rows,
-                probe.agent_mtimes.as_ref(),
-                now,
-                probe.started_at,
-            )?;
+            if let Some(agents) = &probe.agent_rows {
+                reconcile_agent_rows(
+                    s,
+                    &host.alias,
+                    live,
+                    projects,
+                    agents,
+                    probe.agent_mtimes.as_ref(),
+                    now,
+                    probe.started_at,
+                )?;
+            }
             // Task H: stamp freshness on every session this pass observed live,
             // so a proactive (background) reconcile keeps `last_reconciled_at`
             // current and the UI can dim rows whose host has gone quiet. It is
@@ -805,9 +847,10 @@ pub(super) fn reconcile_write_one_host(
                 );
             }
         }
-        Err(_e) => {
+        Err(e) => {
             // Mark host unreachable; surface last-known sessions so the UI
             // can render them dimmed/red. We KEEP them (no delete).
+            tracing::warn!(host = %host.alias, code = %e.code, error = %e.message, "[reconcile] host unreachable");
             s.apply_host_reconcile(HostReconcile {
                 alias: &host.alias,
                 reachable: false,
@@ -1103,11 +1146,13 @@ pub(super) async fn probe_one_host(
     deps: &ReconcileDeps,
 ) -> HostProbe {
     let tmux = (deps.exec)(&host.alias);
+    let fetch_agents = agents_due(deps, &host.alias, std::time::Instant::now());
     probe_with_timeout(
         host,
         tmux,
         deps.probe_timeout,
         Some((deps.shell.as_ref(), deps.pr_cache.as_ref(), &paths)),
+        fetch_agents,
     )
     .await
 }
@@ -1172,48 +1217,66 @@ pub(super) async fn probe_with_timeout(
         &crate::service::outcome::PrProbeCache,
         &HostPaths,
     )>,
+    fetch_agents: bool,
 ) -> HostProbe {
     // Recorded BEFORE the first await: this is the instant the probe's view of
     // the host stops being current (BE-3 ghost guard).
     let started_at = now_unix();
     let probe = async {
-        // Boot identity feeds the reboot-safety-net writer (Task 6). Read
-        // BEFORE the list: a tmux server that dies between the two reads
-        // then shows up as sessions missing from the list (the next pass's
-        // verdict catches it) rather than as a verdict whose `keep` still
-        // names the sessions it just lost. Only trustworthy when we actually
-        // reached the host this pass, so it is discarded below when the
-        // list fails.
-        let identity = tmux.host_identity().await;
-        let tmux_result = tmux.list_sessions().await;
-        let identity = if tmux_result.is_ok() { identity } else { None };
-        let agent_rows = tmux.list_claude_agents().await;
+        // Boot identity, the session list, the oauth account and every live
+        // session's pane tail, in ONE round trip (`RemoteTmux` batches them
+        // into a single delimited script; the default composition on other
+        // executors still runs them sequentially). Identity is read BEFORE
+        // the list on the wire: a tmux server that dies between the two
+        // reads then shows up as sessions missing from the list (the next
+        // pass's verdict catches it) rather than as a verdict whose `keep`
+        // still names the sessions it just lost. Only trustworthy when we
+        // actually reached the host this pass, so it is discarded below
+        // when the list fails.
+        let snap = tmux.probe_snapshot(PANE_TAIL_LINES).await;
+        let tmux_result = snap.sessions;
+        let identity = if tmux_result.is_ok() {
+            snap.identity
+        } else {
+            None
+        };
         // Which account the host is logged into NOW — so a `claude /login`
         // as someone else on a remote host relinks it within one pass
         // instead of waiting for a manual Re-probe. Skipped when the list
         // failed: the host is about to be marked unreachable and the read
         // would only be one more round trip into a dead ssh.
         let account = if tmux_result.is_ok() {
-            tmux.read_oauth_account().await
+            snap.account
+        } else {
+            None
+        };
+        // One pane-tail read per live session, parsed into reconcile intel.
+        let intel = intel_from_tails(&snap.pane_tails);
+        // `None`: not due this pass (cadence) or the host could not be
+        // asked. Either way the bg pruner below must not run this pass —
+        // treating "not asked" as "no agents" is exactly what ghosts every
+        // background row.
+        let agent_rows = if fetch_agents && tmux_result.is_ok() {
+            tmux.list_claude_agents().await
         } else {
             None
         };
         // Transcript mtimes feed the inactive-bg-agent rule; one host call,
         // only when this pass saw a background agent.
-        let bg_ids: Vec<String> = agent_rows
-            .iter()
-            .filter(|a| a.kind == crate::claude_agents::AgentKind::Background)
-            .filter_map(|a| a.session_id.clone())
-            .collect();
-        let agent_mtimes = if bg_ids.is_empty() {
-            Some(std::collections::HashMap::new())
-        } else {
-            tmux.transcript_mtimes(&bg_ids).await
-        };
-        // One pane-tail read per live session, parsed into reconcile intel.
-        let intel = match &tmux_result {
-            Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
-            Err(_) => PaneIntelMap::new(),
+        let agent_mtimes = match &agent_rows {
+            None => None,
+            Some(rows) => {
+                let bg_ids: Vec<String> = rows
+                    .iter()
+                    .filter(|a| a.kind == crate::claude_agents::AgentKind::Background)
+                    .filter_map(|a| a.session_id.clone())
+                    .collect();
+                if bg_ids.is_empty() {
+                    Some(std::collections::HashMap::new())
+                } else {
+                    tmux.transcript_mtimes(&bg_ids).await
+                }
+            }
         };
         (
             tmux_result,
@@ -1245,7 +1308,7 @@ pub(super) async fn probe_with_timeout(
             return HostProbe {
                 host,
                 result: Err(IpcError::new(codes::E_TIMEOUT, "host probe timed out")),
-                agent_rows: Vec::new(),
+                agent_rows: None,
                 agent_mtimes: None,
                 intel: PaneIntelMap::new(),
                 pr_info: PrInfoMap::new(),
@@ -1605,5 +1668,43 @@ pub(super) fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Optio
             );
             None
         }
+    }
+}
+
+/// The `claude_status` candidate for one live session this pass.
+///
+/// `agents_asked` is `probe.agent_rows.is_some()` — whether `claude agents
+/// --json` was actually asked this pass (see `agents_due`): a cadence-
+/// skipped host or an unanswerable call both leave `agent_status` at
+/// `None` before this function is even reached.
+///
+/// When agents WERE asked: the authoritative agent status wins, falling
+/// back to the pane heuristic when absent — this is the pre-cadence
+/// behaviour, unchanged.
+///
+/// When agents were NOT asked: `agent_status` is always `None` (no
+/// pairing ran), so falling back to the pane heuristic unconditionally
+/// would overwrite a stored authoritative/hook-stamped status with a weak
+/// pane guess on every skipped pass — at the 60 s agents / 20 s reconcile
+/// cadence that is 2 of every 3 passes, producing status flicker and
+/// spurious `status_change` events. Only `Blocked` (a real dialog or
+/// stuck pane) is strong enough pane evidence to surface without waiting
+/// for the next agents pass; any other pane verdict yields `None` so the
+/// upsert's `COALESCE(excluded.claude_status, claude_status)` keeps
+/// whatever is stored (a hook-stamped `idle`/`working` survives between
+/// agent fetches).
+pub(super) fn status_candidate(
+    agents_asked: bool,
+    agent_status: Option<crate::service::pane_intel::ClaudeStatus>,
+    pane: Option<crate::service::pane_intel::ClaudeStatus>,
+) -> Option<crate::service::pane_intel::ClaudeStatus> {
+    if agents_asked {
+        return agent_status.or(pane);
+    }
+    match pane {
+        Some(crate::service::pane_intel::ClaudeStatus::Blocked) => {
+            Some(crate::service::pane_intel::ClaudeStatus::Blocked)
+        }
+        _ => None,
     }
 }

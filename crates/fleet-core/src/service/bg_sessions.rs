@@ -240,7 +240,7 @@ async fn find_launched_id(
         if attempt > 0 {
             tokio::time::sleep(LAUNCH_LOOKUP_DELAY).await;
         }
-        let agents = tmux.list_claude_agents().await;
+        let agents = tmux.list_claude_agents().await.unwrap_or_default();
         if let Some(id) = pick_launched_id(None, &agents, name, launch_started) {
             return Some(id);
         }

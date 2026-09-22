@@ -584,6 +584,15 @@ pub(super) fn resolve_controller(store: &Store) -> Option<(String, String)> {
     store.get_controller().ok().flatten()
 }
 
+/// The most scrollback one capture reads. `capture-pane -S -<n>` with an
+/// unbounded `n` pulls the whole history of a pane through ssh; nothing in
+/// the UI or the control API needs more than this.
+pub const MAX_SCROLLBACK_LINES: u32 = 20_000;
+
+pub fn clamp_scrollback(lines: Option<u32>) -> Option<u32> {
+    lines.map(|n| n.min(MAX_SCROLLBACK_LINES))
+}
+
 /// Capture a session's terminal output. `scrollback_lines = None` returns the
 /// visible pane; `Some(n)` includes `n` rows of scrollback history.
 pub async fn capture_session_output(
@@ -594,7 +603,7 @@ pub async fn capture_session_output(
 ) -> Result<String, IpcError> {
     let (host, name) = crate::service::repo::session_target(store, session_id)?;
     let tmux = exec_for(&host, ssh);
-    match scrollback_lines {
+    match clamp_scrollback(scrollback_lines) {
         Some(n) => tmux.capture_pane_scrollback(&name, n).await,
         None => tmux.capture_pane(&name).await,
     }

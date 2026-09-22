@@ -57,10 +57,10 @@ pub trait TmuxExec: Send + Sync {
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
     /// Capture the pane plus `lines` rows of scrollback history.
     async fn capture_pane_scrollback(&self, name: &str, lines: u32) -> Result<String, IpcError>;
-    /// Run `claude agents --json` on this host and return parsed session info.
-    /// Returns an empty vec if claude CLI is not installed or the command fails —
-    /// the fleet treats missing Claude agent data as degraded-gracefully.
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow>;
+    /// `claude agents --json` on the host. `None` when the host could not be
+    /// asked (ssh failure, timeout, non-zero exit): the caller must not treat
+    /// it as "no agents" — that is what ghosts every background row.
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>>;
     /// `sessionId → transcript mtime (unix s)` for the given ids; ids that are not
     /// valid Claude session ids are skipped. `Some(map)` when the call succeeded
     /// (possibly empty: no transcript found, or no valid id to ask about);
@@ -96,6 +96,33 @@ pub trait TmuxExec: Send + Sync {
     /// is `None`; `LocalTmux` and `RemoteTmux` both override it.
     async fn host_identity(&self) -> Option<HostIdentity> {
         None
+    }
+
+    /// Everything a reconcile pass needs from the host. The default composes
+    /// the per-call methods (local tmux, test fakes); `RemoteTmux` overrides
+    /// it with one script so a pass costs one round trip, not 5 + N.
+    async fn probe_snapshot(&self, tail_lines: u32) -> ProbeSnapshot {
+        let identity = self.host_identity().await;
+        let sessions = self.list_sessions().await;
+        let account = if sessions.is_ok() {
+            self.read_oauth_account().await
+        } else {
+            None
+        };
+        let mut pane_tails = std::collections::HashMap::new();
+        if let Ok(live) = &sessions {
+            for s in live {
+                if let Ok(tail) = self.capture_pane_scrollback(&s.name, tail_lines).await {
+                    pane_tails.insert(s.name.clone(), tail);
+                }
+            }
+        }
+        ProbeSnapshot {
+            identity,
+            sessions,
+            account,
+            pane_tails,
+        }
     }
 }
 
@@ -134,6 +161,21 @@ pub fn parse_mtimes(stdout: &str) -> std::collections::HashMap<String, i64> {
             Some((id.to_string(), mtime.trim().parse::<i64>().ok()?))
         })
         .collect()
+}
+
+/// Section delimiter of the batched probe. A pane line that starts with it
+/// is escaped by the script (one leading space), so the parser never
+/// mistakes pane text for a section.
+pub const PROBE_DELIM: &str = "---FLEET:";
+
+/// Everything a reconcile pass reads from a host, in ONE round trip.
+#[derive(Debug)]
+pub struct ProbeSnapshot {
+    pub identity: Option<HostIdentity>,
+    pub sessions: Result<Vec<TmuxSession>, IpcError>,
+    pub account: Option<crate::service::hosts::OauthAccount>,
+    /// Pane text per live session, exactly `capture-pane -S -<n> -p`.
+    pub pane_tails: std::collections::HashMap<String, String>,
 }
 
 /// A host's boot identity, read once per reconcile probe.
@@ -305,20 +347,19 @@ impl TmuxExec for LocalTmux {
             Ok(String::new())
         }
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        if local_allowed().is_err() {
-            return Vec::new();
-        }
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        local_allowed().ok()?;
         let output = tokio::process::Command::new("claude")
             .args(["agents", "--json"])
             .output()
             .await
-            .ok();
-        let json = output
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_else(|| "[]".to_string());
-        crate::claude_agents::parse_claude_agents_json(&json)
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(crate::claude_agents::parse_claude_agents_json(
+            &String::from_utf8_lossy(&output.stdout),
+        ))
     }
     async fn transcript_mtimes(
         &self,
@@ -359,42 +400,176 @@ pub struct RemoteTmux<C: SshExec = Arc<SshClient>> {
     pub host: String,
 }
 
+/// Cap on the combined stdout captured for one tmux call — a runaway pane
+/// capture or a chatty script must not let the app buffer unbounded remote
+/// output.
+pub const TMUX_OUTPUT_CAP: usize = 8 * 1024 * 1024;
+
 impl<C: SshExec> RemoteTmux<C> {
-    /// We always wrap remote tmux invocations in `bash -lc '…'` so the
-    /// remote user's login env (PATH, LANG, etc.) is sourced. sshd may have
+    /// One tmux call on the host. With a resolved toolchain: `sh -c 'export
+    /// PATH=<login PATH>; <script>'` — no login shell spawned per call.
+    /// Without one: `bash -lc '<script>'` as before, so the remote user's
+    /// login env (PATH, LANG, etc.) is still sourced. sshd may have
     /// `AcceptEnv` disabled which would silently drop SendEnv vars; the
     /// login shell route is portable.
     ///
-    /// CRITICAL: `ssh <host> bash -lc <script>` joins ALL trailing argv with
-    /// spaces before sending to the remote sshd. The remote shell then re-
-    /// tokenizes, so any spaces in `<script>` would break `bash -c` (it
-    /// would get just the first token as the script and everything else as
-    /// positional args). We therefore single-quote the WHOLE script via
-    /// `quote` so it crosses the ssh boundary as one shell word.
-    /// `quote` already escapes the embedded `'` characters used by
+    /// CRITICAL: `ssh <host> bash -lc <script>` (or `sh -c <script>`) joins
+    /// ALL trailing argv with spaces before sending to the remote sshd. The
+    /// remote shell then re-tokenizes, so any spaces in `<script>` would
+    /// break `bash -c` (it would get just the first token as the script and
+    /// everything else as positional args). We therefore single-quote the
+    /// WHOLE script via `quote` so it crosses the ssh boundary as one shell
+    /// word. `quote` already escapes the embedded `'` characters used by
     /// per-arg quoting inside `script`.
     ///
     /// The 10s here is ssh's `ConnectTimeout` only. `SshClient::run` bounds
     /// the whole command by `default_wall_clock(10s)` = 30s on top, so a tmux
     /// command that hangs after connect (wedged ControlMaster) surfaces as
-    /// `E_SSH_TIMEOUT` instead of blocking the caller forever.
-    async fn remote_bash(&self, script: &str) -> Result<std::process::Output, IpcError> {
-        let quoted = quote(script);
+    /// `E_SSH_TIMEOUT` instead of blocking the caller forever. Output is
+    /// capped at [`TMUX_OUTPUT_CAP`].
+    async fn remote_sh(&self, script: &str) -> Result<std::process::Output, IpcError> {
+        let connect = std::time::Duration::from_secs(10);
+        let args: Vec<String> = match self.client.toolchain(&self.host).await {
+            Some(tc) => vec![
+                "sh".into(),
+                "-c".into(),
+                quote(&format!("export PATH={}; {script}", quote(&tc.path))),
+            ],
+            None => vec!["bash".into(), "-lc".into(), quote(script)],
+        };
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         self.client
-            .run(
+            .run_bounded_capped(
                 &self.host,
-                &["bash", "-lc", &quoted],
-                std::time::Duration::from_secs(10),
+                &argv,
+                connect,
+                SshClient::default_wall_clock(connect),
+                TMUX_OUTPUT_CAP,
             )
             .await
     }
 }
 
+const SESSIONS_FORMAT: &str = "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}";
+
+/// The batched probe: identity, the session list with its exit code, the
+/// oauth account, then one pane capture per live session, each behind a
+/// `---FLEET:` line. Ends with `---FLEET:end` so a capped or cut output is
+/// recognisable. Session and pane lines starting with the delimiter get one
+/// leading space (`sed 's/^---FLEET/ &/'`) so they cannot open a section —
+/// a live session literally named `---FLEET:evil` (or a pane whose tail
+/// happens to start with the marker) must never forge a section boundary.
+/// `parse_probe_snapshot` undoes the escape on the sessions section before
+/// parsing it (pane tails keep the leading space verbatim: it's just
+/// display text there).
+pub fn probe_snapshot_script(tail_lines: u32) -> String {
+    let start = scrollback_start(tail_lines);
+    format!(
+        "printf '%s\\n' '---FLEET:identity'; {HOST_IDENTITY_SCRIPT}; \
+         printf '%s\\n' '---FLEET:sessions'; out=$(tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1); rc=$?; printf 'rc=%s\\n' \"$rc\"; printf '%s\\n' \"$out\" | sed 's/^---FLEET/ &/'; \
+         printf '%s\\n' '---FLEET:account'; {}; \
+         printf '%s\\n' '---FLEET:panes'; \
+         tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do printf '%s\\n' \"---FLEET:pane $s\"; tmux capture-pane -t \"=$s:\" -S {start} -p 2>/dev/null | sed 's/^---FLEET/ &/'; done; \
+         printf '%s\\n' '---FLEET:end'",
+        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
+    )
+}
+
+/// Undo the `sed 's/^---FLEET/ &/'` escape `probe_snapshot_script` applies
+/// to a session (or pane) line that would otherwise open a section: strip
+/// exactly one leading space from any line starting with ` ---FLEET`.
+fn unescape_delim_lines(body: &str) -> String {
+    body.lines()
+        .map(|l| {
+            l.strip_prefix(' ')
+                .filter(|r| r.starts_with("---FLEET"))
+                .unwrap_or(l)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Parse [`probe_snapshot_script`] output. `Err` only when the text is not
+/// a probe at all (ssh's own error, or a capped/cut output without the end
+/// marker); a section that is present but unusable degrades to that
+/// section's "unknown" value, except the session list, whose garbage is an
+/// `Err` inside the snapshot exactly as `list_sessions` reports it.
+pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
+    let mut sections: Vec<(String, String)> = Vec::new();
+    for line in stdout.lines() {
+        if let Some(name) = line.strip_prefix(PROBE_DELIM) {
+            sections.push((name.to_string(), String::new()));
+        } else if let Some((_, body)) = sections.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    if !sections.iter().any(|(n, _)| n == "end") {
+        return Err(IpcError::new(
+            codes::E_TMUX,
+            format!(
+                "probe output truncated or not a probe: {}",
+                stdout.trim().lines().next().unwrap_or("")
+            ),
+        ));
+    }
+    let section = |name: &str| {
+        sections
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, b)| b.as_str())
+    };
+    let identity = section("identity").and_then(parse_host_identity);
+    let sessions = match section("sessions") {
+        None => Err(IpcError::new(
+            codes::E_TMUX,
+            "probe output has no sessions section",
+        )),
+        Some(body) => {
+            let mut lines = body.lines();
+            let rc: Option<i32> = lines
+                .next()
+                .and_then(|l| l.strip_prefix("rc="))
+                .and_then(|v| v.trim().parse().ok());
+            let combined: String = unescape_delim_lines(&lines.collect::<Vec<_>>().join("\n"));
+            match rc {
+                Some(0) => {
+                    if combined.trim().is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        parse_sessions_checked(&combined)
+                    }
+                }
+                Some(_) if is_no_server_running(&combined) => Ok(Vec::new()),
+                Some(_) => Err(IpcError::new(codes::E_TMUX, combined.trim())),
+                None => Err(IpcError::new(
+                    codes::E_TMUX,
+                    "probe output has no sessions exit code",
+                )),
+            }
+        }
+    };
+    let account =
+        section("account").and_then(|b| crate::service::hosts::parse_oauth_account(b.trim()));
+    let mut pane_tails = std::collections::HashMap::new();
+    for (name, body) in &sections {
+        if let Some(pane) = name.strip_prefix("pane ") {
+            pane_tails.insert(pane.to_string(), body.trim_end_matches('\n').to_string());
+        }
+    }
+    Ok(ProbeSnapshot {
+        identity,
+        sessions,
+        account,
+        pane_tails,
+    })
+}
+
 #[async_trait]
 impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
-        let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}' 2>&1";
-        let output = self.remote_bash(script).await?;
+        let script = format!("tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1");
+        let output = self.remote_sh(&script).await?;
         let combined = String::from_utf8_lossy(&output.stdout).into_owned();
         if output.status.success() {
             return parse_sessions_checked(&combined);
@@ -422,9 +597,12 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             " -e LANG={}",
             quote(&std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
         ));
+        if let Some(tc) = self.client.toolchain(&self.host).await {
+            script.push_str(&format!(" -e PATH={}", quote(&tc.path)));
+        }
         script.push(' ');
         script.push_str(&quote(pane_cmd));
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -437,7 +615,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
 
     async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
         let script = format!("tmux kill-session -t {}", quote(&exact_session(name)));
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -470,7 +648,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             quote(&exact_session(old)),
             quote(trimmed)
         );
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -487,7 +665,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             quote(&exact_pane(name)),
             quote(pane_cmd)
         );
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -505,7 +683,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         pane_cmd: &str,
     ) -> Result<(), IpcError> {
         let script = respawn_pane_in_script(name, cwd, pane_cmd);
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -518,7 +696,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
 
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
         let script = format!("tmux capture-pane -t {} -p", quote(&exact_pane(name)));
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
@@ -533,7 +711,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             quote(&exact_pane(name)),
             quote(&start),
         );
-        let output = self.remote_bash(&script).await?;
+        let output = self.remote_sh(&script).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
@@ -541,14 +719,17 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(String::new())
         }
     }
-    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
-        let script = "claude agents --json 2>/dev/null || echo '[]'";
-        let output = self.remote_bash(script).await.ok();
-        let json = output
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_else(|| "[]".to_string());
-        crate::claude_agents::parse_claude_agents_json(&json)
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        let output = self
+            .remote_sh("claude agents --json 2>/dev/null")
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(crate::claude_agents::parse_claude_agents_json(
+            &String::from_utf8_lossy(&output.stdout),
+        ))
     }
     async fn transcript_mtimes(
         &self,
@@ -557,10 +738,10 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         let Some(script) = transcript_mtimes_script(ids) else {
             return Some(std::collections::HashMap::new());
         };
-        // `remote_bash` bounds the call (its timeout surfaces as `Err`); an
+        // `remote_sh` bounds the call (its timeout surfaces as `Err`); an
         // unreachable host is ssh exiting 255 — both are failures, not "no
         // transcript".
-        match self.remote_bash(&script).await {
+        match self.remote_sh(&script).await {
             Ok(o) if o.status.success() => Some(parse_mtimes(&String::from_utf8_lossy(&o.stdout))),
             _ => None,
         }
@@ -570,7 +751,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         // script itself never fails (`|| true`), so a non-zero exit is ssh
         // (unreachable / timeout) — "could not tell", not "logged out".
         let output = self
-            .remote_bash(crate::service::hosts::OAUTH_ACCOUNT_SCRIPT)
+            .remote_sh(crate::service::hosts::OAUTH_ACCOUNT_SCRIPT)
             .await
             .ok()
             .filter(|o| o.status.success())?;
@@ -578,11 +759,42 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     }
     async fn host_identity(&self) -> Option<HostIdentity> {
         let out = self
-            .remote_bash(HOST_IDENTITY_SCRIPT)
+            .remote_sh(HOST_IDENTITY_SCRIPT)
             .await
             .ok()
             .filter(|o| o.status.success())?;
         parse_host_identity(&String::from_utf8_lossy(&out.stdout))
+    }
+    async fn probe_snapshot(&self, tail_lines: u32) -> ProbeSnapshot {
+        let script = probe_snapshot_script(tail_lines);
+        match self.remote_sh(&script).await {
+            Err(e) => ProbeSnapshot {
+                identity: None,
+                sessions: Err(e),
+                account: None,
+                pane_tails: Default::default(),
+            },
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                match parse_probe_snapshot(&text) {
+                    Ok(snap) => snap,
+                    Err(e) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        let why = if out.status.success() {
+                            e.message
+                        } else {
+                            format!("{} ({})", stderr.trim(), e.message)
+                        };
+                        ProbeSnapshot {
+                            identity: None,
+                            sessions: Err(IpcError::new(codes::E_SSH, why)),
+                            account: None,
+                            pane_tails: Default::default(),
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -951,6 +1163,146 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot_text(
+        sessions_rc: i32,
+        sessions: &str,
+        account: &str,
+        panes: &[(&str, &str)],
+    ) -> String {
+        let mut s = String::new();
+        s.push_str("---FLEET:identity\nboot=abc-123\ntmuxrc=0\ntmuxout=4242\n");
+        s.push_str(&format!(
+            "---FLEET:sessions\nrc={sessions_rc}\n{sessions}\n"
+        ));
+        s.push_str(&format!("---FLEET:account\n{account}\n"));
+        s.push_str("---FLEET:panes\n");
+        for (name, tail) in panes {
+            s.push_str(&format!("---FLEET:pane {name}\n{tail}\n"));
+        }
+        s.push_str("---FLEET:end\n");
+        s
+    }
+
+    #[test]
+    fn probe_snapshot_parses_every_section() {
+        let text = snapshot_text(
+            0,
+            "dev-a|1700000000|1700000100|0|/home/u/p|%3\ndev-b|1700000000|1700000200|1|/home/u/q|%7",
+            r#"{"accountUuid":"u-1","emailAddress":"a@b.c"}"#,
+            &[("dev-a", "❯ \n? for shortcuts"), ("dev-b", "Thinking… (3s · esc to interrupt)")],
+        );
+        let snap = parse_probe_snapshot(&text).unwrap();
+        let sessions = snap.sessions.unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].name, "dev-a");
+        assert_eq!(snap.identity.unwrap().tmux_server_pid, Some(4242));
+        assert_eq!(snap.account.unwrap().uuid.as_deref(), Some("u-1"));
+        assert_eq!(
+            snap.pane_tails["dev-b"],
+            "Thinking… (3s · esc to interrupt)"
+        );
+        assert_eq!(snap.pane_tails.len(), 2);
+    }
+
+    #[test]
+    fn probe_snapshot_reads_no_server_running_as_zero_sessions() {
+        let text = snapshot_text(1, "no server running on /tmp/tmux-501/default", "{}", &[]);
+        let snap = parse_probe_snapshot(&text).unwrap();
+        assert_eq!(snap.sessions.unwrap().len(), 0);
+        assert!(snap.account.is_none());
+        assert!(snap.pane_tails.is_empty());
+    }
+
+    #[test]
+    fn probe_snapshot_refuses_garbage_and_truncation() {
+        let text = snapshot_text(0, "this is not a session line", "{}", &[]);
+        assert!(
+            parse_probe_snapshot(&text).unwrap().sessions.is_err(),
+            "garbage must not read as zero sessions"
+        );
+        let mut truncated = snapshot_text(0, "", "{}", &[]);
+        truncated.truncate(truncated.len() - "---FLEET:end\n".len());
+        let e = parse_probe_snapshot(&truncated).unwrap_err();
+        assert_eq!(e.code, "E_TMUX");
+        assert!(e.message.contains("truncated"), "{}", e.message);
+        let e =
+            parse_probe_snapshot("ssh: connect to host h port 22: No route to host").unwrap_err();
+        assert_eq!(e.code, "E_TMUX");
+    }
+
+    #[test]
+    fn probe_snapshot_keeps_an_escaped_delimiter_inside_a_pane() {
+        let text = snapshot_text(
+            0,
+            "dev-a|1|2|0|/p|%1",
+            "{}",
+            &[("dev-a", " ---FLEET:panes is just text\nline2")],
+        );
+        let snap = parse_probe_snapshot(&text).unwrap();
+        assert_eq!(
+            snap.pane_tails["dev-a"],
+            " ---FLEET:panes is just text\nline2"
+        );
+    }
+
+    #[test]
+    fn probe_snapshot_unescapes_a_delimiter_named_session() {
+        // A live session literally named `---FLEET:evil` comes back from
+        // the script with the sed escape already applied (one leading
+        // space) — the parser must undo it before handing the line to
+        // `parse_sessions_checked`, and the section boundary that follows
+        // must still be found (the escape is what makes that possible in
+        // the first place).
+        let text = snapshot_text(
+            0,
+            " ---FLEET:evil|1|2|0|/p|%9",
+            r#"{"accountUuid":"u-9"}"#,
+            &[],
+        );
+        let snap = parse_probe_snapshot(&text).unwrap();
+        let sessions = snap.sessions.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "---FLEET:evil");
+        assert_eq!(
+            snap.account.unwrap().uuid.as_deref(),
+            Some("u-9"),
+            "the section boundary after the escaped session line must still be found"
+        );
+    }
+
+    #[test]
+    fn probe_snapshot_script_has_every_section_and_escapes_pane_lines() {
+        let s = probe_snapshot_script(8);
+        for section in [
+            "---FLEET:identity",
+            "---FLEET:sessions",
+            "---FLEET:account",
+            "---FLEET:panes",
+            "---FLEET:end",
+        ] {
+            assert!(
+                s.contains(&format!("printf '%s\\n' '{section}'")),
+                "{section} missing in {s}"
+            );
+        }
+        assert!(s.contains(HOST_IDENTITY_SCRIPT));
+        assert!(s.contains(crate::service::hosts::OAUTH_ACCOUNT_SCRIPT));
+        assert!(
+            s.contains(
+                "tmux capture-pane -t \"=$s:\" -S -8 -p 2>/dev/null | sed 's/^---FLEET/ &/'"
+            ),
+            "{s}"
+        );
+        // A live session literally named `---FLEET:evil` must not forge a
+        // section boundary either — the session list is escaped the same
+        // way the pane captures are.
+        assert!(
+            s.contains("printf '%s\\n' \"$out\" | sed 's/^---FLEET/ &/'"),
+            "{s}"
+        );
+        assert!(s.contains("while IFS= read -r s; do"), "{s}");
+    }
 
     #[test]
     fn scrollback_start_is_negative_lines() {
@@ -1687,5 +2039,85 @@ mod tests {
         );
         assert_eq!(m.len(), 1);
         assert_eq!(m["44366faf-ae97-426a-91cd-beaf3c74f1d7"], 1_779_999_999);
+    }
+
+    #[tokio::test]
+    async fn remote_tmux_runs_under_sh_with_the_login_path_once_the_toolchain_is_known() {
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.set_toolchain(
+            "h",
+            crate::ssh::HostToolchain {
+                home: "/h".into(),
+                path: "/opt/homebrew/bin:/usr/bin".into(),
+                tmux: Some("/opt/homebrew/bin/tmux".into()),
+                claude: None,
+            },
+        );
+        fake.on_host(
+            "h",
+            crate::ssh_fake::Match::script_contains("tmux list-sessions"),
+            crate::ssh_fake::Reply::ok(""),
+        );
+        let t = RemoteTmux {
+            client: fake.clone(),
+            host: "h".into(),
+        };
+        let _ = t.list_sessions().await;
+        let call = fake.calls_for("h").pop().unwrap();
+        assert_eq!(
+            &call.args[..2],
+            &["sh".to_string(), "-c".to_string()],
+            "{:?}",
+            call.args
+        );
+        let body = crate::ssh_fake::unquote(&call.args[2]).unwrap();
+        assert!(
+            body.starts_with("export PATH='/opt/homebrew/bin:/usr/bin'; "),
+            "{body}"
+        );
+        assert!(
+            call.script().unwrap().starts_with("tmux list-sessions"),
+            "Call::script strips the export prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_tmux_falls_back_to_a_login_shell_without_a_toolchain() {
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.on_host(
+            "h",
+            crate::ssh_fake::Match::script_contains("tmux list-sessions"),
+            crate::ssh_fake::Reply::ok(""),
+        );
+        let t = RemoteTmux {
+            client: fake.clone(),
+            host: "h".into(),
+        };
+        let _ = t.list_sessions().await;
+        let call = fake.calls_for("h").pop().unwrap();
+        assert_eq!(&call.args[..2], &["bash".to_string(), "-lc".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn remote_new_session_forwards_the_login_path_into_the_pane() {
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.set_toolchain(
+            "h",
+            crate::ssh::HostToolchain {
+                home: "/h".into(),
+                path: "/a:/b".into(),
+                tmux: None,
+                claude: None,
+            },
+        );
+        let t = RemoteTmux {
+            client: fake.clone(),
+            host: "h".into(),
+        };
+        t.new_session("s", std::path::Path::new("/w"), "cl")
+            .await
+            .unwrap();
+        let script = fake.calls_for("h").pop().unwrap().script().unwrap();
+        assert!(script.contains(" -e PATH='/a:/b'"), "{script}");
     }
 }

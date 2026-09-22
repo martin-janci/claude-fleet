@@ -168,7 +168,11 @@ pub(super) fn ensure_remote_project_script(
     let root = quote(project_root);
     let mut script = format!(
         "set -e\n\
-         if [ ! -d {root}/.git ]; then mkdir -p \"$(dirname -- {root})\" && git clone {url} {root}; fi\n",
+         if [ ! -d {root}/.git ]; then \
+           mkdir -p \"$(dirname -- {root})\"; \
+           tmp=\"$(dirname -- {root})/.fleet-clone-$$\"; rm -rf \"$tmp\"; \
+           git clone {url} \"$tmp\" && {{ [ ! -e {root} ] || rmdir {root}; }} && mv \"$tmp\" {root} || {{ rm -rf \"$tmp\"; exit 1; }}; \
+         fi\n",
         url = quote(clone_url),
     );
     if let Some(wt) = worktree {
@@ -934,7 +938,10 @@ pub(super) async fn kill_session_with(
             .unwrap_or_else(|| args.name.trim_start_matches("bg:").to_string());
         let status = claude_status.as_deref();
         let agents = if bg_kill_needs_listing(&kind, status) {
-            exec_for(&args.host_alias, ssh).list_claude_agents().await
+            exec_for(&args.host_alias, ssh)
+                .list_claude_agents()
+                .await
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
