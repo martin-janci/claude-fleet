@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// Whether a timeline write also announces itself on the event bus.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Announce {
+    Yes,
+    No,
+}
+
 impl Store {
     /// Append one row to the per-session event timeline (migration 013). The
     /// timeline is append-only; callers must treat a write failure as
@@ -31,6 +38,39 @@ impl Store {
         kind: &str,
         detail: Option<&str>,
     ) -> Result<(), crate::ipc_error::IpcError> {
+        self.write_session_event(session_id, claude_session_id, kind, detail, Announce::Yes)
+    }
+
+    /// [`Self::insert_session_event_for`] that writes the row and stays quiet.
+    ///
+    /// For an event whose only audience is the timeline when somebody next
+    /// opens it. The audit row for a *read* is the case this exists for: on a
+    /// fleet with a desktop and a phone attached, the desktop's 5 s
+    /// conversation poll alone produced ~720 `session:event` frames an hour,
+    /// each one fanned out to every connected client — 253 B apiece to a
+    /// phone, to say that somebody else had just read something. Worse, a
+    /// read-only paired client learned from them what the operator was doing.
+    ///
+    /// The row is still written, so the timeline and `session_history` are
+    /// unchanged: this drops the live announcement, not the audit.
+    pub fn insert_session_event_quietly(
+        &self,
+        session_id: i64,
+        claude_session_id: Option<&str>,
+        kind: &str,
+        detail: Option<&str>,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.write_session_event(session_id, claude_session_id, kind, detail, Announce::No)
+    }
+
+    fn write_session_event(
+        &self,
+        session_id: i64,
+        claude_session_id: Option<&str>,
+        kind: &str,
+        detail: Option<&str>,
+        announce: Announce,
+    ) -> Result<(), crate::ipc_error::IpcError> {
         let at = now_unix();
         self.conn.execute(
             "INSERT INTO session_events (session_id, at, kind, detail, claude_session_id) \
@@ -44,14 +84,16 @@ impl Store {
                    ORDER BY at DESC, id DESC LIMIT ?2)",
             rusqlite::params![session_id, SESSION_EVENTS_CAP],
         )?;
-        self.bus.session_event_added(&SessionEvent {
-            id,
-            session_id,
-            at,
-            kind: kind.to_string(),
-            detail: detail.map(String::from),
-            claude_session_id: claude_session_id.map(String::from),
-        });
+        if announce == Announce::Yes {
+            self.bus.session_event_added(&SessionEvent {
+                id,
+                session_id,
+                at,
+                kind: kind.to_string(),
+                detail: detail.map(String::from),
+                claude_session_id: claude_session_id.map(String::from),
+            });
+        }
         Ok(())
     }
 
@@ -280,6 +322,38 @@ mod tests {
         let other = s.list_session_events(99, 50).unwrap();
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].detail, None);
+    }
+
+    /// A read is audited, and says nothing on the bus. The row is what the
+    /// timeline is for; the frame was 253 B to every connected client telling
+    /// it somebody else had just read something.
+    #[test]
+    fn a_quiet_timeline_write_is_stored_but_not_announced() {
+        let (s, bus) = test_support::store_with_recorder();
+        let sid = 7;
+
+        s.insert_session_event(sid, "mcp_call", Some("send_prompt by controller"))
+            .unwrap();
+        s.insert_session_event_quietly(
+            sid,
+            None,
+            "mcp_call",
+            Some("list_sessions by client:phone"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            bus.names(),
+            vec!["session:event"],
+            "the write announced itself; the read did not"
+        );
+        let rows = s.list_session_events(sid, 10).unwrap();
+        assert_eq!(rows.len(), 2, "both are on the timeline either way");
+        assert!(
+            rows.iter()
+                .any(|r| r.detail.as_deref() == Some("list_sessions by client:phone")),
+            "the quiet one is still audited: {rows:?}"
+        );
     }
 
     #[test]

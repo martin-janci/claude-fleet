@@ -383,7 +383,22 @@ pub(super) fn persist_audit(
     } else {
         format!("{tool} by {}: {summary}", caller.label())
     };
-    let _ = s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)));
+    // A read is written but not announced. The timeline and `session_history`
+    // still carry it; what goes away is one `session:event` frame per read to
+    // every connected client — measured at ~720 an hour from the desktop's
+    // own conversation poll alone, each 253 B, and each one telling a
+    // read-only paired phone what the operator was doing. A write keeps its
+    // announcement: those are the events a client is watching for.
+    let _ = if guard::READONLY_TOOLS.contains(&tool) {
+        s.insert_session_event_quietly(
+            session_id,
+            None,
+            "mcp_call",
+            Some(&guard::scrub_line(&detail)),
+        )
+    } else {
+        s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)))
+    };
 }
 
 /// Describe the origin of a delivered prompt for the untrusted-content marker.
