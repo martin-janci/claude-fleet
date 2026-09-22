@@ -466,6 +466,63 @@ describe('a lost hub connection', () => {
   });
 });
 
+// F1: a timed-out call is the same "no answer" as a lost connection — the
+// hub may have taken the request and be running it still.
+describe('a timed-out hub call', () => {
+  const lost = { code: 'E_HUB_TIMEOUT', message: 'hub did not answer', details: null };
+
+  it('keeps the run running as an observed one, with no error toast', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    p.reject(lost);
+    await flush();
+    const run = get(moves).get(5)!;
+    expect(run.status).toBe('running');
+    expect(run.origin).toBe('observed');
+    expect(run.error?.code).toBe('E_HUB_TIMEOUT');
+    expect(get(toasts).some((t) => t.kind === 'error')).toBe(false);
+    // From here events settle it like any other observed run.
+    applyMoveProgress(ev('handoff', 'done'));
+    expect(get(moves).get(5)!.status).toBe('done');
+  });
+
+  // m4: the outcome is only unknown while the events have not said it. If
+  // they already did, following a move that is over is the wrong thing.
+  it('is not "unknown" when the events already reported a failed step', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    applyMoveProgress(ev('git', 'started'));
+    applyMoveProgress(ev('git', 'failed'));
+    p.reject(lost);
+    await flush();
+    const run = get(moves).get(5)!;
+    expect(run.status).toBe('failed');
+    expect(run.error?.code).toBe('E_HUB_TIMEOUT');
+    expect(activeMoveFor(5)).toBeUndefined();
+  });
+
+  it('is not "unknown" when the events already reported the last step done', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    applyMoveProgress(ev('handoff', 'warned', { detail: '1 file' }));
+    p.reject(lost);
+    await flush();
+    const run = get(moves).get(5)!;
+    expect(run.status).toBe('done');
+    expect(run.report).toBeNull();
+    expect(activeMoveFor(5)).toBeUndefined();
+  });
+
+  it('is still "unknown" in the middle of the move', async () => {
+    const p = pending();
+    startMove(source, 'turanga', { keepSource: false });
+    applyMoveProgress(ev('git', 'started'));
+    p.reject(lost);
+    await flush();
+    expect(get(moves).get(5)!.status).toBe('running');
+  });
+});
+
 // R2: this window's Transfer was refused because ANOTHER move of the same
 // session is already running (reachable after Stop following, or after a
 // lost-hub run was dismissed, then Transfer again). The refusal is about the

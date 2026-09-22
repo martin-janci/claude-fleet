@@ -616,7 +616,7 @@ impl NamedKey {
 
 /// `tmux send-keys -t '=<session>:' <Key>` — one named key, no literal text.
 /// The target is an EXACT pane target (`exact_pane`, the same one
-/// `service::sessions::prompt::build_send_commands` uses for text): a bare
+/// `service::sessions::prompt::build_send_script` falls back to for text): a bare
 /// `-t NAME` is a *lookup* that falls back to a unique prefix or an fnmatch
 /// pattern, so a key aimed at a dead/renamed session could otherwise land on
 /// an unrelated one whose name merely starts with it.

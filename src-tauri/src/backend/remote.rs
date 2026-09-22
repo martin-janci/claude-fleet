@@ -222,6 +222,43 @@ impl HubBackend {
         Some(IpcError::new(codes::E_HUB_CONTRACT, message).with_details(details))
     }
 
+    /// Fail fast while the event bridge already knows the hub cannot be
+    /// CONNECTED to: from the second consecutive failed connect on, a call is
+    /// answered from that knowledge instead of waiting its own bound. Reads
+    /// the STATE, unlike [`Self::contract_error`], because this gate only
+    /// ever closes — it refuses a call, it never lets one through that the
+    /// contract verdict would have stopped.
+    ///
+    /// # Only a connect-phase failure arms it
+    ///
+    /// `Offline` means the last `GET /events` attempt failed, which is not
+    /// the same as "the hub is unreachable": `open_stream` reports the same
+    /// state for a hub that ANSWERED — a 503 because events are disabled, a
+    /// 504 from a proxy, a close after the head. `GET /events` and
+    /// `POST /mcp` are separate sockets, so a hub whose event stream is
+    /// unhappy can still serve every call; refusing them turns one broken
+    /// stream into a window that can do nothing, and `E_HUB_UNREACHABLE`
+    /// would not even be true. [`is_connect_failure`] is the difference, and
+    /// it errs open.
+    fn offline_error(&self, what: &str) -> Option<IpcError> {
+        match self.link.as_ref()?.current() {
+            HubConnection::Offline {
+                attempt,
+                retry_in_secs,
+                reason,
+            } if attempt >= 2 && is_connect_failure(&reason) => Some(IpcError::new(
+                codes::E_HUB_UNREACHABLE,
+                format!(
+                    "{what} was not sent: {} has refused {attempt} connection attempts ({}); \
+                     retrying in {retry_in_secs}s",
+                    self.cfg.base_url,
+                    self.redact(&reason)
+                ),
+            )),
+            _ => None,
+        }
+    }
+
     /// Refuse a call that must only reach a hub whose wire contract the
     /// current connection has confirmed in range — `move_session`'s dry run
     /// or `when`, which a hub built before them ignores, performing a real
@@ -330,17 +367,27 @@ impl HubBackend {
     /// Not `pub`, for the same reason as [`Self::call`]: only
     /// [`Self::route_text`] calls it from outside this module.
     pub(super) async fn call_text(&self, tool: &str, args: Value) -> Result<String, IpcError> {
-        // The two refusals that happen before a socket is opened, in this
-        // order. "This launch cannot use the hub at all" comes first: it is
-        // about the configuration rather than about the hub's version, its
-        // sentence is the one the whole window is already showing, and such a
-        // client never handshakes, so it has no skew to report. The contract
-        // gate is second, and is the only other way a call ends before the
-        // transport is touched.
+        // The three refusals that happen before a socket is opened, in this
+        // order. "This launch cannot use the hub at all"
+        // ([`Self::unavailable_error`]) comes first: it is about the
+        // configuration rather than about the hub's version, its sentence is
+        // the one the whole window is already showing, and such a client
+        // never handshakes, so it has no skew to report. The contract gate
+        // ([`Self::contract_error`]) is second: a hub whose wire revision
+        // this build cannot read is refused whatever the connection is doing,
+        // and that verdict outlives the socket that carried it. The breaker
+        // ([`Self::offline_error`]) is LAST, deliberately: it is the only one
+        // of the three that is merely a shortcut — the call would fail on its
+        // own, just slower — so it must not pre-empt either of the refusals
+        // that carry a specific, actionable sentence. These three are the
+        // only ways a call ends before the transport is touched.
         if let Some(refused) = self.unavailable_error(tool) {
             return Err(refused);
         }
         if let Some(refused) = self.contract_error(tool) {
+            return Err(refused);
+        }
+        if let Some(refused) = self.offline_error(tool) {
             return Err(refused);
         }
         let body = json!({
@@ -361,12 +408,24 @@ impl HubBackend {
                 .await
                 .map_err(|_| {
                     IpcError::new(
-                        codes::E_HUB_UNREACHABLE,
+                        codes::E_HUB_TIMEOUT,
                         format!(
-                            "{} did not answer: no answer within {limit:.0?}",
+                            "{} did not answer: no answer within {limit:.0?} — the request may \
+                             still complete on the hub; refresh before retrying",
                             self.cfg.base_url
                         ),
                     )
+                    // Whether the hub may have CHANGED something. A read that
+                    // never answered changed nothing, and only this layer
+                    // knows which tool was called — the frontend acts on this
+                    // flag (`src/lib/result.ts` → `fleet:outcome-unknown`),
+                    // and its reaction is a fleet-wide re-fetch built out of
+                    // reads, so a read that broadcast would amplify: one
+                    // timeout becomes two more calls that can time out in
+                    // turn.
+                    .with_details(json!({
+                        "outcome_unknown": !fleet_core::mcp::guard::is_readonly_tool(tool),
+                    }))
                 })?
                 .map_err(|e| {
                     IpcError::new(
@@ -1054,12 +1113,41 @@ pub type HubStream = Box<dyn Duplex>;
 pub trait Duplex: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> Duplex for T {}
 
+/// Whether a failed `GET /events` attempt failed at the CONNECT phase — no
+/// socket to the hub at all — rather than after the hub answered.
+///
+/// The two prefixes are [`connect`]'s own, and
+/// `a_real_failed_connect_is_recognised_as_a_connect_failure` pins them
+/// against the real function rather than against this list. Everything else
+/// `open_stream` can return (`the hub answered 503 to GET /events`, `read
+/// from …`, `the hub closed the connection before answering`) describes a hub
+/// that IS reachable, and must not arm [`HubBackend::offline_error`].
+///
+/// It errs open: `connect`'s two configuration-shaped failures (an
+/// unparseable certificate name, a TLS root store that would not load) are
+/// not matched, so a call still goes out and fails on its own terms. Letting
+/// a doomed call run costs one bound; refusing a call that would have worked
+/// costs the window every read it has.
+pub(super) fn is_connect_failure(reason: &str) -> bool {
+    reason.starts_with("connect ") || reason.starts_with("TLS handshake with ")
+}
+
 /// Connect to `at`, wrapping in TLS when it says so. The one place a socket
 /// to a hub is opened.
 pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
-    let tcp = tokio::net::TcpStream::connect((at.host(), at.port()))
-        .await
-        .map_err(|e| format!("connect {}:{}: {e}", at.host(), at.port()))?;
+    let tcp = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect((at.host(), at.port())),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "connect {}:{}: timed out after {CONNECT_TIMEOUT:?}",
+            at.host(),
+            at.port()
+        )
+    })?
+    .map_err(|e| format!("connect {}:{}: {e}", at.host(), at.port()))?;
     if !at.is_tls() {
         return Ok(Box::new(tcp));
     }
@@ -1069,9 +1157,15 @@ pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
     // at `https://10.0.0.5` needs.
     let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(at.host().to_string())
         .map_err(|e| format!("{} is not a valid certificate name: {e}", at.host()))?;
-    let stream = connector
-        .connect(server_name, tcp)
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(server_name, tcp))
         .await
+        .map_err(|_| {
+            format!(
+                "TLS handshake with {}:{} timed out after {CONNECT_TIMEOUT:?}",
+                at.host(),
+                at.port()
+            )
+        })?
         // The usual causes are an expired or self-signed certificate and a
         // name that does not match; rustls says which, and the operator needs
         // to hear it verbatim.
@@ -1084,26 +1178,30 @@ pub async fn connect(at: &Endpoint) -> Result<HubStream, String> {
 /// hundred kilobytes.
 const MAX_RESPONSE: u64 = 8 * 1024 * 1024;
 
-/// One whole request/response exchange, for a tool that answers promptly —
-/// which is every one of them but [`MOVE_CALL_TIMEOUT`]'s.
-const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Added to the hub's own per-tool deadline ([`fleet_core::mcp::tool_deadline`])
+/// so the client never gives up before the server: a call reported failed
+/// while the hub completes it is how a `new_session` gets clicked twice.
+const CALL_MARGIN: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// `move_session` is the one tool whose work is minutes rather than
-/// milliseconds: it copies a repository, a transcript and the Claude state
-/// between two hosts, with a 120 s copy step, a 40 s bound per git step, a
-/// 60 s confirm wait and a chunked bundle download in between. Bounding it
-/// at [`CALL_TIMEOUT`] reported a failure to the user while the hub was
-/// still moving the session — and the move then finished, unobserved.
-const MOVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// `move_session` copies a repository, a transcript and the Claude state
+/// between hosts: minutes, not seconds. Its bound is the larger of the hub's
+/// deadline and this floor.
+const MOVE_CALL_FLOOR: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// How long `tool` may take to answer. Still bounded: a hub that stops
-/// answering mid-move must not leave the window waiting forever.
+/// How long `tool` may take to answer: the hub's deadline for it plus a
+/// margin. Still bounded: a hub that stops answering mid-call must not leave
+/// the window waiting forever.
 fn call_timeout(tool: &str) -> std::time::Duration {
+    let bound = fleet_core::mcp::tool_deadline(tool) + CALL_MARGIN;
     match tool {
-        "move_session" => MOVE_CALL_TIMEOUT,
-        _ => CALL_TIMEOUT,
+        "move_session" => bound.max(MOVE_CALL_FLOOR),
+        _ => bound,
     }
 }
+
+/// TCP connect, and separately the TLS handshake, each get this long. A
+/// black-holed hub then costs seconds, not the whole call bound.
+pub(super) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[async_trait::async_trait]
 impl HubTransport for TcpTransport {

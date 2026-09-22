@@ -38,6 +38,7 @@ pub use events_route::{EventSubscriber, EventsState};
 pub use guard::{ConfirmNotify, PendingConfirms, RateLimiter};
 pub use listener::{NoTls, TlsAcceptor};
 pub use pairing::{pair_url, PairingRequest, PendingPairings};
+pub use tools::tool_deadline;
 pub use tools::FleetTools;
 
 /// `settings` table keys for the control API.

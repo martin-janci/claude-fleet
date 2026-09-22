@@ -670,68 +670,52 @@ pub(super) async fn new_session_inner(
             )
         })?;
 
-    // PROD-5: the fleet created this session now. Soft-fail (cosmetic).
-    if let Err(e) = s.set_started_at(row.id, now_unix()) {
-        tracing::warn!(
-            session = %args.name,
-            error = %e,
-            "[new_session] storing started_at failed"
-        );
-    }
-
-    // Deterministic friendly name: trust an explicit user value, otherwise
-    // derive from the branch so the sidebar never shows the raw slug. Soft-
-    // fail like the claude_session_id write below — a missing label is
-    // cosmetic, the session is live.
     let derived_friendly = derive_friendly_name(&s, &args, row.worktree_id)?;
-    if let Some(ref value) = derived_friendly {
-        if let Err(e) = s.set_friendly_name(&args.host_alias, &args.name, Some(value)) {
-            tracing::warn!(
-                session = %args.name,
-                error = %e,
-                "[new_session] storing friendly_name failed"
-            );
-        }
-    }
+    finalize_new_session(
+        &s,
+        row.id,
+        &args.host_alias,
+        &args.name,
+        derived_friendly.as_deref(),
+        claude_id.as_deref(),
+        is_shell,
+    )
+}
 
-    // Reconcile inserts every session as kind="work"; tag shell sessions
-    // afterwards. The session upsert preserves `kind` on re-reconcile.
+/// The writes `new_session` makes after the session exists, then ONE re-read
+/// so the returned row is the row as of the last write (the frontend merges
+/// it optimistically and orders it by `row_version`). Soft-fails the
+/// cosmetic writes (`started_at`, friendly name, claude id) with a warning;
+/// the `kind` tag and the final read are hard failures.
+pub(super) fn finalize_new_session(
+    s: &Store,
+    row_id: i64,
+    host_alias: &str,
+    name: &str,
+    friendly_name: Option<&str>,
+    claude_id: Option<&str>,
+    is_shell: bool,
+) -> Result<SessionRow, IpcError> {
+    // PROD-5: the fleet created this session now.
+    if let Err(e) = s.set_started_at(row_id, now_unix()) {
+        tracing::warn!(session = %name, error = %e, "[new_session] storing started_at failed");
+    }
+    if let Some(value) = friendly_name {
+        if let Err(e) = s.set_friendly_name(host_alias, name, Some(value)) {
+            tracing::warn!(session = %name, error = %e, "[new_session] storing friendly_name failed");
+        }
+    }
     if is_shell {
-        s.set_session_kind(row.id, "shell", None)?;
-        return s
-            .get_session(&args.name, &args.host_alias)?
-            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after kind tag"));
-    }
-    // Persist the minted Claude session id. Soft-fail: the session is live; a
-    // failed write just means a future recreate falls back to `cl --continue`.
-    let mut row = row;
-    if let Some(ref cid) = claude_id {
-        if let Err(e) = s.set_claude_session_id(row.id, cid) {
-            tracing::warn!(
-                session = %args.name,
-                error = %e,
-                "[new_session] storing claude_session_id failed"
-            );
-        } else {
-            row.claude_session_id = Some(cid.clone());
-            // The rebind reset the context; return what the event carried.
-            if let Ok(Some(fresh)) = s.get_session_by_id(row.id) {
-                row.context = fresh.context;
-                row.context_pct = fresh.context_pct;
-                row.current_activity = fresh.current_activity;
-                row.last_prompt = fresh.last_prompt;
-            }
+        s.set_session_kind(row_id, "shell", None)?;
+    } else if let Some(cid) = claude_id {
+        // Soft-fail: the session is live; a failed write just means a future
+        // recreate falls back to `cl --continue`.
+        if let Err(e) = s.set_claude_session_id(row_id, cid) {
+            tracing::warn!(session = %name, error = %e, "[new_session] storing claude_session_id failed");
         }
     }
-    if derived_friendly.is_some() {
-        // The set_friendly_name call above emitted a session_updated row
-        // event already; we refresh in-memory so the value returned to the
-        // caller matches what the sidebar will display.
-        if let Some(refreshed) = s.get_session(&args.name, &args.host_alias)? {
-            row.friendly_name = refreshed.friendly_name;
-        }
-    }
-    Ok(row)
+    s.get_session_by_id(row_id)?
+        .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after creation"))
 }
 
 /// Resolve the friendly name to persist for a freshly created session:

@@ -283,8 +283,13 @@ async fn status_transitions_emit_session_events_and_stamp_lifecycle_columns() {
     );
 
     // Pass 2 — nothing changed: identical row, zero events of either kind.
+    // `row_version` (migration 042) is excluded: the trigger bumps it on
+    // every physical UPDATE, no-op or not, so it is not part of "identical".
     f.pass().await;
-    assert_eq!(f.row("work", "alpha"), r1, "an identical pass is a no-op");
+    assert!(
+        f.row("work", "alpha").eq_ignoring_row_version(&r1),
+        "an identical pass is a no-op"
+    );
     assert!(
         f.session_row_events().is_empty(),
         "no-op pass emits no row event"
@@ -330,7 +335,10 @@ async fn status_transitions_emit_session_events_and_stamp_lifecycle_columns() {
     // the row is untouched.
     next_unix_second().await;
     f.pass().await;
-    assert_eq!(f.row("work", "alpha"), r4, "same stuck episode is a no-op");
+    assert!(
+        f.row("work", "alpha").eq_ignoring_row_version(&r4),
+        "same stuck episode is a no-op"
+    );
     assert!(f.session_row_events().is_empty());
     assert_eq!(f.timeline(id).len(), 3);
 

@@ -6,8 +6,9 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
 import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
+import type { SessionRow } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -41,9 +42,9 @@ describe('usage formatting', () => {
   });
 });
 
-const sample = [
-  { id: 1, tmux_name: 'dev-foo', host_alias: 'local', project_id: null, worktree_id: null, created_at: 1, last_activity_at: 2, status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null, pending_input: null },
-];
+const base: SessionRow = { id: 1, tmux_name: 'dev-foo', host_alias: 'local', project_id: null, worktree_id: null, created_at: 1, last_activity_at: 2, status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null, pending_input: null };
+
+const sample = [base];
 
 describe('sessions store', () => {
   it('loadSessions populates on Ok', async () => {
@@ -245,5 +246,69 @@ describe('showBgAgents', () => {
     expect(get(showBgAgents)).toBe(true);
     showBgAgents.set(false);
     expect(localStorage.getItem('cf:pref:show-bg-agents')).toBe('false');
+  });
+});
+
+describe('optimistic merge guard', () => {
+  it('drops a payload whose row_version is older than the row it holds', () => {
+    sessions.set([{ ...base, id: 1, friendly_name: 'newer', row_version: 5 }]);
+    applySessionEvents([
+      { type: 'updated', row: { ...base, id: 1, friendly_name: 'older', row_version: 4 } },
+    ]);
+    expect(get(sessions)[0].friendly_name).toBe('newer');
+  });
+
+  it('applies a payload with an equal or newer row_version, and one without any', () => {
+    sessions.set([{ ...base, id: 1, friendly_name: 'v5', row_version: 5 }]);
+    applySessionEvents([
+      { type: 'updated', row: { ...base, id: 1, friendly_name: 'v5b', row_version: 5 } },
+    ]);
+    expect(get(sessions)[0].friendly_name).toBe('v5b');
+    applySessionEvents([
+      { type: 'updated', row: { ...base, id: 1, friendly_name: 'v6', row_version: 6 } },
+    ]);
+    expect(get(sessions)[0].friendly_name).toBe('v6');
+    // A row built client-side (no row_version) is never rejected for lacking one.
+    sessions.set([{ ...base, id: 2, friendly_name: 'x' }]);
+    applySessionEvents([
+      { type: 'updated', row: { ...base, id: 2, friendly_name: 'y', row_version: 1 } },
+    ]);
+    expect(get(sessions)[0].friendly_name).toBe('y');
+  });
+
+  it('loadSessions keeps an event applied while the list was in flight', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_sessions') {
+        // The list was built before the event: an older row_version.
+        return [{ ...base, id: 1, friendly_name: 'from-list', row_version: 3 }];
+      }
+      return null;
+    });
+    const p = loadSessions();
+    applySessionEvents([
+      { type: 'updated', row: { ...base, id: 1, friendly_name: 'from-event', row_version: 4 } },
+    ]);
+    await p;
+    expect(get(sessions).find((s) => s.id === 1)?.friendly_name).toBe('from-event');
+  });
+
+  it('loadSessions drops rows the list no longer has', async () => {
+    sessions.set([{ ...base, id: 1 }, { ...base, id: 2, tmux_name: 'gone' }]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'list_sessions' ? [{ ...base, id: 1, row_version: 1 }] : null,
+    );
+    await loadSessions();
+    expect(get(sessions).map((s) => s.id)).toEqual([1]);
+  });
+
+  it("loadSessions adopts the list's order", async () => {
+    sessions.set([{ ...base, id: 1, row_version: 1 }, { ...base, id: 2, row_version: 1 }]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'list_sessions'
+        ? [{ ...base, id: 2, row_version: 2 }, { ...base, id: 1, row_version: 2 }]
+        : null,
+    );
+    await loadSessions();
+    expect(get(sessions).map((s) => s.id)).toEqual([2, 1]);
   });
 });

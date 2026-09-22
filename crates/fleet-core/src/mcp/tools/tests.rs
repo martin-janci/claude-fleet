@@ -1,5 +1,6 @@
 use super::*;
 use crate::ipc_error::codes;
+use std::time::Duration;
 
 fn text_of(c: &Content) -> &str {
     c.as_text().expect("text content").text.as_str()
@@ -425,6 +426,8 @@ async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
                 submit: true,
                 raw: false,
                 keys: Some("Delete".into()),
+                force: false,
+                client_msg_id: None,
             }),
         )
         .await
@@ -441,6 +444,8 @@ async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
                 submit: true,
                 raw: false,
                 keys: Some("Enter".into()),
+                force: false,
+                client_msg_id: None,
             }),
         )
         .await
@@ -510,6 +515,8 @@ async fn keys_press_a_key_without_a_marker_and_without_recording_a_prompt() {
                 submit: true,
                 raw: false,
                 keys: Some("Escape".into()),
+                force: false,
+                client_msg_id: None,
             }),
         )
         .await
@@ -965,6 +972,63 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     // Nothing was recorded.
     let s = t.store.lock().unwrap();
     assert!(s.list_tasks(None, None, None, 10).unwrap().is_empty());
+}
+
+/// An existing worker that is blocked on a dialog cannot be dispatched into:
+/// the delivery gate refuses before anything is typed (Enter would answer
+/// that dialog). The task row must not be left `queued` forever — it is
+/// failed with the refusal in its error, and the caller sees the refusal too.
+#[tokio::test]
+async fn dispatch_task_into_a_blocked_worker_fails_the_task_and_sends_nothing() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let worker = s
+        .upsert_session(
+            "dev-worker",
+            "local",
+            Some(pid),
+            None,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    s.record_notification_hook_for_row(
+        worker,
+        crate::service::pane_intel::ClaudeStatus::Blocked,
+        None,
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let e = t
+        .dispatch_task(
+            Extension(Caller::master()),
+            Parameters(DispatchTaskParams {
+                worker_session_id: Some(worker),
+                new_worker: None,
+                prompt: "do the thing".into(),
+                requester_session_id: None,
+                raw: false,
+            }),
+        )
+        .await
+        .expect_err("a blocked worker cannot be dispatched into");
+    assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
+    let s = t.store.lock().unwrap();
+    let tasks = s.list_tasks(None, None, None, 10).unwrap();
+    assert_eq!(tasks.len(), 1, "the task row is created, then failed");
+    assert_eq!(tasks[0].state, "failed");
+    assert!(
+        tasks[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("E_INVALID_STATE"),
+        "{:?}",
+        tasks[0].error
+    );
 }
 
 /// F3: `dispatch_task` gates `requester_session_id` so an agent cannot file
@@ -1633,7 +1697,6 @@ fn a_tool_name_an_old_hub_does_not_know_refuses_a_client_with_e_forbidden() {
 
 #[test]
 fn tool_deadline_uses_the_documented_caps() {
-    use std::time::Duration;
     assert_eq!(tool_deadline("wait_for_session"), Duration::from_secs(660));
     assert_eq!(tool_deadline("run_prompt"), Duration::from_secs(660));
     assert_eq!(tool_deadline("new_session"), Duration::from_secs(300));
@@ -2538,7 +2601,22 @@ fn the_served_definition_budget_stays_bounded() {
     /// raise through 3b: the `when` raise above was measured against 57,700,
     /// so the merged surface came to 58,282; raised to that plus 100 bytes
     /// of headroom.
-    const BUDGET_BYTES: usize = 58_382;
+    ///
+    /// Raised by 600 (57,700 to 58,300 on its own branch) for `send_prompt`'s `force` and
+    /// `client_msg_id` (device-communication phase 1, task 3): two new
+    /// fields on an already-served tool, each paying the JSON-schema
+    /// structural cost (`"default"`, `"type"`, the property wrapper) on top
+    /// of its description, which trimming cannot touch. A degenerate pass —
+    /// the tool description cut to a fragment, both field docs to a few
+    /// words — still measured 57,892, 192 over the old budget, so text
+    /// could not have paid for it either; the two fields plus the three
+    /// required sentences of tool description measure 58,217.
+    ///
+    /// Raised from 58,382 to 59,057 when device-communication phase 1 met
+    /// main's `keys` and `when` raises: each side was measured without the
+    /// other, so the merged surface came to 58,957; raised to that plus 100
+    /// bytes of headroom.
+    const BUDGET_BYTES: usize = 59_057;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -2934,4 +3012,295 @@ fn every_confirmed_tool_outlives_its_confirmation_window() {
             crate::mcp::guard::CONFIRM_TTL,
         );
     }
+}
+
+fn row_with(status: Option<&str>, stuck: Option<&str>, turn_seq: i64) -> crate::store::SessionRow {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("gate", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let mut row = s.get_session_by_id(id).unwrap().unwrap();
+    row.claude_status = status.map(str::to_string);
+    row.stuck_kind = stuck.map(str::to_string);
+    row.turn_seq = turn_seq;
+    row
+}
+
+#[test]
+fn delivery_gate_refuses_a_blocked_or_stuck_session_unless_forced() {
+    let blocked = row_with(Some("blocked"), None, 3);
+    let e = delivery_gate(&blocked, false, true).unwrap_err();
+    assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
+    assert!(e.message.contains("force"), "{}", e.message);
+    let stuck = row_with(Some("idle"), Some("trust_prompt"), 3);
+    let e = delivery_gate(&stuck, false, true).unwrap_err();
+    assert!(e.message.contains("trust_prompt"), "{}", e.message);
+    assert!(!delivery_gate(&blocked, true, true).unwrap());
+    assert!(!delivery_gate(&stuck, true, true).unwrap());
+}
+
+#[test]
+fn delivery_gate_reports_a_working_session_as_queued_and_idle_as_not() {
+    assert!(delivery_gate(&row_with(Some("working"), None, 1), false, true).unwrap());
+    assert!(!delivery_gate(&row_with(Some("idle"), None, 1), false, true).unwrap());
+    assert!(!delivery_gate(&row_with(None, None, 1), false, true).unwrap());
+    // Staging text (submit=false) never queues a turn.
+    assert!(!delivery_gate(&row_with(Some("working"), None, 1), false, false).unwrap());
+}
+
+#[test]
+fn turn_seq_before_points_past_the_current_turn_only_for_an_unacked_queued_prompt() {
+    assert_eq!(turn_seq_before(7, false, Some(true)), 7);
+    assert_eq!(turn_seq_before(7, false, None), 7);
+    assert_eq!(
+        turn_seq_before(7, true, Some(true)),
+        7,
+        "acked now: the status was stale"
+    );
+    assert_eq!(
+        turn_seq_before(7, true, Some(false)),
+        8,
+        "really queued behind the running turn"
+    );
+    assert_eq!(turn_seq_before(7, true, None), 8);
+}
+
+#[tokio::test(start_paused = true)]
+async fn await_prompt_ack_returns_true_once_the_submit_counter_moves() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("ack", "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let bump = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            store
+                .lock()
+                .unwrap()
+                .record_prompt_submit_hook_for_row(id)
+                .unwrap();
+        })
+    };
+    let acked = await_prompt_ack(&store, id, 0, ACK_WAIT).await.unwrap();
+    bump.await.unwrap();
+    assert!(acked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn await_prompt_ack_returns_false_when_nothing_moves_before_the_deadline() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("ack", "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    assert!(!await_prompt_ack(&store, id, 0, ACK_WAIT).await.unwrap());
+}
+
+/// The gate is the handler's, not just the helper's: a real `send_prompt`
+/// with a body is refused into a `blocked` row BEFORE anything is sent, so
+/// this exercises the whole tool without needing a tmux to send into.
+#[tokio::test]
+async fn send_prompt_with_a_body_is_refused_into_a_blocked_session() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-blocked", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.record_notification_hook_for_row(
+        id,
+        crate::service::pane_intel::ClaudeStatus::Blocked,
+        Some(Some(crate::service::pane_intel::StuckKind::PressEnter)),
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let e = t
+        .send_prompt(
+            Extension(Caller::master()),
+            Parameters(SendPromptParams {
+                session_id: Some(id),
+                host_alias: None,
+                tmux_name: None,
+                prompt: "hi".into(),
+                submit: true,
+                raw: false,
+                force: false,
+                client_msg_id: None,
+                keys: None,
+            }),
+        )
+        .await
+        .expect_err("a blocked session refuses a typed prompt");
+    assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
+    assert!(e.message.contains("press_enter"), "{}", e.message);
+}
+
+/// An empty prompt with `submit: false` types nothing and presses nothing,
+/// so it is refused BEFORE `bypasses_gate`'s bare-Enter early return would
+/// otherwise skip `delivery_gate` and no-op it into a false `delivered:
+/// true`. The row is on host "local" — nothing may be sent, or this test
+/// would hang or fail trying to reach real tmux.
+#[tokio::test]
+async fn an_empty_prompt_without_submit_is_refused_before_the_gate() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-blocked", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.record_notification_hook_for_row(
+        id,
+        crate::service::pane_intel::ClaudeStatus::Blocked,
+        Some(Some(crate::service::pane_intel::StuckKind::PressEnter)),
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let e = t
+        .send_prompt(
+            Extension(Caller::master()),
+            Parameters(SendPromptParams {
+                session_id: Some(id),
+                host_alias: None,
+                tmux_name: None,
+                prompt: "".into(),
+                submit: false,
+                raw: false,
+                force: false,
+                client_msg_id: None,
+                keys: None,
+            }),
+        )
+        .await
+        .expect_err("an empty prompt with submit: false has nothing to deliver");
+    assert!(e.message.starts_with("E_VALIDATE"), "{}", e.message);
+}
+
+/// The same refusal applies to a session that is NOT blocked: it is the
+/// empty + `submit: false` combination being refused, not the session's
+/// state, so a healthy `idle` row is refused identically.
+#[tokio::test]
+async fn an_empty_prompt_without_submit_is_refused_regardless_of_session_state() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-idle", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.record_notification_hook_for_row(id, crate::service::pane_intel::ClaudeStatus::Idle, None)
+        .unwrap();
+    let t = test_tools(s);
+    let e = t
+        .send_prompt(
+            Extension(Caller::master()),
+            Parameters(SendPromptParams {
+                session_id: Some(id),
+                host_alias: None,
+                tmux_name: None,
+                prompt: "".into(),
+                submit: false,
+                raw: false,
+                force: false,
+                client_msg_id: None,
+                keys: None,
+            }),
+        )
+        .await
+        .expect_err("an empty prompt with submit: false has nothing to deliver");
+    assert!(e.message.starts_with("E_VALIDATE"), "{}", e.message);
+}
+
+/// Minor 9: a QUEUED prompt's ack cannot be known. Claude Code holds it
+/// behind the running turn, and `UserPromptSubmit` fires only when that
+/// queued prompt actually starts — long after the 1.5 s wait. Waiting for it
+/// bought a guaranteed `false`, which reads as "the send failed"; `null` is
+/// the honest answer and costs the caller no wall time.
+#[test]
+fn a_queued_prompt_has_no_knowable_ack() {
+    assert!(ack_knowable(true, false, true));
+    assert!(!ack_knowable(true, true, true), "queued: not knowable");
+    assert!(!ack_knowable(false, false, true), "nothing was submitted");
+    assert!(!ack_knowable(true, false, false), "no hook has ever landed");
+}
+
+/// A bare Enter is a key press, not a prompt. The gate exists because Enter
+/// into a dialog ANSWERS it — which is precisely what the Conversation tab's
+/// "Press Enter" chip is for, so an empty body must walk past the gate the
+/// prompt path cannot. `bypasses_gate` reads the body AFTER `apply_marker`
+/// has run, because that is what `deliver_prompt` is handed: an empty prompt
+/// from an untrusted caller arrives as the marker line and nothing else.
+#[test]
+fn only_an_empty_body_bypasses_the_gate_marked_or_not() {
+    assert!(bypasses_gate(""));
+    assert!(bypasses_gate(&guard::mark_untrusted(
+        "",
+        "session 12 on mefistos"
+    )));
+    assert!(!bypasses_gate("hi"));
+    assert!(!bypasses_gate(&guard::mark_untrusted(
+        "hi",
+        "session 12 on mefistos"
+    )));
+    // Not "looks blank": a body of whitespace is still typed, so it is not a
+    // bare Enter and the gate still owns it.
+    assert!(!bypasses_gate(" "));
+    assert!(!bypasses_gate("\n"));
+}
+
+/// The dedupe key is reserved BEFORE delivery, not written after it: the
+/// window a retry actually lands in is the one where the first call is still
+/// in flight.
+#[test]
+fn a_reserved_send_is_pending_until_it_completes_and_the_map_stays_bounded() {
+    let mut r = RecentSends::default();
+    assert!(matches!(r.reserve("m", "a"), Reservation::Fresh));
+    // The second caller of the same key, while the first is still running.
+    assert!(matches!(r.reserve("m", "a"), Reservation::Pending));
+    assert!(
+        matches!(r.reserve("other-caller", "a"), Reservation::Fresh),
+        "keyed per caller"
+    );
+    r.complete("m", "a", serde_json::json!({"n": 1}));
+    match r.reserve("m", "a") {
+        Reservation::Done(v) => assert_eq!(v, serde_json::json!({"n": 1})),
+        other => panic!("expected the first result back, got {other:?}"),
+    }
+    for i in 0..(RECENT_SENDS_MAX + 5) {
+        assert!(matches!(
+            r.reserve("m", &format!("id-{i}")),
+            Reservation::Fresh
+        ));
+        r.complete("m", &format!("id-{i}"), serde_json::json!(i));
+    }
+    assert!(r.entries.len() <= RECENT_SENDS_MAX);
+}
+
+/// A send that failed never happened: the key must be free again, or a
+/// caller retrying after an error (exactly what `client_msg_id` is for) is
+/// answered `E_IN_FLIGHT` forever.
+#[test]
+fn a_released_reservation_frees_the_key_again() {
+    let mut r = RecentSends::default();
+    assert!(matches!(r.reserve("m", "a"), Reservation::Fresh));
+    r.release("m", "a");
+    assert!(matches!(r.reserve("m", "a"), Reservation::Fresh));
+    // Releasing a completed key is not a way to re-deliver: `complete` wins.
+    r.complete("m", "a", serde_json::json!(1));
+    assert!(matches!(r.reserve("m", "a"), Reservation::Done(_)));
+}
+
+/// A task that died between `reserve` and `complete` must not pin its key
+/// for the full result TTL.
+#[test]
+fn a_pending_entry_older_than_its_own_ttl_is_swept() {
+    let mut r = RecentSends::default();
+    assert!(matches!(r.reserve("m", "a"), Reservation::Fresh));
+    r.backdate("m", "a", PENDING_TTL + Duration::from_secs(1));
+    assert!(
+        matches!(r.reserve("m", "a"), Reservation::Fresh),
+        "a crashed send may not pin its client_msg_id"
+    );
 }

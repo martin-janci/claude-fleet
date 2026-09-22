@@ -460,8 +460,11 @@ impl Store {
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
             match prior {
                 None => out.push(RowChange::SessionCreated(row)),
-                // Every wire field identical ⇒ a no-op pass; emit nothing.
-                Some(ref before) if *before == row => {}
+                // Every wire field identical (modulo `row_version`, which the
+                // migration 042 trigger bumps on every physical UPDATE, no-op
+                // or not — see `eq_ignoring_row_version`) ⇒ a no-op pass;
+                // emit nothing.
+                Some(ref before) if before.eq_ignoring_row_version(&row) => {}
                 Some(_) => out.push(RowChange::SessionUpdated(row)),
             }
         }
@@ -799,6 +802,7 @@ mod tests {
     fn bare_row(lost_at: Option<i64>) -> SessionRow {
         SessionRow {
             id: 1,
+            row_version: 0,
             tmux_name: "work-a".into(),
             host_alias: "alpha".into(),
             project_id: None,

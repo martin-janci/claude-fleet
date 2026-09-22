@@ -142,6 +142,7 @@ fn row(
 ) -> SessionRow {
     SessionRow {
         id,
+        row_version: 0,
         tmux_name: tmux.into(),
         host_alias: host.into(),
         project_id,
@@ -223,6 +224,32 @@ fn select_targets_filters_by_project() {
         ..Default::default()
     };
     assert_eq!(select_targets(&s, &f, None, None), vec![3]);
+}
+
+#[test]
+fn select_targets_skips_blocked_and_stuck_sessions_unless_asked_for_them() {
+    let mut s = sample_sessions();
+    s[0].claude_status = Some("blocked".into());
+    s[1].stuck_kind = Some("auth_menu".into());
+    let f = BroadcastFilter::default();
+    let picked = select_targets(&s, &f, None, None);
+    assert!(
+        !picked.contains(&1),
+        "a blocked session would get Enter on its dialog: {picked:?}"
+    );
+    assert!(
+        !picked.contains(&2),
+        "a stuck session would get Enter on its menu: {picked:?}"
+    );
+    let f = BroadcastFilter {
+        status: Some("blocked".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        select_targets(&s, &f, None, None),
+        vec![1],
+        "an explicit status filter is the operator's choice"
+    );
 }
 
 #[test]
@@ -1332,49 +1359,120 @@ fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
     );
 }
 
-#[test]
-fn build_send_commands_emits_literal_text_then_enter() {
-    let cmds = build_send_commands("dev-foo", "hello world", true);
-    assert_eq!(cmds.len(), 3);
-    assert!(cmds[0].starts_with("tmux send-keys -t "));
-    assert!(cmds[0].contains(" -l "));
-    assert!(cmds[0].contains("'hello world'"));
-    assert!(cmds.last().unwrap().ends_with(" Enter"));
+fn b64(s: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
 }
 
 #[test]
-fn build_send_commands_escapes_embedded_quotes() {
-    let cmds = build_send_commands("dev-foo", "it's a test", true);
-    // quote uses the '\''..  dance for embedded singles.
-    assert!(cmds[0].contains("'it'\\''s a test'"));
+fn normalize_prompt_body_folds_crlf_and_lone_cr_into_lf() {
+    assert_eq!(normalize_prompt_body("a\r\nb\r\n").unwrap(), "a\nb\n");
+    assert_eq!(normalize_prompt_body("a\rb").unwrap(), "a\nb");
+    assert_eq!(normalize_prompt_body("tab\there\n").unwrap(), "tab\there\n");
+    assert_eq!(normalize_prompt_body("čšž é 🚀").unwrap(), "čšž é 🚀");
 }
 
 #[test]
-fn build_send_commands_quotes_session_name_with_dashes() {
-    let cmds = build_send_commands("dev-with-dashes", "x", true);
-    // Quoted AND exact: a bare name would let tmux prefix-match another session.
-    assert!(cmds[0].contains("'=dev-with-dashes:'"), "got: {}", cmds[0]);
+fn normalize_prompt_body_refuses_control_bytes_that_are_keystrokes() {
+    for bad in ["\x03", "esc \x1b[200~", "bell\x07", "\x00"] {
+        let e = normalize_prompt_body(bad).unwrap_err();
+        assert_eq!(e.code, "E_VALIDATE", "{bad:?}");
+        assert!(e.message.contains("control"), "{}", e.message);
+    }
 }
 
 #[test]
-fn send_commands_strip_trailing_newline_and_submit_once() {
-    let cmds = build_send_commands("dev-x", "line1\nline2\n", true);
-    // body preserves the internal newline, trailing newline stripped
-    assert!(cmds
-        .iter()
-        .any(|c| c.contains("-l") && c.contains("line1") && c.contains("line2")));
-    // the literal body must not carry the trailing newline
-    assert!(!cmds.iter().any(|c| c.contains("line2\n")));
-    // exactly one Enter/submit, with a settle before it
-    let enters = cmds.iter().filter(|c| c.ends_with("Enter")).count();
-    assert_eq!(enters, 1);
-    assert!(cmds.iter().any(|c| c.contains("sleep")));
+fn normalize_prompt_body_caps_the_size_and_names_the_cap() {
+    let big = "x".repeat(MAX_PROMPT_BYTES + 1);
+    let e = normalize_prompt_body(&big).unwrap_err();
+    assert_eq!(e.code, "E_VALIDATE");
+    assert!(e.message.contains("65536"), "{}", e.message);
+    assert!(normalize_prompt_body(&"x".repeat(MAX_PROMPT_BYTES)).is_ok());
 }
 
 #[test]
-fn send_commands_no_submit_when_submit_false() {
-    let cmds = build_send_commands("dev-x", "stage me", false);
-    assert!(cmds.iter().all(|c| !c.ends_with("Enter")));
+fn send_script_ships_the_body_base64_through_load_buffer_and_pastes_bracketed() {
+    let s = build_send_script("dev-foo", None, "it's a test", "fleet-abc", true);
+    assert!(
+        s.contains(&format!(
+            "printf %s '{}' | base64 -d | tmux load-buffer -b 'fleet-abc' - && tmux paste-buffer -p -d -b 'fleet-abc' -t \"$t\" || {{ tmux delete-buffer -b 'fleet-abc' 2>/dev/null; false; }}",
+            b64("it's a test")
+        )),
+        "{s}"
+    );
+    // A failed paste deletes the buffer AND stops the chain before Enter.
+    assert!(s.contains("delete-buffer -b 'fleet-abc'"), "{s}");
+    assert!(
+        s.contains("delete-buffer -b 'fleet-abc' 2>/dev/null; false; }"),
+        "{s}"
+    );
+    assert!(s.contains("sleep 0.15"), "{s}");
+    assert!(
+        s.trim_end().ends_with("tmux send-keys -t \"$t\" Enter"),
+        "{s}"
+    );
+    // The raw body never appears in the script: no quoting problem can.
+    assert!(!s.contains("it's"), "{s}");
+}
+
+#[test]
+fn send_script_targets_the_known_pane_id_and_falls_back_to_the_exact_session() {
+    let s = build_send_script("dev-foo", Some("%17"), "x", "fleet-1", true);
+    assert!(s.starts_with("set -o pipefail; t='=dev-foo:'; if [ \"$(tmux display-message -p -t '%17' '#{session_name}' 2>/dev/null)\" = 'dev-foo' ]; then t='%17'; fi; "), "{s}");
+    let s = build_send_script("dev-foo", None, "x", "fleet-1", true);
+    assert!(s.starts_with("set -o pipefail; t='=dev-foo:'; "), "{s}");
+    assert!(!s.contains("display-message"), "{s}");
+}
+
+/// Minor 8: without `pipefail`, `printf … | base64 -d | tmux load-buffer -`
+/// reports only the LAST command's status. A `base64` that dies part-way
+/// (a truncated argv, an OOM) still leaves `load-buffer` succeeding on the
+/// bytes it did get, and a TRUNCATED prompt is pasted and submitted. The
+/// prompt body is the one thing in this script that must never be delivered
+/// in part.
+#[test]
+fn send_script_fails_the_whole_pipeline_when_base64_dies_mid_stream() {
+    let s = build_send_script("dev-x", None, "body", "fleet-1", true);
+    assert!(s.starts_with("set -o pipefail; "), "{s}");
+    // And the cleanup's own noise ("no buffer fleet-1") must not become the
+    // E_TMUX message in place of the real failure.
+    assert!(
+        s.contains("|| { tmux delete-buffer -b 'fleet-1' 2>/dev/null; false; }"),
+        "{s}"
+    );
+}
+
+#[test]
+fn send_script_strips_one_trailing_newline_and_submits_once() {
+    let s = build_send_script("dev-x", None, "line1\nline2\n", "fleet-1", true);
+    assert!(s.contains(&b64("line1\nline2")), "{s}");
+    assert!(!s.contains(&b64("line1\nline2\n")), "{s}");
+    assert_eq!(s.matches(" Enter").count(), 1, "{s}");
+}
+
+#[test]
+fn send_script_without_submit_pastes_but_never_presses_enter() {
+    let s = build_send_script("dev-x", None, "stage me", "fleet-1", false);
+    assert!(s.contains("paste-buffer"), "{s}");
+    assert!(!s.contains("Enter"), "{s}");
+    assert!(!s.contains("sleep"), "{s}");
+}
+
+#[test]
+fn send_script_with_an_empty_body_is_a_bare_enter() {
+    let s = build_send_script("dev-x", Some("%3"), "", "fleet-1", true);
+    assert!(!s.contains("load-buffer"), "{s}");
+    assert!(
+        s.trim_end().ends_with("tmux send-keys -t \"$t\" Enter"),
+        "{s}"
+    );
+}
+
+#[test]
+fn send_script_with_an_empty_body_and_no_submit_presses_nothing() {
+    let s = build_send_script("dev-x", Some("%3"), "", "fleet-1", false);
+    assert!(!s.contains("Enter"), "{s}");
+    assert!(!s.contains("load-buffer"), "{s}");
 }
 
 // Paused clock: nothing here but timers, so virtual time is exact where a

@@ -32,6 +32,7 @@ pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
+pub use sessions::PromptAckState;
 
 pub struct Store {
     conn: Connection,

@@ -206,6 +206,7 @@ mod tests {
     ) -> SessionRow {
         SessionRow {
             id: 0,
+            row_version: 0,
             tmux_name: "t".to_string(),
             host_alias: "alpha".to_string(),
             project_id: None,
@@ -474,7 +475,7 @@ mod tests {
         let h = health_from_store(&s);
         assert_eq!(h.version, crate::app_version::get());
         assert!(h.db_ready);
-        assert_eq!(h.schema_version, 41);
+        assert_eq!(h.schema_version, 42);
         // Empty store → empty roll-up.
         assert_eq!(h.sessions_total, 0);
         assert_eq!(h.hosts_total, 0);

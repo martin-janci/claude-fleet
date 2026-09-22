@@ -5,28 +5,113 @@ use super::*;
 use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
-/// Build the tmux invocations that together send a prompt to a session:
-///   1. send-keys -t '=<name>:' -l <body>   (literal, no key-name translation;
-///      a single trailing newline is stripped so internal newlines stay as
-///      soft newlines and a stray trailing one can't pre-submit the body)
-///   2. (when `submit`) a short settle so the REPL flushes the literal paste
-///   3. (when `submit`) send-keys -t '=<name>:' Enter   (one real Enter to submit)
-///
-/// The target is an EXACT pane target: a bare name lets tmux fall back to a
-/// prefix or pattern match, which would deliver the prompt to a different
-/// session whose name merely starts with this one.
-///
-/// With `submit = false` the body is staged in the REPL but not submitted.
-pub fn build_send_commands(tmux_name: &str, prompt: &str, submit: bool) -> Vec<String> {
-    let body = prompt.strip_suffix('\n').unwrap_or(prompt);
-    let target = quote(&crate::tmux::exact_pane(tmux_name));
-    let mut cmds = vec![format!("tmux send-keys -t {target} -l {}", quote(body))];
-    if submit {
-        // settle so the REPL flushes the literal paste before the submit key
-        cmds.push("sleep 0.15".to_string());
-        cmds.push(format!("tmux send-keys -t {target} Enter"));
+/// Largest prompt body (bytes, after normalisation) a single send carries.
+/// The body rides the command line base64-encoded (ssh has no stdin path on
+/// an agent-routed host): 64 KiB × 4/3 stays under Linux's 128 KiB per-argv
+/// string, with room for the script around it.
+pub const MAX_PROMPT_BYTES: usize = 65_536;
+
+/// Make a prompt body safe to type: `\r\n` and a lone `\r` become `\n` (a
+/// CRLF client's prompt otherwise reaches the REPL as several submissions,
+/// since `\r` is Return there); any other control character except `\n` and
+/// `\t` is refused — an ESC or Ctrl-C byte in a body would interrupt or kill
+/// the recipient. Caps the size at [`MAX_PROMPT_BYTES`].
+pub fn normalize_prompt_body(prompt: &str) -> Result<String, IpcError> {
+    let folded = prompt.replace("\r\n", "\n").replace('\r', "\n");
+    if let Some(c) = folded
+        .chars()
+        .find(|c| c.is_control() && *c != '\n' && *c != '\t')
+    {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            format!(
+                "prompt contains a control character (U+{:04X}); only newline and tab are allowed",
+                c as u32
+            ),
+        ));
     }
-    cmds
+    if folded.len() > MAX_PROMPT_BYTES {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            format!(
+                "prompt is {} bytes; the limit is {MAX_PROMPT_BYTES} bytes",
+                folded.len()
+            ),
+        ));
+    }
+    Ok(folded)
+}
+
+/// The one shell script that delivers a prompt to a session, in a single
+/// round trip:
+///
+/// 0. `set -o pipefail`, so the body can never be pasted in PART: without
+///    it a pipeline reports only its last command's status, and a `base64`
+///    that dies half-way (a truncated argv, an OOM) still leaves
+///    `load-buffer` succeeding on the bytes it did receive — a truncated
+///    prompt, pasted and submitted, indistinguishable from what was asked
+///    for;
+/// 1. pick the target: the row's known pane id when it still belongs to
+///    this session (a split window's active pane is the shell, not Claude),
+///    else the EXACT session target `=<name>:` (a bare name would let tmux
+///    prefix-match another session);
+/// 2. `printf … | base64 -d | tmux load-buffer -b <buffer> -` — the body
+///    never touches shell quoting, tmux key-name parsing or the 150 ms
+///    typing race;
+/// 3. `tmux paste-buffer -p -d` — bracketed paste when the pane asked for
+///    it (Claude Code does), so the REPL sees one paste with an unambiguous
+///    end marker and internal newlines stay soft; on failure (e.g. a stale
+///    target) the buffer is explicitly deleted so it can't leak on the
+///    host, and the chain stops there — Enter never fires after a failed
+///    paste. The cleanup's own stderr is discarded: a "no buffer fleet-…"
+///    from deleting a buffer that was never loaded would otherwise BE the
+///    `E_TMUX` message, in place of the failure that caused it;
+/// 4. when `submit`, a short settle and ONE Enter.
+///
+/// A single trailing newline is stripped so it cannot pre-submit the body.
+/// An empty body presses Enter only when `submit` is true (the Conversation
+/// tab's "Press Enter" chip); with `submit = false` an empty body is a
+/// no-op — nothing is typed and nothing is pressed.
+pub fn build_send_script(
+    tmux_name: &str,
+    pane_id: Option<&str>,
+    body: &str,
+    buffer: &str,
+    submit: bool,
+) -> String {
+    use base64::Engine as _;
+    let body = body.strip_suffix('\n').unwrap_or(body);
+    let exact = quote(&crate::tmux::exact_pane(tmux_name));
+    // See step 0 above: the body must arrive whole or not at all.
+    let mut script = format!("set -o pipefail; t={exact}; ");
+    if let Some(pane) = pane_id {
+        let pane_q = quote(pane);
+        let name_q = quote(tmux_name);
+        script.push_str(&format!(
+            "if [ \"$(tmux display-message -p -t {pane_q} '#{{session_name}}' 2>/dev/null)\" = {name_q} ]; then t={pane_q}; fi; "
+        ));
+    }
+    if body.is_empty() {
+        if submit {
+            script.push_str("tmux send-keys -t \"$t\" Enter");
+        } else {
+            // Nothing to type and nothing to press: a no-op that still
+            // leaves the target-selection prefix as a syntactically valid
+            // script.
+            script.push(':');
+        }
+        return script;
+    }
+    let b64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
+    let buf_q = quote(buffer);
+    script.push_str(&format!(
+        "printf %s {} | base64 -d | tmux load-buffer -b {buf_q} - && tmux paste-buffer -p -d -b {buf_q} -t \"$t\" || {{ tmux delete-buffer -b {buf_q} 2>/dev/null; false; }}",
+        quote(&b64)
+    ));
+    if submit {
+        script.push_str(" && sleep 0.15 && tmux send-keys -t \"$t\" Enter");
+    }
+    script
 }
 
 pub(super) fn default_submit() -> bool {
@@ -106,28 +191,34 @@ pub(super) async fn send_prompt_inner(
 ) -> Result<(), IpcError> {
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name_addressable(tmux_name)?;
-    // The send-keys commands run in ONE shell invocation joined with `&&` (so a
-    // failed literal-text send doesn't still fire Enter) — one round-trip
-    // instead of two.
-    let script = build_send_commands(tmux_name, prompt, submit).join(" && ");
+    let body = normalize_prompt_body(prompt)?;
+    // The pane Claude runs in, when reconcile or a hook has told us. Lock,
+    // read, unlock — never across the send.
+    let pane_id = {
+        let s = lock(store)?;
+        s.get_session(tmux_name, host_alias)?
+            .and_then(|r| r.context.tmux_pane_id)
+    };
+    let buffer = format!("fleet-{}", uuid::Uuid::new_v4().simple());
+    let script = build_send_script(tmux_name, pane_id.as_deref(), &body, &buffer, submit);
     run_tmux_script(host_alias, ssh, &script).await?;
     // Task G: record the prompt on the session's timeline (detail truncated to
     // ~120 chars). Append-only + best-effort: never fail the send on this.
     // A bare Enter (empty body: the Conversation tab's "Press Enter" chip
     // for a stuck session) is a key press, not a prompt: nothing to record,
     // and it must not blank the row's last_prompt.
-    if is_prompt(prompt) {
+    if is_prompt(&body) {
         record_session_event(store, host_alias, tmux_name, "prompt_sent", {
             // What was DELIVERED keeps the untrusted marker; what fleet records
             // does not (D8 / Q2). The marker line alone is ~77 chars, so without
             // this the 120-char detail is almost entirely marker.
-            let truncated: String = crate::mcp::guard::strip_marker(prompt)
+            let truncated: String = crate::mcp::guard::strip_marker(&body)
                 .chars()
                 .take(120)
                 .collect();
             Some(truncated)
         });
-        record_prompt_outcome(store, host_alias, tmux_name, prompt);
+        record_prompt_outcome(store, host_alias, tmux_name, &body);
     }
     Ok(())
 }
@@ -364,6 +455,12 @@ pub fn select_targets(
     sessions
         .iter()
         .filter(|s| s.kind == "work")
+        // Never fan Enter into a dialog: a blocked or stuck session is
+        // skipped unless the operator's status filter asks for exactly that.
+        .filter(|s| {
+            f.status.as_deref() == Some("blocked")
+                || (s.claude_status.as_deref() != Some("blocked") && s.stuck_kind.is_none())
+        })
         .filter(|s| match &f.host {
             Some(h) => &s.host_alias == h,
             None => true,

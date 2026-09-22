@@ -82,6 +82,41 @@ describe('App bootstrap failure', () => {
   });
 });
 
+describe('App startup order', () => {
+  it('subscribes to row events before the first list resolves', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const { listen } = await import('@tauri-apps/api/event');
+    const inv = invoke as ReturnType<typeof vi.fn>;
+    const lis = listen as ReturnType<typeof vi.fn>;
+    const original = inv.getMockImplementation() as
+      | ((cmd: string, ...rest: unknown[]) => Promise<unknown>)
+      | undefined;
+    const order: string[] = [];
+    lis.mockImplementation(async (name: string) => {
+      order.push(`listen:${name}`);
+      return () => {};
+    });
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+      if (cmd === 'list_sessions') {
+        order.push('list_sessions');
+        return [];
+      }
+      return original ? original(cmd, ...rest) : null;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(order).toContain('list_sessions'));
+      const firstListen = order.findIndex((o) => o === 'listen:session:updated');
+      const list = order.indexOf('list_sessions');
+      expect(firstListen).toBeGreaterThanOrEqual(0);
+      expect(firstListen).toBeLessThan(list);
+    } finally {
+      inv.mockImplementation(original!);
+      lis.mockImplementation(async () => () => {});
+    }
+  });
+});
+
 describe('App layout', () => {
   it('renders sidebar, center, and terminal panes', () => {
     const { getByTestId } = render(App);
@@ -410,5 +445,76 @@ describe('App: the Conversation tab', () => {
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
     expect(checked('subtab-terminal')).toBe('true');
     expect(get(sessionView)).toBe('terminal');
+  });
+});
+
+// A hub-routed MUTATION that timed out broadcasts `fleet:outcome-unknown`,
+// and this listener re-fetches the whole fleet. Two things must bound it:
+// a refresh that is still in flight is not started again (otherwise a hub
+// that is answering slowly gets one full fleet re-fetch per timed-out call,
+// each of which can time out and broadcast again), and a window whose
+// configured hub is unusable does not fetch at all.
+describe('App: fleet:outcome-unknown', () => {
+  it('a second broadcast while the refresh is in flight does not start another list_sessions', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const inv = invoke as ReturnType<typeof vi.fn>;
+    const original = inv.getMockImplementation() as
+      | ((cmd: string, ...rest: unknown[]) => Promise<unknown>)
+      | undefined;
+    let release: (() => void) | undefined;
+    let gate: Promise<void> | null = null;
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+      if (cmd === 'list_sessions' && gate) {
+        await gate;
+        return [];
+      }
+      return original ? original(cmd, ...rest) : null;
+    });
+    try {
+      render(App);
+      await tick();
+      await tick();
+      const listCalls = () => inv.mock.calls.filter((c) => c[0] === 'list_sessions').length;
+      const before = listCalls();
+      gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      window.dispatchEvent(new CustomEvent('fleet:outcome-unknown', { detail: { cmd: 'kill_session' } }));
+      window.dispatchEvent(new CustomEvent('fleet:outcome-unknown', { detail: { cmd: 'kill_session' } }));
+      await tick();
+      expect(listCalls() - before).toBe(1);
+      // Once it lands, a later broadcast is served again: the guard bounds
+      // the burst, it does not swallow refreshes.
+      release!();
+      gate = null;
+      await new Promise((r) => setTimeout(r, 0));
+      const mark = listCalls();
+      window.dispatchEvent(new CustomEvent('fleet:outcome-unknown', { detail: { cmd: 'kill_session' } }));
+      await tick();
+      expect(listCalls() - mark).toBe(1);
+    } finally {
+      release?.();
+      inv.mockImplementation(original!);
+    }
+  });
+
+  it('does not fetch at all while the configured hub is unusable', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const { hubStatus } = await import('./lib/hub');
+    const inv = invoke as ReturnType<typeof vi.fn>;
+    render(App);
+    await tick();
+    await tick();
+    const current = (await import('svelte/store')).get(hubStatus);
+    hubStatus.set({ ...current, unavailable: 'no stored token' });
+    try {
+      const listCalls = () => inv.mock.calls.filter((c) => c[0] === 'list_sessions').length;
+      const before = listCalls();
+      window.dispatchEvent(new CustomEvent('fleet:outcome-unknown', { detail: { cmd: 'kill_session' } }));
+      await tick();
+      expect(listCalls()).toBe(before);
+    } finally {
+      hubStatus.set(current);
+    }
   });
 });

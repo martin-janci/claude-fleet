@@ -189,6 +189,24 @@
       healthError = `${hr0.error.code}: ${hr0.error.message}`;
       push({ kind: 'error', code: hr0.error.code, message: `Health check failed: ${hr0.error.message}` });
     }
+    // Subscribed BEFORE the first list: a `session:updated` that lands while
+    // the list is in flight would otherwise be emitted to no listener and
+    // lost until the row changes again.
+    unlistenEvents = await subscribeToRowEvents({
+      onSessionEvents: applySessionEvents,
+      onHostEvents: applyHostEvents,
+      onAccountEvents: applyAccountEvents,
+      onProjectEvents: applyProjectEvents,
+      onTaskEvents: applyTaskEvents,
+      onAccountUsageEvents: applyAccountUsageEvents,
+      onTimelineEvents: dispatchTimelineEvents,
+      onConversationsChanged: dispatchConversationsChanged,
+      onAssetInventoryUpdated: mergeInventoryRow,
+      onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
+      onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
+      onSyncProgress: (p) => syncProgress.set(p),
+      onMoveProgress: applyMoveProgress,
+    });
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),
       loadSessions(),
@@ -215,23 +233,6 @@
     if (!get(onboardingWelcomed) && visibleHostCount === 0 && workSessionCount === 0) {
       showWelcome = true;
     }
-    // Batched handlers: a reconcile burst of N `session:updated` events lands
-    // as ONE store update instead of N (see events.ts).
-    unlistenEvents = await subscribeToRowEvents({
-      onSessionEvents: applySessionEvents,
-      onHostEvents: applyHostEvents,
-      onAccountEvents: applyAccountEvents,
-      onProjectEvents: applyProjectEvents,
-      onTaskEvents: applyTaskEvents,
-      onAccountUsageEvents: applyAccountUsageEvents,
-      onTimelineEvents: dispatchTimelineEvents,
-      onConversationsChanged: dispatchConversationsChanged,
-      onAssetInventoryUpdated: mergeInventoryRow,
-      onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
-      onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
-      onSyncProgress: (p) => syncProgress.set(p),
-      onMoveProgress: applyMoveProgress,
-    });
     // Tasks are secondary to the session list: load after the row
     // subscription is live so no `task:updated` is missed, and never block
     // startup on it (a failure only leaves the Tasks panel empty).
@@ -276,6 +277,28 @@
   // targets call stopPropagation(), so this only ever sees strays.
   const swallowDrag = (e: DragEvent) => e.preventDefault();
 
+  // A hub-routed MUTATION timed out (`E_HUB_TIMEOUT` with
+  // `details.outcome_unknown`): the hub may have done it anyway. Unlike
+  // `onFocus`, this is not throttled by a clock — the whole point is that the
+  // outcome is unknown right now, not on the next alt-tab.
+  //
+  // It is bounded in the only two ways that cannot lose a refresh: a window
+  // whose configured hub is unusable fetches nothing at all (same rule as
+  // `onFocus`), and a refresh this listener already started is not started a
+  // second time while it is still in flight. The second matters because the
+  // refresh is itself two hub-routed reads: a hub answering slowly would
+  // otherwise get one full fleet re-fetch per timed-out call, each able to
+  // time out in turn.
+  let outcomeRefreshInFlight = false;
+  function onOutcomeUnknown() {
+    if (get(hubStatus).unavailable) return;
+    if (outcomeRefreshInFlight) return;
+    outcomeRefreshInFlight = true;
+    void Promise.all([loadProjects(), loadSessions()]).finally(() => {
+      outcomeRefreshInFlight = false;
+    });
+  }
+
   onMount(() => {
     window.addEventListener('focus', onFocus);
     window.addEventListener('keydown', onKeydown);
@@ -284,6 +307,7 @@
     window.addEventListener('keydown', onChordKeydown, true);
     window.addEventListener('dragover', swallowDrag);
     window.addEventListener('drop', swallowDrag);
+    window.addEventListener('fleet:outcome-unknown', onOutcomeUnknown);
   });
 
   // Opening a session from anywhere (sidebar, quick switcher, a Hosts-view
@@ -307,6 +331,7 @@
     window.removeEventListener('keydown', onChordKeydown, true);
     window.removeEventListener('dragover', swallowDrag);
     window.removeEventListener('drop', swallowDrag);
+    window.removeEventListener('fleet:outcome-unknown', onOutcomeUnknown);
     unsubOpened();
     unsubHostsClose();
     unlistenEvents?.();

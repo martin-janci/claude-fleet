@@ -257,6 +257,16 @@ pub struct SendPromptParams {
     /// marked. Default false.
     #[serde(default)]
     pub raw: bool,
+    /// Deliver even when the session is blocked on a dialog or stuck. Off by
+    /// default: Enter on a permission prompt selects the highlighted answer.
+    #[serde(default)]
+    pub force: bool,
+    /// Caller-chosen id, unique per send for this caller. A repeat within
+    /// ten minutes replays the first result (E_IN_FLIGHT while it still
+    /// runs). The key does not include the session, so reusing an id for a
+    /// different session returns the earlier result without delivering.
+    #[serde(default)]
+    pub client_msg_id: Option<String>,
     /// Press a key instead of typing text: `Enter`, `Escape` or `C-c`. Never
     /// marked (a key is not text) and never recorded as a prompt. `prompt`
     /// must be empty with it.
