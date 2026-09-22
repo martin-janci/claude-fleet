@@ -9,10 +9,18 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 /// One whole request/response exchange with the local hub, same budget as
-/// `pair.rs`'s calls. The response-size cap ([`crate::pair`]'s own
-/// `MAX_RESPONSE`) is [`exchange`]'s, not this module's — a full 1000-row
-/// page of reports, context included, is well under its 1 MiB.
+/// `pair.rs`'s calls.
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Largest `GET /reports` response this module will read — bigger than
+/// `pair.rs`'s own 1 MiB `MAX_RESPONSE`, which was sized for `client list`
+/// (a few KB on a big fleet), not a page of error reports. A single row can
+/// carry `fleet_proto::report::MESSAGE_MAX` (2048 *chars*, up to 8 KiB as
+/// UTF-8) plus `CONTEXT_MAX` (4 KiB of serialized JSON) — call it ~13 KiB
+/// worst case with the rest of the row's fields and JSON punctuation. At
+/// `--limit`'s ceiling of 1000 rows that is on the order of 13 MiB; 16 MiB
+/// leaves headroom above that worst case.
+const MAX_RESPONSE: u64 = 16 * 1024 * 1024;
 
 /// `30m`, `2h`, `3d`, or a unix timestamp.
 pub fn parse_since(s: &str, now: i64) -> Result<i64, String> {
@@ -139,14 +147,33 @@ pub fn table(rows: &[serde_json::Value], width: usize) -> String {
     out.trim_end_matches('\n').to_string()
 }
 
+/// Percent-encode `s` for one query-string value: every byte of its UTF-8
+/// form that is not `A-Z a-z 0-9 - . _ ~` (the URI "unreserved" set) becomes
+/// an uppercase `%XX`.
+///
+/// `--origin` needs this, not just an escape of `:` — `validate_client_name`
+/// ([`fleet_core::store::clients`]) only rejects control characters and line
+/// breaks in a paired client's name, so `client:<name>` can carry a space
+/// (breaks the HTTP request line), `&` or `=` (corrupts the query string),
+/// or non-ASCII (fine over the wire but not worth a second, narrower escape
+/// path). One general-purpose encoder covers `:` (→ `%3A`) the same way it
+/// covers all of those, without a dependency for one query parameter.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// `fleet-hub reports [--limit] [--since] [--origin] [--json]`: `GET
 /// /reports` on the running hub, over loopback with the master token, like
 /// `pair`/`client` reach it.
-///
-/// `--origin`'s only special character is `:` (`client:<name>`,
-/// `host:<alias>`); names are validated printable ASCII, so a manual
-/// percent-encoding of that one character is enough and saves a dependency
-/// a single query parameter does not otherwise need.
 pub async fn run(
     opts: &HubOptions,
     env: &HashMap<String, String>,
@@ -162,23 +189,27 @@ pub async fn run(
         query.push_str(&format!("&since={}", parse_since(&s, now)?));
     }
     if let Some(o) = origin {
-        query.push_str(&format!("&origin={}", o.replace(':', "%3A")));
+        query.push_str(&format!("&origin={}", percent_encode(&o)));
     }
     let request = format!(
         "GET /reports?{query} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
          Accept: application/json\r\nConnection: close\r\n\r\n",
         conn.addr, conn.token
     );
-    let raw =
-        match tokio::time::timeout(CALL_TIMEOUT, exchange(conn.addr, conn.tls, &request)).await {
-            Ok(r) => r?,
-            Err(_) => {
-                return Err(format!(
-                    "{} did not answer within {CALL_TIMEOUT:.0?}",
-                    conn.addr
-                ))
-            }
-        };
+    let raw = match tokio::time::timeout(
+        CALL_TIMEOUT,
+        exchange(conn.addr, conn.tls, &request, MAX_RESPONSE),
+    )
+    .await
+    {
+        Ok(r) => r?,
+        Err(_) => {
+            return Err(format!(
+                "{} did not answer within {CALL_TIMEOUT:.0?}",
+                conn.addr
+            ))
+        }
+    };
     let rows = parse_json_response(&raw)?;
     let rows = rows.as_array().cloned().unwrap_or_default();
     if json {
@@ -196,6 +227,18 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_encode_escapes_everything_outside_the_unreserved_set() {
+        assert_eq!(
+            percent_encode("client:office ipad&x=ü"),
+            "client%3Aoffice%20ipad%26x%3D%C3%BC"
+        );
+        assert_eq!(
+            percent_encode("host:build-box_1.local~"),
+            "host%3Abuild-box_1.local~"
+        );
+    }
 
     #[test]
     fn since_accepts_durations_and_unix_seconds() {

@@ -151,7 +151,12 @@ async fn call_tool(
         conn.token,
         body.len()
     );
-    let raw = match tokio::time::timeout(CALL_TIMEOUT, exchange(addr, conn.tls, &request)).await {
+    let raw = match tokio::time::timeout(
+        CALL_TIMEOUT,
+        exchange(addr, conn.tls, &request, MAX_RESPONSE),
+    )
+    .await
+    {
         Ok(r) => r?,
         Err(_) => return Err(format!("{addr} did not answer within {CALL_TIMEOUT:.0?}")),
     };
@@ -170,7 +175,17 @@ async fn call_tool(
 /// network error when the read itself fails, even if some bytes already
 /// arrived: a truncated response would otherwise surface as a confusing
 /// downstream JSON-RPC parse failure instead of naming the reset.
-pub(crate) async fn exchange(addr: SocketAddr, tls: bool, request: &str) -> Result<String, String> {
+///
+/// `cap` bounds the read: this module's own calls pass its [`MAX_RESPONSE`]
+/// (1 MiB, plenty for a `client list` or a pairing reply), but a caller with
+/// a larger worst-case body — `reports.rs`'s `GET /reports` page — passes
+/// its own.
+pub(crate) async fn exchange(
+    addr: SocketAddr,
+    tls: bool,
+    request: &str,
+    cap: u64,
+) -> Result<String, String> {
     let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::ConnectionRefused {
             format!("no hub is answering on {addr} — {NOT_RUNNING}")
@@ -179,7 +194,7 @@ pub(crate) async fn exchange(addr: SocketAddr, tls: bool, request: &str) -> Resu
         }
     })?;
     let conn = maybe_tls(tcp, addr, tls).await?;
-    let raw = crate::serve::write_and_read(conn, addr, request, MAX_RESPONSE, false).await?;
+    let raw = crate::serve::write_and_read(conn, addr, request, cap, false).await?;
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
