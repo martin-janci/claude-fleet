@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// Defined once in `service::pane_intel` (they are built from a parsed pane
+/// tail); re-exported here so `SessionRow` can name them.
+pub use crate::service::pane_intel::{PendingInput, PendingOption};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectRow {
     pub id: i64,
@@ -209,6 +213,13 @@ pub struct SessionRow {
     /// Current-conversation context (migration 037), flattened on the wire.
     #[serde(flatten)]
     pub context: SessionContext,
+    /// The permission/question dialog a blocked pane is showing (migration
+    /// 040), derived by the reconcile pass alongside `current_activity`.
+    /// `None` whenever the pane shows no such dialog. `serde(default)` so a
+    /// hub/desktop/phone built before this column never fails to parse a row
+    /// that omits it.
+    #[serde(default)]
+    pub pending_input: Option<PendingInput>,
 }
 
 /// The `sessions` column list every `SessionRow` read shares, in the order
@@ -225,7 +236,8 @@ pub(super) const SESSION_COLUMNS: &str =
      turn_seq, last_stop_at, parent_session_id, tags, \
      usage_input_tokens, usage_output_tokens, usage_cache_write_tokens, usage_cache_read_tokens, \
      usage_cost_micros, usage_model, usage_updated_at, \
-     model, context_tokens, context_window, context_source, context_at, context_stale, tmux_pane_id";
+     model, context_tokens, context_window, context_source, context_at, context_stale, tmux_pane_id, \
+     pending_input";
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -305,7 +317,22 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
             context_stale: row.get::<_, i64>(49)? != 0,
             tmux_pane_id: row.get(50)?,
         },
+        pending_input: decode_pending_input(row.get(51)?),
     })
+}
+
+/// Decode the `sessions.pending_input` JSON column. NULL or malformed text
+/// (never written by us, but a hand-edited DB is possible) reads as `None`
+/// rather than failing the row.
+pub(super) fn decode_pending_input(raw: Option<String>) -> Option<PendingInput> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// Encode `pending_input` for the `sessions.pending_input` column: `None`
+/// for no dialog, or when the value fails to serialize (never happens for
+/// the derived type, but a NULL is safer than a write error).
+pub(super) fn encode_pending_input(pending_input: Option<&PendingInput>) -> Option<String> {
+    pending_input.and_then(|p| serde_json::to_string(p).ok())
 }
 
 /// Token usage + estimated cost of a session (migration 025). Flattened
@@ -790,6 +817,11 @@ pub struct ReconcileSession<'a> {
     pub pr_observed: bool,
     /// The session's active tmux pane (`%N`). `None` keeps the stored one.
     pub tmux_pane_id: Option<String>,
+    /// The dialog `pane_intel::analyze` found this pass, if any. Governed by
+    /// `intel_observed` exactly like `stuck_kind`: authoritative (and a
+    /// `None` CLEARS a stale dialog) when the pane was captured this pass,
+    /// preserved when it was not.
+    pub pending_input: Option<PendingInput>,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by

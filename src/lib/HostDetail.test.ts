@@ -1,9 +1,13 @@
 import { render, screen, fireEvent, within } from '@testing-library/svelte';
 import { describe, it, expect, vi } from 'vitest';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 import HostDetail from './HostDetail.svelte';
 import { sharedWith } from './hosts_view';
 import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host } from './hosts_fixture';
+import { viewHostSessions } from './host_actions';
+import { hostFilter } from './hosts';
+import { onHostsCloseRequested } from './app_views';
 
 function mount(alias: string, over: Record<string, unknown> = {}) {
   const hosts = fleetHosts();
@@ -79,5 +83,28 @@ describe('HostDetail', () => {
   it('an ssh host (the default) shows no transport fact', () => {
     mount('mefistos');
     expect(screen.queryByTestId('detail-transport')).toBeNull();
+  });
+
+  it('the "View sessions" button jumps the sidebar filter and asks to close the Hosts overlay', async () => {
+    hostFilter.set('all');
+    const onCloseRequested = vi.fn();
+    const unsub = onHostsCloseRequested(onCloseRequested);
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('detail-view-sessions'));
+    expect(get(hostFilter)).toBe('mefistos');
+    expect(onCloseRequested).toHaveBeenCalledTimes(1);
+    unsub();
+  });
+});
+
+describe('viewHostSessions', () => {
+  it('sets hostFilter to the alias and fires the Hosts-overlay-close signal', () => {
+    hostFilter.set('all');
+    const onCloseRequested = vi.fn();
+    const unsub = onHostsCloseRequested(onCloseRequested);
+    viewHostSessions('mefistos');
+    expect(get(hostFilter)).toBe('mefistos');
+    expect(onCloseRequested).toHaveBeenCalledTimes(1);
+    unsub();
   });
 });

@@ -179,6 +179,7 @@ pub async fn send_message(
                 tmux_name: to_row.tmux_name.clone(),
                 prompt: header,
                 submit: args.submit,
+                keys: None,
             },
             store,
             ssh,

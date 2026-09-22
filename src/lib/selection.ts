@@ -94,6 +94,42 @@ export function selectSession(s: SessionRow | null, opts: { follow?: boolean } =
   if (!opts.follow) for (const fn of openedListeners) fn(s);
 }
 
+// Monotonically increasing counter bumped by `selectSessionExplicitly`,
+// AFTER the selection itself has been applied. Deliberately NOT id-keyed:
+// - Re-selecting the SAME session explicitly (no id change) must still
+//   reveal it; a counter bump is a distinct event even when the id repeats,
+//   where an id-keyed flag compared against `$selectedSession.id` would see
+//   no change and do nothing.
+// - Nothing can "replay" a stale reveal against an unrelated later
+//   selection: a non-explicit reselect never bumps this, so the sequence
+//   number a reader reacts to only ever changes on an explicit pick, and a
+//   reader reads the CURRENT `$selectedSession` at the moment it handles a
+//   bump rather than remembering which id the bump was "for".
+// A reader must compare against the value it saw when IT started watching
+// (not a fixed sentinel like 0, and not "did the number change since the
+// component's own last run"): the Sidebar is destroyed and recreated on
+// collapse/expand, so a fresh mount does NOT replay a bump that happened
+// before it existed — see `Sidebar.svelte`'s `appliedSeq`.
+export const revealSeq = writable(0);
+
+/**
+ * Select a session as a deliberate user action: a sidebar row click, the
+ * quick switcher, restore-on-launch, a fresh New-session create, or any
+ * other explicit "open this session" link (a related/background/task
+ * session, a review, a move's "open the new session"). Bumps `revealSeq` so
+ * Sidebar widens `hostFilter` to `all` if it hides the session's host — a
+ * non-explicit reselect (a rename/recreate resync, a completed move's
+ * follow reselect) must go through the plain `selectSession` instead and
+ * stays silent.
+ */
+export function selectSessionExplicitly(
+  s: SessionRow,
+  opts: { follow?: boolean } = {},
+): void {
+  selectSession(s, opts);
+  revealSeq.update((n) => n + 1);
+}
+
 /**
  * Re-select the session the user last had open. Call once after the `sessions`
  * store is populated (post-bootstrap). If the remembered session no longer
@@ -106,7 +142,7 @@ export function restoreLastSession(): void {
     (s) => s.host_alias === ident.host_alias && s.tmux_name === ident.tmux_name,
   );
   if (match && match.status !== 'ghost') {
-    selectSession(match, { follow: true });
+    selectSessionExplicitly(match, { follow: true });
   } else {
     writePref<SessionIdent | null>(LAST_SESSION_KEY, null);
   }

@@ -13,6 +13,8 @@ import {
   closeAgent,
   toggleAgent,
   restartOperator,
+  refreshOperator,
+  operatorHost,
   blockedCopy,
 } from './operator';
 import { sessions, applySessionEvents, type SessionRow } from './sessions';
@@ -93,6 +95,38 @@ describe('blockedCopy', () => {
     const t = blockedCopy('no_host').title;
     expect(t).toContain('local');
     expect(t).not.toContain('not running');
+  });
+
+  it('no_host on local names the fix; no_host elsewhere names the host', () => {
+    // A hub without a local host: the way out is homing the operator on a
+    // fleet host, and the copy says which flag does that.
+    const onLocal = blockedCopy('no_host', 'local').title;
+    expect(onLocal).toContain('--operator-host');
+    // A configured home the fleet does not have: the copy names it, so the
+    // person can tell a typo from a host they never added.
+    const onGhost = blockedCopy('no_host', 'mefistos').title;
+    expect(onGhost).toContain('mefistos');
+    expect(onGhost).toContain('not in this fleet');
+    expect(onGhost).not.toContain('hub.local_host');
+    expect(blockedCopy('no_host', 'mefistos').action).toBeNull();
+  });
+});
+
+describe('operatorHost', () => {
+  it('is read from the status and defaults to local', async () => {
+    invoke.mockResolvedValueOnce({
+      ready: false,
+      session: null,
+      blocked: 'no_host',
+      host: 'mefistos',
+    });
+    await openAgent();
+    expect(get(operatorState)).toBe('no_host');
+    expect(get(operatorHost)).toBe('mefistos');
+    // An older hub answers without the field.
+    invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'no_host' });
+    await refreshOperator();
+    expect(get(operatorHost)).toBe('local');
   });
 });
 

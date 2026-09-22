@@ -245,7 +245,7 @@ Label sessions for triage with `set_session_tags { session_id, tags }` (up to
 16 short tags) and find them again with `list_sessions { tag }`.
 
 `session_history { session_id, limit? }` is the per-session event log
-(`status_change`, `prompt_sent`, `stuck`, `killed`, `recreated`,
+(`status_change`, `prompt_sent`, `keys_sent`, `stuck`, `killed`, `recreated`,
 `message_sent`, `message_received`, `safe_kill_requested`, `safe_kill_ready`,
 `safe_kill_failed`, `safe_kill_send_failed`, `task_dispatched`,
 `task_started`, `task_done`, `task_failed`, `task_cancelled`; newest first) —

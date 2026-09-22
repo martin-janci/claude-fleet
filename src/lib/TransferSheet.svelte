@@ -10,7 +10,7 @@
   import type { ResolveAction } from './moveSession';
   import { stepLabel } from './moveProgress';
   import { dismissMove, displaySteps, moves, resolveMoveRun, retryMove, startMove, transferSheetFor } from './moves';
-  import { selectSession } from './selection';
+  import { selectSessionExplicitly } from './selection';
   import { sessions } from './sessions';
 
   // One sheet for the whole app. Which view shows is a function of the run:
@@ -184,7 +184,7 @@
     close();
   }
   function openTarget() {
-    if (newSession) selectSession(newSession);
+    if (newSession) selectSessionExplicitly(newSession);
     done();
   }
   function moveBack(): void {

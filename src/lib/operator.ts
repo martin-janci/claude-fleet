@@ -11,6 +11,11 @@ export interface OperatorStatus {
   ready: boolean;
   session: SessionRow | null;
   blocked: OperatorBlocked | null;
+  /**
+   * The host the operator runs (or would run) on. Absent from a hub older
+   * than the field, which only ever homed the operator on `local`.
+   */
+  host?: string;
 }
 
 export const agentPanelOpen: Writable<boolean> = writable(false);
@@ -22,6 +27,11 @@ export const operatorState: Writable<'unknown' | 'waking' | 'ready' | OperatorBl
  * about — not the live status; read `operatorRow` for that.
  */
 export const operatorSession: Writable<SessionRow | null> = writable(null);
+/**
+ * Where the operator is homed, as the last status call said. Only the
+ * `no_host` copy reads it: which host is missing decides what the fix is.
+ */
+export const operatorHost: Writable<string> = writable('local');
 
 /**
  * The operator's row as the app currently knows it.
@@ -68,7 +78,10 @@ export const operatorRow: Readable<SessionRow | null> = derived(
  *    recovery is killing that session from the sidebar and pressing the
  *    open-agent button again, which the title says outright.
  */
-export function blockedCopy(b: OperatorBlocked): { title: string; action: string | null } {
+export function blockedCopy(
+  b: OperatorBlocked,
+  host = 'local',
+): { title: string; action: string | null } {
   switch (b) {
     case 'absent':
       return { title: 'The agent is not running.', action: 'Wake the agent' };
@@ -92,10 +105,15 @@ export function blockedCopy(b: OperatorBlocked): { title: string; action: string
       };
     case 'no_host':
       // `absent` here would offer "Wake the agent" for a press that cannot
-      // work: the agent runs on the `local` host, and this fleet has none.
+      // work: the agent's home is a host this fleet does not have. Which
+      // host decides the fix — `local` means a hub without a local host,
+      // and the flag that homes the agent elsewhere is the way out; any
+      // other alias was configured and is simply not in the fleet.
       return {
         title:
-          'The agent runs on the local host, and this fleet has none (a hub started with hub.local_host=false). There is nowhere to start it.',
+          host === 'local'
+            ? 'The agent runs on the local host, and this fleet has none (a hub started with hub.local_host=false). Start the hub with --operator-host <alias> to run it on a fleet host.'
+            : `The agent is set to run on ${host}, which is not in this fleet. Add that host, or point the agent elsewhere with --operator-host <alias>.`,
         action: null,
       };
   }
@@ -109,6 +127,7 @@ export async function refreshOperator(): Promise<void> {
     return;
   }
   operatorSession.set(r.value.session);
+  operatorHost.set(r.value.host ?? 'local');
   operatorState.set(r.value.ready ? 'ready' : (r.value.blocked ?? 'absent'));
 }
 

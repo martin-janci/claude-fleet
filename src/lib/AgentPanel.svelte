@@ -20,6 +20,7 @@
   import {
     agentPanelOpen,
     operatorState,
+    operatorHost,
     operatorRow,
     blockedCopy,
     closeAgent,
@@ -60,7 +61,7 @@
 
   const blocked = $derived(
     $operatorState !== 'ready' && $operatorState !== 'waking' && $operatorState !== 'unknown'
-      ? blockedCopy($operatorState as OperatorBlocked)
+      ? blockedCopy($operatorState as OperatorBlocked, $operatorHost)
       : null,
   );
   // Which function a blocked-state button runs, keyed on the actual state

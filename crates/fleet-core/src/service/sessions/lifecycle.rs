@@ -423,6 +423,32 @@ pub(super) fn project_taken_slugs(
     Ok(taken)
 }
 
+/// The pane cwd for a SYSTEM project (`Some`), or `None` for an ordinary one.
+///
+/// A system project (the UX agent's operator dir) is not a repository: its
+/// `base_path` is the cwd on the host the session is for, resolved there by
+/// the service that made it (`operator::ensure_operator` → `resolve_dir`).
+/// So there is nothing to clone on a remote host, nothing to repair, and no
+/// worktree to make — a worktree request against it is a caller error, not
+/// something to guess a path for.
+pub(super) fn system_project_cwd(
+    s: &Store,
+    project_id: i64,
+    worktree_id: Option<i64>,
+    new_worktree: Option<&str>,
+) -> Result<Option<String>, IpcError> {
+    let Some(path) = fetch_system_base_path(s, project_id)? else {
+        return Ok(None);
+    };
+    if worktree_id.is_some() || new_worktree.is_some() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("project {project_id} is a system project without a repository; it has no worktrees"),
+        ));
+    }
+    Ok(Some(path))
+}
+
 pub(super) async fn new_session_inner(
     args: NewSessionArgs,
     store: &Mutex<Store>,
@@ -434,8 +460,21 @@ pub(super) async fn new_session_inner(
     // For REMOTE we can't use the local path — it doesn't exist on the other
     // machine — so we translate to `~/projects/github.com/<owner>/<repo>`
     // (matching proj-clean's convention) and auto-clone if missing.
+    // A SYSTEM project is neither: its `base_path` is the cwd on either kind
+    // of host, and there is no repository to clone or repair.
     crate::service::hub::ensure_local_allowed(&args.host_alias)?;
-    let path: PathBuf = if args.host_alias == "local" {
+    let fixed: Option<String> = {
+        let s = lock(store)?;
+        system_project_cwd(
+            &s,
+            args.project_id,
+            args.worktree_id,
+            args.new_worktree.as_deref(),
+        )?
+    };
+    let path: PathBuf = if let Some(p) = fixed.clone() {
+        PathBuf::from(p)
+    } else if args.host_alias == "local" {
         if let Some(ref name) = args.new_worktree {
             // NEW WORKTREE: create branch + worktree, return the new dir.
             let base_path = {
@@ -573,8 +612,9 @@ pub(super) async fn new_session_inner(
     // row may point at a directory that was deleted since it was written.
     // Automatic means create-only (re-add a missing worktree from its existing
     // branch); anything more returns E_REPAIR_REQUIRED before tmux starts.
-    // A brand-new worktree was just created by `worktree_add_script`.
-    let (path, repaired) = if args.new_worktree.is_none() {
+    // A brand-new worktree was just created by `worktree_add_script`, and a
+    // system project has no repository to check.
+    let (path, repaired) = if args.new_worktree.is_none() && fixed.is_none() {
         let rep = crate::service::repair::ensure_for_new_session(
             store,
             ssh,

@@ -18,7 +18,7 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
   import { spawnAuthorSession } from './assets';
-  import { selectSession } from './selection';
+  import { selectSessionExplicitly } from './selection';
 
   let {
     kind,
@@ -59,7 +59,7 @@
       return;
     }
     authorSessionOpened = true;
-    selectSession(r.value);
+    selectSessionExplicitly(r.value);
     onclose();
   }
 
