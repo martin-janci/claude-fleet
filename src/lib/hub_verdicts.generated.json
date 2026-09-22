@@ -73,6 +73,7 @@
   "routed": [
     "cancel_task",
     "delete_worktree",
+    "discover_lost_sessions",
     "dismiss_ghost_session",
     "ensure_operator",
     "health_check",
@@ -103,6 +104,7 @@
     "repo_tree",
     "resolve_move",
     "restart_session",
+    "restore_host_sessions",
     "safe_kill_session",
     "send_prompt",
     "session_activity",

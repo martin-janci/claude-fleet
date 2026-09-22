@@ -19,7 +19,30 @@ On first launch the app walks you through setup — see the **[Getting Started g
 Grab the bundle for your platform from the
 [Releases page](https://github.com/martin-janci/claude-fleet/releases) —
 `.dmg` for macOS (`aarch64` for Apple Silicon, `x86_64` for Intel),
-`.AppImage` or `.deb` for Linux.
+`.AppImage` or `.deb` for Linux. Every filename carries the version, so a
+download is always traceable to the release it came from.
+
+### Verify what you downloaded
+
+Each release attaches a `SHA256SUMS` asset covering **every** asset on that
+release — desktop bundles included. If that file is incomplete, or any asset
+the manifest declares is missing, the release run fails (`verify-release` in
+`.github/workflows/release.yml`); the draft is still published by hand, so
+treat a red release run as a reason not to trust the draft. Nothing here is
+code-signed (see below), so this checksum is the only integrity check
+available; it is worth the ten seconds.
+
+From the directory you downloaded into, with `v0.3.0` replaced by the release
+you took:
+
+```bash
+curl -LO https://github.com/martin-janci/claude-fleet/releases/download/v0.3.0/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing     # macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+`--ignore-missing` is what lets you check just the one bundle you took
+instead of all of them; every file you *do* have must print `OK`. The release
+notes also record the exact commit the bundles were built from.
 
 ### macOS — "claude-fleet.app is damaged and can't be opened"
 

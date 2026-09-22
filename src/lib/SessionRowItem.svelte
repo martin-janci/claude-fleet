@@ -9,6 +9,7 @@
     formatCostMicros,
     formatTokens,
     sessionUsageTokens,
+    lostReasonLabel,
     type SessionRow,
   } from './sessions';
   import { selectedSession } from './selection';
@@ -237,7 +238,7 @@
       }</span>
       {#if sess.lost_at}
         <span class="lost-at" title="Lost at {new Date(sess.lost_at * 1000).toLocaleString()}">
-          lost {timeAgo(sess.lost_at)}
+          lost {timeAgo(sess.lost_at)}{#if lostReasonLabel(sess.lost_reason)}<span data-testid="lost-reason"> · {lostReasonLabel(sess.lost_reason)}</span>{/if}
         </span>
       {/if}
       <div class="row-actions">

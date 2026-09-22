@@ -37,6 +37,9 @@ export interface SessionRow {
   reviews_session_id: number | null;
   worktree_key: string | null;
   lost_at: number | null;
+  /** Why the row was marked lost: "host_reboot" | "tmux_server_gone" |
+   *  "missing" | "killed" | null (never lost, or still live). */
+  lost_reason?: string | null;
   // Claude agent fields — null when claude CLI not installed or session not managed by Claude Code
   claude_session_id: string | null;
   claude_status: ClaudeStatus | null;
@@ -173,6 +176,19 @@ function sessionIsStale(incoming: SessionRow, current: SessionRow): boolean {
     current.row_version !== undefined &&
     incoming.row_version < current.row_version
   );
+}
+
+/** Human label for a ghost row's `lost_reason`, or null when the reason has
+ *  no dedicated wording (e.g. "missing", "killed", or none recorded). */
+export function lostReasonLabel(reason: string | null | undefined): string | null {
+  switch (reason) {
+    case 'host_reboot':
+      return 'host rebooted';
+    case 'tmux_server_gone':
+      return 'tmux server stopped';
+    default:
+      return null;
+  }
 }
 
 const rows = createRowStore<SessionRow, number>({
@@ -432,6 +448,12 @@ export interface NewSessionArgs {
    * `dev-<owner>-<repo>--…` slug.
    */
   friendly_name?: string | null;
+  /**
+   * Resume this Claude conversation id instead of minting a fresh one (from
+   * discover_lost_sessions). Rejected for a shell session and when a session
+   * on the host already holds that conversation.
+   */
+  resume_claude_session_id?: string;
 }
 
 export async function newSessionAbortable(
@@ -558,6 +580,94 @@ export async function recreateSession(sessionId: number): Promise<Result<Session
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;
+}
+
+/** Mirrors `service::sessions::restore::RestorePlanEntry`: one planned restore
+ *  action. `action` is `"restore"` for a session the batch will attempt to
+ *  resume, `"skip"` (with `reason` set) for one an explicit `sessionIds`
+ *  request named that cannot be restored. */
+export interface RestorePlanEntry {
+  session_id: number;
+  tmux_name: string | null;
+  cwd: string | null;
+  claude_session_id: string | null;
+  friendly_name: string | null;
+  action: 'restore' | 'skip';
+  reason: string | null;
+}
+
+/** Mirrors `service::sessions::restore::RestoreOutcome`: the result of one
+ *  restore attempt. */
+export interface RestoreOutcome {
+  session_id: number;
+  tmux_name: string;
+  ok: boolean;
+  error: string | null;
+}
+
+/** Mirrors `service::sessions::restore::RestoreReport`. */
+export interface RestoreReport {
+  host_alias: string;
+  dry_run: boolean;
+  plan: RestorePlanEntry[];
+  results: RestoreOutcome[];
+}
+
+/** Batch-restore a host's sessions lost to a reboot or a tmux server restart,
+ *  over `recreate_session`. Pass `dryRun: true` first to get the plan (no
+ *  ssh, no writes); `sessionIds` restricts the batch to those fleet session
+ *  ids instead of every lost, resumable session on the host. The backend
+ *  emits `session:updated` row events for anything it restores, so nothing
+ *  is merged into the sessions store here. */
+export async function restoreHostSessions(
+  hostAlias: string,
+  opts: { dryRun?: boolean; sessionIds?: number[] } = {},
+): Promise<Result<RestoreReport>> {
+  return invokeCmd<RestoreReport>('restore_host_sessions', {
+    args: {
+      host_alias: hostAlias,
+      dry_run: opts.dryRun ?? false,
+      session_ids: opts.sessionIds ?? null,
+    },
+  });
+}
+
+/** Mirrors `service::sessions::discover::LostCandidate`: one transcript the
+ *  host has (possibly already held by a fleet row — `existing_session_id`),
+ *  ranked and enriched from the store. `rank_hint` is relative to the host's
+ *  last boot. `resumable` is true only when `new_session` would start the
+ *  pane in exactly `cwd` (a registered worktree or the project root) —
+ *  anywhere else `claude --resume` misses the transcript and a new, empty
+ *  conversation starts instead. `derived_tmux_name` is set only when
+ *  `resumable`, and is a hint for `new_session`'s `name` — it may already be
+ *  taken by a second session on the same worktree. Restore a resumable
+ *  candidate with `new_session({ hostAlias, projectId, worktreeId, name:
+ *  derivedTmuxName, resumeClaudeSessionId: claudeSessionId })`. */
+export interface LostCandidate {
+  cwd: string;
+  git_branch: string | null;
+  claude_session_id: string;
+  transcript_mtime: number;
+  derived_tmux_name: string | null;
+  project_id: number | null;
+  worktree_id: number | null;
+  existing_session_id: number | null;
+  rank_hint: 'before_boot' | 'after_boot' | 'stale' | 'unknown';
+  resumable: boolean;
+}
+
+/** Scan a host's Claude transcripts (`~/.claude/projects`) for lost
+ *  conversations (one a fleet row already holds is flagged via
+ *  `existing_session_id`) and rank/enrich them from the store. Read-only: no
+ *  writes, nothing to merge into the sessions store. `limit` caps how many
+ *  transcripts (newest first) are read; omit for the backend default (50). */
+export async function discoverLostSessions(
+  hostAlias: string,
+  limit?: number,
+): Promise<Result<LostCandidate[]>> {
+  return invokeCmd<LostCandidate[]>('discover_lost_sessions', {
+    args: { host_alias: hostAlias, limit: limit ?? null },
+  });
 }
 
 export async function dismissGhostSession(sessionId: number): Promise<Result<void>> {

@@ -9,12 +9,13 @@
 # This does NOT write a combined SHA256SUMS: two matrix legs (one per
 # target) each run this script independently, and a file named the same by
 # both would just have whichever leg finishes last silently overwrite the
-# other's on upload — the published checksums would then cover 2 of the 4
-# tarballs, not 4, with nothing to say so. Instead each run writes its own
+# other's on upload. Instead each run writes its own
 # `dist/SHA256SUMS.$TARGET`, uploaded as a distinctly-named workflow
-# artifact; a separate job (`agent-hub-checksums` in release.yml, see
-# scripts/merge-sha256sums.sh) combines both legs' files into the one
-# SHA256SUMS the release actually gets.
+# artifact. The release's single `SHA256SUMS` is produced later by the
+# `checksums` job, from the assets actually attached to the release (so it
+# covers the desktop bundles too, not just these tarballs); these per-target
+# files become the cross-check that the bytes GitHub serves are the bytes
+# this runner built. See scripts/merge-sha256sums.sh.
 #
 # Run from the repository root, after the cargo build, with:
 #   TARGET   the Rust target triple the binaries were built for, e.g.
@@ -23,16 +24,31 @@
 #   TAG      the release tag, e.g. v0.3.0 (the version in each asset name is
 #            this with the leading `v` stripped)
 #   REPO     "owner/repo", used only for the README's docs/hub.md link
+#   GIT_SHA  the full commit sha this was built from (`github.sha`), recorded
+#            verbatim in each tarball's README.txt. Required, not optional: a
+#            tag can be moved or re-cut, so the tag alone does not identify
+#            the source of a binary somebody downloaded — the sha does, and a
+#            tarball that silently omitted it would be indistinguishable from
+#            one built from a different commit under the same name.
 #
-# Every value that could vary per run (tag, target, repo) is read from the
-# environment rather than interpolated as workflow YAML text, so the CI job
-# passes them through `env:` and never inlines a tag/ref into a shell string.
+# Every value that could vary per run (tag, target, repo, sha) is read from
+# the environment rather than interpolated as workflow YAML text, so the CI
+# job passes them through `env:` and never inlines a tag/ref into a shell
+# string.
+#
+# The asset names this writes are not invented here: they are asserted
+# against `scripts/release-assets.sh assets <version> bins-<target>` — the
+# one manifest that also drives release.yml's matrices and
+# scripts/verify-release.sh — so a rename cannot land in one of those places
+# and not the others.
 set -euo pipefail
 
 : "${TARGET:?TARGET is required, e.g. x86_64-unknown-linux-gnu}"
 : "${TAG:?TAG is required, e.g. v0.3.0}"
 : "${REPO:?REPO is required, e.g. owner/repo}"
+: "${GIT_SHA:?GIT_SHA is required — the commit this was built from}"
 
+here="$(cd "$(dirname "$0")" && pwd)"
 version="${TAG#v}"
 bin_dir="target/${TARGET}/release"
 out="dist"
@@ -106,8 +122,16 @@ for bin in fleet-agent fleet-hub; do
     cp "$license" "$stage/LICENSE"
     license_line="License: see LICENSE"
   fi
+  # The commit is recorded next to the version because the version alone
+  # cannot answer "what is in this tarball": a tag can be re-cut and a
+  # version can be bumped by a hand commit, and the binary reports only
+  # CARGO_PKG_VERSION. With the sha, anyone holding this tarball can check
+  # out exactly what produced it.
   cat >"$stage/README.txt" <<EOF
 $bin $version ($TARGET)
+
+Built from https://github.com/$REPO/commit/$GIT_SHA
+Tag: $TAG
 
 See https://github.com/$REPO/blob/$TAG/docs/hub.md for how to install and
 run this binary, including the minimum glibc it needs and how to run it
@@ -126,5 +150,21 @@ done
 # the same directory; a `./` prefix works with --ignore-missing too, but
 # the requirement is bare names, so this is `*.tar.gz`, not `./*.tar.gz`.
 ( cd "$out" && sha256sum -- *.tar.gz >"SHA256SUMS.${TARGET}" )
+
+# The tarballs just written must be exactly the ones the release manifest
+# says this leg produces — no more, no fewer, no differently spelled. Without
+# this, a rename here would silently drop an asset from the release and the
+# only symptom would be verify-release.sh failing at the very end of a full
+# build; with it, the leg that caused the drift is the leg that fails.
+produced="$(cd "$out" && ls -1 ./*.tar.gz | sed 's#^\./##' | LC_ALL=C sort)"
+declared="$("$here/release-assets.sh" assets "$version" "bins-${TARGET}" | LC_ALL=C sort)"
+if [ "$produced" != "$declared" ]; then
+  echo "package-linux-release.sh: the tarballs written disagree with scripts/release-assets.sh" >&2
+  echo "package-linux-release.sh: declared for leg bins-${TARGET}:" >&2
+  printf '  %s\n' $declared >&2
+  echo "package-linux-release.sh: actually produced:" >&2
+  printf '  %s\n' $produced >&2
+  exit 1
+fi
 
 ls -la "$out"

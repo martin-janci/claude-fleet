@@ -256,6 +256,7 @@ pub async fn spawn_author_session(
             kind: Some("work".to_string()),
             start_command: None,
             friendly_name: Some(friendly_name),
+            resume_claude_session_id: None,
         },
         store,
         ssh,
