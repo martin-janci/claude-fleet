@@ -18,4 +18,4 @@ CREATE INDEX IF NOT EXISTS error_reports_recent
 CREATE INDEX IF NOT EXISTS error_reports_by_origin
   ON error_reports(origin, received_at DESC);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (40);
+INSERT OR IGNORE INTO schema_version (version) VALUES (41);

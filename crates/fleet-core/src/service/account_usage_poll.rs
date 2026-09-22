@@ -92,7 +92,7 @@ async fn fetch_and_emit(
     let before = lock_cache(cache).snapshot(account_uuid);
     let after =
         account_usage::fetch_account_usage_with(account_uuid, hosts, ssh, cache, false).await;
-    if after != before {
+    if after.is_newsworthy_change(&before) {
         bus.account_usage_updated(&after);
     }
     after
@@ -199,7 +199,9 @@ pub async fn refresh_account_usage(
 mod tests {
     use super::*;
     use crate::events::RecordingEventBus;
-    use crate::service::account_usage::{Clock, FetchResult, UsageOutcome, UsageOutcomeKind};
+    use crate::service::account_usage::{
+        Clock, FetchResult, UsageOutcome, UsageOutcomeKind, USAGE_POLL_FLOOR_SECS,
+    };
     use crate::ssh_fake::FakeSsh;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{ExitStatus, Output};
@@ -221,6 +223,14 @@ mod tests {
                 base: Instant::now(),
                 state: Mutex::new((Duration::ZERO, 1_770_000_000)),
             })
+        }
+        /// Move both hands forward together, so a floor measured in monotonic
+        /// time and a `next_try_at` in unix seconds agree about how long it
+        /// has been.
+        fn advance(&self, secs: u64) {
+            let mut st = self.state.lock().unwrap();
+            st.0 += Duration::from_secs(secs);
+            st.1 += secs as i64;
         }
     }
 
@@ -497,6 +507,40 @@ mod tests {
             vec!["account_usage:updated:acct-1".to_string()],
             "only the due, changed account should emit"
         );
+    }
+
+    /// `fetch_and_emit` is documented as "emit iff changed", and for an
+    /// account whose answer never changes — an unreachable host, a machine
+    /// with no credentials file — it used to emit forever: `next_try_at`
+    /// moves on every attempt and the derived `PartialEq` compared it.
+    #[tokio::test]
+    async fn an_unchanged_account_emits_once_however_often_it_is_polled() {
+        let hosts = vec![host("h1", "acct-1")];
+        let clock = TestClock::new();
+        let cache = Mutex::new(UsageCache::with_clock(clock.clone()));
+        let fake = FakeSsh::new();
+        fake.on(
+            crate::ssh_fake::Match::Any,
+            crate::ssh_fake::Reply::ok(NO_CREDENTIALS_OUTPUT),
+        );
+        let ssh: Arc<dyn SshExec> = Arc::new(fake);
+        let recording = RecordingEventBus::new();
+
+        let first = fetch_and_emit("acct-1", &hosts, ssh.as_ref(), &cache, &recording).await;
+        clock.advance(USAGE_POLL_FLOOR_SECS as u64 + 10);
+        let second = fetch_and_emit("acct-1", &hosts, ssh.as_ref(), &cache, &recording).await;
+
+        assert_eq!(
+            recording.take(),
+            vec!["account_usage:updated:acct-1".to_string()],
+            "the same answer, twice, is one event"
+        );
+        assert_ne!(
+            first.next_try_at, second.next_try_at,
+            "the second attempt really did happen and really did reschedule — \
+             which is exactly the field that must not count as news"
+        );
+        assert_eq!(first.status, second.status);
     }
 
     // ── list_account_usage / refresh_account_usage ──────────────────────

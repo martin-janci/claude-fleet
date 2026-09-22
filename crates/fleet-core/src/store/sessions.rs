@@ -936,10 +936,11 @@ impl Store {
 
     /// The Stop hook's write: the turn is over. Sets `claude_status = idle`,
     /// bumps `turn_seq`, stamps `last_stop_at` / `last_turn_at`, maintains
-    /// `idle_since` and ends a `compacting` activity. Keyed by row id (the
-    /// hook resolver already picked the row: two rows may share one
-    /// `claude_session_id`); returns the updated row (`None` when the row is
-    /// gone). Emits `session_updated`.
+    /// `idle_since`, ends a `compacting` activity, and clears `pending_input`
+    /// (a dialog on the just-ended turn's pane does not survive it). Keyed
+    /// by row id (the hook resolver already picked the row: two rows may
+    /// share one `claude_session_id`); returns the updated row (`None` when
+    /// the row is gone). Emits `session_updated`.
     pub fn record_stop_hook_for_row(
         &self,
         row_id: i64,
@@ -949,7 +950,7 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
-                     idle_since = COALESCE(idle_since, ?2){END_COMPACTING} \
+                     idle_since = COALESCE(idle_since, ?2), pending_input = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -963,8 +964,10 @@ impl Store {
     /// The UserPromptSubmit hook's write: a turn is starting. Sets
     /// `claude_status = working`, clears `idle_since` so "idle because
     /// never started" and "idle after a turn" are distinguishable from
-    /// "busy", and ends a `compacting` activity. Returns the updated row
-    /// (`None` when the row is gone). Emits `session_updated`.
+    /// "busy", ends a `compacting` activity, and clears `pending_input` (a
+    /// dialog on the pane before this prompt is stale the moment a new turn
+    /// starts). Returns the updated row (`None` when the row is gone).
+    /// Emits `session_updated`.
     pub fn record_prompt_submit_hook_for_row(
         &self,
         row_id: i64,
@@ -972,7 +975,7 @@ impl Store {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
-                     last_hook_at = ?2{END_COMPACTING} WHERE id = ?1"
+                     last_hook_at = ?2, pending_input = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
@@ -984,9 +987,10 @@ impl Store {
 
     /// The SessionEnd hook's write: the Claude process is gone. Sets
     /// `claude_status = stopped`, starts `idle_since` if not already idle,
-    /// clears any stuck episode and stamps `last_hook_at` so the reconcile
-    /// guard keeps the verdict until a later pass observes the pane afresh.
-    /// Returns the row (`None` when the row is gone). Emits `session_updated`.
+    /// clears any stuck episode and `pending_input` (no pane is left to show
+    /// a dialog), and stamps `last_hook_at` so the reconcile guard keeps the
+    /// verdict until a later pass observes the pane afresh. Returns the row
+    /// (`None` when the row is gone). Emits `session_updated`.
     pub fn record_session_end_hook_for_row(
         &self,
         row_id: i64,
@@ -995,7 +999,7 @@ impl Store {
         let changed = self.conn.execute(
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
-                 stuck_kind = NULL, stuck_since = NULL \
+                 stuck_kind = NULL, stuck_since = NULL, pending_input = NULL \
                  WHERE id = ?1",
             rusqlite::params![row_id, now],
         )?;
@@ -1127,14 +1131,19 @@ impl Store {
         }
     }
 
-    /// Set (or clear) the row's `current_activity`. Emits `session_updated`.
+    /// Set (or clear) the row's `current_activity`. Also clears
+    /// `pending_input`: every caller of this method is overriding the pane
+    /// guess with something authoritative (a hook, not the reconcile pass
+    /// that derives `pending_input` from the same pane read), so whatever
+    /// dialog was last seen no longer describes what the pane is showing
+    /// now. Emits `session_updated`.
     pub fn set_current_activity(
         &self,
         id: i64,
         activity: Option<&str>,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         self.conn.execute(
-            "UPDATE sessions SET current_activity = ?2 WHERE id = ?1",
+            "UPDATE sessions SET current_activity = ?2, pending_input = NULL WHERE id = ?1",
             rusqlite::params![id, activity],
         )?;
         Ok(self.emit_session(id)?)
@@ -1286,6 +1295,56 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         s
+    }
+
+    #[test]
+    fn pending_input_round_trips_and_defaults_to_none() {
+        // The reconcile upsert (`Store::apply_host_reconcile`) is the only
+        // production writer of this column; seed it directly here with a
+        // raw UPDATE, the same way `map_session_row`/`encode_pending_input`
+        // read and write it, to check the round trip without a dedicated
+        // single-row setter.
+        let s = store();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let pi = PendingInput {
+            kind: "permission".into(),
+            question: Some("Do it?".into()),
+            options: vec![PendingOption {
+                n: 1,
+                label: "Yes".into(),
+                selected: true,
+            }],
+        };
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET pending_input = ?2 WHERE id = ?1",
+                rusqlite::params![id, encode_pending_input(Some(&pi))],
+            )
+            .unwrap();
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().pending_input,
+            Some(pi)
+        );
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET pending_input = NULL WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().pending_input,
+            None
+        );
+
+        // An older hub's JSON (no key at all) still parses.
+        let row: SessionRow = serde_json::from_str(
+            r#"{"id":1,"tmux_name":"s","host_alias":"h","created_at":0,
+                "last_activity_at":0,"status":"running","kind":"work","turn_seq":0}"#,
+        )
+        .unwrap();
+        assert!(row.pending_input.is_none());
     }
 
     #[test]
@@ -2537,6 +2596,9 @@ mod tests {
         assert!(decode_tags(Some("".into())).is_empty());
         assert_eq!(decode_tags(Some("[\"a\"]".into())), vec!["a".to_string()]);
         assert_eq!(encode_tags(&[]), None);
+        // Same rule for pending_input: a malformed column reads as no dialog.
+        assert_eq!(decode_pending_input(Some("not json".into())), None);
+        assert_eq!(decode_pending_input(None), None);
         // A reconcile pass does not touch tags / parent / turn_seq.
         s.set_session_tags(id, &["keep".to_string()]).unwrap();
         s.set_parent_session_id(id, Some(7)).unwrap();

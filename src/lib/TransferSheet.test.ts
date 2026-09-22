@@ -1,10 +1,21 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
+
+// Task 7: `requestPreflight` becomes a bare spy so the setup-view tests can
+// see how the component called it, without a real debounced round trip
+// through `previewMove`/`invoke`. Everything else — `preflights`,
+// `preflightFor`, `preflightAge`, `putPreflightForTest`, the constants — stays
+// the real module, so seeding an entry goes through the module's own private
+// key function rather than a copy of it in this file.
+vi.mock('./preflight', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./preflight')>();
+  return { ...actual, requestPreflight: vi.fn() };
+});
 
 // Only `retryMove`, `resolveMoveRun` and `startMove` are replaced: `startMove`
 // keeps its real behaviour (wrapped so its calls can still be asserted on) —
@@ -18,6 +29,7 @@ vi.mock('./moves', async (importOriginal) => {
     retryMove: vi.fn(),
     resolveMoveRun: vi.fn(),
     startMove: vi.fn(actual.startMove),
+    cancelWait: vi.fn(),
   };
 });
 import TransferSheet from './TransferSheet.svelte';
@@ -27,19 +39,30 @@ import {
   startMove,
   retryMove,
   resolveMoveRun,
+  cancelWait,
   putRunForTest,
   applyMoveProgress,
   resetMovesForTest,
   type MoveRun,
 } from './moves';
-import { UNDONE } from './moveErrors';
+import { UNDONE, describeMoveError } from './moveErrors';
 import { MOVE_STEPS, type MoveProgress, type MoveStep, type MoveStepState } from './moveProgress';
-import type { MoveReport } from './moveSession';
+import type { MovePreview, MoveReport } from './moveSession';
 import type { IpcError } from './result';
 import { sessions, type SessionRow } from './sessions';
 import { hosts, type HostRow } from './hosts';
 import { selectedSession, selectSession } from './selection';
 import { toasts, clearToasts } from './toasts';
+import { hubConnection } from './hub_connection';
+import type { HubConnection } from './hub_connection';
+import {
+  requestPreflight,
+  resetPreflightsForTest,
+  putPreflightForTest,
+  PREFLIGHT_DEBOUNCE_MS,
+  PREFLIGHT_STALE_MS,
+  type PreflightEntry,
+} from './preflight';
 
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -113,7 +136,7 @@ describe('TransferSheet', () => {
     expect(mockInvoke).toHaveBeenCalledWith('move_session', {
       args: {
         session_id: 5, target_host_alias: 'turanga', keep_source: true, strict: false,
-        clean_target: false,
+        clean_target: false, dry_run: false, when: 'idle',
       },
     });
     expect(await screen.findByTestId('transfer-steps')).toBeTruthy();
@@ -160,7 +183,7 @@ describe('TransferSheet', () => {
     startMove(source, 'turanga', { keepSource: false });
     transferSheetFor.set(5);
     render(TransferSheet);
-    p.resolve(report);
+    p.resolve({ kind: 'moved', ...report });
     await flush();
     await tick();
     const result = await screen.findByTestId('transfer-result');
@@ -185,7 +208,7 @@ describe('TransferSheet', () => {
     startMove(source, 'turanga', { keepSource: false });
     transferSheetFor.set(5);
     render(TransferSheet);
-    p.resolve({ ...report, warnings: [], carried: { ...report.carried, commits: 0, dirty_entries: [] } });
+    p.resolve({ kind: 'moved', ...report, warnings: [], carried: { ...report.carried, commits: 0, dirty_entries: [] } });
     await flush();
     await tick();
     expect((await screen.findByTestId('transfer-result')).textContent)
@@ -325,6 +348,7 @@ describe('TransferSheet', () => {
     render(TransferSheet);
     const both = { path: 'same.bin', bytes: 1, reason: 'over_cap' as const };
     p.resolve({
+      kind: 'moved',
       ...report,
       warnings: ['the very same warning', 'the very same warning'],
       carried: {
@@ -388,6 +412,9 @@ describe('TransferSheet: recovery actions', () => {
       attempt: 1,
       resolving: false,
       awaitingStart: false,
+      deadlineUnix: null,
+      waitEnded: null,
+      waitRefusal: null,
     };
   }
 
@@ -422,6 +449,9 @@ describe('TransferSheet: recovery actions', () => {
       attempt: 1,
       resolving: false,
       awaitingStart: false,
+      deadlineUnix: null,
+      waitEnded: null,
+      waitRefusal: null,
     };
   }
 
@@ -453,6 +483,9 @@ describe('TransferSheet: recovery actions', () => {
       attempt: 1,
       resolving: opts.resolving ?? false,
       awaitingStart: false,
+      deadlineUnix: null,
+      waitEnded: null,
+      waitRefusal: null,
     };
   }
 
@@ -523,7 +556,7 @@ describe('TransferSheet: recovery actions', () => {
   it('offers Move back on a finished move', async () => {
     // Clicking "Move back" starts a genuine (mocked-invoke) move of session 8:
     // give it something to resolve with so that real flow does not throw.
-    mockInvoke.mockImplementation(() => Promise.resolve(report));
+    mockInvoke.mockImplementation(() => Promise.resolve({ kind: 'moved', ...report }));
     const { getByTestId } = renderSheet(doneRun({ fromHost: 'alpha', toHost: 'beta' }));
     const back = getByTestId('transfer-move-back');
     expect(back.textContent).toContain('alpha');
@@ -670,5 +703,292 @@ describe('TransferSheet: recovery actions', () => {
     await tick();
     expect(queryByTestId('transfer-finish-confirm')).toBeNull();
     expect(queryByTestId('transfer-resolve-error')).toBeNull();
+  });
+});
+
+// Task 8: a pending `waiting` run (Transfer sends `when: 'idle'`, and a busy
+// source parks the run at `status: 'waiting'` instead of failing) and a run
+// that ended a wait without a move (`waitEnded`). Fixtures built directly
+// with `putRunForTest`, like the recovery-action tests above.
+describe('TransferSheet: waiting', () => {
+  function blankSteps() {
+    return MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null }));
+  }
+
+  function waitingRun(over: Partial<MoveRun> = {}): MoveRun {
+    return {
+      sessionId: 7,
+      sessionName: 'sess7',
+      fromHost: 'alpha',
+      toHost: 'beta',
+      keepSource: null,
+      origin: 'local',
+      steps: blankSteps(),
+      status: 'waiting',
+      report: null,
+      error: null,
+      resolveError: null,
+      startedAt: Date.now(),
+      settledAt: null,
+      cleanTarget: false,
+      attempt: 1,
+      resolving: false,
+      awaitingStart: false,
+      deadlineUnix: Math.floor(Date.now() / 1000) + 600,
+      waitEnded: null,
+      waitRefusal: null,
+      ...over,
+    };
+  }
+
+  function renderSheet(run: MoveRun) {
+    putRunForTest(run);
+    transferSheetFor.set(run.sessionId);
+    return render(TransferSheet);
+  }
+
+  beforeEach(() => {
+    vi.mocked(retryMove).mockClear();
+    vi.mocked(cancelWait).mockClear();
+    resetMovesForTest();
+    sessions.set([source]);
+    hosts.set([host('alpha'), host('beta')]);
+    selectSession(null);
+  });
+
+  it('shows the host, the deadline, a Cancel that calls cancelWait, and the right title', async () => {
+    const { getByTestId } = renderSheet(waitingRun());
+    const waiting = getByTestId('transfer-waiting');
+    expect(waiting.textContent).toContain('Waiting for sess7 to finish');
+    expect(waiting.textContent).toContain('will transfer to beta');
+    expect(getByTestId('transfer-wait-deadline').textContent).toMatch(/\d/);
+    expect(getByTestId('move-dialog').querySelector('.title')?.textContent).toBe('Waiting to move to beta');
+    await fireEvent.click(getByTestId('transfer-cancel-wait'));
+    expect(cancelWait).toHaveBeenCalledWith(7);
+  });
+
+  it('a run with no deadline shows no deadline line', () => {
+    const { queryByTestId } = renderSheet(waitingRun({ deadlineUnix: null }));
+    expect(queryByTestId('transfer-wait-deadline')).toBeNull();
+  });
+
+  it.each([
+    ['cancelled', /cancel/i],
+    ['timed_out', /timed out/i],
+    ['session_gone', /disappear/i],
+    ['refused', /refused/i],
+    // M7: also written by a dropped waiter and the startup sweep in local
+    // mode, where there is no hub at all.
+    ['hub_restarted', /^The wait was interrupted \(the app or the hub restarted\)\.$/],
+    // I1(a): the backend said nothing was waiting and the timeline recorded
+    // no end — no reason is invented.
+    ['unknown', /could not tell how it ended/i],
+  ])('says why the wait ended (%s) and offers Transfer again', async (reason, pattern) => {
+    const { getByTestId, queryByTestId } = renderSheet(
+      waitingRun({ status: 'failed', waitEnded: reason, deadlineUnix: null }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toMatch(pattern);
+    // Not the generic "started elsewhere" failure text a null `error` would
+    // otherwise produce through `describeMoveError`.
+    expect(queryByTestId('transfer-failure')).toBeNull();
+    await fireEvent.click(getByTestId('transfer-wait-retry'));
+    expect(retryMove).toHaveBeenCalledWith(7);
+  });
+
+  // I1(c): a wait past its deadline can be let go of from the sheet.
+  it('offers Stop following for a wait past its deadline', async () => {
+    const { getByTestId } = renderSheet(waitingRun({ deadlineUnix: Math.floor(Date.now() / 1000) - 5 }));
+    await fireEvent.click(getByTestId('transfer-wait-dismiss'));
+    expect(get(moves).has(7)).toBe(false);
+  });
+
+  // I1(b): a `moved` end settled the run with no report to show.
+  it('a run settled by a moved wait end says it moved, without a report', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({ status: 'done', waitEnded: 'moved', deadlineUnix: null, settledAt: Date.now() }),
+    );
+    expect(getByTestId('transfer-result').textContent).toContain(
+      'sess7 finished its turn and was moved to beta. This window has no report for it',
+    );
+  });
+
+  // Fix round 1, finding 1: a `refused` wait carries `code`/`message`
+  // (`moves.ts`'s `waitRefusal`) that the sheet should read, in preference
+  // to the bare "the move was refused" sentence.
+  it('a refused wait with a known code shows the failure view\'s own wording for it', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({
+        status: 'failed',
+        waitEnded: 'refused',
+        deadlineUnix: null,
+        waitRefusal: { code: 'E_MOVE_DIRTY', message: 'raw backend text' },
+      }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toContain(
+      'The source has uncommitted work, and this move was asked to refuse that.',
+    );
+  });
+
+  it('a refused wait with an unrecognised code falls back to its message', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({
+        status: 'failed',
+        waitEnded: 'refused',
+        deadlineUnix: null,
+        waitRefusal: { code: 'E_SOME_FUTURE_CODE', message: 'a message from a newer backend' },
+      }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toContain(
+      'a message from a newer backend',
+    );
+  });
+
+  it('a refused wait with no usable refusal falls back to the bare sentence', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({ status: 'failed', waitEnded: 'refused', deadlineUnix: null, waitRefusal: null }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toContain(
+      'The source finished, but the move itself was refused.',
+    );
+  });
+});
+
+// Task 7: the setup view previews what a Transfer would carry before it is
+// pressed. The one rule this must not break: Transfer's `disabled` stays
+// exactly `!target || blocked !== null` — never gated by the preflight, so
+// three of the tests below arm the preview into loading/refused/stale and
+// simply check the button is not disabled.
+describe('TransferSheet: preflight', () => {
+  const pfSource = {
+    id: 7, tmux_name: 'sess7', host_alias: 'alpha', kind: 'work', worktree_id: 20,
+    project_id: 1, claude_session_id: '660e8400-e29b-41d4-a716-446655440000',
+    parent_session_id: null, tags: [],
+  } as unknown as SessionRow;
+
+  const previewFixture: MovePreview = {
+    session_id: 7,
+    from_host: 'alpha',
+    to_host: 'beta',
+    branch: 'feat',
+    source_cwd: '/work/feat',
+    unpushed_commits: 2,
+    commits_ahead: 1,
+    dirty: [{ status: ' M', path: 'src/lib.rs' }],
+    ignored_carried: [{ path: '.env', bytes: 12 }],
+    ignored_left_behind: [{ path: 'node_modules', bytes: 900000000, reason: 'over_cap' }],
+    transcript_bytes: 500,
+    session_state_files: 2,
+    session_state_bytes: 40,
+    memory_files: 1,
+    memory_bytes: 10,
+    target_path: '/home/beta/work/feat',
+    target: { state: 'clean', head: 'abc1234' },
+    unknowns: ['bundle size is an estimate'],
+  };
+
+  const refusalFixture: IpcError = {
+    code: 'E_MOVE_TARGET_DIRTY',
+    message: 'x',
+    details: { leftovers: 'theirs', theirs: ['x.md'] },
+  };
+
+  function seed(toHost: string, kind: 'loading' | 'ready' | 'refused' | 'stale'): PreflightEntry {
+    if (kind === 'loading') {
+      return { sessionId: pfSource.id, toHost, status: 'loading', preview: null, error: null, at: null };
+    }
+    if (kind === 'refused') {
+      return {
+        sessionId: pfSource.id, toHost, status: 'refused', preview: null, error: refusalFixture,
+        at: Date.now(),
+      };
+    }
+    // 'ready' and 'stale' both carry the same preview; 'stale' only differs
+    // in how long ago it arrived.
+    const at = kind === 'stale' ? Date.now() - PREFLIGHT_STALE_MS - 5000 : Date.now();
+    return { sessionId: pfSource.id, toHost, status: 'ready', preview: previewFixture, error: null, at };
+  }
+
+  function renderSetup(opts: {
+    targets: string[];
+    preflight?: 'loading' | 'ready' | 'refused' | 'stale';
+    connection?: HubConnection;
+  }) {
+    resetMovesForTest();
+    resetPreflightsForTest();
+    sessions.set([pfSource]);
+    hosts.set([host('alpha'), ...opts.targets.map((t) => host(t))]);
+    hubConnection.set(opts.connection ?? { state: 'standalone' });
+    if (opts.preflight) {
+      const toHost = opts.targets[0];
+      putPreflightForTest(seed(toHost, opts.preflight));
+    }
+    transferSheetFor.set(pfSource.id);
+    return render(TransferSheet);
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(requestPreflight).mockClear();
+    selectSession(null);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('asks for a preview for the selected target', async () => {
+    renderSetup({ targets: ['beta', 'gamma'] });
+    await vi.advanceTimersByTimeAsync(PREFLIGHT_DEBOUNCE_MS);
+    expect(requestPreflight).toHaveBeenLastCalledWith(7, 'beta');
+  });
+
+  it('asks again when the target changes', async () => {
+    const { getByTestId } = renderSetup({ targets: ['beta', 'gamma'] });
+    await fireEvent.change(getByTestId('move-target'), { target: { value: 'gamma' } });
+    expect(requestPreflight).toHaveBeenLastCalledWith(7, 'gamma');
+  });
+
+  it.each(['loading', 'refused', 'stale'] as const)('keeps Transfer enabled while %s', (state) => {
+    const { getByTestId } = renderSetup({ targets: ['beta'], preflight: state });
+    expect((getByTestId('confirm-move') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('renders what would travel and what would be left behind, with reasons', () => {
+    const { getByTestId } = renderSetup({ targets: ['beta'], preflight: 'ready' });
+    const view = getByTestId('transfer-preflight').textContent ?? '';
+    expect(view).toContain('src/lib.rs'); // a dirty entry
+    expect(view).toContain('.env'); // an ignored file carried
+    expect(view).toContain('node_modules'); // one left behind…
+    expect(view).toMatch(/too large|deny/i); // …and why
+  });
+
+  it('shows a refusal in the words the failure view would use', () => {
+    const { getByTestId } = renderSetup({ targets: ['beta'], preflight: 'refused' });
+    expect(getByTestId('transfer-preflight-refusal').textContent).toContain(
+      describeMoveError(refusalFixture, 'failed', 'beta', null).what,
+    );
+  });
+
+  it('names what it cannot know', () => {
+    const { getByTestId } = renderSetup({ targets: ['beta'], preflight: 'ready' });
+    expect(getByTestId('transfer-preflight-unknowns').textContent).toMatch(/bundle/i);
+  });
+
+  it('shows the age of a stale preview', () => {
+    const { getByTestId } = renderSetup({ targets: ['beta'], preflight: 'stale' });
+    expect(getByTestId('transfer-preflight-age').textContent).toMatch(/\d+\s*s/);
+  });
+
+  // The safety guard added after the brief: a hub that has not yet passed
+  // the `ready`-frame contract check must never see a preview request — an
+  // old hub would silently treat `dry_run` as a real move. No request while
+  // connecting (or reconnecting/offline); one request once connected.
+  it('requests nothing while the hub is still connecting, then asks once connected', async () => {
+    renderSetup({ targets: ['beta'], connection: { state: 'connecting' } });
+    await vi.advanceTimersByTimeAsync(PREFLIGHT_DEBOUNCE_MS);
+    expect(requestPreflight).not.toHaveBeenCalled();
+    hubConnection.set({ state: 'connected' });
+    await tick();
+    expect(requestPreflight).toHaveBeenLastCalledWith(7, 'beta');
   });
 });

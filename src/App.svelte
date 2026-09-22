@@ -12,7 +12,8 @@
   import AssetsPanel from './lib/AssetsPanel.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
-  import { loadHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
+  import { loadHosts, applyHostEvents, hosts } from './lib/hosts';
+  import { viewHostSessions } from './lib/host_actions';
   import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
@@ -20,7 +21,7 @@
   import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import TransferSheet from './lib/TransferSheet.svelte';
-  import { applyMoveProgress } from './lib/moves';
+  import { applyMoveProgress, recheckWaitingRuns } from './lib/moves';
   import { dispatchTimelineEvents, dispatchConversationsChanged } from './lib/live_events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -29,12 +30,13 @@
   import { push, pushError } from './lib/toasts';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-  import { selectedSession, restoreLastSession, selectSession, onSessionOpened } from './lib/selection';
+  import { selectedSession, restoreLastSession, selectSessionExplicitly, onSessionOpened } from './lib/selection';
   import {
     appChord,
     hostsChordLabel,
     hostsViewOpen,
     hostsViewRequest,
+    onHostsCloseRequested,
     openPathRequest,
     requestNewSessionOnHost,
     sessionViewChordLabel,
@@ -263,6 +265,10 @@
     // toast on every alt-tab back into the window would only repeat that.
     void loadProjects();
     void loadSessions();
+    // A Transfer waiting for its session to go idle hears of the wait's end
+    // only through the live timeline push; one missed while the window was
+    // away (sleep, a dropped stream) is read back from the timeline here.
+    void recheckWaitingRuns();
   }
 
   // A drop that reaches the window navigates a WKWebView to file://… and
@@ -284,6 +290,16 @@
   // session row, a fresh create) means "go to it": leave the Hosts view so
   // the terminal shows that session.
   const unsubOpened = onSessionOpened(() => closeHosts());
+  // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
+  // HostDetail's header button) can't reach `closeHosts` directly — it asks
+  // through this signal instead, same shape as `onSessionOpened` above.
+  // Expanding the sidebar belongs HERE, not at one call site: the action has
+  // just narrowed the sidebar to a host, and a collapsed rail would hide the
+  // very list it filtered.
+  const unsubHostsClose = onHostsCloseRequested(() => {
+    sidebarCollapsed = false;
+    closeHosts();
+  });
 
   onDestroy(() => {
     window.removeEventListener('focus', onFocus);
@@ -292,6 +308,7 @@
     window.removeEventListener('dragover', swallowDrag);
     window.removeEventListener('drop', swallowDrag);
     unsubOpened();
+    unsubHostsClose();
     unlistenEvents?.();
   });
 
@@ -475,8 +492,10 @@
   });
 
   function onHostsFilterSidebar(alias: string) {
-    sidebarCollapsed = false;
-    hostFilter.set(alias);
+    // `viewHostSessions` fires `onHostsCloseRequested`, which expands the
+    // sidebar and closes the overlay — the `s` key and HostDetail's button
+    // are the same path.
+    viewHostSessions(alias);
   }
   function onHostsNewSession(alias: string) {
     sidebarCollapsed = false;
@@ -574,7 +593,7 @@
     initialName={$newSessionRequest.initialName}
     onCreate={(s) => {
       clearNewSessionRequest();
-      selectSession(s);
+      selectSessionExplicitly(s);
     }}
     onCancel={clearNewSessionRequest}
   />

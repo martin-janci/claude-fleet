@@ -37,6 +37,8 @@
         ⇄ moved from {run.fromHost}
       {:else if run.status === 'running'}
         ⇄ moving to {run.toHost} · {stepNumber(run)}/{run.steps.length}
+      {:else if run.status === 'waiting'}
+        ⇄ waiting to move to {run.toHost}
       {:else if run.status === 'done'}
         ⇄ moved to {run.toHost}
       {:else if run.status === 'partial'}

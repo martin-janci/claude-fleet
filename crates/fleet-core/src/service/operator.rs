@@ -1785,9 +1785,17 @@ mod tests {
                 label: "safe_kill_session",
             },
             GuardSite {
-                what: "move_session_inner",
+                // The guard moved into `gather()` when the move's opening
+                // sequence was extracted so a dry run (`preview()`, Task 3 of
+                // the transfer-preflight project) could run exactly the
+                // move's own checks — `gather()` is now the one place that
+                // calls the guard, and `move_session_inner` calls `gather()`
+                // (pinned by the assertion just below this loop). The guard
+                // still runs before any step, on every real move; only the
+                // function that holds the call moved.
+                what: "gather",
                 source: MOVE,
-                signature: "async fn move_session_inner(",
+                signature: "async fn gather(",
                 label: "move_session",
             },
         ];
@@ -1806,6 +1814,18 @@ mod tests {
                 site.label
             );
         }
+        // The guard living inside `gather()` only protects a real move if
+        // `move_session_inner` actually calls `gather()` — pin the chain end
+        // to end, so the guard cannot be lost by `move_session_inner` quietly
+        // ceasing to call it (e.g. inlining its own copy of the opening
+        // sequence again).
+        let move_session_inner_body = item_source(MOVE, "async fn move_session_inner(");
+        assert!(
+            move_session_inner_body.contains("gather("),
+            "move_session_inner no longer calls gather() — the move would run \
+             without the operator guard, since that is the only place gather() \
+             (and the guard inside it) is reached from"
+        );
     }
 
     /// `restart_session` is the one session-addressed operation the design

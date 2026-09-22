@@ -5,7 +5,8 @@
 // this module owns the shared token cache and the user-facing toasts, so no
 // logic exists twice.
 import { writable } from 'svelte/store';
-import { hideHost, probeHost, type HostRow } from './hosts';
+import { requestCloseHosts } from './app_views';
+import { hideHost, hostFilter, probeHost, type HostRow } from './hosts';
 import {
   listHostTokens,
   rotateHostToken,
@@ -76,4 +77,16 @@ export async function hideHostWithUndo(alias: string): Promise<Result<HostRow>> 
     action: { label: 'Undo', run: () => void showHost(alias) },
   });
   return r;
+}
+
+/**
+ * "View sessions" for a host: jump the sidebar filter to `alias` and close
+ * the Hosts overlay so the sessions actually show. The single action behind
+ * the `s` keyboard shortcut (HostsView.svelte) and HostDetail's "View
+ * sessions" header button — one click (or one key) from a host to its
+ * sessions, per the views/filters UX review.
+ */
+export function viewHostSessions(alias: string): void {
+  hostFilter.set(alias);
+  requestCloseHosts();
 }

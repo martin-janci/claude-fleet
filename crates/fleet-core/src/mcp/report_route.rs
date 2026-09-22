@@ -109,6 +109,7 @@ mod tests {
         }
         let app = build_app(
             axum::routing::any(|| async { "MCP_OK" }),
+            None,
             hooks::HookState {
                 store: Arc::clone(&store),
                 ssh: Arc::new(SshClient::new()),

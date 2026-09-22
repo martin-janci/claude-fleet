@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
+  import { get } from 'svelte/store';
   import { projects, refreshProjects, type ProjectTreeRow } from './projects';
   import {
     sessions,
@@ -13,8 +14,9 @@
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
+  import { sessionMatchesSearch } from './search';
   import { type ProjectRow } from './projects';
-  import { selectedSession, selectSession } from './selection';
+  import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
   import { forgetSessionUi } from './session_ui';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
@@ -206,29 +208,84 @@
   // see their sessions immediately.
   let collapsed: Set<number> = $state(new Set());
 
-  // Reveal the selected session wherever the selection came from (quick
-  // switcher, restore-on-launch, a fresh New-session create, a click): widen
-  // the host filter if it hides the session's host, expand its project if
-  // collapsed, then scroll its row into view. Keyed on the id so reconcile
-  // updates (a new row object every tick) neither re-scroll nor undo a
-  // later collapse or re-filter.
   let sidebarEl: HTMLElement | undefined = $state();
-  const revealId = $derived($selectedSession?.id ?? null);
-  $effect(() => {
-    const id = revealId;
-    if (id === null) return;
-    const host = untrack(() => $selectedSession?.host_alias ?? null);
-    const filter = untrack(() => $hostFilter);
-    if (host !== null && filter !== 'all' && filter !== host) hostFilter.set('all');
-    const pid = untrack(() => $selectedSession?.project_id ?? null);
-    if (pid !== null && untrack(() => collapsed.has(pid))) {
-      const next = new Set(untrack(() => collapsed));
-      next.delete(pid);
+
+  // Expand the session's project if collapsed, then scroll its row into
+  // view. Shared by both reveal effects below — always safe regardless of
+  // what moved the selection, so callers don't gate it on anything. Every
+  // caller wraps its call in `untrack` so reading `collapsed`/`sidebarEl`
+  // here doesn't become an extra tracked dependency of whichever effect is
+  // calling it.
+  function expandAndScrollTo(sess: SessionRow): void {
+    if (sess.project_id !== null && collapsed.has(sess.project_id)) {
+      const next = new Set(collapsed);
+      next.delete(sess.project_id);
       collapsed = next;
     }
     void tick().then(() => {
-      const el = sidebarEl?.querySelector<HTMLElement>(`[data-session-id="${id}"]`);
+      const el = sidebarEl?.querySelector<HTMLElement>(`[data-session-id="${sess.id}"]`);
       if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  // Whatever moved the selection — a click, the quick switcher, a
+  // rename/recreate resync, a completed move's follow reselect, the
+  // selection store's own re-sync: expand its project if collapsed and
+  // scroll its row into view. Keyed on the id so reconcile updates (a new
+  // row object every tick) neither re-scroll nor undo a later collapse.
+  const revealId = $derived($selectedSession?.id ?? null);
+  // The id this pair of effects last revealed, so the same session is never
+  // scrolled into view twice for one user action.
+  let revealedId: number | null = null;
+  $effect(() => {
+    const id = revealId;
+    if (id === null) return;
+    untrack(() => {
+      // Only when the id actually changed, and not when an explicit select
+      // is mid-flight: `selectSessionExplicitly` moves the selection and THEN
+      // bumps `revealSeq`, so both writes land in one flush — the effect
+      // below is about to reveal this very session (widening the filter
+      // first), and revealing here too would scroll for it twice.
+      if (id === revealedId || get(revealSeq) !== appliedSeq) return;
+      revealedId = id;
+      const sess = $selectedSession;
+      if (sess) expandAndScrollTo(sess);
+    });
+  });
+
+  // Widening `hostFilter` is reserved for a deliberate "open this session"
+  // action. `selectSessionExplicitly` bumps `revealSeq` AFTER applying the
+  // selection; this effect tracks the SEQUENCE NUMBER rather than the
+  // session id:
+  //  - a non-explicit reselect (a rename/recreate resync, a move's follow
+  //    reselect, the selection store's own re-sync) never bumps it, so it
+  //    can never widen the filter — no matter how many times the id changes;
+  //  - re-selecting the SAME session explicitly still reveals it, even
+  //    though the id-keyed effect above wouldn't re-run for that (no id
+  //    change) — a bump is a distinct event regardless of the id it targets.
+  //
+  // `appliedSeq` is captured once, when THIS Sidebar instance is created,
+  // and the effect only reacts to a bump that lands AFTER that point — never
+  // to `$revealSeq`'s absolute value. That matters because the Sidebar is
+  // destroyed and recreated on collapse/expand (App.svelte's `{#if
+  // sidebarCollapsed}`): without this, a fresh mount would see whatever
+  // `$revealSeq` already was (non-zero after the first-ever explicit select)
+  // and treat it as a brand new bump, widening the filter for whatever
+  // happens to be selected right then — even a session that arrived via a
+  // later NON-explicit reselect while the Sidebar was unmounted. Comparing
+  // against this instance's own baseline means a remount never replays a
+  // bump from before it existed.
+  let appliedSeq = get(revealSeq);
+  $effect(() => {
+    const seq = $revealSeq;
+    if (seq === appliedSeq) return;
+    appliedSeq = seq;
+    untrack(() => {
+      const sess = $selectedSession;
+      if (!sess) return;
+      revealedId = sess.id;
+      if ($hostFilter !== 'all' && $hostFilter !== sess.host_alias) hostFilter.set('all');
+      expandAndScrollTo(sess);
     });
   });
 
@@ -256,12 +313,7 @@
     const needle = q.toLowerCase();
     if (p.project.owner.toLowerCase().includes(needle)) return true;
     if (p.project.repo.toLowerCase().includes(needle)) return true;
-    return sessionsForProject(p.project.id).some(
-      (s) =>
-        s.tmux_name.toLowerCase().includes(needle) ||
-        s.host_alias.toLowerCase().includes(needle) ||
-        (s.friendly_name?.toLowerCase().includes(needle) ?? false),
-    );
+    return sessionsForProject(p.project.id).some((s) => sessionMatchesSearch(s, needle));
   }
 
   // Sessions under the host / bg filters only (no triage predicate): the
@@ -438,7 +490,7 @@
   function onCreated(s: SessionRow) {
     dialogProject = null;
     // Auto-focus the just-created session in the center/terminal panes.
-    selectSession(s);
+    selectSessionExplicitly(s);
   }
 
   function onCancel() {
@@ -472,7 +524,7 @@
     if (cur && cur.id === sess.id && !$hostsViewOpen) {
       selectSession(null);
     } else {
-      selectSession(sess);
+      selectSessionExplicitly(sess);
     }
   }
 

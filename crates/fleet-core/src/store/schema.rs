@@ -162,6 +162,17 @@ fn sessions_has_tmux_pane_id(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 040: `sessions` already has its
+/// `pending_input` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+fn sessions_has_pending_input(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'pending_input'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Ordered schema migrations, `(version, sql)`. Versions are contiguous from
 /// 1 and every script must end by recording its own version with
 /// `INSERT OR IGNORE INTO schema_version (version) VALUES (N)` — the tests
@@ -315,9 +326,15 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/039_client_trust.sql"),
         already_applied: Some(client_tokens_has_trusted_at),
     },
+    // `sessions.pending_input`; ADD COLUMN, so the same guard as 039.
+    Migration {
+        version: 40,
+        sql: include_str!("../../migrations/040_pending_input.sql"),
+        already_applied: Some(sessions_has_pending_input),
+    },
     // `CREATE TABLE IF NOT EXISTS` plus two `CREATE INDEX IF NOT EXISTS`,
     // safe to re-run.
-    Migration::plain(40, include_str!("../../migrations/040_error_reports.sql")),
+    Migration::plain(41, include_str!("../../migrations/041_error_reports.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

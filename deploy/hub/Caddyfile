@@ -1,4 +1,12 @@
 {$FLEET_HUB_DOMAIN} {
+    # `encode`'s default matcher skips `text/event-stream`, so this line does
+    # nothing for `/mcp` or `/events` — deliberately: compressing a stream
+    # would buffer the keep-alives `flush_interval -1` exists to let through.
+    # What it does compress is `/mcp/json`, the unframed `application/json`
+    # mount a phone uses. Measured on this hub: a phone's cold start is
+    # 61 335 B of list answers, 9 550 B once they may be compressed.
+    encode zstd gzip
+
     reverse_proxy fleet-hub:4180 {
         # Keeps the upstream Host loopback, so the hub accepts the request
         # regardless of how its own Host/Origin allowlist is configured.

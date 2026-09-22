@@ -191,6 +191,28 @@ pub struct PaneIntel {
     /// so [`analyze`] also puts it in `activity` as
     /// `waiting for <reason>: <question>`.
     pub waiting_for: Option<WaitingFor>,
+    /// The dialog's question and numbered choices, stored on the session row
+    /// (`sessions.pending_input`) so a client can turn them into buttons.
+    /// `None` whenever the pane shows no permission/question dialog.
+    pub pending_input: Option<PendingInput>,
+}
+
+/// One numbered choice of a permission or question dialog.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingOption {
+    pub n: u8,
+    pub label: String,
+    pub selected: bool,
+}
+
+/// The permission/question dialog a blocked pane is showing, as stored on
+/// `sessions.pending_input`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingInput {
+    /// `"permission"` | `"input"` (mirrors [`WaitingFor::as_str`]).
+    pub kind: String,
+    pub question: Option<String>,
+    pub options: Vec<PendingOption>,
 }
 
 /// Why a pane showing a Claude Code dialog is waiting on the user.
@@ -462,6 +484,8 @@ struct Dialog {
     /// The dialog's question line, or the selected answer when no line of it
     /// ends with `?`.
     prompt: Option<String>,
+    /// The dialog's numbered choices, in on-screen order.
+    options: Vec<PendingOption>,
 }
 
 impl Dialog {
@@ -473,7 +497,39 @@ impl Dialog {
         };
         s.chars().take(ACTIVITY_MAX).collect()
     }
+
+    /// What gets stored on `sessions.pending_input`. Capped by construction
+    /// ([`PENDING_QUESTION_MAX`] / [`PENDING_LABEL_MAX`] / [`PENDING_OPTIONS_MAX`])
+    /// so a pane a client turns straight into buttons can never blow up the
+    /// row or the wire, however malformed the captured text.
+    fn pending_input(&self) -> PendingInput {
+        PendingInput {
+            kind: self.kind.as_str().into(),
+            question: self
+                .prompt
+                .as_deref()
+                .map(|q| q.chars().take(PENDING_QUESTION_MAX).collect()),
+            options: self
+                .options
+                .iter()
+                .take(PENDING_OPTIONS_MAX)
+                .map(|o| PendingOption {
+                    n: o.n,
+                    label: o.label.chars().take(PENDING_LABEL_MAX).collect(),
+                    selected: o.selected,
+                })
+                .collect(),
+        }
+    }
 }
+
+/// Cap on `PendingInput.question`'s length — a client turns this straight
+/// into UI, so a runaway pane read must not blow up the row or the wire.
+const PENDING_QUESTION_MAX: usize = 300;
+/// Cap on each `PendingOption.label`'s length.
+const PENDING_LABEL_MAX: usize = 200;
+/// Cap on the number of options `PendingInput` carries.
+const PENDING_OPTIONS_MAX: usize = 16;
 
 /// A pane line without surrounding whitespace or box-drawing borders, so a
 /// boxed dialog (`│ ❯ 1. Yes   │`) reads like an unboxed one.
@@ -481,9 +537,12 @@ fn clean_line(line: &str) -> &str {
     line.trim_matches(|c: char| c.is_whitespace() || c == '│' || c == '║')
 }
 
-/// `Some(selected)` when a cleaned line is a numbered choice such as
-/// `❯ 1. Yes` (`selected` = true) or `2. No`. `1.5 GB` and `42 + x` are not.
-fn numbered_choice(line: &str) -> Option<bool> {
+/// Parse a cleaned line as a numbered choice such as `❯ 1. Yes` or `2) No`:
+/// the ordinal, the label after the `N. ` / `N) ` marker (trimmed), and
+/// whether it carries the `❯`/`›` selection glyph. `None` for anything else
+/// (`1.5 GB`, `42 + x`, prose) — the one parser [`numbered_choice`] and the
+/// dialog's `options` both build on.
+fn parse_choice(line: &str) -> Option<(u8, &str, bool)> {
     let rest = line.trim_start_matches(['❯', '›']);
     let selected = rest.len() != line.len();
     let rest = rest.trim_start();
@@ -493,9 +552,22 @@ fn numbered_choice(line: &str) -> Option<bool> {
     }
     let mut after = rest[digits..].chars();
     match (after.next(), after.next()) {
-        (Some('.' | ')'), Some(' ') | None) => Some(selected),
+        (Some('.' | ')'), Some(' ') | None) => {
+            let n: u8 = rest[..digits].parse().ok()?;
+            let label = rest[digits + 1..].trim();
+            Some((n, label, selected))
+        }
         _ => None,
     }
+}
+
+/// `Some(selected)` when a cleaned line is a numbered choice such as
+/// `❯ 1. Yes` (`selected` = true) or `2. No`. `1.5 GB` and `42 + x` are not.
+/// A thin, test-only view of [`parse_choice`] (production code needs the
+/// ordinal and label too, so it calls `parse_choice` directly).
+#[cfg(test)]
+fn numbered_choice(line: &str) -> Option<bool> {
+    parse_choice(line).map(|(_, _, selected)| selected)
 }
 
 /// Detect a Claude Code permission or question dialog on screen.
@@ -511,14 +583,19 @@ fn numbered_choice(line: &str) -> Option<bool> {
 /// choice) BELOW the last dialog line means the text is scrollback, and no
 /// dialog is reported.
 fn detect_dialog(stripped: &str) -> Option<Dialog> {
-    let lines: Vec<&str> = stripped.lines().map(clean_line).collect();
+    // Kept alongside the cleaned `lines` (border/whitespace-trimmed) so the
+    // `options` fallback below can still tell an indented description line
+    // from an unindented one — `clean_line` erases that difference.
+    let raw_lines: Vec<&str> = stripped.lines().collect();
+    let lines: Vec<&str> = raw_lines.iter().map(|l| clean_line(l)).collect();
     let lower: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
-    let choices: Vec<(usize, bool)> = lines
+    // (line index, ordinal, label, selected) for every numbered-choice line.
+    let choices: Vec<(usize, u8, &str, bool)> = lines
         .iter()
         .enumerate()
-        .filter_map(|(i, l)| numbered_choice(l).map(|sel| (i, sel)))
+        .filter_map(|(i, l)| parse_choice(l).map(|(n, label, sel)| (i, n, label, sel)))
         .collect();
-    let is_choice = |i: usize| choices.iter().any(|(j, _)| *j == i);
+    let is_choice = |i: usize| choices.iter().any(|(j, ..)| *j == i);
     let last = |pred: &dyn Fn(&str) -> bool| lower.iter().rposition(|l| pred(l));
 
     let tell_claude = last(&|l| l.contains("no, and tell claude"));
@@ -526,10 +603,10 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
     let select_hint = last(&|l| l.contains("enter to select"));
 
     let kind = if tell_claude.is_some()
-        || ask.is_some_and(|a| choices.iter().filter(|(j, _)| *j > a).count() >= 2)
+        || ask.is_some_and(|a| choices.iter().filter(|(j, ..)| *j > a).count() >= 2)
     {
         WaitingFor::Permission
-    } else if select_hint.is_some() && choices.iter().any(|(_, sel)| *sel) {
+    } else if select_hint.is_some() && choices.iter().any(|(_, _, _, sel)| *sel) {
         WaitingFor::Input
     } else {
         return None;
@@ -546,19 +623,84 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
         return None;
     }
 
-    let question = lines[..=dialog_end]
+    let question_idx = lines[..=dialog_end]
         .iter()
         .enumerate()
         .rev()
         .find(|(i, l)| l.ends_with('?') && !is_choice(*i))
-        .map(|(_, l)| l.to_string());
+        .map(|(i, _)| i);
+    let question = question_idx.map(|i| lines[i].to_string());
     let selected = choices
         .iter()
-        .find(|(_, sel)| *sel)
-        .map(|(i, _)| lines[*i].trim_start_matches(['❯', '›']).trim().to_string());
+        .find(|(_, _, _, sel)| *sel)
+        .map(|(i, ..)| lines[*i].trim_start_matches(['❯', '›']).trim().to_string());
+    // `options` is bounded to the dialog's OWN choice block, not every
+    // numbered line in the captured tail — an agent's own "2. Add the guard
+    // / 3. Run the tests" text further up the scrollback must not leak in
+    // and duplicate `n`.
+    //
+    // When the dialog has a question/ask line (the "do you want to" /
+    // "would you like to" line, or the line the `question` search above
+    // found), every choice AFTER it and at or before `dialog_end` belongs
+    // to the dialog — real dialogs interleave indented description lines
+    // between choices (see `question_ask_user.txt`), so this branch does
+    // not require contiguity. `ask` is the LAST such phrase anywhere in the
+    // pane, which can be stale scrollback prose sitting above the real
+    // dialog's own question; taking the LATER of `ask` and `question_idx`
+    // (not just preferring `ask`) keeps the bound as close to the actual
+    // choices as possible, so that stale prose does not widen `options`
+    // back into an unrelated numbered list between it and the real dialog.
+    //
+    // Without such a line (a bare `tell_claude` match with no "do you
+    // want"/"?" line above its choices), fall back to the trailing run of
+    // choice lines ending at the last one, tolerating a non-choice line in
+    // between only when it is blank/decoration-only or was indented in the
+    // raw capture (a description line) — an unindented, non-empty line ends
+    // the run, so an unrelated list higher up the scrollback is excluded.
+    let bound_after = ask.into_iter().chain(question_idx).max();
+    let options: Vec<PendingOption> = match bound_after {
+        Some(after) => choices
+            .iter()
+            .filter(|(i, ..)| *i > after)
+            .map(|(_, n, label, selected)| PendingOption {
+                n: *n,
+                label: (*label).to_string(),
+                selected: *selected,
+            })
+            .collect(),
+        None => match choices.last() {
+            Some((last_idx, ..)) => {
+                let mut start = *last_idx;
+                while start > 0 {
+                    let prev = start - 1;
+                    if is_choice(prev) {
+                        start = prev;
+                        continue;
+                    }
+                    let gap_allowed = lines[prev].chars().all(is_decoration)
+                        || raw_lines[prev].starts_with(|c: char| c.is_whitespace());
+                    if !gap_allowed {
+                        break;
+                    }
+                    start = prev;
+                }
+                choices
+                    .iter()
+                    .filter(|(i, ..)| *i >= start)
+                    .map(|(_, n, label, selected)| PendingOption {
+                        n: *n,
+                        label: (*label).to_string(),
+                        selected: *selected,
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        },
+    };
     Some(Dialog {
         kind,
         prompt: question.or(selected),
+        options,
     })
 }
 
@@ -684,12 +826,14 @@ pub fn analyze(pane_tail: &str) -> PaneIntel {
         None => pick_activity(&stripped),
     };
     let derived_status = derive_status(stuck, dialog.as_ref(), &stripped);
+    let pending_input = dialog.as_ref().map(Dialog::pending_input);
     PaneIntel {
         activity,
         stuck,
         context_pct,
         derived_status,
         waiting_for: dialog.map(|d| d.kind),
+        pending_input,
     }
 }
 
@@ -920,11 +1064,16 @@ mod tests {
         intel
     }
 
-    fn assert_dialog(name: &str, text: &str, kind: WaitingFor, activity: &str) {
+    fn assert_dialog(name: &str, text: &str, kind: WaitingFor, activity: &str, options_len: usize) {
         let intel = fixture_intel(name, text);
         assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked), "{name}");
         assert_eq!(intel.waiting_for, Some(kind), "{name}");
         assert_eq!(intel.activity.as_deref(), Some(activity), "{name}");
+        assert_eq!(
+            intel.pending_input.map(|p| p.options.len()),
+            Some(options_len),
+            "{name}: unexpected options count"
+        );
     }
 
     /// LIVE CAPTURE (`tmux capture-pane -p -S -8`, Claude Code 2.1.267, a
@@ -939,6 +1088,7 @@ mod tests {
             include_str!("testdata/pane_intel/permission_bash.txt"),
             WaitingFor::Permission,
             "waiting for permission: Do you want to proceed?",
+            4,
         );
     }
 
@@ -954,6 +1104,7 @@ mod tests {
         assert_eq!(intel.waiting_for, Some(WaitingFor::Permission));
         // The status line is still read for the context percentage.
         assert_eq!(intel.context_pct, Some(34.0));
+        assert_eq!(intel.pending_input.map(|p| p.options.len()), Some(4));
     }
 
     #[test]
@@ -963,6 +1114,7 @@ mod tests {
             include_str!("testdata/pane_intel/permission_edit_boxed.txt"),
             WaitingFor::Permission,
             "waiting for permission: Do you want to make this edit to health.rs?",
+            3,
         );
     }
 
@@ -975,6 +1127,7 @@ mod tests {
             include_str!("testdata/pane_intel/permission_create_footer.txt"),
             WaitingFor::Permission,
             "waiting for permission: Do you want to create notes.md?",
+            3,
         );
     }
 
@@ -985,6 +1138,45 @@ mod tests {
             include_str!("testdata/pane_intel/question_ask_user.txt"),
             WaitingFor::Input,
             "waiting for input: Keep ghosted sessions for how long before deleting them?",
+            4,
+        );
+    }
+
+    /// The description line under each choice (e.g. "Long enough to
+    /// recreate them after a tmux server restart.") must not break the
+    /// choice block: all four options survive, with their real labels.
+    #[test]
+    fn question_ask_user_fixture_options_survive_description_lines() {
+        let p = fixture_intel(
+            "question_ask_user",
+            include_str!("testdata/pane_intel/question_ask_user.txt"),
+        )
+        .pending_input
+        .expect("dialog");
+        assert_eq!(
+            p.options,
+            vec![
+                PendingOption {
+                    n: 1,
+                    label: "24 hours (Recommended)".into(),
+                    selected: true
+                },
+                PendingOption {
+                    n: 2,
+                    label: "1 hour".into(),
+                    selected: false
+                },
+                PendingOption {
+                    n: 3,
+                    label: "Until dismissed".into(),
+                    selected: false
+                },
+                PendingOption {
+                    n: 4,
+                    label: "Type something.".into(),
+                    selected: false
+                },
+            ]
         );
     }
 
@@ -997,6 +1189,7 @@ mod tests {
             include_str!("testdata/pane_intel/plan_approval_bypass.txt"),
             WaitingFor::Permission,
             "waiting for permission: Would you like to proceed?",
+            3,
         );
     }
 
@@ -1063,9 +1256,154 @@ mod tests {
     }
 
     #[test]
+    fn parse_choice_extracts_the_ordinal_and_label() {
+        assert_eq!(
+            parse_choice("10) Something"),
+            Some((10, "Something", false))
+        );
+        assert_eq!(parse_choice("2) No"), Some((2, "No", false)));
+        assert_eq!(parse_choice("❯ 1. Yes"), Some((1, "Yes", true)));
+    }
+
+    #[test]
     fn waiting_for_tags_are_stable() {
         assert_eq!(WaitingFor::Permission.as_str(), "permission");
         assert_eq!(WaitingFor::Input.as_str(), "input");
+    }
+
+    #[test]
+    fn pending_input_caps_question_label_and_option_count() {
+        // A client turns this straight into UI, so a malformed or
+        // adversarial pane read must not blow up the row or the wire.
+        let long_label = "x".repeat(500);
+        let dialog = Dialog {
+            kind: WaitingFor::Input,
+            prompt: Some("q".repeat(500)),
+            options: (1..=20u8)
+                .map(|n| PendingOption {
+                    n,
+                    label: long_label.clone(),
+                    selected: false,
+                })
+                .collect(),
+        };
+        let p = dialog.pending_input();
+        assert_eq!(p.question.as_deref().map(|q| q.chars().count()), Some(300));
+        assert_eq!(p.options.len(), 16);
+        assert!(p.options.iter().all(|o| o.label.chars().count() == 200));
+    }
+
+    #[test]
+    fn a_permission_dialog_carries_its_numbered_options() {
+        let pane = "\
+Do you want to make this edit to src/main.rs?
+❯ 1. Yes
+  2. Yes, and don't ask again this session
+  3. No, and tell Claude what to do differently
+";
+        let d = detect_dialog(pane).expect("dialog");
+        let p = d.pending_input();
+        assert_eq!(p.kind, "permission");
+        assert_eq!(
+            p.question.as_deref(),
+            Some("Do you want to make this edit to src/main.rs?")
+        );
+        assert_eq!(p.options.len(), 3);
+        assert_eq!(
+            p.options[0],
+            PendingOption {
+                n: 1,
+                label: "Yes".into(),
+                selected: true
+            }
+        );
+        assert_eq!(p.options[2].n, 3);
+        assert!(!p.options[2].selected);
+    }
+
+    #[test]
+    fn a_question_dialog_is_input_and_a_boxed_dialog_loses_its_borders() {
+        let pane = "│ Keep ghosted sessions for how long before deleting them? │\n│ ❯ 1. 1 hour │\n│   2. 1 day │\nEnter to select\n";
+        let p = detect_dialog(pane).expect("dialog").pending_input();
+        assert_eq!(p.kind, "input");
+        assert_eq!(
+            p.options
+                .iter()
+                .map(|o| o.label.as_str())
+                .collect::<Vec<_>>(),
+            ["1 hour", "1 day"]
+        );
+    }
+
+    #[test]
+    fn options_stop_at_the_dialog_and_do_not_swallow_an_earlier_numbered_list() {
+        // A numbered list further up the scrollback (an agent's own plan or
+        // suggestion text) must not leak into `options` and duplicate `n`.
+        let pane = "\
+  2. Add the guard
+  3. Run the tests
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and don't ask again
+  3. No, and tell Claude what to do differently
+";
+        let p = detect_dialog(pane).expect("dialog").pending_input();
+        assert_eq!(p.question.as_deref(), Some("Do you want to proceed?"));
+        assert_eq!(p.options.len(), 3);
+        assert_eq!(p.options.iter().map(|o| o.n).collect::<Vec<_>>(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn options_fallback_tolerates_indented_descriptions_but_stops_at_unrelated_prose() {
+        // No "do you want to"/"would you like to" line and no "?" question
+        // here — `tell_claude` alone carries the kind — so `options` falls
+        // back to the trailing run: the indented description line between
+        // the two choices is tolerated, but the unindented, unrelated prose
+        // line above the dialog ends the run.
+        let pane = "\
+Some unrelated prose line
+❯ 1. Yes
+     do it now
+  2. No, and tell Claude what to do differently
+";
+        let p = detect_dialog(pane).expect("dialog").pending_input();
+        assert_eq!(p.options.len(), 2);
+        assert_eq!(
+            p.options,
+            vec![
+                PendingOption {
+                    n: 1,
+                    label: "Yes".into(),
+                    selected: true
+                },
+                PendingOption {
+                    n: 2,
+                    label: "No, and tell Claude what to do differently".into(),
+                    selected: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn bound_after_picks_the_later_of_ask_and_question_not_stale_scrollback_prose() {
+        // Stale scrollback prose containing "do you want to" sits well above
+        // the real dialog and its own unrelated numbered list; the real
+        // dialog's own question line is LATER (closer to its choices) and
+        // must win the bound, or the stale prose's numbered list leaks back
+        // into `options`.
+        let pane = "\
+Earlier I asked: do you want to grab coffee?
+  2. Add the guard
+  3. Run the tests
+Keep ghosted sessions for how long before deleting them?
+❯ 1. 1 hour
+  2. 1 day
+Enter to select
+";
+        let p = detect_dialog(pane).expect("dialog").pending_input();
+        assert_eq!(p.options.len(), 2);
+        assert_eq!(p.options.iter().map(|o| o.n).collect::<Vec<_>>(), [1, 2]);
     }
 
     #[test]

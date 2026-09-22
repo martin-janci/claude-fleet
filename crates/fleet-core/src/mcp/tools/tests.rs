@@ -382,6 +382,152 @@ fn a_client_cannot_skip_the_untrusted_marker() {
     assert!(out.contains("claude-fleet"), "marker missing: {out}");
 }
 
+// ---- send_prompt { keys } (Task 1: a phone presses Enter/Escape/C-c) ------
+
+/// `FleetTools` over a store holding one `local` session (id returned), the
+/// same shape `test_tools` builds elsewhere in this file. Real `SshClient`,
+/// like `test_tools` — there is no fake-SSH fixture for `send_prompt`'s
+/// delivery path (`FleetTools::ssh` is a concrete `Arc<SshClient>`, not
+/// generic over `SshExec`), which is why the happy-path test below drives a
+/// real local tmux session instead of asserting on a recorded command.
+fn keys_test_tools() -> (FleetTools, Arc<Mutex<Store>>, i64) {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let sid = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-keys", "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let t = FleetTools::new(
+        Arc::clone(&store),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    );
+    (t, store, sid)
+}
+
+/// Validation happens before any tmux/ssh delivery is attempted, so this
+/// needs no real backend: an unknown key name, and text alongside `keys`,
+/// are both refused up front.
+#[tokio::test]
+async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
+    let (tools, _store, sid) = keys_test_tools();
+    let bad = tools
+        .send_prompt(
+            Extension(Caller::master()),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: String::new(),
+                submit: true,
+                raw: false,
+                keys: Some("Delete".into()),
+            }),
+        )
+        .await
+        .expect_err("unknown key");
+    assert!(bad.message.starts_with("E_VALIDATE"), "{}", bad.message);
+    let both = tools
+        .send_prompt(
+            Extension(Caller::master()),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: "hi".into(),
+                submit: true,
+                raw: false,
+                keys: Some("Enter".into()),
+            }),
+        )
+        .await
+        .expect_err("text and keys");
+    assert!(both.message.starts_with("E_VALIDATE"), "{}", both.message);
+}
+
+/// The happy path: a key press is delivered without the untrusted marker and
+/// lands on the timeline as `keys_sent`, never `prompt_sent`. There is no
+/// fake-SSH fixture to intercept the delivered command (see `keys_test_tools`
+/// above), so this drives a REAL local tmux session — skipped when `tmux`
+/// isn't on PATH, which is the macOS CI runner (the ubuntu-24.04 leg has it;
+/// see the `tmux_roundtrip` opt-in test in `fleet_e2e_tests.rs` for the same
+/// constraint on the same fact).
+#[tokio::test]
+async fn keys_press_a_key_without_a_marker_and_without_recording_a_prompt() {
+    if tokio::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .await
+        .is_err()
+    {
+        eprintln!(
+            "skipping keys_press_a_key_without_a_marker_and_without_recording_a_prompt: no tmux on PATH"
+        );
+        return;
+    }
+    let name = format!("fleet-test-keys-{}", std::process::id());
+    let created = tokio::process::Command::new("tmux")
+        .args(["new-session", "-d", "-s", &name])
+        .output()
+        .await
+        .expect("spawn tmux");
+    assert!(created.status.success(), "{created:?}");
+    struct KillOnDrop(String);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &self.0])
+                .output();
+        }
+    }
+    let _guard = KillOnDrop(name.clone());
+
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let sid = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session(&name, "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let tools = FleetTools::new(
+        Arc::clone(&store),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    );
+    let r = tools
+        .send_prompt(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: String::new(),
+                submit: true,
+                raw: false,
+                keys: Some("Escape".into()),
+            }),
+        )
+        .await
+        .expect("keys");
+    assert_eq!(result_json(&r)["delivered"], true);
+    let s = store.lock().unwrap();
+    let hist = s.list_session_events(sid, 10).unwrap();
+    assert!(
+        hist.iter()
+            .any(|e| e.kind == "keys_sent" && e.detail.as_deref() == Some("Escape")),
+        "{hist:?}"
+    );
+    assert!(!hist.iter().any(|e| e.kind == "prompt_sent"), "{hist:?}");
+    // A key press must never touch last_prompt.
+    let row = s.get_session_by_id(sid).unwrap().unwrap();
+    assert!(row.last_prompt.is_none(), "{row:?}");
+}
+
 #[test]
 fn audit_row_lands_on_target_session_with_redacted_args() {
     let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
@@ -2354,7 +2500,45 @@ fn the_served_definition_budget_stays_bounded() {
     /// of headroom — and the two together, already cut to a one-sentence
     /// description and one-line field docs, add 615 for a total of 57,603.
     /// Headroom is again deliberately small.
-    const BUDGET_BYTES: usize = 57_700;
+    ///
+    /// Raised from 57,700 to 57,900 for `send_prompt { keys }`: one clause
+    /// on the tool description plus the `keys` field's one-line doc measured
+    /// 57,870, 170 over budget.
+    ///
+    /// Raised from 57,900 to 58,000 for the one-clause addition to
+    /// `submit`'s doc comment (fix round 1: "ignored when `keys` is set"),
+    /// which measured 57,935, 35 over budget.
+    ///
+    /// Raised from 58,000 to 58,113 when main's `send_prompt { keys }` raise
+    /// met Transfer 3b's `dry_run` parameter: both were measured against
+    /// 57,700, so the merged surface came to 58,013; raised to that plus 100
+    /// bytes of headroom.
+    ///
+    /// Raised from 57,700 to 58,034 for Transfer 3c Task 4's `when` parameter
+    /// on `move_session` (`now` | `idle` | `cancel`, one short clause per
+    /// value in its own field doc — the tool's own description was left
+    /// alone, per the same "document on the parameter" rule `clean_target`
+    /// set above). The surface before it measured 57,673 — 27 bytes of
+    /// headroom, an enum parameter was never going to fit in.
+    ///
+    /// A first measurement came in at 58,655: `When` derives `JsonSchema` on
+    /// its own type (`service::move_session::When`, not just the
+    /// `MoveSessionParams::when` field), and schemars had serialised that
+    /// whole enum's Rustdoc — several sentences of maintainer-facing
+    /// implementation reasoning, never meant for a client — into
+    /// `$defs.When.description`, at a cost of 982 bytes for one field.
+    /// `#[schemars(description = "now, idle, or cancel a wait")]` on `When`
+    /// overrides that, the same way the parameter's own field doc stays
+    /// short; trimming the served surface only after measuring it dropped
+    /// the real cost to 261 bytes (57,673 to 57,934), so the constant is
+    /// raised to that plus 100 bytes of headroom rather than to the
+    /// unslimmed number.
+    ///
+    /// Raised from 58,113 to 58,382 when 3c met main's `send_prompt { keys }`
+    /// raise through 3b: the `when` raise above was measured against 57,700,
+    /// so the merged surface came to 58,282; raised to that plus 100 bytes
+    /// of headroom.
+    const BUDGET_BYTES: usize = 58_382;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -2489,6 +2673,76 @@ fn move_session_params_carry_clean_target_into_the_service_args() {
         serde_json::from_value(serde_json::json!({ "session_id": 1, "target_host_alias": "beta" }))
             .unwrap();
     assert!(!p.into_args(41).clean_target);
+
+    // `dry_run` is the same story: a `{"dry_run": true}` arriving at the tool
+    // must reach `MoveSessionArgs.dry_run`, and the default stays false.
+    let p: super::params::MoveSessionParams = serde_json::from_value(serde_json::json!({
+        "session_id": 1,
+        "target_host_alias": "beta",
+        "dry_run": true,
+    }))
+    .unwrap();
+    assert!(
+        p.into_args(41).dry_run,
+        "a dry_run=true arriving at the tool must reach the service args"
+    );
+    let p: super::params::MoveSessionParams =
+        serde_json::from_value(serde_json::json!({ "session_id": 1, "target_host_alias": "beta" }))
+            .unwrap();
+    assert!(!p.into_args(41).dry_run);
+}
+
+/// `when` must reach `MoveSessionArgs.when` too (Transfer 3c Task 4) — the
+/// same lesson as `clean_target`/`dry_run` above, and the one 3d shipped a
+/// regression of: a routed argument that is on the schema but not mapped in
+/// `into_args` never reaches the service or the hub.
+/// M7: `when: idle` can answer a pending wait, so the tool's own summary
+/// of what it returns must say so, not only "a moved report or a preview".
+#[test]
+fn move_session_description_names_the_wait_it_can_answer() {
+    let tool = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .find(|t| t.name == "move_session")
+        .expect("move_session is served");
+    let d = tool.description.as_deref().unwrap_or_default();
+    assert!(d.contains("or a wait"), "{d}");
+}
+
+#[test]
+fn move_session_params_carry_when_into_the_service_args() {
+    let p: super::params::MoveSessionParams = serde_json::from_value(serde_json::json!({
+        "session_id": 1,
+        "target_host_alias": "beta",
+        "when": "cancel",
+    }))
+    .unwrap();
+    assert_eq!(
+        p.into_args(41).when,
+        crate::service::move_session::When::Cancel,
+        "a when=cancel arriving at the tool must reach the service args"
+    );
+
+    let p: super::params::MoveSessionParams = serde_json::from_value(serde_json::json!({
+        "session_id": 1,
+        "target_host_alias": "beta",
+        "when": "idle",
+    }))
+    .unwrap();
+    assert_eq!(
+        p.into_args(41).when,
+        crate::service::move_session::When::Idle,
+        "a when=idle arriving at the tool must reach the service args"
+    );
+
+    // The default stays `now`: nothing implies a wait or a cancel.
+    let p: super::params::MoveSessionParams =
+        serde_json::from_value(serde_json::json!({ "session_id": 1, "target_host_alias": "beta" }))
+            .unwrap();
+    assert_eq!(
+        p.into_args(41).when,
+        crate::service::move_session::When::Now
+    );
 }
 
 /// …and the handler must be the mapping's only caller. `into_args` being
@@ -2509,6 +2763,148 @@ fn the_move_session_handler_builds_its_args_through_into_args() {
         !src.contains("clean_target:"),
         "no args literal in lifecycle.rs may set clean_target itself"
     );
+    assert!(
+        !src.contains("dry_run:"),
+        "no args literal in lifecycle.rs may set dry_run itself"
+    );
+    assert!(
+        !src.contains("when:"),
+        "no args literal in lifecycle.rs may set when itself"
+    );
+}
+
+/// The confirm gate must be skipped for a dry run — a preview changes
+/// nothing, so it needs no desktop approval — but a real move still does.
+/// `dry_run` is read from `p` before `into_args` consumes it, so this also
+/// proves the branch and the mapping agree on the same value.
+#[tokio::test]
+async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs_it() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
+        .unwrap();
+    // Kept as its own `Arc` (rather than going through `test_tools`, which
+    // swallows it into the `FleetTools` it builds) so this test can take
+    // `MoveClaim::acquire`'s own claim below on the SAME store the service
+    // will see — the claim is keyed by the store's pointer.
+    let store = Arc::new(Mutex::new(s));
+    let t = FleetTools::new(
+        Arc::clone(&store),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    );
+    let caller = Caller::master();
+
+    let params = |dry_run: bool| super::params::MoveSessionParams {
+        session_id: on_b,
+        target_host_alias: "hosta".into(),
+        keep_source: false,
+        strict: false,
+        clean_target: false,
+        confirm_nonce: None,
+        dry_run,
+        when: crate::service::move_session::When::Now,
+    };
+
+    let err = t
+        .move_session(Extension(caller.clone()), Parameters(params(false)))
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.starts_with("E_CONFIRM_REQUIRED"),
+        "a real move must still be gated: {}",
+        err.message
+    );
+
+    // Hold the real move's own concurrency claim for the whole dry-run call.
+    // Only `move_session_inner` (the real-move branch, reached only once
+    // `dry_run` is false) ever calls `MoveClaim::acquire`; `preview::preview`
+    // (the `dry_run: true` branch) never does. So if a regression skipped
+    // the confirm gate above AND fell through to a real move for
+    // `dry_run: true`, this held claim would collide and the call would
+    // answer "already in progress" instead of the preview path's own
+    // refusal — proving whether the service actually branched on `dry_run`,
+    // not merely that SOME error came back (which the old assertion here
+    // could not tell apart from a real move quietly succeeding or failing
+    // for an unrelated reason).
+    let _claim = crate::service::move_session::MoveClaim::acquire(&store, on_b)
+        .expect("nothing else holds this session's claim yet");
+
+    let err = t
+        .move_session(Extension(caller), Parameters(params(true)))
+        .await
+        .unwrap_err();
+    assert!(
+        !err.message.starts_with("E_CONFIRM_REQUIRED"),
+        "a dry run must skip the confirm gate: {}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("is already in progress"),
+        "a dry run must never reach MoveClaim::acquire — the real move's own \
+         concurrency guard — which would mean it ran the real move instead: {}",
+        err.message
+    );
+    // The fixture's session has no `claude_session_id`, which is exactly
+    // the refusal `gather()` — shared by `preview()` and the real move —
+    // raises first when nothing SSH-dependent has run yet. Landing here
+    // (rather than on the claim above) is the positive proof the call took
+    // the preview branch.
+    assert!(
+        err.message.contains("no Claude session id"),
+        "expected the preview path's own local refusal, got: {}",
+        err.message
+    );
+}
+
+/// `when: cancel` prevents a move, so it must skip the confirm gate exactly
+/// like a dry run; `when: idle` is a (deferred) move and keeps it. Built
+/// from JSON rather than a `MoveSessionParams` literal — before Task 4's
+/// `params.rs` change `when` is not yet a field on that struct at all — so
+/// this also proves the value actually reaches the handler's gate decision
+/// and not just `into_args`.
+#[tokio::test]
+async fn move_session_skips_the_confirm_gate_for_cancel_but_not_for_idle() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
+        .unwrap();
+    let store = Arc::new(Mutex::new(s));
+    let t = FleetTools::new(
+        Arc::clone(&store),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    );
+    let caller = Caller::master();
+
+    let params = |when: &str| -> super::params::MoveSessionParams {
+        serde_json::from_value(serde_json::json!({
+            "session_id": on_b,
+            "target_host_alias": "hosta",
+            "when": when,
+        }))
+        .unwrap()
+    };
+
+    let err = t
+        .move_session(Extension(caller.clone()), Parameters(params("idle")))
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.starts_with("E_CONFIRM_REQUIRED"),
+        "when: idle is a deferred move and must still be gated: {}",
+        err.message
+    );
+
+    let out = t
+        .move_session(Extension(caller), Parameters(params("cancel")))
+        .await
+        .expect("when: cancel must skip the confirm gate");
+    let json: serde_json::Value = serde_json::from_str(text_of(&out.content[0])).unwrap();
+    assert_eq!(json["kind"], "wait_cancelled");
+    assert_eq!(json["was_waiting"], false);
 }
 
 /// A confirmation nonce must never outlive the call that is waiting on it.

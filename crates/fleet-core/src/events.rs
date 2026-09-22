@@ -494,11 +494,23 @@ impl EventBus for BroadcastEventBus {
         if self.receiver_count() == 0 {
             return;
         }
+        // Null keys come off before the frame is broadcast, once per event
+        // rather than once per subscriber. `list_sessions` already answers
+        // through `ok_json_compact`, so without this the same row arrives
+        // stripped from a tool call and unstripped from the stream — and the
+        // unstripped half is the one sent again on every change. Measured on
+        // a 44-session fleet, nulls were 34 % of the bytes a fifteen-second
+        // `/events` sample wrote. Clients deserialize an absent key and a
+        // null key to the same `None` (see `crate::json`), and the desktop's
+        // own Tauri bus does not come through here, so its value→null
+        // clearing is untouched.
+        let mut payload = e.payload();
+        crate::json::strip_nulls(&mut payload);
         // `Err` means the last receiver went away in that window. Not an
         // error, not a log line.
         let _ = self.tx.send(EventMessage {
             name: e.name(),
-            payload: e.payload(),
+            payload,
         });
     }
 }
@@ -852,6 +864,38 @@ mod tests {
         drop(rx);
         assert_eq!(bus.receiver_count(), 0);
         bus.emit(&RowChange::SessionKilled(2));
+    }
+
+    /// The stream and the tool boundary must agree about what a null field
+    /// looks like on the wire: `list_sessions` answers through
+    /// `ok_json_compact`, and the frame for one of its rows goes out here.
+    /// Clients give every optional field a default precisely because of it.
+    #[tokio::test]
+    async fn a_broadcast_frame_carries_no_null_keys() {
+        let bus = BroadcastEventBus::new(4);
+        let mut rx = bus.subscribe();
+        bus.emit(&RowChange::SessionEventAdded(crate::store::SessionEvent {
+            id: 2_125_930,
+            session_id: 21_340,
+            at: 1_790_027_305,
+            kind: "mcp_call".into(),
+            detail: Some("list_sessions".into()),
+            // The field that was 396 bytes of `"claude_session_id":null`
+            // across one fifteen-second sample of the live hub.
+            claude_session_id: None,
+        }));
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg.name, "session:event");
+        assert!(
+            msg.payload.get("claude_session_id").is_none(),
+            "a null field must not reach the wire: {}",
+            msg.payload
+        );
+        assert_eq!(
+            msg.payload.get("detail").and_then(|v| v.as_str()),
+            Some("list_sessions"),
+            "a field that has a value is untouched"
+        );
     }
 
     #[tokio::test]

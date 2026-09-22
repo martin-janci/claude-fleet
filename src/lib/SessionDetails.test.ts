@@ -49,7 +49,7 @@ const sampleSession = {
   effort_level: null,
   pr_url: null,
   current_activity: null,
-  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
+  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null, pending_input: null,
 };
 
 beforeEach(() => {
@@ -703,5 +703,63 @@ describe('SessionDetails recovery actions from the timeline', () => {
     const { queryByTestId } = render(SessionDetails, { props: { session: row({ id: 8 }) } });
     await waitFor(() => expect(queryByTestId('details-move-back')).toBeNull());
     expect(queryByTestId('details-finish-move')).toBeNull();
+    expect(queryByTestId('details-resume-wait')).toBeNull();
+  });
+
+  // Task 8: after a restart there is no in-memory run for a wait that was
+  // still pending — the durable record is the source's own timeline, exactly
+  // like `unresolvedPartial`/`adoptPartial` above.
+  it('offers to resume an unresolved wait, and hands it to the sheet', async () => {
+    const events = [
+      {
+        id: 1,
+        session_id: 8,
+        at: 1700000000,
+        kind: 'session_move_waiting',
+        detail: JSON.stringify({ to_host: 'beta', deadline_unix: 1700003600 }),
+        claude_session_id: null,
+      },
+    ];
+    inv().mockImplementation(async (cmd: string) => (cmd === 'session_history' ? events : undefined));
+    const waitingRow = row({ id: 8, host_alias: 'alpha', tmux_name: 'sess8' });
+    sessions.set([waitingRow]);
+    const { getByTestId } = render(SessionDetails, { props: { session: waitingRow } });
+    await waitFor(() => expect(getByTestId('details-resume-wait')).toBeTruthy());
+    expect(getByTestId('details-resume-wait').textContent).toContain('beta');
+    await fireEvent.click(getByTestId('details-resume-wait'));
+    expect(get(transferSheetFor)).toBe(8);
+    const run = get(moves).get(8)!;
+    expect(run.status).toBe('waiting');
+    expect(run.toHost).toBe('beta');
+  });
+
+  // A `session_move_wait_ended` closes the record — nothing left to resume.
+  it('does not offer to resume a wait that already ended', async () => {
+    const events = [
+      {
+        id: 2,
+        session_id: 8,
+        at: 1700000100,
+        kind: 'session_move_wait_ended',
+        detail: JSON.stringify({ reason: 'cancelled' }),
+        claude_session_id: null,
+      },
+      {
+        id: 1,
+        session_id: 8,
+        at: 1700000000,
+        kind: 'session_move_waiting',
+        detail: JSON.stringify({ to_host: 'beta', deadline_unix: 1700003600 }),
+        claude_session_id: null,
+      },
+    ];
+    inv().mockImplementation(async (cmd: string) => (cmd === 'session_history' ? events : undefined));
+    const { queryByTestId, findByTestId } = render(SessionDetails, {
+      props: { session: row({ id: 8, host_alias: 'alpha' }) },
+    });
+    await findByTestId('session-host');
+    await waitFor(() => expect(inv()).toHaveBeenCalled());
+    await tick();
+    expect(queryByTestId('details-resume-wait')).toBeNull();
   });
 });

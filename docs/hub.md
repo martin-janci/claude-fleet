@@ -621,6 +621,44 @@ free to pair again:
 revoked phone (paired 2026-09-17 09:12Z); its next request is refused and the name is free again
 ```
 
+## `/mcp/json` — the same tools, a body a proxy can compress
+
+`POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
+`data:` line. That framing is load-bearing for the long polls
+(`wait_for_session`, `run_prompt`), whose 15-second keep-alives are what hold
+a reverse tunnel open — but it also means the answer is never compressed,
+because Caddy's `encode` matcher and Cloudflare both skip
+`text/event-stream`, correctly: compressing a stream would buffer it.
+
+`POST /mcp/json` is the same tool surface, behind the same bearer token, with
+the framing taken off. It answers `application/json`, so a reverse proxy
+compresses it like any other body:
+
+```bash
+curl -s --compressed https://fleet.example.com/mcp/json \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fleet_health","arguments":{}}}'
+```
+
+(The `Accept` header still offers both types — rmcp requires the pair on
+either mount.)
+
+What it is worth, measured on a 44-session fleet: `list_sessions`
+`{summary:false}` is 51 968 B unframed and 7 767 B gzipped, `list_projects`
+7 660 → 1 308 B, `list_hosts` 1 707 → 475 B. A phone's cold start is those
+three calls: **61 335 B today, about 9 550 B over `/mcp/json` behind a proxy
+that compresses** — and one fewer full JSON re-parse on the device, since the
+body is no longer a JSON document inside a JSON string.
+
+Use `/mcp` for anything long-polling; use `/mcp/json` for ordinary calls from
+a client on a metered or slow link. Existing clients need no change:
+`/mcp` is untouched, and the wire-contract revision does not move for a new
+path. `deploy/hub/Caddyfile` ships with `encode zstd gzip`; a bare-binary
+deployment with no reverse proxy in front gets the unframed body but no
+compression.
+
 ## Events
 
 A client that has listed what it needs does not have to poll for changes:
@@ -641,6 +679,12 @@ before the `:`. An unrecognised kind (`sessions` for `session`, say) is
 dropped from the filter and logged as a warning by the hub, and it is missing
 from the `ready` frame's `kinds` — which is how you spot the typo instead of
 watching a stream that never says anything.
+
+A session row's `pending_input` (carried on `session:updated`, migration 040)
+is the permission/question dialog a blocked pane is showing —
+`{kind, question, options[{n,label,selected}]}`, or null when the pane shows
+none — so a client can turn the numbered choices into buttons instead of
+typing them.
 
 The `ready` frame also carries `contract`, the wire-contract revision of the
 row shapes and tool results this hub sends (`fleet_core::wire_contract`,
@@ -1253,6 +1297,32 @@ finished a handshake yet (`connecting`) calls, because nothing has been
 learned; a stream that is merely down (`reconnecting`, `offline`) changes
 nothing either way; and the first `ready` frame that classifies the hub back
 in range opens all of it again, with no restart.
+
+**Upgrade a desktop and its hub together from contract revision 3.**
+Revision 2 is the release where `move_session` answers a tagged result
+(`kind: moved | preview`) and honours `dry_run`. Revision 3 adds a `when`
+argument (`now` | `idle` | `cancel`): `idle` waits for the source to go idle
+before moving, `cancel` ends a pending wait instead of moving anything. Both
+ends require the current revision: a new desktop refuses an older hub
+(revision 0, 1 or 2, "update the hub"), and an older desktop refuses a newer
+hub ("update this app"). There is no mixed window in which the two work
+together.
+
+Two things wait for more than the absence of a skew: a Transfer preview
+(`move_session` with `dry_run: true`) and a call whose `when` is not `now`. A
+hub from before revision 3 ignores both `dry_run` and `when`, so it performs a
+real move regardless of what either one asked for. For `dry_run` and `when:
+idle` that only means the desktop refuses to ask something it could not trust
+the answer to; for `when: cancel` it is the reason the guard exists at all —
+an old hub sees an ordinary move request and moves the session, so cancelling
+a wait would perform the very move it was meant to stop. Either way the
+desktop refuses with `E_HUB_CONTRACT` until the current connection's
+`ready` frame has been judged in range — not merely "no mismatch recorded
+yet", which is also what a desktop still connecting sees. A dropped event
+stream withdraws that judgement until the next `ready` frame: the hub that
+answers the reconnect may be an older build. These calls become available
+once the desktop has confirmed the hub's version; a plain move (`when: now`,
+not a dry run) is not held back by this.
 
 ### Parity or refusal
 

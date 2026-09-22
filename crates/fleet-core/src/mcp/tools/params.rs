@@ -248,6 +248,7 @@ pub struct SendPromptParams {
     pub prompt: String,
     /// Whether to submit the prompt (press Enter). Defaults to true. Set
     /// `submit: false` to stage the text in the REPL without submitting it.
+    /// Ignored when `keys` is set — a key press has nothing to stage.
     #[serde(default = "default_true")]
     pub submit: bool,
     /// Deliver the prompt verbatim, without the leading
@@ -256,6 +257,11 @@ pub struct SendPromptParams {
     /// marked. Default false.
     #[serde(default)]
     pub raw: bool,
+    /// Press a key instead of typing text: `Enter`, `Escape` or `C-c`. Never
+    /// marked (a key is not text) and never recorded as a prompt. `prompt`
+    /// must be empty with it.
+    #[serde(default)]
+    pub keys: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -634,10 +640,17 @@ pub struct MoveSessionParams {
     /// Replace what an earlier attempt left in the target worktree.
     #[serde(default)]
     pub clean_target: bool,
+    /// Preview; no changes.
+    #[serde(default)]
+    pub dry_run: bool,
     /// Nonce from a previous E_CONFIRM_REQUIRED, once approved on the
     /// desktop (only when mcp.confirm_destructive is on).
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// When to move: `now` (default), `idle` (wait, then move), `cancel`
+    /// (end a pending wait).
+    #[serde(default)]
+    pub when: crate::service::move_session::When,
 }
 
 impl MoveSessionParams {
@@ -656,6 +669,8 @@ impl MoveSessionParams {
             keep_source: self.keep_source,
             strict: self.strict,
             clean_target: self.clean_target,
+            dry_run: self.dry_run,
+            when: self.when,
         }
     }
 }

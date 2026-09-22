@@ -155,9 +155,9 @@ Parameters: `host_alias`, `limit`, `project_id`, `summary`
 
 ### `move_session`
 
-Move a work session to another host, carrying its work as it is: the Claude transcript, unpushed commits, staged/modified/untracked files and small git-ignored files (.env); also the session's Claude directory (subagent transcripts, tool results) and the project's Claude memory, added to the target without replacing anything there (these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the same conversation and the source is killed only once the target runs (keep_source=true leaves it). strict=true refuses instead of carrying: E_MOVE_DIRTY, E_MOVE_UNPUSHED. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts (in practice the master). Returns a MoveReport with the new row as target.
+Move a work session to another host, carrying its work as it is: the Claude transcript, unpushed commits, staged/modified/untracked files and small git-ignored files (.env); also the session's Claude directory (subagent transcripts, tool results) and the project's Claude memory, added to the target without replacing anything there (these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the same conversation and the source is killed only once the target runs (keep_source=true leaves it). strict=true refuses instead of carrying: E_MOVE_DIRTY, E_MOVE_UNPUSHED. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts (in practice the master). Returns a moved report, a preview or a wait.
 
-Parameters: `clean_target`, `confirm_nonce`, `keep_source`, `session_id`, `strict`, `target_host_alias`
+Parameters: `clean_target`, `confirm_nonce`, `dry_run`, `keep_source`, `session_id`, `strict`, `target_host_alias`, `when`
 
 ### `new_bg_session`
 
@@ -353,9 +353,9 @@ Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `su
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only) or the caller is a trusted client. Returns JSON { delivered, session_id, turn_seq_before }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three).
+Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only) or the caller is a trusted client. keys=Enter|Escape|C-c presses a key instead (unmarked). Returns JSON { delivered, session_id, turn_seq_before }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three).
 
-Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
+Parameters: `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
 ### `session_conversation`
 

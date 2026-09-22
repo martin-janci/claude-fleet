@@ -1,5 +1,5 @@
 {
-  "revision": 1,
+  "revision": 3,
   "types": {
     "AccountRow": [
       "display_name",
@@ -238,6 +238,7 @@
       "model",
       "notes",
       "parent_session_id",
+      "pending_input",
       "pr_url",
       "project_id",
       "reviews_session_id",
