@@ -217,6 +217,80 @@ pub fn mcp_json(endpoint: &str, token: &str) -> String {
     .to_string()
 }
 
+/// The name of the MCP server in [`mcp_json`], which is also the name the
+/// project-scoped approval in `~/.claude.json` lists.
+const OPERATOR_MCP_SERVER: &str = "claude-fleet";
+
+/// PURE: mark `dir` as trusted in a host's `~/.claude.json`, the way Claude
+/// Code records the user's own answer to its workspace trust dialog, and
+/// pre-approve the operator's `.mcp.json` server.
+///
+/// On a fresh host Claude Code stops at "Is this a project you created or
+/// one you trust?" before it reads a word of `CLAUDE.md`, and the fleet then
+/// reports the operator as `stuck_kind: trust_prompt` forever. The directory
+/// holds nothing but the two files the birth just wrote, so the answer is
+/// known, and the file records it as
+/// `projects["<absolute dir>"].hasTrustDialogAccepted = true` (verified
+/// against a real `~/.claude.json`; the key is the absolute path, which is
+/// why [`OperatorHost::resolve_dir`] hands over an expanded one). A
+/// project's `.mcp.json` is a second, separate approval —
+/// `enabledMcpjsonServers`, a list of server names — so `claude-fleet` is
+/// added there too, and only it: any other server the user approved in that
+/// entry stays, and nothing else is enabled on their behalf.
+///
+/// Same shape as `provision::merge_mcp_entry` on the same file: `existing`
+/// is the current content (empty for a missing file), every sibling key is
+/// preserved, a second run is a no-op, and a file that is not the JSON
+/// object Claude Code writes is refused (`E_PROVISION`) BEFORE the caller
+/// writes anything.
+pub fn pre_trust_claude_json(existing: &str, dir: &str) -> Result<String, IpcError> {
+    let mut root = crate::service::provision::parse_claude_json(existing)?;
+    let projects = json_object_entry(&mut root, "projects")?;
+    let project = json_object_entry(projects, dir)?;
+    let obj = project
+        .as_object_mut()
+        .expect("json_object_entry returns an object");
+    obj.insert(
+        "hasTrustDialogAccepted".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    let enabled = obj
+        .entry("enabledMcpjsonServers")
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(list) = enabled.as_array_mut() else {
+        return Err(IpcError::new(
+            codes::E_PROVISION,
+            format!("~/.claude.json: projects[{dir:?}].enabledMcpjsonServers is not a JSON array"),
+        ));
+    };
+    if !list.iter().any(|v| v == OPERATOR_MCP_SERVER) {
+        list.push(serde_json::Value::String(OPERATOR_MCP_SERVER.to_string()));
+    }
+    serde_json::to_string_pretty(&root)
+        .map_err(|e| IpcError::new(codes::E_PROVISION, format!("serialize: {e}")))
+}
+
+/// `parent[key]`, created as `{}` when absent; `E_PROVISION` when present
+/// and not an object, so a file with a shape Claude Code never writes is
+/// refused rather than overwritten.
+fn json_object_entry<'a>(
+    parent: &'a mut serde_json::Value,
+    key: &str,
+) -> Result<&'a mut serde_json::Value, IpcError> {
+    let entry = parent
+        .as_object_mut()
+        .expect("the caller checked the parent is an object")
+        .entry(key)
+        .or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        return Err(IpcError::new(
+            codes::E_PROVISION,
+            format!("~/.claude.json: {key:?} is not a JSON object"),
+        ));
+    }
+    Ok(entry)
+}
+
 /// The part of `ensure_operator` that reaches outside the database: where
 /// the operator's directory actually is on the host, the two files that go
 /// into it, and starting the session.
@@ -251,6 +325,11 @@ pub(crate) trait OperatorHost: Send + Sync {
         claude_md: &str,
         mcp_json: &str,
     ) -> Result<(), IpcError>;
+
+    /// Record `dir` as trusted in `host`'s `~/.claude.json` and pre-approve
+    /// the `.mcp.json` server in it — [`pre_trust_claude_json`] applied
+    /// read-merge-write to the file on the host, never truncating it.
+    async fn pre_trust(&self, host: &str, dir: &str) -> Result<(), IpcError>;
 
     /// Start the operator's session on `host` and return its row.
     async fn start_session(&self, host: &str, project_id: i64) -> Result<SessionRow, IpcError>;
@@ -303,6 +382,31 @@ impl OperatorHost for LiveHost {
             mcp_json,
         )
         .await
+    }
+
+    async fn pre_trust(&self, host: &str, dir: &str) -> Result<(), IpcError> {
+        use crate::service::provision::{
+            read_host_file, write_host_file_secret, CLAUDE_DIR, CLAUDE_JSON,
+        };
+        // The same read → merge (preserve siblings) → back up → write that
+        // `provision_one` does on this file for `mcpServers`. The parse
+        // error fires before any write, and the file carries the host's
+        // own bearer token from provisioning, so it goes through the secret
+        // path: 0600, and renamed onto the target rather than truncated.
+        let ssh = self.ssh.as_ref();
+        let existing = read_host_file(ssh, host, CLAUDE_JSON).await?;
+        let merged = pre_trust_claude_json(&existing, dir)?;
+        if !existing.trim().is_empty() {
+            write_host_file_secret(
+                ssh,
+                host,
+                CLAUDE_DIR,
+                &format!("{CLAUDE_JSON}.fleet-bak"),
+                &existing,
+            )
+            .await?;
+        }
+        write_host_file_secret(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await
     }
 
     async fn start_session(&self, host: &str, project_id: i64) -> Result<SessionRow, IpcError> {
@@ -622,6 +726,13 @@ pub(crate) async fn ensure_operator_on(
     //    closes against a race.
     host.write_files(&home, &dir, claude_md(), &mcp_json(&endpoint, &token))
         .await?;
+    //    And the answer to the trust dialog Claude Code would otherwise stop
+    //    at when it starts in that directory — part of delivering the
+    //    files, and under the same rule: if the host's `~/.claude.json`
+    //    cannot be merged the birth stops here, with no token committed and
+    //    no session started to sit at the prompt. See
+    //    [`pre_trust_claude_json`].
+    host.pre_trust(&home, &dir).await?;
 
     // 5. Commit the token. (guard #4)
     {
@@ -723,6 +834,100 @@ mod tests {
         assert_eq!(srv["headers"]["Authorization"], "Bearer deadbeef");
     }
 
+    // ---------------------------------------------- the pre-trust merge
+
+    /// A fresh host has no `~/.claude.json` at all: the merge creates the
+    /// project entry exactly as Claude Code would record it after the user
+    /// answered the trust dialog, and pre-approves the `.mcp.json` server.
+    #[test]
+    fn pre_trust_marks_the_directory_trusted_in_an_empty_file() {
+        let out = pre_trust_claude_json("", "/home/op/.claude-fleet/operator").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        let p = &v["projects"]["/home/op/.claude-fleet/operator"];
+        assert_eq!(p["hasTrustDialogAccepted"], true);
+        assert_eq!(
+            p["enabledMcpjsonServers"],
+            serde_json::json!(["claude-fleet"]),
+            "the operator's own server is the only one pre-approved"
+        );
+    }
+
+    /// The file on a real host carries the account, the fleet MCP entry
+    /// from provisioning and hundreds of other projects: all of it survives,
+    /// a second run changes nothing, and an approval the user already made
+    /// in that entry is kept next to ours.
+    #[test]
+    fn pre_trust_preserves_siblings_and_is_idempotent() {
+        let existing = r#"{
+  "oauthAccount": { "emailAddress": "op@example.com" },
+  "mcpServers": { "claude-fleet": { "type": "http", "url": "http://h/mcp" } },
+  "projects": {
+    "/home/op/other": { "hasTrustDialogAccepted": false, "allowedTools": ["Bash"] },
+    "/home/op/.claude-fleet/operator": {
+      "hasTrustDialogAccepted": false,
+      "enabledMcpjsonServers": ["theirs"],
+      "allowedTools": ["Read"]
+    }
+  }
+}"#;
+        let dir = "/home/op/.claude-fleet/operator";
+        let once = pre_trust_claude_json(existing, dir).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&once).unwrap();
+        assert_eq!(v["oauthAccount"]["emailAddress"], "op@example.com");
+        assert_eq!(v["mcpServers"]["claude-fleet"]["url"], "http://h/mcp");
+        assert_eq!(
+            v["projects"]["/home/op/other"]["hasTrustDialogAccepted"],
+            false
+        );
+        assert_eq!(
+            v["projects"]["/home/op/other"]["allowedTools"],
+            serde_json::json!(["Bash"])
+        );
+        let p = &v["projects"][dir];
+        assert_eq!(p["hasTrustDialogAccepted"], true);
+        assert_eq!(p["allowedTools"], serde_json::json!(["Read"]));
+        assert_eq!(
+            p["enabledMcpjsonServers"],
+            serde_json::json!(["theirs", "claude-fleet"])
+        );
+
+        let twice = pre_trust_claude_json(&once, dir).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&twice).unwrap();
+        assert_eq!(
+            v2, v,
+            "a second run is a no-op, the server is not listed twice"
+        );
+    }
+
+    /// A malformed file is refused BEFORE anything is written, the same rule
+    /// `provision::merge_mcp_entry` applies to the same file.
+    #[test]
+    fn pre_trust_refuses_a_file_it_cannot_parse() {
+        assert_eq!(
+            pre_trust_claude_json("not json", "/d").unwrap_err().code,
+            codes::E_PROVISION
+        );
+        assert_eq!(
+            pre_trust_claude_json("[]", "/d").unwrap_err().code,
+            codes::E_PROVISION
+        );
+        assert_eq!(
+            pre_trust_claude_json(r#"{"projects": []}"#, "/d")
+                .unwrap_err()
+                .code,
+            codes::E_PROVISION
+        );
+        assert_eq!(
+            pre_trust_claude_json(
+                r#"{"projects": {"/d": {"enabledMcpjsonServers": "x"}}}"#,
+                "/d"
+            )
+            .unwrap_err()
+            .code,
+            codes::E_PROVISION
+        );
+    }
+
     #[test]
     fn the_operating_instructions_state_the_two_rules_that_matter() {
         let md = claude_md();
@@ -768,6 +973,9 @@ mod tests {
         dir: String,
         files: std::sync::Mutex<Vec<(String, String)>>,
         starts: std::sync::atomic::AtomicUsize,
+        /// The host's `~/.claude.json` as it is on disk: what `pre_trust`
+        /// reads, and what it leaves behind.
+        claude_json: std::sync::Mutex<String>,
     }
 
     impl FakeHost {
@@ -777,6 +985,7 @@ mod tests {
                 dir: "/tmp/fleet-operator-test".to_string(),
                 files: std::sync::Mutex::new(Vec::new()),
                 starts: std::sync::atomic::AtomicUsize::new(0),
+                claude_json: std::sync::Mutex::new(String::new()),
             }
         }
     }
@@ -801,6 +1010,16 @@ mod tests {
             ));
             Ok(())
         }
+        async fn pre_trust(&self, host: &str, dir: &str) -> Result<(), IpcError> {
+            let mut on_disk = self.claude_json.lock().unwrap();
+            let merged = pre_trust_claude_json(&on_disk, dir)?;
+            *on_disk = merged.clone();
+            self.files
+                .lock()
+                .unwrap()
+                .push((format!("{host}:~/.claude.json"), merged));
+            Ok(())
+        }
         async fn start_session(&self, host: &str, project_id: i64) -> Result<SessionRow, IpcError> {
             self.starts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -820,6 +1039,16 @@ mod tests {
                 .unwrap()
                 .expect("the fake host just wrote this row"))
         }
+    }
+
+    /// The `~/.claude.json` the fake host was left with, as JSON.
+    fn written_claude_json(host: &FakeHost) -> serde_json::Value {
+        let files = host.files.lock().unwrap();
+        let (_, body) = files
+            .iter()
+            .find(|(p, _)| p.ends_with(":~/.claude.json"))
+            .expect("the birth wrote the host's ~/.claude.json");
+        serde_json::from_str(body).expect("valid JSON")
     }
 
     /// The `.mcp.json` the fake host was handed, as JSON.
@@ -924,6 +1153,103 @@ mod tests {
     /// Every LIVE client-token row the operator owns. A helper because both
     /// the count assertion and the "same token on both sides" assertion want
     /// it, and the name is the literal the brief pins.
+    /// The birth answers Claude Code's workspace trust dialog for the
+    /// directory it just filled — the operator on a fresh host sat at
+    /// `stuck_kind: trust_prompt` otherwise — by merging into the host's
+    /// `~/.claude.json` through the seam, under the absolute directory the
+    /// session starts in, without touching what was already there.
+    #[tokio::test]
+    async fn the_birth_pre_trusts_the_operator_directory() {
+        let (store, _ssh, _reg) = fixture();
+        let host = FakeHost::new(&store);
+        *host.claude_json.lock().unwrap() = r#"{
+  "oauthAccount": { "emailAddress": "op@example.com" },
+  "projects": { "/home/op/other": { "hasTrustDialogAccepted": false } }
+}"#
+        .to_string();
+        let row = ensure_operator_on(&store, &host).await.unwrap();
+
+        let v = written_claude_json(&host);
+        let p = &v["projects"][host.dir.as_str()];
+        assert_eq!(p["hasTrustDialogAccepted"], true);
+        assert_eq!(
+            p["enabledMcpjsonServers"],
+            serde_json::json!(["claude-fleet"])
+        );
+        assert_eq!(
+            v["oauthAccount"]["emailAddress"], "op@example.com",
+            "read, merged, written"
+        );
+        assert_eq!(
+            v["projects"]["/home/op/other"]["hasTrustDialogAccepted"],
+            false
+        );
+
+        // Under the directory the session really starts in, or the entry
+        // is for a path Claude Code never looks up.
+        let s = lock(&store).unwrap();
+        let base_path = s
+            .project_base_path(row.project_id.unwrap())
+            .unwrap()
+            .expect("the operator's project row");
+        assert_eq!(base_path, host.dir);
+        assert!(v["projects"].get(&base_path).is_some());
+    }
+
+    /// [`FakeHost`] whose `pre_trust` fails the way a host with a corrupt
+    /// `~/.claude.json` does.
+    struct FailingTrustHost {
+        inner: FakeHost,
+    }
+
+    #[async_trait::async_trait]
+    impl OperatorHost for FailingTrustHost {
+        async fn resolve_dir(&self, h: &str) -> Result<String, IpcError> {
+            self.inner.resolve_dir(h).await
+        }
+        async fn write_files(&self, h: &str, d: &str, c: &str, m: &str) -> Result<(), IpcError> {
+            self.inner.write_files(h, d, c, m).await
+        }
+        async fn pre_trust(&self, _h: &str, _d: &str) -> Result<(), IpcError> {
+            Err(IpcError::new(
+                codes::E_PROVISION,
+                "~/.claude.json is not valid JSON",
+            ))
+        }
+        async fn start_session(&self, h: &str, project_id: i64) -> Result<SessionRow, IpcError> {
+            self.inner.start_session(h, project_id).await
+        }
+    }
+
+    /// Pre-trust is part of delivering the files, not an afterthought: when
+    /// it fails the birth stops there — no token is committed for a host the
+    /// operator cannot run on, no session is started to sit at the dialog,
+    /// and the next press retries from the top.
+    #[tokio::test]
+    async fn a_birth_that_cannot_pre_trust_starts_nothing_and_commits_no_token() {
+        let (store, _ssh, _reg) = fixture();
+        let host = FailingTrustHost {
+            inner: FakeHost::new(&store),
+        };
+        let err = ensure_operator_on(&store, &host)
+            .await
+            .expect_err("the host's ~/.claude.json was refused");
+        assert_eq!(err.code, codes::E_PROVISION);
+
+        let s = lock(&store).unwrap();
+        assert!(
+            tokens_named_ux_agent(&s).is_empty(),
+            "no token was committed"
+        );
+        assert!(s.get_setting(SETTING_OPERATOR_TOKEN_SHA).unwrap().is_none());
+        assert!(operator_ref(&s).is_none(), "no reference was recorded");
+        assert_eq!(
+            host.inner.starts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no session was started"
+        );
+    }
+
     fn tokens_named_ux_agent(s: &Store) -> Vec<crate::store::ClientTokenRow> {
         s.list_client_tokens(false)
             .unwrap()
@@ -1347,6 +1673,10 @@ mod tests {
             tokio::task::yield_now().await;
             self.inner.write_files(h, d, c, m).await
         }
+        async fn pre_trust(&self, h: &str, d: &str) -> Result<(), IpcError> {
+            tokio::task::yield_now().await;
+            self.inner.pre_trust(h, d).await
+        }
         async fn start_session(&self, h: &str, project_id: i64) -> Result<SessionRow, IpcError> {
             tokio::task::yield_now().await;
             self.inner.start_session(h, project_id).await
@@ -1372,6 +1702,9 @@ mod tests {
             _m: &str,
         ) -> Result<(), IpcError> {
             Err(IpcError::new(codes::E_PROVISION, "no space left on device"))
+        }
+        async fn pre_trust(&self, h: &str, d: &str) -> Result<(), IpcError> {
+            self.inner.pre_trust(h, d).await
         }
         async fn start_session(&self, h: &str, project_id: i64) -> Result<SessionRow, IpcError> {
             self.inner.start_session(h, project_id).await
@@ -1452,9 +1785,17 @@ mod tests {
                 label: "safe_kill_session",
             },
             GuardSite {
-                what: "move_session_inner",
+                // The guard moved into `gather()` when the move's opening
+                // sequence was extracted so a dry run (`preview()`, Task 3 of
+                // the transfer-preflight project) could run exactly the
+                // move's own checks — `gather()` is now the one place that
+                // calls the guard, and `move_session_inner` calls `gather()`
+                // (pinned by the assertion just below this loop). The guard
+                // still runs before any step, on every real move; only the
+                // function that holds the call moved.
+                what: "gather",
                 source: MOVE,
-                signature: "async fn move_session_inner(",
+                signature: "async fn gather(",
                 label: "move_session",
             },
         ];
@@ -1473,6 +1814,18 @@ mod tests {
                 site.label
             );
         }
+        // The guard living inside `gather()` only protects a real move if
+        // `move_session_inner` actually calls `gather()` — pin the chain end
+        // to end, so the guard cannot be lost by `move_session_inner` quietly
+        // ceasing to call it (e.g. inlining its own copy of the opening
+        // sequence again).
+        let move_session_inner_body = item_source(MOVE, "async fn move_session_inner(");
+        assert!(
+            move_session_inner_body.contains("gather("),
+            "move_session_inner no longer calls gather() — the move would run \
+             without the operator guard, since that is the only place gather() \
+             (and the guard inside it) is reached from"
+        );
     }
 
     /// `restart_session` is the one session-addressed operation the design

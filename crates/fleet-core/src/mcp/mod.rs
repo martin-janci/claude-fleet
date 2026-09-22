@@ -255,11 +255,17 @@ async fn healthz() -> impl axum::response::IntoResponse {
     )
 }
 
-/// Build the axum app: `/mcp` (rmcp service) and `/hook` behind [`authorize`],
-/// plus the unauthenticated `/healthz` liveness and `/pair` exchange routes.
-/// Shared by `start` and the routing test.
+/// Build the axum app: `/mcp` and `/mcp/json` (rmcp services) and `/hook`
+/// behind [`authorize`], plus the unauthenticated `/healthz` liveness and
+/// `/pair` exchange routes. Shared by `start` and the routing test.
+///
+/// `mcp_json_service` is the same tool surface answering unframed
+/// `application/json` instead of SSE — see [`streamable_service`] for why
+/// that is a second mount rather than a flag on the first. `None` leaves the
+/// path unrouted, which is what every test that does not exercise it passes.
 fn build_app(
     mcp_service: axum::routing::MethodRouter<hooks::HookState>,
+    mcp_json_service: Option<axum::routing::MethodRouter<hooks::HookState>>,
     hook_state: hooks::HookState,
     auth_state: AuthState,
     pair_state: pairing::PairState,
@@ -272,8 +278,16 @@ fn build_app(
     // inside the spawned serve task *after* the listener had bound, so
     // `start` returned Ok and the UI showed the server "running" while
     // nothing was actually accepting connections.
-    let authorized = axum::Router::new()
-        .route("/mcp", mcp_service)
+    let mut mcp_routes = axum::Router::new().route("/mcp", mcp_service);
+    // A sibling path, not a header switch: rmcp's `json_response` is a
+    // per-service flag (`StreamableHttpServerConfig`), so the two answer
+    // shapes cannot share one mount. `/mcp` keeps SSE framing for the long
+    // polls whose keep-alive rides it; `/mcp/json` is for a client that wants
+    // a body a proxy will compress.
+    if let Some(json_service) = mcp_json_service {
+        mcp_routes = mcp_routes.route("/mcp/json", json_service);
+    }
+    let authorized = mcp_routes
         .route("/hook", axum::routing::post(hooks::handle_hook))
         .with_state(hook_state)
         // `/events` carries its own state, so it is a second router merged in
@@ -339,6 +353,7 @@ pub(crate) fn test_app(
 ) -> axum::Router {
     build_app(
         axum::routing::any(|| async { "MCP_OK" }),
+        None,
         hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::new(SshClient::new()),
@@ -359,16 +374,23 @@ pub(crate) fn test_app(
     )
 }
 
-/// The stateless rmcp service behind `/mcp`.
+/// Which answer shape a mount produces. The two differ in one rmcp config
+/// flag and nothing else — same tools, same auth, same Host allowlist.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Framing {
+    /// `text/event-stream`, the JSON-RPC body on a `data:` line.
+    Sse,
+    /// `application/json`, the body as it is.
+    Json,
+}
+
+/// The stateless rmcp service behind `/mcp` and `/mcp/json`.
 ///
 /// Stateless means every POST is a self-contained JSON-RPC exchange served by
 /// a fresh `FleetTools` clone: no `Mcp-Session-Id` is issued or required, and
 /// `GET`/`DELETE` are refused (405). The server never sends server-initiated
 /// messages (tools only), so a session bought nothing and cost a reconnect
-/// after every app restart, port or token change, or tunnel bounce. Responses
-/// keep SSE framing (`json_response` default `false`) so the 15 s keep-alive
-/// still flows on long polls (`wait_for_session`, `run_prompt`) through the
-/// reverse tunnel.
+/// after every app restart, port or token change, or tunnel bounce.
 ///
 /// rmcp keeps its own DNS-rebinding Host check, separate from fleet's
 /// `authorize` layer, and by default it admits only loopback Hosts. A Host
@@ -377,10 +399,30 @@ pub(crate) fn test_app(
 /// names followed by the same normalized `allowed_hosts` the `AuthState`
 /// holds. The list is never empty (an empty list would make rmcp allow every
 /// Host). Origin stays unchecked by rmcp: `authorize` enforces it first.
+///
+/// # Why the framing is a second mount rather than content negotiation
+///
+/// A phone pays for SSE framing twice. Once in bytes: the body is JSON
+/// escaped inside a JSON string, measured at 9–12 % of each list answer.
+/// And once in compression, which is the larger half — neither Caddy nor
+/// Cloudflare will compress `text/event-stream`, by design and correctly, so
+/// today *nothing* on this API is ever compressed. Measured on the live hub,
+/// `gzip -9` over the captured bodies: `list_sessions {summary:false}`
+/// 51 968 → 7 767 B, `list_projects` 7 660 → 1 308 B, `list_hosts`
+/// 1 707 → 475 B. A phone's cold start is three of those calls: 61 335 B
+/// today, ~9 550 B once a proxy may compress them.
+///
+/// The SSE mount cannot simply be switched over, because its framing is load
+/// bearing: `wait_for_session` and `run_prompt` are long polls whose 15 s
+/// keep-alive is what holds a reverse tunnel open. And rmcp's flag is
+/// per-service rather than per-request (`StreamableHttpServerConfig::
+/// with_json_response`), so one mount cannot answer both. Hence two paths,
+/// from one `FleetTools`, behind one `authorize` layer.
 pub(crate) fn streamable_service(
     tools: FleetTools,
     cancel: CancellationToken,
     allowed_hosts: &[String],
+    framing: Framing,
 ) -> StreamableHttpService<FleetTools, NeverSessionManager> {
     let rmcp_hosts: Vec<String> = ["localhost", "127.0.0.1", "::1"]
         .into_iter()
@@ -393,7 +435,8 @@ pub(crate) fn streamable_service(
         StreamableHttpServerConfig::default()
             .with_stateful_mode(false)
             .with_cancellation_token(cancel)
-            .with_allowed_hosts(rmcp_hosts),
+            .with_allowed_hosts(rmcp_hosts)
+            .with_json_response(framing == Framing::Json),
     )
 }
 
@@ -552,9 +595,21 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             base_url,
         );
         let tools = FleetTools::new(store, ssh, reg, tunnels, guards);
-        let service = streamable_service(tools, serve_shutdown.child_token(), &allowed_hosts);
+        let service = streamable_service(
+            tools.clone(),
+            serve_shutdown.child_token(),
+            &allowed_hosts,
+            Framing::Sse,
+        );
+        let json_service = streamable_service(
+            tools,
+            serve_shutdown.child_token(),
+            &allowed_hosts,
+            Framing::Json,
+        );
         let app = build_app(
             axum::routing::any_service(service),
+            Some(axum::routing::any_service(json_service)),
             hook_state,
             auth_state,
             pair_state,
@@ -682,6 +737,7 @@ mod tests {
         pair_state.attempt_interval = std::time::Duration::ZERO;
         let app = build_app(
             any(|| async { "MCP_OK" }),
+            None,
             hook_state,
             auth_state,
             pair_state,
@@ -1050,6 +1106,7 @@ mod tests {
         };
         let app2 = build_app(
             any(|| async { "MCP_OK" }),
+            None,
             hook_state2,
             auth_state2,
             pairing::PairState::new(
@@ -1106,6 +1163,7 @@ mod tests {
         let limited_pairings = Arc::new(pairing::PendingPairings::new());
         let app3 = build_app(
             any(|| async { "MCP_OK" }),
+            None,
             hook_state3,
             auth_state3,
             pairing::PairState::new(
@@ -1213,9 +1271,24 @@ mod tests {
             Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
             guards,
         );
-        let service = streamable_service(tools, CancellationToken::new(), &allowed_hosts);
+        // Both mounts, because this harness is the only place a real tool
+        // call crosses a real socket, and `/mcp/json` differs from `/mcp`
+        // exactly in what comes back over one.
+        let service = streamable_service(
+            tools.clone(),
+            CancellationToken::new(),
+            &allowed_hosts,
+            Framing::Sse,
+        );
+        let json_service = streamable_service(
+            tools,
+            CancellationToken::new(),
+            &allowed_hosts,
+            Framing::Json,
+        );
         let app = build_app(
             axum::routing::any_service(service),
+            Some(axum::routing::any_service(json_service)),
             hook_state,
             auth_state,
             pair_state,
@@ -1261,6 +1334,11 @@ mod tests {
     /// `POST /mcp` with the master token and the Accept pair rmcp requires.
     fn post_mcp(body: &str) -> String {
         post_mcp_to("127.0.0.1", body)
+    }
+
+    /// [`post_mcp_to`] against a chosen path, for the second mount.
+    fn post_mcp_path(path: &str, host: &str, body: &str) -> String {
+        post_mcp_to(host, body).replacen("POST /mcp ", &format!("POST {path} "), 1)
     }
 
     /// [`post_mcp`] with an explicit `Host` header.
@@ -1309,6 +1387,60 @@ mod tests {
                    Authorization: Bearer s3cret\r\nConnection: close\r\n\r\n";
         let r = raw_round_trip(addr, get).await;
         assert!(r.contains("405"), "GET must be 405 in stateless mode:\n{r}");
+    }
+
+    /// `/mcp/json` is the same tool surface with the framing taken off, so a
+    /// reverse proxy may compress it. Both mounts sit behind the same
+    /// `authorize` layer; neither changes what the other answers.
+    ///
+    /// The point of the unframed body is what a proxy can then do with it:
+    /// `text/event-stream` is excluded from compression by Caddy's `encode`
+    /// matcher and by Cloudflare, so on the live hub `--compressed` returns
+    /// byte-identical responses today. `application/json` is not.
+    #[tokio::test]
+    async fn mcp_json_answers_unframed_and_is_still_behind_the_token() {
+        let addr = serve_real_tools().await;
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+
+        let framed = raw_round_trip(addr, &post_mcp(list)).await;
+        assert!(
+            framed.to_ascii_lowercase().contains("text/event-stream"),
+            "/mcp keeps its framing — the long polls' keep-alive rides it:\n{framed}"
+        );
+        assert!(
+            framed.contains("data: {"),
+            "/mcp puts the body on a data: line:\n{framed}"
+        );
+
+        let plain = raw_round_trip(addr, &post_mcp_path("/mcp/json", "127.0.0.1", list)).await;
+        assert!(plain.contains("200 OK"), "/mcp/json:\n{plain}");
+        assert!(
+            plain
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "/mcp/json answers application/json:\n{plain}"
+        );
+        assert!(
+            !plain.contains("data: "),
+            "/mcp/json is unframed — no data: line:\n{plain}"
+        );
+        assert!(
+            plain.contains(r#""name":"list_sessions""#),
+            "the same tools are behind it:\n{plain}"
+        );
+
+        // The second mount is inside the authorize layer, not beside it.
+        let no_token = format!(
+            "POST /mcp/json HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json, \
+             text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{list}",
+            list.len()
+        );
+        let r = raw_round_trip(addr, &no_token).await;
+        assert!(
+            r.contains("401"),
+            "an unauthenticated tool endpoint is the way to get this wrong:\n{r}"
+        );
     }
 
     /// rmcp keeps its own DNS-rebinding Host check (loopback only by
@@ -1429,6 +1561,7 @@ mod tests {
             .with_shutdown(stop);
         let app = build_app(
             any(|| async { "MCP_OK" }),
+            None,
             hook_state,
             auth_state,
             pair_state,

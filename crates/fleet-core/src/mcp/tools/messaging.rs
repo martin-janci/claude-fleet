@@ -9,6 +9,7 @@ impl FleetTools {
         session's REPL (pasted, then one Enter). The first prompt to a \
         still-unnamed session also becomes its friendly name. \
         Marked untrusted unless raw=true (master only) or a trusted client. \
+        keys=Enter|Escape|C-c presses a key instead (unmarked). \
         Returns JSON { delivered, session_id, turn_seq_before, queued, acked \
         }: pass turn_seq_before to wait_for_session \
         { until: \"turn_gt\" } or session_transcript { since_turn } to \
@@ -27,8 +28,8 @@ impl FleetTools {
         audit(
             "send_prompt",
             &format!(
-                "session_id={:?} host={:?} session={:?}",
-                p.session_id, p.host_alias, p.tmux_name
+                "session_id={:?} host={:?} session={:?} keys={:?}",
+                p.session_id, p.host_alias, p.tmux_name, p.keys
             ),
         );
         let row = self.resolve_target_row(
@@ -38,6 +39,30 @@ impl FleetTools {
             p.tmux_name.as_deref(),
             "the session to prompt",
         )?;
+        if let Some(k) = p.keys.as_deref() {
+            let key = crate::tmux::NamedKey::parse(k).ok_or_else(|| {
+                mcp_err(
+                    codes::E_VALIDATE,
+                    format!("keys must be Enter, Escape or C-c, not {k:?}"),
+                    None,
+                )
+            })?;
+            if !p.prompt.is_empty() {
+                return Err(mcp_err(
+                    codes::E_VALIDATE,
+                    "keys and a non-empty prompt cannot be sent together",
+                    None,
+                ));
+            }
+            sessions::send_keys(&row.host_alias, &row.tmux_name, key, &self.store, &self.ssh)
+                .await
+                .map_err(to_mcp_err)?;
+            return ok_json(&serde_json::json!({
+                "delivered": true,
+                "session_id": row.id,
+                "turn_seq_before": row.turn_seq,
+            }));
+        }
         let label = caller.label();
         // The key is RESERVED before the send, not written after it. A send
         // is an SSH round trip plus up to 1.5 s of ack wait, and a caller

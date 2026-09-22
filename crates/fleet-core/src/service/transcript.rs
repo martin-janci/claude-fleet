@@ -1602,6 +1602,125 @@ mod tests {
     use super::*;
     use crate::store::StartSource;
 
+    /// Every `kind` tag [`ConvItem`] puts on the wire.
+    ///
+    /// The `match` is the point: it is exhaustive, so a new variant does not
+    /// compile until someone edits this function, and editing it means reading
+    /// the test below.
+    fn kind_tag(item: &ConvItem) -> &'static str {
+        match item {
+            ConvItem::Text { .. } => "text",
+            ConvItem::Tool { .. } => "tool",
+            ConvItem::Subagent { .. } => "subagent",
+            ConvItem::Compact { .. } => "compact",
+            ConvItem::Command { .. } => "command",
+            ConvItem::Notification { .. } => "notification",
+            ConvItem::Interrupt { .. } => "interrupt",
+        }
+    }
+
+    /// **A phone has its own copy of this enum. Adding a variant here is not
+    /// the whole change.**
+    ///
+    /// `session_conversation` is one of the five tools a paired client token
+    /// may call, and `fleet-mobile` decodes these items in
+    /// `shared/src/commonMain/kotlin/dev/claudefleet/mobile/model/Conversation.kt`.
+    /// It falls back to an `Unsupported` placeholder for a tag it does not
+    /// know, deliberately, so that an older phone against a newer hub degrades
+    /// instead of throwing.
+    ///
+    /// The cost of that kindness is that drift is **silent in both
+    /// directions**. When `notification` landed here (`74c82b3`, "parse task
+    /// notifications instead of printing their XML") it improved the desktop
+    /// and made the phone worse: those notifications had been arriving as
+    /// `text` items holding raw XML — ugly, and readable — and afterwards
+    /// arrived tagged, so the phone drew "(unsupported item: notification)".
+    /// Content that had been visible stopped being visible. Nothing failed.
+    /// Both repositories' suites stayed green, because each side was
+    /// internally consistent on its own.
+    ///
+    /// So this list is a handoff note with a compiler behind it. If you are
+    /// here because [`kind_tag`] stopped compiling, the other half of the
+    /// change is in `fleet-mobile`: add the variant to `ConvItem`, to
+    /// `ConvItemSerializer`, to the renderer's `when` in `SessionScreen.kt`,
+    /// and to `ConvItemTest.every_kind_the_hub_emits_today_is_modelled`.
+    #[test]
+    fn the_wire_kinds_a_phone_must_also_understand() {
+        let every = [
+            ConvItem::Text {
+                text: String::new(),
+            },
+            ConvItem::Tool {
+                summary: String::new(),
+                error: false,
+                id: None,
+                name: String::new(),
+                target: None,
+                at: None,
+                ended_at: None,
+                done: true,
+            },
+            ConvItem::Compact {
+                trigger: None,
+                pre_tokens: None,
+                summary: None,
+            },
+            ConvItem::Command {
+                name: String::new(),
+                args: None,
+                output: None,
+            },
+            ConvItem::Interrupt { during_tool: false },
+        ];
+
+        let mut tags: Vec<&str> = every.iter().map(kind_tag).collect();
+        // The two with long field lists are checked through `kind_tag` alone
+        // rather than constructed here; what matters is the tag set, and
+        // `kind_tag`'s own exhaustiveness is what makes that complete.
+        tags.push("subagent");
+        tags.push("notification");
+        tags.sort_unstable();
+
+        assert_eq!(
+            tags,
+            [
+                "command",
+                "compact",
+                "interrupt",
+                "notification",
+                "subagent",
+                "text",
+                "tool",
+            ],
+            "the set of wire kinds changed; fleet-mobile decodes these too — see this test's docs"
+        );
+    }
+
+    /// And the tags are what `serde` actually writes, not what we believe.
+    ///
+    /// `kind_tag` above is a second statement of the same fact, and two
+    /// statements of one fact disagree eventually. This is the one that asks
+    /// the serializer.
+    #[test]
+    fn the_tag_a_variant_serializes_with_is_the_one_named_here() {
+        for item in [
+            ConvItem::Text { text: "x".into() },
+            ConvItem::Compact {
+                trigger: None,
+                pre_tokens: None,
+                summary: None,
+            },
+            ConvItem::Interrupt { during_tool: true },
+        ] {
+            let json = serde_json::to_value(&item).expect("ConvItem serializes");
+            assert_eq!(
+                json.get("kind").and_then(|k| k.as_str()),
+                Some(kind_tag(&item)),
+                "serde's tag and kind_tag disagree for {json:?}"
+            );
+        }
+    }
+
     #[test]
     fn project_dir_encoding_matches_claude_code() {
         // Observed on a live install (see module docs).

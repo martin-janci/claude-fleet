@@ -29,15 +29,16 @@ vi.mock('./sessions', async () => {
 });
 vi.mock('./selection', async () => {
   const actual = await vi.importActual<typeof import('./selection')>('./selection');
-  return { ...actual, selectSession: vi.fn() };
+  return { ...actual, selectSession: vi.fn(), selectSessionExplicitly: vi.fn() };
 });
 import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, sessions, type SessionRow } from './sessions';
-import { selectSession } from './selection';
+import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
 import { composerPresets, resetComposerPresets } from './composer_presets';
 import { composerDrafts } from './conversation';
+import { scrollMemory } from './conversation_nav';
 import { openPathRequest } from './app_views';
 import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_events';
 import type { SessionEvent } from './timeline';
@@ -64,7 +65,7 @@ const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
 const mockedAct = sessionActivity as unknown as ReturnType<typeof vi.fn>;
 const mockedList = listConversations as unknown as ReturnType<typeof vi.fn>;
 const mockedDetail = toolDetail as unknown as ReturnType<typeof vi.fn>;
-const selectSessionSpy = selectSession as unknown as ReturnType<typeof vi.fn>;
+const selectSessionExplicitlySpy = selectSessionExplicitly as unknown as ReturnType<typeof vi.fn>;
 
 function session(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -131,7 +132,7 @@ beforeEach(() => {
   mockedAct.mockReset();
   mockedList.mockReset();
   mockedDetail.mockReset();
-  selectSessionSpy.mockReset();
+  selectSessionExplicitlySpy.mockReset();
   mockedDetail.mockResolvedValue({
     ok: true,
     value: { id: 't1', name: 'Bash', input: '{}', edit: null, command: 'ls', result: 'out', is_error: false },
@@ -139,6 +140,7 @@ beforeEach(() => {
   mockedList.mockResolvedValue({ ok: true, value: [] });
   mockedAct.mockResolvedValue({ ok: false, error: { code: 'E_INVALID_STATE', message: 'no pane' } });
   composerDrafts.clear();
+  scrollMemory.clear();
   resetComposerPresets();
   setVisibility('visible');
   hubStatus.set({ ...STANDALONE });
@@ -2578,6 +2580,262 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(document.activeElement).toBe(items[0]);
   });
 
+  function rect(top: number, bottom: number) {
+    return { top, bottom, left: 0, right: 0, width: 0, height: bottom - top, x: 0, y: top, toJSON: () => ({}) } as DOMRect;
+  }
+
+  /** The scroll handler measures (and remembers) in a `requestAnimationFrame`,
+   *  so a scroll is only recorded once a frame has run. */
+  const frame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+
+  /** Put the reader at `key`, two rows' worth above the fold. */
+  function readAt(key: string) {
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 500, configurable: true });
+    scroller.getBoundingClientRect = () => rect(0, 500);
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-row-key]'))) {
+      el.getBoundingClientRect = () => (el.dataset.rowKey === key ? rect(-10, 40) : rect(-60, -20));
+    }
+    scroller.scrollTop = 300;
+    return scroller;
+  }
+
+  it('remembers where a session was scrolled to across a switch away and back', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    const { rerender } = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await settle();
+
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 500, configurable: true });
+    scroller.scrollTop = 300;
+    await fireEvent.scroll(scroller);
+    // Scrolled away from the bottom, and reading around t1.
+    expect(screen.getByTestId('conv-latest')).toBeTruthy();
+    scroller.getBoundingClientRect = () => rect(0, 500);
+    (document.querySelector('[data-row-key="t1"]') as HTMLElement).getBoundingClientRect = () => rect(-10, 40);
+
+    // Switch to another session: a fresh view starts at the bottom.
+    mockedConv.mockReturnValue(
+      ok(conv({ turns: [{ prompt: 'other session', at: '2026-09-18T11:00:00Z', ended_at: null, items: [] }] })),
+    );
+    await rerender({ session: session({ id: 2 }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-latest')).toBeNull();
+
+    // The reader scrolls up in THAT session too — this is the scroller
+    // `load()` measures when the next switch starts, before the reset has
+    // flushed it away.
+    const other = screen.getByTestId('conv-scroller');
+    Object.defineProperty(other, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(other, 'clientHeight', { value: 500, configurable: true });
+    other.getBoundingClientRect = () => rect(0, 500);
+    (document.querySelector('[data-row-key="t0"]') as HTMLElement).getBoundingClientRect = () => rect(-10, 40);
+    other.scrollTop = 300;
+    await fireEvent.scroll(other);
+    await frame();
+
+    // Switching back restores both the scroll position and the "not at the
+    // bottom" state, instead of snapping to the latest turn.
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    await rerender({ session: session({ id: 1 }), visible: true });
+    await settle();
+    await settle();
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t1');
+    // The restored view is where the reader left it — not a view with three
+    // brand-new turns in it. `load()` measured the OUTGOING session's
+    // scroller before the reset flushed and counted the whole incoming
+    // transcript as unseen, so this said "↓ 5 new".
+    expect(screen.getByTestId('conv-latest').textContent?.trim()).toBe('↓ Latest');
+  });
+
+  it('remembers the read position across an unmount and remount of the same session', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    const first = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await settle();
+
+    const scroller = readAt('t1');
+    await fireEvent.scroll(scroller);
+    await frame();
+    expect(screen.getByTestId('conv-latest')).toBeTruthy();
+
+    // The panel goes away entirely (the Conversation tab is left, the window
+    // is re-laid-out) — no session-prop change ever happens, so the old
+    // switch-time snapshot never ran on this path.
+    first.unmount();
+
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await settle();
+    await settle();
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t1');
+    expect(screen.getByTestId('conv-latest').textContent?.trim()).toBe('↓ Latest');
+  });
+
+  it('restores by the TURN, not by the window position, after the window slid', async () => {
+    // Four turns; the reader stops on the second one.
+    const slidable = (from: number) =>
+      conv({
+        turns: [0, 1, 2, 3].map((i) => ({
+          prompt: `ask ${from + i}`,
+          at: new Date(Date.parse('2026-09-18T09:00:00Z') + (from + i) * 60_000).toISOString(),
+          ended_at: null,
+          items: [{ kind: 'text' as const, text: 'ok' }],
+        })),
+      });
+    mockedConv.mockReturnValue(ok(slidable(0)));
+    const { rerender } = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await settle();
+
+    // `ask 2` is t2 in this window.
+    const scroller = readAt('t2');
+    await fireEvent.scroll(scroller);
+    await frame();
+
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'elsewhere', at: null, ended_at: null, items: [] }] })));
+    await rerender({ session: session({ id: 2 }), visible: true });
+    await settle();
+
+    // Two more turns have landed meanwhile, so the window slid: `ask 2` is
+    // t0 now. Anchored on the turn's timestamp, the restore follows it; the
+    // raw `t2` key would have landed two turns further down.
+    mockedConv.mockReturnValue(ok(slidable(2)));
+    await rerender({ session: session({ id: 1 }), visible: true });
+    await settle();
+    await settle();
+    const landed = scrolled.at(-1) as HTMLElement;
+    expect(landed.getAttribute('data-row-key')).toBe('t0');
+    expect(landed.textContent).toContain('ask 2');
+  });
+
+  it('a remembered row outside the returning session\'s loaded window keeps the view pinned to the bottom', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    const { rerender } = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await settle();
+
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 500, configurable: true });
+    scroller.scrollTop = 300;
+    await fireEvent.scroll(scroller);
+    expect(screen.getByTestId('conv-latest')).toBeTruthy();
+    scroller.getBoundingClientRect = () => rect(0, 500);
+    (document.querySelector('[data-row-key="t1"]') as HTMLElement).getBoundingClientRect = () => rect(-10, 40);
+
+    // Switch to another session: a fresh view starts at the bottom.
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'other session', at: null, ended_at: null, items: [] }] })));
+    await rerender({ session: session({ id: 2 }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-latest')).toBeNull();
+
+    // Switching back to session 1, but its transcript now loads with only a
+    // single (different) turn — t1, where the view was left, is not among
+    // the rendered rows. The restore must not fake a scroll to a row that
+    // isn't there.
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'trimmed history', at: null, ended_at: null, items: [] }] })));
+    const before = scrolled.length;
+    await rerender({ session: session({ id: 1 }), visible: true });
+    await settle();
+    await settle();
+
+    expect(scrolled.length).toBe(before);
+    expect(screen.queryByTestId('conv-latest')).toBeNull();
+  });
+
+  it('the turn-stepper buttons and `[`/`]` move to the turn adjacent to the read position', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+
+    const scroller = screen.getByTestId('conv-scroller');
+    scroller.getBoundingClientRect = () => rect(0, 500);
+    // The reader is at t1: its row is the first whose bottom sits below the
+    // scroller's own top edge.
+    (document.querySelector('[data-row-key="t0"]') as HTMLElement).getBoundingClientRect = () => rect(-50, -10);
+    (document.querySelector('[data-row-key="t1"]') as HTMLElement).getBoundingClientRect = () => rect(-10, 40);
+    (document.querySelector('[data-row-key="t2"]') as HTMLElement).getBoundingClientRect = () => rect(40, 90);
+
+    const next = screen.getByTestId('conv-turn-next') as HTMLButtonElement;
+    const prev = screen.getByTestId('conv-turn-prev') as HTMLButtonElement;
+    expect(next.getAttribute('aria-label')).toBe('Next turn');
+    expect(prev.getAttribute('aria-label')).toBe('Previous turn');
+    // The visible text must read the same direction as the accessible name,
+    // and the tooltip names the keyboard shortcut.
+    expect(next.textContent?.trim()).toBe('Next turn ›');
+    expect(prev.textContent?.trim()).toBe('‹ Prev turn');
+    expect(next.getAttribute('title')).toBe('Next turn (])');
+    expect(prev.getAttribute('title')).toBe('Previous turn ([)');
+
+    await fireEvent.click(next);
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t2');
+
+    await fireEvent.click(prev);
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t0');
+
+    await fireEvent.keyDown(scroller, { key: ']' });
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t2');
+    await fireEvent.keyDown(scroller, { key: '[' });
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t0');
+    // Landed back on the first turn: "previous" disables, "next" stays live.
+    await tick();
+    expect(prev.disabled).toBe(true);
+    expect(next.disabled).toBe(false);
+
+    // A disabled button ignores a click — no further scroll, no exception.
+    const before1 = scrolled.length;
+    await fireEvent.click(prev);
+    expect(scrolled.length).toBe(before1);
+
+    // Typing `[`/`]` into the composer must not steal the keystroke.
+    const before = scrolled.length;
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.keyDown(box, { key: ']' });
+    expect(scrolled.length).toBe(before);
+  });
+
+  it('`]` on an inline event steps to the turn BELOW it, not back to the top', async () => {
+    const base = Date.parse('2026-09-18T09:00:00Z');
+    const at = (min: number) => new Date(base + min * 60_000).toISOString();
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [0, 1, 2, 3].map((i) => ({
+            prompt: `ask ${i}`,
+            at: at(i),
+            ended_at: null,
+            items: [{ kind: 'text' as const, text: 'ok' }],
+          })),
+          // Between `ask 1` and `ask 2`, so the thread reads t0 t1 e5 t2 t3.
+          events: [event({ id: 5, at: (base + 90_000) / 1000, kind: 'stop_failure', detail: 'rate_limit: slow down' })],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(Array.from(document.querySelectorAll('[data-row-key]')).map((e) => e.getAttribute('data-row-key'))).toEqual([
+      't0', 't1', 'e5', 't2', 't3',
+    ]);
+
+    // The reader is parked on the event row.
+    const scroller = readAt('e5');
+
+    // An event is not a turn: resolving it backwards used to yield turn 0,
+    // so `]` scrolled UP to t1 instead of on to the next turn.
+    await fireEvent.keyDown(scroller, { key: ']' });
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t3');
+    await fireEvent.keyDown(scroller, { key: '[' });
+    expect(scrolled.at(-1)?.getAttribute('data-row-key')).toBe('t1');
+  });
+
+  it('the turn stepper only shows with more than one turn', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-turn-prev')).toBeNull();
+    expect(screen.queryByTestId('conv-turn-next')).toBeNull();
+  });
+
   it('an unfinished tool call in an earlier turn shows "no result"; the running turn counts up', async () => {
     const at = new Date(Date.now() - 3_000).toISOString();
     mockedConv.mockReturnValue(
@@ -3040,7 +3298,7 @@ describe('ConversationPanel background switcher', () => {
     await fireEvent.click(getByTestId('conv-background-button'));
     await fireEvent.click(getAllByTestId('conv-background-item')[0]);
     await fireEvent.click(getByTestId('bg-detail-open-session'));
-    expect(selectSessionSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 4 }));
+    expect(selectSessionExplicitlySpy).toHaveBeenCalledWith(expect.objectContaining({ id: 4 }));
   });
 
   it('switches the app to a fleet child session rather than showing a detail', async () => {
@@ -3049,7 +3307,7 @@ describe('ConversationPanel background switcher', () => {
     });
     await fireEvent.click(getByTestId('conv-background-button'));
     await fireEvent.click(getAllByTestId('conv-background-item')[0]);
-    expect(selectSessionSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }));
+    expect(selectSessionExplicitlySpy).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }));
   });
 });
 

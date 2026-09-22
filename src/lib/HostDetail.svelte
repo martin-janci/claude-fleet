@@ -12,10 +12,10 @@
   import type { AccountUsageSnapshot } from './account_usage_store';
   import type { HostTokenInfo, TokenMode } from './mcp';
   import type { SessionRow } from './sessions';
-  import { selectSession } from './selection';
+  import { selectSessionExplicitly } from './selection';
   import { claudeStatusLabel, stuckKindLabel } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
-  import { hideHostWithUndo, rotateToken, setTokenMode, showHost } from './host_actions';
+  import { hideHostWithUndo, rotateToken, setTokenMode, showHost, viewHostSessions } from './host_actions';
   import { pushError, push } from './toasts';
   import { removeHostMessage, rotateTokenMessage, type HostAttention } from './hosts_view';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
@@ -155,6 +155,13 @@
       <button
         type="button"
         class="small"
+        onclick={() => viewHostSessions(host.alias)}
+        data-testid="detail-view-sessions"
+        ><kbd>s</kbd> View sessions</button
+      >
+      <button
+        type="button"
+        class="small"
         onclick={onreprobe}
         disabled={probing || reprobeBlocked !== null}
         title={reprobeBlocked ?? ''}
@@ -224,7 +231,7 @@
               class="session"
               data-nav-row
               data-testid="detail-session"
-              onclick={() => selectSession(s)}
+              onclick={() => selectSessionExplicitly(s)}
             >
               <span class="s-name">{sessionName(s)}</span>
               <span class="muted">{sessionState(s)}</span>

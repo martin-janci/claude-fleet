@@ -93,7 +93,7 @@ fn client_tokens_has_trusted_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 040: `sessions` already has its
+/// `already_applied` guard of migration 041: `sessions` already has its
 /// `row_version` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
 fn sessions_has_row_version(conn: &Connection) -> rusqlite::Result<bool> {
@@ -168,6 +168,17 @@ fn hosts_has_transport(conn: &Connection) -> rusqlite::Result<bool> {
 fn sessions_has_tmux_pane_id(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'tmux_pane_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 040: `sessions` already has its
+/// `pending_input` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+fn sessions_has_pending_input(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'pending_input'",
         [],
         |r| r.get(0),
     )?;
@@ -327,11 +338,17 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/039_client_trust.sql"),
         already_applied: Some(client_tokens_has_trusted_at),
     },
-    // `sessions.row_version` (+ trigger) and `sessions.prompt_submit_seq`;
-    // ADD COLUMN, so the same guard as 038/039.
+    // `sessions.pending_input`; ADD COLUMN, so the same guard as 039.
     Migration {
         version: 40,
-        sql: include_str!("../../migrations/040_row_version_and_prompt_ack.sql"),
+        sql: include_str!("../../migrations/040_pending_input.sql"),
+        already_applied: Some(sessions_has_pending_input),
+    },
+    // `sessions.row_version` (+ trigger) and `sessions.prompt_submit_seq`;
+    // ADD COLUMN, so the same guard as 038/039/040.
+    Migration {
+        version: 41,
+        sql: include_str!("../../migrations/041_row_version_and_prompt_ack.sql"),
         already_applied: Some(sessions_has_row_version),
     },
 ];

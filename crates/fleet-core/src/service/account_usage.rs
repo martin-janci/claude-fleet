@@ -908,6 +908,40 @@ pub struct AccountUsageSnapshot {
     pub next_try_at: i64,
 }
 
+impl AccountUsageSnapshot {
+    /// Whether this snapshot says anything new compared with `before`.
+    ///
+    /// Everything except [`Self::next_try_at`], which moves on every attempt
+    /// whether or not the answer changed — it is a display value, and the
+    /// schedule that produces it is monotonic. `PartialEq` stays derived and
+    /// keeps comparing it, because the scheduling tests assert on it.
+    ///
+    /// Without this distinction an account whose usage, status, subscription
+    /// and detail are all identical compares unequal forever, so
+    /// `fetch_and_emit` — documented as "emit iff changed" — emitted on every
+    /// poll: roughly 6 KB/h to each connected client per account, and a
+    /// desktop repainting a usage panel that had not changed.
+    pub fn is_newsworthy_change(&self, before: &Self) -> bool {
+        let Self {
+            account_uuid,
+            usage,
+            subscription,
+            fetched_at,
+            source_host,
+            status,
+            detail,
+            next_try_at: _,
+        } = self;
+        account_uuid != &before.account_uuid
+            || usage != &before.usage
+            || subscription != &before.subscription
+            || fetched_at != &before.fetched_at
+            || source_host != &before.source_host
+            || status != &before.status
+            || detail != &before.detail
+    }
+}
+
 fn lock(cache: &Mutex<UsageCache>) -> std::sync::MutexGuard<'_, UsageCache> {
     cache.lock().unwrap_or_else(PoisonError::into_inner)
 }

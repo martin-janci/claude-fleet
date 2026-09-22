@@ -1,6 +1,6 @@
 <script lang="ts">
   import { spawnReview, DEFAULT_REVIEW_PROMPT, type SessionRow } from './sessions';
-  import { selectSession } from './selection';
+  import { selectSessionExplicitly } from './selection';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import Modal from './Modal.svelte';
@@ -23,7 +23,7 @@
     try {
       const r = await spawnReview(source.id, prompt, controller.signal);
       if (r.ok) {
-        selectSession(r.value);
+        selectSessionExplicitly(r.value);
         onClose();
       } else if (r.error.code !== 'E_CANCELLED') {
         error = r.error.message;

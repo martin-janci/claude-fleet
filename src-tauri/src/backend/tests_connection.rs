@@ -151,6 +151,76 @@ fn the_contract_verdict_outlives_the_state_and_only_a_hello_moves_it() {
     assert_eq!(s.contract_verdict(), None);
 }
 
+/// "Confirmed" is positive knowledge: only an in-range `ready` frame
+/// (`Connected`) sets it; a socket drop or a skew clears it. A fresh
+/// client — whose verdict is also `None` — is NOT confirmed.
+#[test]
+fn only_an_in_range_hello_confirms_the_contract() {
+    let (s, _) = status("cl_t");
+    assert!(!s.contract_confirmed(), "never judged is not confirmed");
+    for state in [
+        HubConnection::Connecting,
+        HubConnection::Offline {
+            attempt: 1,
+            retry_in_secs: 1,
+            reason: "connection refused".into(),
+        },
+    ] {
+        s.report(state.clone());
+        assert!(!s.contract_confirmed(), "{state:?}");
+    }
+    s.report(HubConnection::Connected);
+    assert!(s.contract_confirmed());
+    s.report(HubConnection::Reconnecting {
+        attempt: 1,
+        retry_in_secs: 1,
+        reason: "the hub closed the event stream".into(),
+    });
+    assert!(
+        !s.contract_confirmed(),
+        "a socket drop withdraws it: the next hub may be a different build"
+    );
+    s.report(HubConnection::Connected);
+    s.report(HubConnection::HubTooOld {
+        hub_contract: 1,
+        min_contract: 2,
+    });
+    assert!(!s.contract_confirmed(), "a skew withdraws it");
+}
+
+/// I4: every transition away from `Connected` — `Connecting`,
+/// `Reconnecting`, `Offline` — withdraws the confirmation, and only a NEW
+/// judged `ready` (`Connected`) restores it. Across a reconnect the hub
+/// may have been swapped for an older build (a downgrade, a restart onto a
+/// stale image): a `when: cancel` sent to it in that window would MOVE the
+/// session, so nothing from the previous connection may vouch for it.
+#[test]
+fn every_transition_away_from_connected_withdraws_the_confirmation() {
+    let (s, _) = status("cl_t");
+    for away in [
+        HubConnection::Reconnecting {
+            attempt: 1,
+            retry_in_secs: 1,
+            reason: "the hub closed the event stream".into(),
+        },
+        HubConnection::Offline {
+            attempt: 2,
+            retry_in_secs: 2,
+            reason: "connection refused".into(),
+        },
+        HubConnection::Connecting,
+    ] {
+        s.report(HubConnection::Connected);
+        assert!(s.contract_confirmed(), "an in-range ready confirms");
+        s.report(away.clone());
+        assert!(!s.contract_confirmed(), "{away:?} must withdraw it");
+        s.report(away.clone());
+        assert!(!s.contract_confirmed(), "{away:?} again: still withdrawn");
+    }
+    s.report(HubConnection::Connected);
+    assert!(s.contract_confirmed(), "a new judged ready restores it");
+}
+
 #[test]
 fn a_standalone_status_emits_nothing() {
     let s = HubConnectionStatus::standalone();

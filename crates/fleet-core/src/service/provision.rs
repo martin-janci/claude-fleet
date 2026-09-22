@@ -18,8 +18,8 @@ const SKILL_PATH: &str = "~/.claude/skills/claude-fleet-control/SKILL.md";
 const FRIENDLY_NAME_SKILL: &str = include_str!("../../../../skills/fleet-friendly-name/SKILL.md");
 const FRIENDLY_NAME_SKILL_DIR: &str = "~/.claude/skills/fleet-friendly-name";
 const FRIENDLY_NAME_SKILL_PATH: &str = "~/.claude/skills/fleet-friendly-name/SKILL.md";
-const CLAUDE_JSON: &str = "~/.claude.json";
-const CLAUDE_DIR: &str = "~/.claude";
+pub(crate) const CLAUDE_JSON: &str = "~/.claude.json";
+pub(crate) const CLAUDE_DIR: &str = "~/.claude";
 const CLAUDE_MD_PATH: &str = "~/.claude/CLAUDE.md";
 const TMUX_CONF: &str = "~/.tmux.conf";
 
@@ -780,11 +780,14 @@ pub(crate) fn expand_home_local(path: &str) -> Result<String, IpcError> {
     }
 }
 
-/// Merge the claude-fleet HTTP MCP server entry into a host's `~/.claude.json`
-/// content, preserving every existing key. Returns the new JSON (pretty).
-/// Errors if `existing` is non-empty and not valid JSON.
-pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String, IpcError> {
-    let mut root: serde_json::Value = if existing.trim().is_empty() {
+/// The current content of a host's `~/.claude.json` as the JSON object
+/// Claude Code writes: a missing (empty) file is an empty object, and
+/// anything else that is not an object is refused with `E_PROVISION` so no
+/// merge ever writes over a file it did not understand. Shared by every
+/// read-merge-write on that file ([`merge_mcp_entry`],
+/// `operator::pre_trust_claude_json`).
+pub(crate) fn parse_claude_json(existing: &str) -> Result<serde_json::Value, IpcError> {
+    let root: serde_json::Value = if existing.trim().is_empty() {
         serde_json::json!({})
     } else {
         serde_json::from_str(existing).map_err(|e| {
@@ -800,6 +803,14 @@ pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String,
             "~/.claude.json is not a JSON object",
         ));
     }
+    Ok(root)
+}
+
+/// Merge the claude-fleet HTTP MCP server entry into a host's `~/.claude.json`
+/// content, preserving every existing key. Returns the new JSON (pretty).
+/// Errors if `existing` is non-empty and not valid JSON.
+pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String, IpcError> {
+    let mut root = parse_claude_json(existing)?;
     let servers = root
         .as_object_mut()
         .unwrap()
@@ -2020,39 +2031,42 @@ mod tests {
             s.upsert_host("mefistos").unwrap();
             s.set_host_provisioned("mefistos", true).unwrap();
         }
-        let spawned = Arc::new(Mutex::new(Vec::<String>::new()));
-        let seen = Arc::clone(&spawned);
+        // The fake spawner reports each ssh it is asked to start; the
+        // supervisor spawns from a task, so the test waits on this signal
+        // instead of guessing how long that task takes to run.
+        let (spawned_tx, mut spawned) = tokio::sync::mpsc::unbounded_channel::<String>();
         let tunnels = Arc::new(TunnelSupervisor::with_spawner(
             Arc::new(move |argv: Vec<String>| {
-                seen.lock()
-                    .unwrap()
-                    .push(argv.last().cloned().unwrap_or_default());
+                let _ = spawned_tx.send(argv.last().cloned().unwrap_or_default());
                 Box::pin(std::future::pending())
             }),
             Duration::from_secs(3600),
         ));
         let public = HubBase::public("https://fleet.example.com", 4180).unwrap();
         reestablish_tunnels(&store, &tunnels, &public).unwrap();
-        // The supervisor spawns from a task, so let it run before counting.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // `ensure` registers its task before returning, so an empty snapshot
+        // means no supervised task exists — and only a task can spawn ssh.
         assert!(tunnels.snapshot().is_empty(), "no tunnel for a public hub");
         assert!(
-            spawned.lock().unwrap().is_empty(),
-            "a public hub must spawn no ssh at all: {:?}",
-            spawned.lock().unwrap()
+            spawned.try_recv().is_err(),
+            "a public hub must spawn no ssh at all"
         );
         reestablish_tunnels(&store, &tunnels, &HubBase::loopback(4180)).unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             tunnels.snapshot().get("mefistos"),
             Some(&true),
             "loopback hub tunnels provisioned hosts"
         );
         assert_eq!(tunnels.snapshot().len(), 1);
-        // And exactly one ssh was spawned, for that host.
-        let argv = spawned.lock().unwrap().clone();
-        assert_eq!(argv.len(), 1, "{argv:?}");
-        assert!(argv[0].contains("mefistos"), "{argv:?}");
+        let first = tokio::time::timeout(Duration::from_secs(5), spawned.recv())
+            .await
+            .expect("the loopback pass spawns ssh within 5s")
+            .expect("spawner channel open");
+        assert!(first.contains("mefistos"), "{first:?}");
+        // And exactly one ssh was spawned: the one task's fake ssh never
+        // exits, so it never restarts, and the public pass (run first, on
+        // this single-threaded runtime) would have been received ahead of it.
+        assert!(spawned.try_recv().is_err(), "exactly one ssh, for mefistos");
         tunnels.stop_all();
     }
 
@@ -2072,7 +2086,8 @@ mod tests {
         }
         let tunnels = quiet_tunnels();
         reestablish_tunnels(&store, &tunnels, &HubBase::loopback(4180)).unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // No wait needed: `ensure` registers the host's task before returning,
+        // and the snapshot reads only that registry.
         assert!(
             !tunnels.snapshot().contains_key("laptop"),
             "an agent host has no way to reach an ssh -R tunnel: {:?}",

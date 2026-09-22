@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// Defined once in `service::pane_intel` (they are built from a parsed pane
+/// tail); re-exported here so `SessionRow` can name them.
+pub use crate::service::pane_intel::{PendingInput, PendingOption};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectRow {
     pub id: i64,
@@ -112,7 +116,7 @@ pub(super) const KIND_PANE_LESS: &str = "kind IN ('bg','external')";
 /// `PartialEq` covers every wire field including `row_version`. For the
 /// no-op-reconcile-pass check `upsert_session_in_tx` wants (a real change vs.
 /// a pass that observed exactly what is already stored), use
-/// [`SessionRow::eq_ignoring_row_version`] instead: the migration 040 trigger
+/// [`SessionRow::eq_ignoring_row_version`] instead: the migration 041 trigger
 /// bumps `row_version` on every physical UPDATE, no-op or not, so plain `==`
 /// would make every pass look like a change.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -206,7 +210,7 @@ pub struct SessionRow {
     /// (NULL ⇒ empty) and always surfaced as a list on the wire.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Bumped by a trigger on every UPDATE (migration 040). The frontend's
+    /// Bumped by a trigger on every UPDATE (migration 041). The frontend's
     /// merge guard orders a command's return value against a row event by
     /// it. `#[serde(default)]`: a hub older than the column sends none.
     #[serde(default)]
@@ -218,6 +222,13 @@ pub struct SessionRow {
     /// Current-conversation context (migration 037), flattened on the wire.
     #[serde(flatten)]
     pub context: SessionContext,
+    /// The permission/question dialog a blocked pane is showing (migration
+    /// 040), derived by the reconcile pass alongside `current_activity`.
+    /// `None` whenever the pane shows no such dialog. `serde(default)` so a
+    /// hub/desktop/phone built before this column never fails to parse a row
+    /// that omits it.
+    #[serde(default)]
+    pub pending_input: Option<PendingInput>,
 }
 
 impl SessionRow {
@@ -225,7 +236,7 @@ impl SessionRow {
     /// this row carry the same user-visible content.
     ///
     /// See the note above the `PartialEq` derive: plain `==` cannot answer
-    /// that question, because migration 040's trigger bumps `row_version` on
+    /// that question, because migration 041's trigger bumps `row_version` on
     /// every physical UPDATE regardless of whether any other field changed.
     ///
     /// The equal-version case — every no-op reconcile pass, which is what
@@ -259,7 +270,7 @@ pub(super) const SESSION_COLUMNS: &str =
      usage_input_tokens, usage_output_tokens, usage_cache_write_tokens, usage_cache_read_tokens, \
      usage_cost_micros, usage_model, usage_updated_at, \
      model, context_tokens, context_window, context_source, context_at, context_stale, tmux_pane_id, \
-     row_version";
+     pending_input, row_version";
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -321,7 +332,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         last_stop_at: row.get(34)?,
         parent_session_id: row.get(35)?,
         tags: decode_tags(row.get(36)?),
-        row_version: row.get(51)?,
+        row_version: row.get(52)?,
         usage: SessionUsage {
             usage_input_tokens: row.get(37)?,
             usage_output_tokens: row.get(38)?,
@@ -340,7 +351,22 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
             context_stale: row.get::<_, i64>(49)? != 0,
             tmux_pane_id: row.get(50)?,
         },
+        pending_input: decode_pending_input(row.get(51)?),
     })
+}
+
+/// Decode the `sessions.pending_input` JSON column. NULL or malformed text
+/// (never written by us, but a hand-edited DB is possible) reads as `None`
+/// rather than failing the row.
+pub(super) fn decode_pending_input(raw: Option<String>) -> Option<PendingInput> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// Encode `pending_input` for the `sessions.pending_input` column: `None`
+/// for no dialog, or when the value fails to serialize (never happens for
+/// the derived type, but a NULL is safer than a write error).
+pub(super) fn encode_pending_input(pending_input: Option<&PendingInput>) -> Option<String> {
+    pending_input.and_then(|p| serde_json::to_string(p).ok())
 }
 
 /// Token usage + estimated cost of a session (migration 025). Flattened
@@ -825,6 +851,11 @@ pub struct ReconcileSession<'a> {
     pub pr_observed: bool,
     /// The session's active tmux pane (`%N`). `None` keeps the stored one.
     pub tmux_pane_id: Option<String>,
+    /// The dialog `pane_intel::analyze` found this pass, if any. Governed by
+    /// `intel_observed` exactly like `stuck_kind`: authoritative (and a
+    /// `None` CLEARS a stale dialog) when the pane was captured this pass,
+    /// preserved when it was not.
+    pub pending_input: Option<PendingInput>,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by
