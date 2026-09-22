@@ -618,6 +618,44 @@ free to pair again:
 revoked phone (paired 2026-09-17 09:12Z); its next request is refused and the name is free again
 ```
 
+## `/mcp/json` — the same tools, a body a proxy can compress
+
+`POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
+`data:` line. That framing is load-bearing for the long polls
+(`wait_for_session`, `run_prompt`), whose 15-second keep-alives are what hold
+a reverse tunnel open — but it also means the answer is never compressed,
+because Caddy's `encode` matcher and Cloudflare both skip
+`text/event-stream`, correctly: compressing a stream would buffer it.
+
+`POST /mcp/json` is the same tool surface, behind the same bearer token, with
+the framing taken off. It answers `application/json`, so a reverse proxy
+compresses it like any other body:
+
+```bash
+curl -s --compressed https://fleet.example.com/mcp/json \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fleet_health","arguments":{}}}'
+```
+
+(The `Accept` header still offers both types — rmcp requires the pair on
+either mount.)
+
+What it is worth, measured on a 44-session fleet: `list_sessions`
+`{summary:false}` is 51 968 B unframed and 7 767 B gzipped, `list_projects`
+7 660 → 1 308 B, `list_hosts` 1 707 → 475 B. A phone's cold start is those
+three calls: **61 335 B today, about 9 550 B over `/mcp/json` behind a proxy
+that compresses** — and one fewer full JSON re-parse on the device, since the
+body is no longer a JSON document inside a JSON string.
+
+Use `/mcp` for anything long-polling; use `/mcp/json` for ordinary calls from
+a client on a metered or slow link. Existing clients need no change:
+`/mcp` is untouched, and the wire-contract revision does not move for a new
+path. `deploy/hub/Caddyfile` ships with `encode zstd gzip`; a bare-binary
+deployment with no reverse proxy in front gets the unframed body but no
+compression.
+
 ## Events
 
 A client that has listed what it needs does not have to poll for changes:
