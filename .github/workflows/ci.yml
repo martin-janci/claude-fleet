@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual re-run. The real coverage is the two triggers above — every PR and
+  # every push to main — but without this the workflow cannot be started from
+  # the UI or `gh workflow run ci.yml` at all, which is how a job added here
+  # gets exercised once against main before anyone relies on it.
+  workflow_dispatch:
 
 jobs:
   # The six version carriers scripts/release.sh rewrites, plus the four
