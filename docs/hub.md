@@ -1153,9 +1153,11 @@ idle` that only means the desktop refuses to ask something it could not trust
 the answer to; for `when: cancel` it is the reason the guard exists at all —
 an old hub sees an ordinary move request and moves the session, so cancelling
 a wait would perform the very move it was meant to stop. Either way the
-desktop refuses with `E_HUB_CONTRACT` until this launch has seen the hub's
-`ready` frame judged in range — not merely "no mismatch recorded yet", which
-is also what a desktop still connecting sees. These calls become available
+desktop refuses with `E_HUB_CONTRACT` until the current connection's
+`ready` frame has been judged in range — not merely "no mismatch recorded
+yet", which is also what a desktop still connecting sees. A dropped event
+stream withdraws that judgement until the next `ready` frame: the hub that
+answers the reconnect may be an older build. These calls become available
 once the desktop has confirmed the hub's version; a plain move (`when: now`,
 not a dry run) is not held back by this.
 

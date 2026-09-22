@@ -1703,13 +1703,6 @@ fn a_dry_run_routes_once_an_in_range_ready_frame_has_been_seen() {
     let backend = FleetBackend::remote_over(cfg(), fake.clone())
         .watching(Arc::clone(&link) as Arc<dyn connection::ConnectionView>);
     link.report(connection::HubConnection::Connected);
-    // The event stream dropping afterwards says nothing about the hub's
-    // version: the confirmation stands.
-    link.report(connection::HubConnection::Reconnecting {
-        attempt: 1,
-        retry_in_secs: 1,
-        reason: "stream ended".into(),
-    });
     block_on(commands::move_session::routed::move_session(
         &backend,
         dry_run_args(true),
@@ -1720,6 +1713,36 @@ fn a_dry_run_routes_once_an_in_range_ready_frame_has_been_seen() {
     let (tool, args) = fake.only_call();
     assert_eq!(tool, "move_session");
     assert_eq!(args["dry_run"], true);
+}
+
+/// I4: the event stream dropping withdraws the confirmation — the hub that
+/// answers the reconnect may be an older build — so a dry run is refused
+/// again until a new `ready` frame is judged in range.
+#[test]
+fn a_dry_run_is_refused_again_after_the_stream_drops() {
+    let fake = Fake::answering(PREVIEW_PAYLOAD);
+    let (_dir, st) = store();
+    let link = Arc::new(connection::HubConnectionStatus::remote(
+        Arc::new(Silent),
+        &cfg().token,
+    ));
+    let backend = FleetBackend::remote_over(cfg(), fake.clone())
+        .watching(Arc::clone(&link) as Arc<dyn connection::ConnectionView>);
+    link.report(connection::HubConnection::Connected);
+    link.report(connection::HubConnection::Reconnecting {
+        attempt: 1,
+        retry_in_secs: 1,
+        reason: "stream ended".into(),
+    });
+    let err = block_on(commands::move_session::routed::move_session(
+        &backend,
+        dry_run_args(true),
+        &st,
+        &ssh(),
+    ))
+    .expect_err("an unconfirmed reconnect");
+    assert_eq!(err.code, codes::E_HUB_CONTRACT, "{err:?}");
+    fake.was_not_called();
 }
 
 /// An out-of-range `ready` frame is already refused by the contract gate,
