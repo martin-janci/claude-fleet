@@ -1647,6 +1647,18 @@
                   {/if}
                 </div>
               {/if}
+              {#if turn.reminders?.length}
+                <details class="reminders" data-testid="conv-reminders">
+                  <summary
+                    >{turn.reminders.length === 1
+                      ? 'system reminder'
+                      : `${turn.reminders.length} system reminders`}</summary
+                  >
+                  {#each turn.reminders as r, k (k)}
+                    <pre class="reminder-body" data-testid="conv-reminder-body">{r}</pre>
+                  {/each}
+                </details>
+              {/if}
               <div class="reply">
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
@@ -1696,6 +1708,30 @@
                         {/if}
                       {/if}
                     </div>
+                  {:else if g.kind === 'bash'}
+                    {@const bashKey = `bash:${turnKey(turn, i)}:${j}`}
+                    {@const out = [g.stdout, g.stderr].filter((o) => o !== null).join('\n')}
+                    {@const longOut = out !== '' && isLongOutput(out)}
+                    <div class="command" data-testid="conv-bash">
+                      <code><span class="bang">!</span>{g.command}</code>
+                      {#if out !== ''}
+                        <pre
+                          class="command-out"
+                          class:err={g.stdout === null && g.stderr !== null}
+                          class:clamped={longOut && !expanded.has(bashKey)}
+                          style:--clamp-lines={CMD_CLAMP_LINES}>{out}</pre>
+                        {#if longOut}
+                          <button type="button" class="linkish" data-testid="conv-bash-toggle" onclick={() => togglePrompt(bashKey)}
+                            >{expanded.has(bashKey) ? 'Show less' : 'Show more'}</button
+                          >
+                        {/if}
+                      {/if}
+                    </div>
+                  {:else if g.kind === 'harness'}
+                    <details class="harness" data-testid="conv-harness">
+                      <summary>{g.tag}</summary>
+                      <pre class="harness-body">{g.body}</pre>
+                    </details>
                   {:else if g.kind === 'interrupt'}
                     <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
                   {:else if g.kind === 'notification'}
@@ -2572,6 +2608,45 @@
        line-height and 0.7rem its vertical padding. */
     max-height: calc(var(--clamp-lines) * 1.45em + 0.7rem);
     overflow: hidden;
+  }
+  .command-out.err {
+    color: var(--usage-crit);
+  }
+  .command .bang {
+    opacity: 0.6;
+    margin-right: 0.15rem;
+  }
+  /* A system reminder and an unrecognised harness block are both noise the
+     harness added, not the human's words: folded to one quiet line, opened
+     only when someone wants to see what was in it. */
+  .reminders,
+  .harness {
+    margin: 0.25rem 0 0.4rem;
+    font-size: 0.72rem;
+  }
+  .reminders > summary,
+  .harness > summary {
+    cursor: pointer;
+    display: inline-block;
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--fg-muted);
+    background: var(--bg-pane);
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  }
+  .reminder-body,
+  .harness-body {
+    margin: 0.3rem 0 0;
+    padding: 0.35rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-pane);
+    color: var(--fg-muted);
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .interrupt {
     margin: 0.3rem 0 0.5rem;
