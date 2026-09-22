@@ -2508,7 +2508,12 @@ fn the_served_definition_budget_stays_bounded() {
     /// Raised from 57,900 to 58,000 for the one-clause addition to
     /// `submit`'s doc comment (fix round 1: "ignored when `keys` is set"),
     /// which measured 57,935, 35 over budget.
-    const BUDGET_BYTES: usize = 58_000;
+    ///
+    /// Raised from 58,000 to 58,113 when main's `send_prompt { keys }` raise
+    /// met Transfer 3b's `dry_run` parameter: both were measured against
+    /// 57,700, so the merged surface came to 58,013; raised to that plus 100
+    /// bytes of headroom.
+    const BUDGET_BYTES: usize = 58_113;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
