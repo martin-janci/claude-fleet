@@ -8,6 +8,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.35] - 2026-09-22
+
+### Added
+- **hub-cli:** fleet-hub reports reads the error channel
+- **ui:** report frontend crashes and error toasts to the hub error channel
+- **desktop:** report_client_error queues frontend errors for the hub
+- **ui:** a pending transfer shows in the sheet and the chip, with Cancel
+- **ui:** the run store waits, cancels, and remembers a wait across a reopen
+- **desktop:** flush error reports to the hub in hub-client mode
+- **agent:** report error-level events to the hub on the heartbeat
+- **hub:** age-sweep error reports and drain the hub's own ring on the tick
+- **ui:** a transfer may answer "waiting", and a wait can be cancelled
+- **hub:** store an agent's Report frames under its host
+- **hub:** POST /report and GET /reports behind the bearer layer
+- **move:** a restart closes the waits it can no longer honour
+- **move:** when reaches the hub only once the hub is known to understand it
+- **core:** ingest error reports with clamp, redaction, rate limit and retention settings
+- **conversation:** previous and next turn with [ and ]
+- **conversation:** remember the scroll position per session
+- **sidebar:** search matches tags
+- **core:** ReportLayer captures error events into the process ring
+- **store:** error_reports table with row and age pruning
+- **move:** when=idle waits for the source, when=cancel ends the wait
+- **hosts:** one click from a host to its sessions, and the overlay closes
+- **proto:** AgentFrame::Report carries an agent's error batch
+- **proto:** error report record, batch and bounded ring
+- **move:** a bounded, cancellable wait for the source to go idle, and a sweep for waits a restart lost
+- **store:** find the waits no later event has closed, and a setting to bound them
+- **intel:** the row carries the dialog's numbered options as pending_input, so a client can answer with a tap
+- **mcp:** send_prompt refuses blocked sessions, reports queued/acked, dedupes by client_msg_id
+- **mcp:** send_prompt can press Enter, Escape or C-c, so a phone can answer a dialog without typing
+- **store:** row_version per session and a prompt-submit counter for delivery acks
+- **ui:** the Transfer sheet shows what would travel before you press it
+- **ui:** the newest preview per session and host, debounced, never overwritten by a late one
+- **ui:** a preview and a move each arrive as exactly what they are
+- **move:** dry_run reaches the engine from the desktop, the tool and the hub
+- **move:** a read-only preview built from the move's own checks
+- **move:** read-only probes for what the target already holds
+
+### Changed
+- **events:** stop announcing what has not changed, and reads nobody asked about
+- **provision:** wait on a spawner signal, not a fixed sleep, in the reestablish_tunnels tests
+- **ssh:** resolve each host's login PATH once; tmux calls run under sh -c and panes inherit it
+- **transcript:** make ConvItem's second owner impossible to forget
+- **mcp:** the budget holds main's send_prompt keys and 3b's dry_run together
+- **desktop:** find the queued frontend report by tag, not by position
+- **search:** the session fixture carries pending_input from the merged hub contract
+- **hub:** /mcp/json, so a phone's answers can be compressed
+- **events:** the stream stops sending the word "null" to every client
+- **reconcile:** one delimited probe script per host instead of 5 + N ssh calls
+- **conversation:** the html gate imports the parser and scans every hub-text component
+- **conversation:** a gate that hub text never reaches {@html}
+- **prompt:** one tmux dispatch path for text and keys
+- **ui:** pin that only a moved outcome's target reaches the sessions store
+- **move:** hold gather()'s result alive so a leaked claim would fail the seam test
+- **move:** the opening checks become gather(), shared with the preview
+
+### Fixed
+- **sessions:** clone into a temp dir and move on success; clamp capture scrollback
+- **ssh:** the terminal attach gets its own ControlMaster and keepalive; the tunnel bounds its connect
+- **ssh:** check the master before resetting it, and require ssh's own broken-pipe wording
+- **ssh:** reset the ControlMaster and retry once when it dies under a command
+- **hub:** mark a report truncated when redaction loses its context
+- **hub:** rate-limit an empty report batch like a one-report one
+- **agent:** batch report frames by bytes so the hub never refuses one
+- **transfer-sheet:** true wait-end copy, and a way out of a stale wait
+- **moves:** a waiting run never sticks, and survives a busy-again attempt
+- **transfer:** plain words for an unconfirmed hub contract and an existing wait
+- **reconcile:** escape the sessions section and make the hook-rebind race test bite
+- **hub-client:** the unconfirmed-contract refusal names the move hazard, not a preview
+- **hub-client:** leaving Connected withdraws the confirmed hub contract
+- **hub-cli:** percent-encode the origin filter and read a full reports page
+- **move:** when: idle waits when a stale idle source is found busy, and the public branch is tested
+- **move:** a waiter mid-move is no longer cancellable, and a dropped waiter records its end
+- **move:** a wait's deadline is wall-clock, checked between bounded poll slices
+- **ui:** write the dedupe separator as an escape and mark seen only on send
+- **ui:** a wait's refusal reaches the sheet, not just its bare reason
+- **reconcile:** a skipped agents pass no longer lets the pane overwrite the stored status
+- **desktop:** discard deterministically refused report batches and cap the body
+- **reconcile:** an unanswerable claude-agents call never prunes; agents asked on a 60 s cadence
+- **ui:** moves.ts keeps the pre-idle when: now behaviour until Task 7's real wait
+- **operator:** pre-trust the operator directory at birth
+- **views:** scroll memory anchors on the turn, remembers on scroll, no phantom new-count; one host→sessions path; a real {@html} gate
+- **send:** refuse an empty prompt with submit:false instead of skipping the gate
+- **conversation:** a restore that finds no row keeps the view pinned, stepper buttons disable at the ends
+- **send:** outcome-unknown only for mutations, bare Enter past the gate, in-flight dedupe
+- **sidebar:** a remounted sidebar does not replay an old reveal
+- **sidebar:** every click that opens a session reveals it, and a reveal can never be replayed
+- **sidebar:** only an explicit selection widens the host filter
+- **hub:** pending_input clears on every turn boundary, keys work in local mode too, options bounded and capped
+- **hub-client:** client timeouts follow the hub's deadlines; connect timeout, offline breaker, E_HUB_TIMEOUT
+- **intel:** dialog options survive description lines between choices
+- **ui:** rebuild loadSessions in list order, not store order
+- **ui:** order optimistic merges by row_version and subscribe to row events before the first list
+- **intel:** pending_input options stop at the dialog, and clear wherever the activity is reset
+- **sessions:** new_session returns the row as of its last write
+- **mcp:** don't fail send_prompt on a failed Enter retry; skip the retry once the turn has started
+- **prompt:** gate the empty-body Enter on submit; clean up the buffer on a failed paste
+- **prompt:** deliver through load-buffer/paste-buffer to the known pane; normalise CR and refuse control bytes
+- **tmux:** send_named_key targets the exact session, like every other builder
+- **hub:** refuse a move preview until this launch has confirmed the hub's contract
+- **move:** the target probe never reports an enclosing repository's state as the target's
+- **move:** a dry run's source inspection never fetches and takes no optional locks
+- **mcp:** trim this branch's tool wording back under the merged surface budget
+- **ui:** seed preflight test entries through preflight.ts, drop the raw NUL key copy
+- **ui:** escape the preflight key separator instead of a raw NUL byte
+- **move:** bump the wire contract for MoveOutcome/dry_run, name it in the tool, and prove Preview round-trips
+- **move:** preview honours strict, wraps target-$HOME like the move, and widens the writes-nothing guard
+
+### Documentation
+- toolchain resolve, ControlMaster retry, scrollback clamp; phase 2a landed
+- **ux:** audit of v0.2.33 in hub-client mode, iterations 1–10 and two consolidations
+- **ssh:** fix three doc comments left describing the pre-task shared-ControlMaster PTY design
+- **transfer:** the roadmap records 3b in review, 3c built, and 3c's debts
+- **hub:** the standalone tick's own rows, origin `master`, and who edits the bounds
+- **desktop:** say what `transport()` actually shares
+- **hub:** the error channel — reports, bounds, privacy, the client contract
+- **mcp:** move_session says it can answer a wait
+- phase 2a plan (SSH path O(1) per tick, second chances)
+- send_prompt contract for gated, acked, deduped delivery; phase 1 landed
+- the views/filters/scrolling analysis and the desktop plan for it
+- **plan:** hub error channel implementation plan
+- **spec:** hub error channel design
+- **transfer:** slice 3c implementation plan
+- **transfer:** 3c spec names the cancel variant and the second sanctioned preview divergence
+- **transfer:** slice 3c design — transfer when the session finishes, waiting on the hub
+- plan for the pager's hub contract — send_prompt keys and pending_input on the row
+- device communication analysis and phase 1 plan
+- **transfer:** the preview spec records the fetch-free dry run and the backend guard
+- move_session's dry_run and tagged result, and upgrading a desktop and hub together
+- **transfer:** a dry run honours strict, which is read-only, and explains clean_target
+- **transfer:** a failed target probe is unknown, never a refusal
+- **transfer:** slice 3b implementation plan, and five spec revisions found planning it
+- **transfer:** slice 3b design — a read-only dry run that cannot drift from the move
 ## [0.2.34] - 2026-09-21
 
 ### Fixed
@@ -1099,6 +1233,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.35]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.35
 [0.2.34]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.34
 [0.2.33]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.33
 [0.2.32]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.32
