@@ -146,7 +146,12 @@
   }
   .crow:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .crow.sel { background: color-mix(in srgb, var(--accent) 22%, transparent); }
-  .crow:hover .actions { visibility: visible; }
+  .crow:hover .actions,
+  .crow:focus-within .actions { visibility: visible; }
+  .crow:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
+  }
   .gutter { flex: 0 0 auto; }
   .meta {
     flex: 1 1 auto;

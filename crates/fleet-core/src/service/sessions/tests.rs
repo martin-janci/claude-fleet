@@ -3558,7 +3558,7 @@ fn marked_prompt_records_the_body_not_the_marker() {
     }
     let body = "Rewrite the auth flow!";
     let marked = crate::mcp::guard::mark_untrusted(body, "session 12 on mefistos");
-    record_prompt_outcome(&store, "local", "dev-marked", &marked);
+    record_prompt_outcome(&store, "local", "dev-marked", &marked, true);
     {
         let s = store.lock().unwrap();
         let row = s.get_session("dev-marked", "local").unwrap().unwrap();
@@ -3568,7 +3568,7 @@ fn marked_prompt_records_the_body_not_the_marker() {
     // An unmarked prompt is recorded verbatim, and a body that merely opens
     // with similar words keeps every character.
     let lookalike = "[claude-fleet: message from me] ship it";
-    record_prompt_outcome(&store, "local", "dev-marked", lookalike);
+    record_prompt_outcome(&store, "local", "dev-marked", lookalike, true);
     let s = store.lock().unwrap();
     let row = s.get_session("dev-marked", "local").unwrap().unwrap();
     assert_eq!(row.last_prompt.as_deref(), Some(lookalike));
@@ -3617,6 +3617,7 @@ fn prompt_derived_name_replaces_only_the_branch_default() {
         "local",
         "dev-o-r--fix-login",
         "Rewrite the auth flow!",
+        true,
     );
     {
         let s = store.lock().unwrap();
@@ -3630,7 +3631,13 @@ fn prompt_derived_name_replaces_only_the_branch_default() {
         s.set_friendly_name("local", "dev-o-r--fix-login", Some("My label"))
             .unwrap();
     }
-    record_prompt_outcome(&store, "local", "dev-o-r--fix-login", "Another prompt here");
+    record_prompt_outcome(
+        &store,
+        "local",
+        "dev-o-r--fix-login",
+        "Another prompt here",
+        true,
+    );
     let s = store.lock().unwrap();
     let row = s
         .get_session("dev-o-r--fix-login", "local")
@@ -3638,6 +3645,156 @@ fn prompt_derived_name_replaces_only_the_branch_default() {
         .unwrap();
     assert_eq!(row.friendly_name.as_deref(), Some("My label"));
     assert_eq!(row.last_prompt.as_deref(), Some("Another prompt here"));
+}
+
+/// UX-05, the shape of the bug: under the old rule the FIRST prompt through
+/// fleet won permanently, so a session answered with `yes` stayed `yes`
+/// forever. Now a rejected prompt writes nothing, the row keeps its branch
+/// default, and the next real prompt names it.
+#[test]
+fn a_rejected_prompt_leaves_the_default_for_the_next_real_one() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let default = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let wid = s
+            .upsert_worktree(
+                pid,
+                "fix-login",
+                "/p/o/r/.worktrees/fix-login",
+                Some("dev-o-r--fix-login"),
+            )
+            .unwrap();
+        s.upsert_session(
+            "dev-o-r--fix-login",
+            "local",
+            Some(pid),
+            Some(wid),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+        let id = s
+            .get_session("dev-o-r--fix-login", "local")
+            .unwrap()
+            .unwrap()
+            .id;
+        let default = s
+            .default_friendly_name(id)
+            .unwrap()
+            .expect("branch default");
+        s.set_friendly_name("local", "dev-o-r--fix-login", Some(&default))
+            .unwrap();
+        default
+    };
+    for junk in ["/clear", "yes", "push"] {
+        record_prompt_outcome(&store, "local", "dev-o-r--fix-login", junk, true);
+        let s = store.lock().unwrap();
+        let row = s
+            .get_session("dev-o-r--fix-login", "local")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.friendly_name.as_deref(),
+            Some(default.as_str()),
+            "{junk:?} must not name the session"
+        );
+        // The prompt is still recorded: only the label is refused.
+        assert_eq!(row.last_prompt.as_deref(), Some(junk));
+    }
+    record_prompt_outcome(
+        &store,
+        "local",
+        "dev-o-r--fix-login",
+        "Fix the login redirect loop",
+        true,
+    );
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session("dev-o-r--fix-login", "local")
+            .unwrap()
+            .unwrap()
+            .friendly_name
+            .as_deref(),
+        Some("fix the login redirect loop")
+    );
+}
+
+/// A label the OLD rule derived from a junk prompt is replaced once, so the
+/// sessions already called `yes` in a live fleet heal themselves. A label a
+/// human chose is never the five-word reduction of the stored prompt, so it
+/// survives.
+#[test]
+fn a_legacy_junk_label_heals_but_a_chosen_one_survives() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        for name in ["dev-junk", "dev-chosen"] {
+            s.upsert_session(name, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        // What the pre-UX-05 rule left behind: name == 5-word reduction of
+        // the prompt that produced it.
+        s.set_last_prompt(
+            s.get_session("dev-junk", "local").unwrap().unwrap().id,
+            "yes",
+        )
+        .unwrap();
+        s.set_friendly_name("local", "dev-junk", Some("yes"))
+            .unwrap();
+        // A human label over the same junk prompt.
+        s.set_last_prompt(
+            s.get_session("dev-chosen", "local").unwrap().unwrap().id,
+            "yes",
+        )
+        .unwrap();
+        s.set_friendly_name("local", "dev-chosen", Some("PR review"))
+            .unwrap();
+    }
+    for name in ["dev-junk", "dev-chosen"] {
+        record_prompt_outcome(&store, "local", name, "Rewrite the auth flow", true);
+    }
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session("dev-junk", "local")
+            .unwrap()
+            .unwrap()
+            .friendly_name
+            .as_deref(),
+        Some("rewrite the auth flow")
+    );
+    assert_eq!(
+        s.get_session("dev-chosen", "local")
+            .unwrap()
+            .unwrap()
+            .friendly_name
+            .as_deref(),
+        Some("PR review")
+    );
+}
+
+/// A prompt fleet composed (safe-kill, an inbox header, a review seed) or
+/// fanned out over N sessions describes fleet's request, not the user's
+/// work: `label: false` records it without naming anything.
+#[test]
+fn a_system_prompt_records_without_naming() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-sys", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+    }
+    let body = crate::service::safe_kill::build_safe_kill_prompt("abc123");
+    record_prompt_outcome(&store, "local", "dev-sys", &body, false);
+    let s = store.lock().unwrap();
+    let row = s.get_session("dev-sys", "local").unwrap().unwrap();
+    assert_eq!(row.friendly_name, None);
+    assert!(row.last_prompt.is_some());
 }
 
 #[test]
@@ -3665,22 +3822,93 @@ fn find_session_by_tmux_name_returns_the_single_match_or_lists_candidates() {
 // ── Wave 2 Track D: naming + PR probe ──
 
 #[test]
-fn friendly_name_from_prompt_takes_five_lowercase_words_without_punctuation() {
+fn label_from_prompt_takes_five_lowercase_words_without_punctuation() {
     assert_eq!(
-        friendly_name_from_prompt("Fix the login bug, then add tests for it!").as_deref(),
+        label_from_prompt("Fix the login bug, then add tests for it!").as_deref(),
         Some("fix the login bug then")
     );
     assert_eq!(
-        friendly_name_from_prompt("  Refactor   SSH   layer  ").as_deref(),
+        label_from_prompt("  Refactor   SSH   layer  ").as_deref(),
         Some("refactor ssh layer")
     );
-    assert_eq!(friendly_name_from_prompt("!!! ... ---"), None);
-    assert_eq!(friendly_name_from_prompt(""), None);
+    assert_eq!(label_from_prompt("!!! ... ---"), None);
+    assert_eq!(label_from_prompt(""), None);
     // Unicode letters survive, symbols do not.
     assert_eq!(
-        friendly_name_from_prompt("Oprav chybu v prihlásení (rýchlo)").as_deref(),
+        label_from_prompt("Oprav chybu v prihlásení (rýchlo)").as_deref(),
         Some("oprav chybu v prihlásení rýchlo")
     );
+}
+
+/// UX-05: a slash command, a bash-mode line, a memory note and fleet's own
+/// message header are commands, not descriptions of work — a Conversation
+/// quick-action chip sending `/clear` must not name the session `clear`.
+#[test]
+fn label_from_prompt_rejects_commands_and_machine_headers() {
+    for prompt in [
+        "/clear",
+        "/compact",
+        "/status",
+        "!ls -la",
+        "#remember the port is 3100",
+        "[msg #42 from dev-foo@hetzner]: hello there",
+        "<system-reminder>do the thing</system-reminder>",
+        "> quoted text here",
+    ] {
+        assert_eq!(label_from_prompt(prompt), None, "should reject {prompt:?}");
+    }
+}
+
+/// UX-05: an acknowledgement is the single most common prompt in a live
+/// session and the least informative label there is.
+#[test]
+fn label_from_prompt_rejects_acknowledgements() {
+    for prompt in [
+        "yes",
+        "ok, ship it",
+        "Sure, go ahead with that",
+        "thanks that worked",
+        "Continue where you left off.",
+        "ano, sprav to tak",
+        "Ďakujem, to stačí",
+    ] {
+        assert_eq!(label_from_prompt(prompt), None, "should reject {prompt:?}");
+    }
+    // The same words inside a sentence stay informative.
+    assert_eq!(
+        label_from_prompt("push the release branch").as_deref(),
+        Some("push the release branch")
+    );
+    // `please` is deliberately NOT a stop word.
+    assert_eq!(
+        label_from_prompt("please fix the login redirect").as_deref(),
+        Some("please fix the login redirect")
+    );
+}
+
+#[test]
+fn label_from_prompt_requires_three_words_and_a_letter() {
+    assert_eq!(label_from_prompt("push"), None);
+    assert_eq!(label_from_prompt("go on"), None);
+    assert_eq!(label_from_prompt("2"), None);
+    assert_eq!(label_from_prompt("👍"), None);
+    assert_eq!(label_from_prompt("1 2 3 4"), None);
+    assert_eq!(
+        label_from_prompt("rerun the failing test").as_deref(),
+        Some("rerun the failing test")
+    );
+}
+
+/// A multi-line prompt is judged by its opening line, so a one-word first
+/// line is not rescued by the paragraph under it — and a real task is not
+/// polluted by the detail block that follows.
+#[test]
+fn label_from_prompt_reads_only_the_first_non_empty_line() {
+    assert_eq!(
+        label_from_prompt("\n\nFix the parser.\n\nDetails: it chokes on tabs").as_deref(),
+        Some("fix the parser")
+    );
+    assert_eq!(label_from_prompt("yes\n\nand rewrite the auth flow"), None);
 }
 
 /// A host shell that answers the PR probe with canned stdout and counts

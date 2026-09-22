@@ -181,6 +181,12 @@ async fn run_tmux_script(
     Ok(())
 }
 
+/// Deliver one prompt into a session's REPL.
+///
+/// `label` decides whether this prompt may give a still-unnamed session its
+/// sidebar label. `false` for prompts fleet itself composes (safe-kill,
+/// inbox delivery, a review seed) and for a broadcast, where one body would
+/// stamp the same name onto every target row (UX-05).
 pub(super) async fn send_prompt_inner(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -188,6 +194,7 @@ pub(super) async fn send_prompt_inner(
     tmux_name: &str,
     prompt: &str,
     submit: bool,
+    label: bool,
 ) -> Result<(), IpcError> {
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name_addressable(tmux_name)?;
@@ -218,7 +225,7 @@ pub(super) async fn send_prompt_inner(
                 .collect();
             Some(truncated)
         });
-        record_prompt_outcome(store, host_alias, tmux_name, &body);
+        record_prompt_outcome(store, host_alias, tmux_name, &body, label);
     }
     Ok(())
 }
@@ -249,12 +256,51 @@ pub async fn send_keys(
     Ok(())
 }
 
-/// Derive a default sidebar label from a prompt (PROD-4): the first five
-/// words, lowercased, punctuation stripped, capped to the friendly-name
-/// limit. `None` when nothing printable is left.
-pub fn friendly_name_from_prompt(prompt: &str) -> Option<String> {
-    let words: Vec<String> = prompt
-        .split_whitespace()
+/// Opening words that are an acknowledgement, never a task. Rejected only
+/// as the FIRST word of a prompt: inside a sentence ("push the release
+/// branch") the same word is informative. Nudges that are a single word
+/// (`push`, `go`, `done`, `retry`) are rejected by [`LABEL_MIN_WORDS`]
+/// instead.
+const LABEL_STOP_FIRST_WORD: &[&str] = &[
+    "yes",
+    "yeah",
+    "yep",
+    "y",
+    "no",
+    "nope",
+    "nah",
+    "ok",
+    "okay",
+    "k",
+    "kk",
+    "sure",
+    "thanks",
+    "thank",
+    "hi",
+    "hello",
+    "continue",
+    "ano",
+    "áno",
+    "hej",
+    "nie",
+    "dobre",
+    "dakujem",
+    "ďakujem",
+    "pokracuj",
+    "pokračuj",
+];
+/// Prefixes that mark a line as a command or a machine-written header, not a
+/// task: `/clear` (slash command), `!ls` (bash mode), `#note` (memory),
+/// `[msg #42 from …]` (fleet's own message header), `<tag>` / `>` (harness).
+const LABEL_REJECT_PREFIXES: &[char] = &['/', '!', '#', '[', '<', '>'];
+const LABEL_MIN_WORDS: usize = 3;
+const LABEL_MAX_WORDS: usize = 5;
+const LABEL_MAX_CHARS: usize = 80;
+
+/// Reduce a prompt to at most [`LABEL_MAX_WORDS`] lowercase alphanumeric
+/// words. Shared by [`label_from_prompt`] and the legacy reducer.
+fn label_words(line: &str) -> Vec<String> {
+    line.split_whitespace()
         .map(|w| {
             w.chars()
                 .filter(|c| c.is_alphanumeric())
@@ -262,13 +308,77 @@ pub fn friendly_name_from_prompt(prompt: &str) -> Option<String> {
                 .collect::<String>()
         })
         .filter(|w| !w.is_empty())
-        .take(5)
-        .collect();
+        .collect()
+}
+
+fn join_label(words: &[String]) -> String {
+    words
+        .iter()
+        .take(LABEL_MAX_WORDS)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(LABEL_MAX_CHARS)
+        .collect()
+}
+
+/// PURE: derive a default sidebar label from a prompt (PROD-4), or `None`
+/// when the prompt is a command, a machine-written header, an
+/// acknowledgement, or too short to describe work.
+///
+/// `None` is the load-bearing case: the row then keeps its deterministic
+/// branch-derived default, stays `replaceable`, and the NEXT real prompt
+/// names it. That is why `/clear` from a Conversation quick-action chip and
+/// a bare `yes` no longer freeze a session's label (UX-05).
+///
+/// Callers must have stripped the untrusted MCP marker first.
+pub fn label_from_prompt(prompt: &str) -> Option<String> {
+    // A multi-line prompt is judged by its opening line — the same text the
+    // sidebar's prompt preview shows.
+    let line = prompt.lines().map(str::trim).find(|l| !l.is_empty())?;
+    if line.starts_with(LABEL_REJECT_PREFIXES) {
+        return None;
+    }
+    let words = label_words(line);
+    // A prompt with no letter at all (`2`, `👍`) names nothing.
+    if !words.iter().any(|w| w.chars().any(char::is_alphabetic)) {
+        return None;
+    }
+    if words
+        .first()
+        .is_some_and(|w| LABEL_STOP_FIRST_WORD.contains(&w.as_str()))
+    {
+        return None;
+    }
+    if words.len() < LABEL_MIN_WORDS {
+        return None;
+    }
+    Some(join_label(&words))
+}
+
+/// The pre-UX-05 rule: the first five words of the WHOLE prompt, with no
+/// filter. Kept for one purpose only — recognising a label this app derived
+/// under the old rule, so [`record_prompt_outcome`] may replace it once.
+fn legacy_label_from_prompt(prompt: &str) -> Option<String> {
+    let words = label_words(prompt);
     if words.is_empty() {
         return None;
     }
-    let joined = words.join(" ");
-    Some(joined.chars().take(80).collect())
+    Some(join_label(&words))
+}
+
+/// PURE: whether `current` is a label this app derived from `last_prompt`
+/// under the pre-UX-05 rule AND the current rule would refuse to derive at
+/// all. Such a label (`yes`, `clear`, `push`) is junk the old rule wrote, so
+/// the next real prompt may replace it once. A label a human typed is not
+/// the five-word reduction of the session's last prompt, so this is `false`
+/// for it.
+fn is_legacy_derived_junk(current: &str, last_prompt: Option<&str>) -> bool {
+    let Some(prev) = last_prompt else {
+        return false;
+    };
+    legacy_label_from_prompt(prev).as_deref() == Some(current) && label_from_prompt(prev).is_none()
 }
 
 /// Post-send bookkeeping (PROD-4 / PROD-5): stamp `last_prompt`, and give a
@@ -280,6 +390,7 @@ pub(super) fn record_prompt_outcome(
     host_alias: &str,
     tmux_name: &str,
     prompt: &str,
+    label: bool,
 ) {
     // An MCP-delivered prompt arrives with the untrusted marker as its first
     // line. The session was shown it; `last_prompt` and the derived label must
@@ -319,14 +430,21 @@ pub(super) fn record_prompt_outcome(
     // The prompt-derived label replaces NO name or the deterministic
     // branch-derived default every fleet-created session starts with; a
     // label a human or the in-session agent chose (set_friendly_name) stays.
+    // The prompt-derived label replaces NO name, the deterministic
+    // branch-derived default every fleet-created session starts with, or a
+    // label the PRE-UX-05 rule derived from the stored `last_prompt` and the
+    // current rule would reject (`yes`, `clear`, `push`). A label a human or
+    // the in-session agent chose (set_friendly_name) stays: it cannot equal
+    // the five-word reduction of the prompt that produced it by accident.
     let replaceable = match &row.friendly_name {
         None => true,
         Some(current) => {
             s.default_friendly_name(row.id).ok().flatten().as_deref() == Some(current.as_str())
+                || is_legacy_derived_junk(current, row.last_prompt.as_deref())
         }
     };
-    if replaceable {
-        if let Some(name) = friendly_name_from_prompt(prompt) {
+    if label && replaceable {
+        if let Some(name) = label_from_prompt(prompt) {
             if let Err(e) = s.set_friendly_name(host_alias, tmux_name, Some(&name)) {
                 tracing::warn!(
                     host = %host_alias,
@@ -420,8 +538,24 @@ pub async fn send_prompt(
         &args.tmux_name,
         &args.prompt,
         args.submit,
+        true,
     )
     .await
+}
+
+/// Deliver a prompt fleet itself composed (safe-kill instructions, an inbox
+/// message header) into a session's REPL. Identical to [`send_prompt`] but
+/// it never names the session: the body describes fleet's request, not the
+/// user's work (UX-05).
+pub async fn send_system_prompt(
+    host_alias: &str,
+    tmux_name: &str,
+    prompt: &str,
+    submit: bool,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<(), IpcError> {
+    send_prompt_inner(store, ssh, host_alias, tmux_name, prompt, submit, false).await
 }
 
 // --- broadcast_prompt (fan-out to matching work sessions) ------------------
@@ -547,8 +681,16 @@ pub async fn broadcast_prompt(
         let Some(row) = sessions.iter().find(|s| s.id == sid) else {
             continue;
         };
-        let res =
-            send_prompt_inner(store, ssh, &row.host_alias, &row.tmux_name, &prompt, submit).await;
+        let res = send_prompt_inner(
+            store,
+            ssh,
+            &row.host_alias,
+            &row.tmux_name,
+            &prompt,
+            submit,
+            false,
+        )
+        .await;
         match res {
             Ok(()) => {
                 sent += 1;

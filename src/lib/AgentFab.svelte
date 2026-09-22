@@ -49,9 +49,10 @@
   .agent-fab {
     position: fixed;
     right: 20px;
-    bottom: 20px;
-    width: 48px;
-    height: 48px;
+    /* Clear of the status footer — it used to cover the usage button. */
+    bottom: calc(var(--status-h) + var(--layer-gap));
+    width: var(--fab-size);
+    height: var(--fab-size);
     border-radius: 50%;
     border: 1px solid var(--border);
     background: var(--bg-pane);

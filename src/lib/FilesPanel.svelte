@@ -199,7 +199,15 @@
     else { applyFailure(r); }
   }
 
+  // Despite the name this used to confirm nothing — a single click switched
+  // the branch under a running agent, while checking out a *commit* three
+  // dialogs down raised a danger confirm for the same consequence.
   function confirmCheckout(branch: string): void {
+    dialog = { kind: 'checkout-branch', name: branch };
+  }
+
+  function doCheckoutBranch(branch: string): void {
+    closeDialog();
     void runAction(repoCheckout(session.id, branch), () => { loadBranches(); historyLoaded = false; reloadKey++; });
   }
 
@@ -207,6 +215,7 @@
   // with null, so "New branch" never worked on macOS, and the native boxes
   // were unstyled and untrappable. Exactly one dialog is open at a time.
   type FilesDialog =
+    | { kind: 'checkout-branch'; name: string }
     | { kind: 'checkout-commit'; hash: string }
     | { kind: 'delete-branch'; name: string }
     | { kind: 'new-branch'; startPoint: string | null };
@@ -383,7 +392,20 @@
   {/if}
 </div>
 
-{#if dialog?.kind === 'checkout-commit'}
+{#if dialog?.kind === 'checkout-branch'}
+  {@const name = dialog.name}
+  <ConfirmDialog
+    title="Switch branch?"
+    confirmLabel="Checkout"
+    danger
+    onconfirm={() => doCheckoutBranch(name)}
+    oncancel={closeDialog}
+    confirmTestId="confirm-checkout-branch"
+  >
+    Check out <code>{name}</code> in this worktree? The agent's branch will change
+    under it, and anything it is editing right now is edited against the new branch.
+  </ConfirmDialog>
+{:else if dialog?.kind === 'checkout-commit'}
   {@const hash = dialog.hash}
   <ConfirmDialog
     title="Checkout commit?"

@@ -272,6 +272,14 @@
       <div class="left">
         {#if $catalog}
           <AssetList listing={$catalog} {selected} {filter} onselect={(kind, name) => (selected = { kind, name })} onimport={onImportUnmanaged} />
+        {:else if error}
+          <!-- `catalog` is only ever set on success, so a failed load used to
+               render the error line AND a permanent "Loading…" side by side,
+               with no way to try again but the panel header's ↻. -->
+          <div class="load-failed" data-testid="assets-load-failed">
+            <p class="muted">The asset catalog could not be loaded.</p>
+            <button class="btn" onclick={() => void reload(false)} data-testid="assets-retry">Retry</button>
+          </div>
         {:else}
           <p class="muted">Loading…</p>
         {/if}
@@ -328,6 +336,13 @@
 </div>
 
 <style>
+  .load-failed {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+  }
   .assets-panel { display: flex; flex-direction: column; height: 100%; }
   .setup { max-width: 480px; margin: 40px auto; display: flex; flex-direction: column; gap: 10px; }
   .setup label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }

@@ -85,6 +85,34 @@ describe('McpConfirmDialog', () => {
     expect(screen.getByTestId('mcp-confirm').textContent).toContain('set_clipboard');
   });
 
+  // The dialog appears unannounced over whatever the user is doing, and
+  // showModal() steals focus — so a Space/Enter already in flight lands on
+  // the focused button. That button must be the safe one.
+  it('gives initial focus to Deny, not Approve', async () => {
+    render(McpConfirmDialog);
+    await tick();
+    await emit('mcp:confirm-required', { nonce: 'n-1', tool: 'kill_session', summary: '', caller: 'master' });
+    await tick(); await tick();
+    expect(screen.getByTestId('mcp-confirm-deny')).toHaveAttribute('data-autofocus');
+    expect(screen.getByTestId('mcp-confirm-approve')).not.toHaveAttribute('data-autofocus');
+  });
+
+  it('keeps the request queued and reports when the verdict fails to land', async () => {
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'mcp_pending_confirms') return [];
+      if (cmd === 'mcp_confirm') throw new Error('ipc down');
+      return null;
+    });
+    render(McpConfirmDialog);
+    await tick();
+    await emit('mcp:confirm-required', { nonce: 'n-1', tool: 'kill_session', summary: '', caller: 'master' });
+    await tick();
+    await fireEvent.click(screen.getByTestId('mcp-confirm-deny'));
+    await tick(); await tick();
+    // Still on screen: the user has NOT denied anything yet.
+    expect(screen.getByTestId('mcp-confirm').textContent).toContain('kill_session');
+  });
+
   it('loads requests that were pending before mount', async () => {
     inv.mockImplementation(async (cmd: string) =>
       cmd === 'mcp_pending_confirms' ? [{ nonce: 'p', tool: 'delete_worktree' }] : null,
