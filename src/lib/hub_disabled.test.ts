@@ -234,7 +234,7 @@ describe('new_session and repair_session route now, so their buttons stay enable
     started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null,
     parent_session_id: null, tags: [],
     model: null, context_tokens: null, context_window: null, context_source: null,
-    context_at: null, context_stale: false, tmux_pane_id: null,
+    context_at: null, context_stale: false, tmux_pane_id: null, pending_input: null,
   };
 
   it('+ New session is enabled on a hub client', async () => {

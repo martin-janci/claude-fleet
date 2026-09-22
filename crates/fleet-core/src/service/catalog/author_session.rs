@@ -273,6 +273,7 @@ pub async fn spawn_author_session(
             tmux_name: row.tmux_name.clone(),
             prompt,
             submit: true,
+            keys: None,
         },
         store,
         ssh,

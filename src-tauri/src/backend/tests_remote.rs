@@ -397,6 +397,7 @@ fn sample_session_row() -> SessionRow {
             usage_updated_at: Some(1_757_003_500),
         },
         context: fleet_core::store::SessionContext::default(),
+        pending_input: None,
     }
 }
 
