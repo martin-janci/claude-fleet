@@ -29,6 +29,7 @@ vi.mock('./moves', async (importOriginal) => {
     retryMove: vi.fn(),
     resolveMoveRun: vi.fn(),
     startMove: vi.fn(actual.startMove),
+    cancelWait: vi.fn(),
   };
 });
 import TransferSheet from './TransferSheet.svelte';
@@ -38,6 +39,7 @@ import {
   startMove,
   retryMove,
   resolveMoveRun,
+  cancelWait,
   putRunForTest,
   applyMoveProgress,
   resetMovesForTest,
@@ -134,7 +136,7 @@ describe('TransferSheet', () => {
     expect(mockInvoke).toHaveBeenCalledWith('move_session', {
       args: {
         session_id: 5, target_host_alias: 'turanga', keep_source: true, strict: false,
-        clean_target: false, dry_run: false,
+        clean_target: false, dry_run: false, when: 'idle',
       },
     });
     expect(await screen.findByTestId('transfer-steps')).toBeTruthy();
@@ -410,6 +412,9 @@ describe('TransferSheet: recovery actions', () => {
       attempt: 1,
       resolving: false,
       awaitingStart: false,
+      deadlineUnix: null,
+      waitEnded: null,
+      waitRefusal: null,
     };
   }
 
@@ -444,6 +449,9 @@ describe('TransferSheet: recovery actions', () => {
       attempt: 1,
       resolving: false,
       awaitingStart: false,
+      deadlineUnix: null,
+      waitEnded: null,
+      waitRefusal: null,
     };
   }
 
@@ -475,6 +483,9 @@ describe('TransferSheet: recovery actions', () => {
       attempt: 1,
       resolving: opts.resolving ?? false,
       awaitingStart: false,
+      deadlineUnix: null,
+      waitEnded: null,
+      waitRefusal: null,
     };
   }
 
@@ -692,6 +703,153 @@ describe('TransferSheet: recovery actions', () => {
     await tick();
     expect(queryByTestId('transfer-finish-confirm')).toBeNull();
     expect(queryByTestId('transfer-resolve-error')).toBeNull();
+  });
+});
+
+// Task 8: a pending `waiting` run (Transfer sends `when: 'idle'`, and a busy
+// source parks the run at `status: 'waiting'` instead of failing) and a run
+// that ended a wait without a move (`waitEnded`). Fixtures built directly
+// with `putRunForTest`, like the recovery-action tests above.
+describe('TransferSheet: waiting', () => {
+  function blankSteps() {
+    return MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null }));
+  }
+
+  function waitingRun(over: Partial<MoveRun> = {}): MoveRun {
+    return {
+      sessionId: 7,
+      sessionName: 'sess7',
+      fromHost: 'alpha',
+      toHost: 'beta',
+      keepSource: null,
+      origin: 'local',
+      steps: blankSteps(),
+      status: 'waiting',
+      report: null,
+      error: null,
+      resolveError: null,
+      startedAt: Date.now(),
+      settledAt: null,
+      cleanTarget: false,
+      attempt: 1,
+      resolving: false,
+      awaitingStart: false,
+      deadlineUnix: Math.floor(Date.now() / 1000) + 600,
+      waitEnded: null,
+      waitRefusal: null,
+      ...over,
+    };
+  }
+
+  function renderSheet(run: MoveRun) {
+    putRunForTest(run);
+    transferSheetFor.set(run.sessionId);
+    return render(TransferSheet);
+  }
+
+  beforeEach(() => {
+    vi.mocked(retryMove).mockClear();
+    vi.mocked(cancelWait).mockClear();
+    resetMovesForTest();
+    sessions.set([source]);
+    hosts.set([host('alpha'), host('beta')]);
+    selectSession(null);
+  });
+
+  it('shows the host, the deadline, a Cancel that calls cancelWait, and the right title', async () => {
+    const { getByTestId } = renderSheet(waitingRun());
+    const waiting = getByTestId('transfer-waiting');
+    expect(waiting.textContent).toContain('Waiting for sess7 to finish');
+    expect(waiting.textContent).toContain('will transfer to beta');
+    expect(getByTestId('transfer-wait-deadline').textContent).toMatch(/\d/);
+    expect(getByTestId('move-dialog').querySelector('.title')?.textContent).toBe('Waiting to move to beta');
+    await fireEvent.click(getByTestId('transfer-cancel-wait'));
+    expect(cancelWait).toHaveBeenCalledWith(7);
+  });
+
+  it('a run with no deadline shows no deadline line', () => {
+    const { queryByTestId } = renderSheet(waitingRun({ deadlineUnix: null }));
+    expect(queryByTestId('transfer-wait-deadline')).toBeNull();
+  });
+
+  it.each([
+    ['cancelled', /cancel/i],
+    ['timed_out', /timed out/i],
+    ['session_gone', /disappear/i],
+    ['refused', /refused/i],
+    // M7: also written by a dropped waiter and the startup sweep in local
+    // mode, where there is no hub at all.
+    ['hub_restarted', /^The wait was interrupted \(the app or the hub restarted\)\.$/],
+    // I1(a): the backend said nothing was waiting and the timeline recorded
+    // no end — no reason is invented.
+    ['unknown', /could not tell how it ended/i],
+  ])('says why the wait ended (%s) and offers Transfer again', async (reason, pattern) => {
+    const { getByTestId, queryByTestId } = renderSheet(
+      waitingRun({ status: 'failed', waitEnded: reason, deadlineUnix: null }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toMatch(pattern);
+    // Not the generic "started elsewhere" failure text a null `error` would
+    // otherwise produce through `describeMoveError`.
+    expect(queryByTestId('transfer-failure')).toBeNull();
+    await fireEvent.click(getByTestId('transfer-wait-retry'));
+    expect(retryMove).toHaveBeenCalledWith(7);
+  });
+
+  // I1(c): a wait past its deadline can be let go of from the sheet.
+  it('offers Stop following for a wait past its deadline', async () => {
+    const { getByTestId } = renderSheet(waitingRun({ deadlineUnix: Math.floor(Date.now() / 1000) - 5 }));
+    await fireEvent.click(getByTestId('transfer-wait-dismiss'));
+    expect(get(moves).has(7)).toBe(false);
+  });
+
+  // I1(b): a `moved` end settled the run with no report to show.
+  it('a run settled by a moved wait end says it moved, without a report', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({ status: 'done', waitEnded: 'moved', deadlineUnix: null, settledAt: Date.now() }),
+    );
+    expect(getByTestId('transfer-result').textContent).toContain(
+      'sess7 finished its turn and was moved to beta. This window has no report for it',
+    );
+  });
+
+  // Fix round 1, finding 1: a `refused` wait carries `code`/`message`
+  // (`moves.ts`'s `waitRefusal`) that the sheet should read, in preference
+  // to the bare "the move was refused" sentence.
+  it('a refused wait with a known code shows the failure view\'s own wording for it', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({
+        status: 'failed',
+        waitEnded: 'refused',
+        deadlineUnix: null,
+        waitRefusal: { code: 'E_MOVE_DIRTY', message: 'raw backend text' },
+      }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toContain(
+      'The source has uncommitted work, and this move was asked to refuse that.',
+    );
+  });
+
+  it('a refused wait with an unrecognised code falls back to its message', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({
+        status: 'failed',
+        waitEnded: 'refused',
+        deadlineUnix: null,
+        waitRefusal: { code: 'E_SOME_FUTURE_CODE', message: 'a message from a newer backend' },
+      }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toContain(
+      'a message from a newer backend',
+    );
+  });
+
+  it('a refused wait with no usable refusal falls back to the bare sentence', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({ status: 'failed', waitEnded: 'refused', deadlineUnix: null, waitRefusal: null }),
+    );
+    expect(getByTestId('transfer-wait-ended').textContent).toContain(
+      'The source finished, but the move itself was refused.',
+    );
   });
 });
 

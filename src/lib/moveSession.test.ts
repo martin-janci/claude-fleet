@@ -10,7 +10,15 @@ vi.mock('./sessions', async (importOriginal) => {
 });
 import { invokeCmd, type Result } from './result';
 import { mergeSession, type SessionRow } from './sessions';
-import { moveSession, previewMove, type MoveReport, type MovePreview } from './moveSession';
+import {
+  moveSession,
+  previewMove,
+  cancelMoveWait,
+  type MoveReport,
+  type MovePreview,
+  type MoveWaiting,
+  type MoveWaitCancelled,
+} from './moveSession';
 
 const invoked = invokeCmd as ReturnType<typeof vi.fn>;
 const merged = mergeSession as ReturnType<typeof vi.fn>;
@@ -88,6 +96,17 @@ const previewFixture: MovePreview = {
   unknowns: ['the bundle size is decided by snapshotting the source worktree'],
 };
 
+const waitingFixture: MoveWaiting = {
+  session_id: 7,
+  to_host: 'beta',
+  deadline_unix: 2_000_000_000,
+};
+
+const waitCancelledFixture: MoveWaitCancelled = {
+  session_id: 7,
+  was_waiting: true,
+};
+
 beforeEach(() => {
   invoked.mockReset();
   merged.mockReset();
@@ -104,6 +123,15 @@ describe('previewMove', () => {
       dry_run: true,
     });
     expect(r.ok && r.value.to_host).toBe('beta');
+  });
+
+  // spec §4: a busy source previews with a "will wait" line instead of
+  // stopping at the refusal, so the preview must ask the same question the
+  // Transfer button will actually send.
+  it('sends when: idle, so the preview matches what Transfer will do', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'preview', ...previewFixture }));
+    await previewMove(7, 'beta');
+    expect(invoked.mock.calls[0][1].args).toMatchObject({ when: 'idle' });
   });
 
   it('refuses to treat a real move as a preview', async () => {
@@ -138,7 +166,9 @@ describe('moveSession', () => {
   it('still hands back the report of a real move', async () => {
     invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...reportFixture }));
     const r = await moveSession(7, 'beta');
-    expect(r.ok && r.value.target_session_id).toBe(reportFixture.target_session_id);
+    expect(r.ok && r.value.kind === 'moved' && r.value.target_session_id).toBe(
+      reportFixture.target_session_id,
+    );
   });
 
   it('merges the target row of a moved outcome, and only that', async () => {
@@ -160,5 +190,83 @@ describe('moveSession', () => {
     invoked.mockResolvedValueOnce(err('E_MOVE_MIDOP', 'mid-merge'));
     await moveSession(7, 'beta');
     expect(merged).not.toHaveBeenCalled();
+  });
+
+  // A real transfer defaults to `when: idle` — an idle source moves at once,
+  // a busy one yields a pending wait, instead of the old flat refusal.
+  it('sends when: idle by default', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...reportFixture }));
+    await moveSession(7, 'beta');
+    expect(invoked.mock.calls[0][1].args).toMatchObject({ when: 'idle' });
+  });
+
+  it('sends when: now when asked for it', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...reportFixture }));
+    await moveSession(7, 'beta', { when: 'now' });
+    expect(invoked.mock.calls[0][1].args).toMatchObject({ when: 'now' });
+  });
+
+  it('accepts a waiting outcome and merges nothing', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'waiting', ...waitingFixture }));
+    const r = await moveSession(7, 'beta');
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.value.kind).toBe('waiting');
+    expect(r.ok && (r.value as MoveWaiting).deadline_unix).toBe(waitingFixture.deadline_unix);
+    expect(merged).not.toHaveBeenCalled();
+  });
+
+  // `moveSession` never asks for `when: cancel` — a `wait_cancelled` answer
+  // here would mean the backend and this wrapper disagree about the call it
+  // just made, so it is refused like any other wrong-shaped answer.
+  it('refuses a wait_cancelled answer', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'wait_cancelled', ...waitCancelledFixture }));
+    const r = await moveSession(7, 'beta');
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error.code).toBe('E_PARSE');
+  });
+});
+
+describe('cancelMoveWait', () => {
+  it('sends the session id, the target host, and when: cancel', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'wait_cancelled', ...waitCancelledFixture }));
+    await cancelMoveWait(7, 'beta');
+    expect(invoked.mock.calls[0][0]).toBe('move_session');
+    expect(invoked.mock.calls[0][1].args).toMatchObject({
+      session_id: 7,
+      target_host_alias: 'beta',
+      when: 'cancel',
+    });
+  });
+
+  it('narrows to wait_cancelled', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'wait_cancelled', ...waitCancelledFixture }));
+    const r = await cancelMoveWait(7, 'beta');
+    expect(r.ok && r.value).toEqual(waitCancelledFixture);
+  });
+
+  it('reports was_waiting: false when there was nothing pending to cancel', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'wait_cancelled', session_id: 7, was_waiting: false }));
+    const r = await cancelMoveWait(7, 'beta');
+    expect(r.ok && (r.value as MoveWaitCancelled).was_waiting).toBe(false);
+  });
+
+  it('refuses a moved answer', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...reportFixture }));
+    const r = await cancelMoveWait(7, 'beta');
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error.code).toBe('E_PARSE');
+  });
+
+  it('refuses a waiting answer', async () => {
+    invoked.mockResolvedValueOnce(ok({ kind: 'waiting', ...waitingFixture }));
+    const r = await cancelMoveWait(7, 'beta');
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error.code).toBe('E_PARSE');
+  });
+
+  it('passes a refusal through untouched', async () => {
+    invoked.mockResolvedValueOnce(err('E_MOVE_MIDOP', 'mid-merge'));
+    const r = await cancelMoveWait(7, 'beta');
+    expect(!r.ok && r.error.code).toBe('E_MOVE_MIDOP');
   });
 });

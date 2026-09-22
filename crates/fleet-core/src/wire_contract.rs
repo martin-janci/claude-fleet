@@ -51,4 +51,12 @@
 //!   silently ignores an unknown `dry_run` field and runs a real move where
 //!   this build asked for a read-only preview. Both are exactly what this
 //!   mechanism exists to refuse instead of risking.
-pub const CONTRACT_REVISION: u32 = 2;
+//! - **3** — `move_session` takes a `when` argument (`now` | `idle` |
+//!   `cancel`) and can answer `MoveOutcome::Waiting` or `WaitCancelled` in
+//!   addition to `Moved`/`Preview`. An older hub ignores `when` entirely: for
+//!   `idle` that is harmless (it sees no such field and refuses a busy
+//!   source exactly as it always has), but for `cancel` it is not — the old
+//!   hub sees an ordinary move request and MOVES the session, so cancelling
+//!   a wait would perform the very move it was meant to stop. That is the
+//!   one case this bump exists to refuse instead of risking.
+pub const CONTRACT_REVISION: u32 = 3;

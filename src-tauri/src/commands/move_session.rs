@@ -3,8 +3,10 @@
 //!
 //! Routes in remote mode: `MoveSessionArgs` is exactly the tool's parameter
 //! set (`session_id`, `target_host_alias`, `keep_source`, `strict`,
-//! `clean_target`, `dry_run`), and the tool answers the same `MoveOutcome`
-//! (a `MoveReport` for a real move, a `MovePreview` for `dry_run: true`).
+//! `clean_target`, `dry_run`, `when`), and the tool answers the same
+//! `MoveOutcome` (a `MoveReport` for a real move, a `MovePreview` for
+//! `dry_run: true`, a `MoveWaiting` for `when: idle` on a busy source, a
+//! `MoveWaitCancelled` for `when: cancel`).
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
@@ -30,18 +32,27 @@ pub(crate) mod routed {
     pub async fn move_session(
         backend: &FleetBackend,
         args: MoveSessionArgs,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
         ssh: &Arc<SshClient>,
     ) -> Result<MoveOutcome, IpcError> {
         match backend.hub() {
             Some(hub) => {
-                // A hub built before `dry_run` ignores it and MOVES the
-                // session. The contract gate only refuses such a hub once its
-                // `ready` frame has been judged, so a preview waits for a
-                // positive in-range judgement on this launch. Real moves are
-                // not gated here.
-                if args.dry_run {
-                    hub.require_confirmed_contract("move_session (dry run)")?;
+                // A hub built before `dry_run` or `when` ignores whichever it
+                // predates and MOVES the session — harmless for `when: idle`
+                // (it just sees no such field and refuses a busy source as
+                // today), but not for `when: cancel`: cancelling a wait would
+                // instead perform the very move it was meant to stop. The
+                // contract gate only refuses such a hub once its `ready`
+                // frame has been judged, so any request an older hub could
+                // misread this way waits for a positive in-range judgement
+                // on this launch. A plain move (`when: now`, not a dry run)
+                // stays ungated.
+                if args.dry_run || args.when != move_session::When::Now {
+                    hub.require_confirmed_contract(
+                        "This transfer request",
+                        "a hub older than this app would ignore what it asks and move the \
+                         session at once",
+                    )?;
                 }
                 hub.route("move_session", &args).await
             }

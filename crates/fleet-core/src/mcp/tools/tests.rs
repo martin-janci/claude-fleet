@@ -2513,7 +2513,32 @@ fn the_served_definition_budget_stays_bounded() {
     /// met Transfer 3b's `dry_run` parameter: both were measured against
     /// 57,700, so the merged surface came to 58,013; raised to that plus 100
     /// bytes of headroom.
-    const BUDGET_BYTES: usize = 58_113;
+    ///
+    /// Raised from 57,700 to 58,034 for Transfer 3c Task 4's `when` parameter
+    /// on `move_session` (`now` | `idle` | `cancel`, one short clause per
+    /// value in its own field doc — the tool's own description was left
+    /// alone, per the same "document on the parameter" rule `clean_target`
+    /// set above). The surface before it measured 57,673 — 27 bytes of
+    /// headroom, an enum parameter was never going to fit in.
+    ///
+    /// A first measurement came in at 58,655: `When` derives `JsonSchema` on
+    /// its own type (`service::move_session::When`, not just the
+    /// `MoveSessionParams::when` field), and schemars had serialised that
+    /// whole enum's Rustdoc — several sentences of maintainer-facing
+    /// implementation reasoning, never meant for a client — into
+    /// `$defs.When.description`, at a cost of 982 bytes for one field.
+    /// `#[schemars(description = "now, idle, or cancel a wait")]` on `When`
+    /// overrides that, the same way the parameter's own field doc stays
+    /// short; trimming the served surface only after measuring it dropped
+    /// the real cost to 261 bytes (57,673 to 57,934), so the constant is
+    /// raised to that plus 100 bytes of headroom rather than to the
+    /// unslimmed number.
+    ///
+    /// Raised from 58,113 to 58,382 when 3c met main's `send_prompt { keys }`
+    /// raise through 3b: the `when` raise above was measured against 57,700,
+    /// so the merged surface came to 58,282; raised to that plus 100 bytes
+    /// of headroom.
+    const BUDGET_BYTES: usize = 58_382;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -2667,6 +2692,59 @@ fn move_session_params_carry_clean_target_into_the_service_args() {
     assert!(!p.into_args(41).dry_run);
 }
 
+/// `when` must reach `MoveSessionArgs.when` too (Transfer 3c Task 4) — the
+/// same lesson as `clean_target`/`dry_run` above, and the one 3d shipped a
+/// regression of: a routed argument that is on the schema but not mapped in
+/// `into_args` never reaches the service or the hub.
+/// M7: `when: idle` can answer a pending wait, so the tool's own summary
+/// of what it returns must say so, not only "a moved report or a preview".
+#[test]
+fn move_session_description_names_the_wait_it_can_answer() {
+    let tool = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .find(|t| t.name == "move_session")
+        .expect("move_session is served");
+    let d = tool.description.as_deref().unwrap_or_default();
+    assert!(d.contains("or a wait"), "{d}");
+}
+
+#[test]
+fn move_session_params_carry_when_into_the_service_args() {
+    let p: super::params::MoveSessionParams = serde_json::from_value(serde_json::json!({
+        "session_id": 1,
+        "target_host_alias": "beta",
+        "when": "cancel",
+    }))
+    .unwrap();
+    assert_eq!(
+        p.into_args(41).when,
+        crate::service::move_session::When::Cancel,
+        "a when=cancel arriving at the tool must reach the service args"
+    );
+
+    let p: super::params::MoveSessionParams = serde_json::from_value(serde_json::json!({
+        "session_id": 1,
+        "target_host_alias": "beta",
+        "when": "idle",
+    }))
+    .unwrap();
+    assert_eq!(
+        p.into_args(41).when,
+        crate::service::move_session::When::Idle,
+        "a when=idle arriving at the tool must reach the service args"
+    );
+
+    // The default stays `now`: nothing implies a wait or a cancel.
+    let p: super::params::MoveSessionParams =
+        serde_json::from_value(serde_json::json!({ "session_id": 1, "target_host_alias": "beta" }))
+            .unwrap();
+    assert_eq!(
+        p.into_args(41).when,
+        crate::service::move_session::When::Now
+    );
+}
+
 /// …and the handler must be the mapping's only caller. `into_args` being
 /// correct is worth nothing if `move_session` builds its own args literal
 /// beside it — which is exactly how `clean_target: false` came to be
@@ -2688,6 +2766,10 @@ fn the_move_session_handler_builds_its_args_through_into_args() {
     assert!(
         !src.contains("dry_run:"),
         "no args literal in lifecycle.rs may set dry_run itself"
+    );
+    assert!(
+        !src.contains("when:"),
+        "no args literal in lifecycle.rs may set when itself"
     );
 }
 
@@ -2722,6 +2804,7 @@ async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs
         clean_target: false,
         confirm_nonce: None,
         dry_run,
+        when: crate::service::move_session::When::Now,
     };
 
     let err = t
@@ -2773,6 +2856,55 @@ async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs
         "expected the preview path's own local refusal, got: {}",
         err.message
     );
+}
+
+/// `when: cancel` prevents a move, so it must skip the confirm gate exactly
+/// like a dry run; `when: idle` is a (deferred) move and keeps it. Built
+/// from JSON rather than a `MoveSessionParams` literal — before Task 4's
+/// `params.rs` change `when` is not yet a field on that struct at all — so
+/// this also proves the value actually reaches the handler's gate decision
+/// and not just `into_args`.
+#[tokio::test]
+async fn move_session_skips_the_confirm_gate_for_cancel_but_not_for_idle() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
+        .unwrap();
+    let store = Arc::new(Mutex::new(s));
+    let t = FleetTools::new(
+        Arc::clone(&store),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    );
+    let caller = Caller::master();
+
+    let params = |when: &str| -> super::params::MoveSessionParams {
+        serde_json::from_value(serde_json::json!({
+            "session_id": on_b,
+            "target_host_alias": "hosta",
+            "when": when,
+        }))
+        .unwrap()
+    };
+
+    let err = t
+        .move_session(Extension(caller.clone()), Parameters(params("idle")))
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.starts_with("E_CONFIRM_REQUIRED"),
+        "when: idle is a deferred move and must still be gated: {}",
+        err.message
+    );
+
+    let out = t
+        .move_session(Extension(caller), Parameters(params("cancel")))
+        .await
+        .expect("when: cancel must skip the confirm gate");
+    let json: serde_json::Value = serde_json::from_str(text_of(&out.content[0])).unwrap();
+    assert_eq!(json["kind"], "wait_cancelled");
+    assert_eq!(json["was_waiting"], false);
 }
 
 /// A confirmation nonce must never outlive the call that is waiting on it.

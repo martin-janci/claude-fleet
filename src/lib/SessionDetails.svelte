@@ -19,8 +19,8 @@
     discardKillSession,
   } from './sessions';
   import { canMoveSession, moveBlockedReason } from './moveEligibility';
-  import { transferSheetFor, startMove, adoptPartial } from './moves';
-  import { moveOrigin, unresolvedPartial, type SessionEvent } from './timeline';
+  import { transferSheetFor, startMove, adoptPartial, adoptWait } from './moves';
+  import { moveOrigin, unresolvedPartial, unresolvedWait, type SessionEvent } from './timeline';
   import { projectById } from './projects';
   import { selectSession, selectSessionExplicitly, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
@@ -368,6 +368,12 @@
     return stillThere ? null : origin;
   });
   const unresolvedMove = $derived(unresolvedPartial(timelineEvents));
+  /** A pending wait for a busy source to go idle, recorded on this session's
+   *  own timeline — the wait's `session_move_waiting` is only ever written
+   *  to the source's own row, so this only ever finds one on the source's
+   *  own panel, the same way `unresolvedMove` only ever names a partial on
+   *  a row involved in it. */
+  const unresolvedWaitRec = $derived(unresolvedWait(timelineEvents));
 
   function openMoveBack() {
     if (!moveBackOrigin) return;
@@ -384,6 +390,16 @@
     if (!unresolvedMove) return;
     adoptPartial(unresolvedMove, session.tmux_name);
     transferSheetFor.set(unresolvedMove.sourceSessionId ?? session.id);
+  }
+
+  /** Same recovery shape as `openFinishOrUndo`, for a wait instead of a
+   *  partial: `adoptWait` rebuilds the run from the recorded event (a no-op
+   *  if a live one already exists), then the sheet opens on it — Cancel and
+   *  the reason it ended live there, not in this panel. */
+  function openWait() {
+    if (!unresolvedWaitRec) return;
+    adoptWait(unresolvedWaitRec, session.tmux_name);
+    transferSheetFor.set(unresolvedWaitRec.sessionId);
   }
 
   async function doRecreate() {
@@ -676,6 +692,11 @@
         </button>
         <button class="ghost" onclick={openFinishOrUndo} data-testid="details-undo-move">
           Undo the move
+        </button>
+      {/if}
+      {#if unresolvedWaitRec}
+        <button class="ghost" onclick={openWait} data-testid="details-resume-wait">
+          ⇄ Waiting to move to {unresolvedWaitRec.toHost}
         </button>
       {/if}
       {#if isInactiveAgent(session)}

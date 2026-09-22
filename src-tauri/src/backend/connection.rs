@@ -112,7 +112,8 @@ pub trait ConnectionView: Send + Sync {
     /// Whether THIS launch has positively seen a `ready` frame whose wire
     /// contract is in range — set only when the event bridge reports
     /// [`HubConnection::Connected`], which it does only in the in-range arm
-    /// of its ready-frame check, and cleared by a later skew verdict.
+    /// of its ready-frame check, and cleared by a later skew verdict or by
+    /// the connection leaving `Connected` (the next hub may be older).
     ///
     /// Not the same as [`Self::contract_verdict`] being `None`: that also
     /// means "never judged". It gates what must not reach a hub that might
@@ -162,8 +163,11 @@ pub struct HubConnectionStatus {
     /// so there is no in-process re-pair that would have to clear it too.
     contract: Mutex<Option<HubConnection>>,
     /// See [`ConnectionView::contract_confirmed`]. Set by
-    /// [`HubConnection::Connected`], cleared by a skew verdict, untouched by
-    /// every socket-only transition.
+    /// [`HubConnection::Connected`], cleared by a skew verdict AND by every
+    /// transition away from `Connected` (`Connecting`, `Reconnecting`,
+    /// `Offline`) — unlike `contract`, which outlives a socket drop: the
+    /// verdict is a refusal worth keeping, the confirmation a permission
+    /// that must be re-earned on each connection.
     confirmed: std::sync::atomic::AtomicBool,
     sink: Option<Arc<dyn RemoteEventSink>>,
     /// Only ever used to blank itself out of a reason.
@@ -290,7 +294,8 @@ impl ConnectionReporter for HubConnectionStatus {
         // skew is remembered until another `ready` frame judges the hub in
         // range (which is the only thing that reports `Connected`); every
         // other transition is about the socket and says nothing about the
-        // hub's row shapes, so it leaves the verdict alone. See
+        // hub's row shapes, so it leaves the verdict alone — but not the
+        // confirmation, see below. See
         // [`ConnectionView::contract_verdict`].
         match &state {
             HubConnection::HubTooOld { .. } | HubConnection::HubTooNew { .. } => {
@@ -303,7 +308,17 @@ impl ConnectionReporter for HubConnectionStatus {
                 self.confirmed
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            _ => {}
+            // Leaving `Connected` withdraws the confirmation (never the skew
+            // verdict): across a reconnect the hub may have been replaced by
+            // an older build, and a `when: cancel` that build ignores would
+            // MOVE the session. Only a new judged `ready` restores it.
+            HubConnection::Connecting
+            | HubConnection::Reconnecting { .. }
+            | HubConnection::Offline { .. } => {
+                self.confirmed
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            HubConnection::Standalone => {}
         }
         match serde_json::to_value(&state) {
             Ok(payload) => sink.emit_remote(CONNECTION_EVENT, payload),

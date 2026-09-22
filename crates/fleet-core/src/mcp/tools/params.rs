@@ -647,6 +647,10 @@ pub struct MoveSessionParams {
     /// desktop (only when mcp.confirm_destructive is on).
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// When to move: `now` (default), `idle` (wait, then move), `cancel`
+    /// (end a pending wait).
+    #[serde(default)]
+    pub when: crate::service::move_session::When,
 }
 
 impl MoveSessionParams {
@@ -666,6 +670,7 @@ impl MoveSessionParams {
             strict: self.strict,
             clean_target: self.clean_target,
             dry_run: self.dry_run,
+            when: self.when,
         }
     }
 }

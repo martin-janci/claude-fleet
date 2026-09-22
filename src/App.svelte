@@ -21,7 +21,7 @@
   import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import TransferSheet from './lib/TransferSheet.svelte';
-  import { applyMoveProgress } from './lib/moves';
+  import { applyMoveProgress, recheckWaitingRuns } from './lib/moves';
   import { dispatchTimelineEvents, dispatchConversationsChanged } from './lib/live_events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -265,6 +265,10 @@
     // toast on every alt-tab back into the window would only repeat that.
     void loadProjects();
     void loadSessions();
+    // A Transfer waiting for its session to go idle hears of the wait's end
+    // only through the live timeline push; one missed while the window was
+    // away (sleep, a dropped stream) is read back from the timeline here.
+    void recheckWaitingRuns();
   }
 
   // A drop that reaches the window navigates a WKWebView to file://… and

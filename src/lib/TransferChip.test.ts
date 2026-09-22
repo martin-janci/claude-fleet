@@ -6,7 +6,14 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => new Promise(() => {})) }));
 import { invoke } from '@tauri-apps/api/core';
 import TransferChip from './TransferChip.svelte';
-import { transferSheetFor, startMove, applyMoveProgress, resetMovesForTest } from './moves';
+import {
+  transferSheetFor,
+  startMove,
+  applyMoveProgress,
+  resetMovesForTest,
+  putRunForTest,
+  type MoveRun,
+} from './moves';
 import { MOVE_STEPS, type MoveProgress, type MoveStep, type MoveStepState } from './moveProgress';
 import { sessions, type SessionRow } from './sessions';
 import { hubStatus } from './hub';
@@ -111,6 +118,26 @@ describe('TransferChip', () => {
     await tick();
     expect(screen.getByTestId('transfer-live').textContent?.replace(/\s+/g, ' ').trim())
       .toBe('⇄ moved to beta');
+  });
+
+  // Task 8: a pending wait reads distinctly from a running or a failed move.
+  it('waiting: reads as waiting, not running or failed', async () => {
+    const run: MoveRun = {
+      sessionId: 5, sessionName: 'dev-foo', fromHost: 'alpha', toHost: 'beta',
+      keepSource: null, origin: 'local',
+      steps: MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null })),
+      status: 'waiting', report: null, error: null, resolveError: null,
+      startedAt: Date.now(), settledAt: null, cleanTarget: false, attempt: 1,
+      resolving: false, awaitingStart: false,
+      deadlineUnix: Math.floor(Date.now() / 1000) + 600, waitEnded: null, waitRefusal: null,
+    };
+    putRunForTest(run);
+    render(TransferChip, { props: { session: movable } });
+    await tick();
+    const live = screen.getByTestId('transfer-live');
+    expect(live.getAttribute('data-state')).toBe('waiting');
+    expect(live.textContent?.replace(/\s+/g, ' ').trim()).toBe('⇄ waiting to move to beta');
+    expect(live.textContent).not.toContain('failed');
   });
 
   // F10: a partial move is not a failed one — both sessions are alive.

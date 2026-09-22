@@ -140,6 +140,15 @@ pub(super) async fn preview(
 
     let mut unknowns: Vec<String> = Vec::new();
 
+    // 1a. `when: idle`'s own divergence: `gather()` deferred the idle check
+    // for us (it never does on a real move), and the source turned out to
+    // still be busy — say so, since that is exactly what the move would then
+    // wait on instead of refusing.
+    if g.busy {
+        unknowns
+            .push("the source Claude is busy now; the move will wait for it to finish".to_string());
+    }
+
     // 1b. The one thing `gather()` reads differently on a dry run: it does
     // not fetch origin's tip, so when the source has not fetched it the
     // unpushed count (and, for a strict move, the unpushed refusal) cannot

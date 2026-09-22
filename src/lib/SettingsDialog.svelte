@@ -34,6 +34,7 @@
     MOVE_IGNORED_ENTRY_KB_MAX,
     MOVE_IGNORED_TOTAL_MB_MAX,
     MOVE_MAX_SESSION_STATE_MB_MAX,
+    MOVE_WAIT_MAX_MINS_MAX,
     PROJECTS_LOCAL_ENV_KEY,
     settingPathMap,
     settingLayout,
@@ -936,6 +937,16 @@
           data-testid="move-session-state-mb"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.moveMaxSessionStateMb, 'Move session state', e)} />
         <span class="hook-desc" id="limit-move-session-state-desc">largest per-session Claude directory (MiB, 1–{MOVE_MAX_SESSION_STATE_MB_MAX}: subagent transcripts, tool results) Move to host… carries; above it the biggest files stay behind</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="limit-move-wait-max-mins">transfer wait</label>
+        <input class="port" id="limit-move-wait-max-mins" type="number" min="1" max={MOVE_WAIT_MAX_MINS_MAX} step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.moveWaitMaxMins)}
+          disabled={limitsBusy}
+          aria-describedby="limit-move-wait-max-mins-desc"
+          data-testid="move-wait-max-mins"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveWaitMaxMins, 'Move wait timeout', e)} />
+        <span class="hook-desc" id="limit-move-wait-max-mins-desc">minutes (1–{MOVE_WAIT_MAX_MINS_MAX}) "Transfer when it finishes" waits for the session to go idle before giving up</span>
       </div>
       <div class="mcp-field">
         <label class="lbl" for="usage-enabled">usage</label>
