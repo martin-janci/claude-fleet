@@ -235,6 +235,49 @@ enum ResolvedBy {
     Awaiting,
 }
 
+/// How many pending messages one hook response considers. The packer's budget
+/// is the real limit; this only bounds the query.
+const DELIVERY_SCAN_LIMIT: i64 = 64;
+
+/// Pending messages for the session this hook belongs to, packed for an
+/// `additionalContext` and stamped `delivered_at` in the same lock window.
+///
+/// Called from the `/hook` handler, which must answer in milliseconds: this
+/// does ONE indexed read plus one UPDATE and never touches SSH or a hub.
+///
+/// Row resolution deliberately reuses [`resolve_hook_row`] with
+/// `may_rebind = false` — delivery must never be the thing that rebinds a
+/// conversation to a row; that stays the business of the events that own it.
+pub fn take_pending_delivery(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<crate::service::delivery::Packed> {
+    let s = lock(store).ok()?;
+    let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
+    let pending = s
+        .list_undelivered_for_session(row.id, DELIVERY_SCAN_LIMIT)
+        .ok()?;
+    if pending.is_empty() {
+        return None;
+    }
+    // `sender_label` needs a name per sender; resolve inside this same lock
+    // window, and fall back to the bare id rather than failing a delivery.
+    let label = |from_id: i64| match s.get_session_by_id(from_id) {
+        Ok(Some(r)) => format!("{}@{}", r.tmux_name, r.host_alias),
+        _ => format!("session {from_id}"),
+    };
+    let packed = crate::service::delivery::pack(&pending, &label);
+    if packed.included.is_empty() {
+        // Everything pending is individually over budget. Still report the
+        // tail so the agent learns the messages exist, but stamp nothing —
+        // they must stay deliverable via `inbox`.
+        return Some(packed);
+    }
+    let _ = s.mark_messages_delivered(&packed.included);
+    Some(packed)
+}
+
 /// May a hook that reached `row` through its PANE move it onto a new id?
 /// Any `claude` started in the pane — a Bash-tool `claude -p` included —
 /// inherits `$TMUX_PANE`, so the pane alone does not prove the payload's
@@ -2691,5 +2734,66 @@ mod tests {
         let t = s.get_task(task).unwrap().unwrap();
         assert!(t.finished_at.is_none());
         assert_eq!(t.worker_claude_session_id.as_deref(), Some(OLD));
+    }
+
+    fn seed(s: &Store, name: &str) -> i64 {
+        s.upsert_host("local").unwrap();
+        s.upsert_session(name, "local", None, None, 0, 0, "running", None)
+            .unwrap()
+    }
+
+    #[test]
+    fn take_pending_delivery_packs_stamps_and_then_returns_none() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (a, b) = {
+            let s = store.lock().unwrap();
+            (seed(&s, "alpha"), seed(&s, "beta"))
+        };
+        {
+            let s = store.lock().unwrap();
+            s.insert_message(a, b, "ping", "message", None).unwrap();
+            // Bind the hook payload to beta's conversation.
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
+                    rusqlite::params![b],
+                )
+                .unwrap();
+        }
+        let payload = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+        };
+
+        let packed = take_pending_delivery(&store, &payload, &ctx).expect("one message to deliver");
+        assert_eq!(packed.included.len(), 1);
+        assert!(packed.text.contains("ping"));
+        assert!(packed.text.contains("alpha@local"));
+
+        // Stamped, so the next hook has nothing — no infinite re-delivery.
+        assert!(
+            take_pending_delivery(&store, &payload, &ctx).is_none(),
+            "a delivered message is not handed over twice"
+        );
+    }
+
+    #[test]
+    fn take_pending_delivery_is_none_for_an_unresolvable_hook() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let payload = HookPayload {
+            session_id: Some("00000000-0000-0000-0000-000000000000".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+        };
+        assert!(take_pending_delivery(&store, &payload, &ctx).is_none());
     }
 }
