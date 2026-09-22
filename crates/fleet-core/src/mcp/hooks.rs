@@ -11,7 +11,12 @@
 //! older installs is still accepted by the middleware until every host is
 //! re-provisioned.
 
-use axum::{extract::State, http::StatusCode, Extension, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Extension, Json,
+};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 
@@ -90,7 +95,7 @@ pub async fn handle_hook(
     Extension(caller): Extension<Caller>,
     headers: axum::http::HeaderMap,
     Json(payload): Json<HookPayload>,
-) -> StatusCode {
+) -> Response {
     use crate::ipc_error::codes;
     // A paired client (a phone) has no business reporting hook events: hooks
     // are Claude Code's own callbacks, and `service::hooks::caller_host` maps
@@ -102,7 +107,7 @@ pub async fn handle_hook(
     // `debug`, matching the accepted path two lines below.
     if caller.is_client() {
         tracing::debug!(caller = %caller.label(), "[hook] refused: clients do not report hooks");
-        return StatusCode::FORBIDDEN;
+        return StatusCode::FORBIDDEN.into_response();
     }
     let pane_id = pane_header(&headers);
     // Every hook event lands here (several per turn): debug, not info. Only
@@ -121,10 +126,38 @@ pub async fn handle_hook(
         pane_id,
     };
     match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload, &ctx) {
-        Ok(()) => StatusCode::NO_CONTENT,
+        Ok(()) => {
+            // Delivery rides the response body of exactly these two events:
+            // they are the only hooks Claude Code reads `additionalContext`
+            // from, and both must stay SYNCHRONOUS (never `async: true`) or
+            // the body is discarded. See the phase-2b exception in
+            // docs/superpowers/specs/2026-09-22-fleet-mesh-addressing-and-delivery-design.md
+            let event = payload.hook_event_name.as_deref().unwrap_or("");
+            if !matches!(event, "UserPromptSubmit" | "Stop") {
+                return StatusCode::NO_CONTENT.into_response();
+            }
+            match crate::service::hooks::take_pending_delivery(&state.store, &payload, &ctx) {
+                Some(packed) if !packed.text.is_empty() => {
+                    tracing::debug!(
+                        event,
+                        delivered = packed.included.len(),
+                        remaining = packed.remaining,
+                        "[hook] carrying a delivery"
+                    );
+                    axum::Json(serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": event,
+                            "additionalContext": packed.text,
+                        }
+                    }))
+                    .into_response()
+                }
+                _ => StatusCode::NO_CONTENT.into_response(),
+            }
+        }
         Err(e) if e.code == codes::E_VALIDATE || e.code == codes::E_INVALID => {
             tracing::warn!(code = %e.code, error = %e.message, "[hook] rejected payload");
-            StatusCode::BAD_REQUEST
+            StatusCode::BAD_REQUEST.into_response()
         }
         Err(e) if e.code == codes::E_FORBIDDEN => {
             tracing::warn!(
@@ -133,11 +166,11 @@ pub async fn handle_hook(
                 error = %e.message,
                 "[hook] refused"
             );
-            StatusCode::FORBIDDEN
+            StatusCode::FORBIDDEN.into_response()
         }
         Err(e) => {
             tracing::error!(code = %e.code, error = %e.message, "[hook] apply_hook failed");
-            StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }
@@ -174,7 +207,9 @@ mod tests {
                 axum::http::HeaderMap::new(),
                 Json(payload)
             )
-            .await,
+            .await
+            .into_response()
+            .status(),
             StatusCode::FORBIDDEN,
             "a paired client must never report hook events"
         );
@@ -291,5 +326,107 @@ mod tests {
         let json = r#"{"unknown_future_field":"x","session_id":"s1"}"#;
         let p: HookPayload = serde_json::from_str(json).unwrap();
         assert_eq!(p.session_id.as_deref(), Some("s1"));
+    }
+
+    #[tokio::test]
+    async fn a_hook_with_nothing_pending_still_answers_204() {
+        let state = HookState {
+            store: Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap())),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let payload = HookPayload {
+            session_id: Some("conv-x".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        let res = handle_hook(
+            State(state),
+            Extension(Caller::master()),
+            axum::http::HeaderMap::new(),
+            Json(payload),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn a_pending_message_comes_back_as_hook_specific_output() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let (a, b) = {
+            let s = store.lock().unwrap();
+            let a = seed(&s, "alpha");
+            let b = seed(&s, "beta");
+            s.insert_message(a, b, "ping", "message", None).unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
+                    rusqlite::params![b],
+                )
+                .unwrap();
+            (a, b)
+        };
+        let _ = (a, b);
+        let state = HookState {
+            store: store.clone(),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let payload = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        let res = handle_hook(
+            State(state),
+            Extension(Caller::master()),
+            axum::http::HeaderMap::new(),
+            Json(payload),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+        let ctx = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("ping"), "{ctx}");
+    }
+
+    #[tokio::test]
+    async fn a_client_caller_is_still_refused_and_gets_no_delivery() {
+        // Regression guard: the 403 path must not become a delivery channel.
+        use crate::mcp::auth::{ClientRef, TokenMode};
+        let state = HookState {
+            store: Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap())),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let client = Caller {
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 1,
+                name: "phone".into(),
+                trusted: false,
+            }),
+            mode: TokenMode::Full,
+        };
+        let res = handle_hook(
+            State(state),
+            Extension(client),
+            axum::http::HeaderMap::new(),
+            Json(HookPayload::default()),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    fn seed(s: &crate::store::Store, name: &str) -> i64 {
+        s.upsert_host("local").unwrap();
+        s.upsert_session(name, "local", None, None, 0, 0, "running", None)
+            .unwrap()
     }
 }

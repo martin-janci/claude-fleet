@@ -442,6 +442,37 @@ check "the agent re-installed with the new token connects again" 'connected' "$(
 c3=$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}")
 check "session commands work again over the new connection" 'echo "$c3" | grep -q "\"isError\":false"' "${c3:0:400}"
 
+# --- /hook two-way delivery: a real hook answers 200 with a pending message
+# in its body (spec phase 2b) ----------------------------------------------
+# This is the one place in this script a host-scoped bearer token (not
+# master) is sitting on a session with a real tmux pane: a hook resolves a
+# brand-new claude_session_id onto a row only through its PANE step, which
+# needs exactly that combination (see resolve_hook_row / rebind_eligible in
+# service/hooks.rs). agt2 (S2) already has a reconciled tmux_pane_id from the
+# list_sessions call above.
+ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}")
+PANE2=$(aenv tmux list-panes -t agt2 -F '#{pane_id}' | head -1)
+CONV=e2eaaaaa-bbbb-cccc-dddd-e2e2e2e2e2e2
+bindcode=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "http://127.0.0.1:$PC/hook" \
+  -H "Host: $PUB" -H "Authorization: Bearer $NTOK" -H "X-Fleet-Pane: $PANE2" \
+  -H 'Content-Type: application/json' \
+  -d "{\"hook_event_name\":\"SessionStart\",\"source\":\"startup\",\"session_id\":\"$CONV\"}")
+check "a real SessionStart hook over the agent binds the pane's session id" '[ "$bindcode" = 204 ]' "http $bindcode pane=$PANE2"
+aenv tmux new-session -d -s agt3 -c "$AHOME" "exec bash --noprofile --norc"
+ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}")
+S3=$(sid_of agt3)
+check "a sender session id was parsed for the delivery check" '[ -n "$S3" ]' "${ls_a:0:400}"
+sm=$(tool "$PC" "$PUB" "$TOKC" send_message "{\"from_session_id\":${S3:-0},\"to_session_id\":${S2:-0},\"body\":\"e2e hook delivery ping\"}")
+check "send_message queues a message for the bound session" 'echo "$sm" | grep -q "\"isError\":false"' "${sm:0:400}"
+hookresp=$(curl -s -w '\n%{http_code}' -m 10 -X POST "http://127.0.0.1:$PC/hook" \
+  -H "Host: $PUB" -H "Authorization: Bearer $TOKC" \
+  -H 'Content-Type: application/json' \
+  -d "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"$CONV\",\"prompt\":\"hi\"}")
+hookcode="${hookresp##*$'\n'}"; hookbody="${hookresp%$'\n'*}"
+check "a hook with a pending message answers 200 with the delivery in its body" \
+  '[ "$hookcode" = 200 ] && echo "$hookbody" | grep -q "e2e hook delivery ping" && echo "$hookbody" | grep -q additionalContext' \
+  "code=$hookcode body=${hookbody:0:400}"
+
 # Stopping the agent: it exits cleanly, the hub fails calls at once, and the
 # tmux server the agent's commands started outlives it.
 stop_agent agent2
