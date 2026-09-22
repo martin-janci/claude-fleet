@@ -191,6 +191,12 @@ Landed 2026-09-21 on branch feature/device-communication-fa2aec (plan: docs/supe
 
 ### Phase 2 — Make the SSH path O(1) per tick (fast, hosts)
 
+Items 5–7 landed 2026-09-22 on branch `feature/device-communication-phase-2`
+(plan: `docs/superpowers/plans/2026-09-22-device-communication-phase-2a.md`).
+Item 8 is Phase 2b. Deviations: no `E_CL_MISSING` — main's `cl` fallback
+(331d49f8) covers a missing `cl`; the toolchain is resolved from the user's
+interactive login shell and cached for the process lifetime, not persisted.
+
 5. **Batch the probe** into one delimited script per host (identity, list,
    all pane tails via `| tail -n 8`, oauth), parsed in Rust; `claude
    agents --json` on a slower cadence and returning `Option` so a failure

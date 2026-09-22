@@ -371,7 +371,8 @@ return slim summary rows by default and accept `limit`; `list_worktrees`
 answers `{total, worktrees}` with slim rows, at most 100 of them (`limit`,
 0 = no cap — what the desktop asks for in hub-client mode), filtered by
 `project_id` / `host_alias`; `capture_session` returns plain text
-capped to the last 200 lines (`max_lines`, 0 = no cap); `repo_log` returns 50
+capped to the last 200 lines (`max_lines`, 0 = no cap), and reads at most
+20 000 rows of scrollback however large `scrollback_lines` is; `repo_log` returns 50
 commits by default (`limit`, `skip`); `session_history`, `inbox` and
 `list_tasks` default to 50 rows; `session_transcript` / `run_prompt` return at
 most `max_chars` characters (default 8000, max 64000).
