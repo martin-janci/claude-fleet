@@ -1,6 +1,12 @@
 [package]
 name = "fleet-core"
 version = "0.1.0"
+# Not versioned in step with the app (scripts/release.sh excludes it) and
+# never published: `publish = false` makes that exception enforced instead of
+# conventional, so this 0.1.0 can never reach a registry as if it were a
+# release of claude-fleet. scripts/check-version-consistency.sh asserts this
+# marker is here for every version-exempt crate (F-C22).
+publish = false
 description = "Transport-agnostic core of claude-fleet: service layer, store, SSH, tmux, MCP control API"
 authors = ["martin-janci"]
 edition = "2021"

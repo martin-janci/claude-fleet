@@ -6,6 +6,20 @@ on:
   pull_request:
 
 jobs:
+  # The six version carriers scripts/release.sh rewrites, plus the four
+  # Cargo.lock member entries it syncs, must all hold the same string — and
+  # crates/fleet-core must stay at its allowlisted 0.1.0 with `publish = false`.
+  # Nothing used to check this, so the hand bump to 0.2.27 (fa8f3a30) went
+  # unnoticed (F-C5). Seconds, not minutes: text reads plus the runner's
+  # preinstalled node — no cargo build, no pnpm install, no cache.
+  # release.yml runs the same script as its gating first job, there with
+  # --expect-tag, so the pushed tag is checked too.
+  version-consistency:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-version-consistency.sh
+
   rust:
     strategy:
       fail-fast: false
