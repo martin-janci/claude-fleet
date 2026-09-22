@@ -1022,7 +1022,55 @@ mod tests {
         );
     }
 
+    /// Make git in this test binary ignore whoever is running it.
+    ///
+    /// These tests are about which identity a commit ends up with, so anything
+    /// the machine can contribute to that has to go. Two layers can, and the
+    /// second is the one that is easy to miss:
+    ///
+    ///  - **config.** `has_identity` asks `git config user.email`, which falls
+    ///    back to the global file. On a clean runner a fresh repo has none and
+    ///    `commit` takes its fallback branch; on a developer's machine it has
+    ///    one and that branch is unreachable.
+    ///  - **environment.** `GIT_AUTHOR_EMAIL` and friends override *every*
+    ///    config layer, including a repository's own `--local` setting. An
+    ///    agent harness sets them so its commits are attributed correctly, and
+    ///    with them set `commit_keeps_configured_identity` fails even though
+    ///    the test had just written a local identity — which is what makes
+    ///    this the wrong thing to diagnose as "the global config leaked in".
+    ///
+    /// Green in CI and red locally is the worse of the two failures, because
+    /// it is the pattern that teaches people to ignore a red local suite.
+    ///
+    /// Scoped to this process, so the environment the tests run *in* is
+    /// untouched. That is the point rather than a side effect: a test whose
+    /// result depends on the machine is a test that is not about the code, and
+    /// everything here that passes on a runner already depends on neither.
+    /// This makes local match CI rather than the other way round.
+    fn isolate_git_config() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // `/dev/null` reads as an empty config. Both platforms this is
+            // built on have it; nothing here runs on Windows.
+            std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+            std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
+            for name in [
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_AUTHOR_DATE",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+                "GIT_COMMITTER_DATE",
+                // Git's last resort before it gives up guessing.
+                "EMAIL",
+            ] {
+                std::env::remove_var(name);
+            }
+        });
+    }
+
     fn init_repo(root: &std::path::Path) {
+        isolate_git_config();
         git_run(root, &["init", "-q", "-b", "main"]);
     }
 
