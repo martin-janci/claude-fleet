@@ -109,7 +109,7 @@ impl Drop for WaitGuard {
     }
 }
 
-fn now_unix() -> i64 {
+pub(super) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -139,7 +139,7 @@ fn wait_max_mins(s: &Store) -> u64 {
 pub(super) fn begin_wait(
     args: &MoveSessionArgs,
     store: &Mutex<Store>,
-) -> Result<(WaitGuard, tokio::time::Instant, MoveWaiting), IpcError> {
+) -> Result<(WaitGuard, i64, MoveWaiting), IpcError> {
     let key = key_for(store, args.session_id);
 
     {
@@ -178,7 +178,6 @@ pub(super) fn begin_wait(
         }
     };
     let deadline_unix = now_unix() + (mins as i64) * 60;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(mins * 60);
 
     let waiting = MoveWaiting {
         session_id: args.session_id,
@@ -204,7 +203,7 @@ pub(super) fn begin_wait(
             );
         }
     }
-    Ok((guard, deadline, waiting))
+    Ok((guard, deadline_unix, waiting))
 }
 
 /// Cancel a pending wait. `true` if there was one registered.
@@ -239,12 +238,53 @@ pub(super) async fn run_wait(
     hooks: &dyn MoveHooks,
     opts: MoveOptions,
     token: &CancellationToken,
-    deadline: tokio::time::Instant,
+    deadline_unix: i64,
     poll: Duration,
+) -> WaitEnd {
+    run_wait_with(
+        args,
+        store,
+        ssh,
+        hooks,
+        opts,
+        token,
+        deadline_unix,
+        poll,
+        WAIT_SLICE,
+        &now_unix,
+    )
+    .await
+}
+
+/// Longest single idle poll between two wall-clock deadline checks.
+pub(super) const WAIT_SLICE: Duration = Duration::from_secs(60);
+
+/// [`run_wait`] with its wall clock (unix seconds) and poll slice injected,
+/// so a test can move the wall clock without sleeping.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_wait_with(
+    args: MoveSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    hooks: &dyn MoveHooks,
+    opts: MoveOptions,
+    token: &CancellationToken,
+    deadline_unix: i64,
+    poll: Duration,
+    slice: Duration,
+    clock: &(dyn Fn() -> i64 + Sync),
 ) -> WaitEnd {
     let mut refusal: Option<IpcError> = None;
     let end = loop {
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        // The deadline is wall-clock (I3): a monotonic `Instant` stops while
+        // a Mac sleeps, so a Friday wait would fire on Monday. Poll in slices
+        // of at most `slice` and re-read the wall clock between them, so a
+        // wake past the deadline ends the wait within one slice.
+        let now = clock();
+        if now >= deadline_unix {
+            break WaitEnd::TimedOut;
+        }
+        let left = Duration::from_secs((deadline_unix - now) as u64).min(slice);
         let idle = tokio::select! {
             _ = token.cancelled() => break WaitEnd::Cancelled,
             r = wait_for_session_with(store, args.session_id, WaitCond::Idle, left, poll) => r,
@@ -255,7 +295,8 @@ pub(super) async fn run_wait(
                 refusal = Some(e);
                 break WaitEnd::Refused;
             }
-            Ok(o) if !o.satisfied => break WaitEnd::TimedOut,
+            // Not idle within this slice: back to the wall-clock check.
+            Ok(o) if !o.satisfied => continue,
             Ok(_) => {}
         }
         // Idle: run the real move. A cancel from here on lets it finish —

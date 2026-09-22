@@ -7435,7 +7435,7 @@ mod tests {
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         let a = args(&f, false);
         let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
-        let deadline = tokio::time::Instant::now() + POLL * 3;
+        let deadline = wait::now_unix() - 1;
         let end = wait::run_wait(
             a,
             &f.store,
@@ -7447,6 +7447,53 @@ mod tests {
             POLL,
         )
         .await;
+        assert_eq!(end, wait::WaitEnd::TimedOut);
+        assert!(!events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+    }
+
+    /// I3: the deadline is wall-clock. macOS's monotonic clock stops while
+    /// the machine sleeps, so a deadline kept as a `tokio::time::Instant`
+    /// fires hours late after a lid close. Here the injected wall clock jumps
+    /// past the deadline while almost no monotonic time passes: the wait must
+    /// notice within one slice and end `timed_out`.
+    #[tokio::test]
+    async fn the_wall_clock_passing_the_deadline_ends_the_wait_even_if_monotonic_time_did_not() {
+        use std::sync::atomic::AtomicI64;
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let a = args(&f, false);
+        let (guard, _, _) = wait::begin_wait(&a, &f.store).unwrap();
+        const T0: i64 = 1_800_000_000;
+        let wall = AtomicI64::new(T0);
+        let clock = || wall.load(Ordering::SeqCst);
+        let run = async {
+            let (end, ()) = tokio::join!(
+                wait::run_wait_with(
+                    a,
+                    &f.store,
+                    &f.fake,
+                    &hooks,
+                    fast(),
+                    guard.token(),
+                    T0 + 3600,
+                    POLL,
+                    POLL * 2,
+                    &clock,
+                ),
+                async {
+                    tokio::time::sleep(POLL * 3).await;
+                    // The machine "slept" for an hour and a bit.
+                    wall.store(T0 + 3600, Ordering::SeqCst);
+                },
+            );
+            end
+        };
+        let end = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("the wait must end on the wall-clock deadline, not an hour of monotonic time");
         assert_eq!(end, wait::WaitEnd::TimedOut);
         assert!(!events(&f, f.source_id)
             .iter()
