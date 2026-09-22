@@ -926,6 +926,23 @@ others, so a later bare `serve` keeps it. Changing it does not move a
 running operator: kill the old `fleet-operator` session first, then press
 the button again.
 
+The birth also answers Claude Code's workspace trust dialog for the operator
+directory. On a fresh host Claude Code stops at "Is this a project you
+created or one you trust?" before it reads `CLAUDE.md`, and the fleet would
+report the operator as `stuck_kind: trust_prompt` for good. The directory
+holds nothing but the two files the fleet just wrote, so the answer is known,
+and it is recorded the way Claude Code records the user's own: in the host's
+`~/.claude.json`, `projects["<absolute operator dir>"].hasTrustDialogAccepted`
+is set to `true`, and the project-scoped `.mcp.json` approval
+(`enabledMcpjsonServers`) lists `claude-fleet` — only that server, so nothing
+else is enabled on the user's behalf. The write is a read-merge-write like
+the `mcpServers` entry provisioning puts in the same file: every other key
+and project survives, a `.fleet-bak` copy is kept, the file is renamed into
+place rather than truncated, and a file that is not the JSON object Claude
+Code writes is refused (`E_PROVISION`) before anything is written — that
+refusal ends the birth with no token committed and no session started, and
+the next press retries.
+
 ## Migrating from the desktop
 
 1. Quit the desktop app.

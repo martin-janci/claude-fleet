@@ -179,7 +179,7 @@ Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `
 
 ### `operator_status`
 
-Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked.
+Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host.
 
 ### `pair_client`
 
