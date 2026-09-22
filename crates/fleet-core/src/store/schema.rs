@@ -399,9 +399,13 @@ impl Migration {
     }
 }
 
-/// The schema version a fully migrated database reports.
+/// The schema version a fully migrated database reports. `pub(crate)` (not
+/// `pub`) so other crate-internal tests — e.g. `service::health`'s — can
+/// assert against the authoritative value instead of a literal that rots on
+/// every new migration; re-exported from `store::mod` since `schema` itself
+/// is a private submodule.
 #[cfg(test)]
-const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
+pub(crate) const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
 
 impl Store {
     pub(super) fn migrate(&self) -> Result<()> {

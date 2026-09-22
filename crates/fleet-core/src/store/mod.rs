@@ -34,6 +34,8 @@ pub use layers::HostLayerRow;
 pub use participants::ParticipantRow;
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
+#[cfg(test)]
+pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
 
 pub struct Store {
