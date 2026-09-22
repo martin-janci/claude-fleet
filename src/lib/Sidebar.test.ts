@@ -63,7 +63,7 @@ import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, loadProjects } from './projects';
 import { sessions, loadSessions, showBgAgents, showRowDetails, resetTombstonesForTests, type SessionRow } from './sessions';
-import { selectedSession, selectSession } from './selection';
+import { selectedSession, selectSession, selectSessionExplicitly } from './selection';
 import { hosts, loadHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
 import { accounts, loadAccounts } from './accounts';
 import { onboardingDismissed } from './onboarding';
@@ -237,7 +237,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     }
   });
 
-  it('selecting a session on a host hidden by the host filter widens the filter to all', async () => {
+  it('an explicit select on a host hidden by the host filter widens the filter to all', async () => {
     // The persisted host filter outlives the New-session dialog: a session
     // created (and auto-selected) on another host used to vanish from the
     // tree with no feedback, so the user kept creating it again.
@@ -249,13 +249,180 @@ describe('Sidebar (sessions-grouped view)', () => {
     await tick(); await tick();
     expect(screen.queryAllByTestId('sess-row')).toHaveLength(1);
 
-    // Select from outside the tree, as onCreated / the quick switcher do.
-    selectSession(created);
+    // Select from outside the tree, as onCreated / the quick switcher do —
+    // both go through `selectSessionExplicitly`, which is what marks the
+    // pick as reveal-worthy.
+    selectSessionExplicitly(created);
     await tick(); await tick(); await Promise.resolve();
     expect(get(hostFilter)).toBe('all');
     const ids = screen.queryAllByTestId('sess-row').map((r) => r.getAttribute('data-session-id'));
     expect(ids).toContain(String(created.id));
     expect(ids).toContain(String(shown.id));
+  });
+
+  it('a non-explicit reselect to a session on a hidden host does NOT widen the host filter', async () => {
+    // A rename/recreate resync or a completed move's follow reselect can
+    // move the selection to a session on a different host without any user
+    // "open" action — e.g. `moves.ts` calling `selectSession(target, {
+    // follow: true })` once a move finishes. That must never reset a filter
+    // the user deliberately set.
+    const onMefistos = sessionFor(1, 'dev-mefistos');
+    onMefistos.host_alias = 'mefistos';
+    const onMac = sessionFor(1, 'dev-mac');
+    onMac.host_alias = 'mac';
+    mockBackend(fakeProjects, [onMefistos, onMac]);
+    hostFilter.set('mefistos');
+    render(Sidebar);
+    await tick(); await tick();
+
+    // Simulate the store's selection moving to the `mac` session through a
+    // non-explicit path (no `selectSessionExplicitly` anywhere in it).
+    selectSession(onMac, { follow: true });
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('mefistos');
+  });
+
+  it('an explicit re-select of the ALREADY-selected session still widens the filter', async () => {
+    // The reveal is keyed on `revealSeq`, not the selected id, precisely so
+    // this works: the id doesn't change on a re-select, but the user still
+    // asked to open it.
+    const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-local'), onMac]);
+    hostFilter.set('local');
+    render(Sidebar);
+    await tick(); await tick();
+
+    selectSessionExplicitly(onMac);
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('all');
+
+    // The user narrows the filter back down while `onMac` stays selected...
+    hostFilter.set('local');
+    await tick();
+    // ...then explicitly opens the very same session again (e.g. clicking
+    // it again from the quick switcher) — same id, but a fresh ask to see it.
+    selectSessionExplicitly(onMac);
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('all');
+  });
+
+  it('a non-explicit reselect that follows an earlier explicit one does NOT widen the filter', async () => {
+    // A bump can't be "replayed": once the explicit reveal for the first
+    // session has been applied, a later non-explicit id change (e.g. a
+    // rename resync) must not re-widen the filter on the new session's
+    // behalf just because a bump happened at some point in the past.
+    const onLocal = sessionFor(1, 'dev-local');
+    const onMefistos = { ...sessionFor(1, 'dev-mefistos'), host_alias: 'mefistos' };
+    const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
+    mockBackend(fakeProjects, [onLocal, onMefistos, onMac]);
+    hostFilter.set('local');
+    render(Sidebar);
+    await tick(); await tick();
+
+    // Explicit select onto `mefistos` — widens as expected.
+    selectSessionExplicitly(onMefistos);
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('all');
+
+    // The user narrows the filter back down...
+    hostFilter.set('mefistos');
+    await tick();
+    // ...then a non-explicit reselect (no `selectSessionExplicitly`) moves
+    // the selection to `mac` — must stay put, not widen again.
+    selectSession(onMac, { follow: true });
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('mefistos');
+  });
+
+  // #223 fix round 2: the Sidebar is destroyed and recreated on
+  // collapse/expand (App.svelte's `{#if sidebarCollapsed}`). `revealSeq` is
+  // a module-level counter that outlives any one Sidebar instance, so a
+  // fresh mount must only react to a bump that happens AFTER it exists —
+  // never replay whatever `revealSeq` already was, or it would widen the
+  // filter for a session that arrived non-explicitly while collapsed.
+  describe('reveal across a Sidebar remount', () => {
+    it('an explicit select scrolls the row into view ONCE, not once per effect', async () => {
+      // Two effects reveal: the id-keyed one and the `revealSeq` one. An
+      // explicit select moves the selection AND bumps the sequence in the
+      // same flush, so without a gate both fired for the same session.
+      const onLocal = sessionFor(1, 'dev-local');
+      const onOther = sessionFor(1, 'dev-other');
+      mockBackend(fakeProjects, [onLocal, onOther]);
+      hostFilter.set('all');
+      render(Sidebar);
+      await tick(); await tick();
+
+      const scrolled: string[] = [];
+      const orig = Element.prototype.scrollIntoView;
+      Element.prototype.scrollIntoView = function (this: Element) {
+        scrolled.push((this as HTMLElement).dataset.sessionId ?? '');
+      };
+      try {
+        selectSessionExplicitly(onOther);
+        await tick(); await tick(); await Promise.resolve(); await tick();
+        expect(scrolled).toEqual([String(onOther.id)]);
+      } finally {
+        Element.prototype.scrollIntoView = orig;
+      }
+    });
+
+    it('a bump from before mount is not replayed at mount time', async () => {
+      const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
+      mockBackend(fakeProjects, [sessionFor(1, 'dev-local'), onMac]);
+      hostFilter.set('mefistos');
+      // Bump `revealSeq` BEFORE the Sidebar ever mounts.
+      selectSessionExplicitly(onMac);
+
+      render(Sidebar);
+      await tick(); await tick(); await Promise.resolve();
+      expect(get(hostFilter)).toBe('mefistos');
+    });
+
+    it('an explicit select after mount still widens the filter', async () => {
+      const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
+      mockBackend(fakeProjects, [sessionFor(1, 'dev-local'), onMac]);
+      hostFilter.set('mefistos');
+      // Same pre-mount bump as above, so the mounted instance's baseline
+      // already accounts for it...
+      selectSessionExplicitly(onMac);
+      render(Sidebar);
+      await tick(); await tick(); await Promise.resolve();
+      expect(get(hostFilter)).toBe('mefistos');
+
+      // ...but a NEW explicit select after mount is a fresh bump and must
+      // still widen.
+      selectSessionExplicitly(onMac);
+      await tick(); await tick(); await Promise.resolve();
+      expect(get(hostFilter)).toBe('all');
+    });
+
+    it('unmount, a non-explicit reselect to another host, then remount: the filter stays put', async () => {
+      const onMefistos = { ...sessionFor(1, 'dev-mefistos'), host_alias: 'mefistos' };
+      const onMac = { ...sessionFor(1, 'dev-mac'), host_alias: 'mac' };
+      mockBackend(fakeProjects, [onMefistos, onMac]);
+      // Start on a filter that HIDES the session about to be selected, so
+      // the widen below is a real event and not a no-op on a matching host.
+      hostFilter.set('mac');
+
+      const first = render(Sidebar);
+      await tick(); await tick();
+      // An explicit select while mounted widens, as established above.
+      selectSessionExplicitly(onMefistos);
+      await tick(); await tick(); await Promise.resolve();
+      expect(get(hostFilter)).toBe('all');
+
+      hostFilter.set('mefistos');
+      first.unmount();
+
+      // While unmounted, a non-explicit reselect (no bump) moves to `mac`.
+      selectSession(onMac, { follow: true });
+
+      // Remounting must NOT treat the leftover, already-applied `revealSeq`
+      // value as a fresh bump for whatever is selected now.
+      render(Sidebar);
+      await tick(); await tick(); await Promise.resolve();
+      expect(get(hostFilter)).toBe('mefistos');
+    });
   });
 
   it('clicking a session row selects it in the store', async () => {

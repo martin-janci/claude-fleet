@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { selectedSession, selectSession, restoreLastSession, clearSelection, onSessionOpened } from './selection';
+import {
+  selectedSession,
+  selectSession,
+  selectSessionExplicitly,
+  restoreLastSession,
+  clearSelection,
+  onSessionOpened,
+  revealSeq,
+} from './selection';
 import {
   sessions,
   mergeSession,
@@ -178,6 +186,36 @@ describe('selectedSession is derived from the sessions store', () => {
     selectSession(fresh);
     expect(get(sessions).map((s) => s.id)).toEqual([42]);
     expect(get(selectedSession)?.id).toBe(42);
+  });
+});
+
+describe('revealSeq', () => {
+  it('selectSessionExplicitly sets the selection and bumps revealSeq exactly once', () => {
+    const before = get(revealSeq);
+    const row = makeSession({ id: 5, tmux_name: 'dev-explicit' });
+    selectSessionExplicitly(row);
+    expect(get(selectedSession)?.id).toBe(5);
+    expect(get(revealSeq)).toBe(before + 1);
+
+    // A second explicit select — even of the very same session — bumps
+    // again, exactly once, so a Sidebar effect keyed on the sequence number
+    // (not the session id) can still react.
+    selectSessionExplicitly(row);
+    expect(get(revealSeq)).toBe(before + 2);
+  });
+
+  it('plain selectSession never bumps revealSeq', () => {
+    const before = get(revealSeq);
+    selectSession(makeSession({ id: 6, tmux_name: 'dev-plain' }));
+    expect(get(selectedSession)?.id).toBe(6);
+    expect(get(revealSeq)).toBe(before);
+
+    selectSession(makeSession({ id: 7, tmux_name: 'dev-follow' }), { follow: true });
+    expect(get(selectedSession)?.id).toBe(7);
+    expect(get(revealSeq)).toBe(before);
+
+    selectSession(null);
+    expect(get(revealSeq)).toBe(before);
   });
 });
 

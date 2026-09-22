@@ -28,8 +28,20 @@
   import ToolLine from './ToolLine.svelte';
   import SubagentBlock from './SubagentBlock.svelte';
   import CopyButton from './CopyButton.svelte';
-  import { findMatches, turnIndex, rowKey } from './conversation_nav';
-  import { detectMac } from './terminal_keys';
+  import {
+    findMatches,
+    turnIndex,
+    rowKey,
+    rememberScroll,
+    recallScroll,
+    forgetScroll,
+    anchorAt,
+    resolveScroll,
+    nearestTurn,
+    turnKeyNear,
+    adjacentTurn,
+  } from './conversation_nav';
+  import { detectMac, isEditable } from './terminal_keys';
   import {
     sessionConversation,
     listConversations,
@@ -91,7 +103,7 @@
   import { pointInRect } from './geometry';
   import Markdown from './MarkdownView.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
-  import { selectSession } from './selection';
+  import { selectSessionExplicitly } from './selection';
   import { tasks } from './tasks';
 
   let {
@@ -133,6 +145,12 @@
   let atBottom = $state(true);
   // Items that landed while the user was scrolled up; shown on the button.
   let unseen = $state(0);
+  // True between `resetView()` and the first load that lands on the fresh
+  // view. The scroller still holds the OUTGOING conversation's geometry at
+  // that point (the reset has not flushed), so measuring it would report
+  // "scrolled up" and count the whole incoming transcript as unseen. A view
+  // that has just been reset is pinned by definition.
+  let justReset = $state(true);
   // Turn window asked of the backend; undefined = its default. "Load older"
   // grows it; polls keep using it so loaded history does not vanish.
   let turnsWanted = $state<number | undefined>(undefined);
@@ -242,7 +260,7 @@
     const mine = ++seq;
     loading = conv === null;
     const fetchedTurnSeq = session.turn_seq;
-    const pinned = scroller ? isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight) : true;
+    const pinned = justReset || !scroller ? true : isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
     try {
@@ -261,6 +279,7 @@
       // at the normal cadence, not after the quiet one.
       lastFetchAt = Date.now();
       lastFetchTurnSeq = fetchedTurnSeq;
+      justReset = false;
       errorCode = null;
       errorMsg = null;
       convCid = cid;
@@ -309,6 +328,7 @@
     expanded = new Set();
     atBottom = true;
     unseen = 0;
+    justReset = true;
     turnsWanted = undefined;
     loadingOlder = false;
     turnsOpen = false;
@@ -331,10 +351,15 @@
     idleSeenSinceSend = false;
   }
 
-  // Reset + immediate fetch on session change.
+  // Reset + immediate fetch on session change. Nothing is snapshotted here:
+  // the position is remembered as the user scrolls (`rememberHere`), so an
+  // unmount — which this effect never sees — is remembered too.
   $effect(() => {
     void sessionId;
     untrack(() => {
+      // The outgoing conversation is still on screen and still scrolled
+      // where the reader left it: measure it now, before the reset wipes it.
+      flushScroll();
       resetThread();
       viewing = null;
       newerAvailable = false;
@@ -353,7 +378,31 @@
       // catch that; it has to be dropped here.
       attachments = [];
       attachErrors = [];
-      void load();
+      // Restore where the returning session was left, once its fetch lands —
+      // a snapshot only exists when it was scrolled away from the bottom
+      // (`rememberScroll` drops an at-bottom one), so recalling one always
+      // means "come back here", not "come back to the bottom".
+      const id = sessionId;
+      void load().then(() => {
+        if (sessionId !== id) return;
+        const snap = recallScroll(id);
+        if (!snap) return;
+        void tick().then(() => {
+          // `turnAt` names the turn itself; the key it wears in THIS window
+          // is whatever the freshly built index says. No match (the turn
+          // fell out of the window, or the row is simply not rendered) →
+          // leave the pinned-to-bottom state alone rather than showing
+          // "↓ Latest" over a view that is, in fact, already at the bottom.
+          const key = resolveScroll(turnEntries, snap);
+          if (key !== null && scrollToRow(key)) {
+            atBottom = false;
+            // The count belongs to the load that just filled this view, not
+            // to the reader: nothing here has gone unseen.
+            unseen = 0;
+            currentTurnPos = nearestTurn(turnEntries, key);
+          }
+        });
+      });
       void loadConversations();
     });
   });
@@ -374,6 +423,9 @@
         newerAvailable = true;
         return;
       }
+      // A followed /clear or /resume replaces the transcript wholesale: a
+      // position inside the old one would restore into unrelated content.
+      forgetScroll(sid);
       resetThread();
       void load();
       void loadConversations();
@@ -388,6 +440,9 @@
     const leavingForNewer = id === null && newerAvailable;
     viewing = id;
     switchNotice = null;
+    // Another conversation entirely — the remembered position belonged to
+    // the one being left.
+    forgetScroll(sessionId);
     resetView();
     if (id === null) {
       newerAvailable = false;
@@ -551,9 +606,80 @@
   function rowEl(key: string): HTMLElement | null {
     return scroller?.querySelector<HTMLElement>(`[data-row-key="${key}"]`) ?? null;
   }
-  function scrollToRow(key: string) {
+  /** Scrolls to the row and reports whether one was found: false means the
+   *  key names a row outside the currently loaded window (or an empty
+   *  thread), so the caller must not act as though the scroll happened. */
+  function scrollToRow(key: string): boolean {
     const el = rowEl(key);
-    if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
+    if (!el || typeof el.scrollIntoView !== 'function') return false;
+    el.scrollIntoView({ block: 'center' });
+    return true;
+  }
+
+  /** The row nearest the top of the visible scroller area: the first row (in
+   *  document order) whose bottom edge is below the scroller's own top edge.
+   *  `el.getBoundingClientRect().bottom > scroller.getBoundingClientRect().top`
+   *  is the scroll-position-independent form of "row bottom below
+   *  scroller.scrollTop" (the scrollTop term cancels between the two rects).
+   *  Backs the per-session scroll memory (`rememberScroll`) and the `[`/`]`
+   *  turn stepper's "where am I" when no turn is otherwise current. */
+  function topVisibleRowKey(): string | null {
+    if (!scroller) return null;
+    const top = scroller.getBoundingClientRect().top;
+    for (const el of Array.from(scroller.querySelectorAll<HTMLElement>('[data-row-key]'))) {
+      if (el.getBoundingClientRect().bottom > top) return el.dataset.rowKey ?? null;
+    }
+    return null;
+  }
+
+  /** Every rendered row key in document order — what `turnKeyNear` walks to
+   *  turn an inline event's key into the turn it should resolve to. */
+  function rowKeys(): string[] {
+    if (!scroller) return [];
+    return Array.from(scroller.querySelectorAll<HTMLElement>('[data-row-key]')).map((el) => el.dataset.rowKey ?? '');
+  }
+
+  // Position in `turnEntries` nearest the current read position, kept in
+  // sync with actual scrolling (see the `onScroll`/`scrollToBottom` calls
+  // below) rather than recomputed on every render: `topVisibleRowKey` reads
+  // live layout, which is not itself a Svelte reactive dependency. Backs
+  // both the `[`/`]` step target and the stepper buttons' disabled state.
+  let currentTurnPos = $state(0);
+  function refreshCurrentTurnPos() {
+    // An inline event is not a turn: resolve it FORWARD to the turn below it
+    // rather than letting `nearestTurn` fall back to 0, which sent `]` to
+    // the top of the conversation.
+    currentTurnPos = nearestTurn(turnEntries, turnKeyNear(rowKeys(), topVisibleRowKey(), 1));
+  }
+
+  /** Remember the current read position for this session (see `rememberScroll`).
+   *  Anchored on the turn's `at`, so the window may slide or grow before the
+   *  reader comes back. */
+  function rememberHere(id: number) {
+    if (!scroller) return;
+    const key = topVisibleRowKey();
+    if (atBottom || key === null) {
+      // At the bottom there is nothing to come back TO: the default view is
+      // already the latest turn, so drop any earlier snapshot.
+      forgetScroll(id);
+      return;
+    }
+    rememberScroll(id, {
+      turnAt: anchorAt(turnEntries, turnKeyNear(rowKeys(), key, -1)),
+      rowKey: key,
+      atBottom,
+    });
+  }
+  const prevTurn = $derived(adjacentTurn(turnEntries, currentTurnPos, -1));
+  const nextTurn = $derived(adjacentTurn(turnEntries, currentTurnPos, 1));
+
+  /** `[` / `]` and the turn-stepper buttons: jump to the turn adjacent to
+   *  the one nearest the current read position. */
+  function stepTurn(delta: 1 | -1) {
+    if (turnEntries.length === 0) return;
+    refreshCurrentTurnPos();
+    const next = adjacentTurn(turnEntries, currentTurnPos, delta);
+    if (next && scrollToRow(next.rowKey)) currentTurnPos += delta;
   }
 
   async function openFind() {
@@ -605,6 +731,21 @@
           e.preventDefault();
           closeFind();
         }
+        return;
+      }
+      // `[` / `]` step the turn stepper — only away from any text entry
+      // (the composer, the find box), same guard the terminal uses for its
+      // own global shortcuts.
+      if (
+        (e.key === '[' || e.key === ']') &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !isEditable(e.target as HTMLElement | null)
+      ) {
+        if (!threadShown) return;
+        e.preventDefault();
+        stepTurn(e.key === '[' ? -1 : 1);
         return;
       }
       const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
@@ -666,7 +807,7 @@
    *  Shared by `openBackground` and the detail's worker-session link. */
   function goToSession(id: number): void {
     const row = $sessions.find((s) => s.id === id);
-    if (row) selectSession(row);
+    if (row) selectSessionExplicitly(row);
   }
 
   /** The entry a notification row belongs to: the call it named, which is
@@ -1063,13 +1204,43 @@
     scroller.scrollTop = scroller.scrollHeight;
     atBottom = true;
     unseen = 0;
+    refreshCurrentTurnPos();
   }
 
+  // Reading every row's rect is a forced layout, and a scroll fires dozens
+  // of events per gesture: one pending frame collapses a flick into a single
+  // measurement. `scrollFrameFor` is the session the pending frame measured,
+  // so a switch that flushes it still writes the snapshot under the OUTGOING
+  // session's id (`sessionId` is the incoming one by then).
+  let scrollFrame: number | null = null;
+  let scrollFrameFor: number | null = null;
+  function afterScroll() {
+    const id = scrollFrameFor;
+    scrollFrame = null;
+    scrollFrameFor = null;
+    if (id === null || !scroller) return;
+    if (id === sessionId) refreshCurrentTurnPos();
+    rememberHere(id);
+  }
+  /** Run a pending measurement now — a session switch or an unmount, either
+   *  of which would drop the frame and lose the last scroll. */
+  function flushScroll() {
+    if (scrollFrame === null) return;
+    cancelAnimationFrame(scrollFrame);
+    afterScroll();
+  }
   function onScroll() {
     if (!scroller) return;
     atBottom = isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
     if (atBottom) unseen = 0;
+    if (scrollFrame === null) {
+      scrollFrameFor = sessionId;
+      scrollFrame = requestAnimationFrame(afterScroll);
+    }
   }
+  // The panel is ONE instance for every session, so an unmount is the only
+  // place a pending frame is lost for good.
+  $effect(() => () => flushScroll());
 
   /** Run a mutation that changes the composer's height without moving the
    *  transcript under the reader. The composer is flex: 0 0 auto at the
@@ -1593,10 +1764,38 @@
         {/if}
       </div>
     </div>
-    {#if !atBottom}
-      <button type="button" class="latest" class:fresh={unseen > 0} data-testid="conv-latest" aria-live="polite" onclick={scrollToBottom}
-        >↓ {unseen > 0 ? `${unseen} new` : 'Latest'}</button
-      >
+    {#if turnEntries.length > 1 || !atBottom}
+      <div class="scroll-actions">
+        {#if turnEntries.length > 1}
+          <div class="turn-nav" role="group" aria-label="Step turns">
+            <button
+              type="button"
+              class="turn-step"
+              data-testid="conv-turn-prev"
+              aria-label="Previous turn"
+              title="Previous turn ([)"
+              disabled={prevTurn === null}
+              onclick={() => prevTurn && stepTurn(-1)}
+              >‹ Prev turn</button
+            >
+            <button
+              type="button"
+              class="turn-step"
+              data-testid="conv-turn-next"
+              aria-label="Next turn"
+              title="Next turn (])"
+              disabled={nextTurn === null}
+              onclick={() => nextTurn && stepTurn(1)}
+              >Next turn ›</button
+            >
+          </div>
+        {/if}
+        {#if !atBottom}
+          <button type="button" class="latest" class:fresh={unseen > 0} data-testid="conv-latest" aria-live="polite" onclick={scrollToBottom}
+            >↓ {unseen > 0 ? `${unseen} new` : 'Latest'}</button
+          >
+        {/if}
+      </div>
     {/if}
   {/if}
   </div>
@@ -2420,10 +2619,20 @@
     padding-left: 0.4rem;
     font-size: 0.72rem;
   }
-  .latest {
+  .scroll-actions {
     position: absolute;
     right: 1rem;
     bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .turn-nav {
+    display: flex;
+    gap: 0.35rem;
+  }
+  .turn-step,
+  .latest {
     padding: 0.3rem 0.7rem;
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -2433,8 +2642,16 @@
     cursor: pointer;
     box-shadow: 0 2px 8px color-mix(in srgb, var(--fg) 15%, transparent);
   }
+  .turn-step:hover,
   .latest:hover {
     border-color: var(--accent);
+  }
+  .turn-step:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .turn-step:disabled:hover {
+    border-color: var(--border);
   }
   .latest.fresh {
     border-color: var(--accent);
@@ -2458,7 +2675,7 @@
       align-items: stretch;
       gap: 0.45rem;
     }
-    .latest {
+    .scroll-actions {
       right: 0.5rem;
       bottom: 0.5rem;
     }
