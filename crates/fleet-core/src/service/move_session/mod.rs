@@ -391,41 +391,86 @@ pub async fn move_session(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<MoveOutcome, IpcError> {
-    if args.when == When::Idle && !args.dry_run && !source_is_idle(store, args.session_id)? {
-        let (guard, deadline, waiting) = wait::begin_wait(&args, Arc::clone(store))?;
-        let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
+    let hooks = RealHooks { ssh };
+    let (task_store, task_ssh) = (Arc::clone(store), Arc::clone(ssh));
+    move_or_wait(
+        args,
+        Arc::clone(store),
+        &**ssh,
+        &hooks,
+        MoveOptions::default(),
+        move |guard, now, deadline| {
+            // The spawn lives here, not in `move_or_wait`: this is the one
+            // entry point that owns `'static` `Arc`s it can hand to a
+            // detached task, and the only caller allowed to outlive its own
+            // call. Tests drive `move_or_wait` with a recording closure
+            // instead, against `FakeSsh` / `FakeHooks` borrowed for the
+            // duration of the `.await`, which a spawned task cannot do.
+            tokio::spawn(async move {
+                let hooks = RealHooks { ssh: &task_ssh };
+                // The guard lives as long as the task: dropping it
+                // deregisters the wait so `cancel_wait` and the startup
+                // sweep see it as resolved.
+                let token = guard.token().clone();
+                wait::run_wait(
+                    now,
+                    &task_store,
+                    &*task_ssh,
+                    &hooks,
+                    MoveOptions::default(),
+                    &token,
+                    deadline,
+                    WAIT_POLL,
+                )
+                .await;
+                drop(guard);
+            });
+        },
+    )
+    .await
+}
+
+/// The public entry's branching, with the waiter's spawn injected as
+/// `start_wait(guard, args_to_run, deadline_unix)` so tests can drive it.
+///
+/// `when: idle` (not a dry run) on a busy source registers a wait and
+/// answers `Waiting` — also when the store said idle but the move's own
+/// fresh check refused the source as busy (`SOURCE_NOT_IDLE`); every other
+/// request is [`move_session_with`].
+/// `start_wait` gets the move to run once idle: the original arguments with
+/// `when: now` and `dry_run: false`, which [`wait::run_wait`] requires.
+async fn move_or_wait<S, F>(
+    args: MoveSessionArgs,
+    store: S,
+    ssh: &dyn SshExec,
+    hooks: &dyn MoveHooks,
+    opts: MoveOptions,
+    start_wait: F,
+) -> Result<MoveOutcome, IpcError>
+where
+    S: std::ops::Deref<Target = Mutex<Store>>,
+    F: FnOnce(wait::WaitGuard<S>, MoveSessionArgs, i64),
+{
+    if args.when == When::Idle && !args.dry_run {
+        if source_is_idle(&store, args.session_id)? {
+            // The stored status can be stale: the move's own `gather()`
+            // reconciles and re-checks before touching anything, and may
+            // find the source busy after all. `idle` means "wait for
+            // exactly that", so that refusal becomes a wait (I5a); anything
+            // else — a move, or any other refusal — is the answer.
+            match move_session_with(args.clone(), &store, ssh, hooks, opts).await {
+                Err(e) if e.message.contains(SOURCE_NOT_IDLE) => {}
+                other => return other,
+            }
+        }
+        let (guard, deadline, waiting) = wait::begin_wait(&args, store)?;
         let mut now = args;
         now.when = When::Now;
         now.dry_run = false;
-        // The spawn lives here, not in `move_session_with`: this is the one
-        // entry point that owns `'static` `Arc`s it can hand to a detached
-        // task, and the only caller allowed to outlive its own call. Every
-        // test drives `move_session_with` directly against `FakeSsh` /
-        // `FakeHooks` borrowed for the duration of the `.await`, which a
-        // spawned task cannot do.
-        tokio::spawn(async move {
-            let hooks = RealHooks { ssh: &ssh };
-            // The guard lives as long as the task: dropping it deregisters
-            // the wait so `cancel_wait` and the startup sweep see it as
-            // resolved.
-            let token = guard.token().clone();
-            wait::run_wait(
-                now,
-                &store,
-                &*ssh,
-                &hooks,
-                MoveOptions::default(),
-                &token,
-                deadline,
-                WAIT_POLL,
-            )
-            .await;
-            drop(guard);
-        });
+        start_wait(guard, now, deadline);
         return Ok(MoveOutcome::Waiting(Box::new(waiting)));
     }
-    let hooks = RealHooks { ssh };
-    move_session_with(args, store, &**ssh, &hooks, MoveOptions::default()).await
+    move_session_with(args, &store, ssh, hooks, opts).await
 }
 
 // ── pure helpers ────────────────────────────────────────────────────────────
@@ -7843,6 +7888,86 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message.contains(SOURCE_NOT_IDLE), "{}", err.message);
+    }
+
+    // ── the public branch (`move_or_wait`), fix wave I5 ──────────────────
+
+    type Started<'a> =
+        std::cell::RefCell<Option<(wait::WaitGuard<&'a Mutex<Store>>, MoveSessionArgs, i64)>>;
+
+    /// I5b: a dry run of `when: idle` on a busy source is a preview, through
+    /// the public branch too — never a wait, and no `session_move_waiting`.
+    #[tokio::test]
+    async fn the_public_branch_previews_a_dry_run_idle_on_a_busy_source_without_waiting() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.dry_run = true;
+        a.when = When::Idle;
+        let started: Started = Default::default();
+        let out = move_or_wait(a, &f.store, &f.fake, &hooks, fast(), |g, a, d| {
+            *started.borrow_mut() = Some((g, a, d));
+        })
+        .await
+        .unwrap();
+        assert!(matches!(out, MoveOutcome::Preview(_)), "{out:?}");
+        assert!(started.borrow().is_none(), "no waiter was started");
+        assert!(wait_events(&f).is_empty(), "{:?}", wait_events(&f));
+    }
+
+    /// I5b: `when: idle` on a busy source answers `Waiting`, touches no
+    /// host, and hands the waiter a plain `when: now` move to run.
+    #[tokio::test]
+    async fn the_public_branch_waits_for_idle_on_a_busy_source() {
+        let (f, _bus) = recorded_fixture();
+        set_status(&f, "working");
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let mut a = args(&f, false);
+        a.when = When::Idle;
+        let started: Started = Default::default();
+        let out = move_or_wait(a, &f.store, &f.fake, &hooks, fast(), |g, a, d| {
+            *started.borrow_mut() = Some((g, a, d));
+        })
+        .await
+        .unwrap();
+        let MoveOutcome::Waiting(w) = out else {
+            panic!("{out:?}")
+        };
+        assert_eq!(w.session_id, f.source_id);
+        let started = started.borrow();
+        let (_, run, deadline) = started.as_ref().expect("a waiter was started");
+        assert_eq!(run.when, When::Now);
+        assert!(!run.dry_run);
+        assert_eq!(*deadline, w.deadline_unix);
+        assert!(f.fake.calls().is_empty(), "waiting touches no host");
+        assert_eq!(
+            wait_events(&f).first().map(|(k, _)| k.as_str()),
+            Some(wait::EVENT_MOVE_WAITING)
+        );
+    }
+
+    /// I5a: the store said idle (stale), so the move ran — and its own
+    /// fresh check found the source busy. `when: idle` means wait for
+    /// exactly that, so the refusal becomes a wait instead of an error.
+    #[tokio::test]
+    async fn the_public_branch_waits_when_a_stale_idle_source_is_found_busy() {
+        let (f, _bus) = recorded_fixture(); // stored status: idle
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.busy_once_on_refresh.store(true, Ordering::SeqCst);
+        let mut a = args(&f, false);
+        a.when = When::Idle;
+        let started: Started = Default::default();
+        let out = move_or_wait(a, &f.store, &f.fake, &hooks, fast(), |g, a, d| {
+            *started.borrow_mut() = Some((g, a, d));
+        })
+        .await;
+        let out = out.expect("a wait, not the busy refusal");
+        assert!(matches!(out, MoveOutcome::Waiting(_)), "{out:?}");
+        assert!(started.borrow().is_some(), "a waiter was started");
+        assert!(!events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
     }
 
     #[test]
