@@ -255,6 +255,22 @@ pub fn take_pending_delivery(
 ) -> Option<crate::service::delivery::Packed> {
     let s = lock(store).ok()?;
     let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
+    // A pane match only says which pane sent the hook, not that the
+    // payload's conversation is the row's current one (see
+    // `resolve_hook_row` / `rebind_eligible`): a `claude -p` fired from the
+    // row's own Bash tool inherits `$TMUX_PANE`, so it resolves to the
+    // SAME row as the real interactive session. Without this check its
+    // UserPromptSubmit would drain the parent's inbox into the
+    // subprocess's one-shot context and stamp it delivered — the real
+    // session never sees it, and re-delivery is out of scope, so that is
+    // silent data loss. Deliver only when the payload names the row's
+    // actual current conversation; a row with no id yet (a bounded delay,
+    // not a loss) or a stale/foreign id fails closed, leaving the message
+    // in the inbox.
+    let current = row.claude_session_id.as_deref()?;
+    if payload.session_id.as_deref() != Some(current) {
+        return None;
+    }
     let pending = s
         .list_undelivered_for_session(row.id, DELIVERY_SCAN_LIMIT)
         .ok()?;
@@ -274,7 +290,15 @@ pub fn take_pending_delivery(
         // they must stay deliverable via `inbox`.
         return Some(packed);
     }
-    let _ = s.mark_messages_delivered(&packed.included);
+    if let Err(e) = s.mark_messages_delivered(&packed.included) {
+        // A failed UPDATE here means the same messages get packed and
+        // handed over again on the next prompt, forever — never silent.
+        tracing::warn!(
+            ids = ?packed.included,
+            error = %e.message,
+            "[hook] mark_messages_delivered failed; delivery will repeat"
+        );
+    }
     Some(packed)
 }
 
@@ -2795,5 +2819,77 @@ mod tests {
             pane_id: None,
         };
         assert!(take_pending_delivery(&store, &payload, &ctx).is_none());
+    }
+
+    /// A `claude -p` launched from the row's own Bash tool inherits
+    /// `$TMUX_PANE`, so a hook it fires resolves to the SAME row as the
+    /// real interactive session (pane step, `ResolvedBy::Pane`) while
+    /// carrying that subprocess's OWN fresh conversation id — never the
+    /// row's. Delivery must fail closed here: packing the parent's pending
+    /// mail into the subprocess's one-shot `additionalContext` would stamp
+    /// it delivered while the real session never reads it, and re-delivery
+    /// is deliberately out of scope.
+    #[test]
+    fn a_pane_match_with_a_foreign_conversation_id_gets_no_delivery() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let row = pane_session(&store, "parent", "%9"); // claude_session_id = OLD
+        let sender = {
+            let s = store.lock().unwrap();
+            seed(&s, "other")
+        };
+        {
+            let s = store.lock().unwrap();
+            s.insert_message(sender, row, "for the parent only", "message", None)
+                .unwrap();
+        }
+        // The nested `claude -p`'s own id — NOT the row's (OLD).
+        let payload = HookPayload {
+            session_id: Some(NEW.into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        let host = host_caller("local");
+        let ctx = ctx(&host, Some("%9"));
+
+        assert!(
+            take_pending_delivery(&store, &payload, &ctx).is_none(),
+            "a foreign conversation id sharing the pane must never receive the row's mail"
+        );
+
+        // Unstamped and still in the inbox: nothing was lost.
+        let s = store.lock().unwrap();
+        let still_pending = s.list_undelivered_for_session(row, 10).unwrap();
+        assert_eq!(still_pending.len(), 1, "the message must stay undelivered");
+    }
+
+    /// The positive twin of the test above: when the payload's conversation
+    /// id genuinely IS the row's current one, a pane-resolved hook still
+    /// delivers. Pins the guard to the actual mismatch, not to the pane
+    /// step in general.
+    #[test]
+    fn a_pane_match_with_the_rows_own_conversation_id_still_delivers() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let row = pane_session(&store, "parent2", "%11"); // claude_session_id = OLD
+        let sender = {
+            let s = store.lock().unwrap();
+            seed(&s, "other2")
+        };
+        {
+            let s = store.lock().unwrap();
+            s.insert_message(sender, row, "for the real session", "message", None)
+                .unwrap();
+        }
+        let payload = HookPayload {
+            session_id: Some(OLD.into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        let host = host_caller("local");
+        let ctx = ctx(&host, Some("%11"));
+
+        let packed =
+            take_pending_delivery(&store, &payload, &ctx).expect("the real session gets its mail");
+        assert_eq!(packed.included.len(), 1);
+        assert!(packed.text.contains("for the real session"));
     }
 }

@@ -429,4 +429,151 @@ mod tests {
         s.upsert_session(name, "local", None, None, 0, 0, "running", None)
             .unwrap()
     }
+
+    /// A pending message must never leak through, or be stamped, on any hook
+    /// event outside `UserPromptSubmit`/`Stop` — those are the only two
+    /// Claude Code actually reads `additionalContext` from (see the comment
+    /// on the `matches!` gate in `handle_hook`). Without this test the gate
+    /// could be deleted and nothing here would notice.
+    #[tokio::test]
+    async fn a_non_delivery_event_with_a_message_pending_still_answers_204_and_stamps_nothing() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let b = {
+            let s = store.lock().unwrap();
+            let a = seed(&s, "alpha");
+            let b = seed(&s, "beta");
+            s.insert_message(a, b, "ping", "message", None).unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
+                    rusqlite::params![b],
+                )
+                .unwrap();
+            b
+        };
+        let state = HookState {
+            store: store.clone(),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let payload = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("PreCompact".into()),
+            ..Default::default()
+        };
+        let res = handle_hook(
+            State(state),
+            Extension(Caller::master()),
+            axum::http::HeaderMap::new(),
+            Json(payload),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.list_undelivered_for_session(b, 10).unwrap().len(),
+            1,
+            "a non-delivery event must never stamp the pending message"
+        );
+    }
+
+    /// When every pending message is individually over `pack`'s budget,
+    /// `included` is empty but the tail ("N more waiting…") is not: the
+    /// response must still carry that tail, and nothing may be stamped —
+    /// the messages have to stay reachable through `inbox`.
+    #[tokio::test]
+    async fn an_over_budget_message_carries_the_tail_and_stamps_nothing() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let b = {
+            let s = store.lock().unwrap();
+            let a = seed(&s, "alpha");
+            let b = seed(&s, "beta");
+            let huge = "x".repeat(crate::service::delivery::CTX_MAX_CHARS + 1);
+            s.insert_message(a, b, &huge, "message", None).unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
+                    rusqlite::params![b],
+                )
+                .unwrap();
+            b
+        };
+        let state = HookState {
+            store: store.clone(),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let payload = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        let res = handle_hook(
+            State(state),
+            Extension(Caller::master()),
+            axum::http::HeaderMap::new(),
+            Json(payload),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("1 more"), "{ctx}");
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.list_undelivered_for_session(b, 10).unwrap().len(),
+            1,
+            "an over-budget message must stay undelivered, reachable via inbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_event_delivers_the_pending_message() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            let a = seed(&s, "alpha");
+            let b = seed(&s, "beta");
+            s.insert_message(a, b, "stop-time ping", "message", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
+                    rusqlite::params![b],
+                )
+                .unwrap();
+        }
+        let state = HookState {
+            store: store.clone(),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let payload = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("Stop".into()),
+            ..Default::default()
+        };
+        let res = handle_hook(
+            State(state),
+            Extension(Caller::master()),
+            axum::http::HeaderMap::new(),
+            Json(payload),
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "Stop");
+        let ctx = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("stop-time ping"), "{ctx}");
+    }
 }

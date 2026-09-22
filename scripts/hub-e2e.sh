@@ -450,7 +450,6 @@ check "session commands work again over the new connection" 'echo "$c3" | grep -
 # needs exactly that combination (see resolve_hook_row / rebind_eligible in
 # service/hooks.rs). agt2 (S2) already has a reconciled tmux_pane_id from the
 # list_sessions call above.
-ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}")
 PANE2=$(aenv tmux list-panes -t agt2 -F '#{pane_id}' | head -1)
 CONV=e2eaaaaa-bbbb-cccc-dddd-e2e2e2e2e2e2
 bindcode=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "http://127.0.0.1:$PC/hook" \
@@ -472,6 +471,14 @@ hookcode="${hookresp##*$'\n'}"; hookbody="${hookresp%$'\n'*}"
 check "a hook with a pending message answers 200 with the delivery in its body" \
   '[ "$hookcode" = 200 ] && echo "$hookbody" | grep -q "e2e hook delivery ping" && echo "$hookbody" | grep -q additionalContext' \
   "code=$hookcode body=${hookbody:0:400}"
+# Non-redelivery, proved on the wire (not only in a Rust unit test): the
+# message was stamped delivered by the call above, so the identical hook
+# fired again finds nothing left to pack.
+hookcode2=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "http://127.0.0.1:$PC/hook" \
+  -H "Host: $PUB" -H "Authorization: Bearer $TOKC" \
+  -H 'Content-Type: application/json' \
+  -d "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"$CONV\",\"prompt\":\"hi again\"}")
+check "a second hook for the same session gets no redelivery -> 204" '[ "$hookcode2" = 204 ]' "http $hookcode2"
 
 # Stopping the agent: it exits cleanly, the hub fails calls at once, and the
 # tmux server the agent's commands started outlives it.
