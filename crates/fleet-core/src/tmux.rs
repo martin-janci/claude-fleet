@@ -97,6 +97,33 @@ pub trait TmuxExec: Send + Sync {
     async fn host_identity(&self) -> Option<HostIdentity> {
         None
     }
+
+    /// Everything a reconcile pass needs from the host. The default composes
+    /// the per-call methods (local tmux, test fakes); `RemoteTmux` overrides
+    /// it with one script so a pass costs one round trip, not 5 + N.
+    async fn probe_snapshot(&self, tail_lines: u32) -> ProbeSnapshot {
+        let identity = self.host_identity().await;
+        let sessions = self.list_sessions().await;
+        let account = if sessions.is_ok() {
+            self.read_oauth_account().await
+        } else {
+            None
+        };
+        let mut pane_tails = std::collections::HashMap::new();
+        if let Ok(live) = &sessions {
+            for s in live {
+                if let Ok(tail) = self.capture_pane_scrollback(&s.name, tail_lines).await {
+                    pane_tails.insert(s.name.clone(), tail);
+                }
+            }
+        }
+        ProbeSnapshot {
+            identity,
+            sessions,
+            account,
+            pane_tails,
+        }
+    }
 }
 
 /// Shell script printing `<sessionId>\t<mtime>` for the first
@@ -134,6 +161,21 @@ pub fn parse_mtimes(stdout: &str) -> std::collections::HashMap<String, i64> {
             Some((id.to_string(), mtime.trim().parse::<i64>().ok()?))
         })
         .collect()
+}
+
+/// Section delimiter of the batched probe. A pane line that starts with it
+/// is escaped by the script (one leading space), so the parser never
+/// mistakes pane text for a section.
+pub const PROBE_DELIM: &str = "---FLEET:";
+
+/// Everything a reconcile pass reads from a host, in ONE round trip.
+#[derive(Debug)]
+pub struct ProbeSnapshot {
+    pub identity: Option<HostIdentity>,
+    pub sessions: Result<Vec<TmuxSession>, IpcError>,
+    pub account: Option<crate::service::hosts::OauthAccount>,
+    /// Pane text per live session, exactly `capture-pane -S -<n> -p`.
+    pub pane_tails: std::collections::HashMap<String, String>,
 }
 
 /// A host's boot identity, read once per reconcile probe.
@@ -389,11 +431,107 @@ impl<C: SshExec> RemoteTmux<C> {
     }
 }
 
+const SESSIONS_FORMAT: &str = "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}";
+
+/// The batched probe: identity, the session list with its exit code, the
+/// oauth account, then one pane capture per live session, each behind a
+/// `---FLEET:` line. Ends with `---FLEET:end` so a capped or cut output is
+/// recognisable. Pane lines starting with the delimiter get one leading
+/// space so they cannot open a section.
+pub fn probe_snapshot_script(tail_lines: u32) -> String {
+    let start = scrollback_start(tail_lines);
+    format!(
+        "printf '%s\\n' '---FLEET:identity'; {HOST_IDENTITY_SCRIPT}; \
+         printf '%s\\n' '---FLEET:sessions'; out=$(tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1); rc=$?; printf 'rc=%s\\n' \"$rc\"; printf '%s\\n' \"$out\"; \
+         printf '%s\\n' '---FLEET:account'; {}; \
+         printf '%s\\n' '---FLEET:panes'; \
+         tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do printf '%s\\n' \"---FLEET:pane $s\"; tmux capture-pane -t \"=$s:\" -S {start} -p 2>/dev/null | sed 's/^---FLEET/ &/'; done; \
+         printf '%s\\n' '---FLEET:end'",
+        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
+    )
+}
+
+/// Parse [`probe_snapshot_script`] output. `Err` only when the text is not
+/// a probe at all (ssh's own error, or a capped/cut output without the end
+/// marker); a section that is present but unusable degrades to that
+/// section's "unknown" value, except the session list, whose garbage is an
+/// `Err` inside the snapshot exactly as `list_sessions` reports it.
+pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
+    let mut sections: Vec<(String, String)> = Vec::new();
+    for line in stdout.lines() {
+        if let Some(name) = line.strip_prefix(PROBE_DELIM) {
+            sections.push((name.to_string(), String::new()));
+        } else if let Some((_, body)) = sections.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    if !sections.iter().any(|(n, _)| n == "end") {
+        return Err(IpcError::new(
+            codes::E_TMUX,
+            format!(
+                "probe output truncated or not a probe: {}",
+                stdout.trim().lines().next().unwrap_or("")
+            ),
+        ));
+    }
+    let section = |name: &str| {
+        sections
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, b)| b.as_str())
+    };
+    let identity = section("identity").and_then(parse_host_identity);
+    let sessions = match section("sessions") {
+        None => Err(IpcError::new(
+            codes::E_TMUX,
+            "probe output has no sessions section",
+        )),
+        Some(body) => {
+            let mut lines = body.lines();
+            let rc: Option<i32> = lines
+                .next()
+                .and_then(|l| l.strip_prefix("rc="))
+                .and_then(|v| v.trim().parse().ok());
+            let combined: String = lines.collect::<Vec<_>>().join("\n");
+            match rc {
+                Some(0) => {
+                    if combined.trim().is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        parse_sessions_checked(&combined)
+                    }
+                }
+                Some(_) if is_no_server_running(&combined) => Ok(Vec::new()),
+                Some(_) => Err(IpcError::new(codes::E_TMUX, combined.trim())),
+                None => Err(IpcError::new(
+                    codes::E_TMUX,
+                    "probe output has no sessions exit code",
+                )),
+            }
+        }
+    };
+    let account =
+        section("account").and_then(|b| crate::service::hosts::parse_oauth_account(b.trim()));
+    let mut pane_tails = std::collections::HashMap::new();
+    for (name, body) in &sections {
+        if let Some(pane) = name.strip_prefix("pane ") {
+            pane_tails.insert(pane.to_string(), body.trim_end_matches('\n').to_string());
+        }
+    }
+    Ok(ProbeSnapshot {
+        identity,
+        sessions,
+        account,
+        pane_tails,
+    })
+}
+
 #[async_trait]
 impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
-        let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}' 2>&1";
-        let output = self.remote_bash(script).await?;
+        let script = format!("tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1");
+        let output = self.remote_bash(&script).await?;
         let combined = String::from_utf8_lossy(&output.stdout).into_owned();
         if output.status.success() {
             return parse_sessions_checked(&combined);
@@ -585,6 +723,37 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .ok()
             .filter(|o| o.status.success())?;
         parse_host_identity(&String::from_utf8_lossy(&out.stdout))
+    }
+    async fn probe_snapshot(&self, tail_lines: u32) -> ProbeSnapshot {
+        let script = probe_snapshot_script(tail_lines);
+        match self.remote_bash(&script).await {
+            Err(e) => ProbeSnapshot {
+                identity: None,
+                sessions: Err(e),
+                account: None,
+                pane_tails: Default::default(),
+            },
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                match parse_probe_snapshot(&text) {
+                    Ok(snap) => snap,
+                    Err(e) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        let why = if out.status.success() {
+                            e.message
+                        } else {
+                            format!("{} ({})", stderr.trim(), e.message)
+                        };
+                        ProbeSnapshot {
+                            identity: None,
+                            sessions: Err(IpcError::new(codes::E_SSH, why)),
+                            account: None,
+                            pane_tails: Default::default(),
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -911,6 +1080,114 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot_text(
+        sessions_rc: i32,
+        sessions: &str,
+        account: &str,
+        panes: &[(&str, &str)],
+    ) -> String {
+        let mut s = String::new();
+        s.push_str("---FLEET:identity\nboot=abc-123\ntmuxrc=0\ntmuxout=4242\n");
+        s.push_str(&format!(
+            "---FLEET:sessions\nrc={sessions_rc}\n{sessions}\n"
+        ));
+        s.push_str(&format!("---FLEET:account\n{account}\n"));
+        s.push_str("---FLEET:panes\n");
+        for (name, tail) in panes {
+            s.push_str(&format!("---FLEET:pane {name}\n{tail}\n"));
+        }
+        s.push_str("---FLEET:end\n");
+        s
+    }
+
+    #[test]
+    fn probe_snapshot_parses_every_section() {
+        let text = snapshot_text(
+            0,
+            "dev-a|1700000000|1700000100|0|/home/u/p|%3\ndev-b|1700000000|1700000200|1|/home/u/q|%7",
+            r#"{"accountUuid":"u-1","emailAddress":"a@b.c"}"#,
+            &[("dev-a", "❯ \n? for shortcuts"), ("dev-b", "Thinking… (3s · esc to interrupt)")],
+        );
+        let snap = parse_probe_snapshot(&text).unwrap();
+        let sessions = snap.sessions.unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].name, "dev-a");
+        assert_eq!(snap.identity.unwrap().tmux_server_pid, Some(4242));
+        assert_eq!(snap.account.unwrap().uuid.as_deref(), Some("u-1"));
+        assert_eq!(
+            snap.pane_tails["dev-b"],
+            "Thinking… (3s · esc to interrupt)"
+        );
+        assert_eq!(snap.pane_tails.len(), 2);
+    }
+
+    #[test]
+    fn probe_snapshot_reads_no_server_running_as_zero_sessions() {
+        let text = snapshot_text(1, "no server running on /tmp/tmux-501/default", "{}", &[]);
+        let snap = parse_probe_snapshot(&text).unwrap();
+        assert_eq!(snap.sessions.unwrap().len(), 0);
+        assert!(snap.account.is_none());
+        assert!(snap.pane_tails.is_empty());
+    }
+
+    #[test]
+    fn probe_snapshot_refuses_garbage_and_truncation() {
+        let text = snapshot_text(0, "this is not a session line", "{}", &[]);
+        assert!(
+            parse_probe_snapshot(&text).unwrap().sessions.is_err(),
+            "garbage must not read as zero sessions"
+        );
+        let mut truncated = snapshot_text(0, "", "{}", &[]);
+        truncated.truncate(truncated.len() - "---FLEET:end\n".len());
+        let e = parse_probe_snapshot(&truncated).unwrap_err();
+        assert_eq!(e.code, "E_TMUX");
+        assert!(e.message.contains("truncated"), "{}", e.message);
+        let e =
+            parse_probe_snapshot("ssh: connect to host h port 22: No route to host").unwrap_err();
+        assert_eq!(e.code, "E_TMUX");
+    }
+
+    #[test]
+    fn probe_snapshot_keeps_an_escaped_delimiter_inside_a_pane() {
+        let text = snapshot_text(
+            0,
+            "dev-a|1|2|0|/p|%1",
+            "{}",
+            &[("dev-a", " ---FLEET:panes is just text\nline2")],
+        );
+        let snap = parse_probe_snapshot(&text).unwrap();
+        assert_eq!(
+            snap.pane_tails["dev-a"],
+            " ---FLEET:panes is just text\nline2"
+        );
+    }
+
+    #[test]
+    fn probe_snapshot_script_has_every_section_and_escapes_pane_lines() {
+        let s = probe_snapshot_script(8);
+        for section in [
+            "---FLEET:identity",
+            "---FLEET:sessions",
+            "---FLEET:account",
+            "---FLEET:panes",
+            "---FLEET:end",
+        ] {
+            assert!(
+                s.contains(&format!("printf '%s\\n' '{section}'")),
+                "{section} missing in {s}"
+            );
+        }
+        assert!(s.contains(HOST_IDENTITY_SCRIPT));
+        assert!(s.contains(crate::service::hosts::OAUTH_ACCOUNT_SCRIPT));
+        assert!(
+            s.contains(
+                "tmux capture-pane -t \"=$s:\" -S -8 -p 2>/dev/null | sed 's/^---FLEET/ &/'"
+            ),
+            "{s}"
+        );
+        assert!(s.contains("while IFS= read -r s; do"), "{s}");
+    }
 
     #[test]
     fn scrollback_start_is_negative_lines() {

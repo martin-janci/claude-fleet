@@ -31,36 +31,50 @@ fn deps_over(fake: FakeSsh, probe_timeout: Duration) -> Arc<ReconcileDeps> {
     )
 }
 
-const LIST_SCRIPT: &str = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}|#{pane_id}' 2>&1";
+/// Build one host's combined `---FLEET:` probe reply directly (the shape
+/// `crate::tmux::probe_snapshot_script`'s output must parse into) —
+/// `sessions_rc`/`sessions` are the session-list section's exit code and
+/// body, `account` its compact-JSON oauth account (`"{}"` when unset), and
+/// `panes` one `(name, tail)` per live session's `capture-pane` reply.
+fn probe_reply(sessions_rc: i32, sessions: &str, account: &str, panes: &[(&str, &str)]) -> String {
+    let mut s = String::from("---FLEET:identity\nboot=e2e\ntmuxrc=0\ntmuxout=100\n");
+    s.push_str(&format!(
+        "---FLEET:sessions\nrc={sessions_rc}\n{sessions}\n"
+    ));
+    s.push_str(&format!("---FLEET:account\n{account}\n"));
+    s.push_str("---FLEET:panes\n");
+    for (name, tail) in panes {
+        s.push_str(&format!("---FLEET:pane {name}\n{tail}\n"));
+    }
+    s.push_str("---FLEET:end\n");
+    s
+}
 
-/// A fleet where `local` has no tmux server and `host` answers
-/// `list-sessions` with the single `line` (no agents, a plain pane).
+/// A fleet where `local` has no tmux server and `host` answers the batched
+/// probe with the single session `line` (no agents, a plain pane).
 fn one_session_host(host: &str, line: &str) -> FakeSsh {
     let fake = FakeSsh::new();
     fake.set_wall_clock(Duration::from_millis(200));
     fake.on_host(
         "local",
-        Match::script(LIST_SCRIPT),
-        Reply::Exit {
-            code: 1,
-            stdout: b"no server running on /tmp/tmux-1000/default\n".to_vec(),
-            stderr: Vec::new(),
-        },
+        Match::script_contains("---FLEET:end"),
+        Reply::ok(&probe_reply(
+            1,
+            "no server running on /tmp/tmux-1000/default",
+            "{}",
+            &[],
+        )),
     );
+    let name = line.split('|').next().unwrap_or_default();
     fake.on_host(
         host,
-        Match::script(LIST_SCRIPT),
-        Reply::ok(&format!("{line}\n")),
+        Match::script_contains("---FLEET:end"),
+        Reply::ok(&probe_reply(0, line, "{}", &[(name, "❯ \n")])),
     )
     .on_host(
         host,
         Match::script_contains("claude agents --json"),
         Reply::ok("[]\n"),
-    )
-    .on_host(
-        host,
-        Match::script_contains("tmux capture-pane"),
-        Reply::ok("❯ \n"),
     );
     fake
 }
@@ -153,36 +167,32 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
     }
     let fake = FakeSsh::new();
     fake.set_wall_clock(Duration::from_millis(200));
-    // `2>&1` in the list script: tmux's "no server" message arrives on
-    // stdout with a non-zero exit, which RemoteTmux maps to "no sessions".
+    // `rc=1` in the sessions section: tmux's "no server" message arrives
+    // with a non-zero exit, which the parser maps to "no sessions".
     fake.on_host(
         "local",
-        Match::script(LIST_SCRIPT),
-        Reply::Exit {
-            code: 1,
-            stdout: b"no server running on /tmp/tmux-1000/default\n".to_vec(),
-            stderr: Vec::new(),
-        },
+        Match::script_contains("---FLEET:end"),
+        Reply::ok(&probe_reply(
+            1,
+            "no server running on /tmp/tmux-1000/default",
+            "{}",
+            &[],
+        )),
     );
     fake.on_host(
         "alpha",
-        Match::script(LIST_SCRIPT),
-        Reply::ok("alpha-live|1700000000|1700000100|0|/home/x/projects/github.com/o/r\n"),
+        Match::script_contains("---FLEET:end"),
+        Reply::ok(&probe_reply(
+            0,
+            "alpha-live|1700000000|1700000100|0|/home/x/projects/github.com/o/r",
+            r#"{"accountUuid":"acc-alpha","emailAddress":"alpha@x.com"}"#,
+            &[("alpha-live", "Some tool output\n❯ \n")],
+        )),
     )
     .on_host(
         "alpha",
         Match::script_contains("claude agents --json"),
         Reply::ok("[]\n"),
-    )
-    .on_host(
-        "alpha",
-        Match::script_contains("tmux capture-pane"),
-        Reply::ok("Some tool output\n❯ \n"),
-    )
-    .on_host(
-        "alpha",
-        Match::script_contains(".claude.json"),
-        Reply::ok(r#"{"accountUuid":"acc-alpha","emailAddress":"alpha@x.com"}"#),
     );
     fake.unreachable("beta");
     fake.hanging("gamma");
@@ -235,11 +245,10 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
         assert!(row.lost_at.is_none());
     }
 
-    // What actually crossed the wire for alpha: the boot-identity read
-    // (FIRST, so a tmux server dying mid-probe cannot yield a verdict whose
-    // keep set still names its sessions) → list → agents → the
-    // `~/.claude.json` account read → one pane capture per live session,
-    // each as a single quoted `bash -lc` word.
+    // What actually crossed the wire for alpha: ONE batched `---FLEET:`
+    // script — identity, list, account, one pane capture per live session
+    // — then the separate `claude agents` call, each as a single quoted
+    // `bash -lc` word.
     let scripts: Vec<String> = fake
         .calls_for("alpha")
         .iter()
@@ -252,18 +261,13 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
     assert_eq!(
         scripts,
         vec![
-            crate::tmux::HOST_IDENTITY_SCRIPT.to_string(),
-            LIST_SCRIPT.to_string(),
+            crate::tmux::probe_snapshot_script(8),
             "claude agents --json 2>/dev/null".to_string(),
-            crate::service::hosts::OAUTH_ACCOUNT_SCRIPT.to_string(),
-            "tmux capture-pane -t '=alpha-live:' -S '-8' -p".to_string(),
         ]
     );
-    // beta and gamma: the identity read (attempted before the list, its
-    // result discarded once the list fails) and the list, and nothing
-    // more — a failed list skips the agents probe (a `None` agent read
-    // must never reach the bg pruner), the account read and the
-    // per-session pane captures.
+    // beta and gamma: the ONE batched probe script, and nothing more — a
+    // failed probe skips the agents call entirely (a `None` agent read
+    // must never reach the bg pruner).
     for host in ["beta", "gamma"] {
         let scripts: Vec<String> = fake
             .calls_for(host)
@@ -272,10 +276,7 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
             .collect();
         assert_eq!(
             scripts,
-            vec![
-                crate::tmux::HOST_IDENTITY_SCRIPT.to_string(),
-                LIST_SCRIPT.to_string(),
-            ],
+            vec![crate::tmux::probe_snapshot_script(8)],
             "{host}"
         );
     }
@@ -288,12 +289,13 @@ async fn reconcile_recovers_a_host_once_it_answers_again() {
     let fake = FakeSsh::new();
     fake.on_host(
         "local",
-        Match::script(LIST_SCRIPT),
-        Reply::Exit {
-            code: 1,
-            stdout: b"no server running on /tmp/tmux-1000/default\n".to_vec(),
-            stderr: Vec::new(),
-        },
+        Match::script_contains("---FLEET:end"),
+        Reply::ok(&probe_reply(
+            1,
+            "no server running on /tmp/tmux-1000/default",
+            "{}",
+            &[],
+        )),
     );
     fake.unreachable("beta");
     let deps = deps_over(fake.clone(), Duration::from_secs(5));
@@ -313,13 +315,13 @@ async fn reconcile_recovers_a_host_once_it_answers_again() {
     // Later rules win: beta comes back with one session.
     fake.on_host(
         "beta",
-        Match::Any,
-        Reply::fail(1, "no such command for anything but the list"),
-    )
-    .on_host(
-        "beta",
-        Match::script(LIST_SCRIPT),
-        Reply::ok("beta-live|1|2|1|/tmp\n"),
+        Match::script_contains("---FLEET:end"),
+        Reply::ok(&probe_reply(
+            0,
+            "beta-live|1|2|1|/tmp",
+            "{}",
+            &[("beta-live", "❯ \n")],
+        )),
     );
     reconcile_sessions_with(&store, &deps).await.unwrap();
     let s = store.lock().unwrap();

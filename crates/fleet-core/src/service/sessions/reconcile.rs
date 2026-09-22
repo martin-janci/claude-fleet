@@ -19,12 +19,12 @@ pub(super) const PANE_TAIL_LINES: u32 = 8;
 /// before `list_sessions` can return, one hung host would block the whole load
 /// path and leave the sidebar empty for ALL hosts, including the healthy
 /// `local` one. On elapse we synthesize a probe error, routing the host through
-/// the existing "unreachable, keep last-known sessions" branch. Set generously
-/// so a healthy host with many sessions (each pane capture is a sequential
-/// round-trip) never false-trips; on a real wedge the ssh-layer wall clock
-/// (`SshClient::run` → `E_SSH_TIMEOUT`) usually fires first and resets the
-/// master.
-pub(crate) const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// the existing "unreachable, keep last-known sessions" branch.
+///
+/// Safety net above the per-call wall clock: the batched probe is one call
+/// (30 s wall clock, which already resets a wedged master), agents a second;
+/// 2 × 30 + 5.
+pub(crate) const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(65);
 
 /// Production cadence for `claude agents --json` per host (a node cold
 /// start): once per minute, not every reconcile pass. See `agents_due`.
@@ -442,30 +442,16 @@ pub fn reconcile_gate() -> &'static ReconcileGate {
     &GATE
 }
 
-/// Capture and analyze the pane tail for every live session on a host. Runs
-/// off-lock inside the probe task. A failed capture for one session is skipped
-/// (no map entry) rather than aborting — reconcile must be robust to a session
-/// whose pane just vanished.
-pub(super) async fn capture_pane_intel(
-    tmux: &dyn TmuxExec,
-    sessions: &[crate::tmux::TmuxSession],
-) -> PaneIntelMap {
-    let mut map = PaneIntelMap::new();
-    for sess in sessions {
-        match tmux
-            .capture_pane_scrollback(&sess.name, PANE_TAIL_LINES)
-            .await
-        {
-            Ok(tail) if !tail.is_empty() => {
-                map.insert(
-                    sess.name.clone(),
-                    crate::service::pane_intel::analyze(&tail),
-                );
-            }
-            _ => {}
-        }
-    }
-    map
+/// Analyze the pane tail captured for every live session on a host by the
+/// batched probe. A tail absent (capture failed) or empty is skipped (no map
+/// entry) rather than aborting — reconcile must be robust to a session whose
+/// pane just vanished.
+pub(super) fn intel_from_tails(tails: &std::collections::HashMap<String, String>) -> PaneIntelMap {
+    tails
+        .iter()
+        .filter(|(_, t)| !t.is_empty())
+        .map(|(name, t)| (name.clone(), crate::service::pane_intel::analyze(t)))
+        .collect()
 }
 
 pub(crate) fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
@@ -860,9 +846,10 @@ pub(super) fn reconcile_write_one_host(
                 );
             }
         }
-        Err(_e) => {
+        Err(e) => {
             // Mark host unreachable; surface last-known sessions so the UI
             // can render them dimmed/red. We KEEP them (no delete).
+            tracing::warn!(host = %host.alias, code = %e.code, error = %e.message, "[reconcile] host unreachable");
             s.apply_host_reconcile(HostReconcile {
                 alias: &host.alias,
                 reachable: false,
@@ -1235,22 +1222,20 @@ pub(super) async fn probe_with_timeout(
     // the host stops being current (BE-3 ghost guard).
     let started_at = now_unix();
     let probe = async {
-        // Boot identity feeds the reboot-safety-net writer (Task 6). Read
-        // BEFORE the list: a tmux server that dies between the two reads
-        // then shows up as sessions missing from the list (the next pass's
-        // verdict catches it) rather than as a verdict whose `keep` still
-        // names the sessions it just lost. Only trustworthy when we actually
-        // reached the host this pass, so it is discarded below when the
-        // list fails.
-        let identity = tmux.host_identity().await;
-        let tmux_result = tmux.list_sessions().await;
-        let identity = if tmux_result.is_ok() { identity } else { None };
-        // `None`: not due this pass (cadence) or the host could not be
-        // asked. Either way the bg pruner below must not run this pass —
-        // treating "not asked" as "no agents" is exactly what ghosts every
-        // background row.
-        let agent_rows = if fetch_agents && tmux_result.is_ok() {
-            tmux.list_claude_agents().await
+        // Boot identity, the session list, the oauth account and every live
+        // session's pane tail, in ONE round trip (`RemoteTmux` batches them
+        // into a single delimited script; the default composition on other
+        // executors still runs them sequentially). Identity is read BEFORE
+        // the list on the wire: a tmux server that dies between the two
+        // reads then shows up as sessions missing from the list (the next
+        // pass's verdict catches it) rather than as a verdict whose `keep`
+        // still names the sessions it just lost. Only trustworthy when we
+        // actually reached the host this pass, so it is discarded below
+        // when the list fails.
+        let snap = tmux.probe_snapshot(PANE_TAIL_LINES).await;
+        let tmux_result = snap.sessions;
+        let identity = if tmux_result.is_ok() {
+            snap.identity
         } else {
             None
         };
@@ -1260,7 +1245,18 @@ pub(super) async fn probe_with_timeout(
         // failed: the host is about to be marked unreachable and the read
         // would only be one more round trip into a dead ssh.
         let account = if tmux_result.is_ok() {
-            tmux.read_oauth_account().await
+            snap.account
+        } else {
+            None
+        };
+        // One pane-tail read per live session, parsed into reconcile intel.
+        let intel = intel_from_tails(&snap.pane_tails);
+        // `None`: not due this pass (cadence) or the host could not be
+        // asked. Either way the bg pruner below must not run this pass —
+        // treating "not asked" as "no agents" is exactly what ghosts every
+        // background row.
+        let agent_rows = if fetch_agents && tmux_result.is_ok() {
+            tmux.list_claude_agents().await
         } else {
             None
         };
@@ -1280,11 +1276,6 @@ pub(super) async fn probe_with_timeout(
                     tmux.transcript_mtimes(&bg_ids).await
                 }
             }
-        };
-        // One pane-tail read per live session, parsed into reconcile intel.
-        let intel = match &tmux_result {
-            Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
-            Err(_) => PaneIntelMap::new(),
         };
         (
             tmux_result,

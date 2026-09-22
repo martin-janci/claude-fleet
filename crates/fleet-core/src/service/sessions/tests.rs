@@ -1815,6 +1815,18 @@ async fn wedged_host_probe_times_out_into_unreachable() {
     );
 }
 
+#[test]
+fn host_probe_timeout_covers_twice_the_ssh_wall_clock_plus_the_agents_call() {
+    // The batched probe is one ssh call (bounded by the ssh-layer wall
+    // clock, which already resets a wedged master); `claude agents --json`
+    // is a second. HOST_PROBE_TIMEOUT is the safety net above both.
+    assert!(
+        HOST_PROBE_TIMEOUT
+            >= crate::ssh::SshClient::default_wall_clock(std::time::Duration::from_secs(10)) * 2
+                + std::time::Duration::from_secs(5)
+    );
+}
+
 /// Scriptable executor for the reconcile-core tests: returns a fixed
 /// session list after `delay` (or never, when `hang`), and counts how many
 /// probes hit it so a test can prove "zero probes" / "exactly one probe".
