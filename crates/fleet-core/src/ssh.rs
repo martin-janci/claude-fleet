@@ -254,6 +254,35 @@ impl SshClient {
         ]
     }
 
+    /// The attached terminal's own ControlPath: a probe's master reset must
+    /// never take the user's terminal down with it.
+    pub fn control_path_for_pty(&self, host: &str) -> PathBuf {
+        self.control_path(host)
+            .with_file_name(format!("cm-{host}-tty.sock"))
+    }
+
+    /// `mux_opts` for the interactive attach: its own socket, and a keepalive
+    /// that tolerates a 45s stall (Wi-Fi roam, VPN rekey) instead of 10s.
+    ///
+    /// Rewrites `mux_opts`'s `-o`/value pairs in place, so it relies on every
+    /// entry there being exactly that shape (`chunks_mut(2)`) — true today
+    /// (see `mux_opts`) and worth re-checking if that function's option list
+    /// ever grows a bare flag.
+    pub fn mux_opts_for_pty(&self, host: &str, timeout: Duration) -> Vec<String> {
+        let mut opts = self.mux_opts(host, timeout);
+        for pair in opts.chunks_mut(2) {
+            match pair[1].as_str() {
+                s if s.starts_with("ControlPath=") => {
+                    pair[1] = format!("ControlPath={}", self.control_path_for_pty(host).display())
+                }
+                "ServerAliveInterval=5" => pair[1] = "ServerAliveInterval=15".into(),
+                "ServerAliveCountMax=2" => pair[1] = "ServerAliveCountMax=3".into(),
+                _ => {}
+            }
+        }
+        opts
+    }
+
     /// Wall-clock bound applied to `run` / `run_cancellable` when the caller
     /// gives only a connect timeout. `ConnectTimeout` covers ONLY the initial
     /// TCP/SSH handshake of a fresh master; a command that hangs AFTER connect
@@ -779,19 +808,20 @@ impl SshClient {
     pub fn shutdown_all(&self) {
         let hosts: Vec<String> = self.inner.seen.iter().map(|e| e.key().clone()).collect();
         for host in hosts {
-            let path = self.control_path(&host);
-            let _ = std::process::Command::new(&self.inner.ssh_bin)
-                .args([
-                    "-o",
-                    &format!("ControlPath={}", path.display()),
-                    "-O",
-                    "exit",
-                    "--",
-                    &host,
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            for path in [self.control_path(&host), self.control_path_for_pty(&host)] {
+                let _ = std::process::Command::new(&self.inner.ssh_bin)
+                    .args([
+                        "-o",
+                        &format!("ControlPath={}", path.display()),
+                        "-O",
+                        "exit",
+                        "--",
+                        &host,
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
         }
     }
 
@@ -1549,6 +1579,31 @@ mod tests {
     fn shutdown_when_no_hosts_seen_is_noop() {
         let c = SshClient::new();
         c.shutdown_all(); // must not panic when no host has been touched
+    }
+
+    #[test]
+    fn pty_mux_opts_use_their_own_socket_and_a_gentler_keepalive() {
+        let c = SshClient::new();
+        let opts = c.mux_opts_for_pty("h", Duration::from_secs(5)).join(" ");
+        assert!(
+            opts.contains("ControlPath=") && opts.contains("cm-h-tty.sock"),
+            "{opts}"
+        );
+        assert!(
+            opts.contains("ServerAliveInterval=15") && opts.contains("ServerAliveCountMax=3"),
+            "{opts}"
+        );
+        assert!(
+            opts.contains("ControlMaster=auto")
+                && opts.contains("BatchMode=yes")
+                && opts.contains("ConnectTimeout=5"),
+            "{opts}"
+        );
+        let probe = c.mux_opts("h", Duration::from_secs(5)).join(" ");
+        assert!(
+            probe.contains("ServerAliveInterval=5") && probe.contains("cm-h.sock"),
+            "the probe master is unchanged: {probe}"
+        );
     }
 
     #[test]

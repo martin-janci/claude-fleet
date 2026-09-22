@@ -183,6 +183,13 @@ pub fn tunnel_argv(host: &str, remote_port: u16, mcp_port: u16) -> Vec<String> {
         "ControlPath=none".into(),
         "-o".into(),
         "ExitOnForwardFailure=yes".into(),
+        // Bound the initial connect and never fall back to an interactive
+        // prompt (password/host-key) — the supervisor has no tty to answer
+        // one on, so a prompt would otherwise hang this ssh forever.
+        "-o".into(),
+        "ConnectTimeout=10".into(),
+        "-o".into(),
+        "BatchMode=yes".into(),
         "-o".into(),
         "ServerAliveInterval=30".into(),
         "-o".into(),
@@ -679,6 +686,26 @@ mod tests {
         assert!(
             pairs.contains(&("-o", "ControlPath=none")),
             "argv must ignore a configured ControlPath: {a:?}"
+        );
+    }
+
+    #[test]
+    fn tunnel_argv_bounds_the_connect_and_never_prompts() {
+        // The supervised tunnel must never hang on the initial TCP/SSH
+        // handshake, and must never block on a password/host-key prompt
+        // (there's no tty for the supervisor to answer one on).
+        let a = tunnel_argv("mefistos", 4180, 4180);
+        let pairs: Vec<(&str, &str)> = a
+            .windows(2)
+            .map(|w| (w[0].as_str(), w[1].as_str()))
+            .collect();
+        assert!(
+            pairs.contains(&("-o", "ConnectTimeout=10")),
+            "argv must bound the initial connect: {a:?}"
+        );
+        assert!(
+            pairs.contains(&("-o", "BatchMode=yes")),
+            "argv must never prompt: {a:?}"
         );
     }
 

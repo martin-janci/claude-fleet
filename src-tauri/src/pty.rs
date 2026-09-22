@@ -379,6 +379,19 @@ pub(crate) fn attach_argv(
     argv
 }
 
+/// `mux_opts` for the attach site: none for `local` (no ssh in the path),
+/// otherwise [`SshClient::mux_opts_for_pty`] — the terminal's own
+/// ControlPath and a gentler keepalive, so a probe's master reset (a
+/// DIFFERENT ssh call, on the DIFFERENT `cm-<host>.sock`) never takes the
+/// user's attached terminal down with it.
+pub(crate) fn attach_mux_opts(ssh: &SshClient, host: &str) -> Vec<String> {
+    if host == "local" {
+        Vec::new()
+    } else {
+        ssh.mux_opts_for_pty(host, std::time::Duration::from_secs(5))
+    }
+}
+
 /// Environment handed to the attached process, derived from `lookup` (the
 /// process environment in production; a map in tests):
 ///
@@ -508,11 +521,7 @@ pub fn pty_open(
         .openpty(clamp_size(args.cols, args.rows))
         .map_err(|e| IpcError::new(codes::E_PTY, format!("openpty: {e}")))?;
 
-    let mux_opts = if args.host_alias == "local" {
-        Vec::new()
-    } else {
-        ssh.mux_opts(&args.host_alias, std::time::Duration::from_secs(5))
-    };
+    let mux_opts = attach_mux_opts(&ssh, &args.host_alias);
     let argv = attach_argv(&args.host_alias, &args.session_name, &mux_opts);
     let mut cmd = CommandBuilder::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -890,6 +899,16 @@ mod tests {
             .output()
             .expect("spawn bash");
         assert_eq!(String::from_utf8(out.stdout).unwrap(), script);
+    }
+
+    #[test]
+    fn attach_mux_opts_gives_local_nothing_and_remote_the_pty_socket() {
+        assert!(attach_mux_opts(&SshClient::new(), "local").is_empty());
+        let opts = attach_mux_opts(&SshClient::new(), "h").join(" ");
+        assert!(
+            opts.contains("cm-h-tty.sock"),
+            "attach must use its own ControlPath, not the probe's: {opts}"
+        );
     }
 
     // ---- environment ----
