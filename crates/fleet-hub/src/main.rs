@@ -155,6 +155,9 @@ enum ClientCmd {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Mandatory and first: fleet-core keeps no default app version, so
+    // `app_version::get()` — /healthz, the agent handshake, the MCP hello —
+    // panics until this line has run. This crate's version is the hub's.
     fleet_core::app_version::set(env!("CARGO_PKG_VERSION"));
     let cli = Cli::parse();
     let env: std::collections::HashMap<String, String> = std::env::vars().collect();
