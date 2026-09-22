@@ -705,9 +705,10 @@ impl SshClient {
     /// Skipped while other commands are live on the host (they would lose
     /// their channels) and when the master still answers `ssh -O check`
     /// within `MASTER_RESET_TIMEOUT` (the timed-out command was slow, not
-    /// the transport). The `-O check` also covers channels this client does
-    /// not count — the user's attached PTY in `pty.rs` multiplexes over the
-    /// same ControlPath.
+    /// the transport). The user's attached PTY in `pty.rs` has its OWN
+    /// ControlPath (`control_path_for_pty`, via `mux_opts_for_pty`) and is
+    /// deliberately outside this `-O check` and this reset — a probe's
+    /// master dying must never take the attached terminal down with it.
     async fn maybe_reset_master(&self, host: &str) -> bool {
         if self.others_in_flight(host) > 0 {
             // warn: a timeout is a failure path, and this is its only log line
