@@ -18,6 +18,8 @@
     retryMove,
     startMove,
     transferSheetFor,
+    UNKNOWN_WAIT_END,
+    waitIsStale,
     type MoveRun,
   } from './moves';
   import { formatDuration } from './account_usage';
@@ -122,7 +124,11 @@
     timed_out: 'The wait timed out after the limit.',
     session_gone: 'The session disappeared while fleet was waiting for it to finish.',
     refused: 'The source finished, but the move itself was refused.',
-    hub_restarted: 'The hub restarted while the wait was pending.',
+    // Written by the startup sweep and by a waiter that stopped without
+    // ending its wait — in local mode too, where there is no hub.
+    hub_restarted: 'The wait was interrupted (the app or the hub restarted).',
+    [UNKNOWN_WAIT_END]:
+      'The wait is no longer pending, and this window could not tell how it ended — the session timeline has the record.',
   };
   /** `refused` with a usable `waitRefusal`: the same wording the ordinary
    *  failure view would use for that code, when the code is one this build
@@ -495,6 +501,10 @@
           <p class="note">
             The connection to the hub was lost during the move, so this window has no report for it.
           </p>
+        {:else if run.waitEnded === 'moved'}
+          <p class="note" data-testid="transfer-moved-after-wait">
+            {`${run.sessionName} finished its turn and was moved to ${run.toHost}. This window has no report for it; the session timeline has the record.`}
+          </p>
         {:else}
           <p class="note">Started elsewhere — this window has no report for it.</p>
         {/if}
@@ -521,6 +531,12 @@
         <p class="muted" data-testid="transfer-wait-deadline">Gives up {deadlineText}</p>
       {/if}
       <div class="buttons">
+        {#if waitIsStale(run, now)}
+          <!-- Past its deadline (or never given one): its end may have been
+               missed, and a run that can never settle would block every
+               later Transfer of this session. -->
+          <button onclick={done} data-testid="transfer-wait-dismiss">Stop following</button>
+        {/if}
         <button onclick={() => cancelWait(run.sessionId)} data-testid="transfer-cancel-wait">Cancel</button>
       </div>
     {:else if run && waitEndedText}

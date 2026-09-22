@@ -777,7 +777,12 @@ describe('TransferSheet: waiting', () => {
     ['timed_out', /timed out/i],
     ['session_gone', /disappear/i],
     ['refused', /refused/i],
-    ['hub_restarted', /hub restart/i],
+    // M7: also written by a dropped waiter and the startup sweep in local
+    // mode, where there is no hub at all.
+    ['hub_restarted', /^The wait was interrupted \(the app or the hub restarted\)\.$/],
+    // I1(a): the backend said nothing was waiting and the timeline recorded
+    // no end — no reason is invented.
+    ['unknown', /could not tell how it ended/i],
   ])('says why the wait ended (%s) and offers Transfer again', async (reason, pattern) => {
     const { getByTestId, queryByTestId } = renderSheet(
       waitingRun({ status: 'failed', waitEnded: reason, deadlineUnix: null }),
@@ -788,6 +793,23 @@ describe('TransferSheet: waiting', () => {
     expect(queryByTestId('transfer-failure')).toBeNull();
     await fireEvent.click(getByTestId('transfer-wait-retry'));
     expect(retryMove).toHaveBeenCalledWith(7);
+  });
+
+  // I1(c): a wait past its deadline can be let go of from the sheet.
+  it('offers Stop following for a wait past its deadline', async () => {
+    const { getByTestId } = renderSheet(waitingRun({ deadlineUnix: Math.floor(Date.now() / 1000) - 5 }));
+    await fireEvent.click(getByTestId('transfer-wait-dismiss'));
+    expect(get(moves).has(7)).toBe(false);
+  });
+
+  // I1(b): a `moved` end settled the run with no report to show.
+  it('a run settled by a moved wait end says it moved, without a report', () => {
+    const { getByTestId } = renderSheet(
+      waitingRun({ status: 'done', waitEnded: 'moved', deadlineUnix: null, settledAt: Date.now() }),
+    );
+    expect(getByTestId('transfer-result').textContent).toContain(
+      'sess7 finished its turn and was moved to beta. This window has no report for it',
+    );
   });
 
   // Fix round 1, finding 1: a `refused` wait carries `code`/`message`
