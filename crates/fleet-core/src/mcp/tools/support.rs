@@ -553,22 +553,11 @@ pub(super) fn ok_json_compact<T: serde::Serialize>(value: &T) -> Result<CallTool
     Ok(CallToolResult::success(vec![text_content(json)]))
 }
 
-pub(super) fn strip_nulls(v: &mut serde_json::Value) {
-    match v {
-        serde_json::Value::Object(map) => {
-            map.retain(|_, val| !val.is_null());
-            for val in map.values_mut() {
-                strip_nulls(val);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for val in arr.iter_mut() {
-                strip_nulls(val);
-            }
-        }
-        _ => {}
-    }
-}
+// One home, because the hub's `/events` broadcast strips the same rows for
+// the same clients (see `crate::json`): a divergence here would mean
+// `list_sessions` and the `session:updated` frame for one of its rows
+// disagreeing about what a null field looks like on the wire.
+pub(super) use crate::json::strip_nulls;
 
 /// A `SessionRow` augmented with the controller flag for the `list_sessions`
 /// MCP output. `#[serde(flatten)]` keeps every original SessionRow field at the
