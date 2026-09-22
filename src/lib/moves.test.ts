@@ -10,7 +10,9 @@ import {
   moves, transferSheetFor, startMove, applyMoveProgress, dismissMove,
   activeMoveFor, stepNumber, displaySteps, runForSession, resetMovesForTest,
   SETTLE_GRACE_MS, retryMove, resolveMoveRun, adoptPartial, cancelWait, adoptWait,
+  putRunForTest, recheckWaitingRuns,
 } from './moves';
+import { hubConnection } from './hub_connection';
 import { UNDONE } from './moveErrors';
 import type { MoveProgress, MoveStep, MoveStepState } from './moveProgress';
 import { MOVE_STEPS } from './moveProgress';
@@ -795,7 +797,12 @@ describe('a waiting run', () => {
     expect(run.waitRefusal).toBeNull();
   });
 
-  it('a "moved" wait_ended is left alone: move:progress settles it instead', async () => {
+  // Fix wave I1(b): a `moved` end on a run still `waiting` (its move's
+  // `move:progress` never reached this window — a dropped stream, a hub
+  // restart) used to be ignored, leaving the run waiting for ever. It settles
+  // the run as done, and the move's own events arriving afterwards do not
+  // settle it a second time.
+  it('a "moved" wait_ended settles a still-waiting run as done, exactly once', async () => {
     invoked.mockResolvedValueOnce(
       ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
     );
@@ -804,7 +811,39 @@ describe('a waiting run', () => {
     dispatchTimelineEvents([
       waitingEvent({ detail: JSON.stringify({ reason: 'moved', to_host: 'beta' }) }),
     ]);
-    expect(get(moves).get(7)!.status).toBe('waiting');
+    const run = get(moves).get(7)!;
+    expect(run.status).toBe('done');
+    expect(run.waitEnded).toBe('moved');
+    const settledAt = run.settledAt;
+    expect(settledAt).not.toBeNull();
+    const successes = get(toasts).filter((t) => t.kind === 'success').length;
+    // The move's own events, late: they may fill in the steps, never settle again.
+    for (const step of MOVE_STEPS) {
+      applyMoveProgress(ev(step, 'started', { session_id: 7, to_host: 'beta' }));
+      applyMoveProgress(ev(step, 'done', { session_id: 7, to_host: 'beta' }));
+    }
+    const after = get(moves).get(7)!;
+    expect(after.status).toBe('done');
+    expect(after.settledAt).toBe(settledAt);
+    expect(get(toasts).filter((t) => t.kind === 'success').length).toBe(successes);
+  });
+
+  it('a "moved" wait_ended after move:progress already finished the run changes nothing', async () => {
+    invoked.mockResolvedValueOnce(
+      ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+    );
+    startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+    await flush();
+    for (const step of MOVE_STEPS) {
+      applyMoveProgress(ev(step, 'started', { session_id: 7, to_host: 'beta' }));
+      applyMoveProgress(ev(step, 'done', { session_id: 7, to_host: 'beta' }));
+    }
+    const before = get(moves).get(7)!;
+    expect(before.status).toBe('done');
+    dispatchTimelineEvents([
+      waitingEvent({ detail: JSON.stringify({ reason: 'moved', to_host: 'beta' }) }),
+    ]);
+    expect(get(moves).get(7)).toBe(before);
   });
 
   it('ignores a wait_ended for a session that is not (or no longer) waiting', async () => {
@@ -845,18 +884,302 @@ describe('a waiting run', () => {
       expect(run.waitEnded).toBe('cancelled');
     });
 
-    it('says so, rather than pretending it was cancelled, on was_waiting: false', async () => {
+    // Fix wave I1(a): `was_waiting: false` used to leave the run `waiting`
+    // for ever when the end event had been missed. The run re-reads its own
+    // timeline and settles from the end recorded there.
+    it('on was_waiting: false, settles from the end the timeline recorded', async () => {
       invoked.mockResolvedValueOnce(
         ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
       );
       startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
       await flush();
       invoked.mockResolvedValueOnce(ok({ kind: 'wait_cancelled', session_id: 7, was_waiting: false }));
+      invoked.mockResolvedValueOnce(
+        ok([
+          waitingEvent({ id: 3, detail: JSON.stringify({ reason: 'timed_out' }) }),
+          waitingEvent({ id: 2, kind: 'session_move_waiting', detail: JSON.stringify({ to_host: 'beta', deadline_unix: 2_000_000_000 }) }),
+        ]),
+      );
       cancelWait(7);
       await flush();
-      expect(get(toasts).some((t) => t.message.includes('already ended'))).toBe(true);
-      // Still waiting as far as this window knows — no run mutated on a false claim.
+      expect(invoked).toHaveBeenCalledWith('session_history', { args: { session_id: 7, limit: null } });
+      const run = get(moves).get(7)!;
+      expect(run.status).toBe('failed');
+      expect(run.waitEnded).toBe('timed_out');
+    });
+
+    it('on was_waiting: false with no end recorded and no move started, settles as ended without inventing why', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      invoked.mockResolvedValueOnce(ok({ kind: 'wait_cancelled', session_id: 7, was_waiting: false }));
+      invoked.mockResolvedValueOnce(
+        ok([waitingEvent({ id: 2, kind: 'session_move_waiting', detail: JSON.stringify({ to_host: 'beta' }) })]),
+      );
+      cancelWait(7);
+      await flush();
+      const run = get(moves).get(7)!;
+      expect(run.status).toBe('failed');
+      expect(run.waitEnded).toBe('unknown');
+      expect(get(toasts).some((t) => t.message.includes('Nothing was left to cancel'))).toBe(true);
+      // A real end recorded later still names what happened.
+      dispatchTimelineEvents([waitingEvent({ detail: JSON.stringify({ reason: 'cancelled' }) })]);
+      expect(get(moves).get(7)!.waitEnded).toBe('cancelled');
+    });
+
+    it('on was_waiting: false with the move under way, leaves the run to its progress', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      let answerCancel!: (v: unknown) => void;
+      invoked.mockImplementationOnce(() => new Promise((res) => { answerCancel = res; }));
+      invoked.mockResolvedValueOnce(
+        ok([waitingEvent({ id: 2, kind: 'session_move_waiting', detail: JSON.stringify({ to_host: 'beta' }) })]),
+      );
+      cancelWait(7);
+      // The waiter's move started before the cancel reached it (M2).
+      applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: 'beta' }));
+      applyMoveProgress(ev('check', 'done', { session_id: 7, to_host: 'beta' }));
+      answerCancel(ok({ kind: 'wait_cancelled', session_id: 7, was_waiting: false }));
+      await flush();
+      const run = get(moves).get(7)!;
+      expect(run.status).toBe('running');
+      expect(run.waitEnded).toBeNull();
+    });
+  });
+
+  // Fix wave I1(c): a waiting run this window can no longer prove is pending
+  // must be dismissable, or a missed end blocks every later Transfer.
+  describe('dismissMove on a waiting run', () => {
+    it('is refused while the deadline is ahead and the wait is watched', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      dismissMove(7);
+      expect(get(moves).get(7)?.status).toBe('waiting');
+    });
+
+    it('is allowed once the deadline has passed', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: Math.floor(Date.now() / 1000) - 5 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      expect(get(moves).get(7)?.status).toBe('waiting');
+      dismissMove(7);
+      expect(get(moves).has(7)).toBe(false);
+      // …and the watcher went with it: a late end creates no run.
+      dispatchTimelineEvents([waitingEvent({ detail: JSON.stringify({ reason: 'timed_out' }) })]);
+      expect(get(moves).has(7)).toBe(false);
+    });
+
+    it('is allowed for a stale run nothing is watching', () => {
+      putRunForTest({
+        sessionId: 7, sessionName: 's', fromHost: 'alpha', toHost: 'beta', keepSource: null,
+        origin: 'local', steps: MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null })),
+        status: 'waiting', report: null, error: null, resolveError: null, startedAt: 1, settledAt: null,
+        cleanTarget: false, attempt: 1, resolving: false, awaitingStart: false,
+        deadlineUnix: 2_000_000_000, waitEnded: null, waitRefusal: null,
+      });
+      dismissMove(7);
+      expect(get(moves).has(7)).toBe(false);
+    });
+  });
+
+  // Fix wave I1(d): an end missed while the event stream was down is found
+  // again from the timeline when the hub link comes back, or on focus.
+  describe('re-checking waiting runs', () => {
+    beforeEach(() => hubConnection.set({ state: 'connected' }));
+
+    it('settles a waiting run from its timeline when the hub link comes back', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 1, reason: 'x' });
+      invoked.mockResolvedValueOnce(
+        ok([
+          waitingEvent({ id: 3, detail: JSON.stringify({ reason: 'refused', code: 'E_MOVE_MIDOP', message: 'midop' }) }),
+          waitingEvent({ id: 2, kind: 'session_move_waiting', detail: JSON.stringify({ to_host: 'beta' }) }),
+        ]),
+      );
+      hubConnection.set({ state: 'connected' });
+      await flush();
+      const run = get(moves).get(7)!;
+      expect(run.status).toBe('failed');
+      expect(run.waitEnded).toBe('refused');
+      expect(run.waitRefusal).toEqual({ code: 'E_MOVE_MIDOP', message: 'midop' });
+    });
+
+    it('leaves a run waiting whose wait the timeline still shows pending', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      invoked.mockResolvedValueOnce(
+        ok([waitingEvent({ id: 2, kind: 'session_move_waiting', detail: JSON.stringify({ to_host: 'beta' }) })]),
+      );
+      await recheckWaitingRuns();
       expect(get(moves).get(7)!.status).toBe('waiting');
+    });
+
+    it('recheckWaitingRuns (the focus path) settles from a recorded end', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      invoked.mockResolvedValueOnce(ok([waitingEvent({ id: 3, detail: JSON.stringify({ reason: 'hub_restarted' }) })]));
+      await recheckWaitingRuns();
+      expect(get(moves).get(7)!.waitEnded).toBe('hub_restarted');
+    });
+  });
+
+  // Fix wave I2: a busy-again attempt inside a live wait emits check:started
+  // then check:failed. The run used to become an observed run and fail, with
+  // the watcher gone and Cancel with it, while the backend was still waiting.
+  describe('a busy-again attempt inside a wait', () => {
+    it('returns the run to waiting with its deadline, and keeps the watcher', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: 'beta' }));
+      expect(get(moves).get(7)!.status).toBe('running');
+      applyMoveProgress(ev('check', 'failed', { session_id: 7, to_host: 'beta' }));
+      const run = get(moves).get(7)!;
+      expect(run.status).toBe('waiting');
+      expect(run.deadlineUnix).toBe(2_000_000_000);
+      expect(displaySteps(run).every((s) => s.state === 'pending')).toBe(true);
+      expect(activeMoveFor(7)).toBe(run);
+      // The watcher survived the attempt: the wait's end still settles it.
+      dispatchTimelineEvents([waitingEvent({ detail: JSON.stringify({ reason: 'cancelled' }) })]);
+      expect(get(moves).get(7)!.waitEnded).toBe('cancelled');
+    });
+
+    it('a genuine failure past check still fails the run', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: 'beta' }));
+      applyMoveProgress(ev('check', 'done', { session_id: 7, to_host: 'beta' }));
+      applyMoveProgress(ev('transcript', 'started', { session_id: 7, to_host: 'beta' }));
+      applyMoveProgress(ev('transcript', 'failed', { session_id: 7, to_host: 'beta' }));
+      expect(get(moves).get(7)!.status).toBe('failed');
+    });
+
+    it('a refused end arriving before the check:failed event settles it, and the late event changes nothing', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: 'beta' }));
+      dispatchTimelineEvents([
+        waitingEvent({ detail: JSON.stringify({ reason: 'refused', code: 'E_MOVE_MIDOP', message: 'm' }) }),
+      ]);
+      expect(get(moves).get(7)!.waitEnded).toBe('refused');
+      applyMoveProgress(ev('check', 'failed', { session_id: 7, to_host: 'beta' }));
+      expect(get(moves).get(7)!.status).toBe('failed');
+      expect(get(moves).get(7)!.waitEnded).toBe('refused');
+    });
+  });
+
+  // Fix wave M1 (and the Rust fix's I5a order): the stale-idle fall-through
+  // emits check:started and check:failed BEFORE the call answers `waiting`,
+  // and the waiter's own move may even start before the answer lands.
+  describe('progress that arrives before the waiting answer', () => {
+    function manual() {
+      let answer!: (v: unknown) => void;
+      invoked.mockImplementationOnce(() => new Promise((res) => { answer = res; }));
+      return (v: unknown) => answer(v);
+    }
+
+    it('a failed check before the answer ends up waiting, with a clean step list', async () => {
+      const answer = manual();
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: 'beta' }));
+      applyMoveProgress(ev('check', 'failed', { session_id: 7, to_host: 'beta' }));
+      answer(ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }));
+      await flush();
+      const run = get(moves).get(7)!;
+      expect(run.status).toBe('waiting');
+      expect(run.deadlineUnix).toBe(2_000_000_000);
+      expect(displaySteps(run).every((s) => s.state === 'pending')).toBe(true);
+      dispatchTimelineEvents([waitingEvent({ detail: JSON.stringify({ reason: 'cancelled' }) })]);
+      expect(get(moves).get(7)!.waitEnded).toBe('cancelled');
+    });
+
+    it('a real move already under way before the answer ends up running, not parked', async () => {
+      const answer = manual();
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      applyMoveProgress(ev('check', 'started', { session_id: 7, to_host: 'beta' }));
+      applyMoveProgress(ev('check', 'done', { session_id: 7, to_host: 'beta' }));
+      applyMoveProgress(ev('transcript', 'started', { session_id: 7, to_host: 'beta' }));
+      answer(ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }));
+      await flush();
+      expect(get(moves).get(7)!.status).toBe('running');
+      // …and it is settled by its events, as any followed move is.
+      for (const step of MOVE_STEPS.slice(1)) {
+        applyMoveProgress(ev(step, 'started', { session_id: 7, to_host: 'beta' }));
+        applyMoveProgress(ev(step, 'done', { session_id: 7, to_host: 'beta' }));
+      }
+      expect(get(moves).get(7)!.status).toBe('done');
+    });
+
+    it('a waiting run whose attempt skipped a lost check:started still follows the move', async () => {
+      invoked.mockResolvedValueOnce(
+        ok({ kind: 'waiting', session_id: 7, to_host: 'beta', deadline_unix: 2_000_000_000 }),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      applyMoveProgress(ev('transcript', 'started', { session_id: 7, to_host: 'beta' }));
+      expect(get(moves).get(7)!.status).toBe('running');
+    });
+  });
+
+  // Fix wave M5: a second window's Transfer is refused with "already waiting
+  // to move". It follows the wait the timeline records instead of failing.
+  describe('a Transfer refused because the session is already waiting', () => {
+    it('adopts the recorded wait', async () => {
+      invoked.mockResolvedValueOnce(err('E_INVALID_STATE', 'session 7 is already waiting to move'));
+      invoked.mockResolvedValueOnce(
+        ok([
+          waitingEvent({
+            id: 2, kind: 'session_move_waiting',
+            detail: JSON.stringify({ to_host: 'gamma', deadline_unix: 2_100_000_000 }),
+          }),
+        ]),
+      );
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      const run = get(moves).get(7)!;
+      expect(run.status).toBe('waiting');
+      expect(run.toHost).toBe('gamma');
+      expect(run.deadlineUnix).toBe(2_100_000_000);
+      dispatchTimelineEvents([waitingEvent({ detail: JSON.stringify({ reason: 'cancelled' }) })]);
+      expect(get(moves).get(7)!.waitEnded).toBe('cancelled');
+    });
+
+    it('fails with the refusal when the timeline records no pending wait', async () => {
+      invoked.mockResolvedValueOnce(err('E_INVALID_STATE', 'session 7 is already waiting to move'));
+      invoked.mockResolvedValueOnce(ok([]));
+      startMove(row({ id: 7, tmux_name: 's', host_alias: 'alpha' }), 'beta', { keepSource: false });
+      await flush();
+      const run = get(moves).get(7)!;
+      expect(run.status).toBe('failed');
+      expect(run.error?.message).toContain('already waiting to move');
     });
   });
 

@@ -4,7 +4,7 @@
 // window, the MCP API, a hub client) is settled by its events. Nothing here
 // is persisted: the session timeline already records the move.
 import { get, writable, type Readable } from 'svelte/store';
-import { UNDONE } from './moveErrors';
+import { ALREADY_WAITING, UNDONE } from './moveErrors';
 import { MOVE_STEPS, type MoveProgress, type MoveStep, type MoveStepState } from './moveProgress';
 import {
   cancelMoveWait,
@@ -20,7 +20,14 @@ import type { IpcError, Result } from './result';
 import { sessions, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
 import { onTimelineEvent } from './live_events';
-import type { SessionEvent, UnresolvedPartial, UnresolvedWait } from './timeline';
+import { hubConnection, type HubConnection } from './hub_connection';
+import {
+  sessionHistory,
+  unresolvedWait,
+  type SessionEvent,
+  type UnresolvedPartial,
+  type UnresolvedWait,
+} from './timeline';
 import { push, pushError } from './toasts';
 
 export type StepState = 'pending' | MoveStepState;
@@ -90,10 +97,12 @@ export interface MoveRun {
   /** The wall-clock deadline (`when: 'idle'`'s `MoveWaiting.deadline_unix`) a
    *  `waiting` run will time out at; `null` off that status. */
   deadlineUnix: number | null;
-  /** Why a `waiting` run's wait ended without a move — the reason on its
+  /** Why a `waiting` run's wait ended — the reason on its
    *  `session_move_wait_ended` (`cancelled`, `timed_out`, `session_gone`,
-   *  `refused`, `hub_restarted`); `null` while waiting, or for a run that
-   *  never waited. */
+   *  `refused`, `hub_restarted`, or `moved` on a run settled `done` from
+   *  that event alone), or `UNKNOWN_WAIT_END` when the backend said nothing
+   *  was waiting any more and the timeline recorded no end; `null` while
+   *  waiting, or for a run that never waited. */
   waitEnded: string | null;
   /** The refusal `record_wait_ended` recorded on a `refused`
    *  `session_move_wait_ended` (`crates/fleet-core/src/service/move_session/
@@ -244,6 +253,7 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
   // an event that may never come (an old hub, a dropped stream) would leave
   // such a run blank — so the flag is only raised where the hazard is real.
   const replacing = get(store).has(session.id);
+  unwatchWait(session.id);
   put({
     sessionId: session.id,
     sessionName: session.tmux_name,
@@ -341,25 +351,86 @@ function settle(sessionId: number, r: Result<MoveReport>): void {
     put({ ...run, origin: 'observed', error: r.error });
     return;
   }
-  put({
-    ...run,
-    status: r.error.code === 'E_MOVE_PARTIAL' ? 'partial' : 'failed',
-    error: r.error,
-    settledAt: Date.now(),
-  });
-  if (!sheetOpen) pushError(r.error, `Move of ${run.sessionName} failed`);
+  if (r.error.code === 'E_INVALID_STATE' && r.error.message.includes(ALREADY_WAITING)) {
+    // `begin_wait` refused: this session already has a wait (another window,
+    // the MCP API). A Retry could only be refused again, so follow that wait
+    // instead — found on the session's own timeline, like `adoptWait`.
+    void followRecordedWait(sessionId, r.error);
+    return;
+  }
+  settleFailed(run, r.error);
 }
 
-/** One subscription per session currently `waiting`, watching its own live
- *  timeline for the `session_move_wait_ended` that would settle it without a
- *  move (see `watchWait`). Torn down the moment that run leaves `waiting`,
- *  however it does — a settled wait, a dismiss, a fresh restart under the
- *  same key — so a session is never listened to twice. */
+function settleFailed(run: MoveRun, error: IpcError): void {
+  put({
+    ...run,
+    status: error.code === 'E_MOVE_PARTIAL' ? 'partial' : 'failed',
+    error,
+    settledAt: Date.now(),
+  });
+  if (get(transferSheetFor) !== run.sessionId) pushError(error, `Move of ${run.sessionName} failed`);
+}
+
+/** M5: turn a Transfer refused with "already waiting to move" into the wait
+ *  the session's timeline records — its target and deadline, not this
+ *  click's — or, when the timeline records none, the refusal itself. */
+async function followRecordedWait(sessionId: number, error: IpcError): Promise<void> {
+  const h = await sessionHistory(sessionId);
+  const run = get(store).get(sessionId);
+  if (!run || run.origin !== 'local' || run.status !== 'running') return;
+  const w = h.ok && Array.isArray(h.value) ? unresolvedWait(h.value) : null;
+  if (!w) {
+    settleFailed(run, error);
+    return;
+  }
+  const toHost = w.toHost !== '' ? w.toHost : run.toHost;
+  put({
+    ...run,
+    toHost,
+    keepSource: null,
+    steps: blank(),
+    status: 'waiting',
+    error: null,
+    awaitingStart: false,
+    deadlineUnix: w.deadlineUnix,
+    waitEnded: null,
+    waitRefusal: null,
+  });
+  watchWait(sessionId);
+  push({
+    kind: 'info',
+    message: `${run.sessionName} was already waiting to move to ${toHost} — following that wait.`,
+  });
+}
+
+/** One subscription per session whose run belongs to a live wait, watching
+ *  its own timeline for the `session_move_wait_ended` that ends it (see
+ *  `watchWait`). It is kept through every attempt the waiter makes — a
+ *  busy-again attempt returns the run to `waiting`, and only the wait's end
+ *  says it is over — and torn down when the run settles, is dismissed, or is
+ *  replaced, so a session is never listened to twice. */
 const waitWatchers = new Map<number, () => void>();
 
 function unwatchWait(sessionId: number): void {
   waitWatchers.get(sessionId)?.();
   waitWatchers.delete(sessionId);
+}
+
+/** `waitEnded` for a wait that is over with no recorded reason: the backend
+ *  answered a Cancel with `was_waiting: false`, and the session's timeline
+ *  holds no `session_move_wait_ended` for it (yet). Not a backend reason —
+ *  it says only what this window knows. A real end arriving later replaces
+ *  it (`waitOpen`). */
+export const UNKNOWN_WAIT_END = 'unknown';
+
+/** Whether `run` still belongs to a wait this window follows, so that the
+ *  wait's end (or its next attempt) may settle it: parked `waiting`, running
+ *  one of the waiter's own attempts, or settled only as "ended, reason
+ *  unknown". */
+function waitOpen(run: MoveRun): boolean {
+  if (run.status === 'waiting') return true;
+  if (!waitWatchers.has(run.sessionId)) return false;
+  return run.status === 'running' || (run.status === 'failed' && run.waitEnded === UNKNOWN_WAIT_END);
 }
 
 /** `detail` on `session_move_wait_ended` — parsed as defensively as
@@ -396,40 +467,135 @@ function waitEndRefusal(detail: string | null): { code: string; message: string 
   }
 }
 
+/** The end of the session's newest wait, from its timeline (newest first):
+ *  the first wait-related event decides — an end is the answer, a
+ *  `session_move_waiting` means that wait is still recorded as pending.
+ *  The list crossed IPC, so anything that is not one reads as "no end". */
+function recordedWaitEnd(events: unknown): SessionEvent | null {
+  if (!Array.isArray(events)) return null;
+  for (const e of events as unknown[]) {
+    if (typeof e !== 'object' || e === null) continue;
+    const kind = (e as SessionEvent).kind;
+    if (kind === 'session_move_wait_ended') return e as SessionEvent;
+    if (kind === 'session_move_waiting') return null;
+  }
+  return null;
+}
+
 /**
- * Subscribe a `waiting` run to its own session's live timeline, so a wait
- * that ends WITHOUT a move (cancelled, timed out, the session gone, refused,
- * a hub restart) still settles this run — nothing else tells this window
- * that the wait is over, since `move:progress` only ever reports an actual
- * move. A `moved` reason needs no action here: `move:progress` settles that
- * run itself, the same way it always has. Idempotent — a run already watched
- * (an adopted one, a straggler retry) is not subscribed twice.
+ * Settle a run from its wait's `session_move_wait_ended`, however that event
+ * reached this window (the live timeline, or a re-read of it). A no-op for a
+ * run no longer following a wait — `move:progress` already settled it, so a
+ * late `moved` never settles anything twice.
+ *
+ * `moved` settles `done`: the waiter's move finished even if none of its
+ * `move:progress` reached this window. There is no report to show — the
+ * sheet says so. Every other reason settles `failed` with that reason; an
+ * unusable detail settles as `UNKNOWN_WAIT_END` rather than leaving the run
+ * waiting for an end that has already come.
+ */
+function settleWaitEnd(sessionId: number, e: SessionEvent): void {
+  const run = get(store).get(sessionId);
+  if (!run || !waitOpen(run)) return;
+  unwatchWait(sessionId);
+  const reason = waitEndReason(e.detail) ?? UNKNOWN_WAIT_END;
+  if (reason === 'moved') {
+    put({
+      ...run,
+      status: 'done',
+      waitEnded: 'moved',
+      waitRefusal: null,
+      error: null,
+      awaitingStart: false,
+      settledAt: Date.now(),
+    });
+    if (run.origin === 'local' && get(transferSheetFor) !== sessionId) {
+      push({
+        kind: 'success',
+        message: `Moved ${run.sessionName} to ${run.toHost}`,
+        action: { label: 'View', run: () => transferSheetFor.set(sessionId) },
+      });
+    }
+    return;
+  }
+  // Only a `refused` end ever carries a refusal.
+  const waitRefusal = reason === 'refused' ? waitEndRefusal(e.detail) : null;
+  put({ ...run, status: 'failed', waitEnded: reason, waitRefusal, error: null, settledAt: Date.now() });
+}
+
+/**
+ * Subscribe a run to its own session's live timeline for the end of its
+ * wait — nothing else tells this window that a wait ended without a move,
+ * and `move:progress` may never arrive for one that ended with a move.
+ * Idempotent — a run already watched (an adopted one, a straggler retry) is
+ * not subscribed twice.
  */
 function watchWait(sessionId: number): void {
   if (waitWatchers.has(sessionId)) return;
   const unsub = onTimelineEvent(sessionId, (e: SessionEvent) => {
-    if (e.kind !== 'session_move_wait_ended') return;
-    const reason = waitEndReason(e.detail);
-    if (reason === 'moved') return;
-    const run = get(store).get(sessionId);
-    if (!run || run.status !== 'waiting') return;
-    unwatchWait(sessionId);
-    if (reason === null) return; // an unusable event: nothing to settle with
-    // Only a `refused` end ever carries a refusal; every other reason's
-    // detail has no `code`/`message` to find, so `waitEndRefusal` would only
-    // waste a parse (and does return `null` on one — this just skips it).
-    const waitRefusal = reason === 'refused' ? waitEndRefusal(e.detail) : null;
-    put({ ...run, status: 'failed', waitEnded: reason, waitRefusal, error: null, settledAt: Date.now() });
+    if (e.kind === 'session_move_wait_ended') settleWaitEnd(sessionId, e);
   });
   waitWatchers.set(sessionId, unsub);
 }
 
+/**
+ * Settle a `waiting` answer. The answer and `move:progress` are two streams,
+ * and the backend may have emitted progress for this session before the
+ * answer arrived: a stale-idle source's own failed check (`check:started`,
+ * `check:failed`, then `Waiting`), or even the waiter's first real attempt.
+ * So the step list decides: nothing past `check` means the run is parked at
+ * `waiting` on a clean list; anything past it is a real move under way,
+ * followed from its events like any move this window did not start — the
+ * call that would have settled it has already answered.
+ */
 function settleWaiting(sessionId: number, w: MoveWaiting): void {
   const run = get(store).get(sessionId);
   if (!run || run.origin !== 'local' || run.status !== 'running') return;
-  put({ ...run, status: 'waiting', deadlineUnix: w.deadline_unix, waitEnded: null, waitRefusal: null });
   watchWait(sessionId);
+  const base = { ...run, deadlineUnix: w.deadline_unix, awaitingStart: false, waitEnded: null, waitRefusal: null };
+  const underWay = run.steps.some((s, i) => i > 0 && s.state !== 'pending');
+  if (!underWay) {
+    put({ ...base, status: 'waiting', steps: blank() });
+    return;
+  }
+  const ended = endedInTheSteps(run.steps);
+  if (ended !== null) {
+    unwatchWait(sessionId);
+    put({ ...base, origin: 'observed', status: ended, settledAt: Date.now() });
+    return;
+  }
+  put({ ...base, origin: 'observed', status: 'running' });
 }
+
+/**
+ * Re-read the timeline of every run following a wait, and settle each whose
+ * wait the timeline says has ended. The live `session:event` push is the
+ * only other way this window hears of an end, so one missed while the hub
+ * link was down (or the window asleep) would otherwise leave the run
+ * waiting for ever. Called when the hub link comes back and on window focus.
+ */
+export async function recheckWaitingRuns(): Promise<void> {
+  const ids = [...get(store).values()]
+    .filter((r) => r.status === 'waiting' || (r.status === 'running' && waitWatchers.has(r.sessionId)))
+    .map((r) => r.sessionId);
+  await Promise.all(
+    ids.map(async (id) => {
+      const h = await sessionHistory(id);
+      if (!h.ok) return;
+      const end = recordedWaitEnd(h.value);
+      if (end) settleWaitEnd(id, end);
+    }),
+  );
+}
+
+// A hub link that comes back (`reconnecting`/`offline`/`connecting` ->
+// `connected`) may have dropped a wait's end on the floor: re-check.
+let lastLink: HubConnection['state'] | null = null;
+hubConnection.subscribe((c) => {
+  const prev = lastLink;
+  lastLink = c.state;
+  if (c.state === 'connected' && prev !== null && prev !== 'connected') void recheckWaitingRuns();
+});
 
 /**
  * Settle what `startMove`/`retryMove`'s own `move_session` call answered: a
@@ -462,6 +628,7 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
   const run = get(store).get(sessionId);
   if (!run || run.status !== 'failed' || run.origin !== 'local') return;
   const cleanTarget = opts.cleanTarget ?? false;
+  unwatchWait(sessionId);
   put({
     ...run,
     steps: blank(),
@@ -722,7 +889,38 @@ export function applyMoveProgress(p: MoveProgress): void {
   }
 
   let settledLocal = false;
-  if (run && run.status !== 'running') {
+  if (run && waitOpen(run)) {
+    // An attempt of the waiter's own move. `check` failing is the source
+    // found busy again (`run_wait` goes back to waiting); any other way the
+    // check fails ends the wait with a `refused` `session_move_wait_ended`,
+    // which the still-live watcher settles from. Either way the run is
+    // parked at `waiting` again, deadline and Cancel intact, until that end
+    // (if any) arrives.
+    if (i === 0 && p.state === 'failed') {
+      if (run.status !== 'waiting' || run.origin !== 'local') {
+        put({ ...run, origin: 'local', status: 'waiting', steps: blank(), error: null, settledAt: null, waitEnded: null });
+      }
+      return;
+    }
+    if (run.status !== 'running') {
+      // A new attempt begins — by its `check:started`, or by a later step if
+      // that one was lost. The origin flips local -> observed on purpose: the
+      // run's own `move_session` call already answered `Waiting`, so this
+      // move has no local caller left to settle it — only its events, or the
+      // wait's end. The watcher stays until one of those settles it.
+      run = {
+        ...run,
+        origin: 'observed',
+        status: 'running',
+        steps: blank(),
+        error: null,
+        settledAt: null,
+        waitEnded: null,
+        waitRefusal: null,
+        startedAt: Date.now(),
+      };
+    }
+  } else if (run && run.status !== 'running') {
     if (
       run.origin === 'local' &&
       run.settledAt !== null &&
@@ -732,14 +930,6 @@ export function applyMoveProgress(p: MoveProgress): void {
       // they may not touch the outcome the user is already reading.
       settledLocal = true;
     } else if (isFreshStart) {
-      // A `waiting` run's own move just started: from here it is patched
-      // exactly like any other run this window is only observing (`observed`
-      // below), so the wait's timeline subscription is no longer needed —
-      // `move:progress` settles it from here.
-      if (run.status === 'waiting') unwatchWait(run.sessionId);
-      // The origin flips local -> observed here on purpose: the waiting
-      // run's own `move_session` call already resolved (with `Waiting`), so
-      // this new move has no local caller left to settle it — only events.
       run = undefined; // a NEW move of this session
     } else {
       return;
@@ -760,6 +950,7 @@ export function applyMoveProgress(p: MoveProgress): void {
     if (p.state === 'failed') status = 'failed';
     else if (i === MOVE_STEPS.length - 1 && (p.state === 'done' || p.state === 'warned')) status = 'done';
   }
+  if (status !== 'running') unwatchWait(run.sessionId);
   put({ ...run, steps, status });
 }
 
@@ -775,30 +966,65 @@ export function cancelWait(sessionId: number): void {
   const run = get(store).get(sessionId);
   if (!run || run.status !== 'waiting') return;
   const sessionName = run.sessionName;
-  void cancelMoveWait(sessionId, run.toHost).then((r: Result<MoveWaitCancelled>) => {
+  void cancelMoveWait(sessionId, run.toHost).then(async (r: Result<MoveWaitCancelled>) => {
     if (!r.ok) {
       pushError(r.error, `Cancelling the transfer of ${sessionName}`);
       return;
     }
-    if (!r.value.was_waiting) {
-      // Nothing was pending any more — the wait ended on its own (moved,
-      // timed out, …) right before this reached the backend. Say so rather
-      // than claim credit for ending something that was already over; the
-      // timeline event that already recorded why settles the run as usual.
-      push({ kind: 'info', message: `The wait for ${sessionName} had already ended.` });
-    }
+    if (r.value.was_waiting) return;
+    // Nothing was pending any more: the wait ended on its own (moved, timed
+    // out, …), or the waiter had already started the move. Say so rather
+    // than claim credit — and do not leave the run waiting on the hope that
+    // the end event still arrives: it may already have been missed.
+    push({
+      kind: 'info',
+      message: `Nothing was left to cancel for ${sessionName} — the wait had already ended, or its move had started.`,
+    });
+    await settleAfterNothingToCancel(sessionId);
   });
 }
 
+/** I1(a): after a Cancel answered `was_waiting: false`. A run its move's
+ *  progress already took over is left to that progress; one the timeline
+ *  records an end for is settled from it; anything else is over for
+ *  reasons this window cannot know, and says exactly that
+ *  (`UNKNOWN_WAIT_END`) — the watcher stays, so a real end still names it,
+ *  and a resumed wait's next attempt still revives it. */
+async function settleAfterNothingToCancel(sessionId: number): Promise<void> {
+  const h = await sessionHistory(sessionId);
+  const run = get(store).get(sessionId);
+  if (!run || run.status !== 'waiting') return;
+  const end = h.ok ? recordedWaitEnd(h.value) : null;
+  if (end) {
+    settleWaitEnd(sessionId, end);
+    return;
+  }
+  put({ ...run, status: 'failed', waitEnded: UNKNOWN_WAIT_END, waitRefusal: null, error: null, settledAt: Date.now() });
+}
+
+/** Whether a `waiting` run can no longer be shown to be pending: its
+ *  deadline has passed (the wait has ended, whether or not this window heard
+ *  of it), it never had one, or nothing is watching for its end. Such a run
+ *  may be dismissed — otherwise a missed end would block every later
+ *  Transfer of the session. */
+export function waitIsStale(run: MoveRun, nowMs: number = Date.now()): boolean {
+  if (run.status !== 'waiting') return false;
+  if (run.deadlineUnix === null || nowMs / 1000 >= run.deadlineUnix) return true;
+  return !waitWatchers.has(run.sessionId);
+}
+
 /**
- * Forget a run. A LOCAL running or waiting one cannot be dismissed — this
- * window owns it and its result (a move, or the wait ending some other way)
- * is still coming. An observed run is only this window's view of someone
- * else's move, so it can always be let go of; the next event re-creates it.
+ * Forget a run. A LOCAL running one cannot be dismissed — this window owns it
+ * and its result is still coming; nor can a waiting one while its end is
+ * still expected (`waitIsStale`). An observed run is only this window's view
+ * of someone else's move, so it can always be let go of; the next event
+ * re-creates it.
  */
 export function dismissMove(sessionId: number): void {
   const run = get(store).get(sessionId);
-  if (run && run.origin === 'local' && (run.status === 'running' || run.status === 'waiting')) return;
+  if (run && run.origin === 'local' && run.status === 'running') return;
+  if (run && run.status === 'waiting' && !waitIsStale(run)) return;
+  unwatchWait(sessionId);
   store.update((m) => {
     const next = new Map(m);
     next.delete(sessionId);
