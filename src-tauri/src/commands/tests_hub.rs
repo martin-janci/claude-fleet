@@ -864,21 +864,32 @@ fn nothing_about_a_stranded_token_carries_the_token() {
 
 #[test]
 fn a_frontend_error_is_queued_clamped_with_its_code() {
+    // The ring is process-global and this binary's tests run in parallel, so
+    // this one owns only its own report: it is tagged, and found by that tag
+    // rather than by a position or an exact count.
+    let tag = format!(
+        "frontend-error-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
     let before = fleet_core::logging::report_ring().len();
     report_client_error_logic(ReportClientErrorArgs {
         level: "error".into(),
         component: "frontend:unhandled".into(),
         code: Some("E_PARSE".into()),
-        message: "x".repeat(5000),
+        message: format!("{tag} {}", "x".repeat(5000)),
         context: Some(serde_json::json!({ "url": "app://index" })),
     })
     .unwrap();
-    assert_eq!(fleet_core::logging::report_ring().len(), before + 1);
+    assert!(fleet_core::logging::report_ring().len() > before);
     let r = fleet_core::logging::report_ring()
         .drain(usize::MAX)
         .reports
-        .pop()
-        .unwrap();
+        .into_iter()
+        .find(|r| r.message.starts_with(&tag))
+        .expect("the queued report");
     assert_eq!(r.code.as_deref(), Some("E_PARSE"));
     assert!(r.truncated);
     assert_eq!(r.component, "frontend:unhandled");
