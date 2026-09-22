@@ -310,6 +310,12 @@ pub struct CaptureSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionActivityParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionHistoryParams {
     /// Fleet session id (from list_sessions).
     pub session_id: i64,

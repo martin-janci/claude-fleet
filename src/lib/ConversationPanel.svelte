@@ -14,7 +14,7 @@
   // send-keys into the REPL), so anything typed here is what the terminal
   // would have received. bg / external rows have no REPL to type into, so
   // they stay read-only.
-  import { untrack, tick, setContext } from 'svelte';
+  import { untrack, tick, setContext, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, sessions, type SessionRow } from './sessions';
   import { hintAnchor } from './hints';
@@ -95,7 +95,6 @@
     type ConvGroup,
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
-  import { hubStatus, ownsTheFleet } from './hub';
   import { invokeCmd } from './result';
   import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, type Attachment, type PickedFile } from './attachments';
   import { withAttachments, tooLong } from './attach_prompt';
@@ -112,18 +111,32 @@
     onOpenTerminal,
     // Find is Cmd+F on macOS (Ctrl+F moves the caret there), Ctrl+F elsewhere.
     isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator),
-    // Opt-out for a host that brings its own composer over this same
-    // session (AgentPanel: the context chip's prefix has to go through a
-    // composer that knows about it). Two composers sending independently
-    // into one tmux REPL is the interleaved-paste failure this flag exists
-    // to prevent — a host that sets this false owns being the only sender.
+    // Opt-out for a host that renders its own prompt UI over this same
+    // session. Two composers sending independently into one tmux REPL is the
+    // interleaved-paste failure this flag exists to prevent — a host that
+    // sets this false owns being the only sender, and owns everything that
+    // goes with that (see `promptPrefix`).
     showComposer = true,
+    // Text prepended to every prompt this composer sends (AgentPanel's
+    // context chip). A prefix is a reason to feed THIS composer, not to
+    // build a second one: `pending`, `optimistic` and the immediate refetch
+    // are all set in `send()` and nowhere else, so a host that sends around
+    // it gets a sheet that shows nothing until the next quiet tick — 15 s
+    // later — with no indicator in between. A slash command is exempt: the
+    // REPL reads the line exactly as typed.
+    promptPrefix = null,
+    // Rendered directly above the composer, inside the panel's own layout
+    // (AgentPanel's removable context chip). Only shown when there IS a
+    // composer to sit above.
+    composerAbove,
   }: {
     session: SessionRow;
     visible: boolean;
     onOpenTerminal?: () => void;
     isMac?: boolean;
     showComposer?: boolean;
+    promptPrefix?: string | null;
+    composerAbove?: Snippet;
   } = $props();
 
   let conv = $state<Conversation | null>(null);
@@ -851,15 +864,16 @@
   // once, then on the interval. `probeLive` is a boolean derived, so a fresh
   // probe (which yields a new `indicator` object) never restarts the timer.
   // bg / external rows have no pane: the backend would reject every probe.
-  // `session_activity` is also local-only in remote mode (the hub's pane
-  // reads answer a different shape) — a hub client must not poll it every 2s
-  // only to drop an E_LOCAL_ONLY every time.
+  //
+  // A hub client probes too. It used to be excluded — `session_activity` was
+  // local-only, so the call could only ever have returned E_LOCAL_ONLY — and
+  // the cost was that a remote desktop had NO live signal at all between one
+  // row status change and the next: no spinner, no activity line, nothing
+  // moving for the length of a turn. The command routes to the hub's own
+  // tool now, which reads the pane over the ssh connection that can actually
+  // reach the host.
   const probeLive = $derived(
-    visible &&
-      !hasNoPane(session) &&
-      indicator !== null &&
-      viewing === null &&
-      ownsTheFleet($hubStatus),
+    visible && !hasNoPane(session) && indicator !== null && viewing === null,
   );
   $effect(() => {
     if (!probeLive) return;
@@ -1076,7 +1090,11 @@
       paths = up.value;
     }
 
-    const body = withAttachments(text, paths);
+    // The prefix rides in front of the attachment line, and never in front
+    // of a slash command: `/clear` with a paragraph glued to its nose is not
+    // a command the REPL runs.
+    const prefixed = promptPrefix && !text.startsWith('/') ? `${promptPrefix}\n\n${text}` : text;
+    const body = withAttachments(prefixed, paths);
     // A remote send is quoted twice (see attach_prompt.ts's header comment
     // for why that compounds rather than doubles), so the bound applied
     // here must match the host the prompt is actually going to.
@@ -1799,6 +1817,9 @@
     {/if}
   {/if}
   </div>
+  {#if composerAbove && showComposer && canPrompt && bgEntry === null}
+    <div class="composer-above">{@render composerAbove()}</div>
+  {/if}
   {#if showComposer && canPrompt && bgEntry === null}
     <form
       class="composer"
@@ -1966,6 +1987,12 @@
 </div>
 
 <style>
+  .composer-above {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    padding: 0 var(--chat-inset);
+  }
   .conversation-panel {
     /* The reading column every part of the thread lines up with: the turns,
        the sticky header, the chips, the slash menu and the composer. */

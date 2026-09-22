@@ -464,6 +464,21 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "session_activity",
+            "session_activity",
+            json!({ "session_id": 7 }),
+            r#"{"claude_status":"working","current_activity":null,"stuck_kind":null,"waiting_for":null,"spinner":"Cooking… (3s)"}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::session_activity(
+                    b,
+                    commands::sessions::SessionActivityArgs { session_id: 7 },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "session_conversation",
             "session_conversation",
             json!({ "session_id": 7, "turns": 5, "events_limit": 200 }),

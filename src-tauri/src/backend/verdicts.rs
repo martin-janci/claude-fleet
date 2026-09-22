@@ -259,10 +259,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "session_activity",
-        Verdict::LocalOnly {
-            instead: "it captures the session's pane over this machine's SSH connection; the \
-                      hub's pane reads answer a different shape, so the live indicator is off \
-                      in remote mode",
+        Verdict::Routed {
+            tool: "session_activity",
         },
     ),
     (

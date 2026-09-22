@@ -357,6 +357,12 @@ Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one En
 
 Parameters: `client_msg_id`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
+### `session_activity`
+
+What the session's pane shows right now: claude_status, stuck_kind, current_activity, waiting_for and the spinner line. One capture, nothing stored — the cheap read behind a live indicator, where capture_session is the whole pane. E_INVALID_STATE outside tmux. JSON.
+
+Parameters: `session_id`
+
 ### `session_conversation`
 
 Read a session conversation as structured turns — the shape of the exchange, where session_transcript gives one flat blob. Each turn carries the prompt, its timestamps, and items by kind: text, tool, subagent, compact, command, interrupt (tool inputs and results are never included). Also returns events (this conversation timeline, newest events_limit: default 50, max 200) and context (context-window usage, or null). turns defaults to 10, max 100; the character budget scales with it. Pass claude_session_id (from session_conversations) for an earlier conversation. Read-only. Errors: E_INVALID, E_INVALID_STATE, E_NO_TRANSCRIPT.

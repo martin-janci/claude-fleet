@@ -8,7 +8,7 @@ use super::*;
 use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 use crate::service::pane_intel;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Lines of pane tail the probe reads: enough for the spinner, a queued
 /// prompt line and the mode footer; more than the tick's 8 so a dialog's
@@ -18,7 +18,11 @@ pub const ACTIVITY_TAIL_LINES: u32 = 12;
 /// What the pane looks like right now. Strings use the same vocabularies as
 /// the session row (`claude_status`, `stuck_kind`), so the frontend can lay
 /// the probe over the row.
-#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+/// `Deserialize` is for the hub client, which reads this back off the wire
+/// (`backend::remote::session_activity`). No `serde(default)` anywhere: a
+/// hub that does not send a field is a hub that cannot answer this probe,
+/// and a silently all-`None` reading would look exactly like an idle pane.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ActivityProbe {
     pub claude_status: Option<String>,
     pub current_activity: Option<String>,

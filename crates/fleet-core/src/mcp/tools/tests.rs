@@ -1488,7 +1488,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 77);
+    assert_eq!(served, 78);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2616,7 +2616,13 @@ fn the_served_definition_budget_stays_bounded() {
     /// main's `keys` and `when` raises: each side was measured without the
     /// other, so the merged surface came to 58,957; raised to that plus 100
     /// bytes of headroom.
-    const BUDGET_BYTES: usize = 59_057;
+    // Raised deliberately from 59_057 when `session_activity` joined the
+    // router: a hub client had no live indicator at all without it (the
+    // command was local-only, so a remote desktop saw nothing move for the
+    // length of a turn). The budget is a ratchet against description creep,
+    // not against tools that earn their place — so it moves with a reason
+    // written down, and only that far.
+    const BUDGET_BYTES: usize = 59_400;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

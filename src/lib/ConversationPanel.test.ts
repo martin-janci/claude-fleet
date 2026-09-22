@@ -1006,19 +1006,21 @@ describe('ConversationPanel live indicator', () => {
     expect(mockedAct).toHaveBeenCalledTimes(2);
   });
 
-  // #147: session_activity is local-only in remote mode (the hub's pane reads
-  // answer a different shape) — a hub client must not poll it every 2s only to
-  // drop an E_LOCAL_ONLY each time.
-  it('a hub client never polls session_activity, even for a working row', async () => {
+  // #147 originally excluded the hub client here, because `session_activity`
+  // was local-only and every poll could only return E_LOCAL_ONLY. The command
+  // routes to the hub's own tool now, and the exclusion was the reason a
+  // remote desktop showed nothing moving for the length of a whole turn.
+  it('a hub client polls session_activity too — the command routes to the hub', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     hubStatus.set(REMOTE);
     mockedConv.mockReturnValue(ok(conv()));
     mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
     render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
     await settle();
-    vi.advanceTimersByTime(ACTIVITY_POLL_MS * 3);
+    expect(mockedAct).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(ACTIVITY_POLL_MS);
     await settle();
-    expect(mockedAct).not.toHaveBeenCalled();
+    expect(mockedAct).toHaveBeenCalledTimes(2);
   });
 
   it('standalone is untouched: a working row still polls', async () => {
