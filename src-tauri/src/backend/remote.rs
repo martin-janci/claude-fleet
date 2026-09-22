@@ -97,7 +97,9 @@ impl HubBackend {
         }
     }
 
-    /// The transport, for the report flusher to share one TLS client.
+    /// The transport, so the report flusher can post through the same
+    /// `HubTransport` implementation as the tool calls (a test injects a
+    /// recorded one).
     pub fn transport(&self) -> Arc<dyn HubTransport> {
         Arc::clone(&self.transport)
     }
