@@ -182,7 +182,14 @@ impl Store {
                 reply_to
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        // `insert_message` is also called inside `Store::atomically`, where a
+        // rollback must announce nothing. `notify_waiters()` only wakes
+        // waiters, which then re-read the table and find nothing — a
+        // spurious wake, never a false message, so signalling here
+        // unconditionally (rather than deferring it until commit) is safe.
+        self.message_notify.notify_waiters();
+        Ok(id)
     }
 
     /// One message by id (any recipient). Used to validate `reply_to`.

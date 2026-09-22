@@ -647,6 +647,7 @@ mod tests {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         };
         assert!(store.has_table("handoffs").unwrap());
         assert!(session_columns(&store).contains(&"frozen_scrollback".to_string()));
@@ -713,6 +714,7 @@ mod tests {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         };
         store.migrate().unwrap();
         let (n, src, started): (i64, String, i64) = store
@@ -939,6 +941,7 @@ mod tests {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -1847,6 +1850,7 @@ mod tests {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         };
         assert_eq!(s.schema_version().unwrap(), SEED_AT);
         assert!(!s.has_table("worktree_parent_fingerprints").unwrap());

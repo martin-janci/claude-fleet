@@ -265,10 +265,57 @@ pub fn peer_status(session_id: i64, store: &Mutex<Store>) -> Result<PeerStatus, 
     })
 }
 
+/// Safety floor: a waiter re-reads at least this often even if no
+/// notification arrives, so a missed signal costs latency, never the wait.
+const REPLY_POLL_FLOOR: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Bounded wait for the next message addressed to `session_id`, newer than
+/// `after_message_id`. `Ok(None)` on timeout — a timeout is an outcome, not an
+/// error, matching `wait_for_session`.
+pub async fn wait_for_reply(
+    store: &Mutex<Store>,
+    session_id: i64,
+    after_message_id: Option<i64>,
+    timeout: std::time::Duration,
+) -> Result<Option<SessionMessage>, IpcError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    // Take the handle (and validate the session) under one short lock window,
+    // never across an await.
+    let notify = {
+        let s = lock(store)?;
+        if s.get_session_by_id(session_id)?.is_none() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {session_id} not found"),
+            ));
+        }
+        s.message_notify()
+    };
+    loop {
+        {
+            let s = lock(store)?;
+            let found = s
+                .list_inbox(session_id, false, 1)?
+                .into_iter()
+                .find(|m| after_message_id.is_none_or(|a| m.id > a));
+            if let Some(m) = found {
+                return Ok(Some(m));
+            }
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        // Wake on arrival; the floor bounds a missed signal.
+        let _ = tokio::time::timeout(REPLY_POLL_FLOOR.min(deadline - now), notify.notified()).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::service::sessions::{build_send_script, normalize_prompt_body};
+    use std::time::Duration;
 
     fn seed(s: &Store, name: &str) -> i64 {
         s.upsert_host("local").unwrap();
@@ -630,5 +677,80 @@ mod tests {
         assert_eq!(p.host_alias, "local");
         assert_eq!(p.status, "running");
         assert_eq!(peer_status(4242, &store).unwrap_err().code, "E_NOTFOUND");
+    }
+
+    // ---- wait_for_reply ----
+
+    #[tokio::test]
+    async fn wait_for_reply_returns_immediately_when_one_already_waits() {
+        let (store, ssh, a, b) = fixture();
+        send_message(args(a, b, "early"), &store, &ssh)
+            .await
+            .unwrap();
+        let got = wait_for_reply(&store, b, None, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .expect("the already-waiting message");
+        assert_eq!(got.body, "early");
+    }
+
+    #[tokio::test]
+    async fn wait_for_reply_wakes_on_a_message_that_arrives_while_waiting() {
+        let (store, ssh, a, b) = fixture();
+        let store = std::sync::Arc::new(store);
+        let (s2, ssh2) = (store.clone(), ssh.clone());
+        let sender = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            send_message(args(a, b, "late"), &s2, &ssh2).await.unwrap();
+        });
+        let started = std::time::Instant::now();
+        let got = wait_for_reply(&store, b, None, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .expect("the message that arrived during the wait");
+        sender.await.unwrap();
+        assert_eq!(got.body, "late");
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "the wake must be event-driven, not a 500 ms poll: took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_reply_times_out_with_none_rather_than_an_error() {
+        let (store, _ssh, _a, b) = fixture();
+        let got = wait_for_reply(&store, b, None, Duration::from_millis(150))
+            .await
+            .unwrap();
+        assert!(got.is_none(), "a timeout is Ok(None), not an error");
+    }
+
+    #[tokio::test]
+    async fn after_message_id_ignores_messages_the_caller_already_saw() {
+        let (store, ssh, a, b) = fixture();
+        let first = send_message(args(a, b, "one"), &store, &ssh).await.unwrap();
+        let got = wait_for_reply(&store, b, Some(first.id), Duration::from_millis(150))
+            .await
+            .unwrap();
+        assert!(
+            got.is_none(),
+            "the already-seen message must not satisfy the wait"
+        );
+        let second = send_message(args(a, b, "two"), &store, &ssh).await.unwrap();
+        let got = wait_for_reply(&store, b, Some(first.id), Duration::from_secs(5))
+            .await
+            .unwrap()
+            .expect("the newer message");
+        assert_eq!(got.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn wait_for_reply_rejects_an_unknown_session() {
+        let (store, _ssh, _a, _b) = fixture();
+        let err = wait_for_reply(&store, 9999, None, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
     }
 }
