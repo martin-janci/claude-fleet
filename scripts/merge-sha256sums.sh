@@ -31,7 +31,16 @@
 #
 # <assets-dir>            files downloaded from the release (one per asset)
 # [per-target-sums-dir]   optional; any `SHA256SUMS.*` files in it are used
-#                         as the cross-check described above
+#                         as the cross-check described above. Genuinely
+#                         optional: a path that does not exist, or exists and
+#                         holds no `SHA256SUMS.*`, only skips the cross-check.
+#                         release.yml passes this path unconditionally while
+#                         the step that creates it (actions/download-artifact,
+#                         continue-on-error) may never run — if both
+#                         `agent-hub-binaries` legs fail before uploading
+#                         their artifact there is no directory at all, and
+#                         that must not cost the desktop bundles that DID
+#                         build their SHA256SUMS.
 #
 # Pure and offline — no `gh`, no network, no knowledge of the release — so it
 # runs against a fixture directory unchanged. Exit 0 with empty stdout means
@@ -73,12 +82,17 @@ fi
 
 count="$(wc -l <"$merged" | tr -d ' ')"
 
+# A per-target directory that is not there at all is the same situation as
+# one that is there and empty (see the usage note above): no cross-check is
+# possible, but the assets still get checksummed. Only the assets directory
+# is mandatory.
+if [ -n "$sums_dir" ] && [ ! -d "$sums_dir" ]; then
+  echo "merge-sha256sums.sh: $sums_dir does not exist — skipping the build-vs-release cross-check" >&2
+  sums_dir=""
+fi
+
 # Cross-check against what the build legs computed locally, if provided.
 if [ -n "$sums_dir" ]; then
-  if [ ! -d "$sums_dir" ]; then
-    echo "merge-sha256sums.sh: $sums_dir is not a directory" >&2
-    exit 1
-  fi
   shopt -s nullglob
   per_target=("$sums_dir"/SHA256SUMS.*)
   shopt -u nullglob
