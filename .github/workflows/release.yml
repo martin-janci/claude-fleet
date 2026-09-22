@@ -10,6 +10,13 @@ name: release
 # hand by the repo owner after checking the assets; publishing it fires
 # docs.yml (release: published).
 #
+# `version-consistency` is the gate in front of all of it: every other job
+# `needs:` it, it is NOT `continue-on-error`, and it asserts both that the six
+# version carriers agree and that this tag is `v<that version>`. A tag whose
+# name disagrees with src-tauri/tauri.conf.json — the file the bundle filenames
+# come from — therefore fails before tauri-action runs a single build, instead
+# of producing a release that advertises three different versions (F-C5, F-C6).
+#
 # `create-release` creates the draft exactly once (or reuses an existing
 # draft for the same tag on a re-run) and passes its id to the three build
 # legs, so concurrent legs never race to create duplicate drafts.
@@ -45,8 +52,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Gate. Same script as ci.yml's version-consistency job, plus --expect-tag:
+  # the six carriers and the four Cargo.lock entries must agree, fleet-core
+  # must still be the allowlisted, unpublishable 0.1.0, and this tag must be
+  # "v<package.json version>". Deliberately NOT continue-on-error, and every
+  # job below `needs:` it, so nothing is built, no draft is created and no
+  # asset is uploaded for a tag that disagrees with the tree it points at.
+  # The tag name arrives through env:, never interpolated into a run: body.
+  version-consistency:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert the carriers and the tag agree
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: scripts/check-version-consistency.sh --expect-tag "$REF_NAME"
+
   create-release:
     if: github.ref_type == 'tag'
+    needs: version-consistency
     runs-on: ubuntu-24.04
     outputs:
       release_id: ${{ steps.draft.outputs.result }}
@@ -90,7 +115,10 @@ jobs:
 
   build:
     if: github.ref_type == 'tag'
-    needs: create-release
+    # version-consistency named explicitly, not just inherited through
+    # create-release: this leg's bundle filenames come from tauri.conf.json, so
+    # the tag-vs-carrier assertion is a direct precondition of it.
+    needs: [version-consistency, create-release]
     name: bundle (${{ matrix.os }}${{ matrix.target && format(', {0}', matrix.target) || '' }})
     strategy:
       fail-fast: false
@@ -165,7 +193,11 @@ jobs:
   # above already covers the hosts this ships to (see docs/hub.md).
   agent-hub-binaries:
     if: github.ref_type == 'tag'
-    needs: create-release
+    # `continue-on-error` below keeps a failure here off the run's overall
+    # status; it does NOT weaken the gate — a failed `needs` skips this job
+    # outright, so the tarballs (named from ${TAG#v}) are never built for a
+    # tag the gate rejected.
+    needs: [version-consistency, create-release]
     continue-on-error: true
     name: agent/hub binaries (${{ matrix.target }})
     strategy:
@@ -236,9 +268,15 @@ jobs:
   # the matrix it depends on) so it still publishes a correct PARTIAL
   # SHA256SUMS for whichever assets a leg failure left on the release —
   # never blocking or being blocked by the desktop bundles either.
+  #
+  # `!cancelled()` overrides the default "all needs succeeded" condition, so
+  # the gate has to be re-stated here by hand: without the explicit
+  # `needs['version-consistency'].result == 'success'` this job would still run
+  # after the gate failed (it deliberately tolerates a failed
+  # agent-hub-binaries leg, which is a different thing).
   agent-hub-checksums:
-    if: github.ref_type == 'tag' && !cancelled()
-    needs: [create-release, agent-hub-binaries]
+    if: github.ref_type == 'tag' && !cancelled() && needs['version-consistency'].result == 'success'
+    needs: [version-consistency, create-release, agent-hub-binaries]
     continue-on-error: true
     runs-on: ubuntu-24.04
     steps:
