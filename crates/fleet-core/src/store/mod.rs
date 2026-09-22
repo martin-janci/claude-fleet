@@ -13,6 +13,7 @@ mod clients;
 mod conversations;
 mod hosts_accounts;
 mod layers;
+mod participants;
 mod projects;
 mod reconcile;
 mod reports;
@@ -30,6 +31,7 @@ pub use clients::{
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
+pub use participants::ParticipantRow;
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
 pub use sessions::PromptAckState;
