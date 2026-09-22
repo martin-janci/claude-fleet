@@ -436,19 +436,38 @@ const SESSIONS_FORMAT: &str = "#{session_name}|#{session_created}|#{session_acti
 /// The batched probe: identity, the session list with its exit code, the
 /// oauth account, then one pane capture per live session, each behind a
 /// `---FLEET:` line. Ends with `---FLEET:end` so a capped or cut output is
-/// recognisable. Pane lines starting with the delimiter get one leading
-/// space so they cannot open a section.
+/// recognisable. Session and pane lines starting with the delimiter get one
+/// leading space (`sed 's/^---FLEET/ &/'`) so they cannot open a section —
+/// a live session literally named `---FLEET:evil` (or a pane whose tail
+/// happens to start with the marker) must never forge a section boundary.
+/// `parse_probe_snapshot` undoes the escape on the sessions section before
+/// parsing it (pane tails keep the leading space verbatim: it's just
+/// display text there).
 pub fn probe_snapshot_script(tail_lines: u32) -> String {
     let start = scrollback_start(tail_lines);
     format!(
         "printf '%s\\n' '---FLEET:identity'; {HOST_IDENTITY_SCRIPT}; \
-         printf '%s\\n' '---FLEET:sessions'; out=$(tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1); rc=$?; printf 'rc=%s\\n' \"$rc\"; printf '%s\\n' \"$out\"; \
+         printf '%s\\n' '---FLEET:sessions'; out=$(tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1); rc=$?; printf 'rc=%s\\n' \"$rc\"; printf '%s\\n' \"$out\" | sed 's/^---FLEET/ &/'; \
          printf '%s\\n' '---FLEET:account'; {}; \
          printf '%s\\n' '---FLEET:panes'; \
          tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do printf '%s\\n' \"---FLEET:pane $s\"; tmux capture-pane -t \"=$s:\" -S {start} -p 2>/dev/null | sed 's/^---FLEET/ &/'; done; \
          printf '%s\\n' '---FLEET:end'",
         crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
     )
+}
+
+/// Undo the `sed 's/^---FLEET/ &/'` escape `probe_snapshot_script` applies
+/// to a session (or pane) line that would otherwise open a section: strip
+/// exactly one leading space from any line starting with ` ---FLEET`.
+fn unescape_delim_lines(body: &str) -> String {
+    body.lines()
+        .map(|l| {
+            l.strip_prefix(' ')
+                .filter(|r| r.starts_with("---FLEET"))
+                .unwrap_or(l)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Parse [`probe_snapshot_script`] output. `Err` only when the text is not
@@ -493,7 +512,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
                 .next()
                 .and_then(|l| l.strip_prefix("rc="))
                 .and_then(|v| v.trim().parse().ok());
-            let combined: String = lines.collect::<Vec<_>>().join("\n");
+            let combined: String = unescape_delim_lines(&lines.collect::<Vec<_>>().join("\n"));
             match rc {
                 Some(0) => {
                     if combined.trim().is_empty() {
@@ -1164,6 +1183,31 @@ mod tests {
     }
 
     #[test]
+    fn probe_snapshot_unescapes_a_delimiter_named_session() {
+        // A live session literally named `---FLEET:evil` comes back from
+        // the script with the sed escape already applied (one leading
+        // space) — the parser must undo it before handing the line to
+        // `parse_sessions_checked`, and the section boundary that follows
+        // must still be found (the escape is what makes that possible in
+        // the first place).
+        let text = snapshot_text(
+            0,
+            " ---FLEET:evil|1|2|0|/p|%9",
+            r#"{"accountUuid":"u-9"}"#,
+            &[],
+        );
+        let snap = parse_probe_snapshot(&text).unwrap();
+        let sessions = snap.sessions.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "---FLEET:evil");
+        assert_eq!(
+            snap.account.unwrap().uuid.as_deref(),
+            Some("u-9"),
+            "the section boundary after the escaped session line must still be found"
+        );
+    }
+
+    #[test]
     fn probe_snapshot_script_has_every_section_and_escapes_pane_lines() {
         let s = probe_snapshot_script(8);
         for section in [
@@ -1184,6 +1228,13 @@ mod tests {
             s.contains(
                 "tmux capture-pane -t \"=$s:\" -S -8 -p 2>/dev/null | sed 's/^---FLEET/ &/'"
             ),
+            "{s}"
+        );
+        // A live session literally named `---FLEET:evil` must not forge a
+        // section boundary either — the session list is escaped the same
+        // way the pane captures are.
+        assert!(
+            s.contains("printf '%s\\n' \"$out\" | sed 's/^---FLEET/ &/'"),
             "{s}"
         );
         assert!(s.contains("while IFS= read -r s; do"), "{s}");

@@ -715,15 +715,22 @@ async fn a_pass_that_probed_before_a_hook_rebind_does_not_undo_it() {
     let r = f.row("work", "alpha");
     assert_eq!(r.claude_session_id.as_deref(), Some("aaa"));
 
-    // Pass 2 stalls on the single batched probe (identity/list/account/panes,
-    // `capture-pane` included in its literal text) while the /clear hooks
-    // land: SessionEnd(clear) closes `aaa`, SessionStart(clear) rebinds the
-    // row to `bbb` and stamps `last_hook_at`. The scripted `claude agents`
-    // reply (still reporting `aaa`) is read AFTER the batched probe
-    // returns, unaffected by the hook, so the race under test — the WRITE
-    // landing after the hook — is unchanged.
+    // Pass 2: alpha's whole probe (batched script + the separate `claude
+    // agents` call, still reporting `aaa`) answers fast and real — it is
+    // fully computed, `claude_session_id: Some("aaa")` included, well before
+    // any write happens. What stalls is a DIFFERENT host: every host's probe
+    // runs as its own spawned task (`JoinSet`), and `reconcile_sessions_with`
+    // does not start writing ANY host until every task in the set has
+    // finished — so hanging `local`'s probe holds the whole pass at the
+    // collection step while the /clear hooks land on alpha's row:
+    // SessionEnd(clear) closes `aaa`, SessionStart(clear) rebinds it to
+    // `bbb` and stamps `last_hook_at`. By the time the reconcile WRITE
+    // finally runs for alpha (after `local`'s hang resolves),
+    // `last_hook_at >= probe.started_at` — the `NEW_ID` in-flight guard in
+    // `store/reconcile.rs` must keep the row's id at `bbb`, not the `aaa`
+    // this pass actually read.
     f.fake.on_host(
-        "alpha",
+        "local",
         Match::script_contains("---FLEET:end"),
         Reply::Hang {
             for_: Duration::from_millis(300),
@@ -731,7 +738,7 @@ async fn a_pass_that_probed_before_a_hook_rebind_does_not_undo_it() {
     );
     f.fake.clear_calls();
     let hook = async {
-        f.called("alpha", "capture-pane").await;
+        f.called("local", "---FLEET:end").await;
         let s = f.store.lock().unwrap();
         s.close_conversation(r.id, "aaa", "clear").unwrap();
         s.rebind_conversation(
