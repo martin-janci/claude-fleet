@@ -3803,7 +3803,7 @@ fn ensure_remote_project_script_clones_only_without_a_worktree() {
     assert!(script.starts_with("set -e\n"), "{script}");
     assert!(
         script.contains(
-            "if [ ! -d '/home/u/projects/github.com/o/r'/.git ]; then mkdir -p \"$(dirname -- '/home/u/projects/github.com/o/r')\" && git clone 'git@github.com:o/r.git' '/home/u/projects/github.com/o/r'; fi"
+            "if [ ! -d '/home/u/projects/github.com/o/r'/.git ]; then mkdir -p \"$(dirname -- '/home/u/projects/github.com/o/r')\"; tmp=\"$(dirname -- '/home/u/projects/github.com/o/r')/.fleet-clone-$$\"; rm -rf \"$tmp\"; git clone 'git@github.com:o/r.git' \"$tmp\" && { [ ! -e '/home/u/projects/github.com/o/r' ] || rmdir '/home/u/projects/github.com/o/r'; } && mv \"$tmp\" '/home/u/projects/github.com/o/r' || { rm -rf \"$tmp\"; exit 1; }; fi"
         ),
         "guarded clone: {script}"
     );
@@ -5266,4 +5266,14 @@ fn pair_session_agents_rejects_an_id_another_session_claims() {
     let anon = [anon];
     let got = pair_session_agents(&live_b, &anon, &stored(&[]), false);
     assert!(got.is_empty(), "{got:?}");
+}
+
+#[test]
+fn scrollback_lines_are_clamped() {
+    assert_eq!(clamp_scrollback(Some(5)), Some(5));
+    assert_eq!(
+        clamp_scrollback(Some(4_000_000_000)),
+        Some(MAX_SCROLLBACK_LINES)
+    );
+    assert_eq!(clamp_scrollback(None), None);
 }

@@ -500,3 +500,78 @@ fn finalize_new_session_tags_a_shell_session() {
     assert_eq!(row.kind, "shell");
     assert!(row.started_at.is_some());
 }
+
+/// A cancelled or killed clone must not leave a half `.git` that the
+/// `[ ! -d root/.git ]` guard then treats as "already cloned" forever: the
+/// clone lands in a sibling temp dir and is moved into place only when it
+/// finished.
+#[test]
+fn ensure_script_clones_into_a_temp_dir_and_moves_it_into_place() {
+    let script = ensure_remote_project_script(
+        "/home/u/projects/github.com/o/r",
+        "git@github.com:o/r.git",
+        None,
+    );
+    assert!(
+        script.contains("tmp=\"$(dirname -- '/home/u/projects/github.com/o/r')/.fleet-clone-$$\""),
+        "{script}"
+    );
+    assert!(
+        script.contains(
+            "git clone 'git@github.com:o/r.git' \"$tmp\" && { [ ! -e '/home/u/projects/github.com/o/r' ] || rmdir '/home/u/projects/github.com/o/r'; } && mv \"$tmp\" '/home/u/projects/github.com/o/r'"
+        ),
+        "{script}"
+    );
+    assert!(
+        script.contains("|| { rm -rf \"$tmp\"; exit 1; }"),
+        "{script}"
+    );
+    assert!(
+        script.contains("rm -rf \"$tmp\";"),
+        "a stale temp dir from an earlier attempt is cleared first: {script}"
+    );
+}
+
+/// The move must land AS the root, not inside it: `mv tmp root` onto an
+/// existing directory moves `tmp` into it, so a root left behind empty (a
+/// failed earlier attempt, a hand-made directory) would leave no `.git` at
+/// the root and every later ensure would clone again. Runs the real script.
+#[test]
+fn ensure_script_clones_onto_an_existing_empty_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let git = |args: &[&str], dir: &std::path::Path| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    std::fs::create_dir(&src).unwrap();
+    git(&["init", "-q"], &src);
+    git(
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "i",
+        ],
+        &src,
+    );
+    let root = tmp.path().join("projects").join("r");
+    std::fs::create_dir_all(&root).unwrap();
+    let script = ensure_remote_project_script(root.to_str().unwrap(), src.to_str().unwrap(), None);
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{script}\n{out:?}");
+    assert!(root.join(".git").is_dir(), "cloned AS the root: {script}");
+}
