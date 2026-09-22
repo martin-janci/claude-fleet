@@ -96,8 +96,16 @@ cmd_runner() {
 # Every expected asset name for this version, sorted and deduplicated. With a
 # leg id, only that leg's — which is how package-linux-release.sh and
 # rename-updater-asset.sh learn the names they are supposed to produce.
+#
+# The sort is done here rather than left to each caller so the contract in
+# that first sentence is one the code actually keeps: callers diff this list
+# against a sorted listing of what a release carries, and two of them were
+# already re-sorting it by hand. Collected into a variable first so an
+# unknown leg still `die`s with its own exit status instead of that status
+# being swallowed by a pipeline.
 cmd_assets() {
   local version="${1:?}" want="${2:-}" found=0 leg kind runner target args assets a
+  local out=""
   check_version "$version"
   while IFS='|' read -r leg kind runner target args assets; do
     if [ -n "$want" ] && [ "$leg" != "$want" ]; then
@@ -107,12 +115,14 @@ cmd_assets() {
     for a in $assets; do
       # Only {v} is substituted, and only by a version that passed
       # check_version above.
-      echo "${a//\{v\}/$version}"
+      out+="${a//\{v\}/$version}"$'\n'
     done
   done < <(read_legs)
   if [ -n "$want" ] && [ "$found" -eq 0 ]; then
     die "no such leg: '$want' (see: $self legs)"
   fi
+  [ -n "$out" ] || return 0
+  printf '%s' "$out" | LC_ALL=C sort -u
 }
 
 # `{"include":[…]}` — the whole `strategy.matrix` value, so release.yml can
