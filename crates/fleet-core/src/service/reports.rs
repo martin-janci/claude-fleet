@@ -81,7 +81,12 @@ fn sanitise(r: &mut Report) {
         if let Ok(text) = serde_json::to_string(ctx) {
             let red = logging::redact(&text);
             if red != text {
+                // A redaction that lands inside a JSON string is still valid
+                // JSON, so this normally re-parses. If it ever does not, the
+                // context is gone — say so, rather than hand the reader a row
+                // that looks like it never had one.
                 r.context = serde_json::from_str(&red).ok();
+                r.truncated |= r.context.is_none();
             }
         }
     }
