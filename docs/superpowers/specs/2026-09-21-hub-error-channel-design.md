@@ -50,7 +50,11 @@ redacted table of them and lets the operator read it from the CLI.
 - Metrics, tracing spans or a log-shipping pipeline. This is a debug channel
   for a fleet of a handful of machines, not observability infrastructure.
 - Reporting from a standalone desktop. It has no hub; its log file is its
-  channel.
+  channel. It does run the same reconcile tick, though, so
+  `service::reports::drain_own_ring` keeps its own error-level events in its
+  own local `error_reports` table under origin `hub`, bounded by the same two
+  settings below. That is a side effect of sharing the tick, not a feature:
+  nothing reads those rows yet beyond the database itself.
 
 ## Vocabulary
 
@@ -58,7 +62,8 @@ redacted table of them and lets the operator read it from the CLI.
   `E_*` code, a message, a small JSON context.
 - **Origin** — who sent it, derived on the hub from the caller's token, never
   from the body: `client:<name>` for a paired desktop or phone,
-  `host:<alias>` for an agent, `hub` for the hub's own events.
+  `host:<alias>` for an agent, `master` for a caller holding the master token,
+  `hub` for the hub's own events.
 - **Batch** — what travels: up to a fixed number of reports plus a count of
   reports the sender dropped since its previous batch.
 
@@ -187,6 +192,9 @@ answers with.
 u32)>>` keyed by origin: a fixed one-minute window of `RATE_PER_MINUTE = 60`
 reports. A batch that would cross it is refused whole with `429` (HTTP) or
 dropped with one `warn` per window (agent frame), and nothing of it is stored.
+An EMPTY batch counts as one report: `{"reports":[],"dropped":1}` stores
+nothing but still costs a `warn` line, so a sender that only ever reported
+drops would otherwise be unlimited.
 The map is pruned of windows older than a minute on every insert, so it
 cannot grow past the number of live origins. The hub's own ring is exempt.
 
@@ -233,9 +241,14 @@ The hub's own ring is drained into the table on the same tick, with origin
 `hub`, so `fleet-hub reports` shows the hub's errors beside everyone else's.
 
 Both settings are the hub's (`fleet-hub`'s `state.db`) and are set the way
-every other setting is: `set_setting` over the control API, or by the
-desktop's Settings when it owns the fleet. The desktop in hub-client mode
-does not see them; it has its own off switch below.
+every other setting is: `set_setting` over the control API (what `fleet-hub`
+itself and any assistant use), or from the desktop's Settings dialog when
+that desktop **owns** the fleet. A desktop in hub-client mode does not edit
+them there: `get_fleet_settings`/`set_fleet_setting` are `LocalOnly`, so
+`SettingsDialog` swaps its whole Limits section for the hub note — the hub's
+bounds are changed on the hub, over `set_setting`. What the hub-client
+desktop owns locally is only its own off switch, the environment variable
+below.
 
 ## Senders
 

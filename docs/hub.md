@@ -694,13 +694,18 @@ desktop's environment turns it off. An agent sends up to 16 per heartbeat in
 a `report` frame, including errors from *before* it managed to connect —
 which is the case the channel exists for; `"report_errors": false` in its
 config turns it off. The hub's own errors join the table on the reconcile
-tick under origin `hub`.
+tick under origin `hub`, and a caller holding the *master* token that posts
+to `POST /report` is stored under origin `master`. (A standalone desktop —
+one that owns its own fleet rather than pairing to a hub — reports nowhere,
+but it runs the same tick, so its own error-level events land in its own
+local `error_reports` table under origin `hub`, under the same two bounds
+below; nothing reads them yet beyond the database.)
 
 **Bounds.** `reports.max_rows` (default 5000) newest rows are kept, pruned
 on every insert; rows older than `reports.max_age_secs` (default 604800,
 seven days; `0` never) are swept on the reconcile tick. An origin may store
-60 reports a minute; a batch that would cross that is refused whole with
-`429`. A message is at most 2048 characters, a context 4 KB, a body 64 KB.
+60 reports a minute — an empty batch, one that reports only drops, counts as
+one of them — and a batch that would cross that is refused whole with `429`. A message is at most 2048 characters, a context 4 KB, a body 64 KB.
 
 **Privacy.** Every string is run through the same redaction the log gets
 (bearer tokens, `?token=` values, 64-hex strings) before it is stored. No
@@ -720,7 +725,8 @@ token (`readonly` included), body
 
 at most 50 reports per call; `204` stored, `400` malformed or a level other
 than `error`/`warn`, `413` over 64 KB, `429` over budget (nothing stored).
-The origin is taken from the token, never from the body.
+The origin is taken from the token, never from the body: `client:<name>` for
+a paired client, `host:<alias>` for an agent, `master` for the master token.
 
 ## Bare binary
 
