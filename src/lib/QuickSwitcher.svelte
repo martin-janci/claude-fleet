@@ -15,7 +15,7 @@
   import { projects } from './projects';
   import { hosts } from './hosts';
   import { requestHostsView } from './app_views';
-  import { selectedSession, selectSession } from './selection';
+  import { selectedSession, selectSessionExplicitly } from './selection';
   import { requestNewSession } from './new_session_request';
   import { push } from './toasts';
   import { detectMac } from './terminal_keys';
@@ -118,7 +118,7 @@
         push({ kind: 'info', message: 'That session is a ghost — recreate it from the sidebar.' });
         return;
       }
-      selectSession(e.session);
+      selectSessionExplicitly(e.session);
       hide();
     } else if (e.kind === 'project' && e.project) {
       requestNewSession({ project: e.project });

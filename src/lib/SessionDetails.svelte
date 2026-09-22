@@ -22,7 +22,7 @@
   import { transferSheetFor, startMove, adoptPartial, adoptWait } from './moves';
   import { moveOrigin, unresolvedPartial, unresolvedWait, type SessionEvent } from './timeline';
   import { projectById } from './projects';
-  import { selectSession, clearSelection } from './selection';
+  import { selectSession, selectSessionExplicitly, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
   import { accountByUuid, accountEmailTier, type AccountRow } from './accounts';
   import { timeAgo } from './session_status';
@@ -538,7 +538,7 @@
     {#if reviewedSource}
       <dt class="meta-label">Reviewing</dt>
       <dd>
-        <button class="link" onclick={() => selectSession(reviewedSource)} data-testid="reviewing-link">
+        <button class="link" onclick={() => selectSessionExplicitly(reviewedSource)} data-testid="reviewing-link">
           {reviewedSource.tmux_name}
         </button>
       </dd>
@@ -554,7 +554,7 @@
             <button
               class="related-row"
               data-testid="related-row"
-              onclick={() => selectSession(r)}
+              onclick={() => selectSessionExplicitly(r)}
             >
               <span class="host-badge">[{r.host_alias}]</span>
               <span class="account">{accountEmailTier(accountForRow(r))}</span>
@@ -577,7 +577,7 @@
             <button
               class="related-row"
               data-testid="reviews-row"
-              onclick={() => selectSession(r)}
+              onclick={() => selectSessionExplicitly(r)}
             >
               <span class="host-badge">[{r.host_alias}]</span>
               <span class="account">{accountEmailTier(accountForRow(r))}</span>

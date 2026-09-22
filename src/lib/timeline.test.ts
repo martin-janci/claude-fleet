@@ -34,6 +34,7 @@ describe('eventCategory', () => {
 
   it('maps prompts, stuck/failures and operations', () => {
     expect(eventCategory(ev(1, 'prompt_sent', 'fix the bug'))).toBe('prompts');
+    expect(eventCategory(ev(1, 'keys_sent', 'Enter'))).toBe('prompts');
     expect(eventCategory(ev(2, 'stuck', 'auth_menu'))).toBe('errors');
     expect(eventCategory(ev(3, 'safe_kill_failed'))).toBe('errors');
     expect(eventCategory(ev(4, 'gc_failed'))).toBe('errors');

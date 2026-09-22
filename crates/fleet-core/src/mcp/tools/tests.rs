@@ -382,6 +382,152 @@ fn a_client_cannot_skip_the_untrusted_marker() {
     assert!(out.contains("claude-fleet"), "marker missing: {out}");
 }
 
+// ---- send_prompt { keys } (Task 1: a phone presses Enter/Escape/C-c) ------
+
+/// `FleetTools` over a store holding one `local` session (id returned), the
+/// same shape `test_tools` builds elsewhere in this file. Real `SshClient`,
+/// like `test_tools` — there is no fake-SSH fixture for `send_prompt`'s
+/// delivery path (`FleetTools::ssh` is a concrete `Arc<SshClient>`, not
+/// generic over `SshExec`), which is why the happy-path test below drives a
+/// real local tmux session instead of asserting on a recorded command.
+fn keys_test_tools() -> (FleetTools, Arc<Mutex<Store>>, i64) {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let sid = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-keys", "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let t = FleetTools::new(
+        Arc::clone(&store),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    );
+    (t, store, sid)
+}
+
+/// Validation happens before any tmux/ssh delivery is attempted, so this
+/// needs no real backend: an unknown key name, and text alongside `keys`,
+/// are both refused up front.
+#[tokio::test]
+async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
+    let (tools, _store, sid) = keys_test_tools();
+    let bad = tools
+        .send_prompt(
+            Extension(Caller::master()),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: String::new(),
+                submit: true,
+                raw: false,
+                keys: Some("Delete".into()),
+            }),
+        )
+        .await
+        .expect_err("unknown key");
+    assert!(bad.message.starts_with("E_VALIDATE"), "{}", bad.message);
+    let both = tools
+        .send_prompt(
+            Extension(Caller::master()),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: "hi".into(),
+                submit: true,
+                raw: false,
+                keys: Some("Enter".into()),
+            }),
+        )
+        .await
+        .expect_err("text and keys");
+    assert!(both.message.starts_with("E_VALIDATE"), "{}", both.message);
+}
+
+/// The happy path: a key press is delivered without the untrusted marker and
+/// lands on the timeline as `keys_sent`, never `prompt_sent`. There is no
+/// fake-SSH fixture to intercept the delivered command (see `keys_test_tools`
+/// above), so this drives a REAL local tmux session — skipped when `tmux`
+/// isn't on PATH, which is the macOS CI runner (the ubuntu-24.04 leg has it;
+/// see the `tmux_roundtrip` opt-in test in `fleet_e2e_tests.rs` for the same
+/// constraint on the same fact).
+#[tokio::test]
+async fn keys_press_a_key_without_a_marker_and_without_recording_a_prompt() {
+    if tokio::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .await
+        .is_err()
+    {
+        eprintln!(
+            "skipping keys_press_a_key_without_a_marker_and_without_recording_a_prompt: no tmux on PATH"
+        );
+        return;
+    }
+    let name = format!("fleet-test-keys-{}", std::process::id());
+    let created = tokio::process::Command::new("tmux")
+        .args(["new-session", "-d", "-s", &name])
+        .output()
+        .await
+        .expect("spawn tmux");
+    assert!(created.status.success(), "{created:?}");
+    struct KillOnDrop(String);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &self.0])
+                .output();
+        }
+    }
+    let _guard = KillOnDrop(name.clone());
+
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let sid = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session(&name, "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let tools = FleetTools::new(
+        Arc::clone(&store),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    );
+    let r = tools
+        .send_prompt(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(SendPromptParams {
+                session_id: Some(sid),
+                host_alias: None,
+                tmux_name: None,
+                prompt: String::new(),
+                submit: true,
+                raw: false,
+                keys: Some("Escape".into()),
+            }),
+        )
+        .await
+        .expect("keys");
+    assert_eq!(result_json(&r)["delivered"], true);
+    let s = store.lock().unwrap();
+    let hist = s.list_session_events(sid, 10).unwrap();
+    assert!(
+        hist.iter()
+            .any(|e| e.kind == "keys_sent" && e.detail.as_deref() == Some("Escape")),
+        "{hist:?}"
+    );
+    assert!(!hist.iter().any(|e| e.kind == "prompt_sent"), "{hist:?}");
+    // A key press must never touch last_prompt.
+    let row = s.get_session_by_id(sid).unwrap().unwrap();
+    assert!(row.last_prompt.is_none(), "{row:?}");
+}
+
 #[test]
 fn audit_row_lands_on_target_session_with_redacted_args() {
     let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
@@ -2355,6 +2501,19 @@ fn the_served_definition_budget_stays_bounded() {
     /// description and one-line field docs, add 615 for a total of 57,603.
     /// Headroom is again deliberately small.
     ///
+    /// Raised from 57,700 to 57,900 for `send_prompt { keys }`: one clause
+    /// on the tool description plus the `keys` field's one-line doc measured
+    /// 57,870, 170 over budget.
+    ///
+    /// Raised from 57,900 to 58,000 for the one-clause addition to
+    /// `submit`'s doc comment (fix round 1: "ignored when `keys` is set"),
+    /// which measured 57,935, 35 over budget.
+    ///
+    /// Raised from 58,000 to 58,113 when main's `send_prompt { keys }` raise
+    /// met Transfer 3b's `dry_run` parameter: both were measured against
+    /// 57,700, so the merged surface came to 58,013; raised to that plus 100
+    /// bytes of headroom.
+    ///
     /// Raised from 57,700 to 58,034 for Transfer 3c Task 4's `when` parameter
     /// on `move_session` (`now` | `idle` | `cancel`, one short clause per
     /// value in its own field doc — the tool's own description was left
@@ -2374,7 +2533,12 @@ fn the_served_definition_budget_stays_bounded() {
     /// the real cost to 261 bytes (57,673 to 57,934), so the constant is
     /// raised to that plus 100 bytes of headroom rather than to the
     /// unslimmed number.
-    const BUDGET_BYTES: usize = 58_034;
+    ///
+    /// Raised from 58,113 to 58,382 when 3c met main's `send_prompt { keys }`
+    /// raise through 3b: the `when` raise above was measured against 57,700,
+    /// so the merged surface came to 58,282; raised to that plus 100 bytes
+    /// of headroom.
+    const BUDGET_BYTES: usize = 58_382;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

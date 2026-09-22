@@ -180,6 +180,7 @@ fn row(
         tags: Vec::new(),
         usage: Default::default(),
         context: Default::default(),
+        pending_input: None,
     }
 }
 
@@ -2291,7 +2292,7 @@ fn cwd_source_remote_honors_worktree_key_when_id_missing() {
             assert_eq!(repo, "repo");
             assert_eq!(wt_name, Some("feat-x".to_string()));
         }
-        CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        CwdSource::Local(_) | CwdSource::Fixed(_) => panic!("expected Remote for host=mefistos"),
     }
 
     // "main" carries no worktree name → project root on the remote.
@@ -2299,7 +2300,7 @@ fn cwd_source_remote_honors_worktree_key_when_id_missing() {
     rm.worktree_key = Some("main".into());
     match cwd_source_for_session(&store, &rm).unwrap() {
         CwdSource::Remote { wt_name, .. } => assert_eq!(wt_name, None),
-        CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        CwdSource::Local(_) | CwdSource::Fixed(_) => panic!("expected Remote for host=mefistos"),
     }
 }
 
@@ -2321,7 +2322,7 @@ fn cwd_source_remote_follows_projects_settings() {
             assert_eq!(root, "~/projects/github.com");
             assert_eq!(layout, Layout::Github);
         }
-        CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        CwdSource::Local(_) | CwdSource::Fixed(_) => panic!("expected Remote for host=mefistos"),
     }
 
     settings::set(
@@ -2343,7 +2344,7 @@ fn cwd_source_remote_follows_projects_settings() {
             let (_, cwd) = remote_project_path(&root, layout, &owner, &repo, wt_name.as_deref());
             assert_eq!(cwd, "/home/m/code/repo/.claude/worktrees/feat-x");
         }
-        CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        CwdSource::Local(_) | CwdSource::Fixed(_) => panic!("expected Remote for host=mefistos"),
     }
 }
 
@@ -2689,7 +2690,7 @@ fn cwd_source_local_uses_db_path_remote_uses_owner_repo() {
     let local_row = store.get_session_by_id(lid).unwrap().unwrap();
     match cwd_source_for_session(&store, &local_row).unwrap() {
         CwdSource::Local(p) => assert_eq!(p, "/base/repo/.claude/worktrees/feat-x"),
-        CwdSource::Remote { .. } => panic!("expected Local for host=local"),
+        CwdSource::Remote { .. } | CwdSource::Fixed(_) => panic!("expected Local for host=local"),
     }
 
     // REMOTE: captures (owner, repo, wt_name) — the local DB path is
@@ -2718,7 +2719,7 @@ fn cwd_source_local_uses_db_path_remote_uses_owner_repo() {
             assert_eq!(repo, "repo");
             assert_eq!(wt_name.as_deref(), Some("feat-x"));
         }
-        CwdSource::Local(_) => panic!("expected Remote for non-local host"),
+        CwdSource::Local(_) | CwdSource::Fixed(_) => panic!("expected Remote for non-local host"),
     }
 
     // REMOTE without worktree → wt_name = None, so remote_project_path
@@ -2729,7 +2730,38 @@ fn cwd_source_local_uses_db_path_remote_uses_owner_repo() {
     let remote_row2 = store.get_session_by_id(rid2).unwrap().unwrap();
     match cwd_source_for_session(&store, &remote_row2).unwrap() {
         CwdSource::Remote { wt_name, .. } => assert!(wt_name.is_none()),
-        CwdSource::Local(_) => panic!("expected Remote for non-local host"),
+        CwdSource::Local(_) | CwdSource::Fixed(_) => panic!("expected Remote for non-local host"),
+    }
+}
+
+/// A system project (the UX agent's operator dir) is not a repository: its
+/// `base_path` is the pane cwd on whichever host the row lives on, already
+/// resolved for that host by the service that wrote it. Deriving
+/// `<root>/<owner>/<repo>` for it would name a checkout that does not exist
+/// — and, in `new_session`, try to clone `fleet/operator` from GitHub.
+#[test]
+fn cwd_source_uses_the_fixed_base_path_of_a_system_project_on_any_host() {
+    let store = Store::open_in_memory().expect("store");
+    store.upsert_host("mefistos").unwrap();
+    let pid = store
+        .upsert_system_project("fleet", "operator", "/home/mjanci/.claude-fleet/operator")
+        .unwrap();
+    let rid = store
+        .upsert_session(
+            "fleet-operator",
+            "mefistos",
+            Some(pid),
+            None,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    let row = store.get_session_by_id(rid).unwrap().unwrap();
+    match cwd_source_for_session(&store, &row).unwrap() {
+        CwdSource::Fixed(p) => assert_eq!(p, "/home/mjanci/.claude-fleet/operator"),
+        other => panic!("a system project must not be derived by convention: {other:?}"),
     }
 }
 

@@ -850,6 +850,7 @@ impl FleetTools {
             tmux_name: row.tmux_name.clone(),
             prompt,
             submit,
+            keys: None,
         };
         sessions::send_prompt(args, &self.store, &self.ssh)
             .await

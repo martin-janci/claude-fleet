@@ -68,7 +68,10 @@ export function eventCategory(e: Pick<SessionEvent, 'kind' | 'detail'>): EventCa
     return /\b(failed|blocked)\b/.test(d) ? 'errors' : 'turns';
   }
   if (TURN_KINDS.has(k)) return 'turns';
-  if (k.startsWith('prompt')) return 'prompts';
+  // `keys_sent` (a key press via send_prompt { keys }) is the same kind of
+  // "we told the session something" event as `prompt_sent`, just without a
+  // typed body — same chip.
+  if (k.startsWith('prompt') || k === 'keys_sent') return 'prompts';
   if (
     OPS_KINDS.has(k) ||
     k.startsWith('repair') ||

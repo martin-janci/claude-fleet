@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { selectedSession, selectSession, restoreLastSession, clearSelection, onSessionOpened } from './selection';
+import {
+  selectedSession,
+  selectSession,
+  selectSessionExplicitly,
+  restoreLastSession,
+  clearSelection,
+  onSessionOpened,
+  revealSeq,
+} from './selection';
 import {
   sessions,
   mergeSession,
@@ -31,7 +39,7 @@ function makeSession(over: Partial<SessionRow> = {}): SessionRow {
     effort_level: null,
     pr_url: null,
     current_activity: null,
-    friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
+    friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null, context_source: null, context_at: null, context_stale: false, tmux_pane_id: null, pending_input: null,
     ...over,
   };
 }
@@ -178,6 +186,36 @@ describe('selectedSession is derived from the sessions store', () => {
     selectSession(fresh);
     expect(get(sessions).map((s) => s.id)).toEqual([42]);
     expect(get(selectedSession)?.id).toBe(42);
+  });
+});
+
+describe('revealSeq', () => {
+  it('selectSessionExplicitly sets the selection and bumps revealSeq exactly once', () => {
+    const before = get(revealSeq);
+    const row = makeSession({ id: 5, tmux_name: 'dev-explicit' });
+    selectSessionExplicitly(row);
+    expect(get(selectedSession)?.id).toBe(5);
+    expect(get(revealSeq)).toBe(before + 1);
+
+    // A second explicit select — even of the very same session — bumps
+    // again, exactly once, so a Sidebar effect keyed on the sequence number
+    // (not the session id) can still react.
+    selectSessionExplicitly(row);
+    expect(get(revealSeq)).toBe(before + 2);
+  });
+
+  it('plain selectSession never bumps revealSeq', () => {
+    const before = get(revealSeq);
+    selectSession(makeSession({ id: 6, tmux_name: 'dev-plain' }));
+    expect(get(selectedSession)?.id).toBe(6);
+    expect(get(revealSeq)).toBe(before);
+
+    selectSession(makeSession({ id: 7, tmux_name: 'dev-follow' }), { follow: true });
+    expect(get(selectedSession)?.id).toBe(7);
+    expect(get(revealSeq)).toBe(before);
+
+    selectSession(null);
+    expect(get(revealSeq)).toBe(before);
   });
 });
 

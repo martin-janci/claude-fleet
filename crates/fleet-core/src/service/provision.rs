@@ -18,8 +18,8 @@ const SKILL_PATH: &str = "~/.claude/skills/claude-fleet-control/SKILL.md";
 const FRIENDLY_NAME_SKILL: &str = include_str!("../../../../skills/fleet-friendly-name/SKILL.md");
 const FRIENDLY_NAME_SKILL_DIR: &str = "~/.claude/skills/fleet-friendly-name";
 const FRIENDLY_NAME_SKILL_PATH: &str = "~/.claude/skills/fleet-friendly-name/SKILL.md";
-const CLAUDE_JSON: &str = "~/.claude.json";
-const CLAUDE_DIR: &str = "~/.claude";
+pub(crate) const CLAUDE_JSON: &str = "~/.claude.json";
+pub(crate) const CLAUDE_DIR: &str = "~/.claude";
 const CLAUDE_MD_PATH: &str = "~/.claude/CLAUDE.md";
 const TMUX_CONF: &str = "~/.tmux.conf";
 
@@ -780,11 +780,14 @@ pub(crate) fn expand_home_local(path: &str) -> Result<String, IpcError> {
     }
 }
 
-/// Merge the claude-fleet HTTP MCP server entry into a host's `~/.claude.json`
-/// content, preserving every existing key. Returns the new JSON (pretty).
-/// Errors if `existing` is non-empty and not valid JSON.
-pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String, IpcError> {
-    let mut root: serde_json::Value = if existing.trim().is_empty() {
+/// The current content of a host's `~/.claude.json` as the JSON object
+/// Claude Code writes: a missing (empty) file is an empty object, and
+/// anything else that is not an object is refused with `E_PROVISION` so no
+/// merge ever writes over a file it did not understand. Shared by every
+/// read-merge-write on that file ([`merge_mcp_entry`],
+/// `operator::pre_trust_claude_json`).
+pub(crate) fn parse_claude_json(existing: &str) -> Result<serde_json::Value, IpcError> {
+    let root: serde_json::Value = if existing.trim().is_empty() {
         serde_json::json!({})
     } else {
         serde_json::from_str(existing).map_err(|e| {
@@ -800,6 +803,14 @@ pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String,
             "~/.claude.json is not a JSON object",
         ));
     }
+    Ok(root)
+}
+
+/// Merge the claude-fleet HTTP MCP server entry into a host's `~/.claude.json`
+/// content, preserving every existing key. Returns the new JSON (pretty).
+/// Errors if `existing` is non-empty and not valid JSON.
+pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String, IpcError> {
+    let mut root = parse_claude_json(existing)?;
     let servers = root
         .as_object_mut()
         .unwrap()

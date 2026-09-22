@@ -110,6 +110,14 @@ export interface SessionRow {
   context_stale: boolean;
   /** tmux pane id (`%17`) reconcile last saw for this row. */
   tmux_pane_id: string | null;
+  // Pane dialog (migration 040): the permission/question dialog a blocked
+  // pane is showing, derived alongside current_activity. Null whenever the
+  // pane shows no such dialog.
+  pending_input: {
+    kind: 'permission' | 'input';
+    question: string | null;
+    options: { n: number; label: string; selected: boolean }[];
+  } | null;
 }
 
 type UsageFields = Partial<

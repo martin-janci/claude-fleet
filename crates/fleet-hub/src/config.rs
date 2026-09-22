@@ -5,6 +5,7 @@ use fleet_core::service::hub::{
     HubBase, SETTING_ALLOWED_HOSTS, SETTING_ALLOW_PLAINTEXT, SETTING_BIND, SETTING_LOCAL_HOST,
     SETTING_PUBLIC_URL, SETTING_TLS, SETTING_TLS_CERT, SETTING_TLS_KEY,
 };
+use fleet_core::service::operator::{OPERATOR_HOST, SETTING_OPERATOR_HOST};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -90,6 +91,9 @@ pub struct HubOptions {
     /// Treat this machine as a fleet host too [env: FLEET_HUB_LOCAL_HOST] [default: false]
     #[arg(long, action = clap::ArgAction::Set, global = true)]
     pub local_host: Option<bool>,
+    /// Fleet host the UX agent's operator session runs on [env: FLEET_HUB_OPERATOR_HOST] [default: local]
+    #[arg(long, global = true)]
+    pub operator_host: Option<String>,
     /// Permit a non-loopback bind without an https:// public URL (plaintext http: container-internal or a private network only) [env: FLEET_HUB_ALLOW_PLAINTEXT]
     #[arg(long, global = true)]
     pub allow_plaintext: bool,
@@ -121,6 +125,11 @@ pub struct Resolved {
     /// public host.
     pub allowed_hosts_explicit: Vec<String>,
     pub local_host: bool,
+    /// The fleet host the UX agent's operator session is homed on (flag >
+    /// env > `operator.host` > `local`). Persisted, so a later bare `serve`
+    /// keeps it. With `local_host` off the default is a home this hub does
+    /// not have, and the agent panel says so until this names a real host.
+    pub operator_host: String,
     /// Whether a non-loopback bind without an https:// public URL is
     /// permitted (flag > env > `hub.allow_plaintext` > false). Persisted, so
     /// a later bare `serve` keeps the allowance it was started with.
@@ -270,6 +279,28 @@ pub fn resolve(
         Some(v) => return Err(format!("local_host must be true or false, got '{v}'")),
     };
 
+    let operator_host = match pick(
+        "--operator-host",
+        opts.operator_host.clone(),
+        env,
+        "FLEET_HUB_OPERATOR_HOST",
+        settings(SETTING_OPERATOR_HOST),
+    )? {
+        None => OPERATOR_HOST.to_string(),
+        Some(v) => {
+            // The syntax check only: whether the alias names a host this
+            // fleet has is answered at runtime (`operator_status`), since
+            // hosts are added and removed while the hub runs.
+            fleet_core::validate::host_alias_syntax(&v).map_err(|e| {
+                format!(
+                    "--operator-host / FLEET_HUB_OPERATOR_HOST / {SETTING_OPERATOR_HOST}: {}",
+                    e.message
+                )
+            })?;
+            v
+        }
+    };
+
     let tls = match pick(
         "--tls",
         opts.tls.clone(),
@@ -395,6 +426,7 @@ pub fn resolve(
         allowed_hosts,
         allowed_hosts_explicit,
         local_host,
+        operator_host,
         allow_plaintext,
         log_dir,
         tls,
@@ -640,6 +672,34 @@ mod tests {
         assert_eq!(r.allowed_hosts, Vec::<String>::new());
         assert_eq!(r.allowed_hosts_explicit, Vec::<String>::new());
         assert_eq!(r.log_dir, r.data_dir.join("logs"));
+    }
+
+    #[test]
+    fn the_operator_host_defaults_to_local_and_follows_the_precedence() {
+        let r = resolve(&opts(), &env(&[]), &|_| None).unwrap();
+        assert_eq!(r.operator_host, "local");
+
+        let settings = |k: &str| (k == "operator.host").then(|| "nas-box".to_string());
+        let r = resolve(&opts(), &env(&[]), &settings).unwrap();
+        assert_eq!(r.operator_host, "nas-box", "setting beats default");
+        let e = env(&[("FLEET_HUB_OPERATOR_HOST", " mefistos ")]);
+        let r = resolve(&opts(), &e, &settings).unwrap();
+        assert_eq!(r.operator_host, "mefistos", "env beats setting, trimmed");
+        let mut o = opts();
+        o.operator_host = Some("mac".into());
+        let r = resolve(&o, &e, &settings).unwrap();
+        assert_eq!(r.operator_host, "mac", "flag wins");
+    }
+
+    #[test]
+    fn a_malformed_operator_host_is_refused_naming_the_flag() {
+        let mut o = opts();
+        o.operator_host = Some("bad alias!".into());
+        let err = resolve(&o, &env(&[]), &|_| None).unwrap_err();
+        assert!(err.contains("--operator-host"), "{err}");
+        let e = env(&[("FLEET_HUB_OPERATOR_HOST", "-dash")]);
+        let err = resolve(&opts(), &e, &|_| None).unwrap_err();
+        assert!(err.contains("FLEET_HUB_OPERATOR_HOST"), "{err}");
     }
 
     #[test]

@@ -11,8 +11,8 @@ use fleet_core::service::tunnel::TunnelHealth;
 use fleet_core::service::usage::DayUsage;
 use fleet_core::service::worktrees::{HostWorktrees, WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
-    AccountRow, ConversationRow, HostRow, ProjectRow, SessionContext, SessionEvent, SessionRow,
-    SessionUsage, TaskRow, UsageTotals, WorktreeRow,
+    AccountRow, ConversationRow, HostRow, PendingInput, PendingOption, ProjectRow, SessionContext,
+    SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorktreeRow,
 };
 use std::collections::BTreeMap;
 
@@ -84,6 +84,15 @@ pub(crate) fn sample_session() -> SessionRow {
             context_stale: true,
             tmux_pane_id: Some("%17".into()),
         },
+        pending_input: Some(PendingInput {
+            kind: "permission".into(),
+            question: Some("Do you want to proceed?".into()),
+            options: vec![PendingOption {
+                n: 1,
+                label: "Yes".into(),
+                selected: true,
+            }],
+        }),
     }
 }
 
@@ -622,7 +631,7 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_fifty_one() {
+fn a_session_rows_wire_names_are_these_exact_fifty_two() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -651,6 +660,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_one() {
         "model",
         "notes",
         "parent_session_id",
+        "pending_input",
         "pr_url",
         "project_id",
         "reviews_session_id",
@@ -677,7 +687,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_one() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 51, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 52, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

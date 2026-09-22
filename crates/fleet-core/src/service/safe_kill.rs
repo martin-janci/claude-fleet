@@ -192,6 +192,7 @@ pub async fn safe_kill_session(
             tmux_name: args.tmux_name.clone(),
             prompt,
             submit: true,
+            keys: None,
         },
         store,
         ssh,

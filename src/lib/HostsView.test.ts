@@ -318,7 +318,7 @@ describe('HostsView: selection and keyboard', () => {
     mount();
     await tick();
     await key(list(), '?');
-    expect(screen.getByTestId('hosts-legend').textContent).toContain('filter the sidebar to this host');
+    expect(screen.getByTestId('hosts-legend').textContent).toContain("view this host's sessions (closes Hosts)");
     await key(list(), '?');
     expect(screen.queryByTestId('hosts-legend')).toBeNull();
     await fireEvent.click(screen.getByTestId('hosts-legend-toggle'));

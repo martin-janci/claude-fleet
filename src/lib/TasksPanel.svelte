@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tasks, cancelTask, isTerminal, promptFirstLine, taskElapsed, type TaskRow } from './tasks';
   import { sessions, type SessionRow } from './sessions';
-  import { selectSession } from './selection';
+  import { selectSessionExplicitly } from './selection';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
@@ -52,6 +52,11 @@
   function sessionRow(id: number | null): SessionRow | null {
     return id === null ? null : (byId.get(id) ?? null);
   }
+  /** Open a task party's session — a deliberate "open session" click. */
+  function openSession(id: number | null): void {
+    const row = sessionRow(id);
+    if (row) selectSessionExplicitly(row);
+  }
 
   const STATE_COLOR: Record<TaskRow['state'], string> = {
     queued: '#8a8a8a',
@@ -93,13 +98,13 @@
             <span class="id">#{t.id}</span>
             <span class="parties" data-testid="task-parties">
               {#if sessionRow(t.requester_session_id)}
-                <button class="link" onclick={() => selectSession(sessionRow(t.requester_session_id))}>{sessionLabel(t.requester_session_id)}</button>
+                <button class="link" onclick={() => openSession(t.requester_session_id)}>{sessionLabel(t.requester_session_id)}</button>
               {:else}
                 <span>{sessionLabel(t.requester_session_id)}</span>
               {/if}
               <span class="arrow">→</span>
               {#if sessionRow(t.worker_session_id)}
-                <button class="link" onclick={() => selectSession(sessionRow(t.worker_session_id))}>{sessionLabel(t.worker_session_id)}</button>
+                <button class="link" onclick={() => openSession(t.worker_session_id)}>{sessionLabel(t.worker_session_id)}</button>
               {:else}
                 <span>{sessionLabel(t.worker_session_id)}</span>
               {/if}
