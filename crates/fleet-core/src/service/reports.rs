@@ -22,6 +22,8 @@ impl RateWindows {
     }
 
     /// Whether `origin` may store `n` more reports at `now`. Counts them if so.
+    ///
+    /// Callers pass at least 1 even for an empty batch — see [`ingest`].
     pub fn admit(&self, origin: &str, n: u32, now: i64) -> bool {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.retain(|_, (start, _)| now - *start < 60);
@@ -96,7 +98,10 @@ pub fn ingest(
     now: i64,
 ) -> Result<Ingested, IpcError> {
     validate(&batch, batch_max)?;
-    if !windows.admit(origin, batch.reports.len() as u32, now) {
+    // An empty batch counts as one report. `{"reports":[],"dropped":1}` still
+    // costs the hub a log line, so a sender that only ever reported drops
+    // would otherwise flood the log at any rate it liked.
+    if !windows.admit(origin, (batch.reports.len() as u32).max(1), now) {
         return Err(IpcError::new(
             codes::E_RATE_LIMITED,
             format!("{origin} may store {RATE_PER_MINUTE} reports per minute"),
@@ -167,7 +172,9 @@ pub const AGENT_BATCH_MAX: usize = FRAME_BATCH_MAX;
 mod tests {
     use super::*;
     use crate::store::ReportFilter;
-    use fleet_proto::report::{Report, FRAME_BATCH_MAX, HTTP_BATCH_MAX, MESSAGE_MAX};
+    use fleet_proto::report::{
+        Report, FRAME_BATCH_MAX, HTTP_BATCH_MAX, MESSAGE_MAX, RATE_PER_MINUTE,
+    };
 
     fn store() -> Mutex<Store> {
         Mutex::new(Store::open_in_memory().unwrap())
@@ -264,6 +271,33 @@ mod tests {
         // Another origin is unaffected; the next minute admits again.
         ingest(&s, &w, "host:other", batch(&["m"]), HTTP_BATCH_MAX, 31).unwrap();
         ingest(&s, &w, "host:box", batch(&["m"]), HTTP_BATCH_MAX, 61).unwrap();
+    }
+
+    /// A batch with no reports is not free: it costs a log line, so it is
+    /// rate-limited like a one-report batch.
+    #[test]
+    fn an_empty_dropped_only_batch_is_rate_limited_too() {
+        let s = store();
+        let w = RateWindows::new();
+        let only_dropped = || ReportBatch {
+            reports: Vec::new(),
+            dropped: 1,
+        };
+        for i in 0..RATE_PER_MINUTE {
+            ingest(
+                &s,
+                &w,
+                "host:box",
+                only_dropped(),
+                HTTP_BATCH_MAX,
+                i as i64 % 60,
+            )
+            .unwrap();
+        }
+        let e = ingest(&s, &w, "host:box", only_dropped(), HTTP_BATCH_MAX, 59).unwrap_err();
+        assert_eq!(e.code, codes::E_RATE_LIMITED);
+        // The next minute admits again.
+        ingest(&s, &w, "host:box", only_dropped(), HTTP_BATCH_MAX, 60).unwrap();
     }
 
     #[test]
