@@ -1431,6 +1431,9 @@ fn an_unreachable_hub_makes_health_an_error_rather_than_a_zeroed_fleet() {
 /// behaviour must not change" constraint, asserted per command.
 #[test]
 fn standalone_reads_still_come_from_the_local_store() {
+    // `app_version::get()` panics until the binary declares its version, and a
+    // test binary never runs `run()`. The health assertion below reads it.
+    crate::declare_app_version();
     let (_dir, st) = store();
     st.lock().unwrap().upsert_host("trn").unwrap();
 

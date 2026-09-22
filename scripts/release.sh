@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Cut a claude-fleet release: bump versions, prefill CHANGELOG, commit, tag.
 # Usage: scripts/release.sh <X.Y.Z>        (run from a clean checkout of main)
+#        scripts/release.sh --list         (print the version carriers; changes nothing)
 # Env:   RELEASE_DRY_RUN=1  edit files only — no cargo/commit/tag (for testing)
 # Needs: bash, git, cargo, node, awk, date. See docs/RELEASING.md.
 set -euo pipefail
@@ -8,13 +9,26 @@ set -euo pipefail
 REPO_URL="https://github.com/martin-janci/claude-fleet"
 # crates/fleet-core stays at 0.1.0 and is deliberately NOT in this list: it is
 # an internal library crate consumed only by path within this workspace, not
-# versioned in step with the app. (Its Cargo.toml has no `publish = false`
-# marker, so this is a convention, not an enforced one — see issue #152.)
+# versioned in step with the app. It carries `publish = false` so that
+# exception is enforced rather than conventional, and
+# scripts/check-version-consistency.sh names it in the allowlist whose marker
+# it verifies.
 VERSION_FILES=(package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml crates/fleet-hub/Cargo.toml crates/fleet-proto/Cargo.toml crates/fleet-agent/Cargo.toml)
 
 die() { echo "release.sh: $*" >&2; exit 1; }
 
-[[ $# -eq 1 ]] || die "usage: scripts/release.sh <X.Y.Z>"
+# `--list` prints exactly the paths this script rewrites, one per line, relative
+# to the repo root — then exits 0 having touched nothing (no git, no cargo, no
+# writes). scripts/check-version-consistency.sh consumes it, so CI reads the
+# real propagation list instead of keeping a second copy that can drift from it
+# (F-C5).
+if [[ ${1:-} == "--list" ]]; then
+  [[ $# -eq 1 ]] || die "usage: scripts/release.sh --list"
+  printf '%s\n' "${VERSION_FILES[@]}"
+  exit 0
+fi
+
+[[ $# -eq 1 ]] || die "usage: scripts/release.sh <X.Y.Z> | scripts/release.sh --list"
 NEW="$1"
 [[ "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "'$NEW' is not a plain semver X.Y.Z"
 

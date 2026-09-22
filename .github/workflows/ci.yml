@@ -4,8 +4,46 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual re-run. The real coverage is the two triggers above — every PR and
+  # every push to main — but without this the workflow cannot be started from
+  # the UI or `gh workflow run ci.yml` at all, which is how a job added here
+  # gets exercised once against main before anyone relies on it.
+  workflow_dispatch:
 
 jobs:
+  # The six version carriers scripts/release.sh rewrites, plus the four
+  # Cargo.lock member entries it syncs, must all hold the same string — and
+  # crates/fleet-core must stay at its allowlisted 0.1.0 with `publish = false`.
+  # Nothing used to check this, so the hand bump to 0.2.27 (fa8f3a30) went
+  # unnoticed (F-C5). Seconds, not minutes: text reads plus the runner's
+  # preinstalled node — no cargo build, no pnpm install, no cache.
+  # release.yml runs the same script as its gating first job, there with
+  # --expect-tag, so the pushed tag is checked too.
+  version-consistency:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-version-consistency.sh
+      # scripts/release-assets.sh is the single source for release.yml's two
+      # build matrices, for the tarball names package-linux-release.sh must
+      # produce, and for the asset set verify-release.sh demands. Nothing
+      # else in CI runs it, so a typo there would first surface at tag time,
+      # after the version gate has already passed. This is the cheapest
+      # possible smoke test that it still parses, still emits legal matrix
+      # JSON, and still declares assets for the version in package.json.
+      - name: Smoke-test the release asset manifest
+        run: |
+          set -euo pipefail
+          v="$(node -p 'require("./package.json").version')"
+          scripts/release-assets.sh assets "$v"
+          for kind in desktop bins; do
+            scripts/release-assets.sh matrix "$kind" >"matrix-$kind.json"
+            node -e 'const m=require("./"+process.argv[1]);if(!Array.isArray(m.include)||m.include.length===0)throw new Error("empty matrix: "+process.argv[1]);console.log(process.argv[1],"->",m.include.length,"leg(s)")' "matrix-$kind.json"
+          done
+          for leg in $(scripts/release-assets.sh legs); do
+            scripts/release-assets.sh assets "$v" "$leg" >/dev/null
+          done
+
   rust:
     strategy:
       fail-fast: false
