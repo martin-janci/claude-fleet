@@ -9,7 +9,8 @@ impl FleetTools {
         session's REPL (pasted, then one Enter). The first prompt to a \
         still-unnamed session also becomes its friendly name. \
         Marked untrusted unless raw=true (master only) or a trusted client. \
-        keys=Enter|Escape|C-c presses a key instead (unmarked). \
+        keys=Enter|Escape|C-c|1-9 presses a key instead (unmarked; 1-9 \
+        answers pending_input). \
         Returns JSON { delivered, session_id, turn_seq_before, queued, acked \
         }: pass turn_seq_before to wait_for_session \
         { until: \"turn_gt\" } or session_transcript { since_turn } to \
@@ -43,7 +44,10 @@ impl FleetTools {
             let key = crate::tmux::NamedKey::parse(k).ok_or_else(|| {
                 mcp_err(
                     codes::E_VALIDATE,
-                    format!("keys must be Enter, Escape or C-c, not {k:?}"),
+                    format!(
+                        "keys must be {}, not {k:?}",
+                        crate::tmux::NamedKey::VOCABULARY
+                    ),
                     None,
                 )
             })?;

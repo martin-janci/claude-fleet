@@ -31,6 +31,8 @@
   import { rowElapsed, rowPrompt, timeAgo } from './session_status';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import AnswerPrompt from './AnswerPrompt.svelte';
+  import { pendingInputFor } from './pending_input';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -91,6 +93,18 @@
   // CSS never reaches jsdom, so this is how tests assert a row's triage state.
   const triage = $derived(rank(sess, { idleSecs: $attentionIdleMinutes * 60, now: nowSec }));
   const promptText = $derived(rowPrompt(sess));
+  // The dialog this row is blocked on, straight from the row: the sidebar
+  // does not probe (that would be one `capture-pane` per visible row, every
+  // couple of seconds). Which is why the card re-reads the pane itself
+  // before it sends anything — see AnswerPrompt.
+  const answerView = $derived(
+    pendingInputFor({
+      rowStatus: sess.claude_status,
+      rowStuck: sess.stuck_kind,
+      rowPending: sess.pending_input,
+      probe: null,
+    }),
+  );
   const primaryIsFriendly = $derived($showFriendlyNames && !!sess.friendly_name);
   const primaryName = $derived(primaryIsFriendly ? sess.friendly_name! : sess.tmux_name);
   // Line 2 names what line 1 does not: the tmux name under a friendly name,
@@ -347,6 +361,12 @@
             {/if}
           </div>
         </div>
+        {#if answerView}
+          <!-- Claude is asking this row a question. The "Needs you" filter
+               shows exactly these rows, so the answer belongs here and not
+               only behind a click into the session. -->
+          <AnswerPrompt session={sess} view={answerView} compact />
+        {/if}
         {#if $showRowDetails}
           <div class="sess-details" data-testid="sess-details">
             <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>

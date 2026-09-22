@@ -2622,7 +2622,16 @@ fn the_served_definition_budget_stays_bounded() {
     // length of a turn). The budget is a ratchet against description creep,
     // not against tools that earn their place — so it moves with a reason
     // written down, and only that far.
-    const BUDGET_BYTES: usize = 59_400;
+    //
+    // Raised from 59_400 to 59_500 when `keys` grew the `1`-`9` digits that
+    // answer a `pending_input` dialog. The surface had 11 bytes of headroom
+    // left, so no wording could have paid for it: the clause is already a
+    // fragment in both places it appears (`keys=Enter|Escape|C-c|1-9 …
+    // (unmarked; 1-9 answers pending_input)` and the field's one added
+    // line), and the capability is the whole point of the dialog UI — a
+    // client that can see the options but not press one is the state this
+    // replaced. Measured at 59,466; 34 bytes of headroom.
+    const BUDGET_BYTES: usize = 59_500;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

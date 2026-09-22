@@ -507,13 +507,26 @@ function acceptCommandRow(row: SessionRow | null | undefined): void {
   rows.accept(row);
 }
 
+/**
+ * Type `prompt` into a session's REPL and submit it.
+ *
+ * `opts.keys` presses one key instead — `Enter`, `Escape`, `C-c`, or a digit
+ * `1`-`9` that picks that option of a `pending_input` dialog. A key is never
+ * marked untrusted and is never recorded as a prompt, and `prompt` must be
+ * empty alongside it (the backend refuses the pair with `E_VALIDATE`).
+ * Answering a dialog has to go this way. The text path pastes through
+ * `paste-buffer -p`, and the REPL has bracketed paste on (DECSET 2004), so
+ * the pane receives `ESC [ 2 0 0 ~ 3 ESC [ 2 0 1 ~` — the first key a select
+ * dialog sees is ESC, which cancels it. `send-keys 3` delivers one raw `3`.
+ */
 export async function sendPrompt(
   hostAlias: string,
   tmuxName: string,
   prompt: string,
+  opts: { keys?: string } = {},
 ): Promise<Result<void>> {
   return invokeCmd<void>('send_prompt', {
-    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt },
+    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt, keys: opts.keys ?? null },
   });
 }
 

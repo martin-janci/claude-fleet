@@ -17,6 +17,8 @@
   import { untrack, tick, setContext, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, sessions, type SessionRow } from './sessions';
+  import AnswerPrompt from './AnswerPrompt.svelte';
+  import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, type ComposerPreset } from './composer_presets';
   import { needsMore } from './composer_overflow';
@@ -574,6 +576,22 @@
       pending: pending !== null,
       optimistic,
     }),
+  );
+
+  // The dialog to answer, if the pane is showing one. A fresh probe is the
+  // authority, including when it says there is none: the row is written by
+  // the 20 s tick, and buttons that outlive their dialog are worse than no
+  // buttons. Never while viewing an earlier conversation — that pane is
+  // read-only history.
+  const answerView = $derived(
+    viewing !== null
+      ? null
+      : pendingInputFor({
+          rowStatus: session.claude_status,
+          rowStuck: session.stuck_kind,
+          rowPending: session.pending_input,
+          probe: liveProbe,
+        }),
   );
 
   // What the running turn is doing right now (the current conversation only:
@@ -1799,7 +1817,9 @@
           </section>
         {/if}
         {#if viewing === null}
-        {#if indicator?.kind === 'blocked'}
+        {#if answerView}
+          <AnswerPrompt {session} view={answerView} {onOpenTerminal} />
+        {:else if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">
             <div class="blocked-text">
               <strong>Claude is waiting for you in the terminal{indicator.waiting === 'permission' ? ' (permission)' : indicator.waiting === 'input' ? ' (input)' : ''}.</strong>

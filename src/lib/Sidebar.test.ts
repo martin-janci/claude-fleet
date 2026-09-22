@@ -1199,6 +1199,41 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(screen.getAllByTestId('claude-chip')).toHaveLength(1);
   });
 
+  it('offers the numbered choices on a row blocked on a dialog', async () => {
+    // The "Needs you" queue is this same row: a blocked session has to be
+    // answerable without opening it first.
+    const asking = {
+      ...sessionFor(1, 'dev-asking'),
+      claude_status: 'blocked' as const,
+      pending_input: {
+        kind: 'permission' as const,
+        question: 'Do you want to proceed?',
+        options: [
+          { n: 1, label: 'Yes', selected: true },
+          { n: 2, label: 'No', selected: false },
+        ],
+      },
+    };
+    const quiet = { ...sessionFor(1, 'dev-quiet'), claude_status: 'working' as const };
+    mockBackend(fakeProjects, [asking, quiet]);
+    render(Sidebar);
+    await tick(); await tick();
+    const cards = screen.getAllByTestId('answer-card');
+    expect(cards).toHaveLength(1);
+    expect(screen.getAllByTestId('answer-option').map((o) => o.getAttribute('data-n'))).toEqual(['1', '2']);
+    // Sidebar density: the choices only — Escape and Open terminal live on
+    // the full card in the Conversation panel.
+    expect(screen.queryByTestId('answer-esc')).toBeNull();
+  });
+
+  it('shows no choices on a blocked row whose dialog the tick has not seen', async () => {
+    const blocked = { ...sessionFor(1, 'dev-blocked'), claude_status: 'blocked' as const };
+    mockBackend(fakeProjects, [blocked]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('answer-card')).toBeNull();
+  });
+
   it('shows a context badge with amber at 70 and red at 90', async () => {
     const warn = { ...sessionFor(1, 'dev-warn'), context_pct: 72 };
     const crit = { ...sessionFor(1, 'dev-crit'), context_pct: 95 };
