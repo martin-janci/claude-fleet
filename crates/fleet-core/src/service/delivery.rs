@@ -13,8 +13,14 @@ pub const CTX_MAX_CHARS: usize = 8000;
 pub const CTX_MAX_LINES: usize = 200;
 
 /// Headroom left for the trailing "N more in the inbox" line, so adding it can
-/// never push a packed batch over either budget.
-const TAIL_RESERVE_CHARS: usize = 120;
+/// never push a packed batch over either budget. Sized to the tail's actual
+/// worst case, not a guess: the line is
+/// `"(N more message(s) waiting — call the fleet `inbox` tool to read them)"`,
+/// whose fixed wording is 89 chars including the widest `N` can ever be
+/// (`remaining` is a `usize`; `usize::MAX` on any 64-bit target is 20 decimal
+/// digits), plus the 2-char/1-line joiner `blocks.join("\n\n")` inserts
+/// before it once earlier blocks exist. 100/2 leaves margin over that 91/2.
+const TAIL_RESERVE_CHARS: usize = 100;
 const TAIL_RESERVE_LINES: usize = 2;
 
 /// What one hook response will carry.
@@ -51,12 +57,20 @@ pub fn pack(messages: &[SessionMessage], sender_label: &dyn Fn(i64) -> String) -
             who = sender_label(m.from_session_id),
             body = m.body
         );
-        // +1 for the blank line joining blocks.
-        let c = block.chars().count() + 1;
-        let l = block.lines().count() + 1;
+        // Exact joiner cost: `blocks.join("\n\n")` inserts "\n\n" — 2 chars,
+        // 1 extra line — between consecutive blocks, so it applies only once
+        // a previous block already exists. A flat "+1" undercounts as N
+        // grows: 95 short messages tracked a total of 7878 chars against the
+        // 7880 budget while the real joined output was 8044 chars, 44 over
+        // CTX_MAX_CHARS — exactly the silent CLI truncation this exists to
+        // prevent.
+        let (joiner_c, joiner_l) = if blocks.is_empty() { (0, 0) } else { (2, 1) };
+        let c = block.chars().count() + joiner_c;
+        let l = block.lines().count() + joiner_l;
         if chars + c > budget_chars || lines + l > budget_lines {
             // Whole messages only: stop at the first one that does not fit
-            // rather than skipping it, so delivery order is never scrambled.
+            // rather than skipping it, so delivery order is never scrambled
+            // and a large message is never starved by smaller later ones.
             break;
         }
         chars += c;
@@ -122,15 +136,35 @@ mod tests {
 
     #[test]
     fn the_char_budget_includes_whole_messages_only_and_reports_the_rest() {
-        let big = "x".repeat(CTX_MAX_CHARS / 2);
-        let p = pack(&[msg(1, &big), msg(2, &big), msg(3, &big)], &label);
+        // Distinct bodies (same length, distinct marker suffix) so a check
+        // that a given id's body is present cannot be satisfied by some
+        // OTHER included message's identical body.
+        let body_for = |id: i64| {
+            let marker = format!("id{id}");
+            let filler = "x".repeat(CTX_MAX_CHARS / 2 - marker.len());
+            format!("{filler}{marker}")
+        };
+        let bodies: Vec<String> = (1..=3).map(body_for).collect();
+        let p = pack(
+            &[msg(1, &bodies[0]), msg(2, &bodies[1]), msg(3, &bodies[2])],
+            &label,
+        );
         assert!(p.text.chars().count() <= CTX_MAX_CHARS, "budget respected");
         assert!(!p.included.is_empty(), "at least one message gets through");
         assert!(p.included.len() < 3, "not all three can fit");
         assert_eq!(p.remaining, 3 - p.included.len());
-        // No body was cut: every included id's full body is present.
-        for id in &p.included {
-            assert!(p.text.contains(&big), "message {id} was truncated");
+        // No body was cut, and only the included ids' own bodies are
+        // present: an excluded id's distinct body must not appear either.
+        for (i, body) in bodies.iter().enumerate() {
+            let id = (i + 1) as i64;
+            if p.included.contains(&id) {
+                assert!(p.text.contains(body), "message {id} was truncated");
+            } else {
+                assert!(
+                    !p.text.contains(body),
+                    "excluded message {id}'s body must not appear"
+                );
+            }
         }
         assert!(p.text.contains(&format!("{} more", p.remaining)));
     }
@@ -168,5 +202,60 @@ mod tests {
         let m = "🦀".repeat(3000);
         let p = pack(&[msg(1, &m), msg(2, &m)], &label);
         assert_eq!(p.included.len(), 2, "char budget, not byte budget");
+    }
+
+    /// The reviewer's exact failing case for the "+1" joiner bug: a flat
+    /// per-block "+1" undercounts the real 2-char/1-line joiner cost of
+    /// `blocks.join("\n\n")`, and the gap grows with N. At N=95 the old
+    /// tracked total (7878) stayed under budget while the real joined
+    /// output (8044 chars) blew CTX_MAX_CHARS by 44 — the exact silent
+    /// truncation this module exists to prevent.
+    #[test]
+    fn ninety_five_short_messages_stay_within_both_budgets() {
+        let body = "b".repeat(48);
+        let messages: Vec<SessionMessage> = (1..=95).map(|id| msg(id, &body)).collect();
+        let p = pack(&messages, &label);
+        assert!(
+            p.text.chars().count() <= CTX_MAX_CHARS,
+            "chars = {}",
+            p.text.chars().count()
+        );
+        assert!(
+            p.text.lines().count() <= CTX_MAX_LINES,
+            "lines = {}",
+            p.text.lines().count()
+        );
+        assert_eq!(p.included.len() + p.remaining, messages.len());
+    }
+
+    /// Property sweep: for a range of message counts and a few body sizes,
+    /// both budgets hold and `included`/`remaining` always account for every
+    /// input message. The original six tests checked behaviour at a few
+    /// hand-picked points; this is the invariant they were missing, which is
+    /// exactly what let the joiner undercount hide at N=95.
+    #[test]
+    fn the_budgets_hold_across_a_sweep_of_counts_and_sizes() {
+        for body_len in [1usize, 48, 200] {
+            let body = "s".repeat(body_len);
+            for n in 1..=120i64 {
+                let messages: Vec<SessionMessage> = (1..=n).map(|id| msg(id, &body)).collect();
+                let p = pack(&messages, &label);
+                assert!(
+                    p.text.chars().count() <= CTX_MAX_CHARS,
+                    "n={n} body_len={body_len} chars={}",
+                    p.text.chars().count()
+                );
+                assert!(
+                    p.text.lines().count() <= CTX_MAX_LINES,
+                    "n={n} body_len={body_len} lines={}",
+                    p.text.lines().count()
+                );
+                assert_eq!(
+                    p.included.len() + p.remaining,
+                    messages.len(),
+                    "n={n} body_len={body_len}"
+                );
+            }
+        }
     }
 }
