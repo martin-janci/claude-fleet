@@ -90,7 +90,10 @@ src/lib/SshDiagnosisCard.svelte, src/lib/sshDiag.ts
 
 `SshFailure { kind: SshFailureKind, host_alias, raw_tail: String }` where
 `SshFailureKind` is `HostKeyUnknown | HostKeyChanged | AuthDenied | DnsFail |
-Refused | Timeout | MuxBroken | Unknown`.
+Refused | Timeout | Handshake | MuxBroken | Unknown`. `Timeout` also covers
+`No route to host` / `Network is unreachable`; `Handshake` is
+`kex_exchange_identification:` or `Connection closed by <ip> port <n>` (sshd
+dropped us before auth: MaxStartups, fail2ban, a dying sshd).
 
 - Input: exit status 255 plus the stderr tail. Anything else is not an SSH
   failure (`None`).
@@ -115,7 +118,7 @@ timeouts (5 s each).
 | `HostKeyChanged` | old fingerprint + line, new fingerprint; `verified_local` check | `ReplaceHostKey { … }` | **never** |
 | `AuthDenied` | `IdentityFile` existence (never contents), `ssh-add -l` count, identities offered (`ssh -v`) | none; explanation | — |
 | `DnsFail` | resolver answer for the hostname | none; explanation | — |
-| `Refused` / `Timeout` | 3 s TCP connect to the port | `Retry` | — |
+| `Refused` / `Timeout` / `Handshake` | 3 s TCP connect to the port | `Retry` | — |
 | `MuxBroken` | socket state | `ResetMux` (existing reset) | yes |
 | `Unknown` | → AI bundle | AI advice | **never** |
 
