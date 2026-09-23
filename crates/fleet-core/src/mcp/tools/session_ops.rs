@@ -132,31 +132,43 @@ impl FleetTools {
             };
         };
 
-        // `fresh_for` present: build the EXACT same bytes the branch above
-        // would have sent — `compact_json_string` is what `ok_json_compact`
-        // / `ok_json_compact_view` call internally — and hash THAT, never a
-        // curated subset. This is why the default slim shape (which drops
-        // `last_activity_at` and `current_activity`, the two fields a
-        // reconcile pass bumps constantly) makes `unchanged` fire usefully:
-        // a `summary: false` caller hashes those two churny fields too, so
-        // it will rarely see `unchanged`.
-        let json_str = match (view, p.summary) {
+        // `fresh_for` present: build the EXACT same fields the branch above
+        // would have sent — `compact_json_value` is what `compact_json_string`
+        // (in turn what `ok_json_compact` / `ok_json_compact_view` call)
+        // builds internally — and hash THAT `Value`, never a curated subset.
+        // This is why the default slim shape (which drops `last_activity_at`
+        // and `current_activity`, the two fields a reconcile pass bumps
+        // constantly) makes `unchanged` fire usefully: a `summary: false`
+        // caller hashes those two churny fields too, so it will rarely see
+        // `unchanged`.
+        //
+        // Sorted by session id first, on this path only: `list_all_sessions`
+        // (the store's underlying query) orders by `last_activity_at DESC` —
+        // the very field the slim shape just dropped because reconcile bumps
+        // it constantly. Two sessions trading activity would otherwise
+        // reorder this array with no field actually differing, changing the
+        // hash for a caller who could not possibly see why. The DEFAULT path
+        // above keeps today's order untouched — only the opt-in envelope's
+        // row order changes here.
+        let data = match (view, p.summary) {
             (Some(v), _) => {
-                let full: Vec<SessionWithController> = tagged.collect();
-                compact_json_string(&full, Some(v.fields()))?
+                let mut full: Vec<SessionWithController> = tagged.collect();
+                full.sort_by_key(|s| s.row.id);
+                compact_json_value(&full, Some(v.fields()))?
             }
             (None, true) => {
-                let slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
-                compact_json_string(&slim, None)?
+                let mut slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
+                slim.sort_by_key(|s| s.id);
+                compact_json_value(&slim, None)?
             }
             (None, false) => {
-                let full: Vec<SessionWithController> = tagged.collect();
-                compact_json_string(&full, None)?
+                let mut full: Vec<SessionWithController> = tagged.collect();
+                full.sort_by_key(|s| s.row.id);
+                compact_json_value(&full, None)?
             }
         };
 
         let resource_key = list_sessions_resource_key(&p);
-        let hash = fresh::snapshot_hash(&json_str);
         // Read-then-write: validate the reader and read the stored hash
         // before deciding anything, so `unchanged` can never be answered to
         // a reader session that no longer exists.
@@ -173,30 +185,16 @@ impl FleetTools {
             (reader_exists, stored_hash)
         };
 
-        if !reader_exists {
-            let data: serde_json::Value = serde_json::from_str(&json_str)
-                .map_err(|e| McpError::internal_error(format!("reparse result: {e}"), None))?;
-            return ok_json(&fresh::envelope(
-                false,
-                Some(fresh::ResetReason::ReaderUnknown),
-                false,
-                data,
-            ));
-        }
-
-        if stored_hash.as_deref() == Some(hash.as_str()) {
-            return ok_json(&fresh::envelope(true, None, false, serde_json::Value::Null));
-        }
-
-        // Written only now that the payload was built successfully.
-        {
+        let decision = snapshot_decision(reader_exists, stored_hash.as_deref(), data)?;
+        // Written only now that the payload was built successfully;
+        // `snapshot_decision` never returns a hash for an unknown reader or
+        // an unchanged read.
+        if let Some(hash) = &decision.new_hash {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.put_snapshot_cursor(reader, "list_sessions", &resource_key, None, &hash)
+            s.put_snapshot_cursor(reader, "list_sessions", &resource_key, None, hash)
                 .map_err(to_mcp_err)?;
         }
-        let data: serde_json::Value = serde_json::from_str(&json_str)
-            .map_err(|e| McpError::internal_error(format!("reparse result: {e}"), None))?;
-        ok_json(&fresh::envelope(false, None, false, data))
+        ok_json(&decision.envelope)
     }
 
     #[tool(description = "List sessions related to a given session — those \

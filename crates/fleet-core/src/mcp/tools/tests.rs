@@ -5339,11 +5339,21 @@ async fn list_projects_has_sessions_keeps_only_projects_a_live_session_names() {
 #[tokio::test]
 async fn list_sessions_fresh_for_answers_unchanged_on_a_repeat_read() {
     let s = Store::open_in_memory().unwrap();
-    s.upsert_host("local").unwrap();
-    s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+    // `list_sessions` goes through the tool layer (real SSH client) and a
+    // fresh store defaults `hub.local_host` to true, so an unlucky gate
+    // (`reconcile_gate()` is a process-global singleton — see
+    // `list_sessions_fresh_for_is_unchanged_when_only_row_order_flips`)
+    // would fan a REAL reconcile out over whatever tmux/background-agent
+    // state happens to exist on the machine running this suite. Disabling
+    // `local_host` and using a fake, unreachable host keeps every assertion
+    // below about the rows this test itself seeded.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
         .unwrap();
     let reader = s
-        .upsert_session("reader", "local", None, None, 1, 1, "running", None)
+        .upsert_session("reader", "hosta", None, None, 1, 1, "running", None)
         .unwrap();
     let t = test_tools(s);
     let params = || {
@@ -5375,12 +5385,15 @@ async fn list_sessions_fresh_for_answers_unchanged_on_a_repeat_read() {
 #[tokio::test]
 async fn list_sessions_fresh_for_answers_changed_after_a_status_change() {
     let s = Store::open_in_memory().unwrap();
-    s.upsert_host("local").unwrap();
+    // See the comment in `list_sessions_fresh_for_answers_unchanged_on_a_repeat_read`.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
     let target = s
-        .upsert_session("dev", "local", None, None, 1, 1, "running", None)
+        .upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
         .unwrap();
     let reader = s
-        .upsert_session("reader", "local", None, None, 1, 1, "running", None)
+        .upsert_session("reader", "hosta", None, None, 1, 1, "running", None)
         .unwrap();
     let t = test_tools(s);
     let params = || {
@@ -5423,11 +5436,14 @@ async fn list_sessions_fresh_for_answers_changed_after_a_status_change() {
 #[tokio::test]
 async fn list_sessions_fresh_for_keeps_two_different_filters_independent() {
     let s = Store::open_in_memory().unwrap();
-    s.upsert_host("local").unwrap();
-    s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+    // See the comment in `list_sessions_fresh_for_answers_unchanged_on_a_repeat_read`.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
         .unwrap();
     let reader = s
-        .upsert_session("reader", "local", None, None, 1, 1, "running", None)
+        .upsert_session("reader", "hosta", None, None, 1, 1, "running", None)
         .unwrap();
     let t = test_tools(s);
 
@@ -5475,8 +5491,11 @@ async fn list_sessions_fresh_for_keeps_two_different_filters_independent() {
 #[tokio::test]
 async fn list_sessions_with_an_unknown_fresh_for_answers_full_and_writes_no_cursor() {
     let s = Store::open_in_memory().unwrap();
-    s.upsert_host("local").unwrap();
-    s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+    // See the comment in `list_sessions_fresh_for_answers_unchanged_on_a_repeat_read`.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
         .unwrap();
     let t = test_tools(s);
     let missing_reader = 999_999;
@@ -5532,32 +5551,6 @@ fn repo_diff_resource_key_is_a_session_and_path_pair() {
     );
 }
 
-/// `repo_diff` hashes `serde_json::to_string` (nulls kept — what `ok_json`
-/// actually sends), never `compact_json_string` (nulls stripped). `FileDiff`
-/// itself has no `Option` fields today, so the two serializations happen to
-/// coincide for it; this pins the wiring choice generically, at the
-/// serialization seam, so a future nullable field on `FileDiff` cannot
-/// silently start hashing bytes different from what is returned.
-#[test]
-fn repo_diff_hashes_the_null_keeping_serialization_not_the_compact_one() {
-    let v = serde_json::json!({ "path": "a", "diff": "x", "binary": false, "extra": null });
-    let sent_as_ok_json = serde_json::to_string(&v).unwrap();
-    let sent_as_compact = compact_json_string(&v, None).unwrap();
-    assert!(
-        sent_as_ok_json.contains("null"),
-        "ok_json keeps nulls: {sent_as_ok_json}"
-    );
-    assert!(
-        !sent_as_compact.contains("null"),
-        "compact_json_string strips nulls: {sent_as_compact}"
-    );
-    assert_ne!(
-        fresh::snapshot_hash(&sent_as_ok_json),
-        fresh::snapshot_hash(&sent_as_compact),
-        "hashing the wrong serialization would make `unchanged` compare the wrong bytes"
-    );
-}
-
 /// Store-level proof of `repo_diff`'s cursor wiring — the same
 /// `put_snapshot_cursor`/`get_read_cursor` round trip the tool performs,
 /// keyed exactly as `repo_diff_resource_key` builds it, with `target =
@@ -5600,5 +5593,126 @@ fn repo_diff_snapshot_cursor_round_trips_at_the_store_seam() {
             .unwrap()
             .is_none(),
         "a different path in the SAME session must not share the cursor just written"
+    );
+}
+
+// ---- Task 7 fix round 1: shared snapshot_decision, order-stable list_sessions
+
+/// The pure decision `repo_diff` and `list_sessions` both call, tested
+/// directly — the tested code is the executed code (fix round 1, finding 3).
+#[test]
+fn snapshot_decision_answers_unchanged_only_when_the_stored_hash_matches_the_canonical_bytes() {
+    let data = serde_json::json!({ "b": 1, "a": 2 });
+    let canonical = serde_json::to_string(&data).unwrap();
+    let hash = fresh::snapshot_hash(&canonical);
+
+    // No stored hash: first read for this reader, never unchanged.
+    let first = snapshot_decision(true, None, data.clone()).unwrap();
+    assert_eq!(first.envelope["unchanged"], false);
+    assert_eq!(first.envelope["data"], data);
+    assert_eq!(first.new_hash.as_deref(), Some(hash.as_str()));
+
+    // Stored hash matches the canonical bytes of the SAME data: unchanged,
+    // no payload, nothing new to write.
+    let repeat = snapshot_decision(true, Some(hash.as_str()), data.clone()).unwrap();
+    assert_eq!(repeat.envelope["unchanged"], true);
+    assert!(repeat.envelope["data"].is_null());
+    assert!(repeat.new_hash.is_none());
+
+    // Stored hash differs: changed, a new hash to persist.
+    let changed = snapshot_decision(true, Some("stale-hash"), data).unwrap();
+    assert_eq!(changed.envelope["unchanged"], false);
+    assert_eq!(changed.new_hash.as_deref(), Some(hash.as_str()));
+}
+
+#[test]
+fn snapshot_decision_treats_an_unknown_reader_as_reader_unknown_and_writes_no_hash() {
+    let data = serde_json::json!({ "x": 1 });
+    // Even a "stored" hash that WOULD match must not be trusted once the
+    // reader itself does not exist.
+    let hash = fresh::snapshot_hash(&serde_json::to_string(&data).unwrap());
+    let d = snapshot_decision(false, Some(hash.as_str()), data.clone()).unwrap();
+    assert_eq!(d.envelope["cursor_reset"], "reader_unknown");
+    assert_eq!(d.envelope["unchanged"], false);
+    assert_eq!(d.envelope["data"], data);
+    assert!(
+        d.new_hash.is_none(),
+        "an unknown reader must never get a hash to store"
+    );
+}
+
+/// Fix round 1, finding 2, pinned at its source: the hash must be over the
+/// CANONICAL serialization of `data` itself (sorted keys — this crate's
+/// `serde_json` has no `preserve_order`), not over some other serialization
+/// of an equivalent value built a different way.
+#[test]
+fn snapshot_decision_hashes_the_canonical_serialization_of_data_itself() {
+    let data = serde_json::json!({ "z": 1, "a": 2, "m": 3 });
+    let canonical = serde_json::to_string(&data).unwrap();
+    assert_eq!(
+        canonical, r#"{"a":2,"m":3,"z":1}"#,
+        "serde_json::Value serializes object keys in sorted order without preserve_order"
+    );
+    let expected_hash = fresh::snapshot_hash(&canonical);
+    let d = snapshot_decision(true, None, data).unwrap();
+    assert_eq!(d.new_hash.as_deref(), Some(expected_hash.as_str()));
+}
+
+/// Fix round 1, finding 1: `list_all_sessions` (store/sessions.rs) orders by
+/// `last_activity_at DESC` — the field the slim shape drops precisely
+/// because reconcile bumps it constantly. Two sessions trading activity
+/// swap that DESC order with no field the hash reads actually changing;
+/// without re-sorting by id first, `unchanged` would almost never fire on a
+/// busy fleet.
+#[tokio::test]
+async fn list_sessions_fresh_for_is_unchanged_when_only_row_order_flips() {
+    let s = Store::open_in_memory().unwrap();
+    // Keep reconcile from ever probing the REAL local machine's tmux — this
+    // test's `list_sessions` calls go through the tool layer (real SSH
+    // client), and a fresh store otherwise defaults `hub.local_host` to
+    // true, which would fan a real reconcile out over whatever background
+    // agents happen to be running on the box this suite executes on.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    // `a` starts with the higher last_activity_at, so the DESC query orders
+    // the first read [a, b].
+    let a = s
+        .upsert_session("a", "hosta", None, None, 1, 100, "running", None)
+        .unwrap();
+    let b = s
+        .upsert_session("b", "hosta", None, None, 1, 50, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let params = || {
+        let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        p.fresh_for = Some(reader);
+        p
+    };
+
+    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    assert_eq!(result_json(&first)["unchanged"], false);
+
+    // Only `last_activity_at` moves — no field the slim shape (or the hash)
+    // reads changes — but it reverses the DESC order to [b, a].
+    t.store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET last_activity_at = 200 WHERE id = ?1",
+            rusqlite::params![b],
+        )
+        .unwrap();
+    assert!(a != b, "sanity: two distinct rows");
+
+    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let v2 = result_json(&second);
+    assert_eq!(
+        v2["unchanged"], true,
+        "a pure reorder from a field the slim shape drops must not invalidate the cursor: {v2}"
     );
 }

@@ -253,48 +253,27 @@ impl FleetTools {
         // watermark, no generation to compare first), so `unchanged` saves
         // the CALLER context and transfer, never the server-side git work.
         //
-        // Hashed via plain `serde_json::to_string`, the same serialization
-        // `ok_json` sends (nulls kept) — NOT `compact_json_string`, which
-        // strips them. Hashing a different serialization than the one
-        // actually returned would make `unchanged` a lie.
+        // `data` keeps every field `ok_json` would send (never
+        // `compact_json_value`, which strips nulls) — hashing a narrower
+        // shape than what is actually returned would make `unchanged` a
+        // lie. `snapshot_decision` hashes this exact `Value`.
         let v = repo_read::repo_diff((&p).into(), &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
-        let json = serde_json::to_string(&v)
+        let data = serde_json::to_value(&v)
             .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
-        let hash = fresh::snapshot_hash(&json);
-
-        if !reader_exists {
-            let data: serde_json::Value = serde_json::from_str(&json)
-                .map_err(|e| McpError::internal_error(format!("reparse result: {e}"), None))?;
-            return ok_json(&fresh::envelope(
-                false,
-                Some(fresh::ResetReason::ReaderUnknown),
-                false,
-                data,
-            ));
-        }
-
-        if stored_hash.as_deref() == Some(hash.as_str()) {
-            return ok_json(&fresh::envelope(true, None, false, serde_json::Value::Null));
-        }
+        let decision = snapshot_decision(reader_exists, stored_hash.as_deref(), data)?;
 
         // Scope 2: written only now that the diff was built and hashed
-        // successfully — a failure above must not mark this as delivered.
-        {
+        // successfully — a failure above must not mark this as delivered,
+        // and `snapshot_decision` never returns a hash to store for an
+        // unknown reader or an unchanged read.
+        if let Some(hash) = &decision.new_hash {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.put_snapshot_cursor(
-                reader,
-                "repo_diff",
-                &resource_key,
-                Some(p.session_id),
-                &hash,
-            )
-            .map_err(to_mcp_err)?;
+            s.put_snapshot_cursor(reader, "repo_diff", &resource_key, Some(p.session_id), hash)
+                .map_err(to_mcp_err)?;
         }
-        let data: serde_json::Value = serde_json::from_str(&json)
-            .map_err(|e| McpError::internal_error(format!("reparse result: {e}"), None))?;
-        ok_json(&fresh::envelope(false, None, false, data))
+        ok_json(&decision.envelope)
     }
 
     #[tool(description = "Commit log (branch graph) for a session's worktree. \
