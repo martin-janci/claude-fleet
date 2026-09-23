@@ -893,6 +893,38 @@ mod tests {
         );
     }
 
+    /// Final review, Important 2. `complete_task` posts the result to the
+    /// requester's inbox with no existence check, and the store's
+    /// `ensure_participant_for_session` used to mint an identity for
+    /// whatever id it was handed. A requester that died mid-task therefore
+    /// left a live participant behind for a row that no longer exists:
+    /// nothing retires it, the 7-day sweep never reaches it, and because
+    /// `sessions.id` is reused the next session to take that id inherits the
+    /// dead requester's mail — injected into its prompt context by
+    /// `list_undelivered_for_session`, not merely visible via `inbox`.
+    #[test]
+    fn completing_a_task_whose_requester_is_gone_mints_no_participant() {
+        let s = Store::open_in_memory().unwrap();
+        let req = seed(&s, "local", "ctl");
+        let w = seed(&s, "local", "w");
+        let t = create_task(&s, Some(req), Some(w), "do it").unwrap();
+        let t = start_task(&s, &t).unwrap();
+        s.delete_session(req).unwrap();
+
+        assert!(
+            complete_task(&s, &t, "all done").unwrap(),
+            "the task still completes — the inbox post is best-effort"
+        );
+        assert!(
+            s.participant_for_session(req).unwrap().is_none(),
+            "no identity may be minted for a session row that is gone"
+        );
+        assert!(
+            s.list_inbox(req, false, 10).unwrap().is_empty(),
+            "and the result must not be addressed to a reusable dead id"
+        );
+    }
+
     // ---- task state machine ----
 
     #[test]

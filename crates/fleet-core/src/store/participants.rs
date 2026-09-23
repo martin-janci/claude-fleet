@@ -232,6 +232,24 @@ impl Store {
     ) -> Result<usize, crate::ipc_error::IpcError> {
         let cutoff = now - older_than_secs;
 
+        // Defence in depth behind `insert_message`'s existence check (final
+        // review, Important 2): retire any LIVE participant whose session
+        // row is gone. Nothing else ever would — `delete_session` tombstones
+        // the participant it knows about, so a participant left pointing at
+        // a vanished row (an older store, a raw SQL path, a future caller
+        // that skips `insert_message`) is unreachable: the sweep below only
+        // looks at retired rows, so its mail would sit forever and its
+        // senders would never be told. Retiring it starts the ordinary
+        // window; a later sweep then reports and drops it. `retired_at` is
+        // `now`, not the cutoff, so this never deletes mail in the same pass
+        // that discovers the orphan.
+        self.conn.execute(
+            "UPDATE participants SET retired_at = ?1, session_id = NULL, client_id = NULL \
+             WHERE retired_at IS NULL AND session_id IS NOT NULL \
+               AND session_id NOT IN (SELECT id FROM sessions)",
+            rusqlite::params![now],
+        )?;
+
         // Orphaned rows first: no participant to sweep by, only messages.
         let orphans: Vec<(i64, i64, bool)> = {
             let mut stmt = self.conn.prepare(
@@ -402,6 +420,46 @@ mod tests {
             vec![m1, m2],
             "both the old and the colliding mail follow the survivor"
         );
+    }
+
+    /// Final review, Important 2 — defence in depth behind
+    /// `insert_message`'s existence check. Whatever the route (an older store
+    /// written before that check, a raw SQL path, a future caller), a LIVE
+    /// participant whose `session_id` resolves to no session row is
+    /// unreachable: nothing retires it, so the retention sweep never reaches
+    /// it and its senders are never told. The sweep tombstones it, which
+    /// starts the normal 7-day window and ends in a
+    /// `message_undeliverable` on each sender's timeline.
+    #[test]
+    fn the_sweep_retires_a_participant_whose_session_is_gone() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let p = s.ensure_participant_for_session(b).unwrap();
+        // Orphan it the way only a bug (or an older store) can: the row goes
+        // away without `delete_session`'s tombstone.
+        s.conn
+            .execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![b])
+            .unwrap();
+        assert!(
+            s.participant_by_id(p)
+                .unwrap()
+                .unwrap()
+                .retired_at
+                .is_none(),
+            "the premise: it is still live"
+        );
+
+        let now = now_unix();
+        s.sweep_retired_participants(now, RETIRED_RETENTION_SECS)
+            .unwrap();
+        let row = s.participant_by_id(p).unwrap().expect("still resolves");
+        assert!(
+            row.retired_at.is_some(),
+            "a participant with no session must be retired by the sweep"
+        );
+        assert_eq!(row.session_id, None);
+        let _ = a;
     }
 
     #[test]

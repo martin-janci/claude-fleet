@@ -155,6 +155,18 @@ impl Store {
     /// Insert one inter-session message (migration 015). `sent_at` is stamped
     /// here as the current unix epoch. Returns the new row id so the caller
     /// can include it in the pane-delivery header.
+    ///
+    /// Both ends must name an existing `sessions` row (`E_NOTFOUND`
+    /// otherwise). This is the chokepoint, not a courtesy check the callers
+    /// duplicate: `ensure_participant_for_session` below mints an identity
+    /// for whatever id it is handed, nothing ever retires one whose session
+    /// does not exist, so the 7-day sweep never reaches it and its sender is
+    /// never told. And because `sessions.id` is REUSED, the next session to
+    /// take that id resolves the same participant and has the dead
+    /// recipient's mail injected into its prompt context by
+    /// `list_undelivered_for_session` — not merely made visible via `inbox`.
+    /// `service::messages::send_message` checks both ends itself;
+    /// `service::tasks::complete_task` (best-effort, `let _ =`) did not.
     pub fn insert_message(
         &self,
         from_session_id: i64,
@@ -164,6 +176,19 @@ impl Store {
         reply_to: Option<i64>,
     ) -> Result<i64, crate::ipc_error::IpcError> {
         let at = now_unix();
+        for (label, id) in [("from", from_session_id), ("to", to_session_id)] {
+            let exists: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(crate::ipc_error::IpcError::new(
+                    crate::ipc_error::codes::E_NOTFOUND,
+                    format!("{label} session {id} not found"),
+                ));
+            }
+        }
         let from_p = self.ensure_participant_for_session(from_session_id)?;
         let to_p = self.ensure_participant_for_session(to_session_id)?;
         self.conn.execute(
@@ -205,6 +230,27 @@ impl Store {
             )
             .optional()
             .map_err(crate::ipc_error::IpcError::from)
+    }
+
+    /// True when `participant_id` is either end of message `id`.
+    ///
+    /// The durable way to ask "did this endpoint take part in that thread?":
+    /// `from_session_id` / `to_session_id` name the `sessions` row as it was
+    /// when the message was sent, and a move replaces that row, so a
+    /// participant comparison is the only one that survives one. False for a
+    /// message that does not exist, so a caller that already checked
+    /// existence keeps its own `E_NOTFOUND` wording.
+    pub fn message_involves_participant(
+        &self,
+        id: i64,
+        participant_id: i64,
+    ) -> Result<bool, crate::ipc_error::IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_messages \
+             WHERE id = ?1 AND (from_participant_id = ?2 OR to_participant_id = ?2))",
+            rusqlite::params![id, participant_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Newest-first messages addressed to `to_session_id`, capped at `limit`.
@@ -383,6 +429,36 @@ mod tests {
         s.upsert_host("local").unwrap();
         s.upsert_session(name, "local", None, None, 0, 0, "running", None)
             .unwrap()
+    }
+
+    /// Final review, Important 2: a participant must never exist for a
+    /// session that does not. `ensure_participant_for_session` mints one for
+    /// any id it is handed, nothing retires it, and `sessions.id` is REUSED —
+    /// so a later session taking that id inherits the dead requester's mail
+    /// and has it injected into its prompt context. `insert_message` is the
+    /// one chokepoint every sender goes through (`service::tasks::complete_task`
+    /// does not check existence itself), so it validates here.
+    #[test]
+    fn insert_message_refuses_a_session_that_does_not_exist() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let gone = 4242;
+        let err = s
+            .insert_message(a, gone, "hi", "message", None)
+            .unwrap_err();
+        assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND, "{err:?}");
+        let err = s
+            .insert_message(gone, a, "hi", "message", None)
+            .unwrap_err();
+        assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND, "{err:?}");
+        assert!(
+            s.participant_for_session(gone).unwrap().is_none(),
+            "a refused insert must not have minted an identity for a dead session"
+        );
+        assert!(
+            s.list_inbox(gone, false, 10).unwrap().is_empty(),
+            "and nothing may be addressed to it"
+        );
     }
 
     #[test]
@@ -619,6 +695,14 @@ mod tests {
     #[test]
     fn session_messages_inbox_roundtrip_and_mark_read() {
         let s = Store::open_in_memory().expect("open");
+        // The ids 1/5/9 below are REAL session rows now: `insert_message`
+        // validates that both ends exist (final review, Important 2), and
+        // this test asserts store mechanics, not the absence of that check.
+        // `sessions.id` starts at 1 and increments, so seeding nine rows
+        // makes 1, 5 and 9 exactly the rows these ids name.
+        for i in 1..=9 {
+            seed(&s, &format!("s{i}"));
+        }
         // Two messages to session 5, one decoy to session 9.
         let m1 = s.insert_message(1, 5, "hello", "message", None).unwrap();
         let m2 = s.insert_message(2, 5, "second", "task", Some(m1)).unwrap();
@@ -653,6 +737,11 @@ mod tests {
     #[test]
     fn messages_carry_reply_to() {
         let s = Store::open_in_memory().unwrap();
+        // Real rows for the same reason as
+        // `session_messages_inbox_roundtrip_and_mark_read` above.
+        for i in 1..=5 {
+            seed(&s, &format!("s{i}"));
+        }
         let m1 = s.insert_message(1, 5, "q", "message", None).unwrap();
         let m2 = s.insert_message(5, 1, "a", "reply", Some(m1)).unwrap();
         assert_eq!(s.get_message(m2).unwrap().unwrap().reply_to, Some(m1));

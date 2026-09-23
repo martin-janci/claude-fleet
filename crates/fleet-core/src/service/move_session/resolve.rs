@@ -707,6 +707,9 @@ mod tests {
         /// successful kill, to prove the post-kill bookkeeping can no longer
         /// turn a completed kill into a hard error.
         poison_after_kill: bool,
+        /// Final review / Important 4: the kill FAILS, which is the
+        /// `E_MOVE_PARTIAL` window where both sessions stay alive.
+        kill_fails: bool,
     }
 
     impl FakeHooks {
@@ -714,6 +717,7 @@ mod tests {
             Self {
                 killed: Mutex::new(Vec::new()),
                 poison_after_kill: false,
+                kill_fails: false,
             }
         }
 
@@ -721,6 +725,15 @@ mod tests {
             Self {
                 killed: Mutex::new(Vec::new()),
                 poison_after_kill: true,
+                kill_fails: false,
+            }
+        }
+
+        fn failing_kill(_fake: &FakeSsh) -> Self {
+            Self {
+                killed: Mutex::new(Vec::new()),
+                poison_after_kill: false,
+                kill_fails: true,
             }
         }
 
@@ -763,6 +776,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((host.to_string(), tmux_name.to_string()));
+            if self.kill_fails {
+                return Err(IpcError::new(codes::E_SSH, "ssh died mid-kill"));
+            }
             if self.poison_after_kill {
                 // A thread that panics while holding a `std::sync::Mutex`
                 // poisons it on unwind; `catch_unwind` stops that unwind
@@ -865,6 +881,78 @@ mod tests {
             );
             assert_eq!(d["finished_from_partial"], true, "{d}");
         }
+    }
+
+    /// Final review, Important 4. The participant is re-pointed to the
+    /// target BEFORE the kill — deliberately, so mail follows the move
+    /// rather than being tombstoned with the source row. But when the kill
+    /// FAILS, both sessions stay alive (that is exactly `E_MOVE_PARTIAL`),
+    /// possibly for hours until `resolve_move` runs. Without a rollback the
+    /// still-running SOURCE has no participant at all: its `list_inbox` is
+    /// empty and every message addressed to it lands on the target instead.
+    /// The order stays as it is; the missing piece is putting the identity
+    /// back when the kill did not happen.
+    #[tokio::test]
+    async fn a_failed_kill_puts_the_participant_back_on_the_still_running_source() {
+        let (store, source_id, target_id) = partial_fixture(true);
+        let (sender, msg_id, participant) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let sender = s
+                .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            let msg_id = s
+                .insert_message(sender, source_id, "still yours", "message", None)
+                .unwrap();
+            let p = s.participant_for_session(source_id).unwrap().unwrap().id;
+            (sender, msg_id, p)
+        };
+        let fake = FakeSsh::new();
+        fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:locate"),
+            Reply::ok(&format!(
+                "{TRANSCRIPT_LEN}\t{MTIME}\t{SRC_TRANSCRIPT_PATH}\n"
+            )),
+        );
+        let hooks = FakeHooks::failing_kill(&fake);
+        let err = resolve_move_with(
+            ResolveMoveArgs {
+                session_id: target_id,
+                action: ResolveMoveAction::Finish,
+            },
+            &store,
+            &fake,
+            &hooks,
+        )
+        .await
+        .unwrap_err();
+        assert!(hooks.killed_any(), "the kill was attempted");
+        assert_eq!(err.code, codes::E_INVALID_STATE, "{err:?}");
+
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.participant_by_id(participant)
+                .unwrap()
+                .unwrap()
+                .session_id,
+            Some(source_id),
+            "the source is still running, so it must still own its identity"
+        );
+        assert_eq!(
+            s.list_inbox(source_id, false, 10)
+                .unwrap()
+                .iter()
+                .map(|m| m.id)
+                .collect::<Vec<_>>(),
+            vec![msg_id],
+            "the source's inbox must not have followed a move that did not happen"
+        );
+        assert!(
+            s.list_inbox(target_id, false, 10).unwrap().is_empty(),
+            "and the target must not be receiving the source's mail"
+        );
+        let _ = sender;
     }
 
     #[tokio::test]

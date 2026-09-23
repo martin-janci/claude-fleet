@@ -157,10 +157,31 @@ pub fn is_foreign(a: &Addr, local_fleet: &str) -> bool {
 /// Settings key holding this fleet's identity.
 pub const FLEET_ID_KEY: &str = "fleet.id";
 
+/// This fleet's id if one has been minted, WITHOUT minting one. `None` when
+/// the setting is absent or empty.
+///
+/// The read half of the pair (final review, Minor 7): minting writes to the
+/// store, and `whoami` — which merely reports the id — is callable with a
+/// readonly token. A readonly caller must never cause a database write, so
+/// reporting uses this and says "not minted yet" rather than creating it.
+pub fn stored_local_fleet_id(
+    store: &std::sync::Mutex<crate::store::Store>,
+) -> Result<Option<String>, IpcError> {
+    let s = crate::ipc_error::lock(store)?;
+    Ok(s.get_setting(FLEET_ID_KEY)?.filter(|v| !v.is_empty()))
+}
+
 /// This fleet's id, minted on first call and stable thereafter. Kept in
 /// `settings` rather than a column: it is one value per store, and a
 /// migration for it would buy nothing.
-pub fn local_fleet_id(store: &std::sync::Mutex<crate::store::Store>) -> Result<String, IpcError> {
+///
+/// Named for the write it may do. Call it only where an address genuinely
+/// has to be compared against this fleet's identity (`is_foreign`) — the
+/// comparison is meaningless without one, and the caller is on a write path
+/// already. To only report the id, use [`stored_local_fleet_id`].
+pub fn ensure_local_fleet_id(
+    store: &std::sync::Mutex<crate::store::Store>,
+) -> Result<String, IpcError> {
     let s = crate::ipc_error::lock(store)?;
     if let Some(existing) = s.get_setting(FLEET_ID_KEY)? {
         if !existing.is_empty() {
@@ -296,11 +317,31 @@ mod tests {
     #[test]
     fn fleet_id_is_minted_once_and_then_stable() {
         let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
-        let a = local_fleet_id(&store).unwrap();
-        let b = local_fleet_id(&store).unwrap();
+        let a = ensure_local_fleet_id(&store).unwrap();
+        let b = ensure_local_fleet_id(&store).unwrap();
         assert_eq!(a, b, "the fleet id must not be re-minted");
         assert_eq!(a.len(), 36, "a uuid v4 in hyphenated form");
         // It parses as the fleet segment of an address.
         assert!(!is_foreign(&parse(&format!("{a}/hub")).unwrap(), &a));
+    }
+
+    /// Final review, Minor 7: `whoami` is callable with a readonly token, and
+    /// a readonly caller must never cause a database write. Reading the fleet
+    /// id therefore may not mint it.
+    #[test]
+    fn reading_the_fleet_id_never_mints_it() {
+        let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
+        assert_eq!(
+            stored_local_fleet_id(&store).unwrap(),
+            None,
+            "nothing minted yet"
+        );
+        assert_eq!(
+            store.lock().unwrap().get_setting(FLEET_ID_KEY).unwrap(),
+            None,
+            "and the read wrote nothing"
+        );
+        let minted = ensure_local_fleet_id(&store).unwrap();
+        assert_eq!(stored_local_fleet_id(&store).unwrap(), Some(minted));
     }
 }

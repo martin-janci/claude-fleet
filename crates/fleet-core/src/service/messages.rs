@@ -153,15 +153,26 @@ pub async fn send_message(
             // A reply must point at a real message the sender took part in;
             // an arbitrary id would let an agent forge a thread.
             if let Some(parent_id) = args.reply_to {
-                let parent = s.get_message(parent_id)?.ok_or_else(|| {
-                    IpcError::new(
+                if s.get_message(parent_id)?.is_none() {
+                    return Err(IpcError::new(
                         codes::E_NOTFOUND,
                         format!("reply_to message {parent_id} not found"),
-                    )
-                })?;
-                if parent.from_session_id != args.from_session_id
-                    && parent.to_session_id != args.from_session_id
-                {
+                    ));
+                }
+                // By PARTICIPANT, not by raw session id (final review,
+                // Important 3): a move creates a new `sessions` row and
+                // kills the source, so keying on `parent.from_session_id` /
+                // `parent.to_session_id` meant a moved session could not
+                // reply to anything it had sent or received before the
+                // move. The participant is the durable end of a thread.
+                // A sender with no participant at all has never sent or
+                // received anything, so it cannot be part of any thread.
+                let mine = s.participant_for_session(args.from_session_id)?;
+                let involved = match mine {
+                    Some(p) => s.message_involves_participant(parent_id, p.id)?,
+                    None => false,
+                };
+                if !involved {
                     return Err(IpcError::new(
                         codes::E_INVALID,
                         format!(
@@ -364,7 +375,9 @@ fn resolve_to_session_id(args: &SendMessageArgs, store: &Mutex<Store>) -> Result
         return Ok(args.to_session_id);
     };
     let addr = crate::service::address::parse(raw)?;
-    let fleet = crate::service::address::local_fleet_id(store)?;
+    // The one place an address genuinely has to be compared against this
+    // fleet's identity, so the one place that may mint it.
+    let fleet = crate::service::address::ensure_local_fleet_id(store)?;
     if crate::service::address::is_foreign(&addr, &fleet) {
         return Err(IpcError::new(
             codes::E_UNSUPPORTED,
@@ -1033,6 +1046,51 @@ mod tests {
         forged.reply_to = Some(first.id);
         let err = send_message(forged, &store, &ssh).await.unwrap_err();
         assert_eq!(err.code, "E_INVALID");
+    }
+
+    /// Final review, Important 3. `reply_to` validation used to key on the
+    /// parent's raw `from_session_id` / `to_session_id`, but a move creates a
+    /// NEW row and kills the source, so after a move a session could not
+    /// reply to anything it had sent or received before it —
+    /// `E_INVALID "reply_to message N does not involve session M"`. The
+    /// durable identity is the participant, and this was the one read the
+    /// participant conversion missed.
+    #[tokio::test]
+    async fn a_reply_still_works_after_the_replying_session_moved() {
+        let (store, ssh, a, b) = fixture();
+        let first = send_message(args(a, b, "question?"), &store, &ssh)
+            .await
+            .unwrap();
+        // The move: a new row for the same endpoint, and the participant
+        // re-pointed onto it exactly as `move_session::finalise` does.
+        let moved = {
+            let s = store.lock().unwrap();
+            let moved = seed(&s, "beta-on-the-other-host");
+            let p = s.participant_for_session(b).unwrap().unwrap();
+            s.repoint_participant(p.id, moved).unwrap();
+            moved
+        };
+        let mut reply = args(moved, a, "answer.");
+        reply.reply_to = Some(first.id);
+        let res = send_message(reply, &store, &ssh)
+            .await
+            .expect("a moved session must still be able to reply to its own thread");
+        let inbox = list_inbox(a, false, 10, false, &store).unwrap();
+        assert_eq!(inbox[0].id, res.id);
+        assert_eq!(inbox[0].reply_to, Some(first.id));
+
+        // The forgery guard still holds: a session that never took part in
+        // the thread is refused, by participant just as by row id.
+        let outsider = {
+            let s = store.lock().unwrap();
+            seed(&s, "delta")
+        };
+        let mut forged = args(outsider, a, "me too");
+        forged.reply_to = Some(first.id);
+        assert_eq!(
+            send_message(forged, &store, &ssh).await.unwrap_err().code,
+            "E_INVALID"
+        );
     }
 
     // ---- atomicity ----
