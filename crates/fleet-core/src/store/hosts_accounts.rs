@@ -414,16 +414,20 @@ impl Store {
             ids
         };
         // What dies with the sessions (as `delete_session` does): their
-        // timeline and the messages addressed to them.
+        // timeline.
         tx.execute(
             "DELETE FROM session_events
               WHERE session_id IN (SELECT id FROM sessions WHERE host_alias=?1)",
             rusqlite::params![alias],
         )?;
+        // Tombstone the participant rather than deleting the messages
+        // addressed to it, as `delete_session` does — removing a host must
+        // not silently destroy an undelivered inbox.
         tx.execute(
-            "DELETE FROM session_messages
-              WHERE to_session_id IN (SELECT id FROM sessions WHERE host_alias=?1)",
-            rusqlite::params![alias],
+            "UPDATE participants SET retired_at = ?1, session_id = NULL, client_id = NULL
+              WHERE session_id IN (SELECT id FROM sessions WHERE host_alias=?2)
+                AND retired_at IS NULL",
+            rusqlite::params![now_unix(), alias],
         )?;
         tx.execute(
             "DELETE FROM sessions WHERE host_alias=?1",
@@ -651,7 +655,13 @@ mod tests {
     }
 
     #[test]
-    fn delete_host_reaps_timeline_inbox_and_fingerprints_in_one_go() {
+    fn delete_host_reaps_timeline_and_fingerprints_but_tombstones_the_inbox() {
+        // Previously named `..._reaps_timeline_inbox_and_...` and asserted
+        // `list_inbox(gone, ...)` was empty after the delete — that
+        // assertion encoded the pre-existing defect Task 13 fixes (removing
+        // a host used to destroy every undelivered message addressed to its
+        // sessions). The message now survives; only the participant
+        // identity is tombstoned.
         let s = Store::open_in_memory().unwrap();
         s.insert_host("h", Some("h")).unwrap();
         s.upsert_host("local").unwrap();
@@ -665,10 +675,12 @@ mod tests {
             .unwrap();
         s.insert_session_event(peer, "status_change", Some("idle"))
             .unwrap();
-        s.insert_message(peer, gone, "to the gone", "message", None)
+        let to_gone = s
+            .insert_message(peer, gone, "to the gone", "message", None)
             .unwrap();
         s.insert_message(gone, peer, "from the gone", "message", None)
             .unwrap();
+        let participant = s.participant_for_session(gone).unwrap().unwrap().id;
         s.record_parent_fingerprint("h", "/h/r/w", "1:2", 1)
             .unwrap();
         s.record_parent_fingerprint("local", "/l/r/w", "3:4", 1)
@@ -677,7 +689,12 @@ mod tests {
         s.delete_host("h").unwrap();
 
         assert!(s.list_session_events(gone, 10).unwrap().is_empty());
-        assert!(s.list_inbox(gone, false, 10).unwrap().is_empty());
+        assert!(
+            s.get_message(to_gone).unwrap().is_some(),
+            "removing a host must not destroy undelivered mail"
+        );
+        let p = s.participant_by_id(participant).unwrap().unwrap();
+        assert!(p.retired_at.is_some(), "the identity is tombstoned instead");
         assert_eq!(s.list_session_events(peer, 10).unwrap().len(), 1);
         assert_eq!(
             s.list_inbox(peer, false, 10).unwrap().len(),

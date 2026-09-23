@@ -7824,6 +7824,48 @@ mod tests {
         assert!(wait_events(&f).is_empty(), "no wait was registered");
     }
 
+    /// Task 13's regression test for the pre-existing data-loss defect: a
+    /// real end-to-end move (not just the store-level repoint) must not
+    /// destroy mail still addressed to the source when the source is
+    /// killed. Before the fix, `delete_session` unconditionally deleted
+    /// every `session_messages` row addressed to the source, so this
+    /// assertion failed with an empty Vec.
+    #[tokio::test]
+    async fn a_move_keeps_the_sources_undelivered_inbox() {
+        let (f, _bus) = recorded_fixture();
+        let (peer, msg) = {
+            let s = f.store.lock().unwrap();
+            let peer = s
+                .upsert_session("peer", "alpha", None, None, 1, 1, "running", None)
+                .unwrap();
+            let msg = s
+                .insert_message(peer, f.source_id, "follow me", "message", None)
+                .unwrap();
+            (peer, msg)
+        };
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let out = move_session_with(args(&f, false), &f.store, &f.fake, &hooks, fast())
+            .await
+            .unwrap();
+        let rep = expect_moved(out);
+        assert!(rep.source_killed, "the source must actually be killed here");
+
+        let s = f.store.lock().unwrap();
+        assert!(
+            s.get_message(msg).unwrap().is_some(),
+            "the move must not destroy undelivered mail"
+        );
+        let pending = s
+            .list_undelivered_for_session(rep.target_session_id, 10)
+            .unwrap();
+        assert_eq!(
+            pending.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![msg],
+            "the moved session inherits its undelivered mail"
+        );
+        let _ = peer;
+    }
+
     #[tokio::test]
     async fn cancel_with_nothing_pending_says_so_and_moves_nothing() {
         let (f, _bus) = recorded_fixture();

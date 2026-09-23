@@ -13,7 +13,7 @@
 
 use std::sync::Mutex;
 
-use crate::ipc_error::{codes, IpcError};
+use crate::ipc_error::{codes, lock, IpcError};
 use crate::store::Store;
 
 use super::{carry, locate_on, Located, MoveHooks, EVENT_MOVED};
@@ -113,6 +113,20 @@ pub(super) async fn finalise_source(
                 )
             })
             .unwrap_or((None, None));
+        // The address embeds the host alias and the row id changes on a
+        // move, so the durable thing is the participant: re-point it BEFORE
+        // the source is killed, and every message already addressed to this
+        // session follows to the target instead of being tombstoned with the
+        // source row (see `store::sessions::delete_session`). No participant
+        // exists when nothing was ever addressed to the source — nothing to
+        // carry, so this is a no-op then.
+        {
+            let s = lock(store)?;
+            if let Some(p) = s.participant_for_session(a.source_row_id)? {
+                s.repoint_participant(p.id, a.target_row_id)
+                    .map_err(|e| tag_step("re-pointing the participant", e))?;
+            }
+        }
         hooks
             .kill_tmux_session(store, a.source_host, a.source_tmux_name)
             .await

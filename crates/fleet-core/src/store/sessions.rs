@@ -858,12 +858,20 @@ impl Store {
     }
 
     /// Hard-delete one session row (ghost dismissal) together with what dies
-    /// with it, in one transaction: its `session_events` timeline and the
-    /// messages addressed TO it (an inbox nobody can read). Neither table has
-    /// an FK cascade, and `sessions.id` has no AUTOINCREMENT, so leftovers
-    /// would surface on the next session that reuses the id. Kept: messages it
-    /// SENT (they live in the recipients' inboxes) and tasks it requested or
-    /// worked — the task sweep fails a task whose worker row is gone.
+    /// with it, in one transaction: its `session_events` timeline. Neither
+    /// table has an FK cascade, and `sessions.id` has no AUTOINCREMENT, so
+    /// leftover events would surface on the next session that reuses the id.
+    /// Kept: messages it SENT (they live in the recipients' inboxes) and
+    /// tasks it requested or worked — the task sweep fails a task whose
+    /// worker row is gone.
+    ///
+    /// Deliberately NOT `DELETE FROM session_messages`: a kill used to
+    /// destroy every undelivered message addressed to this session, and a
+    /// MOVE goes through here too (the source row is killed after the
+    /// target is created), so a move silently lost the inbox. The identity
+    /// is tombstoned instead; `service/gc.rs` sweeps the mail after the
+    /// retention window, and a move re-points the participant BEFORE this
+    /// runs, so there is nothing here left to retire.
     pub fn delete_session(&self, id: i64) -> Result<(), rusqlite::Error> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
@@ -871,8 +879,9 @@ impl Store {
             rusqlite::params![id],
         )?;
         tx.execute(
-            "DELETE FROM session_messages WHERE to_session_id=?1",
-            rusqlite::params![id],
+            "UPDATE participants SET retired_at = ?1, session_id = NULL, client_id = NULL \
+             WHERE session_id = ?2 AND retired_at IS NULL",
+            rusqlite::params![now_unix(), id],
         )?;
         tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         tx.commit()?;
@@ -1328,6 +1337,62 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         s
+    }
+
+    /// In-memory store with one running session on `local`, for the
+    /// participant-tombstone tests below.
+    fn seed(s: &Store, name: &str) -> i64 {
+        s.upsert_host("local").unwrap();
+        s.upsert_session(name, "local", None, None, 0, 0, "running", None)
+            .unwrap()
+    }
+
+    #[test]
+    fn deleting_a_session_retires_its_participant_and_keeps_undelivered_mail() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let m = s.insert_message(a, b, "unread", "message", None).unwrap();
+        let p = s.participant_for_session(b).unwrap().unwrap().id;
+
+        s.delete_session(b).unwrap();
+
+        assert!(
+            s.get_message(m).unwrap().is_some(),
+            "the message survives the kill"
+        );
+        let row = s
+            .participant_by_id(p)
+            .unwrap()
+            .expect("the identity survives");
+        assert!(row.retired_at.is_some(), "and is tombstoned");
+    }
+
+    #[test]
+    fn a_move_repoints_the_participant_so_mail_follows_the_session() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let src = seed(&s, "worker");
+        let dst = seed(&s, "worker-moved");
+        let m = s
+            .insert_message(a, src, "follow me", "message", None)
+            .unwrap();
+        let p = s.participant_for_session(src).unwrap().unwrap().id;
+
+        // What finalise does: re-point, then kill the source row.
+        s.repoint_participant(p, dst).unwrap();
+        s.delete_session(src).unwrap();
+
+        assert_eq!(
+            s.participant_by_id(p).unwrap().unwrap().session_id,
+            Some(dst)
+        );
+        let pending = s.list_undelivered_for_session(dst, 10).unwrap();
+        assert_eq!(
+            pending.iter().map(|x| x.id).collect::<Vec<_>>(),
+            vec![m],
+            "the moved session inherits its undelivered mail"
+        );
     }
 
     #[test]
@@ -2037,7 +2102,15 @@ mod tests {
     }
 
     #[test]
-    fn bg_reconcile_hard_delete_reaps_timeline_and_inbox_but_keeps_sent_messages() {
+    fn bg_reconcile_hard_delete_reaps_the_timeline_but_tombstones_the_inbox_instead_of_deleting_it()
+    {
+        // Previously named `..._reaps_timeline_and_inbox_...` and asserted
+        // `list_inbox(bg, ...)` was empty after the hard-delete — that
+        // assertion encoded the pre-existing defect Task 13 fixes (this
+        // shares `Store::ghost_and_clean` with the tmux reconcile path, so
+        // the same bulk-delete used to destroy undelivered mail here too).
+        // The message now survives; only the participant identity is
+        // tombstoned.
         let store = Store::open_in_memory().unwrap();
         store.upsert_host("alpha").unwrap();
         let bg = store
@@ -2058,12 +2131,13 @@ mod tests {
         store
             .insert_session_event(bg, "status_change", Some("idle"))
             .unwrap();
-        store
+        let to_gone = store
             .insert_message(peer, bg, "to the gone bg", "message", None)
             .unwrap();
         store
             .insert_message(bg, peer, "from the gone bg", "message", None)
             .unwrap();
+        let participant = store.participant_for_session(bg).unwrap().unwrap().id;
         // Two passes without the agent: ghost, then hard-delete.
         store
             .ghost_and_clean_bg_sessions("alpha", &[], 10, None)
@@ -2081,9 +2155,11 @@ mod tests {
             "the timeline goes with the row"
         );
         assert!(
-            store.list_inbox(bg, false, 10).unwrap().is_empty(),
-            "an inbox nobody can read goes with the row"
+            store.get_message(to_gone).unwrap().is_some(),
+            "a hard-deleted bg row must not destroy undelivered mail"
         );
+        let p = store.participant_by_id(participant).unwrap().unwrap();
+        assert!(p.retired_at.is_some(), "the identity is tombstoned instead");
         assert_eq!(
             store.list_inbox(peer, false, 10).unwrap().len(),
             1,
@@ -2302,7 +2378,14 @@ mod tests {
     }
 
     #[test]
-    fn delete_session_reaps_timeline_and_inbox_but_keeps_sent_messages_and_tasks() {
+    fn delete_session_reaps_the_timeline_but_tombstones_the_inbox_instead_of_deleting_it() {
+        // Previously named `..._reaps_timeline_and_inbox_...` and asserted
+        // `list_inbox(dead, ...)` was empty after the kill — that assertion
+        // encoded the pre-existing defect Task 13 fixes (a kill, and
+        // therefore a move, used to destroy every undelivered message
+        // addressed to the session). The message now survives; only the
+        // participant identity is tombstoned, and `service/gc.rs` sweeps the
+        // mail itself after the retention window.
         let store = Store::open_in_memory().unwrap();
         store.upsert_host("alpha").unwrap();
         let dead = store
@@ -2317,18 +2400,24 @@ mod tests {
         store
             .insert_session_event(peer, "status_change", Some("idle"))
             .unwrap();
-        store
+        let to_dead = store
             .insert_message(peer, dead, "to the dead", "message", None)
             .unwrap();
         store
             .insert_message(dead, peer, "from the dead", "message", None)
             .unwrap();
         let task = store.insert_task(Some(peer), Some(dead), "p", "n").unwrap();
+        let participant = store.participant_for_session(dead).unwrap().unwrap().id;
 
         store.delete_session(dead).unwrap();
 
         assert!(store.list_session_events(dead, 10).unwrap().is_empty());
-        assert!(store.list_inbox(dead, false, 10).unwrap().is_empty());
+        assert!(
+            store.get_message(to_dead).unwrap().is_some(),
+            "a kill must not destroy undelivered mail"
+        );
+        let p = store.participant_by_id(participant).unwrap().unwrap();
+        assert!(p.retired_at.is_some(), "the identity is tombstoned instead");
         assert_eq!(store.list_session_events(peer, 10).unwrap().len(), 1);
         assert_eq!(
             store.list_inbox(peer, false, 10).unwrap().len(),

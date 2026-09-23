@@ -86,6 +86,18 @@ impl Store {
     /// Follow a moved session: the identity (and therefore every message
     /// addressed to it) now points at `new_session_id`. Refused for a retired
     /// participant — a tombstone never comes back to life.
+    ///
+    /// `insert_message` calls `ensure_participant_for_session`, so
+    /// `new_session_id` (the move's target row) may already own a DIFFERENT
+    /// participant by the time a move finalises — e.g. someone addressed a
+    /// message to the target session before the move's source was killed.
+    /// The unique partial index on `participants(session_id)` allows only
+    /// one live owner, so that participant is folded into the one being
+    /// re-pointed here rather than left to collide: every message it sent or
+    /// received is reassigned to `participant_id`, and it is retired (never
+    /// deleted, consistent with the rest of this module) before the claim on
+    /// `new_session_id` is made. The re-pointed identity — the one carrying
+    /// this session's history across the move — is the survivor.
     pub fn repoint_participant(
         &self,
         participant_id: i64,
@@ -102,6 +114,19 @@ impl Store {
                 codes::E_PARTICIPANT_RETIRED,
                 format!("participant {participant_id} is retired"),
             ));
+        }
+        if let Some(existing) = self.participant_for_session(new_session_id)? {
+            if existing.id != participant_id {
+                self.conn.execute(
+                    "UPDATE session_messages SET to_participant_id = ?1 WHERE to_participant_id = ?2",
+                    rusqlite::params![participant_id, existing.id],
+                )?;
+                self.conn.execute(
+                    "UPDATE session_messages SET from_participant_id = ?1 WHERE from_participant_id = ?2",
+                    rusqlite::params![participant_id, existing.id],
+                )?;
+                self.retire_participant(existing.id)?;
+            }
         }
         self.conn.execute(
             "UPDATE participants SET session_id = ?1 WHERE id = ?2",
@@ -218,6 +243,59 @@ mod tests {
         assert!(
             row.retired_at.is_some(),
             "retired participants must still resolve"
+        );
+    }
+
+    /// `insert_message` auto-creates a participant for its recipient, so the
+    /// move's target row can already own one by the time `finalise` calls
+    /// `repoint_participant` — e.g. someone messaged the target session
+    /// before the source was killed. Without a collision guard this trips
+    /// the unique partial index on `participants(session_id)` as a bare
+    /// `E_SQLITE`. Ruling 4: merge the collision's mail into the surviving
+    /// (re-pointed) identity and retire the collided-with participant.
+    #[test]
+    fn repointing_into_a_session_that_already_has_a_participant_merges_and_retires_it() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let src = seed(&s, "worker");
+        let dst = seed(&s, "worker-moved");
+
+        // History addressed to the source before the move.
+        let m1 = s
+            .insert_message(a, src, "before the move", "message", None)
+            .unwrap();
+        let src_p = s.participant_for_session(src).unwrap().unwrap().id;
+
+        // A message lands on the target row before finalise re-points —
+        // this is what creates the collision.
+        let m2 = s
+            .insert_message(a, dst, "already there", "message", None)
+            .unwrap();
+        let dst_p = s.participant_for_session(dst).unwrap().unwrap().id;
+        assert_ne!(
+            src_p, dst_p,
+            "two distinct participants exist before the repoint"
+        );
+
+        s.repoint_participant(src_p, dst).unwrap();
+
+        // The surviving identity is the re-pointed one, now owning `dst`.
+        assert_eq!(
+            s.participant_by_id(src_p).unwrap().unwrap().session_id,
+            Some(dst)
+        );
+        // The collided-with participant is tombstoned, not deleted.
+        let retired = s.participant_by_id(dst_p).unwrap().unwrap();
+        assert!(retired.retired_at.is_some(), "the collision is tombstoned");
+        assert_eq!(retired.session_id, None);
+        // Both messages now resolve through the surviving identity.
+        let pending = s.list_undelivered_for_session(dst, 10).unwrap();
+        let mut ids: Vec<_> = pending.iter().map(|m| m.id).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![m1, m2],
+            "both the old and the colliding mail follow the survivor"
         );
     }
 

@@ -536,18 +536,22 @@ impl Store {
     ) -> Result<(), crate::ipc_error::IpcError> {
         let tx = self.conn.unchecked_transaction()?;
         // What dies with the sessions (as `delete_session` does): their
-        // timeline and the messages addressed to them. And the recorded
-        // parent fingerprints (repair) of the project's worktree rows, each
-        // under the ROW's host (rows are host-scoped, migration 024).
+        // timeline. And the recorded parent fingerprints (repair) of the
+        // project's worktree rows, each under the ROW's host (rows are
+        // host-scoped, migration 024).
         tx.execute(
             "DELETE FROM session_events
               WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
             rusqlite::params![project_id],
         )?;
+        // Tombstone the participant rather than deleting the messages
+        // addressed to it, as `delete_session` does — deleting a project
+        // must not silently destroy an undelivered inbox.
         tx.execute(
-            "DELETE FROM session_messages
-              WHERE to_session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
-            rusqlite::params![project_id],
+            "UPDATE participants SET retired_at = ?1, session_id = NULL, client_id = NULL
+              WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?2)
+                AND retired_at IS NULL",
+            rusqlite::params![now_unix(), project_id],
         )?;
         let wt_rows: Vec<(i64, String, String)> = {
             let mut stmt =
@@ -914,7 +918,13 @@ mod tests {
     }
 
     #[test]
-    fn delete_project_reaps_timeline_inbox_and_worktree_fingerprints() {
+    fn delete_project_reaps_timeline_and_worktree_fingerprints_but_tombstones_the_inbox() {
+        // Previously named `..._reaps_timeline_inbox_and_...` and asserted
+        // `list_inbox(sid, ...)` was empty after the delete — that
+        // assertion encoded the pre-existing defect Task 13 fixes (deleting
+        // a project used to destroy every undelivered message addressed to
+        // its sessions). The message now survives; only the participant
+        // identity is tombstoned.
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         let pid = s.upsert_project("o", "r", "/fleet-test/r").unwrap();
@@ -945,8 +955,10 @@ mod tests {
             .unwrap();
         s.insert_session_event(sid, "status_change", Some("idle"))
             .unwrap();
-        s.insert_message(peer, sid, "to the project", "message", None)
+        let to_project = s
+            .insert_message(peer, sid, "to the project", "message", None)
             .unwrap();
+        let participant = s.participant_for_session(sid).unwrap().unwrap().id;
         s.record_parent_fingerprint("local", "/fleet-test/r/.worktrees/feat", "1:2", 1)
             .unwrap();
         s.record_parent_fingerprint("local", "/fleet-test/k/.worktrees/keep", "3:4", 1)
@@ -955,7 +967,12 @@ mod tests {
         s.delete_project(pid, &FingerprintKeys::new()).unwrap();
 
         assert!(s.list_session_events(sid, 10).unwrap().is_empty());
-        assert!(s.list_inbox(sid, false, 10).unwrap().is_empty());
+        assert!(
+            s.get_message(to_project).unwrap().is_some(),
+            "deleting a project must not destroy undelivered mail"
+        );
+        let p = s.participant_by_id(participant).unwrap().unwrap();
+        assert!(p.retired_at.is_some(), "the identity is tombstoned instead");
         assert_eq!(
             s.parent_fingerprint("local", "/fleet-test/r/.worktrees/feat")
                 .unwrap(),
