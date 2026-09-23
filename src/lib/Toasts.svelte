@@ -1,15 +1,10 @@
 <script lang="ts">
-  import { toasts, dismiss, clearToasts, runToastAction } from './toasts';
+  import { toasts, droppedToasts, dismiss, clearToasts, runToastAction } from './toasts';
 </script>
 
 <!-- Polite live region: screen readers announce new toasts without
      interrupting; errors stay until dismissed, info auto-clears. -->
 <div class="toasts" aria-live="polite" role="status" data-testid="toasts">
-  {#if $toasts.length > 1}
-    <button class="dismiss-all" onclick={() => clearToasts()} data-testid="toast-dismiss-all">
-      Dismiss all ({$toasts.length})
-    </button>
-  {/if}
   {#each $toasts as t (t.id)}
     <!-- No nested live region: an assertive role="alert" inside this polite
          role="status" is undefined behaviour and screen readers either
@@ -28,14 +23,39 @@
       <button class="close" onclick={() => dismiss(t.id)} aria-label="Dismiss" data-testid="toast-dismiss">×</button>
     </div>
   {/each}
+  <!-- LAST, not first. The column is anchored at its bottom edge and grows
+       upward, so its first child is the one a tall stack pushes off the top of
+       the viewport — which is exactly when the escape hatch is needed. Sitting
+       next to the anchor, it is on screen no matter how many toasts are up. -->
+  {#if $toasts.length > 1 || $droppedToasts > 0}
+    <div class="bar">
+      {#if $droppedToasts > 0}
+        <!-- The cap threw some away; saying "Dismiss all (5)" and nothing else
+             would understate what actually went wrong. -->
+        <span class="dropped" data-testid="toast-dropped">+{$droppedToasts} older not shown</span>
+      {/if}
+      <button class="dismiss-all" onclick={() => clearToasts()} data-testid="toast-dismiss-all">
+        Dismiss all ({$toasts.length})
+      </button>
+    </div>
+  {/if}
 </div>
 
 <style>
   /* Errors are sticky, so N failing sessions leave N toasts and the only
      way out was N individual × clicks. */
-  .dismiss-all {
+  .bar {
     pointer-events: auto;
     align-self: flex-end;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .dropped {
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+  }
+  .dismiss-all {
     font: inherit;
     font-size: 0.72rem;
     padding: 0.15rem 0.45rem;

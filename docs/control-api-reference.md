@@ -51,6 +51,12 @@ Parameters: `confirm_nonce`, `force`, `worktree_id`
 
 Discover SSH hosts from the user's ~/.ssh/config. These are candidates for add_host. Returns JSON.
 
+### `discover_lost_sessions`
+
+Read-only: scan ~/.claude/projects on a host for Claude conversations fleet has no live pane for, ranked against the host's boot (rank_hint: before_boot | after_boot | stale | unknown) and enriched with project_id, worktree_id and existing_session_id — the last set when a fleet row (live or lost) already holds that conversation, which restore_host_sessions handles, not this. resumable is true only when the pane would start in exactly the transcript's cwd; anywhere else claude --resume silently starts an empty conversation instead, so do not resume it. Resume one with new_session { host_alias, project_id, worktree_id, name: derived_tmux_name (a hint), resume_claude_session_id }. limit: newest first, default 50, max 500.
+
+Parameters: `host_alias`, `limit`
+
 ### `dismiss_ghost_session`
 
 Dismiss a ghost session (lost from tmux): permanently delete its row. Use when a ghost is not worth reviving — the row is the only thing left to clean up. Errors if the session is not a ghost.
@@ -169,7 +175,7 @@ Parameters: `host_alias`, `name`, `prompt`, `requester_session_id`
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree). Pass new_worktree to fork a fresh worktree+branch (optional base_branch). Auto-clones the repo on remote hosts. Optional kind="shell" runs a plain interactive shell instead (see new_shell_session for the same thing with start_command); optional friendly_name sets the sidebar label (omit / empty to derive one from the branch).
 
-Parameters: `base_branch`, `friendly_name`, `host_alias`, `kind`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
+Parameters: `base_branch`, `friendly_name`, `host_alias`, `kind`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -321,6 +327,12 @@ Restart a tmux session (kill and recreate it in the same place). Use when the Cl
 
 Parameters: `force`, `host_alias`, `name`, `session_id`
 
+### `restore_host_sessions`
+
+Restore sessions a host lost to a reboot or tmux restart: resume each one's Claude conversation in its original worktree under its original name. dry_run=true returns the plan (no ssh, no writes) — call it first, and again after a timeout to see what is still lost. One failing session never fails the others; the result lists every outcome. One restore per host at a time (E_INVALID_STATE otherwise); a lost fleet controller is skipped (recreate_session force=true). Paced by restore.batch_size / restore.stagger_ms.
+
+Parameters: `dry_run`, `host_alias`, `session_ids`
+
 ### `revoke_client`
 
 Revoke a paired client's token by name. Its next request is refused (the auth layer only resolves live rows) and the name becomes free to pair again; the row itself is kept, revoked, for the audit trail. E_NOTFOUND when no live client holds that name. Master token only. Returns the revoked row as JSON.
@@ -353,7 +365,7 @@ Parameters: `body`, `client_msg_id`, `deliver`, `from_session_id`, `kind`, `raw`
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one Enter). The first prompt to a still-unnamed session also becomes its friendly name. Marked untrusted unless raw=true (master only) or a trusted client. keys=Enter|Escape|C-c presses a key instead (unmarked). Returns JSON { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working session queues it (queued=true). acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable. Repeat a client_msg_id to retry without delivering twice.
+Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one Enter). The first prompt to a still-unnamed session also becomes its friendly name. Marked untrusted unless raw=true (master only) or a trusted client. keys=Enter|Escape|C-c|1-9 presses a key instead (unmarked; 1-9 answers pending_input). Returns JSON { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working session queues it (queued=true). acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable. Repeat a client_msg_id to retry without delivering twice.
 
 Parameters: `client_msg_id`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
@@ -492,6 +504,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`
+- `commands::sessions::restore_host_sessions`
+- `commands::sessions::discover_lost_sessions`
 - `commands::move_session::move_session`
 - `commands::resolve_move::resolve_move`
 - `commands::sessions::dismiss_ghost_session`

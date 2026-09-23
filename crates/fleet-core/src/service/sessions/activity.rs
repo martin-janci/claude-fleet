@@ -32,6 +32,21 @@ pub struct ActivityProbe {
     /// The live spinner line without its glyph (`Cooking… (3s · …)`), only
     /// while the REPL is generating.
     pub spinner: Option<String>,
+    /// The permission / question dialog on screen right now, options and
+    /// all — the same value the tick stores on `sessions.pending_input`,
+    /// but seconds old instead of up to a tick old. A client draws the
+    /// answer buttons from this and re-reads it to check, immediately
+    /// before sending, that the dialog it is answering is still the dialog
+    /// on screen.
+    ///
+    /// The one `serde(default)` in this struct, deliberately: a hub too old
+    /// to know this field would otherwise fail the whole probe. The rule
+    /// above guards against a silently all-`None` probe reading as an idle
+    /// pane — a missing dialog cannot lie that way, it only falls back to
+    /// the row and to "open the terminal", which is what every client did
+    /// before the field existed.
+    #[serde(default)]
+    pub pending_input: Option<pane_intel::PendingInput>,
 }
 
 /// PURE: the probe for a captured pane tail.
@@ -43,6 +58,7 @@ pub fn probe_from_tail(tail: &str) -> ActivityProbe {
         stuck_kind: intel.stuck.map(|k| k.as_str().to_string()),
         waiting_for: intel.waiting_for.map(|w| w.as_str().to_string()),
         spinner: pane_intel::spinner_line(tail),
+        pending_input: intel.pending_input,
     }
 }
 
@@ -99,6 +115,46 @@ mod tests {
         assert_eq!(p.spinner, None);
     }
 
+    /// The probe reads 12 lines precisely so a dialog's question still fits
+    /// above its options — but the options were being thrown away, leaving
+    /// the 20 s tick's row as the only source of the one thing a client
+    /// needs to draw an answer button. The dialog rides the probe.
+    #[test]
+    fn a_dialog_pane_yields_its_question_and_options() {
+        let p = probe_from_tail(include_str!("../testdata/pane_intel/permission_bash.txt"));
+        assert_eq!(p.claude_status.as_deref(), Some("blocked"));
+        assert_eq!(p.waiting_for.as_deref(), Some("permission"));
+        let dialog = p.pending_input.expect("the dialog rides the probe");
+        assert_eq!(dialog.kind, "permission");
+        assert_eq!(dialog.question.as_deref(), Some("Do you want to proceed?"));
+        assert_eq!(dialog.options.len(), 4);
+        assert_eq!(dialog.options[0].n, 1);
+    }
+
+    #[test]
+    fn a_pane_without_a_dialog_carries_no_pending_input() {
+        assert_eq!(
+            probe_from_tail("❯ \n  ⏸ manual mode on · ? for shortcuts").pending_input,
+            None
+        );
+    }
+
+    /// The other fields deliberately have no `serde(default)`: a hub that
+    /// cannot answer the probe must fail loudly rather than read as an idle
+    /// pane. `pending_input` is the exception — a hub too old to know about
+    /// it degrades to "no buttons, open the terminal", which is honest and
+    /// is exactly what every client did before this field existed.
+    #[test]
+    fn a_probe_from_a_hub_too_old_to_know_the_dialog_still_reads() {
+        let older: ActivityProbe = serde_json::from_str(
+            r#"{"claude_status":"blocked","current_activity":"waiting for permission: x",
+                "stuck_kind":null,"waiting_for":"permission","spinner":null}"#,
+        )
+        .expect("an older hub's probe must still deserialize");
+        assert_eq!(older.waiting_for.as_deref(), Some("permission"));
+        assert_eq!(older.pending_input, None);
+    }
+
     #[test]
     fn empty_capture_is_an_all_none_probe() {
         assert_eq!(
@@ -108,7 +164,8 @@ mod tests {
                 current_activity: None,
                 stuck_kind: None,
                 waiting_for: None,
-                spinner: None
+                spinner: None,
+                pending_input: None,
             }
         );
     }

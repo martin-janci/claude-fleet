@@ -789,6 +789,11 @@ export interface ActivityProbe {
   stuck_kind: StuckKind | null;
   waiting_for: 'permission' | 'input' | null;
   spinner: string | null;
+  /** The dialog on the pane right now, options and all — the same shape the
+   *  row carries, seconds old instead of up to a tick old. `null` when the
+   *  pane shows no dialog, and on a probe from a hub too old to send it (the
+   *  Rust field is the one `serde(default)` in `ActivityProbe`). */
+  pending_input: SessionRow['pending_input'];
 }
 
 export function sessionActivity(sessionId: number): Promise<Result<ActivityProbe>> {

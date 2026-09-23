@@ -77,6 +77,16 @@
     return segs;
   }
 
+  /** Enter/Space that started on a nested control (⎇ branch, ⤓ checkout)
+   *  belongs to that button, not to the row. Without the guard the row
+   *  selects a different commit on keydown while the button's own click
+   *  fires on keyup — two things activate at once, and the checkout confirm
+   *  opens for whatever the selection just moved to (round-20 Low). */
+  function onRowKey(e: KeyboardEvent, hash: string) {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ') onSelect(hash);
+  }
+
   function rel(date: string): string {
     const t = Date.parse(date);
     if (Number.isNaN(t)) return date;
@@ -97,7 +107,7 @@
       role="button"
       tabindex="0"
       onclick={() => onSelect(r.hash)}
-      onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && onSelect(r.hash)}
+      onkeydown={(e) => onRowKey(e, r.hash)}
     >
       <svg class="gutter" width={gutterW} height={ROW_H} aria-hidden="true">
         {#each segments(i) as s}

@@ -17,11 +17,23 @@ use fleet_core::store::Store;
 use pty::PtyState;
 use std::sync::Mutex;
 
+/// Declare this binary's version to fleet-core.
+///
+/// Mandatory, not an optimisation: `fleet_core::app_version::get()` has no
+/// fallback and panics until this has run, precisely so fleet-core's internal
+/// 0.1.0 can never be reported as an app version. `run()` calls it as its first
+/// statement; a test that reaches a version-reporting path (health, the
+/// diagnostics bundle) calls it itself, since tests never go through `run()`.
+/// Repeat calls are harmless — `set` is first-call-wins.
+pub fn declare_app_version() {
+    fleet_core::app_version::set(env!("CARGO_PKG_VERSION"));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Before anything reports a version: fleet-core's own crate version is not
-    // the app's.
-    fleet_core::app_version::set(env!("CARGO_PKG_VERSION"));
+    // the app's, and `app_version::get()` panics until this has run.
+    declare_app_version();
     // File logging first, so the instance reaper and env recovery below are
     // captured too. A failure is non-fatal: the app runs without a log file.
     let data_dir = appdata_dir();
@@ -287,6 +299,8 @@ pub fn run() {
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,
             commands::sessions::recreate_session,
+            commands::sessions::restore_host_sessions,
+            commands::sessions::discover_lost_sessions,
             commands::move_session::move_session,
             commands::resolve_move::resolve_move,
             commands::sessions::dismiss_ghost_session,

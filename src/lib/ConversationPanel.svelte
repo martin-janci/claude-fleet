@@ -17,6 +17,8 @@
   import { untrack, tick, setContext, type Snippet } from 'svelte';
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, sessions, type SessionRow } from './sessions';
+  import AnswerPrompt from './AnswerPrompt.svelte';
+  import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, type ComposerPreset } from './composer_presets';
   import { needsMore } from './composer_overflow';
@@ -125,6 +127,22 @@
     // later — with no indicator in between. A slash command is exempt: the
     // REPL reads the line exactly as typed.
     promptPrefix = null,
+    // Refuse a prompt while the session is working or stuck, instead of
+    // letting it queue behind the running turn. OFF by default, which is the
+    // Conversation tab's long-standing behaviour: typing ahead of a turn is
+    // a deliberate workflow there, and the note under the box ("queued until
+    // the current turn ends") is the honest description of it.
+    //
+    // The agent sheet asks for it (`AgentPanel.svelte`), because that is what
+    // its own composer did before it was deleted: the sheet is a one-shot
+    // "ask the agent" surface, not a queue, and two prompts pasted into one
+    // REPL mid-turn arrive as one mangled line. Restoring the gate there is
+    // the conservative move; extending it to the tab would be a new
+    // restriction nobody asked for, so the scope is an explicit prop rather
+    // than a rule this component invents for both surfaces.
+    //
+    // A bare key press is never gated — see `sendText`.
+    blockWhileBusy = false,
     // Rendered directly above the composer, inside the panel's own layout
     // (AgentPanel's removable context chip). Only shown when there IS a
     // composer to sit above.
@@ -136,6 +154,7 @@
     isMac?: boolean;
     showComposer?: boolean;
     promptPrefix?: string | null;
+    blockWhileBusy?: boolean;
     composerAbove?: Snippet;
   } = $props();
 
@@ -205,6 +224,13 @@
   // saying "working"; after the TTL the row wins again and, if it still
   // says so, the loop restarts and takes a new reading.
   let probeFresh = $state(false);
+  // Set once the hub has told us it does not serve `session_activity` at all
+  // (see `PROBE_UNSUPPORTED_CODES`). It stops the poll loop and replaces the
+  // live detail with one quiet line, rather than leaving the user with the
+  // silent "no live indicator" state the feature was meant to remove while a
+  // failing round-trip goes out every 2 s. Cleared on a session change, so
+  // an upgraded hub is re-discovered without restarting the app.
+  let probeUnsupported = $state(false);
   let probeTimer: ReturnType<typeof setTimeout> | undefined;
   function setProbe(next: ActivityProbe | null) {
     probe = next;
@@ -360,6 +386,11 @@
     pending = null;
     setProbe(null);
     probeSeq++;
+    // Whether the hub serves `session_activity` is a fact about the hub, not
+    // about the session — but re-learning it costs exactly one call per
+    // session switch, and it is what lets an upgraded hub start answering
+    // again without an app restart.
+    probeUnsupported = false;
     sentTurnSeq = null;
     idleSeenSinceSend = false;
   }
@@ -574,6 +605,22 @@
       pending: pending !== null,
       optimistic,
     }),
+  );
+
+  // The dialog to answer, if the pane is showing one. A fresh probe is the
+  // authority, including when it says there is none: the row is written by
+  // the 20 s tick, and buttons that outlive their dialog are worse than no
+  // buttons. Never while viewing an earlier conversation — that pane is
+  // read-only history.
+  const answerView = $derived(
+    viewing !== null
+      ? null
+      : pendingInputFor({
+          rowStatus: session.claude_status,
+          rowStuck: session.stuck_kind,
+          rowPending: session.pending_input,
+          probe: liveProbe,
+        }),
   );
 
   // What the running turn is doing right now (the current conversation only:
@@ -839,6 +886,35 @@
     return bgEntries.find((e) => e.key === `tool:${id}`) ?? null;
   }
 
+  /** Probe failures that mean *this hub will never answer this call*, as
+   *  opposed to "not right now". Matched by CODE, never by message text.
+   *
+   *  `session_activity` is new in this release and the desktop routes it to
+   *  the hub, so a desktop paired with a hub pinned to an older tag calls a
+   *  tool that hub's router does not know:
+   *
+   *  - `E_HUB_PROTOCOL` is the JSON-RPC `error` the router answers with for
+   *    an unknown tool. `src-tauri/src/backend/remote.rs` gives it its own
+   *    code for exactly this purpose — "so a caller built on a tool an older
+   *    hub does not serve can degrade to what it did before that tool
+   *    existed".
+   *  - `E_FORBIDDEN` is the same fact seen through the hub's client gate.
+   *    `session_activity` is `Access::Client` + readonly in the policy table
+   *    of every hub that serves it (`mcp/guard.rs`), so neither gate can
+   *    refuse a paired client for it — and both fail closed on the tool NAME,
+   *    so a hub with no row for it refuses with "not a client-callable tool"
+   *    rather than "no such tool". A policy refusal for THIS tool therefore
+   *    means the name is unknown there. (Same reasoning, same pair of codes,
+   *    as `NewSessionDialog.svelte`'s `HUB_CANNOT_SCAN`.)
+   *
+   *  Everything else keeps retrying, because it can clear without this panel
+   *  being remounted: `E_HUB_UNREACHABLE` / `E_HUB_TIMEOUT` (the hub or the
+   *  host is having a moment), `E_HUB_CONTRACT` (refused before the transport
+   *  is touched — no round-trip, no hub log line — and cleared by the next
+   *  in-range `ready` frame), `E_UNAUTHORIZED` (cleared by re-pairing) and
+   *  every per-session backend error such as `E_INVALID_STATE`. */
+  const PROBE_UNSUPPORTED_CODES = ['E_HUB_PROTOCOL', 'E_FORBIDDEN'];
+
   // One probe in flight at a time (a wedged host must not stack ssh
   // processes every 2 s), and a slow one never overwrites a newer result.
   let probing = false;
@@ -855,7 +931,13 @@
       probing = false;
     }
     if (session.id !== id || mine !== probeSeq) return;
-    if (!r.ok) return;
+    if (!r.ok) {
+      // A permanent refusal stops the loop instead of being repeated every
+      // 2 s per open panel for as long as the panel is open. A transient one
+      // is swallowed as before: the next tick is the retry.
+      if (PROBE_UNSUPPORTED_CODES.includes(r.error.code)) probeUnsupported = true;
+      return;
+    }
     setProbe(r.value);
     if (sentTurnSeq !== null && isQuietStatus(r.value.claude_status)) idleSeenSinceSend = true;
   }
@@ -873,7 +955,7 @@
   // tool now, which reads the pane over the ssh connection that can actually
   // reach the host.
   const probeLive = $derived(
-    visible && !hasNoPane(session) && indicator !== null && viewing === null,
+    visible && !hasNoPane(session) && indicator !== null && viewing === null && !probeUnsupported,
   );
   $effect(() => {
     if (!probeLive) return;
@@ -953,11 +1035,17 @@
       window.removeEventListener('resize', measureChips);
     };
   });
-  const canSend = $derived(draft.trim().length > 0 && !sending && viewing === null);
+  // ONE signal, two uses: the sentence under the box, and — only where the
+  // host asked for it — the gate that refuses the send. Both read this same
+  // `$derived`, so they cannot disagree about whether the session is busy.
+  // (The pre-refactor code claimed exactly that in a comment while the two
+  // composers shared only the note; that is how the gate was lost. The
+  // comment is true now because there is one expression, not two.)
+  const busyNote = $derived(composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }));
+  const busyBlocked = $derived(blockWhileBusy && busyNote !== null);
+  const canSend = $derived(draft.trim().length > 0 && !sending && viewing === null && !busyBlocked);
   const statusNote = $derived(
-    viewing !== null
-      ? 'Viewing an earlier conversation — go back to current to send.'
-      : composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }),
+    viewing !== null ? 'Viewing an earlier conversation — go back to current to send.' : busyNote,
   );
   // The context meter lives in the header; at warn/crit the Compact chip is
   // suggested, since that is the one-click remedy.
@@ -1011,7 +1099,12 @@
   /** A chip fills the box (Shift+click sends at once). A filled command does
    *  not pop the slash menu: the user picked it already. */
   function usePreset(p: ComposerPreset, sendNow: boolean) {
-    if (sendNow) {
+    // A gated composer (see `blockWhileBusy`) degrades Shift+click to a
+    // plain click rather than swallowing it: the chip still fills the box,
+    // the note under the box says why it did not go, and one press of Send
+    // finishes the job once the turn ends. A disabled chip would take the
+    // fill away too, and a silent no-op would say nothing at all.
+    if (sendNow && !busyBlocked) {
       void sendText(p.text.trim() || p.text);
       return;
     }
@@ -1034,10 +1127,33 @@
     await sendText(text, { fromDraft: true });
   }
 
+  /** What a send IS, which is what decides the prefix, the attachments, the
+   *  busy gate and whether a pending turn is recorded. Derived once, here,
+   *  rather than re-tested as `startsWith('/')` at each of those four places
+   *  — the accident that let a context paragraph ride in on a bare Enter.
+   *
+   *  - `key`     — a bare key press (the press_enter chip's `''`). Not a
+   *                prompt at all: no prefix, no attachments, nothing pending,
+   *                and never gated, because it is the recovery path OUT of
+   *                the stuck state a gate would be reading.
+   *  - `command` — a slash command. The REPL reads the line exactly as
+   *                typed, so nothing may be glued to its nose.
+   *  - `prompt`  — text Claude reads. The only kind the context prefix rides
+   *                in front of, deliberately including a preset chip sent
+   *                with Shift+click: the chip above the composer promises
+   *                that everything this composer sends carries the context
+   *                until it is dismissed, and "continue" needs that context
+   *                more than a long typed prompt does. */
+  type SendKind = 'key' | 'command' | 'prompt';
+  const sendKind = (text: string): SendKind =>
+    text === '' ? 'key' : text.startsWith('/') ? 'command' : 'prompt';
+
   /** Send `text` as-is. Empty text is a bare Enter (the press_enter chip):
    *  it lands in the REPL but is not a prompt, so nothing is shown pending. */
   async function sendText(text: string, opts: { fromDraft?: boolean } = {}) {
     if (sending || viewing !== null) return;
+    const kind = sendKind(text);
+    if (kind !== 'key' && busyBlocked) return;
     sending = true;
     sendError = null;
     const id = session.id;
@@ -1050,7 +1166,9 @@
     // own rather than being refused over a tile that was already showing its
     // own honest error, and the tile itself is never touched below — it was
     // never attempted, so it is not this send's to clear or flag.
-    const toUpload = attachments.filter((a) => a.path !== '');
+    // A key press carries nothing: it must not upload, spend or clear a tile
+    // the user attached for the prompt they have not sent yet.
+    const toUpload = kind === 'key' ? [] : attachments.filter((a) => a.path !== '');
     const toUploadIds = new Set(toUpload.map((a) => a.id));
 
     // `upload_attachments` consumes each path's allow-list entry the moment
@@ -1090,10 +1208,12 @@
       paths = up.value;
     }
 
-    // The prefix rides in front of the attachment line, and never in front
-    // of a slash command: `/clear` with a paragraph glued to its nose is not
-    // a command the REPL runs.
-    const prefixed = promptPrefix && !text.startsWith('/') ? `${promptPrefix}\n\n${text}` : text;
+    // The prefix rides in front of the attachment line, and in front of a
+    // `prompt` ONLY. Not a `command` — `/clear` with a paragraph glued to its
+    // nose is not a command the REPL runs — and not a `key`, where the whole
+    // point is that a bare Enter reaches the pane as a bare Enter.
+    const prefixed =
+      promptPrefix && kind === 'prompt' ? `${promptPrefix}\n\n${text}` : text;
     const body = withAttachments(prefixed, paths);
     // A remote send is quoted twice (see attach_prompt.ts's header comment
     // for why that compounds rather than doubles), so the bound applied
@@ -1118,13 +1238,17 @@
       attachments = markNeedsReattach(attachments, toUploadIds);
       return;
     }
+    // A key press is spent here: it went into the pane, it is not a prompt,
+    // so there is no draft to clear, no tray to spend and nothing pending to
+    // show. Returning BEFORE the attachment bookkeeping is the point — the
+    // tray belongs to the prompt the user is still composing.
+    if (kind === 'key') return;
     // Only the attachments this send actually uploaded are spent; anything
     // it could not upload (a pasted entry) was never attempted and stays,
     // so the evidence that it did not go is not lost.
     attachments = clearSent(attachments, toUploadIds);
     // The notes were about the tray that just went; they do not carry over.
     attachErrors = [];
-    if (text === '') return;
     switchNotice = null;
     // Only the box's own text is spent by a send; a chip sent with
     // Shift+click leaves whatever the user was typing.
@@ -1133,7 +1257,7 @@
     // A slash command is handled by the REPL itself: it is not recorded as a
     // prompt (and /clear even moves to a new session id), so no pending
     // turn, and nothing to wait for beyond a fresh read.
-    if (text.startsWith('/')) {
+    if (kind === 'command') {
       box?.focus();
       void load();
       return;
@@ -1799,7 +1923,9 @@
           </section>
         {/if}
         {#if viewing === null}
-        {#if indicator?.kind === 'blocked'}
+        {#if answerView}
+          <AnswerPrompt {session} view={answerView} {onOpenTerminal} />
+        {:else if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">
             <div class="blocked-text">
               <strong>Claude is waiting for you in the terminal{indicator.waiting === 'permission' ? ' (permission)' : indicator.waiting === 'input' ? ' (input)' : ''}.</strong>
@@ -1814,6 +1940,17 @@
             <span class="pulse" aria-hidden="true"><i></i><i></i><i></i></span>
             <span class="indicator-label">{indicator.kind === 'sent' ? 'Sent, waiting for Claude…' : indicatorLabel}</span>
           </div>
+        {/if}
+        {#if probeUnsupported}
+          <!-- Said once, quietly, and then left alone: the loop has stopped,
+               so this is not a state that can repeat. A toast would fire
+               every poll (or need its own dedup) for a fact that is a
+               property of the pairing, and the missing live detail belongs
+               where the live detail would have been. -->
+          <p class="probe-off" data-testid="conv-probe-unsupported" role="status">
+            Live pane detail is off: this hub is older than this app and does not answer
+            <code>session_activity</code>. The status above still follows the session row. Update the hub to get it back.
+          </p>
         {/if}
         {/if}
       </div>
@@ -2311,6 +2448,15 @@
   }
   .indicator[data-kind='sent'] {
     font-style: italic;
+  }
+  .probe-off {
+    margin: 0;
+    padding: 0.35rem 0 0.6rem;
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+  }
+  .probe-off code {
+    font-size: inherit;
   }
   .pulse {
     display: inline-flex;

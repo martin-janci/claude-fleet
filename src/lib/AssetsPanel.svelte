@@ -23,7 +23,14 @@
   let setupPath = $state('~/agent-assets');
   let setupRemote = $state('');
   let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan' | 'apply' | 'commit' | 'push'>('');
+  // Per-ACTION error only (setup / scan / plan / commit / push). Four unrelated
+  // toolbar handlers clear this on entry, so the catalog's own load state must
+  // never be inferred from it — doing that made a successful Sync turn the
+  // failed-load Retry block back into a permanent "Loading…".
   let error = $state<string | null>(null);
+  // The catalog load's own state, owned by `reload()` alone.
+  let catalogLoad = $state<'idle' | 'loading' | 'loaded' | 'failed'>('idle');
+  let catalogLoadError = $state<string | null>(null);
   let scanResults = $state<HostScanResult[] | null>(null);
   let showProblems = $state(false);
   let showImport = $state(false);
@@ -55,8 +62,11 @@
   // mount/setup); `pull: true` is only the explicit "Pull" button.
   async function reload(pull: boolean) {
     error = null;
+    catalogLoad = 'loading';
+    catalogLoadError = null;
     const l = await loadCatalog(pull);
-    if (!l.ok) { error = l.error.message; return; }
+    if (!l.ok) { catalogLoad = 'failed'; catalogLoadError = l.error.message; return; }
+    catalogLoad = 'loaded';
     await refresh();
   }
 
@@ -272,12 +282,14 @@
       <div class="left">
         {#if $catalog}
           <AssetList listing={$catalog} {selected} {filter} onselect={(kind, name) => (selected = { kind, name })} onimport={onImportUnmanaged} />
-        {:else if error}
+        {:else if catalogLoad === 'failed'}
           <!-- `catalog` is only ever set on success, so a failed load used to
                render the error line AND a permanent "Loading…" side by side,
-               with no way to try again but the panel header's ↻. -->
+               with no way to try again but the panel header's ↻. This keys off
+               the load's OWN state, not the shared per-action `error`. -->
           <div class="load-failed" data-testid="assets-load-failed">
             <p class="muted">The asset catalog could not be loaded.</p>
+            {#if catalogLoadError}<p class="error" data-testid="assets-load-error">{catalogLoadError}</p>{/if}
             <button class="btn" onclick={() => void reload(false)} data-testid="assets-retry">Retry</button>
           </div>
         {:else}

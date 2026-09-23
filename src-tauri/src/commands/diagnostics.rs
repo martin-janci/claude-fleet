@@ -198,6 +198,9 @@ mod tests {
 
     #[test]
     fn real_bundle_gets_the_ssh_section_before_its_log_tail() {
+        // The bundle stamps `app_version::get()`, which panics until the
+        // binary declares its version; a test binary never runs `run()`.
+        crate::declare_app_version();
         let tmp = tempfile::tempdir().unwrap();
         let logs = fleet_core::logging::log_dir_in(tmp.path());
         let store = Mutex::new(open_temp_store(tmp.path()));

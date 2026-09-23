@@ -178,6 +178,36 @@ pub struct ProbeSnapshot {
     pub pane_tails: std::collections::HashMap<String, String>,
 }
 
+/// Shell script listing the most recently modified Claude transcripts under
+/// `$HOME/.claude/projects/*/*.jsonl` (a `*/subagents/*` path is skipped),
+/// newest first, up to `limit` (clamped to `1..=500` here — `limit` is
+/// then a bare integer in the script, so it needs no shell quoting). For
+/// each transcript kept it prints `@@F\t<mtime>\t<claude session id>`
+/// (the id is the file's basename with `.jsonl` stripped), then
+/// `@@L\t<line>` carrying the last line of that file (within its last 4 MiB,
+/// truncated to 8192 bytes) that mentions `"cwd"` — the transcript line that
+/// carries the session's `cwd`/`gitBranch`. [`crate::service::sessions::parse_discover_output`]
+/// turns this into [`crate::service::sessions::TranscriptProbe`]s.
+///
+/// Before any of that it prints one boot-time line: `bootsec=<epoch>` when
+/// `/proc/uptime` is readable (Linux), else `bootraw=<kern.boottime output>`
+/// (macOS, via `sysctl`) — the same parser turns either into a boot epoch.
+///
+/// `date -r FILE +%s` behaves the same on GNU and BSD coreutils (unlike
+/// `stat`, deliberately avoided — its flags differ across the two), so this
+/// runs unmodified on both the Linux and macOS hosts fleet targets.
+pub fn discover_transcripts_script(limit: usize) -> String {
+    let limit = limit.clamp(1, 500);
+    format!(
+        "now=$(date +%s)\n\
+if [ -r /proc/uptime ]; then printf 'bootsec=%s\\n' \"$(( now - $(cut -d. -f1 /proc/uptime) ))\"; else printf 'bootraw=%s\\n' \"$(sysctl -n kern.boottime 2>/dev/null)\"; fi\n\
+for f in \"$HOME\"/.claude/projects/*/*.jsonl; do [ -f \"$f\" ] || continue; case \"$f\" in */subagents/*) continue;; esac; printf '%s\\t%s\\n' \"$(date -r \"$f\" +%s)\" \"$f\"; done | sort -rn | head -n {limit} | while IFS=\"$(printf '\\t')\" read -r m f; do\n\
+  printf '@@F\\t%s\\t%s\\n' \"$m\" \"$(basename \"$f\" .jsonl)\"\n\
+  printf '@@L\\t%s\\n' \"$(tail -c 4194304 \"$f\" | grep -a '\"cwd\"' | tail -n 1 | cut -c1-8192)\"\n\
+done"
+    )
+}
+
 /// A host's boot identity, read once per reconcile probe.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HostIdentity {
@@ -806,15 +836,57 @@ pub enum NamedKey {
     Enter,
     Escape,
     CtrlC,
+    /// One of `1`..`9` — the keystroke that answers a numbered permission /
+    /// question dialog. Typing the ordinal as *text* would not do: the text
+    /// path pastes through `paste-buffer -p`, and the REPL has bracketed
+    /// paste on (DECSET 2004), so the pane receives
+    /// `ESC [ 2 0 0 ~ 3 ESC [ 2 0 1 ~` — the first key the dialog sees is
+    /// ESC, which cancels it. `send-keys 3` delivers one raw `3`.
+    Digit(DigitKey),
+}
+
+/// An ordinal a dialog can be answered with: `1`..`9`, and nothing else.
+///
+/// A dialog may carry up to `PENDING_OPTIONS_MAX` (16) options, but the REPL
+/// has no keystroke for a two-digit ordinal — there is no way to press "10"
+/// that a select dialog will not read as "1". So option 10 and up simply has
+/// no key, and [`new`](Self::new) is the only way in: the field is private,
+/// which is what makes the `1..=9` indexing in [`NamedKey::tmux_name`] sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DigitKey(u8);
+
+const DIGIT_NAMES: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+impl DigitKey {
+    /// `Some` for `1..=9`, `None` for anything else.
+    pub fn new(n: u8) -> Option<Self> {
+        (1..=9).contains(&n).then_some(Self(n))
+    }
+
+    /// The ordinal, for a caller that needs the number back.
+    pub fn get(self) -> u8 {
+        self.0
+    }
 }
 
 impl NamedKey {
+    /// Every accepted value, in the words a refusal shows the caller. Both
+    /// `send_prompt` paths (the service function and the MCP tool) print
+    /// this, so the message can never fall behind [`parse`](Self::parse).
+    pub const VOCABULARY: &'static str = "Enter, Escape, C-c or a digit 1-9";
+
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "Enter" => Some(Self::Enter),
             "Escape" => Some(Self::Escape),
             "C-c" => Some(Self::CtrlC),
-            _ => None,
+            // Exactly one ASCII digit. `str::parse::<u8>` would accept
+            // "+1", " 1" and "007"; a dialog answer must be the literal
+            // keystroke or nothing.
+            _ => match s.as_bytes() {
+                [b @ b'0'..=b'9'] => DigitKey::new(b - b'0').map(Self::Digit),
+                _ => None,
+            },
         }
     }
     pub fn tmux_name(self) -> &'static str {
@@ -822,6 +894,9 @@ impl NamedKey {
             Self::Enter => "Enter",
             Self::Escape => "Escape",
             Self::CtrlC => "C-c",
+            // Sound by construction: `DigitKey`'s field is private and
+            // `DigitKey::new` admits only 1..=9.
+            Self::Digit(d) => DIGIT_NAMES[(d.get() - 1) as usize],
         }
     }
 }
@@ -1157,6 +1232,104 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(IpcError::new(codes::E_TMUX, stderr.trim()))
+    }
+}
+
+/// Writing a fake executable that a test is about to run, without the
+/// `ETXTBSY` race that turned `main` red twice (code-review round 20, F1).
+///
+/// `fs::write` + `set_permissions` + exec is not safe in a multi-threaded
+/// test binary: another test's `fork()` landing between the `open(O_WRONLY)`
+/// and the `close()` inherits the write fd, and an exec of that inode then
+/// fails with "Text file busy". `O_CLOEXEC` does not help — the fd is closed
+/// *at* exec, which is exactly when the kernel checks for writers.
+///
+/// [`write_exec`] closes the window in three steps, and the third is the one
+/// that actually closes it:
+///
+///  1. the body goes to a sibling path and is `rename`d into place, so the
+///     final name never names a half-written or not-yet-`chmod`ded file;
+///  2. the `File` is dropped — closed — *before* the rename, so this thread
+///     holds no writer by the time the final name exists;
+///  3. the file is then exec'd once with `--fleet-probe`, retrying while that
+///     exec reports `ETXTBSY`. Steps 1–2 alone do NOT close the race:
+///     `rename` keeps the inode, so a child forked during the write still
+///     holds a writer on the very inode the final name now points at. A
+///     *successful* exec is the only available proof that no writer is left —
+///     and none can appear afterwards, because nothing opens the file again.
+///
+/// Every body written through this module must therefore start with
+/// [`PROBE_GUARD`], which answers the probe before any of the body's own side
+/// effects run (several fakes count their invocations, and a test asserts the
+/// exact count).
+///
+/// Only Linux enforces this on `exec` (the inode's writer count); Darwin does
+/// not, so the flake never reproduces on a developer's Mac and both red runs
+/// were on the Linux runners (`rust (ubuntu-24.04)` and `hub-headless`). A
+/// green local suite says nothing about it — step 3 is what makes it safe by
+/// construction rather than by luck.
+///
+/// Lives in `tmux.rs` rather than in a module of its own so `ssh.rs`'s fakes
+/// can share it without adding a file to the crate root.
+#[cfg(test)]
+pub(crate) mod fake_exec {
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    /// The shell line that answers [`write_exec`]'s probe and nothing else.
+    /// No test passes `--fleet-probe` itself.
+    pub(crate) const PROBE_GUARD: &str = "case \"$1\" in --fleet-probe) exit 0;; esac\n";
+
+    /// `ETXTBSY` — 26 on both Linux and macOS, the only two platforms this
+    /// crate's tests run on.
+    const ETXTBSY: i32 = 26;
+
+    /// Write `body` to `dir/name` as a 0755 file that is safe to exec
+    /// immediately, and hand back its path. `body` must carry
+    /// [`PROBE_GUARD`] ahead of anything with a side effect.
+    pub(crate) fn write_exec(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            body.contains(PROBE_GUARD),
+            "a fake exec must carry the probe guard: {body}"
+        );
+        let path = dir.join(name);
+        let tmp = dir.join(format!(".{name}.fleet-tmp"));
+        {
+            let mut f = std::fs::File::create(&tmp).expect("create the fake");
+            f.write_all(body.as_bytes()).expect("write the fake");
+            f.set_permissions(std::fs::Permissions::from_mode(0o755))
+                .expect("chmod the fake");
+            f.sync_all().expect("fsync the fake");
+            // Explicit, because it is load-bearing: the handle is closed
+            // here, before the rename below publishes the name.
+            drop(f);
+        }
+        std::fs::rename(&tmp, &path).expect("publish the fake");
+        wait_until_executable(&path);
+        path
+    }
+
+    /// Exec `path` with `--fleet-probe` until the exec is not refused with
+    /// `ETXTBSY` any more. Returning means the inode has no writer left.
+    fn wait_until_executable(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match std::process::Command::new(path)
+                .arg("--fleet-probe")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(_) => return,
+                Err(e) if e.raw_os_error() == Some(ETXTBSY) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("{} never became executable: {e}", path.display()),
+            }
+        }
     }
 }
 
@@ -1530,20 +1703,21 @@ mod tests {
     /// fake `claude` recorded. `with_cl` also puts a fake `cl` on PATH.
     #[cfg(unix)]
     fn run_pane_command(shell: &str, cmd: &str, with_cl: bool) -> Vec<String> {
-        use std::os::unix::fs::PermissionsExt;
+        use super::fake_exec::{write_exec, PROBE_GUARD};
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("argv.log");
+        // Never `fs::write` + `set_permissions` here: see `fake_exec`'s doc
+        // comment — that shape is what made this very test fail with an
+        // empty argv log on CI (round 20, F1).
         let write = |name: &str, body: String| {
-            let path = dir.path().join(name);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            write_exec(dir.path(), name, &body);
         };
         // `--resume` fails (no such conversation) so the chain has to reach
         // `--session-id`; everything else succeeds.
         write(
             "claude",
             format!(
-                "#!/bin/sh\nprintf 'claude %s\\n' \"$*\" >> '{}'\ncase \"$*\" in *--resume*) exit 1;; esac\nexit 0\n",
+                "#!/bin/sh\n{PROBE_GUARD}printf 'claude %s\\n' \"$*\" >> '{}'\ncase \"$*\" in *--resume*) exit 1;; esac\nexit 0\n",
                 log.display()
             ),
         );
@@ -1551,13 +1725,13 @@ mod tests {
             write(
                 "cl",
                 format!(
-                    "#!/bin/sh\nprintf 'cl %s\\n' \"$*\" >> '{}'\nexit 0\n",
+                    "#!/bin/sh\n{PROBE_GUARD}printf 'cl %s\\n' \"$*\" >> '{}'\nexit 0\n",
                     log.display()
                 ),
             );
         }
         // The trailing `exec ${SHELL:-/bin/zsh} -l` must terminate, not hang.
-        write("fake-shell", "#!/bin/sh\nexit 0\n".to_string());
+        write("fake-shell", format!("#!/bin/sh\n{PROBE_GUARD}exit 0\n"));
         let status = std::process::Command::new(shell)
             .arg("-c")
             .arg(cmd)
@@ -1575,11 +1749,27 @@ mod tests {
             "{shell}: {}",
             String::from_utf8_lossy(&status.stderr)
         );
-        std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
-            .collect()
+        // NOT `unwrap_or_default`: an absent or empty log means the fake
+        // `claude` never ran at all, and the pane command's own
+        // `a || b || c; exec $SHELL` shape hides that — every `cl`/`claude`
+        // attempt can fail (126 on an ETXTBSY exec) and the trailing `exec
+        // fake-shell` still exits 0, so the assert above passes and the
+        // caller compares against an empty vec. Name the real cause here
+        // instead of letting it masquerade as a fallback-logic bug.
+        let logged = std::fs::read_to_string(&log).unwrap_or_else(|e| {
+            panic!(
+                "{shell}: no argv log at {} ({e}) — the fake `claude`/`cl` never ran, \
+                 so this says nothing about the fallback chain",
+                log.display()
+            )
+        });
+        assert!(
+            !logged.trim().is_empty(),
+            "{shell}: the argv log at {} is empty — the fake `claude`/`cl` never ran, \
+             so this says nothing about the fallback chain",
+            log.display()
+        );
+        logged.lines().map(str::to_string).collect()
     }
 
     #[cfg(unix)]
@@ -1690,6 +1880,120 @@ mod tests {
             "mtime {} vs now {now}",
             m[found]
         );
+    }
+
+    #[test]
+    fn discover_script_clamps_limit() {
+        assert!(discover_transcripts_script(0).contains("head -n 1"));
+        assert!(discover_transcripts_script(10_000).contains("head -n 500"));
+        assert!(discover_transcripts_script(50).contains("head -n 50"));
+    }
+
+    #[test]
+    fn discover_script_runs_under_local_bash() {
+        use crate::service::sessions::parse_discover_output;
+
+        let home = tempfile::tempdir().unwrap();
+        let uuid1 = "11111111-1111-1111-1111-111111111111";
+        let uuid3 = "33333333-3333-3333-3333-333333333333";
+        let uuid4 = "44444444-4444-4444-4444-444444444444";
+
+        // p1/<uuid1>.jsonl: two lines, the last carrying cwd/gitBranch.
+        let p1 = home.path().join(".claude/projects/p1");
+        std::fs::create_dir_all(&p1).unwrap();
+        std::fs::write(
+            p1.join(format!("{uuid1}.jsonl")),
+            format!(
+                "{{\"parentUuid\":null,\"sessionId\":\"{uuid1}\",\"message\":{{\"content\":\"hi\"}}}}\n\
+                 {{\"parentUuid\":\"x\",\"cwd\":\"/w/a\",\"sessionId\":\"{uuid1}\",\"gitBranch\":\"main\",\"message\":{{\"content\":\"there\"}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        // projects/subagents/<uuid3>.jsonl: its path contains "/subagents/",
+        // and — unlike a deeper nesting — it IS reachable by the top-level
+        // `*/*.jsonl` glob (first star = "subagents" itself), so this
+        // actually exercises the script's `case "$f" in */subagents/*)
+        // continue;;` guard rather than being excluded by path depth alone.
+        let sub = home.path().join(".claude/projects/subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join(format!("{uuid3}.jsonl")),
+            format!("{{\"cwd\":\"/w/sub\",\"sessionId\":\"{uuid3}\",\"gitBranch\":\"sub\"}}\n"),
+        )
+        .unwrap();
+
+        // p2/<uuid4>.jsonl: the last cwd-bearing line is followed by a 20 KB
+        // line with no "cwd" in it, exercising the `tail -n 1` over
+        // `grep -a '"cwd"'` against trailing noise.
+        let p2 = home.path().join(".claude/projects/p2");
+        std::fs::create_dir_all(&p2).unwrap();
+        let big = "x".repeat(20_000);
+        std::fs::write(
+            p2.join(format!("{uuid4}.jsonl")),
+            format!(
+                "{{\"cwd\":\"/w/b\",\"sessionId\":\"{uuid4}\",\"gitBranch\":\"dev\",\"message\":{{\"content\":\"hi\"}}}}\n\
+                 {{\"sessionId\":\"{uuid4}\",\"message\":{{\"content\":\"{big}\"}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        // Distinct, deterministic mtimes (no `filetime` dev-dep): `touch -t`.
+        // uuid1 newest, uuid4 older — both well within the limit either way.
+        let touch = |path: &std::path::Path, stamp: &str| {
+            let status = std::process::Command::new("touch")
+                .args(["-t", stamp])
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "touch -t {stamp} {path:?}");
+        };
+        touch(&p1.join(format!("{uuid1}.jsonl")), "202509190200");
+        touch(&p2.join(format!("{uuid4}.jsonl")), "202509190100");
+
+        let script = discover_transcripts_script(10);
+        let out = std::process::Command::new("bash")
+            .args(["-c", &script])
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        // `cut -c` is bytewise, so decode leniently rather than assuming
+        // valid UTF-8 — matches how a real caller must treat this output.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let (boot, probes) = parse_discover_output(&stdout);
+
+        assert!(boot.is_some(), "{stdout}");
+        assert_eq!(probes.len(), 2, "{probes:?}\nraw:\n{stdout}");
+        let by_id: std::collections::HashMap<&str, _> = probes
+            .iter()
+            .map(|p| (p.claude_session_id.as_str(), p))
+            .collect();
+        assert!(!by_id.contains_key(uuid3), "{probes:?}");
+
+        let p1_probe = by_id.get(uuid1).expect("uuid1 present");
+        assert_eq!(p1_probe.cwd.as_deref(), Some("/w/a"));
+        assert_eq!(p1_probe.git_branch.as_deref(), Some("main"));
+
+        let p2_probe = by_id.get(uuid4).expect("uuid4 present");
+        assert_eq!(p2_probe.cwd.as_deref(), Some("/w/b"));
+        assert_eq!(p2_probe.git_branch.as_deref(), Some("dev"));
+
+        // `limit` keeps the NEWEST transcripts: at 1, only uuid1 (touched
+        // an hour after uuid4) comes back.
+        let out = std::process::Command::new("bash")
+            .args(["-c", &discover_transcripts_script(1)])
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let (_boot, probes) = parse_discover_output(&stdout);
+        let ids: Vec<&str> = probes
+            .iter()
+            .map(|p| p.claude_session_id.as_str())
+            .collect();
+        assert_eq!(ids, vec![uuid1], "raw:\n{stdout}");
     }
 
     #[test]
@@ -2030,6 +2334,49 @@ mod tests {
                 crate::shell::quote(&exact_pane("my session"))
             )
         );
+    }
+
+    #[test]
+    fn the_keys_vocabulary_names_every_accepted_key() {
+        // The refusal message both `send_prompt` paths print comes from this
+        // one constant, so a key the parser accepts can never go unnamed.
+        let v = NamedKey::VOCABULARY;
+        for accepted in ["Enter", "Escape", "C-c", "1-9"] {
+            assert!(v.contains(accepted), "{v:?} must mention {accepted}");
+        }
+    }
+
+    #[test]
+    fn digit_keys_answer_a_numbered_dialog() {
+        // Answering a permission/question dialog is one literal digit
+        // keystroke — the text path pastes (bracketed paste) and would then
+        // press Enter into the REPL, which a select dialog does not survive.
+        for n in 1..=9u8 {
+            let s = n.to_string();
+            let key = NamedKey::parse(&s).unwrap_or_else(|| panic!("digit {n} must parse"));
+            assert_eq!(key.tmux_name(), s, "digit {n} keeps its own tmux key name");
+        }
+        assert_eq!(
+            send_named_key("my session", NamedKey::parse("3").expect("3")),
+            format!(
+                "tmux send-keys -t {} 3",
+                crate::shell::quote(&exact_pane("my session"))
+            )
+        );
+    }
+
+    #[test]
+    fn digit_keys_outside_one_to_nine_are_rejected() {
+        // A dialog may carry up to PENDING_OPTIONS_MAX (16) options, but the
+        // REPL has no keystroke for a two-digit ordinal — better no key than
+        // a "1" that silently answers option 1 for a click on option 10.
+        for bad in ["0", "10", "16", "-1", " 1", "1 ", "1.", "a"] {
+            assert_eq!(NamedKey::parse(bad), None, "{bad:?} is not a digit key");
+        }
+        assert_eq!(DigitKey::new(0), None);
+        assert_eq!(DigitKey::new(10), None);
+        assert!(DigitKey::new(1).is_some());
+        assert!(DigitKey::new(9).is_some());
     }
 
     #[test]

@@ -81,6 +81,31 @@ describe('AssetsPanel', () => {
     await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'catalog_load')).toBe(true));
   });
 
+  // The recovery UI above must not hang off a variable that unrelated toolbar
+  // handlers reset. Sync (and Push, and Scan hosts) clear `error` on entry and
+  // leave it clear on success — which used to turn the Retry block back into a
+  // permanent "Loading…" while the catalog was still unloaded.
+  it('keeps the failed-load Retry after an unrelated toolbar action succeeds', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { code: 'E_GIT', message: 'not a checkout' },
+      catalog_repo_status: { head: 'h', dirty: 0, ahead: 0, behind: 0, has_upstream: false },
+      catalog_last_sync: null,
+      catalog_plan_sync: { id: 'plan-1', computed_at: 1, hosts: [], counts: {} },
+    });
+    render(AssetsPanel);
+    expect(await screen.findByTestId('assets-load-failed')).toBeTruthy();
+
+    // A successful Sync — nothing to do with the catalog checkout.
+    await fireEvent.click(screen.getByTestId('assets-sync'));
+    await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'catalog_plan_sync')).toBe(true));
+    await tick(); await tick();
+
+    expect(screen.queryByText('Loading…')).toBeNull();
+    expect(screen.getByTestId('assets-load-failed')).toBeTruthy();
+    expect(screen.getByTestId('assets-retry')).toBeTruthy();
+  });
+
   it('lists assets grouped by kind with state chips, unmanaged group and problems badge', async () => {
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'abcdef1234567890', last_loaded_at: 1 }, catalog_load: { head: 'abcdef1234567890', loaded_at: 1, asset_count: 2, problem_count: 1 }, catalog_list_assets: listing, assets_inventory: [] });
     render(AssetsPanel);

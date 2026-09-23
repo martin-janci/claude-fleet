@@ -890,6 +890,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 kind: None,
                 start_command: None,
                 friendly_name: None,
+                resume_claude_session_id: None,
             }),
         )
         .await
@@ -1095,6 +1096,7 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 host_alias: "hosta".into(),
                 project_id: 4242, // unknown — would be E_NOTFOUND if reached
                 worktree_id: None,
+                resume_claude_session_id: None,
                 name: "x".into(),
                 new_worktree: None,
                 base_branch: None,
@@ -1468,7 +1470,10 @@ fn capture_default_cap_matches_docs() {
 /// session_conversation/pair_client/list_clients/revoke_client, 72 with
 /// agent_status, 73 with session_conversations; bump it when adding a tool.
 /// (`peek_session` came out again with the token-efficiency work, so the
-/// count is 73 with `list_host_worktrees`, 74 with `resolve_move`.)
+/// count is 73 with `list_host_worktrees`, 74 with `resolve_move`, and 80
+/// with restore_host_sessions/discover_lost_sessions. The fleet-mesh
+/// addressing and delivery branch added `wait_for_reply` concurrently, so
+/// the merged count is 81.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1488,7 +1493,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 79);
+    assert_eq!(served, 81);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2637,7 +2642,46 @@ fn the_served_definition_budget_stays_bounded() {
     // (fleet-mesh addressing and delivery task 12) — the same structural
     // cost as task 11's two fields, one field's worth. Measured at 60,100;
     // raised to that plus 100 bytes of headroom.
-    const BUDGET_BYTES: usize = 60_200;
+    //
+    // Raised again from 59_400 for host-reboot recovery's two tools,
+    // `restore_host_sessions` and `discover_lost_sessions`: after a reboot
+    // there is no other way back to a host's conversations, and every
+    // alternative is worse than 2.3 KB — `recreate_session` one row at a
+    // time cannot find a conversation fleet has no row for at all. Both
+    // descriptions were cut to the operational minimum first (889 bytes),
+    // with the prose kept in `docs/control-api.md` and the control skill;
+    // what is left is the part a caller gets wrong without it, above all
+    // that resuming outside the transcript's own cwd silently starts an
+    // EMPTY conversation. 61_746 measured, plus ~100 bytes of headroom.
+    //
+    // Raised from 59_400 to 59_500, on its own branch, when `keys` grew the
+    // `1`-`9` digits that answer a `pending_input` dialog: that surface had
+    // 11 bytes of headroom left, so no wording could have paid for it (the
+    // clause is a fragment in both places it appears), and a client that can
+    // see a dialog's options but not press one is the state it replaced.
+    //
+    // NOT raised again where the digits met main's reboot-recovery raise,
+    // though each side was measured without the other: the digits' clause is
+    // 66 bytes and the raise above already carried ~100 of headroom, so the
+    // merged surface fits inside it. 61,826 measured; 24 bytes left. The next
+    // clause to land here has to pay for itself.
+    //
+    // Raised again on 2026-09-23 (code-review round 20, F18) — not for new
+    // surface, but because the headroom had been inherited instead of
+    // measured twice running, leaving 14 and then 24 bytes. A budget that
+    // tight fails CI on a single added word, which is a ratchet against
+    // wording rather than against creep. The merged surface is re-measured
+    // below and the constant is that plus the customary 100 bytes; the run
+    // prints both numbers so the next person raises it from a measurement.
+    //
+    // Raised again merging the fleet-mesh addressing and delivery branch
+    // (60,200: `wait_for_reply` plus `send_message`'s `to_addr` /
+    // `client_msg_id` / `wake`) into main (61,926: host-reboot recovery's
+    // two tools plus the `keys` digits) — each side was measured without
+    // the other, so neither figure covers the merged surface. Measured
+    // together at 62,540; raised to that plus the customary 100 bytes of
+    // headroom.
+    const BUDGET_BYTES: usize = 62_640;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -2671,10 +2715,21 @@ fn the_served_definition_budget_stays_bounded() {
     ] {
         println!("{label}: {n} tools / {b} bytes (~{} tokens)", b * 10 / 37);
     }
+    // The measured number, stated as such: every raise of the constant above
+    // quotes one of these, so the next one has a figure to quote rather than
+    // a baseline inherited from an older entry.
+    println!(
+        "master surface measured at {bytes} bytes of the {BUDGET_BYTES} budget \
+         ({} bytes of headroom)",
+        BUDGET_BYTES.saturating_sub(bytes)
+    );
     assert!(
         bytes <= BUDGET_BYTES,
         "the tool surface grew to {bytes} bytes, over the {BUDGET_BYTES} budget: \
-         trim a description, or raise the constant on purpose"
+         trim a description, or raise the constant on purpose — to {} (the \
+         measurement plus the customary 100 bytes of headroom), and say in the \
+         constant's doc comment what was measured and when",
+        bytes + 100
     );
     assert!(
         ro_bytes < bytes / 2,
@@ -3574,4 +3629,89 @@ async fn a_client_msg_id_reused_from_send_prompt_does_not_replay_into_send_messa
         1,
         "the send must actually happen, not be swallowed by the cross-tool cache hit"
     );
+}
+
+#[tokio::test]
+async fn restore_host_sessions_is_host_scoped_and_dry_run_returns_the_plan() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let lost = s
+        .upsert_session("lost-1", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_claude_session_id(lost, "claude-1").unwrap();
+    s.mark_host_sessions_lost("hostb", "host_reboot", &[], 500, 0)
+        .unwrap();
+    let t = test_tools(s);
+
+    // A token bound to another host is refused outright — dry_run never
+    // even runs, so this also proves no ssh happens for a forbidden caller.
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.restore_host_sessions(
+            Extension(a),
+            Parameters(sessions::RestoreHostSessionsArgs {
+                host_alias: "hostb".into(),
+                dry_run: true,
+                session_ids: None,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+
+    // The master token's dry_run gets the plan — no ssh (this store has no
+    // `SshClient` wired to anything reachable; a real call would hang or
+    // error, so a JSON plan coming back proves the dry_run early-return).
+    let r = t
+        .restore_host_sessions(
+            Extension(Caller::master()),
+            Parameters(sessions::RestoreHostSessionsArgs {
+                host_alias: "hostb".into(),
+                dry_run: true,
+                session_ids: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(text_of(&r.content[0])).unwrap();
+    assert_eq!(v["dry_run"], true);
+    let plan = v["plan"].as_array().expect("plan is an array");
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0]["session_id"], lost);
+    assert_eq!(plan[0]["action"], "restore");
+    assert_eq!(v["results"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn discover_lost_sessions_is_readonly_and_host_scoped() {
+    assert!(guard::is_readonly_tool("discover_lost_sessions"));
+
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let t = test_tools(s);
+
+    // A token bound to another host is refused outright — no ssh happens for
+    // a forbidden caller.
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.discover_lost_sessions(
+            Extension(a),
+            Parameters(sessions::DiscoverLostSessionsArgs {
+                host_alias: "hostb".into(),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+
+    // A readonly token bound to its own host passes both gates the tool
+    // actually runs behind — the same guards every other readonly tool is
+    // proved against (`enforce_mode` in the MCP dispatch, `require_host` in
+    // the handler body).
+    let ro = host_caller("hostb", TokenMode::Readonly);
+    assert!(enforce_mode(&ro, "discover_lost_sessions").is_ok());
+    assert!(require_host(&ro, "hostb", "the lost sessions").is_ok());
 }

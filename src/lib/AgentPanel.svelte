@@ -43,9 +43,13 @@
   // derived state, no effect required to bring it back.
   let droppedLabel = $state<string | null>(null);
 
-  // The LIVE row, not the snapshot `ensure_operator` returned: the composer's
-  // busy gate and the `stuck_kind` line all hang off this, and they are
-  // worthless if it cannot change. See `operatorRow` in operator.ts.
+  // The LIVE row, not the snapshot `ensure_operator` returned. This sheet
+  // owns no composer any more, so what hangs off this row is what the sheet
+  // hands DOWN to ConversationPanel's: the row it renders, and through it the
+  // `claude_status` / `stuck_kind` that drive both the note under the box and
+  // — because this sheet passes `blockWhileBusy` — the gate that refuses a
+  // send while the agent is mid-turn. A frozen row would leave both stale.
+  // See `operatorRow` in operator.ts.
   const session = $derived($operatorRow);
   const rawCtx = $derived(contextInput ? agentContext(contextInput) : null);
   const ctx = $derived(rawCtx && rawCtx.chipLabel !== droppedLabel ? rawCtx : null);
@@ -123,10 +127,16 @@
         <button onclick={blockedAction}>{blocked.action}</button>
       {/if}
     {:else if session}
+      <!-- `blockWhileBusy` is the gate the sheet's own composer had before it
+           was deleted (`busy = statusNote !== null` at v0.2.35) and lost in
+           the refactor. It is passed explicitly, and only here: the
+           Conversation tab never had it, and queueing a prompt behind a
+           running turn is a workflow there, not a mistake. -->
       <ConversationPanel
         {session}
         visible={true}
         promptPrefix={ctx?.prefix ?? null}
+        blockWhileBusy={true}
         composerAbove={ctx ? chip : undefined}
       />
     {/if}
@@ -137,7 +147,10 @@
   .agent-panel {
     position: fixed;
     right: 20px;
-    bottom: 80px;
+    /* Same slot as the toast column: clear of the status bar AND the FAB.
+       Reads the tokens rather than restating the sum, so a change to any
+       one of them moves this too (the hardcoded 80px was already 9px off). */
+    bottom: calc(var(--status-h) + var(--fab-size) + var(--layer-gap) * 2);
     width: 360px;
     max-height: 60vh;
     display: flex;

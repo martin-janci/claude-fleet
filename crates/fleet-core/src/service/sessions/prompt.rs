@@ -368,17 +368,45 @@ fn legacy_label_from_prompt(prompt: &str) -> Option<String> {
     Some(join_label(&words))
 }
 
-/// PURE: whether `current` is a label this app derived from `last_prompt`
-/// under the pre-UX-05 rule AND the current rule would refuse to derive at
-/// all. Such a label (`yes`, `clear`, `push`) is junk the old rule wrote, so
-/// the next real prompt may replace it once. A label a human typed is not
-/// the five-word reduction of the session's last prompt, so this is `false`
-/// for it.
-fn is_legacy_derived_junk(current: &str, last_prompt: Option<&str>) -> bool {
-    let Some(prev) = last_prompt else {
+/// PURE: whether `current` is a name this app DERIVED under the pre-UX-05
+/// rule and the current rule would refuse to produce — junk (`yes`, `clear`,
+/// `push`, `ok do it`) that the next real prompt may replace once.
+///
+/// Keyed on the NAME, never on the row's stored `last_prompt`: that field is
+/// stamped unconditionally by every send, so a `last_prompt`-based test was
+/// only ever one prompt wide. `yes`, then `ok`, then a real prompt left the
+/// row called `yes` forever — which is exactly the population this heal was
+/// written for (round 20, F8).
+///
+/// Two conditions, and the first is the one that keeps a human's label:
+///
+///  - the name is in the exact form the reducer produces — lowercase,
+///    alphanumeric words, single-spaced, at most [`LABEL_MAX_WORDS`] of them.
+///    `PR review`, `My label`, `auth-flow v2` are not, so they are never
+///    replaceable;
+///  - AND its shape is one the reducer only ever produced out of junk: a
+///    single word (`clear` from `/clear`, `push`, `yes`) or an
+///    acknowledgement as the first word (`yes do it`). A name of two or more
+///    ordinary words (`code review`) is left alone — an agent's
+///    `set_friendly_name("code review")` must survive the user then typing
+///    that same phrase as a prompt, which the previous `last_prompt`
+///    comparison did not manage.
+///
+/// The residue: a lowercase single word a human chose (`reviewer`) cannot be
+/// told apart from `push`, so one labelling prompt may rename it. The store
+/// records no "who named this" bit and a migration for one was rejected, so
+/// that is the accepted cost of healing the rows already out there.
+fn is_derived_junk_name(current: &str) -> bool {
+    // Not its own canonical reduction → a human or the in-session agent
+    // typed it; the reducer could not have produced this string.
+    if legacy_label_from_prompt(current).as_deref() != Some(current) {
         return false;
-    };
-    legacy_label_from_prompt(prev).as_deref() == Some(current) && label_from_prompt(prev).is_none()
+    }
+    let words = label_words(current);
+    words.len() == 1
+        || words
+            .first()
+            .is_some_and(|w| LABEL_STOP_FIRST_WORD.contains(&w.as_str()))
 }
 
 /// Post-send bookkeeping (PROD-4 / PROD-5): stamp `last_prompt`, and give a
@@ -427,20 +455,18 @@ pub(super) fn record_prompt_outcome(
             "[prompt] set_last_prompt failed"
         );
     }
-    // The prompt-derived label replaces NO name or the deterministic
-    // branch-derived default every fleet-created session starts with; a
-    // label a human or the in-session agent chose (set_friendly_name) stays.
     // The prompt-derived label replaces NO name, the deterministic
     // branch-derived default every fleet-created session starts with, or a
-    // label the PRE-UX-05 rule derived from the stored `last_prompt` and the
-    // current rule would reject (`yes`, `clear`, `push`). A label a human or
-    // the in-session agent chose (set_friendly_name) stays: it cannot equal
-    // the five-word reduction of the prompt that produced it by accident.
+    // name the PRE-UX-05 rule derived and the current rule would reject
+    // (`yes`, `clear`, `push`). A label a human or the in-session agent
+    // chose (set_friendly_name) stays — `is_derived_junk_name` documents
+    // what keeps it, and why the test is on the name rather than on the
+    // row's `last_prompt`.
     let replaceable = match &row.friendly_name {
         None => true,
         Some(current) => {
             s.default_friendly_name(row.id).ok().flatten().as_deref() == Some(current.as_str())
-                || is_legacy_derived_junk(current, row.last_prompt.as_deref())
+                || is_derived_junk_name(current)
         }
     };
     if label && replaceable {
@@ -520,7 +546,10 @@ pub async fn send_prompt(
         let key = crate::tmux::NamedKey::parse(k).ok_or_else(|| {
             IpcError::new(
                 codes::E_VALIDATE,
-                format!("keys must be Enter, Escape or C-c, not {k:?}"),
+                format!(
+                    "keys must be {}, not {k:?}",
+                    crate::tmux::NamedKey::VOCABULARY
+                ),
             )
         })?;
         if !args.prompt.is_empty() {

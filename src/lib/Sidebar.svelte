@@ -530,11 +530,31 @@
     }
   }
 
+  /** True only when the key event started on the row element itself.
+   *
+   *  The row is a tabbable `role="button"` that CONTAINS real buttons (the
+   *  action cluster, revealed by `:focus-within`). `keydown` bubbles from a
+   *  focused descendant up to the row, and activating a `<button>` is the
+   *  DEFAULT ACTION of that keydown — so an ancestor calling
+   *  `preventDefault()` on the way up cancels it. Without this guard the
+   *  row's handler swallowed Enter/Space for every nested control (round-20
+   *  F4: UX-132 added the tab stops and reached none of the actions). */
+  function fromRowItself(e: Event): boolean {
+    return e.target === e.currentTarget;
+  }
+
   function onKeySession(e: KeyboardEvent, sess: SessionRow) {
+    if (!fromRowItself(e)) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       onSelectSession(sess);
     }
+  }
+
+  /** Same guard for the project row, which holds + New session and Purge. */
+  function onKeyProject(e: KeyboardEvent, projectId: number) {
+    if (!fromRowItself(e)) return;
+    if (e.key === 'Enter' || e.key === ' ') toggleCollapse(projectId);
   }
 
   async function beginEdit(sess: SessionRow, mode: 'label' | 'tmux', e?: Event) {
@@ -776,7 +796,7 @@
               role="button"
               tabindex="0"
               onclick={() => toggleCollapse(row.project.id)}
-              onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && toggleCollapse(row.project.id)}
+              onkeydown={(e) => onKeyProject(e, row.project.id)}
             >
               <span class="caret" class:collapsed={isCollapsed}>▾</span>
               <span class="label">
@@ -1077,7 +1097,6 @@
     outline: var(--ring-w) solid var(--ring);
     outline-offset: calc(-1 * var(--ring-w));
   }
-  .proj-row:focus-within .purge-btn { opacity: 0.6; }
   .caret {
     color: var(--fg-muted);
     font-size: 0.65rem;
@@ -1177,11 +1196,26 @@
   /* UX-04: `.icon-btn:disabled { opacity: 0.6 }` outranks `opacity: 0` here,
      so before this rule the purge button was INVISIBLE exactly when it
      worked and permanently visible when it did not (hub mode). A blocked
-     destructive action must not be the most prominent thing in the row. */
+     destructive action must not be the most prominent thing in the row.
+
+     Round-20 F10: the reveal rules are written with an explicit
+     `:not(:disabled)` / `:disabled` pair rather than relying on source
+     order, because CASCADE ORDER NEVER DECIDES THIS — specificity does. The
+     first attempt at the keyboard path (`.proj-row:focus-within .purge-btn`,
+     (0,3,0)) silently outranked `.purge-btn:disabled` ((0,2,0)) and lit the
+     blocked trash at 0.6 on focus, brighter than the 0.35 chosen for hover:
+     the very inversion UX-04/UX-133 removed. Hover and focus now share one
+     pair, so the disabled button is never more visible than the enabled one
+     in either path — and the enabled one keeps its keyboard affordance. */
   .purge-btn:disabled { opacity: 0; }
-  .proj-row:hover .purge-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-  .proj-row:hover .purge-btn {
+  .proj-row:hover .purge-btn:not(:disabled),
+  .proj-row:focus-within .purge-btn:not(:disabled) {
     opacity: 0.6;
+  }
+  .proj-row:hover .purge-btn:disabled,
+  .proj-row:focus-within .purge-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
   }
   .purge-btn:hover:not(:disabled) { opacity: 1 !important; }
   .theme-toggle {
