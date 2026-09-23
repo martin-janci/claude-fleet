@@ -552,6 +552,11 @@ pub struct SessionConversationParams {
     /// conversation. Defaults to 50, capped at 200.
     #[serde(default)]
     pub events_limit: Option<i64>,
+    /// The turn_seq you last saw: returns the turns completed since, plus the
+    /// one still running. `turns` wins; out of range (a compaction, /clear)
+    /// gives the default window.
+    #[serde(default)]
+    pub since_turn: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

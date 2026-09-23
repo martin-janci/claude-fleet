@@ -2681,7 +2681,18 @@ fn the_served_definition_budget_stays_bounded() {
     // the other, so neither figure covers the merged surface. Measured
     // together at 62,540; raised to that plus the customary 100 bytes of
     // headroom.
-    const BUDGET_BYTES: usize = 62_640;
+    //
+    // Raised from 62_640 to 62_927 for `session_conversation`'s `since_turn`:
+    // one optional field, whose schema property plus `"default"`/`"type"`
+    // wrappers is structural and no wording pays it off — that surface had
+    // exactly 100 bytes of headroom left. Both texts were cut to a clause
+    // first (the tool's to "since_turn narrows the window to what came after
+    // that turn_seq", the field's to three lines), measuring 62_827; raised
+    // to that plus the customary 100 bytes. What it buys: the call the
+    // Conversation panel makes every 5 s and the phone makes on every row
+    // change re-read and re-rendered the last ten turns every time, nine of
+    // which the caller already had.
+    const BUDGET_BYTES: usize = 62_927;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
