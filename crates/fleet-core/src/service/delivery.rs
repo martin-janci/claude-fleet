@@ -3,7 +3,11 @@
 //! Claude Code caps `additionalContext` at 8000 characters and 200 lines and
 //! truncates silently past either. Truncating a message body mid-sentence is
 //! worse than not sending it, so this packs WHOLE messages only and names how
-//! many are left in the inbox.
+//! many are left in the inbox. A message whose own body cannot fit even as
+//! the first block of an empty batch gets a short stub instead (naming its
+//! id, pointing at `inbox`) rather than being skipped — skipping it would
+//! leave it undelivered at the head of an oldest-first queue forever,
+//! stalling delivery of everything behind it.
 
 use crate::store::SessionMessage;
 
@@ -51,12 +55,15 @@ pub fn pack(messages: &[SessionMessage], sender_label: &dyn Fn(i64) -> String) -
     let mut lines = 0usize;
 
     for m in messages {
+        let who = sender_label(m.from_session_id);
         let block = format!(
             "[fleet msg #{id} from {who}]: {body}",
             id = m.id,
-            who = sender_label(m.from_session_id),
+            who = who,
             body = m.body
         );
+        let block_chars = block.chars().count();
+        let block_lines = block.lines().count();
         // Exact joiner cost: `blocks.join("\n\n")` inserts "\n\n" — 2 chars,
         // 1 extra line — between consecutive blocks, so it applies only once
         // a previous block already exists. A flat "+1" undercounts as N
@@ -65,8 +72,47 @@ pub fn pack(messages: &[SessionMessage], sender_label: &dyn Fn(i64) -> String) -
         // CTX_MAX_CHARS — exactly the silent CLI truncation this exists to
         // prevent.
         let (joiner_c, joiner_l) = if blocks.is_empty() { (0, 0) } else { (2, 1) };
-        let c = block.chars().count() + joiner_c;
-        let l = block.lines().count() + joiner_l;
+
+        // Individually oversized: this message's own body cannot fit even as
+        // the sole content of an empty batch (measured against the FULL
+        // budget, not what happens to be left). Breaking here — as the
+        // ordinary overflow case below does — would leave it undelivered at
+        // the head of the queue forever: `take_pending_delivery_locked`
+        // stamps nothing when `included` is empty, `list_undelivered_for_session`
+        // is oldest-first, so every later hook would hit this exact same
+        // message again. Swap in a short stub instead: it names the id and
+        // says the body must be read via `inbox`, it DOES get stamped
+        // delivered (its id goes into `included`), and packing continues —
+        // so this message can never starve everything behind it. A message
+        // that merely doesn't fit in the *remaining* space of a partly
+        // filled batch is a different case (below): that one still breaks,
+        // to preserve order and avoid starving it by smaller later ones.
+        if block_chars > budget_chars || block_lines > budget_lines {
+            let stub = format!(
+                "[fleet msg #{id} from {who}]: (message too large to inline — {chars} chars; read it with the fleet `inbox` tool)",
+                id = m.id,
+                who = who,
+                chars = block_chars,
+            );
+            let c = stub.chars().count() + joiner_c;
+            let l = stub.lines().count() + joiner_l;
+            if chars + c > budget_chars || lines + l > budget_lines {
+                // Even the stub doesn't fit in what's left of this batch —
+                // stop like the ordinary overflow case; everything from here
+                // on, including this message, is counted in `remaining` and
+                // stays undelivered to be picked up (stubbed, if still
+                // individually oversized) by the next hook.
+                break;
+            }
+            chars += c;
+            lines += l;
+            included.push(m.id);
+            blocks.push(stub);
+            continue;
+        }
+
+        let c = block_chars + joiner_c;
+        let l = block_lines + joiner_l;
         if chars + c > budget_chars || lines + l > budget_lines {
             // Whole messages only: stop at the first one that does not fit
             // rather than skipping it, so delivery order is never scrambled
@@ -212,16 +258,79 @@ mod tests {
         assert_eq!(p.remaining, 1);
     }
 
+    /// Test 1 from the fix spec. Supersedes the old
+    /// `a_single_message_over_budget_is_never_packed_and_is_reported`, which
+    /// asserted `included.is_empty()` and `remaining == 1` for this exact
+    /// input — that WAS the bug: an individually oversized message left
+    /// unstamped at the head of an oldest-first, undelivered-only queue,
+    /// where `pack` breaking on it (and stamping nothing, since `included`
+    /// was empty) meant every later hook hit the same message and nothing
+    /// behind it was ever delivered again. The fix stubs it instead: still
+    /// no body is ever cut to fit, but the id above IS stamped delivered and
+    /// packing does not stop here.
     #[test]
-    fn a_single_message_over_budget_is_never_packed_and_is_reported() {
+    fn a_single_oversized_message_gets_a_stub_and_is_stamped_delivered() {
         let huge = "z".repeat(CTX_MAX_CHARS + 1);
         let p = pack(&[msg(1, &huge)], &label);
-        assert!(p.included.is_empty(), "a body is never cut to fit");
-        assert_eq!(p.remaining, 1);
-        assert!(
-            p.text.contains("1 more"),
-            "the agent must still learn it exists"
+        assert_eq!(
+            p.included,
+            vec![1],
+            "the stub still gets it stamped delivered"
         );
+        assert_eq!(p.remaining, 0);
+        assert!(p.text.contains('1'), "the stub must name the message id");
+        assert!(
+            !p.text.contains(&huge),
+            "the body itself must never be inlined"
+        );
+    }
+
+    /// Test 2 from the fix spec — the regression test for the permanent
+    /// stall. Before the fix: `pack` breaks on message 1 immediately,
+    /// `included` is empty, so `take_pending_delivery_locked` stamps
+    /// nothing; message 1 stays at the head of the oldest-first undelivered
+    /// queue and every subsequent hook repeats this forever, so messages 2
+    /// and 3 are NEVER delivered. `included` would be `[]` and
+    /// `remaining` would be `3`.
+    #[test]
+    fn an_oversized_message_at_the_head_does_not_stall_the_ones_behind_it() {
+        let huge = "z".repeat(CTX_MAX_CHARS + 1);
+        let p = pack(&[msg(1, &huge), msg(2, "second"), msg(3, "third")], &label);
+        assert_eq!(p.included, vec![1, 2, 3], "all three get delivered");
+        assert_eq!(p.remaining, 0);
+        assert!(p.text.contains("second") && p.text.contains("third"));
+        assert!(
+            !p.text.contains(&huge),
+            "the oversized body must not appear"
+        );
+    }
+
+    /// Test 3 from the fix spec: the 8000-char / 200-line caps still hold
+    /// once stubs are mixed into a batch.
+    #[test]
+    fn the_caps_still_hold_when_stubs_are_present() {
+        let huge = "z".repeat(CTX_MAX_CHARS + 1);
+        let messages: Vec<SessionMessage> = (1..=10)
+            .map(|id| {
+                if id % 2 == 0 {
+                    msg(id, &huge)
+                } else {
+                    msg(id, "small")
+                }
+            })
+            .collect();
+        let p = pack(&messages, &label);
+        assert!(
+            p.text.chars().count() <= CTX_MAX_CHARS,
+            "chars = {}",
+            p.text.chars().count()
+        );
+        assert!(
+            p.text.lines().count() <= CTX_MAX_LINES,
+            "lines = {}",
+            p.text.lines().count()
+        );
+        assert_eq!(p.included.len() + p.remaining, messages.len());
     }
 
     #[test]

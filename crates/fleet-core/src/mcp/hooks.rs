@@ -525,12 +525,16 @@ mod tests {
         );
     }
 
-    /// When every pending message is individually over `pack`'s budget,
-    /// `included` is empty but the tail ("N more waiting…") is not: the
-    /// response must still carry that tail, and nothing may be stamped —
-    /// the messages have to stay reachable through `inbox`.
+    /// When a pending message is individually over `pack`'s budget, it gets
+    /// a stub (naming its id, pointing at `inbox`) instead of its body, and
+    /// IS stamped delivered — the old contract here (`included` empty,
+    /// nothing stamped, message stuck reachable only via `inbox`) was the
+    /// permanent-stall bug: an oldest-first, undelivered-only queue with an
+    /// oversized message at the head meant `pack` broke on it every single
+    /// hook, forever, and nothing behind it was ever delivered. See
+    /// `service::delivery::pack`.
     #[tokio::test]
-    async fn an_over_budget_message_carries_the_tail_and_stamps_nothing() {
+    async fn an_over_budget_message_gets_a_stub_and_is_stamped_delivered() {
         let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
         let b = {
             let s = store.lock().unwrap();
@@ -571,12 +575,19 @@ mod tests {
         let ctx = v["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
-        assert!(ctx.contains("1 more"), "{ctx}");
+        assert!(
+            ctx.contains("inbox"),
+            "the stub must point at the inbox tool: {ctx}"
+        );
+        assert!(
+            !ctx.contains("1 more"),
+            "the stub message itself was delivered, so it is not left over: {ctx}"
+        );
         let s = store.lock().unwrap();
         assert_eq!(
             s.list_undelivered_for_session(b, 10).unwrap().len(),
-            1,
-            "an over-budget message must stay undelivered, reachable via inbox"
+            0,
+            "the stub gets the message stamped delivered — it must not stay stuck at the head"
         );
     }
 
