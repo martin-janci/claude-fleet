@@ -53,6 +53,11 @@ use serde_json::Value;
 /// * `current_activity` — the second line;
 /// * `context_pct`, `ci_status` — the row's two trailing badges;
 /// * `last_activity_at` — the age column, and the list's sort key;
+/// * `needs_attention` — the hub's own answer to the question the pager is
+///   opened to ask, with its reason and since. Projected away, the view
+///   would hand a phone the columns to re-derive it and not the answer;
+///   `service::attention` exists so that one rule decides it for the
+///   desktop, the phone and anything that later sends a push;
 /// * `pending_input` — the dialog a blocked session is waiting on, with its
 ///   options. Without it the view is a list a phone can read and not act on:
 ///   the one thing a pager exists for is answering that dialog, and a row
@@ -74,6 +79,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "kind",
     "last_activity_at",
     "last_prompt",
+    "needs_attention",
     "pending_input",
     "project_id",
     "status",

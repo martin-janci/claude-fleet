@@ -3799,7 +3799,12 @@ fn one_full_row() -> serde_json::Value {
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     s.upsert_session("dev", "hosta", Some(pid), None, 1, 1, "running", None)
         .unwrap();
-    let row = s.get_session("dev", "hosta").unwrap().expect("row");
+    let mut row = s.get_session("dev", "hosta").unwrap().expect("row");
+    // Blocked on purpose. `needs_attention` is skipped when a session needs
+    // nobody, so a fixture that is merely running would make the view's own
+    // pinning test pass by that field never being there — which is the thing
+    // it exists to catch.
+    row.claude_status = Some("blocked".to_string());
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -3811,7 +3816,7 @@ fn one_full_row() -> serde_json::Value {
 /// Dropping an entry must be a deliberate edit: the failure it prevents is a
 /// phone drawing a blank column against a hub that believes it answered.
 #[test]
-fn the_phone_view_is_exactly_the_fifteen_columns_a_pager_uses() {
+fn the_phone_view_is_exactly_the_sixteen_columns_a_pager_uses() {
     assert_eq!(
         PHONE_SESSION_FIELDS,
         &[
@@ -3825,6 +3830,7 @@ fn the_phone_view_is_exactly_the_fifteen_columns_a_pager_uses() {
             "kind",
             "last_activity_at",
             "last_prompt",
+            "needs_attention",
             "pending_input",
             "project_id",
             "status",
