@@ -287,6 +287,7 @@ impl ServerHandler for FleetTools {
             }
         };
         let tool = request.name.to_string();
+        let label = caller.label();
         // Audit first so refused calls are on the timeline too.
         persist_audit(&self.store, &tool, request.arguments.as_ref(), &caller);
         if let Err(e) = enforce_mode(&caller, &tool).and_then(|()| enforce_admin(&caller, &tool)) {
@@ -296,7 +297,18 @@ impl ServerHandler for FleetTools {
         let tcc = ToolCallContext::new(self, request, context);
         // Tool-execution failures travel as `is_error` results; only rmcp's
         // own protocol errors (unknown tool, bad arguments) stay JSON-RPC.
-        match bounded(&tool, tool_deadline(&tool), self.tool_router.call(tcc)).await {
+        let answer = bounded(&tool, tool_deadline(&tool), self.tool_router.call(tcc)).await;
+        // One counter write per call, on the same dimension the rate limiter
+        // and the stream cap key on — so a number on `/metrics` lines up with
+        // a refusal in the log. A tool failure travels as an `is_error`
+        // RESULT rather than an `Err`, so both shapes are read here or the
+        // error count would only ever see rmcp's own protocol faults.
+        let failed = match &answer {
+            Ok(r) => r.is_error.unwrap_or(false),
+            Err(_) => true,
+        };
+        self.guards.metrics.record_call(&label, failed);
+        match answer {
             Ok(result) => Ok(result),
             Err(e) => tool_error_result(e),
         }

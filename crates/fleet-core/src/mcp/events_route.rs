@@ -200,6 +200,13 @@ impl EventsState {
         }
     }
 
+    /// The limiter this route counts streams against, so `/metrics` reports
+    /// the same gauge the cap enforces rather than a second tally that could
+    /// disagree with it.
+    pub fn stream_limiter(&self) -> Arc<LongPollLimiter> {
+        Arc::clone(&self.streams)
+    }
+
     /// Stream slots `label` currently holds. A test uses it to see a slot
     /// released after a stream ends.
     #[cfg(test)]

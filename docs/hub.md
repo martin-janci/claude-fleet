@@ -666,6 +666,31 @@ path. `deploy/hub/Caddyfile` ships with `encode zstd gzip`; a bare-binary
 deployment with no reverse proxy in front gets the unframed body but no
 compression.
 
+## `/metrics` — what each caller costs this hub
+
+```bash
+curl -s https://fleet.example.com/metrics -H "Authorization: Bearer <master token>"
+```
+
+```
+fleet_tool_calls_total{caller="client:phone"} 412
+fleet_tool_errors_total{caller="client:phone"} 3
+fleet_event_streams_open{caller="client:phone"} 1
+```
+
+Prometheus text format, **master token only** — a per-host token and a paired
+phone are both callers this reports on, and letting one read the others'
+figures would make a read-only device a traffic monitor for the operator's own
+work. A non-master token gets 403 with that sentence, not a 404: the route
+exists and the token is the problem.
+
+The dimension is the caller label, the same key the rate limiter and the
+stream cap use, so a number here lines up with a refusal in the log.
+Deliberately **no session id, no prompt, no project path and no tool name**: a
+metrics endpoint is scraped on a timer and kept for months, and a series
+labelled with a session id is an activity log of the operator's work with a
+retention policy nobody chose.
+
 ## Events
 
 A client that has listed what it needs does not have to poll for changes:
