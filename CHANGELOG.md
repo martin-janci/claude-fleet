@@ -8,6 +8,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.36] - 2026-09-23
+
+### Added
+- **hub:** /metrics, so what a client costs can be read rather than guessed
+- **events:** a reconnect costs what it missed, and a phone can ask for the columns it draws
+- **gc:** sweep retired participants and tell senders what was never read
+- **messages:** wake an idle recipient, never a blocked one
+- **messages:** address-addressed send, idempotency, wait_for_reply tool
+- **messages:** event-driven wait_for_reply on a store notify
+- **hook:** block a Stop for a question, capped at three in a row
+- **hook:** answer 200 with additionalContext when a message is pending
+- **hooks:** look up and stamp the delivery a hook response carries
+- **store:** undelivered-message query and delivered_at stamping
+- **service:** pack pending messages into a hook additionalContext
+- **service:** mint a stable fleet id and report it from whoami
+- **ui:** answer Claude's dialog from the app instead of the terminal
+- **service:** fleet address parse and render
+- **store:** participant identity with re-point and tombstone
+- **store:** migration 043 — participants, delivery columns, block streak
+- **release:** publish a complete, versioned, fully checksummed release
+- **release:** declare every release asset and build leg in one manifest
+- **release:** gate every release leg on the carrier and tag check
+- **ci:** fail CI when the six version carriers disagree
+- **release:** print the version carriers with release.sh --list
+- **ui:** find and resume lost Claude conversations from HostDetail
+- **mcp:** discover_lost_sessions
+- **sessions:** parse and rank Claude transcripts for lost-session discovery
+- **sessions:** new_session can resume a conversation; never reuse a lost session's name
+- **ui:** restore a host's lost sessions from HostDetail
+- **mcp:** restore_host_sessions tool and command
+- **sessions:** restore_host_sessions service
+- **settings:** restore.batch_size and restore.stagger_ms
+- **sessions:** expose lost_reason on the session row
+
+### Changed
+- **conversation:** a caller that draws no timeline can say so
+- **hub:** ask SQLite about one client instead of reading the table
+- **events:** a probe that found nothing new says so in three fields
+- **conversation:** a caller that says where it got to gets only what it missed
+- regenerate reference, verdicts and contract; correct gc docs
+- **sessions:** the row fixture carries askRestart, new on main
+- allow ci.yml to be started manually
+- **ci:** smoke-test the release asset manifest on every PR
+- **catalog:** stop the identity tests reading whoever runs them
+- **ci:** mirror the version-consistency job in ci-local.sh
+- **ui:** strengthen the bg/external/no-id restore filter test
+- **sessions:** exercise plan_cwd's worktree and local base_path branches
+
+### Fixed
+- **mcp:** cut since_turn's text to a clause, and pay for the field on purpose
+- **ui:** categorise the two Stop-block timeline kinds
+- **participants:** validate both ends, reply by identity, roll back a failed move
+- **delivery:** pack the Stop block reason to its own budget
+- **store:** read the inbox by participant and run retention unconditionally
+- **store:** a kill tombstones the participant; a move keeps its inbox
+- **messages:** namespace the dedupe id and never wake a stuck session
+- **review:** round-20 findings across tests, transcript, contract and UI
+- **delivery:** stub an oversized message so it cannot stall the queue
+- **hooks:** guard the streak reset and decide a Stop in one lock window
+- **hooks:** deliver only to the conversation the row actually holds
+- **delivery:** count the block joiner exactly so the context budget holds
+- **address:** a session or client name may contain a slash
+- **health:** assert the schema version against LATEST_SCHEMA_VERSION
+- **logging:** drop rmcp's client-hung-up ERROR instead of filing it as ours
+- **agent:** the sheet sends through the composer that owns its live state
+- **ux:** stop junk session names, guard destructive one-click actions
+- **conversations:** stop printing harness XML at the reader
+- **release:** make `release-assets.sh assets` keep its sorted/deduped contract
+- **release:** never lose SHA256SUMS to a missing per-target sums dir
+- **core:** require app_version::set, drop the 0.1.0 fallback
+- **ui:** no Resume on a paired desktop; no Restore for an all-skip plan
+- **restore:** skip a lost fleet controller; clarify resume/restore docs
+- **hub-client:** give restore/discover hub calls a 310s deadline
+- **restore:** one restore per host at a time; skip rows no longer lost
+- **discover:** offer Resume only when new_session starts in the transcript's exact cwd
+- **ui:** convert seconds-based now prop to ms before timeAgo in discover-list
+- **sessions:** reject a resume id on shell sessions or one already held on the host
+
+### Documentation
+- record two as-built deviations in the cycle 1 design
+- correct the plan's stale re-delivery statements
+- **review:** code review round 20 — post-v0.2.35 wave, with resolutions
+- **claude-md:** the reboot paragraph describes both halves now
+- implementation plan for fleet mesh addressing and delivery
+- fleet mesh addressing and delivery design (cycle 1 of 3)
+- **readme:** claim only what verify-release can enforce today
+- **release:** describe the asset set, the gate, and how to verify a download
+- **hub:** spell out that declaring the app version is mandatory
+- **plans:** release-process + version-sync audit across claude-fleet and property-management
+- **plans:** host-reboot recovery (PR 2/2)
 ## [0.2.35] - 2026-09-22
 
 ### Added
@@ -1233,6 +1323,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.36]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.36
 [0.2.35]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.35
 [0.2.34]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.34
 [0.2.33]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.33
