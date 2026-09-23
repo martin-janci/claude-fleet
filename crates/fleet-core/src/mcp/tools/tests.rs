@@ -2681,7 +2681,16 @@ fn the_served_definition_budget_stays_bounded() {
     // the other, so neither figure covers the merged surface. Measured
     // together at 62,540; raised to that plus the customary 100 bytes of
     // headroom.
-    const BUDGET_BYTES: usize = 62_640;
+    //
+    // Raised on 2026-09-23 for `list_sessions.view` — 324 bytes of schema
+    // and parameter doc that buy back, for the one client that asks,
+    // 30 257 B of every `list_sessions` answer, measured on a 56-row live
+    // fleet. The definition surface is paid once per connection; that answer
+    // is paid on every resync, so this is the cheap side of the trade. The
+    // tool's own description was cut back to what it said before, and the
+    // parameter doc to two sentences, before raising anything: 62,864
+    // measured, plus the customary 100 bytes.
+    const BUDGET_BYTES: usize = 62_964;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3714,4 +3723,136 @@ async fn discover_lost_sessions_is_readonly_and_host_scoped() {
     let ro = host_caller("hostb", TokenMode::Readonly);
     assert!(enforce_mode(&ro, "discover_lost_sessions").is_ok());
     assert!(require_host(&ro, "hostb", "the lost sessions").is_ok());
+}
+
+// ---- named row projections (`view`) and the project filter ----
+
+/// One serialized `list_sessions` full row, nulls and all, to project.
+fn one_full_row() -> serde_json::Value {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    s.upsert_session("dev", "hosta", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    let row = s.get_session("dev", "hosta").unwrap().expect("row");
+    serde_json::to_value(vec![SessionWithController {
+        is_controller: false,
+        row,
+    }])
+    .expect("serialize")
+}
+
+/// The view is the server's definition of "what a pager row is", so it is
+/// pinned here rather than left to whatever the projection happens to keep.
+/// Dropping an entry must be a deliberate edit: the failure it prevents is a
+/// phone drawing a blank column against a hub that believes it answered.
+#[test]
+fn the_phone_view_is_exactly_the_fourteen_columns_that_list_draws() {
+    assert_eq!(
+        PHONE_SESSION_FIELDS,
+        &[
+            "ci_status",
+            "claude_status",
+            "context_pct",
+            "current_activity",
+            "friendly_name",
+            "host_alias",
+            "id",
+            "kind",
+            "last_activity_at",
+            "last_prompt",
+            "project_id",
+            "status",
+            "stuck_kind",
+            "tmux_name",
+        ]
+    );
+}
+
+/// A view names fields by string, so a renamed column would not fail to
+/// compile — it would quietly project to nothing. Checked against the
+/// serialized row BEFORE `strip_nulls`, which is the only place a field that
+/// is null on this fixture still shows its name.
+#[test]
+fn every_phone_view_field_is_a_real_key_of_the_serialized_row() {
+    let rows = one_full_row();
+    let obj = rows[0].as_object().expect("row object");
+    for f in PHONE_SESSION_FIELDS {
+        assert!(
+            obj.contains_key(*f),
+            "{f} is in the phone view but not a key of SessionWithController: \
+             a rename would silently empty that column"
+        );
+    }
+}
+
+/// The contract rule this change lives under (`wire_contract.rs`): a client
+/// that does not ask for a view must get the identical bytes it got before
+/// the view existed. Proved by construction — both paths are one function —
+/// and asserted so a future short-cut in either branch cannot break it.
+#[test]
+fn a_view_is_opt_in_and_the_default_answer_is_byte_identical() {
+    let rows = one_full_row();
+    let plain = ok_json_compact(&rows).unwrap();
+    let no_view = ok_json_compact_view(&rows, None).unwrap();
+    assert_eq!(text_of(&plain.content[0]), text_of(&no_view.content[0]));
+}
+
+/// The 64 % that is not drawn: the heaviest of these on the measured capture
+/// were `claude_session_id` (2 773 B over 56 rows) and `account_uuid`
+/// (2 160 B). Dropping them is also why a phone stops holding them at all.
+#[test]
+fn the_phone_view_drops_the_columns_no_screen_reads() {
+    let mut rows = one_full_row();
+    project_rows(&mut rows, PHONE_SESSION_FIELDS);
+    let obj = rows[0].as_object().expect("row object");
+    for gone in [
+        "claude_session_id",
+        "account_uuid",
+        "usage_cache_read_tokens",
+        "usage_input_tokens",
+        "usage_model",
+        "context_source",
+        "safe_kill_nonce",
+        "is_controller",
+        "row_version",
+    ] {
+        assert!(!obj.contains_key(gone), "{gone} survived the phone view");
+    }
+    for kept in PHONE_SESSION_FIELDS {
+        assert!(obj.contains_key(*kept), "{kept} fell out of the phone view");
+    }
+}
+
+/// A projection that is not an array of rows is left alone rather than
+/// half-applied — `ok_json_compact_view` is shared, and a scalar or object
+/// result must not be quietly emptied by a stray `view`.
+#[test]
+fn project_rows_leaves_a_non_row_shape_alone() {
+    let mut v = serde_json::json!({ "total": 3, "worktrees": [] });
+    project_rows(&mut v, &["id"]);
+    assert_eq!(v, serde_json::json!({ "total": 3, "worktrees": [] }));
+}
+
+/// `events_route::wanted_kinds` reports what it could not use rather than
+/// serving a stream that silently says nothing; a single-valued parameter's
+/// version of that is a refusal naming the views that do exist. A typo that
+/// answered full rows would look like success and cost the 30 KB this is
+/// for.
+#[test]
+fn an_unknown_view_is_refused_and_names_the_views_that_exist() {
+    let err = SessionView::parse("phne").unwrap_err();
+    assert!(err.message.starts_with("E_INVALID"), "{}", err.message);
+    assert!(err.message.contains("phne"), "{}", err.message);
+    assert!(
+        err.message.contains("phone"),
+        "the refusal must name the known views: {}",
+        err.message
+    );
+    // Typed by hand into an app once: case and stray whitespace still parse.
+    assert_eq!(SessionView::parse(" Phone ").unwrap(), SessionView::Phone);
+    assert_eq!(
+        SessionView::parse("phone").unwrap().fields(),
+        PHONE_SESSION_FIELDS
+    );
 }
