@@ -684,8 +684,14 @@ exists because neither shape fitted: the default summary row is 9 951 B but
 drops `friendly_name`, `current_activity` and `last_activity_at`, which are
 three of the fourteen that list draws.
 
-It is opt-in and additive: omit it and the bytes are what they were, so the
-wire-contract revision does not move.
+`list_projects { has_sessions: true }` keeps only the projects that hold a
+live session — the rows a client needs to turn a session's `project_id` into
+a heading. That fleet's hub listed **78 projects (6 581 B) to name the 8
+(835 B)** its sessions actually carried: −87 %, and the one call whose cost
+grows with the operator's history rather than with the fleet.
+
+Both are opt-in and additive: omit them and the bytes are what they were, so
+the wire-contract revision does not move.
 
 ## Events
 

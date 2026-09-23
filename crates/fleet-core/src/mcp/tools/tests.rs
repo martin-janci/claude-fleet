@@ -2690,7 +2690,13 @@ fn the_served_definition_budget_stays_bounded() {
     // tool's own description was cut back to what it said before, and the
     // parameter doc to two sentences, before raising anything: 62,864
     // measured, plus the customary 100 bytes.
-    const BUDGET_BYTES: usize = 62_964;
+    //
+    // Raised again, same day, for `list_projects.has_sessions` — 206 bytes,
+    // against 5 746 B off every `list_projects` answer on that same fleet
+    // (78 projects listed to name the 8 its sessions carried). Its parameter
+    // doc is two lines and the tool description was left alone. 63,070
+    // measured, plus the customary 100 bytes.
+    const BUDGET_BYTES: usize = 63_170;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3855,4 +3861,52 @@ fn an_unknown_view_is_refused_and_names_the_views_that_exist() {
         SessionView::parse("phone").unwrap().fields(),
         PHONE_SESSION_FIELDS
     );
+}
+
+/// B5: the list that names a session row's project is the one call whose
+/// cost grows with the operator's history rather than the fleet — 78
+/// projects to name the 8 the measured fleet's sessions carried. A ghost
+/// (`lost_at`) keeps nothing alive, because `list_sessions` does not return
+/// it by default either.
+#[tokio::test]
+async fn list_projects_has_sessions_keeps_only_projects_a_live_session_names() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let used = s.upsert_project("o", "used", "/used").unwrap();
+    let ghosted = s.upsert_project("o", "ghosted", "/ghosted").unwrap();
+    s.upsert_project("o", "idle", "/idle").unwrap();
+    s.upsert_session("dev", "hosta", Some(used), None, 1, 1, "running", None)
+        .unwrap();
+    // The ghost lives alone on hostb so a reboot verdict can lose it without
+    // touching the live row this asserts survives.
+    s.upsert_session("old", "hostb", Some(ghosted), None, 1, 1, "running", None)
+        .unwrap();
+    s.mark_host_sessions_lost("hostb", "host_reboot", &[], 500, 0)
+        .unwrap();
+    let t = test_tools(s);
+
+    let params = |has_sessions: bool| ListProjectsParams {
+        summary: true,
+        limit: None,
+        has_sessions,
+    };
+    let repos = |r: CallToolResult| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(text_of(&r.content[0])).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["repo"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let all = repos(t.list_projects(Parameters(params(false))).await.unwrap());
+    assert_eq!(
+        all.len(),
+        3,
+        "the default still lists every project: {all:?}"
+    );
+
+    let live = repos(t.list_projects(Parameters(params(true))).await.unwrap());
+    assert_eq!(live, vec!["used".to_string()], "got {live:?}");
 }

@@ -139,7 +139,7 @@ List the catalog's layer definitions (layers/*.yaml) and each host's role + acti
 
 List discovered projects (repos fleet can spawn sessions in). Slim rows by default (id, owner, repo, worktree_count, last_session_at); summary=false returns the full nested worktree tree, which is large — pair it with limit.
 
-Parameters: `limit`, `summary`
+Parameters: `has_sessions`, `limit`, `summary`
 
 ### `list_sessions`
 

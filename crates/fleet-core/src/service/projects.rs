@@ -140,6 +140,26 @@ pub fn list_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow>, IpcErr
     s.list_projects_joined()
 }
 
+/// [`list_projects`], narrowed to the projects that hold at least one live
+/// session.
+///
+/// This list is what turns a session row's `project_id` into a heading, and
+/// it is the one call whose cost grows with the operator's HISTORY rather
+/// than with the fleet: on the measured hub it answered 78 projects — 6 581 B
+/// of inner JSON, 7 660 B on the wire — to name the 8 distinct `project_id`s
+/// its 56 sessions actually carried. Those 8 rows are 835 B; the other
+/// 5 746 B are headings for projects with nothing running in them.
+///
+/// Both queries run under ONE lock, so the id set and the listing cannot
+/// disagree about a session created between them.
+pub fn list_projects_with_sessions(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow>, IpcError> {
+    let s = lock(store)?;
+    let keep = s.project_ids_with_sessions()?;
+    let mut trees = s.list_projects_joined()?;
+    trees.retain(|t| keep.contains(&t.project.id));
+    Ok(trees)
+}
+
 /// One scanned repository: its `git worktree list` (canonical paths, main
 /// first) and its canonical `git rev-parse --git-common-dir`. `None` when git
 /// could not answer; such a repo is never merged with another.

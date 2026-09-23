@@ -446,6 +446,10 @@ pub struct ListProjectsParams {
     /// roughly ten times a summary row.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Keep only projects holding a live session — the ones `list_sessions`
+    /// rows can name. Applied before `limit`. Default false: every project.
+    #[serde(default)]
+    pub has_sessions: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
