@@ -96,18 +96,30 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// for `when: cancel` instead of ending a wait. From here on such a hub is
 /// refused instead of trusted with a silent default — raise this again the
 /// next time that happens.
-pub const MIN_HUB_CONTRACT: u32 = 3;
+///
+/// Raised to 4 for revision 4: the `ConvItem` kinds `bash` and `harness`, and
+/// `session_activity` becoming a hub tool. A revision-3 hub does not serve
+/// `session_activity` at all, so a desktop paired with one polled it every
+/// two seconds and threw every answer away — no live indicator, no error, a
+/// failing round-trip per panel per tick. Refusing that hub with an honest
+/// skew banner is the whole point of the bump; leaving it `InRange` would
+/// keep the silent version.
+pub const MIN_HUB_CONTRACT: u32 = 4;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
 /// safer to say so than to guess at fields it has never seen.
-pub const MAX_HUB_CONTRACT: u32 = 3;
+///
+/// Moves in lockstep with [`fleet_core::wire_contract::CONTRACT_REVISION`]:
+/// this build's own hub must be `InRange`, so bumping the revision without
+/// bumping this is a shipped outage against itself.
+pub const MAX_HUB_CONTRACT: u32 = 4;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
-/// are `3..=3` today, and unlike the original `0..=1` range this one CAN
-/// exercise "too old" through a live `u32` (a hub reporting `0`, `1` or `2`
-/// is below `3`) — see `tests_contract.rs`, independent of whichever bounds
+/// are `4..=4` today, and unlike the original `0..=1` range this one CAN
+/// exercise "too old" through a live `u32` (a hub reporting `0`…`3` is below
+/// `4`) — see `tests_contract.rs`, independent of whichever bounds
 /// a future release ships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractFit {

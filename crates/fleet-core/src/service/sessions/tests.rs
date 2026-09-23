@@ -3777,6 +3777,84 @@ fn a_legacy_junk_label_heals_but_a_chosen_one_survives() {
     );
 }
 
+/// Round 20 F8 — the heal is not one prompt wide. `set_last_prompt` stamps
+/// EVERY send, so a heal keyed on the stored prompt fired only when the very
+/// next fleet prompt was a labelling one: `yes`, then `ok`, then real work
+/// left the row called `yes` forever. That is the population the heal exists
+/// for, so the acks in between must not matter.
+#[test]
+fn a_legacy_junk_label_heals_across_intervening_non_labelling_prompts() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-junk", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let id = s.get_session("dev-junk", "local").unwrap().unwrap().id;
+        // What the pre-UX-05 rule left behind: name == the reduction of the
+        // prompt that produced it.
+        s.set_last_prompt(id, "yes").unwrap();
+        s.set_friendly_name("local", "dev-junk", Some("yes"))
+            .unwrap();
+    }
+    // Two more acks: neither may name the row, and both move `last_prompt`
+    // off the one that produced the junk name.
+    for ack in ["ok", "thanks"] {
+        record_prompt_outcome(&store, "local", "dev-junk", ack, true);
+        let s = store.lock().unwrap();
+        let row = s.get_session("dev-junk", "local").unwrap().unwrap();
+        assert_eq!(
+            row.friendly_name.as_deref(),
+            Some("yes"),
+            "{ack:?} must not name the session"
+        );
+        assert_eq!(row.last_prompt.as_deref(), Some(ack));
+    }
+    record_prompt_outcome(&store, "local", "dev-junk", "Rewrite the auth flow", true);
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session("dev-junk", "local")
+            .unwrap()
+            .unwrap()
+            .friendly_name
+            .as_deref(),
+        Some("rewrite the auth flow"),
+        "the junk name must heal however many acks came in between"
+    );
+}
+
+/// Round 20 Low (same function) — a name the user or the in-session agent
+/// chose is never replaceable, including when the user then types that exact
+/// phrase as a prompt. The `last_prompt` comparison declared `code review`
+/// replaceable the moment `code review` was the stored prompt, which
+/// contradicted the rule stated right above it.
+#[test]
+fn a_chosen_name_survives_the_user_typing_it_as_a_prompt() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-chosen", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_friendly_name("local", "dev-chosen", Some("code review"))
+            .unwrap();
+    }
+    // Too short to name anything, so it only stamps `last_prompt` — which
+    // now equals the chosen name.
+    record_prompt_outcome(&store, "local", "dev-chosen", "code review", true);
+    record_prompt_outcome(&store, "local", "dev-chosen", "Rewrite the auth flow", true);
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session("dev-chosen", "local")
+            .unwrap()
+            .unwrap()
+            .friendly_name
+            .as_deref(),
+        Some("code review"),
+        "a chosen name is not junk just because a prompt read like it"
+    );
+}
+
 /// A prompt fleet composed (safe-kill, an inbox header, a review seed) or
 /// fanned out over N sessions describes fleet's request, not the user's
 /// work: `label: false` records it without naming anything.

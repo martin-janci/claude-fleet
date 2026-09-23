@@ -159,6 +159,9 @@ describe('SessionDetails', () => {
     });
     btn.click();
     await tick();
+    // Repair can respawn a live pane, so it asks first.
+    (await screen.findByTestId('confirm-repair-details')).click();
+    await tick();
     await tick();
     expect((invoke as ReturnType<typeof vi.fn>).mock.calls).toContainEqual([
       'repair_session',
@@ -169,6 +172,57 @@ describe('SessionDetails', () => {
     expect(done).toBeTruthy();
     // branch_source is always shown for a repair that re-added the worktree.
     expect(done?.message).toContain('branch_local');
+  });
+
+  // Both of these stop the claude process that is running right now. Kill and
+  // Recreate beside them have always confirmed; these two wear a `↻` and a
+  // plaster, which read like Refresh.
+  it('Restart asks before stopping the running claude, and Cancel sends nothing', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const inv = invoke as ReturnType<typeof vi.fn>;
+    render(SessionDetails, { props: { session: { ...sampleSession, id: 11, project_id: 1 } } });
+    await tick();
+    (await screen.findByTestId('restart-from-details')).click();
+    await tick();
+    const dialog = await screen.findByTestId('confirm-dialog');
+    expect(dialog.textContent).toContain('dev-foo');
+    expect(screen.getByTestId('confirm-restart-details')).toBeTruthy();
+    // Destructive: the safe button holds initial focus.
+    expect(document.activeElement).toBe(screen.getByTestId('confirm-cancel'));
+
+    inv.mockClear();
+    screen.getByTestId('confirm-cancel').click();
+    await tick();
+    expect(screen.queryByTestId('confirm-restart-details')).toBeNull();
+    expect(inv.mock.calls.some((c) => c[0] === 'restart_session')).toBe(false);
+
+    // Confirming does send it.
+    (await screen.findByTestId('restart-from-details')).click();
+    await tick();
+    (await screen.findByTestId('confirm-restart-details')).click();
+    await tick();
+    await tick();
+    expect(inv.mock.calls).toContainEqual([
+      'restart_session',
+      { args: { host_alias: 'mefistos', name: 'dev-foo' } },
+    ]);
+  });
+
+  it('Repair asks before respawning the pane, and Cancel sends nothing', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const inv = invoke as ReturnType<typeof vi.fn>;
+    render(SessionDetails, { props: { session: { ...sampleSession, id: 12, project_id: 1 } } });
+    await tick();
+    (await screen.findByTestId('repair-from-details')).click();
+    await tick();
+    expect(screen.getByTestId('confirm-dialog').textContent).toContain('respawn the pane');
+    expect(document.activeElement).toBe(screen.getByTestId('confirm-cancel'));
+
+    inv.mockClear();
+    screen.getByTestId('confirm-cancel').click();
+    await tick();
+    expect(screen.queryByTestId('confirm-repair-details')).toBeNull();
+    expect(inv.mock.calls.some((c) => c[0] === 'repair_session')).toBe(false);
   });
 
   it('offers Move to host… for resumable worktree sessions and opens the Transfer sheet', async () => {

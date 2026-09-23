@@ -2648,7 +2648,15 @@ fn the_served_definition_budget_stays_bounded() {
     // 66 bytes and the raise above already carried ~100 of headroom, so the
     // merged surface fits inside it. 61,826 measured; 24 bytes left. The next
     // clause to land here has to pay for itself.
-    const BUDGET_BYTES: usize = 61_850;
+    //
+    // Raised again on 2026-09-23 (code-review round 20, F18) — not for new
+    // surface, but because the headroom had been inherited instead of
+    // measured twice running, leaving 14 and then 24 bytes. A budget that
+    // tight fails CI on a single added word, which is a ratchet against
+    // wording rather than against creep. The merged surface is re-measured
+    // below and the constant is that plus the customary 100 bytes; the run
+    // prints both numbers so the next person raises it from a measurement.
+    const BUDGET_BYTES: usize = 61_926;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -2682,10 +2690,21 @@ fn the_served_definition_budget_stays_bounded() {
     ] {
         println!("{label}: {n} tools / {b} bytes (~{} tokens)", b * 10 / 37);
     }
+    // The measured number, stated as such: every raise of the constant above
+    // quotes one of these, so the next one has a figure to quote rather than
+    // a baseline inherited from an older entry.
+    println!(
+        "master surface measured at {bytes} bytes of the {BUDGET_BYTES} budget \
+         ({} bytes of headroom)",
+        BUDGET_BYTES.saturating_sub(bytes)
+    );
     assert!(
         bytes <= BUDGET_BYTES,
         "the tool surface grew to {bytes} bytes, over the {BUDGET_BYTES} budget: \
-         trim a description, or raise the constant on purpose"
+         trim a description, or raise the constant on purpose — to {} (the \
+         measurement plus the customary 100 bytes of headroom), and say in the \
+         constant's doc comment what was measured and when",
+        bytes + 100
     );
     assert!(
         ro_bytes < bytes / 2,

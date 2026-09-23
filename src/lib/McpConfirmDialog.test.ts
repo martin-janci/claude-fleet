@@ -93,11 +93,22 @@ describe('McpConfirmDialog', () => {
     await tick();
     await emit('mcp:confirm-required', { nonce: 'n-1', tool: 'kill_session', summary: '', caller: 'master' });
     await tick(); await tick();
+    // Real focus, not just the attribute that asks for it: asserting the
+    // attribute alone passes even if Modal.svelte stops focusing anything at
+    // all, which is the half that actually protects the user.
+    expect(document.activeElement).toBe(screen.getByTestId('mcp-confirm-deny'));
+    expect(document.activeElement).not.toBe(screen.getByTestId('mcp-confirm-approve'));
+    // Deny also happens to be first in DOM order here, so focus alone cannot
+    // prove the attribute is what put it there — keep asserting the marker so
+    // a reordering of the two buttons is still caught.
     expect(screen.getByTestId('mcp-confirm-deny')).toHaveAttribute('data-autofocus');
     expect(screen.getByTestId('mcp-confirm-approve')).not.toHaveAttribute('data-autofocus');
   });
 
   it('keeps the request queued and reports when the verdict fails to land', async () => {
+    const { toasts, clearToasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    clearToasts();
     inv.mockImplementation(async (cmd: string) => {
       if (cmd === 'mcp_pending_confirms') return [];
       if (cmd === 'mcp_confirm') throw new Error('ipc down');
@@ -111,6 +122,14 @@ describe('McpConfirmDialog', () => {
     await tick(); await tick();
     // Still on screen: the user has NOT denied anything yet.
     expect(screen.getByTestId('mcp-confirm').textContent).toContain('kill_session');
+    // …and it says so. Silently re-queueing would leave the user believing
+    // they had refused the agent. (Without this the `pushError` line could be
+    // deleted and the test would still pass.)
+    const shown = get(toasts);
+    expect(shown).toHaveLength(1);
+    expect(shown[0].kind).toBe('error');
+    expect(shown[0].message).toContain('Denying kill_session failed');
+    clearToasts();
   });
 
   it('loads requests that were pending before mount', async () => {

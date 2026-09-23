@@ -470,11 +470,17 @@ describe('ConversationPanel', () => {
         }),
       ),
     );
-    const { container } = render(ConversationPanel, { session: session(), visible: true });
+    render(ConversationPanel, { session: session(), visible: true });
     await tick();
     await Promise.resolve();
     await tick();
-    expect(container.textContent).not.toContain('<system-reminder>');
+    // (Round 20 Low) A "not raw XML" assertion used to sit here. It was
+    // vacuous: `reminders` arrives as an already-parsed array, so the tag it
+    // looked for could not have been in the fixture whatever this component
+    // did. The stripping happens in `service/transcript.rs::split_reminders`
+    // and is covered by that crate's own tests; what this test can prove is
+    // that the parsed reminder is folded into the chip and kept out of the
+    // prompt, which is what it asserts below.
     const chip = screen.getByTestId('conv-reminders');
     expect(chip.querySelector('summary')?.textContent).toBe('system reminder');
     expect(screen.getByTestId('conv-reminder-body').textContent).toBe('You are operating in a git worktree.');
@@ -496,14 +502,16 @@ describe('ConversationPanel', () => {
         }),
       ),
     );
-    const { container } = render(ConversationPanel, { session: session(), visible: true });
+    render(ConversationPanel, { session: session(), visible: true });
     await tick();
     await Promise.resolve();
     await tick();
     const row = screen.getByTestId('conv-bash');
     expect(row.querySelector('code')?.textContent).toBe('!git pull --ff-only');
     expect(row.querySelector('.command-out')?.textContent).toBe('Already up to date.');
-    expect(container.textContent).not.toContain('bash-input');
+    // The dropped assertion here looked for the raw `bash-input` tag, which
+    // the already-parsed `{kind:'bash'}` fixture never carried — see the
+    // reminder test above for why these could not discriminate.
   });
 
   it('folds an unknown harness block under its tag instead of printing the XML', async () => {
@@ -521,14 +529,16 @@ describe('ConversationPanel', () => {
         }),
       ),
     );
-    const { container } = render(ConversationPanel, { session: session(), visible: true });
+    render(ConversationPanel, { session: session(), visible: true });
     await tick();
     await Promise.resolve();
     await tick();
     const block = screen.getByTestId('conv-harness');
     expect(block.querySelector('summary')?.textContent).toBe('ci-monitor-event');
     expect(block.querySelector('.harness-body')?.textContent).toBe('PR #12 checks failed');
-    expect(container.textContent).not.toContain('<ci-monitor-event>');
+    // Likewise: `{kind:'harness', tag, body}` is post-parse, so an assertion
+    // that `<ci-monitor-event>` is absent tested the fixture, not the render.
+    // The summary/body assertions above are the ones with teeth.
   });
 
   it('folds consecutive tool calls into one expandable group; a single call stays a line', async () => {
@@ -760,6 +770,26 @@ describe('ConversationPanel composer', () => {
     expect(description).not.toBeNull();
     expect(description!.textContent).toContain('↵ send · ⇧↵ newline · ↑ history');
   });
+
+  // Round 20 F3, the scope half. The busy gate is `blockWhileBusy`, and the
+  // Conversation tab does not ask for it: typing ahead of a running turn is a
+  // workflow here, described by the note the composer already shows. Restoring
+  // the agent sheet's gate must not quietly become a new restriction on this
+  // surface — if this ever goes red, the gate leaked.
+  it('the Conversation tab still sends while Claude is working — it never had the gate', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-composer-status').textContent).toMatch(/working/i);
+
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'queue this' } });
+    expect((screen.getByTestId('conv-composer-send') as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'queue this');
+  });
 });
 
 describe('ConversationPanel composer auto-grow', () => {
@@ -946,6 +976,59 @@ describe('ConversationPanel quick actions', () => {
     await settle();
     expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '');
     expect(screen.queryByTestId('conv-pending')).toBeNull();
+  });
+
+  // Round 20 F2. The chip's tooltip says "Sends a bare Enter." With a context
+  // chip active (AgentPanel's `promptPrefix`), `''` does not start with `/`,
+  // so the old `promptPrefix && !text.startsWith('/')` glued the whole context
+  // paragraph in front of it and typed THAT into a session already wedged on
+  // a key press — and the empty-text guard sat after the send, so nothing was
+  // shown pending and the paragraph surfaced as a phantom prompt on the next
+  // poll. The exact string handed to `sendPrompt` is the assertion.
+  it('the press_enter chip sends a bare Enter even with a context prefix active', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, {
+      session: session({ claude_status: 'blocked', stuck_kind: 'press_enter' }),
+      visible: true,
+      promptPrefix: 'Looking at: session dev-x on host beta, branch feature/x',
+    });
+    await settle();
+
+    await fireEvent.click(screen.getByTestId('conv-chip-enter'));
+    await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+    expect(mockedSend.mock.calls[0][2]).toBe('');
+    expect(screen.queryByTestId('conv-pending')).toBeNull();
+  });
+
+  // The neighbouring path, decided deliberately rather than left to fall out
+  // of `startsWith('/')`: a preset IS a prompt Claude reads, and the chip
+  // above the composer promises the context rides along until it is
+  // dismissed — "continue" needs that context more than a typed paragraph
+  // does. A slash preset is still exempt: the REPL reads the line as typed.
+  it('Shift+click on a non-slash preset keeps the context prefix; a slash preset does not', async () => {
+    composerPresets.set([
+      { label: 'Continue', text: 'continue' },
+      { label: 'Clear', text: '/clear' },
+    ]);
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, {
+      session: session(),
+      visible: true,
+      promptPrefix: 'Looking at: host beta',
+    });
+    await settle();
+
+    const chips = screen.getAllByTestId('conv-chip');
+    await fireEvent.click(chips[0], { shiftKey: true });
+    await settle();
+    expect(mockedSend.mock.calls[0][2]).toBe('Looking at: host beta\n\ncontinue');
+
+    await fireEvent.click(chips[1], { shiftKey: true });
+    await settle();
+    expect(mockedSend.mock.calls[1][2]).toBe('/clear');
   });
 
   it('no Enter chip otherwise, and no chips at all for a bg row', async () => {
@@ -1244,6 +1327,103 @@ describe('ConversationPanel live indicator', () => {
     await rerender({ session: session({ claude_status: 'idle', turn_seq: 4 }), visible: true });
     await settle();
     expect(mockedConv).toHaveBeenCalledTimes(3);
+  });
+});
+
+// Round 20 F7. `session_activity` is new in this release and the desktop
+// routes it to the hub, so a desktop paired with a hub pinned to an older
+// release tag calls a tool that hub's router does not know. The loop used to
+// swallow the failure (`if (!r.ok) return;`) and keep firing every 2 s per
+// open panel: the user got exactly the "no live indicator" state the feature
+// removes, plus a failing round-trip 30 times a minute in the hub's log.
+//
+// The substance is the classification: PERMANENT (this hub has no such tool)
+// stops the loop, TRANSIENT (the hub or the host is having a moment) must
+// keep retrying, or one bad minute would kill the indicator for the session.
+describe('ConversationPanel activity probe against a hub that lacks the tool', () => {
+  function probe(over: Partial<ActivityProbe> = {}): ActivityProbe {
+    return { claude_status: null, current_activity: null, stuck_kind: null, waiting_for: null, spinner: null, pending_input: null, ...over };
+  }
+
+  // The code `backend/remote.rs` mints for a JSON-RPC `error` — an unknown
+  // tool — and the one the hub's fail-closed client gate answers with when
+  // it has no policy row for the name. Both mean the same thing for this
+  // call, and neither can change without a different hub.
+  for (const code of ['E_HUB_PROTOCOL', 'E_FORBIDDEN']) {
+    it(`stops polling and says so once when the hub answers ${code}`, async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      hubStatus.set(REMOTE);
+      mockedConv.mockReturnValue(ok(conv()));
+      mockedAct.mockResolvedValue({
+        ok: false,
+        error: { code, message: 'the hub refused the session_activity call: tool not found' },
+      });
+      render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+      await settle();
+      expect(mockedAct).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(ACTIVITY_POLL_MS * 5);
+      await settle();
+      // Still one: the interval was torn down, not merely skipped.
+      expect(mockedAct).toHaveBeenCalledTimes(1);
+      // And the degradation is visible rather than silent — one quiet line,
+      // not a toast every two seconds.
+      expect(screen.getByTestId('conv-probe-unsupported').textContent).toMatch(/session_activity/);
+      // The row-driven indicator is untouched; only the pane detail is gone.
+      expect(screen.getByTestId('conv-indicator')).toBeTruthy();
+    });
+  }
+
+  for (const code of ['E_HUB_UNREACHABLE', 'E_HUB_TIMEOUT', 'E_HUB_CONTRACT', 'E_INVALID_STATE']) {
+    it(`keeps retrying after a transient ${code} — it can clear without a remount`, async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      hubStatus.set(REMOTE);
+      mockedConv.mockReturnValue(ok(conv()));
+      mockedAct.mockResolvedValue({ ok: false, error: { code, message: code } });
+      render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+      await settle();
+      expect(mockedAct).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(ACTIVITY_POLL_MS);
+      await settle();
+      vi.advanceTimersByTime(ACTIVITY_POLL_MS);
+      await settle();
+      expect(mockedAct).toHaveBeenCalledTimes(3);
+      expect(screen.queryByTestId('conv-probe-unsupported')).toBeNull();
+    });
+  }
+
+  it('a transient failure after the loop is running does not stop it, and a later success lands', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedAct
+      .mockResolvedValueOnce({ ok: false, error: { code: 'E_HUB_TIMEOUT', message: 'slow' } })
+      .mockResolvedValue({ ok: true, value: probe({ claude_status: 'working', spinner: 'Cooking… (3s · esc to interrupt)' }) });
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    vi.advanceTimersByTime(ACTIVITY_POLL_MS);
+    await settle();
+    expect(mockedAct).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+  });
+
+  it('re-learns on a session switch, so an upgraded hub needs no app restart', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    hubStatus.set(REMOTE);
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedAct.mockResolvedValue({ ok: false, error: { code: 'E_HUB_PROTOCOL', message: 'no such tool' } });
+    const { rerender } = render(ConversationPanel, { session: session({ id: 1, claude_status: 'working' }), visible: true });
+    await settle();
+    vi.advanceTimersByTime(ACTIVITY_POLL_MS * 3);
+    await settle();
+    expect(mockedAct).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('conv-probe-unsupported')).toBeTruthy();
+
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+    await rerender({ session: session({ id: 2, claude_status: 'working' }), visible: true });
+    await settle();
+    expect(mockedAct).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId('conv-probe-unsupported')).toBeNull();
   });
 });
 

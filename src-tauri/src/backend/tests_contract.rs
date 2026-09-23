@@ -427,6 +427,24 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         }),
     );
     put(
+        "ConvItem::Bash",
+        wire_keys(&ConvItem::Bash {
+            command: "git status".into(),
+            stdout: Some("clean".into()),
+            stderr: Some("".into()),
+        }),
+    );
+    // Also the shape an item kind this build cannot read degrades to
+    // (`fleet_core::service::transcript::unsupported_item`), which is a
+    // `Harness` block — see `an_unknown_conv_item_kind_degrades_to_a_pinned_shape`.
+    put(
+        "ConvItem::Harness",
+        wire_keys(&ConvItem::Harness {
+            tag: "ci-monitor-event".into(),
+            body: "PR #12 checks failed".into(),
+        }),
+    );
+    put(
         "ConvItem::Interrupt",
         wire_keys(&ConvItem::Interrupt { during_tool: true }),
     );
@@ -958,6 +976,27 @@ fn a_hub_still_on_revision_2_is_now_too_old_too() {
     );
 }
 
+/// Round 20 (F6/F7): revision 4. Two additions an older hub cannot absorb
+/// landed together — `ConvItem` gained the `bash` and `harness` kinds (a
+/// revision-3 client fails the WHOLE `Conversation` on either, since it has
+/// no tolerant path), and `session_activity` became a hub-routed tool a
+/// revision-3 hub's router does not serve at all. Both are silent today, so
+/// the minimum moves past 3 exactly as it moved past 2, keeping (not
+/// replacing) the older pins above.
+///
+/// **This test fails until `MIN_HUB_CONTRACT`/`MAX_HUB_CONTRACT` in
+/// `backend/contract.rs` are raised to 4 alongside
+/// `fleet_core::wire_contract::CONTRACT_REVISION`** — as does
+/// `todays_bounds_accept_this_builds_own_hub` below, which would otherwise
+/// have this build refusing its OWN hub as too new.
+#[test]
+fn a_hub_still_on_revision_3_is_now_too_old_as_well() {
+    assert_eq!(
+        classify_hub_contract(3, MIN_HUB_CONTRACT, MAX_HUB_CONTRACT),
+        ContractFit::TooOld
+    );
+}
+
 #[test]
 fn todays_bounds_accept_this_builds_own_hub() {
     assert_eq!(
@@ -1038,6 +1077,44 @@ fn regen_verdict_refuses_a_lossy_change_even_if_the_revision_moved_backward() {
     assert_eq!(
         regen_verdict(lost.clone(), 2, 1),
         RegenVerdict::Refuse { lost }
+    );
+}
+
+/// The other direction of the same worry: a hub **newer** than this build
+/// sending an item kind that did not exist when this desktop was compiled.
+///
+/// `ConvItem` is internally tagged, so serde's own answer is to fail the
+/// entire `Conversation` — a parse error where a session's history should
+/// be. `ConvTurn::items` degrades it to one
+/// `fleet_core::service::transcript::unsupported_item` line instead, and
+/// that line is a `Harness` block precisely because `harness` is a kind
+/// every renderer already draws; the shape is pinned above as
+/// `ConvItem::Harness`.
+#[test]
+fn an_unknown_conv_item_kind_degrades_to_a_pinned_shape() {
+    let conv: Conversation = serde_json::from_value(serde_json::json!({
+        "turns": [{
+            "prompt": "hi",
+            "items": [
+                { "kind": "text", "text": "kept" },
+                { "kind": "a_kind_from_the_future", "whatever": 1 },
+            ],
+        }],
+        "truncated": false,
+        "context": null,
+        "events": [],
+    }))
+    .expect("a newer hub's item kind must not fail the whole conversation");
+    assert_eq!(conv.turns[0].items.len(), 2, "the known item survives it");
+    let placeholder = &conv.turns[0].items[1];
+    assert!(
+        matches!(placeholder, ConvItem::Harness { tag, .. } if tag.contains("a_kind_from_the_future")),
+        "the placeholder names the kind it could not read: {placeholder:?}"
+    );
+    assert_eq!(
+        wire_keys(placeholder),
+        the_whole_contract()["ConvItem::Harness"],
+        "the placeholder goes back out in the shape this file pins"
     );
 }
 

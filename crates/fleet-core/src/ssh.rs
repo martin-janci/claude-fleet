@@ -1924,12 +1924,20 @@ mod tests {
         panic!("child pid {pid} still alive 1s after cancel — kill+wait failed to reap");
     }
 
+    /// Write an executable fake `ssh` into `dir` and hand back its path.
+    ///
+    /// Deliberately NOT `fs::write` + `set_permissions`: this is a
+    /// multi-threaded test binary, and a fake written that way and exec'd
+    /// immediately races every other test's `fork()` — the inherited write fd
+    /// makes the exec fail with `ETXTBSY`, which is what took `main` red
+    /// twice (`a_mux_failure_is_retried_only_once` reported
+    /// "ssh spawn h-twice: Text file busy"). [`crate::tmux::fake_exec`] owns
+    /// the fix and explains why a rename alone is not one; the probe guard it
+    /// prepends runs before `body`, so a fake that counts its invocations
+    /// still counts only the real ones.
     fn fake_ssh(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let p = dir.join("ssh");
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        p
+        use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+        write_exec(dir, "ssh", &format!("#!/bin/sh\n{PROBE_GUARD}{body}\n"))
     }
 
     #[test]

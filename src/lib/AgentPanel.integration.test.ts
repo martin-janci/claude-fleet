@@ -147,7 +147,7 @@ describe('the agent sheet sends through ConversationPanel, not around it', () =>
   it('carries the context chip prefix into the one composer that sends', async () => {
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
     render(AgentPanel, {
-      contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null },
+      contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null, friendly: true },
     });
     await settle();
 
@@ -163,7 +163,7 @@ describe('the agent sheet sends through ConversationPanel, not around it', () =>
   it('leaves a slash command exactly as typed — the REPL reads it, not Claude', async () => {
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
     render(AgentPanel, {
-      contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null },
+      contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null, friendly: true },
     });
     await settle();
 
@@ -193,6 +193,8 @@ describe('the sheet feeds the one composer its live state', () => {
     }
   }
 
+  // The note, not the gate — the gate has its own tests below, and conflating
+  // the two is how F3 shipped.
   it('the busy note MOVES on a row event, not only when the panel was opened', async () => {
     render(AgentPanel);
     await settle();
@@ -228,7 +230,7 @@ describe('the sheet feeds the one composer its live state', () => {
   it('a dropped chip comes back when the context changes, and its prefix is sent again', async () => {
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
     const { rerender } = render(AgentPanel, {
-      contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null },
+      contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null, friendly: true },
     });
     await settle();
     expect(screen.getByTestId('agent-context-chip').textContent).toContain('alpha');
@@ -237,11 +239,11 @@ describe('the sheet feeds the one composer its live state', () => {
     expect(screen.queryByTestId('agent-context-chip')).toBeNull();
 
     // Same context re-rendered — the drop persists, this is not a one-shot toggle.
-    await rerender({ contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null } });
+    await rerender({ contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null, friendly: true } });
     expect(screen.queryByTestId('agent-context-chip')).toBeNull();
 
     // A different context — the chip returns on its own, no re-click needed.
-    await rerender({ contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null } });
+    await rerender({ contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null, friendly: true } });
     expect(screen.getByTestId('agent-context-chip').textContent).toContain('beta');
 
     const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
@@ -254,7 +256,7 @@ describe('the sheet feeds the one composer its live state', () => {
   it('a dropped chip sends nothing in front of the prompt', async () => {
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
     render(AgentPanel, {
-      contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null },
+      contextInput: { view: 'hosts', session: null, hostAlias: 'alpha', branch: null, friendly: true },
     });
     await settle();
     await fireEvent.click(screen.getByTestId('agent-context-chip'));
@@ -264,6 +266,88 @@ describe('the sheet feeds the one composer its live state', () => {
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await waitFor(() => expect(mockedSend).toHaveBeenCalled());
     expect(mockedSend.mock.calls[0][2]).toBe('bare');
+  });
+
+  // Round 20 F3. The sheet's own composer gated on agent status before the
+  // refactor deleted it (`busy = statusNote !== null`; `disabled={busy || …}`),
+  // and the composer it delegated to had no such term — so the sheet silently
+  // started accepting a second prompt mid-turn. The deleted test named the
+  // consequence: two pastes into one REPL is one mangled prompt. Its
+  // replacement asserted only that a note renders, which a broken gate passes.
+  //
+  // This asserts the SEND IS REFUSED, which is the thing that was lost.
+  it('refuses to send while the agent is working — the gate, not just the note', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(AgentPanel);
+    await settle();
+
+    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'druhy prompt' } });
+    applySessionEvents([
+      { type: 'updated', row: row({ claude_status: 'working', last_activity_at: 200 }) },
+    ]);
+    await waitFor(() =>
+      expect(screen.getByTestId('conv-composer-status').textContent).toMatch(/working/i),
+    );
+
+    expect((screen.getByTestId('conv-composer-send') as HTMLButtonElement).disabled).toBe(true);
+    // Not only the button: Enter goes down the same path and must be refused too.
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+
+    // …and it is a gate, not a wall: the turn ends and the same draft goes.
+    applySessionEvents([
+      { type: 'updated', row: row({ claude_status: 'idle', last_activity_at: 300 }) },
+    ]);
+    await waitFor(() => expect(screen.queryByTestId('conv-composer-status')).toBeNull());
+    await fireEvent.click(screen.getByTestId('conv-composer-send'));
+    await waitFor(() => expect(mockedSend).toHaveBeenCalledTimes(1));
+    expect(mockedSend.mock.calls[0][2]).toBe('druhy prompt');
+  });
+
+  it('refuses to send while the agent is stuck, where the prompt may never be read', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(AgentPanel);
+    await settle();
+    applySessionEvents([
+      {
+        type: 'updated',
+        row: row({ claude_status: 'blocked', stuck_kind: 'trust_prompt', last_activity_at: 200 }),
+      },
+    ]);
+    await waitFor(() => expect(screen.getByTestId('conv-composer-status')).toBeTruthy());
+
+    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'ahoj' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  // The one exemption, and the reason it has to exist: the gate reads the
+  // stuck state, and the press_enter chip is the way OUT of it. Gating the
+  // recovery would wedge the sheet exactly when it is already wedged.
+  it('still sends the bare-Enter recovery chip while stuck — a key press is not a prompt', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(AgentPanel, {
+      contextInput: { view: 'hosts', session: null, hostAlias: 'beta', branch: null, friendly: true },
+    });
+    await settle();
+    applySessionEvents([
+      {
+        type: 'updated',
+        row: row({ claude_status: 'blocked', stuck_kind: 'press_enter', last_activity_at: 200 }),
+      },
+    ]);
+    await waitFor(() => expect(screen.getByTestId('conv-chip-enter')).toBeTruthy());
+
+    await fireEvent.click(screen.getByTestId('conv-chip-enter'));
+    await waitFor(() => expect(mockedSend).toHaveBeenCalled());
+    // Bare, with the context chip active: not the paragraph (F2), not refused.
+    expect(mockedSend.mock.calls[0][2]).toBe('');
   });
 
   it('closes on Escape from inside the composer, where a window-level handler would not', async () => {

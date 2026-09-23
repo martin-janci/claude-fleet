@@ -49,7 +49,12 @@
      way into Hosts at an over-quota account) and any toast covered the FAB,
      so the agent's single entry point was unclickable while a toast was up.
      One column, measured off one source. */
-  --status-h: 24px;
+  /* The space the footer OCCUPIES, border included (24px of content + its 1px
+     top border). The layers above it clear this, and `.status` sizes itself
+     from it with `box-sizing: border-box` — there is no global border-box
+     rule, so a bare `height: 24px` there would really take 25px and leave
+     every token below it 1px short. */
+  --status-h: 25px;
   --fab-size: 48px;
   --layer-gap: 8px;
 
