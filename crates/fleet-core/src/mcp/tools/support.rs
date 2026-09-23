@@ -657,16 +657,6 @@ pub(super) fn ok_json_compact<T: serde::Serialize>(value: &T) -> Result<CallTool
     ok_json_compact_view(value, None)
 }
 
-/// [`ok_json_compact`] with an optional named projection applied first — the
-/// one place a `view` narrows a list, because this is already where the value
-/// is walked for `strip_nulls`.
-///
-/// `None` is the whole point of the signature: a caller that asks for no view
-/// takes the identical path, so the wire stays byte-for-byte what it was
-/// (`tests::a_view_is_opt_in_and_the_default_answer_is_byte_identical`).
-/// The order matters too — project, THEN strip: a field the view keeps but
-/// this row has no value for must vanish like every other null, not come
-/// back as `"ci_status":null` for a client that has never seen one.
 /// The compact JSON string [`ok_json_compact_view`] returns — split out so a
 /// snapshot tool can hash exactly the bytes it would send.
 pub(super) fn compact_json_string<T: serde::Serialize>(
@@ -683,6 +673,16 @@ pub(super) fn compact_json_string<T: serde::Serialize>(
         .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))
 }
 
+/// [`ok_json_compact`] with an optional named projection applied first — the
+/// one place a `view` narrows a list, because this is already where the value
+/// is walked for `strip_nulls`.
+///
+/// `None` is the whole point of the signature: a caller that asks for no view
+/// takes the identical path, so the wire stays byte-for-byte what it was
+/// (`tests::a_view_is_opt_in_and_the_default_answer_is_byte_identical`).
+/// The order matters too — project, THEN strip: a field the view keeps but
+/// this row has no value for must vanish like every other null, not come
+/// back as `"ci_status":null` for a client that has never seen one.
 pub(super) fn ok_json_compact_view<T: serde::Serialize>(
     value: &T,
     view: Option<&[&str]>,
