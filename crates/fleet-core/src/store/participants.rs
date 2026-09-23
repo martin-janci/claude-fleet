@@ -26,6 +26,11 @@ pub struct ParticipantRow {
 
 const COLUMNS: &str = "id, kind, session_id, client_id, created_at, retired_at";
 
+/// How long a tombstoned participant's undelivered mail is kept. Long enough
+/// that a sender waiting on a reply, or a human reading a timeline the next
+/// day, still sees why nothing came back.
+pub const RETIRED_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
+
 fn map(row: &rusqlite::Row<'_>) -> rusqlite::Result<ParticipantRow> {
     Ok(ParticipantRow {
         id: row.get(0)?,
@@ -192,10 +197,98 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// Drop the mail of participants retired longer than `older_than_secs`
+    /// (measured from `now`), telling each SENDER about anything that was
+    /// never read. Returns how many participants were swept.
+    ///
+    /// `now` is taken explicitly rather than read from the wall clock inside
+    /// — the same parameter `service::gc::sweep_with` already threads
+    /// through for its session sweep, so a caller (and its tests) can pick
+    /// an exact instant instead of this racing the real clock.
+    ///
+    /// Also sweeps `session_messages` rows with a NULL `to_participant_id`:
+    /// migration 043's backfill left those NULL for any pre-existing message
+    /// whose session no longer existed, and such a row can never be
+    /// delivered (delivery resolves through the participant) or, without
+    /// this clause, ever be swept either. Those are aged on `sent_at` since
+    /// there is no participant to retire.
+    pub fn sweep_retired_participants(
+        &self,
+        now: i64,
+        older_than_secs: i64,
+    ) -> Result<usize, crate::ipc_error::IpcError> {
+        let cutoff = now - older_than_secs;
+
+        // Orphaned rows first: no participant to sweep by, only messages.
+        let orphans: Vec<(i64, i64, bool)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, from_session_id, read_at IS NULL FROM session_messages \
+                 WHERE to_participant_id IS NULL AND sent_at <= ?1",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![cutoff], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (mid, sender, unread) in &orphans {
+            if *unread {
+                let _ = self.insert_session_event(
+                    *sender,
+                    "message_undeliverable",
+                    Some(&format!("message {mid} was never read; recipient is gone")),
+                );
+            }
+        }
+        if !orphans.is_empty() {
+            self.conn.execute(
+                "DELETE FROM session_messages WHERE to_participant_id IS NULL AND sent_at <= ?1",
+                rusqlite::params![cutoff],
+            )?;
+        }
+
+        let ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM participants WHERE retired_at IS NOT NULL AND retired_at <= ?1",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![cutoff], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for pid in &ids {
+            // Tell each sender about mail that was never read. A message
+            // that WAS read is swept quietly — nothing went wrong there.
+            let unread: Vec<(i64, i64)> = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, from_session_id FROM session_messages \
+                     WHERE to_participant_id = ?1 AND read_at IS NULL",
+                )?;
+                let rows =
+                    stmt.query_map(rusqlite::params![pid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (mid, sender) in unread {
+                let _ = self.insert_session_event(
+                    sender,
+                    "message_undeliverable",
+                    Some(&format!("message {mid} was never read; recipient is gone")),
+                );
+            }
+            self.conn.execute(
+                "DELETE FROM session_messages WHERE to_participant_id = ?1",
+                rusqlite::params![pid],
+            )?;
+            self.conn.execute(
+                "DELETE FROM participants WHERE id = ?1",
+                rusqlite::params![pid],
+            )?;
+        }
+        Ok(ids.len())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::store::Store;
 
     fn seed(s: &Store, name: &str) -> i64 {
@@ -333,5 +426,127 @@ mod tests {
         let row = s.participant_by_id(p).unwrap().unwrap();
         assert_eq!(row.session_id, None, "session_id must be cleared");
         assert_eq!(row.client_id, None, "client_id must be cleared too");
+    }
+
+    #[test]
+    fn a_retired_participant_within_the_window_is_kept() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let m = s.insert_message(a, b, "pending", "message", None).unwrap();
+        s.delete_session(b).unwrap();
+        assert_eq!(
+            s.sweep_retired_participants(now_unix(), RETIRED_RETENTION_SECS)
+                .unwrap(),
+            0
+        );
+        assert!(s.get_message(m).unwrap().is_some());
+    }
+
+    #[test]
+    fn past_the_window_the_mail_is_swept_and_the_sender_is_told() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let m = s.insert_message(a, b, "pending", "message", None).unwrap();
+        s.delete_session(b).unwrap();
+        // Age the tombstone past the window.
+        s.conn
+            .execute(
+                "UPDATE participants SET retired_at = retired_at - ?1 WHERE retired_at IS NOT NULL",
+                rusqlite::params![RETIRED_RETENTION_SECS + 60],
+            )
+            .unwrap();
+
+        assert_eq!(
+            s.sweep_retired_participants(now_unix(), RETIRED_RETENTION_SECS)
+                .unwrap(),
+            1
+        );
+        assert!(s.get_message(m).unwrap().is_none(), "the mail is gone");
+        let ev = s.list_session_events(a, 10).unwrap();
+        assert!(
+            ev.iter().any(|e| e.kind == "message_undeliverable"),
+            "the SENDER must learn its message was never read: {ev:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_message_is_swept_without_telling_the_sender_anything() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let m = s.insert_message(a, b, "read me", "message", None).unwrap();
+        s.mark_messages_read(&[m], b).unwrap();
+        s.delete_session(b).unwrap();
+        s.conn
+            .execute(
+                "UPDATE participants SET retired_at = retired_at - ?1 WHERE retired_at IS NOT NULL",
+                rusqlite::params![RETIRED_RETENTION_SECS + 60],
+            )
+            .unwrap();
+        s.sweep_retired_participants(now_unix(), RETIRED_RETENTION_SECS)
+            .unwrap();
+        let ev = s.list_session_events(a, 10).unwrap();
+        assert!(
+            !ev.iter().any(|e| e.kind == "message_undeliverable"),
+            "a message that WAS read is not undeliverable"
+        );
+    }
+
+    /// Migration 043's backfill left `to_participant_id` NULL for any
+    /// pre-existing message whose session no longer existed at migration
+    /// time. Such a row can never be delivered (delivery resolves through
+    /// the participant) and, without a dedicated clause, could never be
+    /// swept either — immortal garbage in an upgraded database. Simulated
+    /// here directly since nothing in the current schema produces a NULL
+    /// `to_participant_id` through the public API anymore.
+    #[test]
+    fn an_orphaned_row_with_no_participant_is_swept_and_the_sender_is_told_when_unread() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let m = s.insert_message(a, b, "orphaned", "message", None).unwrap();
+        s.conn
+            .execute(
+                "UPDATE session_messages SET to_participant_id = NULL, \
+                 sent_at = sent_at - ?1 WHERE id = ?2",
+                rusqlite::params![RETIRED_RETENTION_SECS + 60, m],
+            )
+            .unwrap();
+
+        s.sweep_retired_participants(now_unix(), RETIRED_RETENTION_SECS)
+            .unwrap();
+
+        assert!(
+            s.get_message(m).unwrap().is_none(),
+            "an orphaned row must not be immortal garbage"
+        );
+        let ev = s.list_session_events(a, 10).unwrap();
+        assert!(
+            ev.iter().any(|e| e.kind == "message_undeliverable"),
+            "the sender must learn its orphaned message was never read: {ev:?}"
+        );
+    }
+
+    #[test]
+    fn a_recent_orphaned_row_is_kept() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let m = s
+            .insert_message(a, b, "orphaned but fresh", "message", None)
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE session_messages SET to_participant_id = NULL WHERE id = ?1",
+                rusqlite::params![m],
+            )
+            .unwrap();
+
+        s.sweep_retired_participants(now_unix(), RETIRED_RETENTION_SECS)
+            .unwrap();
+
+        assert!(s.get_message(m).unwrap().is_some());
     }
 }

@@ -221,11 +221,17 @@ pub fn needs_safe_remove(insp: &SafeKillInspection) -> bool {
         || (insp.has_worktree && insp.upstream.is_none())
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GcReport {
     pub killed: usize,
     pub safe_kill_requested: usize,
     pub failed: usize,
+    /// Retired participants whose retention window elapsed this sweep (see
+    /// `Store::sweep_retired_participants`). `#[serde(default)]`: this
+    /// report crosses the hub wire, and a new field without a default is a
+    /// shipped outage against an older hub.
+    #[serde(default)]
+    pub swept_participants: usize,
 }
 
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
@@ -310,6 +316,18 @@ pub async fn sweep_with(
             }
         }
     }
+    // The mail-retention sweep, alongside the session-idle one above.
+    // `sweep_retired_participants` returns `Result<usize, IpcError>`, but
+    // this function returns a plain `GcReport` (not a `Result`), so a
+    // failed sweep contributes 0 and the pass still completes — the same
+    // best-effort pattern the rest of this function already uses for its
+    // other store reads/writes; a GC sweep must never abort the whole pass.
+    report.swept_participants = match store.lock() {
+        Ok(s) => s
+            .sweep_retired_participants(now, crate::store::RETIRED_RETENTION_SECS)
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
     report
 }
 
@@ -643,7 +661,8 @@ mod tests {
             GcReport {
                 killed: 1,
                 safe_kill_requested: 0,
-                failed: 0
+                failed: 0,
+                swept_participants: 0,
             }
         );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
@@ -665,7 +684,8 @@ mod tests {
             GcReport {
                 killed: 0,
                 safe_kill_requested: 1,
-                failed: 0
+                failed: 0,
+                swept_participants: 0,
             }
         );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
@@ -675,6 +695,59 @@ mod tests {
             .iter()
             .any(|e| e.kind == "gc_killed"
                 && e.detail.as_deref() == Some("work:safe_kill:idle_10000s")));
+    }
+
+    /// The mail-retention sweep runs alongside the session-idle one, on the
+    /// SAME `sweep_with` call, using the caller-supplied `now` rather than
+    /// the wall clock — so this test can age a tombstone with plain
+    /// arithmetic instead of a real 7-day wait.
+    #[tokio::test]
+    async fn sweep_also_reaps_retired_participants_past_their_retention_window() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let (sender, msg) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let a = s
+                .upsert_session("alpha", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            let b = s
+                .upsert_session("beta", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            let m = s.insert_message(a, b, "pending", "message", None).unwrap();
+            s.delete_session(b).unwrap();
+            // Age the tombstone past the retention window.
+            s.conn_ref()
+                .execute(
+                    "UPDATE participants SET retired_at = retired_at - ?1 \
+                     WHERE retired_at IS NOT NULL",
+                    rusqlite::params![crate::store::RETIRED_RETENTION_SECS + 60],
+                )
+                .unwrap();
+            (a, m)
+        };
+        let exec = fake(false);
+        // `retired_at` is stamped from the real wall clock (`delete_session`
+        // -> `Store::retire_participant` both use `now_unix()`), so the
+        // sweep must be driven by a `now` in the same frame — unlike the
+        // idle-session sweep above, which never touches wall time and is
+        // free to use a small synthetic clock.
+        let report = sweep_with(&store, &exec, &CFG, now_unix()).await;
+        assert_eq!(
+            report,
+            GcReport {
+                killed: 0,
+                safe_kill_requested: 0,
+                failed: 0,
+                swept_participants: 1,
+            }
+        );
+        let s = store.lock().unwrap();
+        assert!(s.get_message(msg).unwrap().is_none(), "the mail is gone");
+        let ev = s.list_session_events(sender, 10).unwrap();
+        assert!(
+            ev.iter().any(|e| e.kind == "message_undeliverable"),
+            "the sender must learn its message was never read: {ev:?}"
+        );
     }
 
     #[tokio::test]

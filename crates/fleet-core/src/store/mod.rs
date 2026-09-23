@@ -31,7 +31,7 @@ pub use clients::{
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
-pub use participants::ParticipantRow;
+pub use participants::{ParticipantRow, RETIRED_RETENTION_SECS};
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
 #[cfg(test)]
