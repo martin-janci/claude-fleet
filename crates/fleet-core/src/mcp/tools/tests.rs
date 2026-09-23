@@ -4699,6 +4699,114 @@ async fn an_anchored_turn_that_gains_an_interrupt_with_no_new_assistant_entry_is
     );
 }
 
+// ---- Fix round 3 -------------------------------------------------------------
+
+fn notification_jsonl(at: &str, summary: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "user",
+            "timestamp": at,
+            "message": {"content": format!(
+                "<task-notification>\n<task-id>t1</task-id>\n<status>completed</status>\n<summary>{summary}</summary>\n</task-notification>"
+            )},
+        })
+    )
+}
+
+fn bash_input_jsonl(at: &str, command: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "user",
+            "timestamp": at,
+            "message": {"content": format!("<bash-input>{command}</bash-input>")},
+        })
+    )
+}
+
+/// The grown tier's own regression: it must search for the EARLIEST turn
+/// sharing the anchor's `at`, not the latest. Turn A (a notification turn)
+/// grows — a second notification merges into it with no new `at` and no
+/// `ended_at` change — and a turn C opens next, stamped the SAME `at` as A.
+/// A latest-match grown tier jumps straight to C and never serves A's
+/// growth.
+#[tokio::test]
+async fn the_grown_tier_finds_the_earliest_same_at_turn_not_the_latest() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let shared_at = "2026-01-01T00:00:00Z";
+    let jsonl = notification_jsonl(shared_at, "FIRST_NOTIFICATION_SUMMARY");
+    let (s, reader, target) = transcript_fixture(&path, &jsonl);
+    let t = test_tools(s);
+
+    // First read: anchors on turn A, the notification turn.
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(first.contains("FIRST_NOTIFICATION_SUMMARY"), "{first}");
+
+    // A second notification — no assistant entry between them, so it
+    // coalesces into turn A (same `at`, `ended_at` untouched by either).
+    let mut jsonl2 = std::fs::read_to_string(&path).unwrap();
+    jsonl2.push_str(&notification_jsonl(
+        shared_at,
+        "SECOND_NOTIFICATION_SUMMARY_MARKER",
+    ));
+    // Turn C opens next, stamped the SAME `at` as A.
+    jsonl2.push_str(&bash_input_jsonl(shared_at, "echo done"));
+    std::fs::write(&path, &jsonl2).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(
+        second.contains("SECOND_NOTIFICATION_SUMMARY_MARKER"),
+        "turn A's growth must be served — the grown tier must not jump past it to turn C: {second}"
+    );
+}
+
+/// A first read whose only turn is a just-landed, reply-less prompt has an
+/// empty RENDERABLE window (round 2's `default_window` filter drops it),
+/// so it must still anchor on that turn (the last PARSED one) rather than
+/// store no anchor at all — otherwise the next `After` read has nothing to
+/// position from and answers a needless `too_far_behind` reset.
+#[tokio::test]
+async fn a_first_read_of_only_an_empty_prompt_does_not_spuriously_reset_the_next_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let jsonl = format!(
+        "{}\n",
+        serde_json::json!({"type":"user","message":{"content":"a brand new question"},"timestamp":"2026-01-01T00:00:00Z"})
+    );
+    let (s, reader, target) = transcript_fixture(&path, &jsonl);
+    let t = test_tools(s);
+
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(
+        first.starts_with("(no assistant text"),
+        "the empty-only first read has nothing to show yet: {first}"
+    );
+
+    let mut jsonl2 = std::fs::read_to_string(&path).unwrap();
+    jsonl2.push_str(&format!(
+        "{}\n",
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"ANSWER_MARKER"}]},"timestamp":"2026-01-01T00:00:01Z"})
+    ));
+    std::fs::write(&path, &jsonl2).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(second.contains("ANSWER_MARKER"), "{second}");
+    assert!(
+        !second.contains("[cursor reset:"),
+        "an ordinary catch-up must not be reported as a reset: {second}"
+    );
+}
+
 // ---- Task 6: session_history and inbox wired to fresh_for -------------------
 
 /// Newest-first + limit + advance-to-head would skip rows. Oldest-first,

@@ -2034,16 +2034,23 @@ fn default_window<'a>(turns: &[&'a ConvTurn], count: usize) -> Vec<&'a ConvTurn>
 /// the anchor of what it served, so the next read can position from
 /// there.
 ///
-/// `anchor: Some(a)` locates the turn `a` names, searching from the END so
-/// a duplicate `at` (more than one turn can open within the same
-/// millisecond — see [`TranscriptAnchor`]'s doc) resolves to the MOST
-/// RECENT match rather than an earlier coincidental one:
-/// - an exact match — same `at` AND the same [`turn_fingerprint`] — is the
-///   turn last served, unchanged; the turns strictly AFTER it are new.
-/// - failing that, the latest turn sharing just `a.at` has DIFFERENT
+/// `anchor: Some(a)` locates the turn `a` names, with more than one turn
+/// possibly sharing `a.at` (several can open within the same millisecond —
+/// see [`TranscriptAnchor`]'s doc), each tier searching in the direction
+/// that cannot skip anything:
+/// - an exact match — same `at` AND the same [`turn_fingerprint`] —
+///   searched from the END so a duplicate `at` resolves to the MOST
+///   RECENT match rather than an earlier coincidental one, is the turn
+///   last served, unchanged; the turns strictly AFTER it are new.
+/// - failing that, the EARLIEST turn sharing just `a.at` has DIFFERENT
 ///   content: it grew since it was served (an assistant entry, an
 ///   interrupt, a merged notification — anything that changes what it
-///   renders as); it is re-served whole, along with anything after it, so
+///   renders as). Earliest, not latest: the exact tier already ruled out
+///   every turn whose content is unchanged, so among the turns still
+///   sharing `a.at` the FIRST is the one that grew — a later match (e.g. a
+///   newly opened turn that happens to share the millisecond) would jump
+///   past it and every same-`at` turn in between, silently skipping their
+///   growth. It is re-served whole, along with anything after it, so
 ///   nothing served through the old, incomplete copy is lost.
 /// - no turn in the window has that `at` at all —
 ///   [`TranscriptDelta::too_far_behind`] is set and the default window is
@@ -2074,8 +2081,19 @@ pub async fn fetch_transcript_after(
     let window = renderable(&turns);
 
     let mut too_far_behind = false;
+    // Set whenever `pending` came from `default_window` rather than a
+    // positioned search — a first read, or the `too_far_behind` fallback,
+    // both of which behave like a fresh start. Used below: if the
+    // renderable window turned out empty (nothing but a just-landed,
+    // reply-less prompt), the anchor still needs to land SOMEWHERE, or the
+    // next read has no position to search from at all and answers a
+    // needless reset the moment turn_seq moves.
+    let mut used_default_window = false;
     let pending: Vec<&ConvTurn> = match anchor {
-        None => default_window(&window, args.turns),
+        None => {
+            used_default_window = true;
+            default_window(&window, args.turns)
+        }
         Some(a) => {
             let exact = turns.iter().enumerate().rev().find(|(_, t)| {
                 t.at.as_deref() == Some(a.at.as_str()) && turn_fingerprint(t) == a.fingerprint
@@ -2083,15 +2101,25 @@ pub async fn fetch_transcript_after(
             match exact {
                 Some((i, _)) => turns[i + 1..].iter().collect(),
                 None => {
+                    // Earliest match, NOT latest: the exact tier above
+                    // already searches from the end, so reaching here means
+                    // no turn's CONTENT matches — the anchored turn grew.
+                    // Among turns sharing its `at`, the anchored one is the
+                    // EARLIEST such turn still unaccounted for (a later
+                    // same-`at` turn, e.g. a newly opened one, would have
+                    // its own distinct content and is not what grew). The
+                    // latest match can jump PAST the grown turn and every
+                    // same-`at` turn between it and the match, silently
+                    // skipping their growth.
                     let grown = turns
                         .iter()
                         .enumerate()
-                        .rev()
                         .find(|(_, t)| t.at.as_deref() == Some(a.at.as_str()));
                     match grown {
                         Some((i, _)) => turns[i..].iter().collect(),
                         None => {
                             too_far_behind = true;
+                            used_default_window = true;
                             default_window(&window, args.turns)
                         }
                     }
@@ -2134,6 +2162,20 @@ pub async fn fetch_transcript_after(
         used += body_len;
         rendered.push(body);
         served_anchor = turn_anchor(turn);
+    }
+    if served_anchor.is_none() && used_default_window {
+        // The renderable window was empty — a just-landed prompt with no
+        // reply yet, nothing else in the tail. Anchor on the LAST PARSED
+        // turn anyway (it renders to nothing, but it still HAS an `at`):
+        // once it is answered, its fingerprint changes and the next read
+        // finds it again through the grown tier (item 1's earliest-match
+        // rule serves exactly this turn, whole, with its new content).
+        // Leaving the anchor `None` here would give the FOLLOWING `After`
+        // read nothing to position from — `anchor_missing_for_after` in
+        // `orchestration.rs` — turning an ordinary "nothing new to render
+        // yet" into a needless `too_far_behind` reset the moment turn_seq
+        // next moves.
+        served_anchor = turns.last().and_then(turn_anchor);
     }
 
     Ok(TranscriptDelta {
