@@ -14,7 +14,7 @@
 
 - **`additionalContext` budget: 8000 characters / 200 lines.** `reason`: 2000 / 20. Measured from Claude Code 2.1.278; truncation is silent apart from a `report.truncated` note.
 - **`STOP_BLOCK_STREAK_MAX = 3`** consecutive `Stop` blocks per session; one message may block at most once.
-- **`REDELIVER_AFTER_TURNS = 2`** — a message with `delivered_at` set and `read_at` null is re-delivered exactly once.
+- **`REDELIVER_AFTER_TURNS` is DEFERRED out of cycle 1** (controller Ruling 5; see Self-Review). A message with `delivered_at` set and `read_at` null is NOT re-delivered — it stays stamped, unread, and readable via `inbox`. Do not implement re-delivery in any task of this plan.
 - **Tombstoned participants' undelivered messages survive 7 days** after `retired_at`, then the `service/gc.rs` pass sweeps them.
 - **`UserPromptSubmit` and `Stop` hooks must stay synchronous** and keep `HOOK_TIMEOUT_SECS = 5`. Phase 2b item 8 proposes `async: true` and 1–2 s for hooks; these two are the exception, because an `async` hook's response body is discarded.
 - **The hook handler must never do remote work** — one indexed `SELECT` and return. No SSH, no hub round-trip.
@@ -1079,7 +1079,7 @@ git commit -m "feat(service): pack pending messages into a hook additionalContex
 **Interfaces:**
 - Consumes: migration 043.
 - Produces, on `Store`:
-  - `pub fn list_undelivered_for_session(&self, session_id: i64, limit: i64) -> Result<Vec<SessionMessage>, IpcError>` — oldest first, `delivered_at IS NULL` or (re-delivery) `read_at IS NULL` and `delivered_at` older than the current turn minus `REDELIVER_AFTER_TURNS`.
+  - `pub fn list_undelivered_for_session(&self, session_id: i64, limit: i64) -> Result<Vec<SessionMessage>, IpcError>` — oldest first, `delivered_at IS NULL` only. Re-delivery is deferred out of cycle 1 (Ruling 5), so there is deliberately no second clause here.
   - `pub fn mark_messages_delivered(&self, ids: &[i64]) -> Result<usize, IpcError>`
 
 - [ ] **Step 1: Write the failing tests**
