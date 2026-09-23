@@ -4281,8 +4281,8 @@ async fn an_in_progress_turn_does_not_hide_the_completed_turn_before_it() {
     );
 }
 
-/// A turn re-read through the SAME anchor (`ended_at` differs from what was
-/// stored) is re-served whole — never left half-delivered.
+/// A turn re-read through the SAME anchor `at` (its fingerprint differs
+/// from what was stored) is re-served whole — never left half-delivered.
 #[tokio::test]
 async fn a_grown_in_progress_turn_is_re_served_not_skipped() {
     let dir = tempfile::tempdir().unwrap();
@@ -4524,6 +4524,178 @@ async fn an_unknown_fresh_for_with_a_readable_transcript_answers_full_and_writes
     assert_eq!(
         n, 0,
         "an unknown fresh_for must never get a cursor row, even on a successful read"
+    );
+}
+
+// ---- Fix round 2 ------------------------------------------------------------
+
+/// Two turns can share the same `at` (a command, bash input, harness
+/// block, notification or compact boundary each open a turn stamped from
+/// the same millisecond as another entry). The anchor lands on the SECOND
+/// of the pair; a naive `at`-only, forward-searching reposition finds the
+/// FIRST instead, misreads it as "grown", and re-serves `[A, B]` on every
+/// call — a page that never reaches the real new content and never
+/// advances, because `more` stays true and the watermark stays held.
+#[tokio::test]
+async fn a_duplicate_at_between_two_turns_does_not_loop_forever() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let shared_at = "2026-01-01T00:00:00Z";
+    let mut jsonl = jsonl_turn("first", "REPLY_A", shared_at, "2026-01-01T00:00:01Z");
+    jsonl.push_str(&jsonl_turn(
+        "second",
+        "REPLY_B_MARKER",
+        shared_at,
+        "2026-01-01T00:00:02Z",
+    ));
+    let (s, reader, target) = transcript_fixture(&path, &jsonl);
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+
+    // First read: the default window (last turn) anchors on turn B, the
+    // SECOND of the pair sharing `shared_at`.
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(first.contains("REPLY_B_MARKER"), "{first}");
+
+    let mut jsonl2 = std::fs::read_to_string(&path).unwrap();
+    jsonl2.push_str(&jsonl_turn(
+        "third",
+        "REPLY_C_MARKER",
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:01:01Z",
+    ));
+    std::fs::write(&path, &jsonl2).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    // A budget too small to fit turns A + B + C together: a wrong
+    // reposition onto turn A would keep re-serving `[A, B]` forever and
+    // never reach C.
+    let mut seen_c = false;
+    let mut a_re_served = false;
+    let mut calls = 0;
+    loop {
+        calls += 1;
+        assert!(
+            calls <= 4,
+            "paging must terminate quickly, not loop forever"
+        );
+        let text = read_transcript(&t, target, reader, Some(20)).await;
+        if text.starts_with("(unchanged") {
+            break;
+        }
+        if text.contains("REPLY_C_MARKER") {
+            seen_c = true;
+        }
+        if text.contains("REPLY_A") {
+            a_re_served = true;
+        }
+    }
+    assert!(
+        seen_c,
+        "turn C must be served — a duplicate `at` must not hide it forever"
+    );
+    assert!(
+        !a_re_served,
+        "turn A, already anchored past (the anchor was on turn B), must never be re-served"
+    );
+}
+
+/// `default_window` (the `Full`/reset path) must filter out empty-body
+/// turns exactly as `parse_turns`/`render_tail` do: a prompt that just
+/// landed, with no reply yet, must not be mistaken for "the last turn" —
+/// that would both hide the real last reply behind it and anchor on
+/// content that never renders to anything.
+#[tokio::test]
+async fn a_just_landed_empty_prompt_does_not_hide_the_reply_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "PREVIOUS_REPLY_MARKER",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    jsonl.push_str(&format!(
+        "{}\n",
+        serde_json::json!({"type":"user","message":{"content":"a new question"},"timestamp":"2026-01-01T00:01:00Z"})
+    ));
+    std::fs::write(&path, &jsonl).unwrap();
+    let t = test_tools(s);
+
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(
+        first.contains("PREVIOUS_REPLY_MARKER"),
+        "the just-landed empty prompt must not hide the reply before it: {first}"
+    );
+
+    // The prompt is now answered.
+    let mut jsonl2 = std::fs::read_to_string(&path).unwrap();
+    jsonl2.push_str(&format!(
+        "{}\n",
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"ANSWER_MARKER"}]},"timestamp":"2026-01-01T00:01:01Z"})
+    ));
+    std::fs::write(&path, &jsonl2).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(second.contains("ANSWER_MARKER"), "{second}");
+}
+
+/// `ended_at` only moves on an assistant entry — an `Interrupt` item (or a
+/// merged notification) adds rendered text to an anchored turn without
+/// touching it, so growth detection must key on the turn's rendered
+/// CONTENT, not `ended_at`.
+#[tokio::test]
+async fn an_anchored_turn_that_gains_an_interrupt_with_no_new_assistant_entry_is_re_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "ORIGINAL_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    let t = test_tools(s);
+
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(first.contains("ORIGINAL_REPLY"), "{first}");
+
+    // The SAME turn (same `at`) is interrupted — a `user`-typed entry with
+    // no new assistant entry, so `ended_at` does not move.
+    let interrupt = serde_json::json!({
+        "type": "user",
+        "message": {"content": "[Request interrupted by user]"},
+        "timestamp": "2026-01-01T00:00:05Z",
+    });
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    jsonl.push_str(&format!("{interrupt}\n"));
+    std::fs::write(&path, &jsonl).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(
+        second.contains("[interrupted]"),
+        "the interrupt must be visible — the turn's content changed even though ended_at did not: {second}"
+    );
+    assert!(
+        second.contains("ORIGINAL_REPLY"),
+        "the turn is re-served WHOLE, not just its new part: {second}"
     );
 }
 
@@ -4851,6 +5023,99 @@ async fn inbox_fresh_for_is_a_per_reader_delta_not_consumed_by_another_readers_m
         v["data"].as_array().unwrap().len(),
         1,
         "a second, independent fresh_for reader still sees the message"
+    );
+}
+
+/// Fix round 2: the `limit >= 1` clamp for the `fresh_for` paging path had
+/// crept in front of the `fresh_for`-absent branch, so `limit: 0` returned
+/// one row instead of none, and a negative `limit` returned one row
+/// instead of every row (SQLite's own "no limit"). Either breaks the
+/// global constraint that `fresh_for` absent is byte-identical to
+/// pre-cycle behaviour.
+#[tokio::test]
+async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let sender = s
+        .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    for i in 0..3 {
+        s.insert_session_event(target, "prompt_sent", Some(&i.to_string()))
+            .unwrap();
+        s.insert_message(sender, target, "hi", "chat", None)
+            .unwrap();
+    }
+    let t = test_tools(s);
+
+    let out = t
+        .session_history(Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(0),
+            fresh_for: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        result_json(&out).as_array().unwrap().len(),
+        0,
+        "session_history limit:0 without fresh_for must stay pre-cycle byte-identical (empty)"
+    );
+
+    let out = t
+        .session_history(Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(-1),
+            fresh_for: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        result_json(&out).as_array().unwrap().len(),
+        3,
+        "session_history negative limit without fresh_for must stay SQLite's own unlimited"
+    );
+
+    let out = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(0),
+                mark_read: false,
+                summary: true,
+                fresh_for: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result_json(&out).as_array().unwrap().len(),
+        0,
+        "inbox limit:0 without fresh_for must stay pre-cycle byte-identical (empty)"
+    );
+
+    let out = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(-1),
+                mark_read: false,
+                summary: true,
+                fresh_for: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result_json(&out).as_array().unwrap().len(),
+        3,
+        "inbox negative limit without fresh_for must stay SQLite's own unlimited"
     );
 }
 

@@ -195,14 +195,12 @@ impl FleetTools {
             "session_history",
             &format!("session_id={} fresh_for={:?}", p.session_id, p.fresh_for),
         );
-        // ≥ 1: 0 or negative would either loop `more:true, data:[]` forever
-        // (history/inbox's paging is `limit`-driven, not offset-driven) or,
-        // unclamped, reach `session_events_after` as an effectively
-        // unlimited SQL `LIMIT`.
-        let limit = p.limit.unwrap_or(50).max(1);
+        let limit = p.limit.unwrap_or(50);
 
         // fresh_for absent: today's default, byte-identical, no cursor
-        // touched.
+        // touched — `limit` reaches the store exactly as it always has
+        // (0 => [], negative => SQLite's own "no limit"), so the clamp
+        // below must never run on this path.
         let Some(reader) = p.fresh_for else {
             let events = {
                 let s = lock(&self.store).map_err(to_mcp_err)?;
@@ -211,6 +209,12 @@ impl FleetTools {
             };
             return ok_json_compact(&events);
         };
+
+        // ≥ 1, for the fresh_for path only: 0 or negative would either loop
+        // `more:true, data:[]` forever (history/inbox's paging is
+        // `limit`-driven, not offset-driven) or, unclamped, reach
+        // `session_events_after` as an effectively unlimited SQL `LIMIT`.
+        let limit = limit.max(1);
 
         let resource_key = p.session_id.to_string();
         let payload = {
@@ -475,13 +479,12 @@ impl FleetTools {
                 "the inbox's session",
             )?;
         }
-        // ≥ 1, matching session_history: 0 or negative would either page
-        // forever (`more:true, data:[]`) or reach the store as an
-        // effectively unlimited SQL `LIMIT`.
-        let limit = p.limit.unwrap_or(50).max(1);
+        let limit = p.limit.unwrap_or(50);
 
         // fresh_for absent: today's default, byte-identical, no cursor
-        // touched.
+        // touched — `limit` reaches `list_inbox` exactly as it always has
+        // (0 => [], negative => SQLite's own "no limit"), so the clamp
+        // below must never run on this path.
         let Some(reader) = p.fresh_for else {
             let msgs = crate::service::messages::list_inbox(
                 p.session_id,
@@ -498,6 +501,11 @@ impl FleetTools {
                 ok_json_compact(&msgs)
             };
         };
+
+        // ≥ 1, matching session_history, for the fresh_for path only: 0 or
+        // negative would either page forever (`more:true, data:[]`) or
+        // reach the store as an effectively unlimited SQL `LIMIT`.
+        let limit = limit.max(1);
 
         // `unread_only` is part of the resource key: a `true` cursor and a
         // `false` cursor watch different, independent sequences of "what
