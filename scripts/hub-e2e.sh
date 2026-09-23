@@ -421,14 +421,15 @@ check "capture_session reads the pane over the agent" 'echo "$cap" | grep -q age
 tool "$PC" "$PUB" "$TOKC" send_prompt "{\"session_id\":${S1:-0},\"prompt\":\"echo sum-\$((40+2))\"}" >/dev/null
 until_ok 50 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | grep -q "sum-42"'
 check "send_prompt types into the pane over the agent (the shell ran it)" 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | grep -q "sum-42"' "$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | head -c 400)"
-# send_message wake=true: agt2 is a plain idle shell (never hooked, so
-# claude_status is unset) — the same "no hook has ever landed" case an
-# idle-but-never-prompted Claude session is in. The unit tests cannot cover
-# the successful paste (no tmux in that fixture); this is that coverage.
+# send_message wake=true against a NEVER-HOOKED recipient: fix round 1
+# changed this from paste to refuse (`claude_status: None` must not be
+# treated as safely idle — a never-hooked session is often sitting on the
+# first-run trust prompt with no pane read yet). agt2 is a plain shell that
+# will never fire a real Claude Code hook at all, so this holds for the rest
+# of this leg until the Stop hook below flips it to a real `idle`.
 wk=$(tool "$PC" "$PUB" "$TOKC" send_message "{\"from_session_id\":${S1:-0},\"to_session_id\":${S2:-0},\"body\":\"wake up\",\"wake\":true}")
-check "send_message wake=true reports woke=true for an idle recipient" 'echo "$wk" | grep -qE "\\\\\"woke\\\\\": ?true"' "${wk:0:400}"
-until_ok 50 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | grep -q "msg #"'
-check "send_message wake=true pastes the msg header into the idle pane" 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | grep -q "msg #"' "$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | head -c 400)"
+check "send_message wake=true refuses a never-hooked (unknown status) recipient" 'echo "$wk" | grep -qE "\\\\\"woke\\\\\": ?false" && echo "$wk" | grep -qi "unknown"' "${wk:0:400}"
+check "and does not paste into its pane" '! tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | grep -q "msg #"' "$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | head -c 400)"
 k=$(tool "$PC" "$PUB" "$TOKC" kill_session "{\"session_id\":${S1:-0}}")
 until_ok 25 '! aenv tmux has-session -t agt1 2>/dev/null'
 check "kill_session kills the tmux session over the agent" '! aenv tmux has-session -t agt1 2>/dev/null' "${k:0:400}"
@@ -469,6 +470,33 @@ aenv tmux new-session -d -s agt3 -c "$AHOME" "exec bash --noprofile --norc"
 ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}")
 S3=$(sid_of agt3)
 check "a sender session id was parsed for the delivery check" '[ -n "$S3" ]' "${ls_a:0:400}"
+
+# Flip S2 to a REAL `idle` claude_status via a genuine Stop hook (not the
+# store-level test helper the unit tests use) — fix round 1's wake_action
+# now refuses claude_status: None, so this is the only way left to reach
+# the Paste branch over real tmux and prove the successful-paste path the
+# unit fixture cannot (no tmux there).
+stopcode=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "http://127.0.0.1:$PC/hook" \
+  -H "Host: $PUB" -H "Authorization: Bearer $NTOK" \
+  -H 'Content-Type: application/json' \
+  -d "{\"hook_event_name\":\"Stop\",\"session_id\":\"$CONV\"}")
+# 200, not 204: the earlier wake=true refusal above already queued a
+# "wake up" inbox row for S2 that is still undelivered, and Stop is one of
+# the two hooks Claude Code reads `additionalContext` from (see hooks.rs),
+# so it carries that pending delivery in its response body.
+check "a real Stop hook over the agent marks the session idle" '[ "$stopcode" = 200 ]' "http $stopcode"
+wk2=$(tool "$PC" "$PUB" "$TOKC" send_message "{\"from_session_id\":${S3:-0},\"to_session_id\":${S2:-0},\"body\":\"now idle\",\"wake\":true}")
+check "send_message wake=true reports woke=true once claude_status is really idle" 'echo "$wk2" | grep -qE "\\\\\"woke\\\\\": ?true"' "${wk2:0:400}"
+until_ok 50 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | grep -q "now idle"'
+check "and the msg header actually lands in the pane" 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | grep -q "now idle"' "$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | head -c 400)"
+# deliver:true + wake:true must paste the message exactly ONCE, not twice
+# (fix round 1: wake now skips when `deliver` already pasted).
+before_n=$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | grep -c "double-paste-check")
+wk3=$(tool "$PC" "$PUB" "$TOKC" send_message "{\"from_session_id\":${S3:-0},\"to_session_id\":${S2:-0},\"body\":\"double-paste-check\",\"deliver\":true,\"wake\":true}")
+until_ok 50 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | grep -q "double-paste-check"'
+after_n=$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | grep -c "double-paste-check")
+check "deliver:true + wake:true pastes the message exactly once, not twice" '[ "$((after_n - before_n))" -eq 1 ]' "before=$before_n after=$after_n resp=${wk3:0:400}"
+
 sm=$(tool "$PC" "$PUB" "$TOKC" send_message "{\"from_session_id\":${S3:-0},\"to_session_id\":${S2:-0},\"body\":\"e2e hook delivery ping\"}")
 check "send_message queues a message for the bound session" 'echo "$sm" | grep -q "\"isError\":false"' "${sm:0:400}"
 hookresp=$(curl -s -w '\n%{http_code}' -m 10 -X POST "http://127.0.0.1:$PC/hook" \

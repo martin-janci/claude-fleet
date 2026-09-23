@@ -44,10 +44,12 @@ pub struct SendMessageArgs {
     #[serde(default)]
     pub reply_to: Option<i64>,
     /// Nudge an IDLE recipient so it notices now instead of at its next
-    /// turn. Only an idle (or never-hooked) session is nudged: a `working`
-    /// one gets the message from its own `Stop` hook, and a `blocked` one
-    /// is never typed into — Enter there would answer whatever dialog is on
-    /// screen. Defaults to false.
+    /// turn. Only a recipient reported plainly `idle` (`claude_status`) is
+    /// nudged: a `working` one gets the message from its own `Stop` hook; a
+    /// `blocked` or otherwise stuck one, or one with no reported status at
+    /// all (never hooked — often sitting on the first-run trust prompt), is
+    /// never typed into. Skipped when `deliver` already pasted this same
+    /// message. Defaults to false. See [`wake_action`] for the exact rule.
     #[serde(default)]
     pub wake: bool,
 }
@@ -224,37 +226,61 @@ pub async fn send_message(
     // Wake-up is the ONLY remaining use of the paste primitive. Delivery
     // proper rides the hook response; this exists because an idle,
     // unprompted session never fires a hook and would otherwise not notice
-    // at all. A `blocked` recipient is never typed into here either — Enter
-    // there would answer whatever dialog is on screen — and a `working` one
-    // is left alone because its own Stop hook will carry the message.
+    // at all. Skipped entirely when `deliver` already pasted this same
+    // message — `deliver` and `wake` both existing to type into the pane
+    // is not a reason to type it in twice.
+    //
+    // The guard mirrors the `deliver` branch above EXACTLY:
+    // `claude_status == blocked` OR `stuck_kind.is_some()` refuses. Checking
+    // `claude_status` alone is not enough — a Stop hook's `idle` is
+    // preserved over a later pane read while `stuck_kind` is COALESCEd from
+    // that pane read, so `claude_status: idle` with `stuck_kind:
+    // Some(trust_prompt)` is reachable and real: wake would paste and press
+    // Enter on a live trust prompt, approving something the operator never
+    // approved. `None` (never hooked) is refused too, not treated as idle:
+    // a never-hooked session is frequently sitting on the first-run trust
+    // prompt with no pane read yet, so unknown is not safely idle either.
     let mut woke = false;
     if args.wake {
-        let status = to_row.claude_status.as_deref();
-        if status.is_none() || status == Some(ClaudeStatus::Idle.as_str()) {
-            let header = pane_header(id, &from_row.tmux_name, &from_row.host_alias, &args.body);
-            match sessions::send_system_prompt(
-                &to_row.host_alias,
-                &to_row.tmux_name,
-                &header,
-                true,
-                store,
-                ssh,
-            )
-            .await
-            {
-                Ok(()) => woke = true,
-                Err(e) => deliver_error = Some(merge_error(deliver_error, e.message)),
+        match wake_action(
+            delivered_to_pane,
+            to_row.claude_status.as_deref(),
+            to_row.stuck_kind.is_some(),
+        ) {
+            WakeAction::Skip => {}
+            WakeAction::Refuse => {
+                deliver_error = Some(merge_error(
+                    deliver_error,
+                    format!(
+                        "recipient is waiting on {}; not typed into — the message is in its inbox",
+                        to_row.stuck_kind.as_deref().unwrap_or("a dialog")
+                    ),
+                ));
             }
-        } else if status == Some(ClaudeStatus::Blocked.as_str()) {
-            deliver_error = Some(merge_error(
-                deliver_error,
-                "recipient is blocked on a dialog; not typed into — the message is in its inbox"
-                    .to_string(),
-            ));
+            WakeAction::RefuseUnknown => {
+                deliver_error = Some(merge_error(
+                    deliver_error,
+                    "recipient's status is unknown (never hooked); not typed into — the message is in its inbox"
+                        .to_string(),
+                ));
+            }
+            WakeAction::Paste => {
+                let header = pane_header(id, &from_row.tmux_name, &from_row.host_alias, &args.body);
+                match sessions::send_system_prompt(
+                    &to_row.host_alias,
+                    &to_row.tmux_name,
+                    &header,
+                    true,
+                    store,
+                    ssh,
+                )
+                .await
+                {
+                    Ok(()) => woke = true,
+                    Err(e) => deliver_error = Some(merge_error(deliver_error, e.message)),
+                }
+            }
         }
-        // working | completed | failed | stopped: nothing to do. A working
-        // session's own Stop hook will carry the message; the others are
-        // not usefully nudgeable.
     }
 
     Ok(SendMessageResult {
@@ -263,6 +289,57 @@ pub async fn send_message(
         deliver_error,
         woke,
     })
+}
+
+/// What `wake` should do, given the recipient's pane-delivery outcome and
+/// reported status. PURE — no SSH, no store — so every branch is testable
+/// without a real tmux server.
+///
+/// - `already_delivered` (this same call's `deliver` already pasted the
+///   message) always wins: `deliver` and `wake` both existing to type into
+///   the pane is not a reason to type it in twice.
+/// - Otherwise this mirrors the `deliver` branch's own guard EXACTLY:
+///   `claude_status == blocked` OR `stuck` refuses. `claude_status` alone is
+///   not enough — a Stop hook's `idle` is preserved over a later pane read
+///   while `stuck_kind` is COALESCEd from that pane read, so `idle` with a
+///   `stuck_kind` is reachable and real: without this check wake would paste
+///   and press Enter into a live dialog (e.g. approve a trust prompt the
+///   operator never approved).
+/// - `None` (never hooked) refuses too, not treated as idle: a never-hooked
+///   session is often sitting on the first-run trust prompt with no pane
+///   read yet, so unknown is not safely idle either.
+/// - `working` / `completed` / `failed` / `stopped` are left alone: a
+///   working session's own Stop hook will carry the message, and the
+///   others are not usefully nudgeable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WakeAction {
+    /// Nothing to do — already delivered, or a status this call does not
+    /// act on (working / completed / failed / stopped).
+    Skip,
+    /// Refuse and report why: blocked, or stuck on any dialog.
+    Refuse,
+    /// Refuse and report why: status has never been reported at all.
+    RefuseUnknown,
+    /// Safe to paste: reported idle, not stuck, not already delivered.
+    Paste,
+}
+
+pub(crate) fn wake_action(
+    already_delivered: bool,
+    claude_status: Option<&str>,
+    stuck: bool,
+) -> WakeAction {
+    if already_delivered {
+        return WakeAction::Skip;
+    }
+    if claude_status == Some(ClaudeStatus::Blocked.as_str()) || stuck {
+        return WakeAction::Refuse;
+    }
+    match claude_status {
+        Some(s) if s == ClaudeStatus::Idle.as_str() => WakeAction::Paste,
+        Some(_) => WakeAction::Skip,
+        None => WakeAction::RefuseUnknown,
+    }
 }
 
 /// PURE: append a second error to a possibly-already-set one, so `deliver`
@@ -756,6 +833,115 @@ mod tests {
             .unwrap();
         assert!(!res.woke);
         assert_eq!(res.deliver_error, None);
+    }
+
+    /// Fix round 1 / CRITICAL 2: `claude_status: idle` with a `stuck_kind`
+    /// set is reachable (a Stop hook's `idle` is preserved over a later
+    /// pane read that COALESCEs `stuck_kind` from it) — checking
+    /// `claude_status` alone would paste into, and press Enter on, a live
+    /// trust prompt. This is the exact scenario the fix must refuse.
+    #[tokio::test]
+    async fn wake_refuses_a_stuck_but_not_blocked_recipient_and_says_why() {
+        let (store, ssh, a, b) = fixture();
+        {
+            let s = store.lock().unwrap();
+            s.record_notification_hook_for_row(
+                b,
+                crate::service::pane_intel::ClaudeStatus::Idle,
+                Some(Some(crate::service::pane_intel::StuckKind::TrustPrompt)),
+            )
+            .unwrap();
+        }
+        let mut m = args(a, b, "do not approve anything for me");
+        m.wake = true;
+        let res = send_message(m, &store, &ssh).await.unwrap();
+        assert!(
+            !res.woke,
+            "idle claude_status must not override a set stuck_kind"
+        );
+        let err = res
+            .deliver_error
+            .expect("a stuck-but-not-blocked recipient reports why");
+        assert!(err.contains("inbox"), "{err}");
+        assert_eq!(
+            list_inbox(b, true, 10, false, &store).unwrap().len(),
+            1,
+            "the message still lands in the inbox"
+        );
+    }
+
+    /// Fix round 1 / Important: a never-hooked session (`claude_status:
+    /// None`) is frequently sitting on the first-run trust prompt with no
+    /// pane read yet, so unknown must not be treated as safely idle.
+    #[tokio::test]
+    async fn wake_refuses_a_recipient_with_unknown_status_and_says_why() {
+        let (store, ssh, a, b) = fixture();
+        // No hook has ever landed for `b`: claude_status stays None.
+        let mut m = args(a, b, "hello?");
+        m.wake = true;
+        let res = send_message(m, &store, &ssh).await.unwrap();
+        assert!(!res.woke, "unknown status must not be treated as idle");
+        let err = res
+            .deliver_error
+            .expect("an unknown-status recipient reports why");
+        assert!(err.contains("inbox"), "{err}");
+        assert_eq!(
+            list_inbox(b, true, 10, false, &store).unwrap().len(),
+            1,
+            "the message still lands in the inbox"
+        );
+    }
+
+    // ---- wake_action (pure decision table) ----
+
+    #[test]
+    fn wake_action_never_pastes_twice_when_deliver_already_did() {
+        // `already_delivered` wins over every status, including one that
+        // would otherwise Paste.
+        for status in [None, Some("idle"), Some("blocked"), Some("working")] {
+            for stuck in [false, true] {
+                assert_eq!(
+                    wake_action(true, status, stuck),
+                    WakeAction::Skip,
+                    "status={status:?} stuck={stuck}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wake_action_refuses_blocked_or_stuck_over_pastes_idle() {
+        assert_eq!(
+            wake_action(false, Some("blocked"), false),
+            WakeAction::Refuse
+        );
+        // idle + stuck: `stuck` must win, not the idle claude_status.
+        assert_eq!(wake_action(false, Some("idle"), true), WakeAction::Refuse);
+        assert_eq!(
+            wake_action(false, Some("blocked"), true),
+            WakeAction::Refuse
+        );
+    }
+
+    #[test]
+    fn wake_action_pastes_only_plain_idle() {
+        assert_eq!(wake_action(false, Some("idle"), false), WakeAction::Paste);
+    }
+
+    #[test]
+    fn wake_action_refuses_unknown_status_rather_than_treating_it_as_idle() {
+        assert_eq!(wake_action(false, None, false), WakeAction::RefuseUnknown);
+        // Unknown status is refused even if (incoherently) stuck were also
+        // set — RefuseUnknown, not the generic Refuse, so the caller sees
+        // the more specific reason.
+        assert_eq!(wake_action(false, None, true), WakeAction::Refuse);
+    }
+
+    #[test]
+    fn wake_action_skips_a_working_or_terminal_status() {
+        for status in ["working", "completed", "failed", "stopped"] {
+            assert_eq!(wake_action(false, Some(status), false), WakeAction::Skip);
+        }
     }
 
     #[tokio::test]

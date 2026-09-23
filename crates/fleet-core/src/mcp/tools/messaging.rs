@@ -267,21 +267,37 @@ impl FleetTools {
         let label = caller.label();
         // The key is RESERVED before the send, not written after it — see
         // the doc comment on `send_prompt`'s identical dance. Reusing
-        // `recent_sends` here (rather than a second table) means a
-        // `client_msg_id` a caller also happens to use for `send_prompt` is
-        // in the SAME namespace (keyed by caller label + id, not by tool);
-        // that is a known sharp edge of reusing the table, not something
-        // introduced here.
+        // `recent_sends` here (rather than a second table) means the raw
+        // `(caller, id)` pair is shared with `send_prompt` — a caller that
+        // reused one `client_msg_id` across both tools would otherwise get
+        // `send_prompt`'s cached `{ delivered, session_id, turn_seq_before
+        // }` replayed as a `send_message` "success" with no inbox row ever
+        // written. The `send_message:` prefix gives this tool its own slice
+        // of the shared map instead; `send_prompt`'s own key stays bare so
+        // its behaviour and tests are untouched.
         let dedupe_id = p.client_msg_id.clone();
-        if let Some(id) = dedupe_id.as_deref() {
-            match lock_sends(&self.recent_sends).reserve(&label, id) {
+        let dedupe_key = dedupe_id.as_deref().map(|id| format!("send_message:{id}"));
+        if let Some(key) = dedupe_key.as_deref() {
+            match lock_sends(&self.recent_sends).reserve(&label, key) {
                 Reservation::Fresh => {}
                 Reservation::Done(hit) => {
-                    audit("send_message", &format!("dedupe client_msg_id={id}"));
+                    audit(
+                        "send_message",
+                        &format!(
+                            "dedupe client_msg_id={}",
+                            dedupe_id.as_deref().unwrap_or("")
+                        ),
+                    );
                     return ok_json(&hit);
                 }
                 Reservation::Pending => {
-                    audit("send_message", &format!("in flight client_msg_id={id}"));
+                    audit(
+                        "send_message",
+                        &format!(
+                            "in flight client_msg_id={}",
+                            dedupe_id.as_deref().unwrap_or("")
+                        ),
+                    );
                     return Err(mcp_err(
                         "E_IN_FLIGHT",
                         "a send with this client_msg_id is still in progress",
@@ -308,16 +324,16 @@ impl FleetTools {
         let result = match sent {
             Ok(r) => r,
             Err(e) => {
-                if let Some(id) = dedupe_id.as_deref() {
-                    lock_sends(&self.recent_sends).release(&label, id);
+                if let Some(key) = dedupe_key.as_deref() {
+                    lock_sends(&self.recent_sends).release(&label, key);
                 }
                 return Err(to_mcp_err(e));
             }
         };
         let value = serde_json::to_value(&result)
             .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
-        if let Some(id) = dedupe_id.as_deref() {
-            lock_sends(&self.recent_sends).complete(&label, id, value.clone());
+        if let Some(key) = dedupe_key.as_deref() {
+            lock_sends(&self.recent_sends).complete(&label, key, value.clone());
         }
         ok_json(&value)
     }

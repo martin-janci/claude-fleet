@@ -3416,7 +3416,11 @@ async fn send_message_with_a_client_msg_id_already_in_flight_is_e_in_flight() {
         .upsert_session("beta", "local", None, None, 0, 0, "running", None)
         .unwrap();
     let t = test_tools(s);
-    let _ = lock_sends(&t.recent_sends).reserve(&Caller::master().label(), "in-flight");
+    // Seeded under `send_message`'s own namespaced key (`send_message:` +
+    // the id), matching what the tool itself reserves under — not the bare
+    // id, which is `send_prompt`'s namespace since fix round 1.
+    let _ =
+        lock_sends(&t.recent_sends).reserve(&Caller::master().label(), "send_message:in-flight");
     let e = t
         .send_message(
             Extension(Caller::master()),
@@ -3498,4 +3502,76 @@ async fn a_send_message_that_fails_releases_its_client_msg_id_for_a_retry() {
         .unwrap();
     let rows: serde_json::Value = serde_json::from_str(text_of(&inbox.content[0])).unwrap();
     assert_eq!(rows.as_array().unwrap().len(), 1);
+}
+
+/// Fix round 1 / CRITICAL 1: `recent_sends` is shared with `send_prompt`,
+/// keyed by `(caller, id)` with no tool component. Before the
+/// `send_message:` prefix, a caller reusing one `client_msg_id` across both
+/// tools got `send_prompt`'s cached `{ delivered, session_id,
+/// turn_seq_before }` replayed as a `send_message` "success" with NO inbox
+/// row ever written — silent message loss presented as a completed send.
+/// This seeds the map exactly the way `send_prompt`'s own dedupe would (its
+/// bare, unprefixed key) and proves `send_message` does its own real work
+/// instead of returning that cached shape.
+#[tokio::test]
+async fn a_client_msg_id_reused_from_send_prompt_does_not_replay_into_send_message() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let a = s
+        .upsert_session("alpha", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let b = s
+        .upsert_session("beta", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let fake_send_prompt_result = serde_json::json!({
+        "delivered": true,
+        "session_id": a,
+        "turn_seq_before": 0,
+        "queued": false,
+        "acked": serde_json::Value::Null,
+    });
+    {
+        let label = Caller::master().label();
+        let mut sends = lock_sends(&t.recent_sends);
+        // The bare id, unprefixed: exactly what `send_prompt`'s own
+        // reserve/complete dance would leave behind for this key.
+        let _ = sends.reserve(&label, "shared-id");
+        sends.complete(&label, "shared-id", fake_send_prompt_result.clone());
+    }
+    let res = t
+        .send_message(
+            Extension(Caller::master()),
+            Parameters(send_message_params(a, b, "real work", Some("shared-id"))),
+        )
+        .await
+        .expect("send_message must not be blocked by send_prompt's unrelated cache entry");
+    let value: serde_json::Value = serde_json::from_str(text_of(&res.content[0])).unwrap();
+    assert_ne!(
+        value, fake_send_prompt_result,
+        "send_message must not replay send_prompt's cached result for the same id"
+    );
+    assert!(
+        value.get("id").is_some(),
+        "send_message must return its own result shape, not send_prompt's"
+    );
+    let inbox = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: b,
+                unread_only: false,
+                limit: Some(10),
+                mark_read: false,
+                summary: false,
+            }),
+        )
+        .await
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_str(text_of(&inbox.content[0])).unwrap();
+    assert_eq!(
+        rows.as_array().unwrap().len(),
+        1,
+        "the send must actually happen, not be swallowed by the cross-tool cache hit"
+    );
 }
