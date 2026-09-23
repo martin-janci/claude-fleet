@@ -83,7 +83,8 @@ impl FleetTools {
         default 50, max 200) and context (context-window usage, or null). turns \
         defaults to 10, max 100; the character budget scales with it. Pass \
         claude_session_id (from session_conversations) for an earlier \
-        conversation. Read-only. Errors: E_INVALID, E_INVALID_STATE, \
+        conversation. since_turn narrows the window to what came after that \
+        turn_seq. Read-only. Errors: E_INVALID, E_INVALID_STATE, \
         E_NO_TRANSCRIPT."
     )]
     pub(super) async fn session_conversation(
@@ -94,13 +95,17 @@ impl FleetTools {
         audit(
             "session_conversation",
             &format!(
-                "session_id={} turns={:?} claude_session_id={:?} events_limit={:?}",
-                p.session_id, p.turns, p.claude_session_id, p.events_limit
+                "session_id={} turns={:?} since_turn={:?} claude_session_id={:?} events_limit={:?}",
+                p.session_id, p.turns, p.since_turn, p.claude_session_id, p.events_limit
             ),
         );
         let row =
             self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
-        let (turns, max_chars) = transcript::conv_limits(p.turns);
+        let (turns, max_chars) = transcript::conv_limits(transcript::conv_turns_for(
+            p.turns,
+            p.since_turn,
+            row.turn_seq,
+        ));
         let conv = transcript::fetch_conversation_for_row(
             &self.store,
             &self.ssh,
