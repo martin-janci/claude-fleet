@@ -508,9 +508,12 @@ session's labels (up to 16 of 1–32 chars from `[A-Za-z0-9_.:-]`) and
 
 **Addressing and reply waits.** `send_message` also accepts `to_addr` (a
 fleet address, `<fleet>/session/<host>/<name>`) as an alternative to
-`to_session_id` — `to_addr` wins when both are set. Repeat `client_msg_id`
-to retry a send without delivering twice, the same discipline as
-`send_prompt`. `wait_for_reply` (`{ session_id,
+`to_session_id` — `to_addr` wins when both are set — and `wake: true` to
+nudge an idle recipient's pane the same way `deliver` does (a working
+session gets it from its own Stop hook; a blocked one is never typed into —
+Enter there would answer whatever dialog is on screen). Repeat
+`client_msg_id` to retry a send without delivering twice, the same
+discipline as `send_prompt`. `wait_for_reply` (`{ session_id,
 after_message_id?, timeout_s? }`) long-polls the inbox for the next message
 newer than `after_message_id`, the same bounded-wait budget as
 `wait_for_session`.

@@ -2632,7 +2632,12 @@ fn the_served_definition_budget_stays_bounded() {
     // its params schema, and each added field's `"default"` / `"type"` /
     // property-wrapper cost, is structural and text cannot pay it off.
     // Measured at 59,918; raised to that plus 100 bytes of headroom.
-    const BUDGET_BYTES: usize = 60_018;
+    //
+    // Raised from 60,018 to 60,200 for `send_message`'s `wake` field
+    // (fleet-mesh addressing and delivery task 12) — the same structural
+    // cost as task 11's two fields, one field's worth. Measured at 60,100;
+    // raised to that plus 100 bytes of headroom.
+    const BUDGET_BYTES: usize = 60_200;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3340,6 +3345,7 @@ fn send_message_params(
         submit: true,
         raw: false,
         reply_to: None,
+        wake: false,
         client_msg_id: client_msg_id.map(str::to_string),
     }
 }

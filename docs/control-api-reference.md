@@ -347,9 +347,9 @@ Parameters: `host_alias`
 
 ### `send_message`
 
-Send a peer-to-peer message (to_session_id or to_addr) to the recipient's inbox; deliver=true also pastes it into the pane. reply_to threads an answer. Per-host token needs its own host (E_FORBIDDEN); body marked untrusted unless raw=true (master only); repeat client_msg_id to avoid a double send.
+Send a peer-to-peer message (to_session_id or to_addr) to the recipient's inbox; deliver=true also pastes it into the pane, wake=true nudges an idle one instead. reply_to threads an answer. Per-host token needs its own host (E_FORBIDDEN); body marked untrusted unless raw=true (master only); repeat client_msg_id to avoid a double send.
 
-Parameters: `body`, `client_msg_id`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `submit`, `to_addr`, `to_session_id`
+Parameters: `body`, `client_msg_id`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `submit`, `to_addr`, `to_session_id`, `wake`
 
 ### `send_prompt`
 

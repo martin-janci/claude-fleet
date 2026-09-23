@@ -225,9 +225,10 @@ impl FleetTools {
 
     #[tool(description = "Send a peer-to-peer message (to_session_id or \
         to_addr) to the recipient's inbox; deliver=true also pastes it into \
-        the pane. reply_to threads an answer. Per-host token needs its own \
-        host (E_FORBIDDEN); body marked untrusted unless raw=true (master \
-        only); repeat client_msg_id to avoid a double send.")]
+        the pane, wake=true nudges an idle one instead. reply_to threads an \
+        answer. Per-host token needs its own host (E_FORBIDDEN); body \
+        marked untrusted unless raw=true (master only); repeat \
+        client_msg_id to avoid a double send.")]
     pub(super) async fn send_message(
         &self,
         Extension(caller): Extension<Caller>,
@@ -237,8 +238,8 @@ impl FleetTools {
         audit(
             "send_message",
             &format!(
-                "from={} to={} to_addr={:?} kind={:?} deliver={}",
-                p.from_session_id, p.to_session_id, p.to_addr, p.kind, p.deliver
+                "from={} to={} to_addr={:?} kind={:?} deliver={} wake={}",
+                p.from_session_id, p.to_session_id, p.to_addr, p.kind, p.deliver, p.wake
             ),
         );
         // The sender must exist and, for a per-host caller, live on that
@@ -301,6 +302,7 @@ impl FleetTools {
             deliver: p.deliver,
             submit: p.submit,
             reply_to: p.reply_to,
+            wake: p.wake,
         };
         let sent = crate::service::messages::send_message(args, &self.store, &self.ssh).await;
         let result = match sent {

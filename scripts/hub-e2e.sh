@@ -421,6 +421,14 @@ check "capture_session reads the pane over the agent" 'echo "$cap" | grep -q age
 tool "$PC" "$PUB" "$TOKC" send_prompt "{\"session_id\":${S1:-0},\"prompt\":\"echo sum-\$((40+2))\"}" >/dev/null
 until_ok 50 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | grep -q "sum-42"'
 check "send_prompt types into the pane over the agent (the shell ran it)" 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | grep -q "sum-42"' "$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | head -c 400)"
+# send_message wake=true: agt2 is a plain idle shell (never hooked, so
+# claude_status is unset) — the same "no hook has ever landed" case an
+# idle-but-never-prompted Claude session is in. The unit tests cannot cover
+# the successful paste (no tmux in that fixture); this is that coverage.
+wk=$(tool "$PC" "$PUB" "$TOKC" send_message "{\"from_session_id\":${S1:-0},\"to_session_id\":${S2:-0},\"body\":\"wake up\",\"wake\":true}")
+check "send_message wake=true reports woke=true for an idle recipient" 'echo "$wk" | grep -qE "\\\\\"woke\\\\\": ?true"' "${wk:0:400}"
+until_ok 50 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | grep -q "msg #"'
+check "send_message wake=true pastes the msg header into the idle pane" 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | grep -q "msg #"' "$(tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S2:-0}}" | head -c 400)"
 k=$(tool "$PC" "$PUB" "$TOKC" kill_session "{\"session_id\":${S1:-0}}")
 until_ok 25 '! aenv tmux has-session -t agt1 2>/dev/null'
 check "kill_session kills the tmux session over the agent" '! aenv tmux has-session -t agt1 2>/dev/null' "${k:0:400}"

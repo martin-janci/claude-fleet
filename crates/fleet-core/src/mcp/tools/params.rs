@@ -378,6 +378,10 @@ pub struct SendMessageParams {
     /// E_NOTFOUND / E_INVALID otherwise. `inbox` rows carry it back.
     #[serde(default)]
     pub reply_to: Option<i64>,
+    /// Nudge an idle recipient's pane now; a blocked one is never typed
+    /// into. Default false.
+    #[serde(default)]
+    pub wake: bool,
     /// Caller-chosen id; a repeat replays the first result instead of
     /// delivering twice (E_IN_FLIGHT while still in progress).
     #[serde(default)]

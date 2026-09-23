@@ -43,6 +43,13 @@ pub struct SendMessageArgs {
     /// and involve the sender (`E_NOTFOUND` / `E_INVALID` otherwise).
     #[serde(default)]
     pub reply_to: Option<i64>,
+    /// Nudge an IDLE recipient so it notices now instead of at its next
+    /// turn. Only an idle (or never-hooked) session is nudged: a `working`
+    /// one gets the message from its own `Stop` hook, and a `blocked` one
+    /// is never typed into — Enter there would answer whatever dialog is on
+    /// screen. Defaults to false.
+    #[serde(default)]
+    pub wake: bool,
 }
 
 fn default_true() -> bool {
@@ -56,6 +63,9 @@ pub struct SendMessageResult {
     /// Pane delivery failure (if any). The inbox row landed regardless — the
     /// recipient will still see it on the next `inbox` call.
     pub deliver_error: Option<String>,
+    /// Whether `wake` actually nudged the recipient's pane (only possible
+    /// for an idle, unprompted session).
+    pub woke: bool,
 }
 
 /// Maximum number of characters of a message body recorded in the
@@ -211,11 +221,58 @@ pub async fn send_message(
         }
     }
 
+    // Wake-up is the ONLY remaining use of the paste primitive. Delivery
+    // proper rides the hook response; this exists because an idle,
+    // unprompted session never fires a hook and would otherwise not notice
+    // at all. A `blocked` recipient is never typed into here either — Enter
+    // there would answer whatever dialog is on screen — and a `working` one
+    // is left alone because its own Stop hook will carry the message.
+    let mut woke = false;
+    if args.wake {
+        let status = to_row.claude_status.as_deref();
+        if status.is_none() || status == Some(ClaudeStatus::Idle.as_str()) {
+            let header = pane_header(id, &from_row.tmux_name, &from_row.host_alias, &args.body);
+            match sessions::send_system_prompt(
+                &to_row.host_alias,
+                &to_row.tmux_name,
+                &header,
+                true,
+                store,
+                ssh,
+            )
+            .await
+            {
+                Ok(()) => woke = true,
+                Err(e) => deliver_error = Some(merge_error(deliver_error, e.message)),
+            }
+        } else if status == Some(ClaudeStatus::Blocked.as_str()) {
+            deliver_error = Some(merge_error(
+                deliver_error,
+                "recipient is blocked on a dialog; not typed into — the message is in its inbox"
+                    .to_string(),
+            ));
+        }
+        // working | completed | failed | stopped: nothing to do. A working
+        // session's own Stop hook will carry the message; the others are
+        // not usefully nudgeable.
+    }
+
     Ok(SendMessageResult {
         id,
         delivered_to_pane,
         deliver_error,
+        woke,
     })
+}
+
+/// PURE: append a second error to a possibly-already-set one, so `deliver`
+/// and `wake` failures on the same call are both visible rather than one
+/// silently overwriting the other.
+fn merge_error(existing: Option<String>, new: String) -> String {
+    match existing {
+        Some(prev) => format!("{prev}; {new}"),
+        None => new,
+    }
 }
 
 /// Resolve `args.to_session_id` from `args.to_addr` when set, otherwise pass
@@ -398,6 +455,7 @@ mod tests {
             deliver: false,
             submit: true,
             reply_to: None,
+            wake: false,
         }
     }
 
@@ -639,6 +697,65 @@ mod tests {
         m.to_addr = Some("/session/local/alpha".into());
         let err = send_message(m, &store, &ssh).await.unwrap_err();
         assert_eq!(err.code, "E_SELF_TARGET");
+    }
+
+    // ---- wake ----
+
+    #[tokio::test]
+    async fn wake_is_skipped_for_a_working_recipient_because_the_hook_will_carry_it() {
+        let (store, ssh, a, b) = fixture();
+        {
+            let s = store.lock().unwrap();
+            s.record_notification_hook_for_row(
+                b,
+                crate::service::pane_intel::ClaudeStatus::Working,
+                None,
+            )
+            .unwrap();
+        }
+        let mut m = args(a, b, "later");
+        m.wake = true;
+        let res = send_message(m, &store, &ssh).await.unwrap();
+        assert!(
+            !res.woke,
+            "a working session gets the message from its Stop hook"
+        );
+        assert_eq!(list_inbox(b, true, 10, false, &store).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn wake_refuses_a_blocked_recipient_and_says_why() {
+        let (store, ssh, a, b) = fixture();
+        {
+            let s = store.lock().unwrap();
+            s.record_notification_hook_for_row(
+                b,
+                crate::service::pane_intel::ClaudeStatus::Blocked,
+                None,
+            )
+            .unwrap();
+        }
+        let mut m = args(a, b, "do not answer the dialog");
+        m.wake = true;
+        let res = send_message(m, &store, &ssh).await.unwrap();
+        assert!(!res.woke);
+        let err = res.deliver_error.expect("a blocked recipient reports why");
+        assert!(err.contains("inbox"), "{err}");
+        assert_eq!(
+            list_inbox(b, true, 10, false, &store).unwrap().len(),
+            1,
+            "the message still lands in the inbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn wake_is_not_attempted_when_wake_is_false() {
+        let (store, ssh, a, b) = fixture();
+        let res = send_message(args(a, b, "quiet"), &store, &ssh)
+            .await
+            .unwrap();
+        assert!(!res.woke);
+        assert_eq!(res.deliver_error, None);
     }
 
     #[tokio::test]
