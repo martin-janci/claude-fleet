@@ -196,12 +196,65 @@ impl FleetTools {
             &format!("session_id={} fresh_for={:?}", p.session_id, p.fresh_for),
         );
         let limit = p.limit.unwrap_or(50);
-        let events = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.list_session_events(p.session_id, limit)
-                .map_err(to_mcp_err)?
+
+        // fresh_for absent: today's default, byte-identical, no cursor
+        // touched.
+        let Some(reader) = p.fresh_for else {
+            let events = {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                s.list_session_events(p.session_id, limit)
+                    .map_err(to_mcp_err)?
+            };
+            return ok_json_compact(&events);
         };
-        ok_json_compact(&events)
+
+        let resource_key = p.session_id.to_string();
+        let payload = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let reader_exists = s
+                .get_session_by_id(reader)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .is_some();
+            let stored = s
+                .get_read_cursor(reader, "session_history", &resource_key)
+                .map_err(to_mcp_err)?;
+            let head = s.max_session_event_id(p.session_id).map_err(to_mcp_err)?;
+            // No generation for this tool: pass None on both sides.
+            let decision = stream_decision(reader_exists, stored.as_ref(), head, None);
+            let (rows, more) = match decision {
+                fresh::StreamStart::Unchanged => (Vec::new(), false),
+                fresh::StreamStart::After(after) => {
+                    page_events(&s, p.session_id, after, limit).map_err(to_mcp_err)?
+                }
+                fresh::StreamStart::Full(_) => {
+                    page_events(&s, p.session_id, 0, limit).map_err(to_mcp_err)?
+                }
+            };
+            let reset = match decision {
+                fresh::StreamStart::Full(r) => r,
+                _ => None,
+            };
+            if let (Some(last), false) = (
+                rows.last().map(|e| e.id),
+                reset == Some(fresh::ResetReason::ReaderUnknown),
+            ) {
+                s.put_stream_cursor(
+                    reader,
+                    "session_history",
+                    &resource_key,
+                    Some(p.session_id),
+                    last,
+                    None,
+                )
+                .map_err(to_mcp_err)?;
+            }
+            let unchanged = matches!(decision, fresh::StreamStart::Unchanged);
+            let mut data = serde_json::to_value(&rows)
+                .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+            crate::json::strip_nulls(&mut data);
+            fresh::envelope(unchanged, reset, more, data)
+        };
+        ok_json(&payload)
     }
 
     #[tool(
@@ -415,20 +468,92 @@ impl FleetTools {
             )?;
         }
         let limit = p.limit.unwrap_or(50);
-        let msgs = crate::service::messages::list_inbox(
-            p.session_id,
-            p.unread_only,
-            limit,
-            p.mark_read,
-            &self.store,
-        )
-        .map_err(to_mcp_err)?;
-        if p.summary {
-            let slim: Vec<InboxSummary> = msgs.into_iter().map(InboxSummary::from).collect();
-            ok_json_compact(&slim)
-        } else {
-            ok_json_compact(&msgs)
-        }
+
+        // fresh_for absent: today's default, byte-identical, no cursor
+        // touched.
+        let Some(reader) = p.fresh_for else {
+            let msgs = crate::service::messages::list_inbox(
+                p.session_id,
+                p.unread_only,
+                limit,
+                p.mark_read,
+                &self.store,
+            )
+            .map_err(to_mcp_err)?;
+            return if p.summary {
+                let slim: Vec<InboxSummary> = msgs.into_iter().map(InboxSummary::from).collect();
+                ok_json_compact(&slim)
+            } else {
+                ok_json_compact(&msgs)
+            };
+        };
+
+        let resource_key = p.session_id.to_string();
+        let payload = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let reader_exists = s
+                .get_session_by_id(reader)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .is_some();
+            let stored = s
+                .get_read_cursor(reader, "inbox", &resource_key)
+                .map_err(to_mcp_err)?;
+            let head = s.max_inbox_id(p.session_id).map_err(to_mcp_err)?;
+            // No generation for this tool: pass None on both sides.
+            let decision = stream_decision(reader_exists, stored.as_ref(), head, None);
+            let (rows, more) = match decision {
+                fresh::StreamStart::Unchanged => (Vec::new(), false),
+                fresh::StreamStart::After(after) => {
+                    page_inbox(&s, p.session_id, after, p.unread_only, limit).map_err(to_mcp_err)?
+                }
+                fresh::StreamStart::Full(_) => {
+                    page_inbox(&s, p.session_id, 0, p.unread_only, limit).map_err(to_mcp_err)?
+                }
+            };
+            let reset = match decision {
+                fresh::StreamStart::Full(r) => r,
+                _ => None,
+            };
+            // mark_read applies to the rows actually returned — exactly as
+            // the non-fresh_for path, just sourced from this page instead of
+            // list_inbox's own newest-first fetch.
+            if p.mark_read {
+                let ids: Vec<i64> = rows
+                    .iter()
+                    .filter(|m| m.read_at.is_none())
+                    .map(|m| m.id)
+                    .collect();
+                if !ids.is_empty() {
+                    s.mark_messages_read(&ids, p.session_id)
+                        .map_err(to_mcp_err)?;
+                }
+            }
+            if let (Some(last), false) = (
+                rows.last().map(|m| m.id),
+                reset == Some(fresh::ResetReason::ReaderUnknown),
+            ) {
+                s.put_stream_cursor(
+                    reader,
+                    "inbox",
+                    &resource_key,
+                    Some(p.session_id),
+                    last,
+                    None,
+                )
+                .map_err(to_mcp_err)?;
+            }
+            let unchanged = matches!(decision, fresh::StreamStart::Unchanged);
+            let mut data = if p.summary {
+                let slim: Vec<InboxSummary> = rows.into_iter().map(InboxSummary::from).collect();
+                serde_json::to_value(&slim)
+            } else {
+                serde_json::to_value(&rows)
+            }
+            .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+            crate::json::strip_nulls(&mut data);
+            fresh::envelope(unchanged, reset, more, data)
+        };
+        ok_json(&payload)
     }
 
     #[tool(description = "What is a peer session doing? Returns claude_status, \
@@ -443,4 +568,37 @@ impl FleetTools {
             crate::service::messages::peer_status(p.session_id, &self.store).map_err(to_mcp_err)?;
         ok_json(&status)
     }
+}
+
+// ---- fresh_for paging: oldest-first, `more` when truncated ------------------
+
+/// One page of `session_history`'s timeline strictly after `after`, oldest
+/// first. `more` is true when the underlying page was longer than `limit` —
+/// fetched as `limit + 1` and truncated, never `LIMIT limit` alone, so a
+/// truncated page is always detectable rather than silently equal to a
+/// complete one.
+fn page_events(
+    s: &Store,
+    session_id: i64,
+    after: i64,
+    limit: i64,
+) -> Result<(Vec<crate::store::SessionEvent>, bool), IpcError> {
+    let mut rows = s.session_events_after(session_id, after, limit + 1)?;
+    let more = rows.len() as i64 > limit;
+    rows.truncate(limit.max(0) as usize);
+    Ok((rows, more))
+}
+
+/// [`page_events`]'s `inbox` counterpart.
+fn page_inbox(
+    s: &Store,
+    session_id: i64,
+    after: i64,
+    unread_only: bool,
+    limit: i64,
+) -> Result<(Vec<crate::store::SessionMessage>, bool), IpcError> {
+    let mut rows = s.inbox_after(session_id, after, unread_only, limit + 1)?;
+    let more = rows.len() as i64 > limit;
+    rows.truncate(limit.max(0) as usize);
+    Ok((rows, more))
 }

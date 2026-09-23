@@ -4171,6 +4171,262 @@ async fn an_unknown_fresh_for_still_attempts_the_read_but_writes_no_cursor() {
     );
 }
 
+// ---- Task 6: session_history and inbox wired to fresh_for -------------------
+
+/// Newest-first + limit + advance-to-head would skip rows. Oldest-first,
+/// advancing only to what was returned, cannot.
+#[tokio::test]
+async fn a_history_cursor_that_falls_behind_pages_through_everything() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    for i in 0..5 {
+        s.insert_session_event(target, "prompt_sent", Some(&i.to_string()))
+            .unwrap();
+    }
+    // insert_session_event returns (), not an id — recover them the same
+    // way the store's own tests do, reading the timeline back oldest-first.
+    let ids: Vec<i64> = s
+        .session_events_after(target, 0, 100)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(ids.len(), 5);
+    let t = test_tools(s);
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let out = t
+            .session_history(Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(2),
+                fresh_for: Some(reader),
+            }))
+            .await
+            .unwrap();
+        let v = result_json(&out);
+        for e in v["data"].as_array().unwrap() {
+            seen.push(e["id"].as_i64().unwrap());
+        }
+        if v["unchanged"] == true {
+            break;
+        }
+    }
+    assert_eq!(
+        seen, ids,
+        "every event exactly once, in order, none skipped"
+    );
+}
+
+#[tokio::test]
+async fn a_history_read_that_has_caught_up_answers_unchanged_with_no_rows() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.insert_session_event(target, "prompt_sent", None).unwrap();
+    let t = test_tools(s);
+    let params = || SessionHistoryParams {
+        session_id: target,
+        limit: Some(50),
+        fresh_for: Some(reader),
+    };
+    let first = t.session_history(Parameters(params())).await.unwrap();
+    let v = result_json(&first);
+    assert_eq!(v["unchanged"], false);
+    assert_eq!(v["data"].as_array().unwrap().len(), 1);
+
+    let second = t.session_history(Parameters(params())).await.unwrap();
+    let v2 = result_json(&second);
+    assert_eq!(v2["unchanged"], true);
+    assert_eq!(v2["data"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn two_readers_of_one_targets_history_each_see_the_full_sequence() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let reader_a = s
+        .upsert_session("reader-a", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let reader_b = s
+        .upsert_session("reader-b", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    for i in 0..3 {
+        s.insert_session_event(target, "prompt_sent", Some(&i.to_string()))
+            .unwrap();
+    }
+    let t = test_tools(s);
+    for reader in [reader_a, reader_b] {
+        let out = t
+            .session_history(Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(50),
+                fresh_for: Some(reader),
+            }))
+            .await
+            .unwrap();
+        let v = result_json(&out);
+        assert_eq!(
+            v["data"].as_array().unwrap().len(),
+            3,
+            "reader {reader} must see the full sequence independently"
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_history_with_an_unknown_fresh_for_answers_full_and_writes_no_cursor() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.insert_session_event(target, "prompt_sent", None).unwrap();
+    let t = test_tools(s);
+    let missing_reader = 999_999;
+    let out = t
+        .session_history(Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(50),
+            fresh_for: Some(missing_reader),
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&out);
+    assert_eq!(v["cursor_reset"], "reader_unknown");
+    assert_eq!(v["data"].as_array().unwrap().len(), 1);
+    let n: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "an unknown fresh_for must never get a cursor row");
+}
+
+#[tokio::test]
+async fn inbox_fresh_for_with_mark_read_false_leaves_read_at_untouched() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let sender = s
+        .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.insert_message(sender, target, "hi", "chat", None)
+        .unwrap();
+    let t = test_tools(s);
+    let out = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(50),
+                mark_read: false,
+                summary: true,
+                fresh_for: Some(reader),
+            }),
+        )
+        .await
+        .unwrap();
+    let v = result_json(&out);
+    assert_eq!(v["data"].as_array().unwrap().len(), 1);
+    let msgs = t
+        .store
+        .lock()
+        .unwrap()
+        .list_inbox(target, false, 50)
+        .unwrap();
+    assert!(
+        msgs[0].read_at.is_none(),
+        "mark_read: false must leave read_at untouched even through fresh_for"
+    );
+}
+
+/// `inbox` already has a consuming "only new" mechanism (`unread_only` +
+/// `mark_read`). `fresh_for` is a second, orthogonal, NON-consuming
+/// per-reader delta: a controller watching a worker's inbox must keep
+/// seeing messages the worker already marked read through its own pull.
+#[tokio::test]
+async fn inbox_fresh_for_is_a_per_reader_delta_not_consumed_by_another_readers_mark_read() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let sender = s
+        .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let worker_reader = s
+        .upsert_session("worker-reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let controller = s
+        .upsert_session("controller", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.insert_message(sender, target, "hi", "chat", None)
+        .unwrap();
+    let t = test_tools(s);
+
+    // target's own worker-side pull: default mark_read=true, the ordinary
+    // "list and consume" behaviour.
+    t.inbox(
+        Extension(Caller::master()),
+        Parameters(InboxParams {
+            session_id: target,
+            unread_only: false,
+            limit: Some(50),
+            mark_read: true,
+            summary: true,
+            fresh_for: Some(worker_reader),
+        }),
+    )
+    .await
+    .unwrap();
+
+    // A controller watching the SAME inbox through its own, independent
+    // fresh_for cursor still sees the message: marking it read for one
+    // reader does not consume it for a different watcher.
+    let out = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(50),
+                mark_read: false,
+                summary: true,
+                fresh_for: Some(controller),
+            }),
+        )
+        .await
+        .unwrap();
+    let v = result_json(&out);
+    assert_eq!(
+        v["data"].as_array().unwrap().len(),
+        1,
+        "a second, independent fresh_for reader still sees the message"
+    );
+}
+
 /// The 64 % that is not drawn: the heaviest of these on the measured capture
 /// were `claude_session_id` (2 773 B over 56 rows) and `account_uuid`
 /// (2 160 B). Dropping them is also why a phone stops holding them at all.
