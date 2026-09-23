@@ -1132,6 +1132,20 @@ impl LongPollLimiter {
         })
     }
 
+    /// Every key holding at least one permit, and how many.
+    ///
+    /// Ordered, because it feeds a metrics exposition that is diffed between
+    /// scrapes: a hash order would make every scrape look changed.
+    pub fn active_by_key(&self) -> std::collections::BTreeMap<String, usize> {
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(k, n)| (k.clone(), *n))
+            .collect()
+    }
+
     /// Permits `key` currently holds.
     #[cfg(test)]
     pub fn active(&self, key: &str) -> usize {

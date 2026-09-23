@@ -14,6 +14,7 @@ pub mod events_route;
 pub mod guard;
 pub mod hooks;
 mod listener;
+pub mod metrics;
 pub mod pairing;
 pub mod report_route;
 pub mod settings;
@@ -99,6 +100,9 @@ impl McpRuntime {
 #[derive(Clone)]
 pub struct McpGuards {
     pub rate: Arc<RateLimiter>,
+    /// Per-caller counters behind `GET /metrics`. See [`metrics`] for what is
+    /// counted and, more to the point, what is deliberately not.
+    pub metrics: Arc<metrics::Metrics>,
     pub confirms: Arc<PendingConfirms>,
     /// Surfaces a confirmation request to the desktop (`mcp:confirm-required`).
     pub notify: ConfirmNotify,
@@ -115,6 +119,7 @@ impl McpGuards {
     pub fn new(notify: ConfirmNotify) -> Self {
         Self {
             rate: Arc::new(RateLimiter::new()),
+            metrics: Arc::new(metrics::Metrics::new()),
             confirms: Arc::new(PendingConfirms::new()),
             notify,
             pairings: Arc::new(PendingPairings::new()),
@@ -267,6 +272,7 @@ async fn healthz() -> impl axum::response::IntoResponse {
 /// path unrouted, which is what every test that does not exercise it passes.
 #[allow(clippy::too_many_arguments)]
 fn build_app(
+    metrics_state: metrics::MetricsState,
     mcp_service: axum::routing::MethodRouter<hooks::HookState>,
     mcp_json_service: Option<axum::routing::MethodRouter<hooks::HookState>>,
     hook_state: hooks::HookState,
@@ -302,6 +308,15 @@ fn build_app(
             axum::Router::new()
                 .route("/events", axum::routing::get(events_route::handle_events))
                 .with_state(events_state),
+        )
+        // `/metrics` is authorized like the rest and then master-gated inside
+        // the handler: a per-host token and a paired phone are both callers it
+        // reports ON, so one reading the others' figures would make a
+        // read-only device a traffic monitor for the operator's own work.
+        .merge(
+            axum::Router::new()
+                .route("/metrics", axum::routing::get(metrics::handle_metrics))
+                .with_state(metrics_state),
         )
         // `/agent` likewise carries its own state, and likewise belongs BEHIND
         // `authorize`: the upgrade needs a valid bearer token, and the handler
@@ -368,6 +383,10 @@ pub(crate) fn test_app(
     agent_state: crate::agent::ws::AgentWsState,
 ) -> axum::Router {
     build_app(
+        metrics::MetricsState {
+            metrics: Arc::new(metrics::Metrics::new()),
+            streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+        },
         axum::routing::any(|| async { "MCP_OK" }),
         None,
         hooks::HookState {
@@ -614,6 +633,11 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             Arc::clone(&guards.rate),
             base_url,
         );
+        // Cloned before `guards` moves into `FleetTools`: the route and the
+        // tool router must write and read the same counters.
+        let metrics_for_route = Arc::clone(&guards.metrics);
+        let events_state =
+            EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token());
         let tools = FleetTools::new(store, ssh, reg, tunnels, guards);
         let service = streamable_service(
             tools.clone(),
@@ -628,6 +652,10 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             Framing::Json,
         );
         let app = build_app(
+            metrics::MetricsState {
+                metrics: Arc::clone(&metrics_for_route),
+                streams: events_state.stream_limiter(),
+            },
             axum::routing::any_service(service),
             Some(axum::routing::any_service(json_service)),
             hook_state,
@@ -635,7 +663,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             pair_state,
             // The stream ends itself when the server stops, so an attached
             // client never holds the graceful drain open.
-            EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token()),
+            events_state,
             // The SAME registry `SshClient` routes agent hosts through, so a
             // connection registered here is the one `AgentTransport` dispatches
             // to. `None` on an SSH-only client (the desktop): `/agent` then
@@ -757,6 +785,10 @@ mod tests {
         // gets its own app at the end of this test.
         pair_state.attempt_interval = std::time::Duration::ZERO;
         let app = build_app(
+            metrics::MetricsState {
+                metrics: Arc::new(metrics::Metrics::new()),
+                streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            },
             any(|| async { "MCP_OK" }),
             None,
             hook_state,
@@ -1127,6 +1159,10 @@ mod tests {
             allowed_hosts: Arc::new(vec!["fleet.example.com".to_string()]),
         };
         let app2 = build_app(
+            metrics::MetricsState {
+                metrics: Arc::new(metrics::Metrics::new()),
+                streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            },
             any(|| async { "MCP_OK" }),
             None,
             hook_state2,
@@ -1186,6 +1222,10 @@ mod tests {
         let limited_pairings = Arc::new(pairing::PendingPairings::new());
         let report_state3 = report_route::ReportState::new(Arc::clone(&store));
         let app3 = build_app(
+            metrics::MetricsState {
+                metrics: Arc::new(metrics::Metrics::new()),
+                streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            },
             any(|| async { "MCP_OK" }),
             None,
             hook_state3,
@@ -1313,6 +1353,10 @@ mod tests {
             Framing::Json,
         );
         let app = build_app(
+            metrics::MetricsState {
+                metrics: Arc::new(metrics::Metrics::new()),
+                streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            },
             axum::routing::any_service(service),
             Some(axum::routing::any_service(json_service)),
             hook_state,
@@ -1470,6 +1514,43 @@ mod tests {
         );
     }
 
+    /// `/metrics` answers the master token and refuses everything else with a
+    /// sentence. A per-host token and a paired phone are both callers it
+    /// reports ON; letting either read the figures would make a read-only
+    /// device a traffic monitor for the operator's own work.
+    #[tokio::test]
+    async fn metrics_answers_the_master_token_and_refuses_the_rest() {
+        let addr = serve_real_tools().await;
+
+        // A call to count.
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        raw_round_trip(addr, &post_mcp(list)).await;
+
+        let get = |auth: &str| {
+            format!(
+                "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                 Authorization: Bearer {auth}\r\nConnection: close\r\n\r\n"
+            )
+        };
+        let r = raw_round_trip(addr, &get("s3cret")).await;
+        assert!(r.contains("200 OK"), "master:\n{r}");
+        assert!(
+            r.contains("fleet_tool_calls_total"),
+            "the exposition must carry the call counter:\n{r}"
+        );
+        assert!(
+            r.to_ascii_lowercase().contains("text/plain"),
+            "Prometheus scrapes text/plain:\n{r}"
+        );
+        // No token at all is the authorize layer's answer, not the handler's.
+        let r = raw_round_trip(
+            addr,
+            "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r.contains("401"), "unauthenticated:\n{r}");
+    }
+
     /// rmcp keeps its own DNS-rebinding Host check (loopback only by
     /// default); the fleet allowlist must reach it, or a public Host that
     /// passed fleet's `authorize` layer is still refused with 403 by rmcp.
@@ -1587,6 +1668,10 @@ mod tests {
             .with_keepalive(keepalive)
             .with_shutdown(stop);
         let app = build_app(
+            metrics::MetricsState {
+                metrics: Arc::new(metrics::Metrics::new()),
+                streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            },
             any(|| async { "MCP_OK" }),
             None,
             hook_state,
