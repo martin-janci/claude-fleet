@@ -377,7 +377,7 @@ Parameters: `session_id`
 
 ### `session_conversation`
 
-Read a session conversation as structured turns — the shape of the exchange, where session_transcript gives one flat blob. Each turn carries the prompt, its timestamps, and items by kind: text, tool, subagent, compact, command, interrupt (tool inputs and results are never included). Also returns events (this conversation timeline, newest events_limit: default 50, max 200) and context (context-window usage, or null). turns defaults to 10, max 100; the character budget scales with it. Pass claude_session_id (from session_conversations) for an earlier conversation. since_turn narrows the window to what came after that turn_seq. Read-only. Errors: E_INVALID, E_INVALID_STATE, E_NO_TRANSCRIPT.
+Read a session conversation as structured turns — the shape of the exchange, where session_transcript gives one flat blob. Each turn carries the prompt, its timestamps, and items by kind: text, tool, subagent, compact, command, interrupt (tool inputs and results are never included). Also returns events (this conversation timeline, newest events_limit: default 50, max 200, 0 for none) and context (context-window usage, or null). turns defaults to 10, max 100; the character budget scales with it. Pass claude_session_id (from session_conversations) for an earlier conversation. since_turn narrows the window to what came after that turn_seq. Read-only. Errors: E_INVALID, E_INVALID_STATE, E_NO_TRANSCRIPT.
 
 Parameters: `claude_session_id`, `events_limit`, `session_id`, `since_turn`, `turns`
 

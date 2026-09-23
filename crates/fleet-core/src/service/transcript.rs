@@ -1630,15 +1630,22 @@ pub async fn fetch_conversation_for_row(
     let claude_id = args.claude_session_id.clone();
     let mut conv = fetch_conversation(args, ssh).await?;
     if let Ok(s) = lock(store) {
-        conv.events = match s.list_conversation_events(row.id, &claude_id, events_limit) {
-            Ok(events) => events,
-            Err(e) => {
-                tracing::warn!(
-                    session_id = row.id,
-                    code = %e.code,
-                    "conversation events query failed; returning none"
-                );
-                Vec::new()
+        // Zero means the caller draws no timeline, so the query is skipped
+        // rather than run and thrown away — one fewer statement under the
+        // global store lock on a call the Conversation panel makes every 5 s.
+        conv.events = if events_limit == 0 {
+            Vec::new()
+        } else {
+            match s.list_conversation_events(row.id, &claude_id, events_limit) {
+                Ok(events) => events,
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = row.id,
+                        code = %e.code,
+                        "conversation events query failed; returning none"
+                    );
+                    Vec::new()
+                }
             }
         };
         if row.claude_session_id.as_deref() == Some(claude_id.as_str()) {
@@ -1818,12 +1825,16 @@ pub const CONV_EVENTS_LIMIT_UI: i64 = 200;
 pub const CONV_EVENTS_LIMIT_MCP: i64 = 50;
 
 /// The `session_conversation` tool's `events_limit`: default
-/// [`CONV_EVENTS_LIMIT_MCP`], clamped to `1..=CONV_EVENTS_LIMIT_UI` (the
+/// [`CONV_EVENTS_LIMIT_MCP`], clamped to `0..=CONV_EVENTS_LIMIT_UI` (the
 /// desktop asks for the UI window when it reads through a hub).
 pub fn conv_events_limit(requested: Option<i64>) -> i64 {
+    // Zero is askable, which it was not: the floor was 1, so a caller that
+    // draws no timeline still received one event and parsed it. A phone's
+    // `Conversation` model has two fields, `turns` and `truncated` — the
+    // whole events block came off the wire to be dropped, on every poll.
     requested
         .unwrap_or(CONV_EVENTS_LIMIT_MCP)
-        .clamp(1, CONV_EVENTS_LIMIT_UI)
+        .clamp(0, CONV_EVENTS_LIMIT_UI)
 }
 
 /// Validate the values of `args` that are interpolated into a read script.
@@ -2399,6 +2410,25 @@ mod tests {
             conv_turns_for(None, Some(0), 0),
             Some(1),
             "a session with no completed turn yet"
+        );
+    }
+
+    /// Zero is askable. A caller that draws no timeline — the phone's
+    /// `Conversation` model has `turns` and `truncated`, and nothing else —
+    /// used to be handed one event anyway and parse it on every poll.
+    #[test]
+    fn conv_events_limit_allows_none_and_still_caps_the_top() {
+        assert_eq!(conv_events_limit(Some(0)), 0, "none is a real answer");
+        assert_eq!(conv_events_limit(None), CONV_EVENTS_LIMIT_MCP);
+        assert_eq!(
+            conv_events_limit(Some(-5)),
+            0,
+            "below zero is none, not one"
+        );
+        assert_eq!(
+            conv_events_limit(Some(9_999)),
+            CONV_EVENTS_LIMIT_UI,
+            "the ceiling is unchanged"
         );
     }
 
