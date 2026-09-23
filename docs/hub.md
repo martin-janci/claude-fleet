@@ -675,14 +675,17 @@ answer smaller, and they stack with it.
 columns a phone-sized session list draws — `id`, `tmux_name`,
 `friendly_name`, `last_prompt`, `host_alias`, `project_id`, `status`,
 `kind`, `claude_status`, `stuck_kind`, `current_activity`, `context_pct`,
-`last_activity_at`, `ci_status`. On the same 44-session fleet that is
+`last_activity_at`, `ci_status`, `pending_input`. On the same 44-session fleet that is
 **46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped**. The view is
 *named*, not a caller-supplied field list, so the hub keeps the definition of
 what a pager row is and can widen it without an app release; an unknown name
 is refused with `E_INVALID` rather than quietly answering full rows. It
 exists because neither shape fitted: the default summary row is 9 951 B but
 drops `friendly_name`, `current_activity` and `last_activity_at`, which are
-three of the fourteen that list draws.
+three of the fifteen a pager uses. `pending_input` is in the view for the
+same reason: it carries the dialog a blocked session is waiting on and its
+options, and without it the view is a list a phone can read but not act on —
+answering that dialog is the one thing a pager exists for.
 
 `list_projects { has_sessions: true }` keeps only the projects that hold a
 live session — the rows a client needs to turn a session's `project_id` into

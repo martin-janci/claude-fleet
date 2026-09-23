@@ -3770,7 +3770,7 @@ fn one_full_row() -> serde_json::Value {
 /// Dropping an entry must be a deliberate edit: the failure it prevents is a
 /// phone drawing a blank column against a hub that believes it answered.
 #[test]
-fn the_phone_view_is_exactly_the_fourteen_columns_that_list_draws() {
+fn the_phone_view_is_exactly_the_fifteen_columns_a_pager_uses() {
     assert_eq!(
         PHONE_SESSION_FIELDS,
         &[
@@ -3784,6 +3784,7 @@ fn the_phone_view_is_exactly_the_fourteen_columns_that_list_draws() {
             "kind",
             "last_activity_at",
             "last_prompt",
+            "pending_input",
             "project_id",
             "status",
             "stuck_kind",
