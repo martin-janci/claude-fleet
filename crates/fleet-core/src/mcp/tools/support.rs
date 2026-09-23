@@ -1179,20 +1179,20 @@ pub(super) fn stream_decision(
     fresh::decide_stream(stored, head, generation)
 }
 
-/// The `After(since_turn)` text `session_transcript` returns: the raw delta,
-/// plus — only when [`transcript::render_tail`]'s own front-trim marker is
-/// present — a note that some of the NEW turns were themselves cut by
-/// `max_chars`. The cursor still advances past them (the caller asked for
-/// `since_turn`, got it, and can re-read wider); without this note that cut
-/// would be invisible instead of just recoverable.
-pub(super) fn format_transcript_after(raw: String, since_turn: i64) -> String {
-    if raw.starts_with("[session_transcript:") {
+/// The continuation note `session_transcript` appends when
+/// [`transcript::TranscriptDelta::more`] is set: turns remain past this
+/// page's `max_chars` budget. The anchor already advanced past everything
+/// in `body` (never past what was not sent), so re-reading with the SAME
+/// `fresh_for` picks up exactly where this page left off — visible, not a
+/// silent truncation.
+pub(super) fn format_transcript_more(body: String, more: bool) -> String {
+    if more {
         format!(
-            "{raw}\n[cursor: the oldest new turns were cut by max_chars; \
-             re-read with since_turn={since_turn} and a larger max_chars]"
+            "{body}\n[more: additional new turns follow — call session_transcript \
+             again with the same fresh_for to continue]"
         )
     } else {
-        raw
+        body
     }
 }
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::ipc_error::codes;
-use crate::store::CursorRow;
+use crate::store::{CursorRow, StartSource};
 use std::time::Duration;
 
 fn text_of(c: &Content) -> &str {
@@ -4018,6 +4018,7 @@ fn transcript_decision_treats_an_unknown_reader_as_reader_unknown_regardless_of_
         watermark: Some(9),
         generation: None,
         content_hash: None,
+        anchor: None,
     };
     assert_eq!(
         stream_decision(false, Some(&stored), Some(9), None),
@@ -4035,6 +4036,7 @@ fn transcript_decision_passes_a_known_readers_cursor_straight_to_decide_stream()
         watermark: Some(9),
         generation: Some(1),
         content_hash: None,
+        anchor: None,
     };
     // Same head, moved generation: still resets, exactly as decide_stream
     // alone would — the reader-existence gate changes nothing once the
@@ -4051,18 +4053,14 @@ fn transcript_decision_passes_a_known_readers_cursor_straight_to_decide_stream()
 }
 
 #[test]
-fn format_transcript_after_appends_a_cut_note_only_when_render_tail_trimmed_the_front() {
+fn format_transcript_more_appends_a_continuation_note_only_when_more_is_true() {
     assert_eq!(
-        format_transcript_after("plain delta".to_string(), 7),
+        format_transcript_more("plain delta".to_string(), false),
         "plain delta"
     );
-    let cut =
-        "[session_transcript: 2 chars dropped from the start — raise max_chars to see more]\ntail";
-    let out = format_transcript_after(cut.to_string(), 7);
-    assert!(out.starts_with(cut));
-    assert!(out.ends_with(
-        "[cursor: the oldest new turns were cut by max_chars; re-read with since_turn=7 and a larger max_chars]"
-    ));
+    let out = format_transcript_more("plain delta".to_string(), true);
+    assert!(out.starts_with("plain delta"));
+    assert!(out.contains("call session_transcript again with the same fresh_for"));
 }
 
 #[test]
@@ -4097,6 +4095,7 @@ async fn an_unchanged_transcript_read_touches_no_transcript_at_all() {
         &target.to_string(),
         Some(target),
         3,
+        None,
         None,
     )
     .unwrap();
@@ -4168,6 +4167,363 @@ async fn an_unknown_fresh_for_still_attempts_the_read_but_writes_no_cursor() {
         cursor_count(&t),
         0,
         "an unknown fresh_for must never get a cursor row"
+    );
+}
+
+// ---- Fix round 1: session_transcript positioned by anchor, not turn_seq ----
+
+/// A `session_transcript` fixture that reads a REAL local transcript file —
+/// host `local` runs bash locally (`ssh::run_shell_bounded`, enabled by
+/// default), so `fresh_for`'s anchor positioning is exercised through an
+/// actual read, not asserted only at the decision level.
+fn transcript_fixture(path: &std::path::Path, jsonl: &str) -> (Store, i64, i64) {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    std::fs::write(path, jsonl).unwrap();
+    s.rebind_conversation(
+        target,
+        "550e8400-e29b-41d4-a716-446655440099",
+        StartSource::Fleet,
+        Some(&path.to_string_lossy()),
+        None,
+    )
+    .unwrap();
+    (s, reader, target)
+}
+
+/// One JSONL turn: a `user` prompt followed by its `assistant` reply, with
+/// distinct `timestamp`s so `ConvTurn::at`/`ended_at` are both real values.
+fn jsonl_turn(prompt: &str, reply: &str, at: &str, ended_at: &str) -> String {
+    format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"user","message":{"content":prompt},"timestamp":at}),
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":reply}]},"timestamp":ended_at}),
+    )
+}
+
+async fn read_transcript(
+    t: &FleetTools,
+    target: i64,
+    reader: i64,
+    max_chars: Option<usize>,
+) -> String {
+    let out = t
+        .session_transcript(
+            Extension(Caller::master()),
+            Parameters(SessionTranscriptParams {
+                session_id: target,
+                since_turn: None,
+                max_chars,
+                fresh_for: Some(reader),
+            }),
+        )
+        .await
+        .unwrap();
+    text_of(&out.content[0]).to_string()
+}
+
+/// THE regression test this fix round exists for: `turn_seq` is a Stop-hook
+/// COUNT, not a position in the transcript FILE. Turn A completes
+/// (turn_seq 1) and is read — establishing the cursor. Turn B then ALSO
+/// completes (turn_seq 2), but before the next read turn C also opens and
+/// streams a partial reply with no Stop yet (turn_seq stays 2). The old
+/// "last (turn_seq − watermark) turns" arithmetic takes the last ONE
+/// file-turn — turn C, still in progress — and turn B, the actual new
+/// completed turn, is never served.
+#[tokio::test]
+async fn an_in_progress_turn_does_not_hide_the_completed_turn_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "FIRST_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap(); // turn_seq = 1
+    let t = test_tools(s);
+
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(first.contains("FIRST_REPLY"), "{first}");
+
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    jsonl.push_str(&jsonl_turn(
+        "second",
+        "SECOND_REPLY_MARKER",
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:01:01Z",
+    ));
+    jsonl.push_str(&jsonl_turn(
+        "third",
+        "THIRD_PARTIAL",
+        "2026-01-01T00:02:00Z",
+        "2026-01-01T00:02:01Z",
+    ));
+    std::fs::write(&path, &jsonl).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap(); // turn_seq = 2 (B only; C never Stops)
+    }
+
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(
+        second.contains("SECOND_REPLY_MARKER"),
+        "turn B must be served, not silently skipped: {second}"
+    );
+}
+
+/// A turn re-read through the SAME anchor (`ended_at` differs from what was
+/// stored) is re-served whole — never left half-delivered.
+#[tokio::test]
+async fn a_grown_in_progress_turn_is_re_served_not_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "PARTIAL_V1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    let t = test_tools(s);
+
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(first.contains("PARTIAL_V1"), "{first}");
+
+    // The SAME turn (same `at`) streams a second assistant block with a
+    // later `timestamp`, and only now gets its Stop.
+    let extra = serde_json::json!({"type":"assistant","message":{"content":[
+        {"type":"text","text":"GROWN_TAIL"}
+    ]},"timestamp":"2026-01-01T00:00:05Z"});
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    jsonl.push_str(&format!("{extra}\n"));
+    std::fs::write(&path, &jsonl).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(
+        second.contains("GROWN_TAIL"),
+        "the grown tail must be served: {second}"
+    );
+    assert!(
+        second.contains("PARTIAL_V1"),
+        "the turn is re-served WHOLE, not just its new part: {second}"
+    );
+}
+
+/// Oldest-first paging: a small `max_chars` forces one turn per page, and
+/// every new turn must still be seen exactly once, in order, with `more`
+/// on every page but the last.
+#[tokio::test]
+async fn a_transcript_delta_pages_oldest_first_with_more_and_skips_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "seed",
+            "SEED_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+    read_transcript(&t, target, reader, None).await; // establishes the cursor at "seed"
+
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    for i in 1..=3 {
+        jsonl.push_str(&jsonl_turn(
+            &format!("prompt{i}"),
+            &format!("REPLY_MARKER_{i}"),
+            &format!("2026-01-01T00:0{i}:00Z"),
+            &format!("2026-01-01T00:0{i}:01Z"),
+        ));
+    }
+    std::fs::write(&path, &jsonl).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        for _ in 1..=3 {
+            store.record_stop_hook_for_row(target).unwrap();
+        }
+    }
+
+    let mut seen = Vec::new();
+    let mut more_pages = 0;
+    for _ in 0..8 {
+        let text = read_transcript(&t, target, reader, Some(20)).await;
+        if text.starts_with("(unchanged") {
+            break;
+        }
+        if text.contains("[more:") {
+            more_pages += 1;
+        }
+        for i in 1..=3 {
+            if text.contains(&format!("REPLY_MARKER_{i}")) {
+                seen.push(i);
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![1, 2, 3],
+        "every new turn exactly once, oldest first, none skipped"
+    );
+    assert!(more_pages >= 2, "at least two pages must say more remains");
+}
+
+/// An anchor the read cannot locate (the file was replaced out from under
+/// it — log rotation, or simply too far behind the tail window) resets
+/// full with `too_far_behind`, never a guess at what to serve.
+#[tokio::test]
+async fn a_transcript_anchor_the_read_cannot_locate_resets_too_far_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "OLD_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+    read_transcript(&t, target, reader, None).await; // anchor := "first"
+
+    // The file is entirely replaced — the anchored turn's `at` is gone.
+    std::fs::write(
+        &path,
+        jsonl_turn(
+            "later",
+            "NEW_REPLY",
+            "2099-01-01T00:00:00Z",
+            "2099-01-01T00:00:01Z",
+        ),
+    )
+    .unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    let text = read_transcript(&t, target, reader, None).await;
+    assert!(
+        text.starts_with("[cursor reset: too_far_behind"),
+        "unexpected text: {text}"
+    );
+    assert!(text.contains("NEW_REPLY"), "{text}");
+    let cursor = t
+        .store
+        .lock()
+        .unwrap()
+        .get_read_cursor(reader, "session_transcript", &target.to_string())
+        .unwrap()
+        .unwrap();
+    assert!(
+        cursor.anchor.is_some(),
+        "the reset read still records a fresh anchor to position the next one"
+    );
+}
+
+/// A conversation boundary (e.g. `/clear`) resets full with
+/// `conversation_changed`, even though the watermark alone looked current.
+#[tokio::test]
+async fn a_transcript_conversation_change_resets_full_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "PRE_CLEAR_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+    read_transcript(&t, target, reader, None).await;
+
+    std::fs::write(
+        &path,
+        jsonl_turn(
+            "after clear",
+            "POST_CLEAR_REPLY",
+            "2026-02-01T00:00:00Z",
+            "2026-02-01T00:00:01Z",
+        ),
+    )
+    .unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store
+            .insert_session_event(target, "conversation_started", None)
+            .unwrap();
+    }
+
+    let text = read_transcript(&t, target, reader, None).await;
+    assert!(
+        text.starts_with("[cursor reset: conversation_changed"),
+        "{text}"
+    );
+    assert!(text.contains("POST_CLEAR_REPLY"), "{text}");
+}
+
+/// The current (pre-fix) guard test only reaches `ReaderUnknown` through a
+/// read that fails anyway (no `claude_session_id`), so a missing
+/// skip-the-cursor-write guard would go unnoticed. This one uses a REAL,
+/// readable transcript: the read succeeds, and only the guard stops a
+/// cursor row from being written for a reader that does not exist.
+#[tokio::test]
+async fn an_unknown_fresh_for_with_a_readable_transcript_answers_full_and_writes_no_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, _reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "SOME_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+    let missing_reader = 999_999;
+
+    let text = read_transcript(&t, target, missing_reader, None).await;
+    assert!(text.starts_with("[cursor reset: reader_unknown"), "{text}");
+    assert!(text.contains("SOME_REPLY"), "{text}");
+    let n: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row(
+            "SELECT COUNT(*) FROM read_cursors WHERE reader_session_id = ?1",
+            [missing_reader],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        n, 0,
+        "an unknown fresh_for must never get a cursor row, even on a successful read"
     );
 }
 

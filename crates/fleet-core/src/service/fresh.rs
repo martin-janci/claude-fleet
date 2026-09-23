@@ -14,6 +14,12 @@ pub enum ResetReason {
     AheadOfHead,
     /// `fresh_for` names no session. Answered, stated, nothing stored.
     ReaderUnknown,
+    /// A positional cursor (`session_transcript`'s anchor) named a spot the
+    /// current read could not locate — outside the tail window, or the
+    /// cursor never recorded one. `turn_seq`/generation alone said `After`,
+    /// but the delta cannot be positioned, so it is answered full instead
+    /// of guessing.
+    TooFarBehind,
 }
 
 impl ResetReason {
@@ -22,6 +28,7 @@ impl ResetReason {
             ResetReason::ConversationChanged => "conversation_changed",
             ResetReason::AheadOfHead => "ahead_of_head",
             ResetReason::ReaderUnknown => "reader_unknown",
+            ResetReason::TooFarBehind => "too_far_behind",
         }
     }
 }
@@ -85,6 +92,7 @@ mod tests {
             watermark: Some(w),
             generation: g,
             content_hash: None,
+            anchor: None,
         }
     }
 
@@ -164,6 +172,7 @@ mod tests {
             watermark: None,
             generation: None,
             content_hash: Some("h".into()),
+            anchor: None,
         };
         assert_eq!(
             decide_stream(Some(&snap), Some(9), None),

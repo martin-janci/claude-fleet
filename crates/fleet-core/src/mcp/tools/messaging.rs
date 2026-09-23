@@ -245,6 +245,7 @@ impl FleetTools {
                     Some(p.session_id),
                     last,
                     None,
+                    None,
                 )
                 .map_err(to_mcp_err)?;
             }
@@ -538,6 +539,7 @@ impl FleetTools {
                     &resource_key,
                     Some(p.session_id),
                     last,
+                    None,
                     None,
                 )
                 .map_err(to_mcp_err)?;

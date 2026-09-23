@@ -12,6 +12,17 @@
 -- counting across /clear while the transcript FILE changes, so without it a
 -- /clear between two reads would silently skip the old conversation's tail.
 --
+-- `anchor`: for session_transcript only, a small JSON string
+-- `{"at":"...","ended_at":"..."}` naming the turn its last read stopped at
+-- (that turn's opening prompt timestamp, and its own `ended_at` at the
+-- time). `watermark` (turn_seq) is only a CHANGE detector here, never a
+-- position: an in-progress turn, an interrupt, a slash command or a queued
+-- prompt each add a turn to the transcript FILE with no Stop hook behind
+-- it, so "turn_seq − watermark" turns from the end of the file does not
+-- reliably name the same turns a caller already saw. `anchor` is what
+-- positions the next read; NULL until a `fresh_for` transcript read has
+-- happened at least once.
+--
 -- `target_session_id`: the session a cursor is ABOUT (NULL for
 -- list_sessions, which has none), so the GC can drop cursors whose target
 -- is gone. No foreign keys, matching the rest of this schema: dangling ids
@@ -24,6 +35,7 @@ CREATE TABLE IF NOT EXISTS read_cursors (
   target_session_id INTEGER,
   watermark INTEGER,
   generation INTEGER,
+  anchor TEXT,
   content_hash TEXT,
   updated_at INTEGER NOT NULL
 );

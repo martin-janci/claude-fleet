@@ -11,6 +11,12 @@ pub struct CursorRow {
     pub watermark: Option<i64>,
     pub generation: Option<i64>,
     pub content_hash: Option<String>,
+    /// `session_transcript` only: where in the transcript FILE the last
+    /// read stopped, as a small JSON string (see the migration's comment
+    /// on why `watermark` alone cannot serve this role). `None` for every
+    /// other tool, and for a transcript cursor that never completed a
+    /// `fresh_for` read.
+    pub anchor: Option<String>,
 }
 
 impl Store {
@@ -22,7 +28,7 @@ impl Store {
     ) -> Result<Option<CursorRow>, IpcError> {
         self.conn
             .query_row(
-                "SELECT watermark, generation, content_hash FROM read_cursors \
+                "SELECT watermark, generation, content_hash, anchor FROM read_cursors \
                  WHERE reader_session_id = ?1 AND tool = ?2 AND resource_key = ?3",
                 rusqlite::params![reader, tool, resource_key],
                 |r| {
@@ -30,6 +36,7 @@ impl Store {
                         watermark: r.get(0)?,
                         generation: r.get(1)?,
                         content_hash: r.get(2)?,
+                        anchor: r.get(3)?,
                     })
                 },
             )
@@ -38,6 +45,9 @@ impl Store {
     }
 
     /// Upsert a stream cursor. Clears any hash, so a row never carries both.
+    /// `anchor` is `session_transcript`'s positional cursor (see
+    /// [`CursorRow::anchor`]); every other stream tool passes `None`.
+    #[allow(clippy::too_many_arguments)] // every field of one upserted row
     pub fn put_stream_cursor(
         &self,
         reader: i64,
@@ -46,15 +56,17 @@ impl Store {
         target: Option<i64>,
         watermark: i64,
         generation: Option<i64>,
+        anchor: Option<&str>,
     ) -> Result<(), IpcError> {
         self.conn.execute(
             "INSERT INTO read_cursors \
                (reader_session_id, tool, resource_key, target_session_id, \
-                watermark, generation, content_hash, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7) \
+                watermark, generation, anchor, content_hash, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8) \
              ON CONFLICT(reader_session_id, tool, resource_key) DO UPDATE SET \
                target_session_id = excluded.target_session_id, \
                watermark = excluded.watermark, generation = excluded.generation, \
+               anchor = excluded.anchor, \
                content_hash = NULL, updated_at = excluded.updated_at",
             rusqlite::params![
                 reader,
@@ -63,13 +75,14 @@ impl Store {
                 target,
                 watermark,
                 generation,
+                anchor,
                 now_unix()
             ],
         )?;
         Ok(())
     }
 
-    /// Upsert a snapshot cursor. Clears any watermark/generation.
+    /// Upsert a snapshot cursor. Clears any watermark/generation/anchor.
     pub fn put_snapshot_cursor(
         &self,
         reader: i64,
@@ -81,11 +94,11 @@ impl Store {
         self.conn.execute(
             "INSERT INTO read_cursors \
                (reader_session_id, tool, resource_key, target_session_id, \
-                watermark, generation, content_hash, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6) \
+                watermark, generation, anchor, content_hash, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5, ?6) \
              ON CONFLICT(reader_session_id, tool, resource_key) DO UPDATE SET \
                target_session_id = excluded.target_session_id, \
-               watermark = NULL, generation = NULL, \
+               watermark = NULL, generation = NULL, anchor = NULL, \
                content_hash = excluded.content_hash, updated_at = excluded.updated_at",
             rusqlite::params![reader, tool, resource_key, target, content_hash, now_unix()],
         )?;
@@ -130,9 +143,9 @@ mod tests {
     fn put_is_an_upsert_per_reader_tool_and_resource() {
         let s = Store::open_in_memory().unwrap();
         let r = seed(&s, "reader");
-        s.put_stream_cursor(r, "session_history", "7", Some(7), 10, None)
+        s.put_stream_cursor(r, "session_history", "7", Some(7), 10, None, None)
             .unwrap();
-        s.put_stream_cursor(r, "session_history", "7", Some(7), 25, None)
+        s.put_stream_cursor(r, "session_history", "7", Some(7), 25, None, None)
             .unwrap();
         let c = s
             .get_read_cursor(r, "session_history", "7")
@@ -155,9 +168,9 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         let a = seed(&s, "reader-a");
         let b = seed(&s, "reader-b");
-        s.put_stream_cursor(a, "session_transcript", "9", Some(9), 3, Some(1))
+        s.put_stream_cursor(a, "session_transcript", "9", Some(9), 3, Some(1), None)
             .unwrap();
-        s.put_stream_cursor(b, "session_transcript", "9", Some(9), 8, Some(1))
+        s.put_stream_cursor(b, "session_transcript", "9", Some(9), 8, Some(1), None)
             .unwrap();
         assert_eq!(
             s.get_read_cursor(a, "session_transcript", "9")
@@ -175,6 +188,37 @@ mod tests {
         );
     }
 
+    /// `session_transcript`'s positional cursor: stored, round-tripped, and
+    /// replaced by a later put — same upsert semantics as `watermark`.
+    #[test]
+    fn a_stream_cursors_anchor_round_trips_and_is_replaced_by_a_later_put() {
+        let s = Store::open_in_memory().unwrap();
+        let r = seed(&s, "reader");
+        let a1 = r#"{"at":"2026-01-01T00:00:00Z","ended_at":"2026-01-01T00:00:01Z"}"#;
+        s.put_stream_cursor(r, "session_transcript", "9", Some(9), 3, None, Some(a1))
+            .unwrap();
+        assert_eq!(
+            s.get_read_cursor(r, "session_transcript", "9")
+                .unwrap()
+                .unwrap()
+                .anchor
+                .as_deref(),
+            Some(a1)
+        );
+        let a2 = r#"{"at":"2026-01-01T00:00:05Z","ended_at":null}"#;
+        s.put_stream_cursor(r, "session_transcript", "9", Some(9), 4, None, Some(a2))
+            .unwrap();
+        assert_eq!(
+            s.get_read_cursor(r, "session_transcript", "9")
+                .unwrap()
+                .unwrap()
+                .anchor
+                .as_deref(),
+            Some(a2),
+            "a later put replaces the anchor, same as watermark"
+        );
+    }
+
     #[test]
     fn a_snapshot_cursor_stores_a_hash_and_no_watermark() {
         let s = Store::open_in_memory().unwrap();
@@ -187,6 +231,7 @@ mod tests {
             .unwrap();
         assert_eq!(c.content_hash.as_deref(), Some("abc"));
         assert_eq!(c.watermark, None);
+        assert_eq!(c.anchor, None);
     }
 
     #[test]
@@ -202,6 +247,7 @@ mod tests {
             Some(target),
             1,
             None,
+            None,
         )
         .unwrap();
         s.put_stream_cursor(
@@ -210,6 +256,7 @@ mod tests {
             &keep.to_string(),
             Some(keep),
             1,
+            None,
             None,
         )
         .unwrap();

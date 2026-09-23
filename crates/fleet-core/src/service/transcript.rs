@@ -1307,6 +1307,46 @@ fn join_notifications(turns: &mut [ConvTurn]) {
     }
 }
 
+/// Render one turn's items as plain text: text blocks verbatim, one summary
+/// line per tool call / subagent / notification / etc. Shared by
+/// [`parse_turns`] (whole-file, turn-count based) and
+/// [`fetch_transcript_after`] (anchor-positioned, `fresh_for` deltas) so the
+/// two never drift into rendering a turn two different ways.
+fn render_turn_text(turn: &ConvTurn) -> String {
+    turn.items
+        .iter()
+        .map(|i| match i {
+            ConvItem::Text { text } => text.clone(),
+            ConvItem::Tool { summary, .. } => format!("{TOOL_USE_PREFIX}{summary}"),
+            ConvItem::Subagent {
+                name, description, ..
+            } => format!(
+                "{TOOL_USE_PREFIX}{name}(description={})",
+                one_line(description.as_deref().unwrap_or(""))
+            ),
+            ConvItem::Compact { trigger, .. } => {
+                format!("[compacted] {}", trigger.as_deref().unwrap_or("unknown"))
+            }
+            ConvItem::Command { name, args, .. } => match args {
+                Some(a) => format!("[command] {name} {a}"),
+                None => format!("[command] {name}"),
+            },
+            ConvItem::Notification { summary, .. } => format!(
+                "[notification] {}",
+                one_line(summary.as_deref().unwrap_or(""))
+            ),
+            ConvItem::Bash { command, .. } => format!("[bash] {command}"),
+            ConvItem::Harness { tag, body } => {
+                format!("[{tag}] {}", one_line(body))
+            }
+            ConvItem::Interrupt { .. } => "[interrupted]".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Split a transcript into assistant turns rendered as plain text: each
 /// turn's text blocks and `[tool_use] ` summary lines joined with newlines.
 /// Turns without assistant content are dropped. Built on
@@ -1315,40 +1355,7 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
     parse_conversation(jsonl)
         .into_iter()
         .filter(|t| !t.items.is_empty())
-        .map(|t| {
-            t.items
-                .iter()
-                .map(|i| match i {
-                    ConvItem::Text { text } => text.clone(),
-                    ConvItem::Tool { summary, .. } => format!("{TOOL_USE_PREFIX}{summary}"),
-                    ConvItem::Subagent {
-                        name, description, ..
-                    } => format!(
-                        "{TOOL_USE_PREFIX}{name}(description={})",
-                        one_line(description.as_deref().unwrap_or(""))
-                    ),
-                    ConvItem::Compact { trigger, .. } => {
-                        format!("[compacted] {}", trigger.as_deref().unwrap_or("unknown"))
-                    }
-                    ConvItem::Command { name, args, .. } => match args {
-                        Some(a) => format!("[command] {name} {a}"),
-                        None => format!("[command] {name}"),
-                    },
-                    ConvItem::Notification { summary, .. } => format!(
-                        "[notification] {}",
-                        one_line(summary.as_deref().unwrap_or(""))
-                    ),
-                    ConvItem::Bash { command, .. } => format!("[bash] {command}"),
-                    ConvItem::Harness { tag, body } => {
-                        format!("[{tag}] {}", one_line(body))
-                    }
-                    ConvItem::Interrupt { .. } => "[interrupted]".to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string()
-        })
+        .map(|t| render_turn_text(&t))
         .collect()
 }
 
@@ -1934,6 +1941,164 @@ pub async fn fetch_transcript(
         args.turns,
         args.max_chars.clamp(1, MAX_MAX_CHARS),
     ))
+}
+
+/// Where a `session_transcript fresh_for` cursor was left: the opening
+/// `at` of the last-served turn, and that turn's `ended_at` **at the time
+/// it was served**.
+///
+/// `turn_seq` (Stop-hook count) is not a position in the transcript FILE —
+/// an in-progress turn, an interrupt, a slash command or a queued prompt
+/// each add a parsed [`ConvTurn`] with no Stop behind it, so counting
+/// "turn_seq − watermark" turns from the end of the file can land on the
+/// wrong entries entirely (see [`fetch_transcript_after`]). Positioning by `at` instead finds the exact
+/// turn again regardless of how many un-Stopped turns came and went around
+/// it; carrying `ended_at` alongside it is what tells a turn that merely
+/// kept streaming (still in progress, same `at`, later `ended_at`) apart
+/// from one that is genuinely done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptAnchor {
+    pub at: String,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+}
+
+/// One page of a `session_transcript fresh_for` read.
+pub struct TranscriptDelta {
+    /// The served turns' text, oldest first, joined like [`render_tail`].
+    /// Empty when nothing new had renderable content.
+    pub text: String,
+    /// `true` when turns remain past this page's `max_chars` budget — the
+    /// caller re-reads with the SAME `fresh_for` (the anchor already
+    /// advanced past everything in `text`) to continue.
+    pub more: bool,
+    /// The last turn actually served, to store as the next read's
+    /// position. `None` only when nothing was ever served (no turn in the
+    /// window had both an `at` and content) — there is then nothing to
+    /// advance to, and a caller should keep whatever anchor it already had.
+    pub anchor: Option<TranscriptAnchor>,
+    /// `true` when an `anchor` was given but not found in this read's tail
+    /// window (or had no `at` to match against): the cursor cannot be
+    /// trusted to position from, so `text`/`anchor` above are instead the
+    /// same default window a first, anchor-less read would produce — never
+    /// a silent skip.
+    pub too_far_behind: bool,
+}
+
+fn turn_anchor(turn: &ConvTurn) -> Option<TranscriptAnchor> {
+    turn.at.clone().map(|at| TranscriptAnchor {
+        at,
+        ended_at: turn.ended_at.clone(),
+    })
+}
+
+/// The last `count` turns (never fewer than 1), matching the slice
+/// [`render_tail`] takes — used both for a first read (`anchor: None`) and
+/// as the fallback when a stored anchor cannot be located.
+fn default_window(turns: &[ConvTurn], count: usize) -> &[ConvTurn] {
+    let count = count.max(1);
+    let start = turns.len().saturating_sub(count);
+    &turns[start..]
+}
+
+/// Fetch a `session_transcript fresh_for` page, positioned by `anchor`
+/// rather than by counting turns.
+///
+/// `anchor: None` renders the same last-`args.turns`-turns default
+/// [`fetch_transcript`] does (a first, `Full` read) and returns the anchor
+/// of what it served, so the next read can position from there.
+///
+/// `anchor: Some(a)` locates the turn whose `at` equals `a.at` in this
+/// read's tail window:
+/// - not found, or no turn in the window has that `at` — [`TranscriptDelta::too_far_behind`]
+///   is set and the default window is served instead (the caller answers a
+///   reset, never a guess).
+/// - found, `ended_at` unchanged — that turn is done; the turns strictly
+///   AFTER it are new.
+/// - found, `ended_at` differs — it grew since it was served (still in
+///   progress, no Stop yet); it is re-served whole, along with anything
+///   after it, so nothing served through the old, incomplete copy is lost.
+///
+/// Turns are served OLDEST FIRST, keeping whole turns until `max_chars`
+/// would be exceeded (`more: true` when turns remain — advancing the
+/// anchor only to the last turn actually placed in `text`, never past
+/// content the caller has not seen). A single turn bigger than the whole
+/// `max_chars` budget is served alone, truncated from the front with its
+/// own visible marker (mirroring [`render_tail`]'s), and the anchor still
+/// passes it: unavoidable, but never silent.
+///
+/// Reads the same tail [`fetch_transcript`] would (`args.max_chars`
+/// governs the byte budget via [`read_bytes_for`]) and parses it with
+/// [`parse_conversation`] instead of [`parse_turns`], so `at`/`ended_at`
+/// survive into the search above. Errors as [`fetch_transcript`].
+pub async fn fetch_transcript_after(
+    args: TranscriptArgs,
+    anchor: Option<&TranscriptAnchor>,
+    ssh: &Arc<SshClient>,
+) -> Result<TranscriptDelta, IpcError> {
+    let script = transcript_read_script(&args)?;
+    let text = read_tail(&args, &script, ssh).await?;
+    let turns = parse_conversation(&text);
+    let max_chars = args.max_chars.clamp(1, MAX_MAX_CHARS);
+
+    let mut too_far_behind = false;
+    let pending: &[ConvTurn] = match anchor {
+        None => default_window(&turns, args.turns),
+        Some(a) => match turns
+            .iter()
+            .position(|t| t.at.as_deref() == Some(a.at.as_str()))
+        {
+            Some(i) if turns[i].ended_at == a.ended_at => &turns[i + 1..],
+            Some(i) => &turns[i..],
+            None => {
+                too_far_behind = true;
+                default_window(&turns, args.turns)
+            }
+        },
+    };
+
+    let mut rendered: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    let mut more = false;
+    let mut served_anchor: Option<TranscriptAnchor> = None;
+    for (idx, turn) in pending.iter().enumerate() {
+        let body = render_turn_text(turn);
+        if body.is_empty() {
+            // No renderable content (a prompt with no reply yet, say) — it
+            // still counts as served: never re-offered on the next read.
+            served_anchor = turn_anchor(turn).or(served_anchor);
+            continue;
+        }
+        let body_len = body.chars().count();
+        if rendered.is_empty() && body_len > max_chars {
+            // One turn alone is over budget: serve it truncated from the
+            // front (the end of a reply is what a reader is waiting for),
+            // with its own visible marker — and still advance past it,
+            // rather than looping forever on the same oversized turn.
+            let dropped = body_len - max_chars;
+            let tail: String = body.chars().skip(dropped).collect();
+            rendered.push(format!(
+                "[session_transcript: {dropped} chars dropped from the start — raise max_chars to see more]\n{tail}"
+            ));
+            served_anchor = turn_anchor(turn);
+            more = idx + 1 < pending.len();
+            break;
+        }
+        if !rendered.is_empty() && used + body_len > max_chars {
+            more = true;
+            break;
+        }
+        used += body_len;
+        rendered.push(body);
+        served_anchor = turn_anchor(turn);
+    }
+
+    Ok(TranscriptDelta {
+        text: rendered.join("\n\n---\n\n"),
+        more,
+        anchor: served_anchor,
+        too_far_behind,
+    })
 }
 
 /// Fetch a transcript as structured turns, trimmed to `args.turns` and
