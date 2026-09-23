@@ -374,6 +374,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/043_participants.sql"),
         already_applied: Some(messages_have_participant_columns),
     },
+    // `read_cursors` (smart caching, cycle 2): CREATE TABLE / INDEX IF NOT
+    // EXISTS only, so re-running it is a no-op — no `already_applied` guard.
+    Migration::plain(44, include_str!("../../migrations/044_read_cursors.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -594,6 +597,7 @@ mod tests {
         "conversations",
         "error_reports",
         "participants",
+        "read_cursors",
     ];
 
     #[test]

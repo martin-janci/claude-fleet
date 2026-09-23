@@ -15,6 +15,7 @@ mod hosts_accounts;
 mod layers;
 mod participants;
 mod projects;
+mod read_cursors;
 mod reconcile;
 mod reports;
 mod rows;
@@ -32,6 +33,7 @@ pub use clients::{
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
 pub use participants::{ParticipantRow, RETIRED_RETENTION_SECS};
+pub use read_cursors::CursorRow;
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
 #[cfg(test)]
