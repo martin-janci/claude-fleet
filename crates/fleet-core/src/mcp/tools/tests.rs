@@ -5333,3 +5333,272 @@ async fn list_projects_has_sessions_keeps_only_projects_a_live_session_names() {
     let live = repos(t.list_projects(Parameters(params(true))).await.unwrap());
     assert_eq!(live, vec!["used".to_string()], "got {live:?}");
 }
+
+// ---- Task 7: repo_diff and list_sessions wired to fresh_for -----------------
+
+#[tokio::test]
+async fn list_sessions_fresh_for_answers_unchanged_on_a_repeat_read() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let params = || {
+        let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        p.fresh_for = Some(reader);
+        p
+    };
+
+    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    let v1 = result_json(&first);
+    assert_eq!(
+        v1["unchanged"], false,
+        "a reader's first read is never unchanged: {v1}"
+    );
+    assert!(
+        v1["data"].is_array(),
+        "first read must carry the payload: {v1}"
+    );
+
+    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let v2 = result_json(&second);
+    assert_eq!(
+        v2["unchanged"], true,
+        "an identical repeat read of an unchanged fleet must answer unchanged: {v2}"
+    );
+    assert!(v2["data"].is_null(), "unchanged carries no payload: {v2}");
+}
+
+#[tokio::test]
+async fn list_sessions_fresh_for_answers_changed_after_a_status_change() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let target = s
+        .upsert_session("dev", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let params = || {
+        let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        p.fresh_for = Some(reader);
+        p
+    };
+
+    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    assert_eq!(result_json(&first)["unchanged"], false);
+
+    // A status change on the target row, applied directly — the freshness
+    // window means the very next `list_sessions` call serves stored rows
+    // rather than re-probing and overwriting it.
+    t.store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET status = 'ghost' WHERE id = ?1",
+            rusqlite::params![target],
+        )
+        .unwrap();
+
+    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let v2 = result_json(&second);
+    assert_eq!(
+        v2["unchanged"], false,
+        "a status change must never be reported unchanged: {v2}"
+    );
+    assert!(
+        v2["data"].is_array(),
+        "a changed read must carry the payload: {v2}"
+    );
+}
+
+/// The same reader, asking with two different filter sets, must never share
+/// a cursor — the second filter's first call is a first read for THAT
+/// resource key, not a continuation of the first filter's cursor.
+#[tokio::test]
+async fn list_sessions_fresh_for_keeps_two_different_filters_independent() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+
+    let filter_a: ListSessionsParams =
+        serde_json::from_value(serde_json::json!({ "status": "running", "fresh_for": reader }))
+            .unwrap();
+    let out_a1 = t.list_sessions(Parameters(filter_a)).await.unwrap();
+    assert_eq!(result_json(&out_a1)["unchanged"], false);
+
+    let filter_a_repeat: ListSessionsParams =
+        serde_json::from_value(serde_json::json!({ "status": "running", "fresh_for": reader }))
+            .unwrap();
+    let out_a2 = t.list_sessions(Parameters(filter_a_repeat)).await.unwrap();
+    assert_eq!(
+        result_json(&out_a2)["unchanged"],
+        true,
+        "same filter repeated must be unchanged"
+    );
+
+    // A different filter (no status) from the SAME reader: must be its own
+    // first read, never `unchanged` from filter_a's cursor.
+    let filter_b: ListSessionsParams =
+        serde_json::from_value(serde_json::json!({ "fresh_for": reader })).unwrap();
+    let out_b1 = t.list_sessions(Parameters(filter_b)).await.unwrap();
+    assert_eq!(
+        result_json(&out_b1)["unchanged"],
+        false,
+        "a different filter set must never be answered from another filter's cursor"
+    );
+
+    let n: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row(
+            "SELECT COUNT(*) FROM read_cursors WHERE reader_session_id = ?1",
+            rusqlite::params![reader],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2, "two distinct filters keep two distinct cursor rows");
+}
+
+#[tokio::test]
+async fn list_sessions_with_an_unknown_fresh_for_answers_full_and_writes_no_cursor() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let missing_reader = 999_999;
+    let p: ListSessionsParams =
+        serde_json::from_value(serde_json::json!({ "fresh_for": missing_reader })).unwrap();
+
+    // Make the assertion able to fail: the read itself must succeed even
+    // though the reader does not exist — a missing ReaderUnknown guard would
+    // otherwise visibly insert a row here rather than silently no-op.
+    let out = t.list_sessions(Parameters(p)).await.unwrap();
+    let v = result_json(&out);
+    assert_eq!(v["cursor_reset"], "reader_unknown");
+    assert_eq!(v["unchanged"], false);
+    assert!(
+        v["data"].is_array(),
+        "ReaderUnknown still returns the payload: {v}"
+    );
+
+    let n: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "an unknown fresh_for must never get a cursor row");
+}
+
+// ---- repo_diff: smallest-seam coverage (no live SSH/tmux target in this
+// fixture — see the Task 7 report for exactly what this does and doesn't
+// exercise) --------------------------------------------------------------
+
+#[test]
+fn repo_diff_resource_key_is_a_session_and_path_pair() {
+    assert_eq!(
+        repo::repo_diff_resource_key(7, "src/lib.rs"),
+        "7:src/lib.rs"
+    );
+    assert_eq!(
+        repo::repo_diff_resource_key(7, "a"),
+        repo::repo_diff_resource_key(7, "a"),
+        "deterministic for the same inputs"
+    );
+    assert_ne!(
+        repo::repo_diff_resource_key(7, "a"),
+        repo::repo_diff_resource_key(8, "a"),
+        "different sessions never share a cursor"
+    );
+    assert_ne!(
+        repo::repo_diff_resource_key(7, "a"),
+        repo::repo_diff_resource_key(7, "b"),
+        "different paths never share a cursor"
+    );
+}
+
+/// `repo_diff` hashes `serde_json::to_string` (nulls kept — what `ok_json`
+/// actually sends), never `compact_json_string` (nulls stripped). `FileDiff`
+/// itself has no `Option` fields today, so the two serializations happen to
+/// coincide for it; this pins the wiring choice generically, at the
+/// serialization seam, so a future nullable field on `FileDiff` cannot
+/// silently start hashing bytes different from what is returned.
+#[test]
+fn repo_diff_hashes_the_null_keeping_serialization_not_the_compact_one() {
+    let v = serde_json::json!({ "path": "a", "diff": "x", "binary": false, "extra": null });
+    let sent_as_ok_json = serde_json::to_string(&v).unwrap();
+    let sent_as_compact = compact_json_string(&v, None).unwrap();
+    assert!(
+        sent_as_ok_json.contains("null"),
+        "ok_json keeps nulls: {sent_as_ok_json}"
+    );
+    assert!(
+        !sent_as_compact.contains("null"),
+        "compact_json_string strips nulls: {sent_as_compact}"
+    );
+    assert_ne!(
+        fresh::snapshot_hash(&sent_as_ok_json),
+        fresh::snapshot_hash(&sent_as_compact),
+        "hashing the wrong serialization would make `unchanged` compare the wrong bytes"
+    );
+}
+
+/// Store-level proof of `repo_diff`'s cursor wiring — the same
+/// `put_snapshot_cursor`/`get_read_cursor` round trip the tool performs,
+/// keyed exactly as `repo_diff_resource_key` builds it, with `target =
+/// Some(session_id)` per the brief. This is the smallest seam this fixture
+/// can exercise without a live tmux pane for `repo_diff`'s own SSH-backed
+/// diff read.
+#[test]
+fn repo_diff_snapshot_cursor_round_trips_at_the_store_seam() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let key = repo::repo_diff_resource_key(target, "src/lib.rs");
+    let payload = serde_json::json!({ "path": "src/lib.rs", "diff": "+x", "binary": false, "truncated": false });
+    let hash = fresh::snapshot_hash(&serde_json::to_string(&payload).unwrap());
+
+    assert!(s
+        .get_read_cursor(reader, "repo_diff", &key)
+        .unwrap()
+        .is_none());
+    s.put_snapshot_cursor(reader, "repo_diff", &key, Some(target), &hash)
+        .unwrap();
+    let stored = s
+        .get_read_cursor(reader, "repo_diff", &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.content_hash.as_deref(), Some(hash.as_str()));
+    assert_eq!(
+        stored.watermark, None,
+        "a snapshot cursor carries no watermark"
+    );
+
+    let other_path_key = repo::repo_diff_resource_key(target, "src/other.rs");
+    assert!(
+        s.get_read_cursor(reader, "repo_diff", &other_path_key)
+            .unwrap()
+            .is_none(),
+        "a different path in the SAME session must not share the cursor just written"
+    );
+}

@@ -111,20 +111,92 @@ impl FleetTools {
         // client asks for full rows today. `summary` keeps its default of
         // true, so a caller that names a view need not also say
         // `summary: false` to be understood.
-        match (view, p.summary) {
+        //
+        // fresh_for absent: today's default, byte-identical, no cursor
+        // touched — kept as a literal early return (not folded into the
+        // hashing branch below) so the two paths can never drift apart.
+        let Some(reader) = p.fresh_for else {
+            return match (view, p.summary) {
+                (Some(v), _) => {
+                    let full: Vec<SessionWithController> = tagged.collect();
+                    ok_json_compact_view(&full, Some(v.fields()))
+                }
+                (None, true) => {
+                    let slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
+                    ok_json_compact(&slim)
+                }
+                (None, false) => {
+                    let full: Vec<SessionWithController> = tagged.collect();
+                    ok_json_compact(&full)
+                }
+            };
+        };
+
+        // `fresh_for` present: build the EXACT same bytes the branch above
+        // would have sent — `compact_json_string` is what `ok_json_compact`
+        // / `ok_json_compact_view` call internally — and hash THAT, never a
+        // curated subset. This is why the default slim shape (which drops
+        // `last_activity_at` and `current_activity`, the two fields a
+        // reconcile pass bumps constantly) makes `unchanged` fire usefully:
+        // a `summary: false` caller hashes those two churny fields too, so
+        // it will rarely see `unchanged`.
+        let json_str = match (view, p.summary) {
             (Some(v), _) => {
                 let full: Vec<SessionWithController> = tagged.collect();
-                ok_json_compact_view(&full, Some(v.fields()))
+                compact_json_string(&full, Some(v.fields()))?
             }
             (None, true) => {
                 let slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
-                ok_json_compact(&slim)
+                compact_json_string(&slim, None)?
             }
             (None, false) => {
                 let full: Vec<SessionWithController> = tagged.collect();
-                ok_json_compact(&full)
+                compact_json_string(&full, None)?
             }
+        };
+
+        let resource_key = list_sessions_resource_key(&p);
+        let hash = fresh::snapshot_hash(&json_str);
+        // Read-then-write: validate the reader and read the stored hash
+        // before deciding anything, so `unchanged` can never be answered to
+        // a reader session that no longer exists.
+        let (reader_exists, stored_hash) = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let reader_exists = s
+                .get_session_by_id(reader)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .is_some();
+            let stored_hash = s
+                .get_read_cursor(reader, "list_sessions", &resource_key)
+                .map_err(to_mcp_err)?
+                .and_then(|c| c.content_hash);
+            (reader_exists, stored_hash)
+        };
+
+        if !reader_exists {
+            let data: serde_json::Value = serde_json::from_str(&json_str)
+                .map_err(|e| McpError::internal_error(format!("reparse result: {e}"), None))?;
+            return ok_json(&fresh::envelope(
+                false,
+                Some(fresh::ResetReason::ReaderUnknown),
+                false,
+                data,
+            ));
         }
+
+        if stored_hash.as_deref() == Some(hash.as_str()) {
+            return ok_json(&fresh::envelope(true, None, false, serde_json::Value::Null));
+        }
+
+        // Written only now that the payload was built successfully.
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.put_snapshot_cursor(reader, "list_sessions", &resource_key, None, &hash)
+                .map_err(to_mcp_err)?;
+        }
+        let data: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| McpError::internal_error(format!("reparse result: {e}"), None))?;
+        ok_json(&fresh::envelope(false, None, false, data))
     }
 
     #[tool(description = "List sessions related to a given session — those \
@@ -527,4 +599,45 @@ impl FleetTools {
     }
 
     // ── Orchestration (Wave 3 Track E) ───────────────────────────────────
+}
+
+/// `list_sessions`'s snapshot cursor key: a fingerprint of every filter
+/// param that SHAPES the output — `host_alias`, `project_id`, `status`,
+/// `claude_status`, `include_lost`, `summary`, `limit`, `tag`, `view`,
+/// `needs_attention`. `force` and `fresh_for` are excluded: neither changes
+/// what "the same filters" means, so including them would split one caller's
+/// repeated reads across needless cursors. A plain JSON encoding of a
+/// fixed-field-order struct is already deterministic; it is hashed only to
+/// keep the stored key short, reusing `fresh::snapshot_hash` rather than a
+/// second hasher. Two calls with identical filters share a cursor; two
+/// different filters never do.
+#[derive(serde::Serialize)]
+struct ListSessionsFilterFingerprint<'a> {
+    host_alias: &'a Option<String>,
+    project_id: Option<i64>,
+    status: &'a Option<String>,
+    claude_status: &'a Option<String>,
+    include_lost: bool,
+    summary: bool,
+    limit: Option<usize>,
+    tag: &'a Option<String>,
+    view: &'a Option<String>,
+    needs_attention: Option<bool>,
+}
+
+fn list_sessions_resource_key(p: &ListSessionsParams) -> String {
+    let fp = ListSessionsFilterFingerprint {
+        host_alias: &p.host_alias,
+        project_id: p.project_id,
+        status: &p.status,
+        claude_status: &p.claude_status,
+        include_lost: p.include_lost,
+        summary: p.summary,
+        limit: p.limit,
+        tag: &p.tag,
+        view: &p.view,
+        needs_attention: p.needs_attention,
+    };
+    let json = serde_json::to_string(&fp).expect("fixed-shape fingerprint always serializes");
+    fresh::snapshot_hash(&json)
 }
