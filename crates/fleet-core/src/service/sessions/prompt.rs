@@ -546,7 +546,10 @@ pub async fn send_prompt(
         let key = crate::tmux::NamedKey::parse(k).ok_or_else(|| {
             IpcError::new(
                 codes::E_VALIDATE,
-                format!("keys must be Enter, Escape or C-c, not {k:?}"),
+                format!(
+                    "keys must be {}, not {k:?}",
+                    crate::tmux::NamedKey::VOCABULARY
+                ),
             )
         })?;
         if !args.prompt.is_empty() {

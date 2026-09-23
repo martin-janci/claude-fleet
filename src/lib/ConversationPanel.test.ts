@@ -1145,8 +1145,17 @@ describe('ConversationPanel quick actions', () => {
 });
 
 describe('ConversationPanel live indicator', () => {
+  const DIALOG: NonNullable<SessionRow['pending_input']> = {
+    kind: 'permission',
+    question: 'Do you want to proceed?',
+    options: [
+      { n: 1, label: 'Yes', selected: true },
+      { n: 2, label: "Yes, and don't ask again", selected: false },
+      { n: 3, label: 'No, and tell Claude what to do differently', selected: false },
+    ],
+  };
   function probe(over: Partial<ActivityProbe> = {}): ActivityProbe {
-    return { claude_status: null, current_activity: null, stuck_kind: null, waiting_for: null, spinner: null, ...over };
+    return { claude_status: null, current_activity: null, stuck_kind: null, waiting_for: null, spinner: null, pending_input: null, ...over };
   }
 
   it('a working row shows the indicator and polls the pane for the spinner text', async () => {
@@ -1218,6 +1227,53 @@ describe('ConversationPanel live indicator', () => {
     expect(onOpenTerminal).toHaveBeenCalled();
   });
 
+  it('a blocked row with a dialog shows the answer card instead of the bare banner', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, {
+      session: session({ claude_status: 'blocked', pending_input: DIALOG }),
+      visible: true,
+    });
+    await settle();
+    expect(screen.getByTestId('answer-card')).toBeTruthy();
+    expect(screen.getAllByTestId('answer-option')).toHaveLength(3);
+    // The banner said "go to the terminal"; the card IS the answer.
+    expect(screen.queryByTestId('conv-blocked')).toBeNull();
+  });
+
+  it('answering from the card presses that option key', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedAct.mockResolvedValue({
+      ok: true,
+      value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: DIALOG }),
+    });
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, {
+      session: session({ claude_status: 'blocked', pending_input: DIALOG }),
+      visible: true,
+    });
+    await settle();
+    await fireEvent.click(screen.getAllByTestId('answer-option')[1]);
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '', { keys: '2' });
+  });
+
+  it('a blocked row whose dialog the probe no longer sees falls back to the banner', async () => {
+    // The row is up to a tick stale. A fresh probe that sees no dialog is the
+    // authority: no buttons, just the banner that points at the terminal.
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedAct.mockResolvedValue({
+      ok: true,
+      value: probe({ claude_status: 'blocked', current_activity: 'Do you want to proceed?' }),
+    });
+    render(ConversationPanel, {
+      session: session({ claude_status: 'blocked', pending_input: DIALOG }),
+      visible: true,
+    });
+    await settle();
+    expect(screen.queryByTestId('answer-card')).toBeNull();
+    expect(screen.getByTestId('conv-blocked')).toBeTruthy();
+  });
+
   it('a stuck row shows no indicator (the composer note covers it)', async () => {
     mockedConv.mockReturnValue(ok(conv()));
     render(ConversationPanel, { session: session({ claude_status: 'blocked', stuck_kind: 'auth_menu' }), visible: true });
@@ -1286,7 +1342,7 @@ describe('ConversationPanel live indicator', () => {
 // keep retrying, or one bad minute would kill the indicator for the session.
 describe('ConversationPanel activity probe against a hub that lacks the tool', () => {
   function probe(over: Partial<ActivityProbe> = {}): ActivityProbe {
-    return { claude_status: null, current_activity: null, stuck_kind: null, waiting_for: null, spinner: null, ...over };
+    return { claude_status: null, current_activity: null, stuck_kind: null, waiting_for: null, spinner: null, pending_input: null, ...over };
   }
 
   // The code `backend/remote.rs` mints for a JSON-RPC `error` — an unknown

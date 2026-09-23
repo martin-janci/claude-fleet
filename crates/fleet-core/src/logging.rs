@@ -319,6 +319,69 @@ pub fn report_from_event(event: &tracing::Event<'_>) -> Option<fleet_proto::repo
     Some(r)
 }
 
+/// Dependency `ERROR` events that say nothing this app can act on, as
+/// `(target, message prefix)` pairs.
+///
+/// `rmcp` logs at ERROR when an MCP client hangs up before it reads the
+/// response it asked for: `fail to response message error=channel closed`. A
+/// control-API client closing its pipe is ordinary. Those lines were the
+/// *only* ERRORs in five days of desktop logs, so `grep ERROR` found nothing
+/// but them, and [`ReportLayer`] shipped each one to the hub as an error
+/// report — a dependency's shrug filed as this app's fault.
+///
+/// Dropped here rather than in [`DEFAULT_FILTER`], which can only silence a
+/// target wholesale and would take rmcp's real errors with it. Keep the
+/// message prefixes narrow for the same reason.
+const DEPENDENCY_NOISE: &[(&str, &str)] = &[("rmcp", "fail to response message")];
+
+/// Whether `target` is `t` or a module under it.
+fn target_matches(target: &str, t: &str) -> bool {
+    target
+        .strip_prefix(t)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+}
+
+/// Whether a `(target, message)` pair matches [`DEPENDENCY_NOISE`]. The
+/// level is the caller's to check.
+fn is_dependency_noise(target: &str, message: &str) -> bool {
+    DEPENDENCY_NOISE
+        .iter()
+        .any(|(t, m)| target_matches(target, t) && message.starts_with(m))
+}
+
+/// [`is_dependency_noise`] for a live event: `ERROR` only, and the target is
+/// checked before the message so no non-matching event pays for a visit.
+pub fn event_is_dependency_noise(event: &tracing::Event<'_>) -> bool {
+    if *event.metadata().level() != tracing::Level::ERROR {
+        return false;
+    }
+    let target = event.metadata().target();
+    if !DEPENDENCY_NOISE
+        .iter()
+        .any(|(t, _)| target_matches(target, t))
+    {
+        return false;
+    }
+    let mut v = ReportVisitor::default();
+    event.record(&mut v);
+    is_dependency_noise(target, &v.message)
+}
+
+/// Drops [`event_is_dependency_noise`] events for every layer in the stack:
+/// `Layered::event_enabled` ANDs its layers, so one `false` here keeps the
+/// line out of the file, out of stderr and out of [`report_ring`] alike.
+pub struct NoiseFilter;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for NoiseFilter {
+    fn event_enabled(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        !event_is_dependency_noise(event)
+    }
+}
+
 /// Pushes every `ERROR` event into [`report_ring`]. Never logs: a layer that
 /// logs re-enters the subscriber.
 pub struct ReportLayer;
@@ -430,6 +493,7 @@ pub fn init_in_with(log_dir: &Path, force_stderr: bool) -> Result<PathBuf, Strin
 
     tracing_subscriber::registry()
         .with(filter)
+        .with(NoiseFilter)
         .with(file_layer)
         .with(stderr_layer)
         .with(ReportLayer)
@@ -459,6 +523,7 @@ pub fn init_stderr_fallback() {
     let (filter, _) = env_filter();
     let _ = tracing_subscriber::registry()
         .with(filter)
+        .with(NoiseFilter)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(RedactingMakeWriter(std::io::stderr))
@@ -507,6 +572,67 @@ mod tests {
         );
         assert!(r.message.contains("host=box"), "{}", r.message);
         assert_eq!(r.level, "error");
+    }
+
+    #[test]
+    fn rmcp_hang_up_errors_are_noise_and_real_ones_are_not() {
+        // The line that filled the ERROR budget, and its whole module tree.
+        assert!(is_dependency_noise(
+            "rmcp::service",
+            "fail to response message error=channel closed"
+        ));
+        assert!(is_dependency_noise("rmcp", "fail to response message"));
+        // A different rmcp error still reaches the log and the hub.
+        assert!(!is_dependency_noise("rmcp::service", "response error id=9"));
+        // Our own targets are never noise, whatever they say.
+        assert!(!is_dependency_noise(
+            "fleet_core::mcp",
+            "fail to response message error=channel closed"
+        ));
+        // A target that merely starts with the same letters is not that target.
+        assert!(!is_dependency_noise(
+            "rmcpx::service",
+            "fail to response message"
+        ));
+    }
+
+    #[test]
+    fn a_noise_error_never_reaches_the_layers_below_the_filter() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        /// Records what `on_event` is actually handed. A local ring, so this
+        /// test does not race fleet-core's other threads over the global one.
+        struct Capture(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut v = ReportVisitor::default();
+                event.record(&mut v);
+                self.0.lock().unwrap().push(v.message);
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::registry()
+            .with(NoiseFilter)
+            .with(Capture(Arc::clone(&seen)));
+        tracing::subscriber::with_default(sub, || {
+            // Dropped: rmcp's client-hung-up shrug.
+            tracing::error!(target: "rmcp::service", "fail to response message error=channel closed");
+            // Kept: an rmcp error that is not on the list.
+            tracing::error!(target: "rmcp::service", "response error id=9");
+            // Kept: the same words at a level the filter does not consider.
+            tracing::warn!(target: "rmcp::service", "fail to response message error=channel closed");
+        });
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[0].starts_with("response error id=9"), "{seen:?}");
+        assert!(seen[1].starts_with("fail to response message"), "{seen:?}");
     }
 
     #[test]

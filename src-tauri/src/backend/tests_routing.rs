@@ -730,9 +730,9 @@ fn routed_mutation_cases() -> Vec<Case> {
     use fleet_core::service::move_session::MoveSessionArgs;
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
-        DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
-        RenameSessionArgs, RestartSessionArgs, SendPromptArgs, SetFriendlyNameArgs,
-        SpawnReviewArgs,
+        DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs,
+        RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
+        SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
     };
     use fleet_core::service::worktrees::DeleteWorktreeArgs;
 
@@ -909,6 +909,43 @@ fn routed_mutation_cases() -> Vec<Case> {
                     RecreateSessionArgs {
                         session_id: 7,
                         force: false,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "restore_host_sessions",
+            "restore_host_sessions",
+            json!({ "host_alias": "trn", "dry_run": true, "session_ids": [7, 9] }),
+            r#"{"host_alias":"trn","dry_run":true,"plan":[],"results":[]}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::restore_host_sessions(
+                    b,
+                    RestoreHostSessionsArgs {
+                        host_alias: "trn".into(),
+                        dry_run: true,
+                        session_ids: Some(vec![7, 9]),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "discover_lost_sessions",
+            "discover_lost_sessions",
+            json!({ "host_alias": "trn", "limit": 25 }),
+            "[]",
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::discover_lost_sessions(
+                    b,
+                    DiscoverLostSessionsArgs {
+                        host_alias: "trn".into(),
+                        limit: Some(25),
                     },
                     s,
                     h,
@@ -1110,6 +1147,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                 "kind": "shell",
                 "start_command": "pnpm dev",
                 "friendly_name": "the demo",
+                "resume_claude_session_id": "550e8400-e29b-41d4-a716-446655440000",
             }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -1126,6 +1164,9 @@ fn routed_mutation_cases() -> Vec<Case> {
                         kind: Some("shell".into()),
                         start_command: Some("pnpm dev".into()),
                         friendly_name: Some("the demo".into()),
+                        resume_claude_session_id: Some(
+                            "550e8400-e29b-41d4-a716-446655440000".into(),
+                        ),
                     },
                     s,
                     h,
@@ -1390,6 +1431,9 @@ fn an_unreachable_hub_makes_health_an_error_rather_than_a_zeroed_fleet() {
 /// behaviour must not change" constraint, asserted per command.
 #[test]
 fn standalone_reads_still_come_from_the_local_store() {
+    // `app_version::get()` panics until the binary declares its version, and a
+    // test binary never runs `run()`. The health assertion below reads it.
+    crate::declare_app_version();
     let (_dir, st) = store();
     st.lock().unwrap().upsert_host("trn").unwrap();
 
