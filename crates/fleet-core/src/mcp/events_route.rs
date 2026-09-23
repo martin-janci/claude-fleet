@@ -395,8 +395,8 @@ fn client_is_live(store: &Mutex<Store>, id: i64) -> bool {
         tracing::warn!("[events] store lock poisoned; ending the stream");
         return false;
     };
-    match s.active_client_tokens() {
-        Ok(rows) => rows.iter().any(|r| r.id == id),
+    match s.client_token_is_live(id) {
+        Ok(live) => live,
         Err(e) => {
             tracing::warn!(error = %e.message, "[events] could not re-check the client; ending the stream");
             false

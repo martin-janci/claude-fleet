@@ -146,6 +146,27 @@ impl Store {
         self.list_client_tokens(false)
     }
 
+    /// Whether client token `id` is still paired.
+    ///
+    /// One indexed row, because the caller asks often and does not want the
+    /// rows: every open `/events` stream re-checks its client on each 15 s
+    /// heartbeat, and doing that through [`Self::active_client_tokens`] read
+    /// every live token — hash column and all — into a `Vec` to look for one
+    /// id, under the global store lock the reconcile pass is also waiting on.
+    /// At five devices that is about 1 200 of those an hour, for an answer
+    /// SQLite can give from the row itself.
+    pub fn client_token_is_live(&self, id: i64) -> Result<bool, crate::ipc_error::IpcError> {
+        let live: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM client_tokens WHERE id = ?1 AND revoked_at IS NULL",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(live.is_some())
+    }
+
     /// Revoke the live token named `name`. `E_NOTFOUND` when there is none.
     ///
     /// The row id is captured BEFORE the update: a name that is paired,
@@ -492,6 +513,27 @@ mod tests {
         assert_eq!(
             s.list_client_tokens(false).unwrap()[0].last_seen_at,
             Some(1_100)
+        );
+    }
+
+    /// The stream heartbeat asks this about one client, many times an hour.
+    /// It must agree with `active_client_tokens` without reading the table.
+    #[test]
+    fn client_token_is_live_tracks_revocation() {
+        let s = Store::open_in_memory().unwrap();
+        let row = s.insert_client_token("phone", "sha-1", "full").unwrap();
+
+        assert!(s.client_token_is_live(row.id).unwrap());
+        assert!(
+            !s.client_token_is_live(row.id + 999).unwrap(),
+            "an id nobody has"
+        );
+
+        s.revoke_client_token("phone").unwrap();
+        assert!(!s.client_token_is_live(row.id).unwrap());
+        assert!(
+            s.active_client_tokens().unwrap().is_empty(),
+            "and it agrees with the list it replaced"
         );
     }
 }

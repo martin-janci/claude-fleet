@@ -34,13 +34,36 @@ services:
       # Reached only by caddy on the compose network; the https:// public URL
       # in fleet-hub.env (Caddy terminates TLS) permits the routable bind.
       FLEET_HUB_BIND: 0.0.0.0
+    # The hub's own log file rotates (hourly, 72 kept); Docker's capture of
+    # the same lines on stdout does not, and on a small VPS that is the file
+    # that fills the disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - hub-data:/var/lib/fleet-hub
       - ./ssh:/home/fleet/.ssh
+    # Uncomment and size these from what the hub actually uses on your box
+    # (`docker stats`), so a runaway client is throttled by its own cgroup
+    # rather than by the host's OOM killer picking a victim. Set too low they
+    # turn a transient spike into a restart loop, which `restart:
+    # unless-stopped` will happily cycle — so measure first, and leave room.
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 1g
+    #       cpus: "1.5"
   caddy:
     image: caddy:2
     restart: unless-stopped
     env_file: fleet-hub.env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports: ["80:80", "443:443"]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
