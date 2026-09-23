@@ -280,6 +280,36 @@ pub const CONV_MAX_CHARS_CEILING: usize = 512_000;
 /// means the default window; a request is clamped to `1..=CONV_MAX_TURNS`
 /// and the char budget grows with it so extra turns are not immediately
 /// trimmed away again.
+/// The window [`conv_limits`] should open for a caller that says where it got
+/// to.
+///
+/// An explicit `turns` wins — it is the caller naming a window, and
+/// `since_turn` is the caller naming a position. Otherwise the window is the
+/// turns completed since `since_turn`, **plus one**: the turn that is running
+/// now has not incremented `turn_seq` yet, and it is the one the caller is
+/// waiting to see. A caller that is fully caught up therefore asks for that
+/// one turn rather than the default ten.
+///
+/// A `since_turn` from the future — a compaction, a `/clear`, a resumed
+/// conversation, or simply a stale client — yields the default window rather
+/// than an empty one: the honest answer to "I am ahead of you" is the whole
+/// picture, not nothing.
+pub fn conv_turns_for(
+    turns: Option<usize>,
+    since_turn: Option<i64>,
+    turn_seq: i64,
+) -> Option<usize> {
+    match (turns, since_turn) {
+        (Some(t), _) => Some(t),
+        (None, Some(since)) if since >= 0 && since <= turn_seq => Some(
+            usize::try_from(turn_seq - since)
+                .unwrap_or(0)
+                .saturating_add(1),
+        ),
+        _ => None,
+    }
+}
+
 pub fn conv_limits(turns: Option<usize>) -> (usize, usize) {
     let turns = turns.unwrap_or(CONV_TURNS).clamp(1, CONV_MAX_TURNS);
     let chars = (CONV_MAX_CHARS.saturating_mul(turns) / CONV_TURNS)
@@ -2327,6 +2357,49 @@ mod tests {
         assert_eq!(conv_read_bytes(0), CONV_READ_BYTES);
         assert_eq!(conv_read_bytes(20), CONV_READ_BYTES * 2);
         assert_eq!(conv_read_bytes(CONV_MAX_TURNS), MAX_READ_BYTES);
+    }
+
+    /// A caller that says where it got to asks for what it is missing, not
+    /// for the default ten turns. The "+1" is the turn that is running now:
+    /// it has not moved `turn_seq` yet and it is the one being waited for.
+    #[test]
+    fn conv_turns_for_narrows_the_window_to_what_the_caller_is_missing() {
+        assert_eq!(
+            conv_turns_for(None, Some(20), 20),
+            Some(1),
+            "caught up: the live turn only"
+        );
+        assert_eq!(
+            conv_turns_for(None, Some(17), 20),
+            Some(4),
+            "three completed since, plus the live one"
+        );
+        assert_eq!(
+            conv_turns_for(None, None, 20),
+            None,
+            "no cursor: the caller gets the default window"
+        );
+    }
+
+    /// An explicit `turns` is the caller naming a window; `since_turn` is the
+    /// caller naming a position. The window wins.
+    #[test]
+    fn an_explicit_turns_beats_a_cursor() {
+        assert_eq!(conv_turns_for(Some(50), Some(19), 20), Some(50));
+    }
+
+    /// A cursor ahead of the row — a compaction, a `/clear`, a resumed
+    /// conversation, a stale client — must not produce an empty window. The
+    /// honest answer to "I am ahead of you" is the default picture.
+    #[test]
+    fn a_cursor_out_of_range_falls_back_to_the_default_window() {
+        assert_eq!(conv_turns_for(None, Some(99), 20), None, "ahead of the row");
+        assert_eq!(conv_turns_for(None, Some(-1), 20), None, "nonsense");
+        assert_eq!(
+            conv_turns_for(None, Some(0), 0),
+            Some(1),
+            "a session with no completed turn yet"
+        );
     }
 
     #[test]
