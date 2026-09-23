@@ -103,6 +103,8 @@ function removeHost(alias: string): void {
 /** One backend host event, as delivered by `events.ts`. */
 export type HostEvent =
   | { type: 'added' | 'probed'; row: HostRow }
+  /** A probe that changed nothing but the stamp — patched onto the row we hold. */
+  | { type: 'pinged'; alias: string; last_pinged_at: number; reachable: boolean }
   | { type: 'removed'; alias: string };
 
 /** Apply a burst of host events in ONE store update, in order (see
@@ -112,7 +114,24 @@ export function applyHostEvents(events: readonly HostEvent[]): void {
   hosts.update((arr) => {
     let next = arr;
     for (const ev of events) {
-      next = ev.type === 'removed' ? rows.removeFrom(next, ev.alias) : rows.mergeInto(next, ev.row);
+      if (ev.type === 'removed') {
+        next = rows.removeFrom(next, ev.alias);
+      } else if (ev.type === 'pinged') {
+        // A partial event, so it patches rather than replaces — and only a
+        // row we already hold: a heartbeat is never the first we hear of a
+        // host, and inventing one from three fields would show a host with
+        // no versions and no transport.
+        const have = next.find((h) => h.alias === ev.alias);
+        if (have) {
+          next = rows.mergeInto(next, {
+            ...have,
+            last_pinged_at: ev.last_pinged_at,
+            reachable: ev.reachable,
+          });
+        }
+      } else {
+        next = rows.mergeInto(next, ev.row);
+      }
     }
     return next;
   });

@@ -190,6 +190,9 @@ impl Store {
         last_pinged_at: i64,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
+        // Read before the write, so the emit below can tell a probe that found
+        // something new from one that found the host exactly as it was.
+        let prior = fetch_host(tx, alias)?;
         tx.execute(
             "UPDATE hosts SET reachable=?1, claude_version=?2, tmux_version=?3, last_pinged_at=?4 WHERE alias=?5",
             rusqlite::params![
@@ -201,7 +204,26 @@ impl Store {
             ],
         )?;
         if let Some(row) = fetch_host(tx, alias)? {
-            out.push(RowChange::HostProbed(row));
+            // Reconcile probes every host every pass, and `last_pinged_at`
+            // moves on each one, so the full row can never be diffed away —
+            // which is why this emitted ~265 B per host per pass to every
+            // connected client to say nothing had changed. When the stamp is
+            // the only thing that moved, say just that.
+            let only_the_stamp_moved = prior.is_some_and(|before| {
+                HostRow {
+                    last_pinged_at: row.last_pinged_at,
+                    ..before
+                } == row
+            });
+            out.push(if only_the_stamp_moved {
+                RowChange::HostPinged {
+                    alias: row.alias,
+                    last_pinged_at: row.last_pinged_at.unwrap_or(last_pinged_at),
+                    reachable: row.reachable,
+                }
+            } else {
+                RowChange::HostProbed(row)
+            });
         }
         Ok(())
     }
@@ -923,6 +945,52 @@ mod tests {
         assert_eq!(orphans, 0, "events must not outlive the hard-deleted row");
     }
 
+    /// Reconcile probes every host every pass and `last_pinged_at` moves each
+    /// time, so a full `host:probed` could never be diffed away: on a
+    /// five-host fleet that was ~108 KB/h to every connected client, to say
+    /// nothing had changed. A probe that finds the host as it was now says so
+    /// in three fields.
+    #[test]
+    fn a_probe_that_changes_nothing_but_the_stamp_sends_a_heartbeat_not_the_row() {
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let first = HostReconcile {
+            claude_version: Some("2.1.0"),
+            ..empty_probe("alpha", 10)
+        };
+        store.apply_host_reconcile(first).unwrap();
+        bus.take();
+
+        // Same host, same versions, later stamp.
+        store
+            .apply_host_reconcile(HostReconcile {
+                claude_version: Some("2.1.0"),
+                ..empty_probe("alpha", 20)
+            })
+            .unwrap();
+        assert_eq!(
+            bus.names(),
+            vec!["host:pinged"],
+            "nothing moved but the stamp"
+        );
+        bus.take();
+
+        // A version bump is a real change and still sends the whole row.
+        store
+            .apply_host_reconcile(HostReconcile {
+                claude_version: Some("2.2.0"),
+                ..empty_probe("alpha", 30)
+            })
+            .unwrap();
+        assert_eq!(bus.names(), vec!["host:probed"], "a real change is a row");
+
+        // And the stamp the heartbeat reported is the one that was stored.
+        assert_eq!(
+            store.get_host_row("alpha").unwrap().unwrap().last_pinged_at,
+            Some(30)
+        );
+    }
+
     #[test]
     fn reconcile_hard_delete_tombstones_the_participant_but_keeps_sent_messages_and_undelivered_mail(
     ) {
@@ -1098,8 +1166,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             bus.take(),
-            vec!["host:probed:alpha".to_string()],
-            "an unchanged row must emit neither session nor project events"
+            vec!["host:pinged:alpha".to_string()],
+            "an unchanged row must emit neither session nor project events — and \
+             the host itself, also unchanged, only its heartbeat"
         );
 
         // Pass 3: one field changed → exactly one session:updated and, since
@@ -2580,7 +2649,7 @@ mod tests {
         assert_eq!(lost_reason_of(&store, id).as_deref(), Some("killed"));
         let evts = bus.take();
         assert!(
-            evts.iter().all(|e| e == "host:probed:alpha"),
+            evts.iter().all(|e| e.starts_with("host:")),
             "the stale pass must announce nothing about the session; got {evts:?}"
         );
 
@@ -2760,7 +2829,7 @@ mod tests {
             "a pass that probed before the kill must not resurrect the session"
         );
         assert!(
-            evts.iter().all(|e| e == "host:probed:alpha"),
+            evts.iter().all(|e| e.starts_with("host:")),
             "nothing inserted ⇒ nothing to announce; got {evts:?}"
         );
     }
@@ -2928,7 +2997,7 @@ mod tests {
             "a pass older than the kill must not resurrect it"
         );
         assert!(
-            evts.iter().all(|e| e == "host:probed:alpha"),
+            evts.iter().all(|e| e.starts_with("host:")),
             "nothing inserted ⇒ nothing to announce; got {evts:?}"
         );
     }

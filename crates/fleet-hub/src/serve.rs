@@ -782,11 +782,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         listener,
         token,
         r.allowed_hosts.clone(),
-        // One fresh subscription per `GET /events` connection.
-        Some({
-            let bus = Arc::clone(&bus);
-            Arc::new(move || bus.subscribe()) as fleet_core::mcp::EventSubscriber
-        }),
+        // One fresh subscription per `GET /events` connection, plus the
+        // replay history a reconnecting client resumes from.
+        Some(Arc::clone(&bus).into()),
         tls,
     )
     .await?;

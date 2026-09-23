@@ -80,7 +80,8 @@ impl FleetTools {
         the prompt, its timestamps, and items by kind: text, tool, subagent, \
         compact, command, interrupt (tool inputs and results are never included). \
         Also returns events (this conversation timeline, newest events_limit: \
-        default 50, max 200) and context (context-window usage, or null). turns \
+        default 50, max 200, 0 for none) and context (context-window usage, or \
+        null). turns \
         defaults to 10, max 100; the character budget scales with it. Pass \
         claude_session_id (from session_conversations) for an earlier \
         conversation. since_turn narrows the window to what came after that \

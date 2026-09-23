@@ -75,6 +75,7 @@ type Queued =
   | { name: 'session:event'; payload: TimelineEvent }
   | { name: 'session:conversations'; payload: { session_id: number } }
   | { name: 'host:added' | 'host:probed'; payload: HostRow }
+  | { name: 'host:pinged'; payload: { alias: string; last_pinged_at: number; reachable: boolean } }
   | { name: 'host:removed'; payload: { alias: string } }
   | { name: 'account:upserted'; payload: AccountRow }
   | { name: 'project:updated'; payload: ProjectRow }
@@ -150,6 +151,12 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'host:probed':
           handlers.onHostProbed?.(ev.payload);
           hostEvents.push({ type: 'probed', row: ev.payload });
+          break;
+        // A probe that found the host exactly as it was. Carries the two
+        // fields that can move without being a change — the stamp and, for
+        // the moment it flips, reachability — instead of the whole row.
+        case 'host:pinged':
+          hostEvents.push({ type: 'pinged', ...ev.payload });
           break;
         case 'host:removed':
           handlers.onHostRemoved?.(ev.payload);
@@ -259,6 +266,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('session:conversations', wanted.conversationsChanged),
     sub('host:added', wanted.host),
     sub('host:probed', wanted.host),
+    sub('host:pinged', wanted.host),
     sub('host:removed', wanted.host),
     sub('account:upserted', wanted.account),
     sub('project:updated', wanted.project),

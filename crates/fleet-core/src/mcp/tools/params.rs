@@ -559,7 +559,7 @@ pub struct SessionConversationParams {
     #[serde(default)]
     pub claude_session_id: Option<String>,
     /// Most timeline events (compactions, /clear, ops) to return with the
-    /// conversation. Defaults to 50, capped at 200.
+    /// conversation. Defaults to 50, capped at 200; 0 returns none.
     #[serde(default)]
     pub events_limit: Option<i64>,
     /// The turn_seq you last saw: returns the turns completed since, plus the

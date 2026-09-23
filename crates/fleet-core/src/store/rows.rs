@@ -527,7 +527,11 @@ pub(super) fn idle_since_sql(st: &str, now_param: &str) -> String {
     )
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// `PartialEq` covers every wire field, for the same reason [`SessionRow`]
+/// derives it: `update_host_probe_in_tx` compares the row it wrote against the
+/// row that was there, so a probe that found the host unchanged can say so in
+/// forty bytes instead of resending all of it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HostRow {
     pub alias: String,
     #[serde(default)]

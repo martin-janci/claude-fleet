@@ -17,6 +17,9 @@ use crate::store::{
     WorktreeRow,
 };
 use serde::Serialize;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// One event on the bus. Also used as the deferred form during a batched
 /// write (e.g. reconcile's per-host write-burst): the SQL is applied inside a
@@ -35,6 +38,23 @@ pub enum RowChange {
     ConversationsChanged(i64),
     HostAdded(HostRow),
     HostProbed(HostRow),
+    /// A probe that found the host exactly as it was: only `last_pinged_at`
+    /// moved.
+    ///
+    /// Reconcile probes every host every pass and `last_pinged_at` moves on
+    /// each one, so the full row could never be diffed away — the comment in
+    /// `upsert_session_in_tx` says as much. Measured on a five-host fleet
+    /// that is three `host:probed` frames of ~265 B every 25 s to every
+    /// connected client, about 108 KB/h, to say nothing changed.
+    ///
+    /// A client that does not know the name drops it (`known_event_name`),
+    /// which is the right fallback: a missed heartbeat is cosmetic, and every
+    /// real change still arrives as a full `host:probed`.
+    HostPinged {
+        alias: String,
+        last_pinged_at: i64,
+        reachable: bool,
+    },
     HostRemoved(String),
     AccountUpserted(AccountRow),
     ProjectUpdated(ProjectRow),
@@ -215,6 +235,7 @@ impl RowChange {
             RowChange::ConversationsChanged(_) => "session:conversations",
             RowChange::HostAdded(_) => "host:added",
             RowChange::HostProbed(_) => "host:probed",
+            RowChange::HostPinged { .. } => "host:pinged",
             RowChange::HostRemoved(_) => "host:removed",
             RowChange::AccountUpserted(_) => "account:upserted",
             RowChange::ProjectUpdated(_) => "project:updated",
@@ -243,6 +264,15 @@ impl RowChange {
             RowChange::SessionEventAdded(e) => to_value(e),
             RowChange::ConversationsChanged(id) => serde_json::json!({ "session_id": id }),
             RowChange::HostAdded(r) | RowChange::HostProbed(r) => to_value(r),
+            RowChange::HostPinged {
+                alias,
+                last_pinged_at,
+                reachable,
+            } => serde_json::json!({
+                "alias": alias,
+                "last_pinged_at": last_pinged_at,
+                "reachable": reachable,
+            }),
             RowChange::HostRemoved(alias) => to_value(&HostRemovedPayload {
                 alias: alias.clone(),
             }),
@@ -364,6 +394,13 @@ impl EventBus for NoopEventBus {
 pub struct EventMessage {
     pub name: &'static str,
     pub payload: serde_json::Value,
+    /// Position in this hub's event sequence, starting at 1.
+    ///
+    /// It is what an SSE `id:` carries and what a reconnecting client sends
+    /// back as `Last-Event-ID`, so a dropped connection can cost the events
+    /// it missed instead of a full re-list. Unique and increasing within one
+    /// process only — see [`BroadcastEventBus::generation`].
+    pub seq: u64,
 }
 
 impl EventMessage {
@@ -391,6 +428,24 @@ impl EventMessage {
 /// (`RecvError::Lagged`) rather than holding anyone up.
 pub struct BroadcastEventBus {
     tx: tokio::sync::broadcast::Sender<EventMessage>,
+    /// Hands out [`EventMessage::seq`]. Bumped under [`Self::ring`], so the
+    /// number an event carries and its position in the ring can never
+    /// disagree — a client that resumes at N must not be sent N+1 before N.
+    seq: AtomicU64,
+    /// The last [`REPLAY_RING`] events, for a client that reconnects with a
+    /// `Last-Event-ID`.
+    ///
+    /// A separate structure and not the broadcast channel's own buffer,
+    /// because a `tokio::sync::broadcast` receiver always starts at the tail
+    /// and cannot be rewound — [`Self::subscribe`] says as much.
+    ring: Mutex<VecDeque<EventMessage>>,
+    /// Identifies this process's sequence. A restarted hub starts counting
+    /// at 1 again, so without it a client resuming at "1200" would be handed
+    /// the wrong twelve hundred events, silently. A generation that does not
+    /// match means no replay and a full re-list, which is the honest answer.
+    generation: u64,
+    /// Unix seconds when a subscriber was last present. See [`RING_GRACE_SECS`].
+    last_subscriber_at: AtomicI64,
 }
 
 /// Every event name a [`RowChange`] renders to — the exact strings
@@ -411,7 +466,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 19] = [
+pub const EVENT_NAMES: [&str; 20] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -419,6 +474,7 @@ pub const EVENT_NAMES: [&str; 19] = [
     "session:conversations",
     "host:added",
     "host:probed",
+    "host:pinged",
     "host:removed",
     "account:upserted",
     "project:updated",
@@ -450,22 +506,93 @@ pub const EVENT_KINDS: [&str; 11] = [
     "move",
 ];
 
+/// Seconds since the Unix epoch (0 on a clock set before 1970).
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Ring size for [`BroadcastEventBus`]. Reconcile holds its emits until the
 /// transaction commits and then flushes them in one burst (one pass every
 /// ~20 s on a hub), so the buffer has to absorb a whole pass over a busy
 /// fleet, not a steady trickle.
 pub const BROADCAST_CAPACITY: usize = 256;
 
+/// Events kept for replay. At the measured churn of a busy fleet — about
+/// 0.64 frames a second — 512 slots is roughly thirteen minutes of history,
+/// which covers a lift, a tunnel, a cell handover and an app switch. A gap
+/// longer than the ring degrades to today's behaviour (a `lagged` frame and
+/// a full re-list), never to something worse.
+pub const REPLAY_RING: usize = 512;
+
+/// How long after the last subscriber leaves the bus keeps recording.
+///
+/// [`BroadcastEventBus::emit`] returns early when nobody is listening, so a
+/// hub nobody has connected a phone to pays nothing to render a feed no one
+/// reads. Taken literally that would also make resume useless: the moment a
+/// phone's connection drops, the receiver count is zero and the ring stops
+/// filling — so there would be nothing to replay precisely when it is
+/// wanted. For this long after the last subscriber, the hub keeps rendering
+/// into the ring and sending nothing.
+pub const RING_GRACE_SECS: i64 = 15 * 60;
+
 impl BroadcastEventBus {
     pub fn new(capacity: usize) -> Self {
         let (tx, _rx) = tokio::sync::broadcast::channel(capacity);
-        Self { tx }
+        Self {
+            tx,
+            seq: AtomicU64::new(0),
+            ring: Mutex::new(VecDeque::with_capacity(REPLAY_RING)),
+            // Wall-clock nanos at construction. Not a random number, because
+            // there is no rng in this crate's dependencies and none is
+            // needed: the property required is "different from the last
+            // process's", and two hubs starting in the same nanosecond on
+            // the same machine is not a failure mode.
+            generation: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(1),
+            last_subscriber_at: AtomicI64::new(0),
+        }
+    }
+
+    /// Identifies this process's sequence; see [`EventMessage::seq`].
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The events after `seq`, oldest first, and whether the ring still
+    /// reached back that far.
+    ///
+    /// `None` means it did not — the client was away longer than the ring is
+    /// deep, or this is a different generation — and the caller must fall
+    /// back to a full re-list rather than pretend continuity.
+    pub fn replay_after(&self, generation: u64, seq: u64) -> Option<Vec<EventMessage>> {
+        if generation != self.generation {
+            return None;
+        }
+        let ring = self.ring.lock().ok()?;
+        // Nothing recorded yet: a client that resumes at 0 has missed
+        // nothing, and one that resumes at N on an empty ring has.
+        let oldest = ring.front().map(|m| m.seq);
+        match oldest {
+            None => (seq == self.seq.load(Ordering::Relaxed)).then(Vec::new),
+            // The ring must still hold the event AFTER the one the client
+            // has, or there is a hole between them.
+            Some(oldest) if oldest <= seq + 1 => {
+                Some(ring.iter().filter(|m| m.seq > seq).cloned().collect())
+            }
+            Some(_) => None,
+        }
     }
 
     /// A receiver that sees every event emitted *after* this call. Nothing is
     /// replayed: a client that wants the current state lists it once and then
     /// follows the stream.
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EventMessage> {
+        self.last_subscriber_at.store(unix_now(), Ordering::Relaxed);
         self.tx.subscribe()
     }
 
@@ -491,8 +618,18 @@ impl EventBus for BroadcastEventBus {
         // subscriber that arrives between this check and the `send` below
         // simply misses this one event, which is the same race `send` already
         // has and is exactly what "nothing is replayed" means here.
+        // …with one exception, added for resume: for [`RING_GRACE_SECS`]
+        // after the last subscriber left, keep recording into the ring. A
+        // phone's connection dropping takes the receiver count to zero, so
+        // the strict rule would stop recording exactly when a replay is
+        // about to be asked for.
+        let now = unix_now();
         if self.receiver_count() == 0 {
-            return;
+            if now - self.last_subscriber_at.load(Ordering::Relaxed) > RING_GRACE_SECS {
+                return;
+            }
+        } else {
+            self.last_subscriber_at.store(now, Ordering::Relaxed);
         }
         // Null keys come off before the frame is broadcast, once per event
         // rather than once per subscriber. `list_sessions` already answers
@@ -506,12 +643,27 @@ impl EventBus for BroadcastEventBus {
         // clearing is untouched.
         let mut payload = e.payload();
         crate::json::strip_nulls(&mut payload);
+        // The number and the ring position are taken under one lock, so a
+        // client resuming at N can never be sent N+1 before N.
+        let msg = {
+            let Ok(mut ring) = self.ring.lock() else {
+                tracing::warn!("[events] replay ring poisoned; the stream stops recording");
+                return;
+            };
+            let msg = EventMessage {
+                name: e.name(),
+                payload,
+                seq: self.seq.fetch_add(1, Ordering::Relaxed) + 1,
+            };
+            if ring.len() == REPLAY_RING {
+                ring.pop_front();
+            }
+            ring.push_back(msg.clone());
+            msg
+        };
         // `Err` means the last receiver went away in that window. Not an
         // error, not a log line.
-        let _ = self.tx.send(EventMessage {
-            name: e.name(),
-            payload,
-        });
+        let _ = self.tx.send(msg);
     }
 }
 
@@ -557,6 +709,7 @@ impl EventBus for RecordingEventBus {
             | RowChange::ConversationsChanged(id) => id.to_string(),
             RowChange::SessionEventAdded(ev) => format!("{}:{}", ev.session_id, ev.kind),
             RowChange::HostAdded(r) | RowChange::HostProbed(r) => r.alias.clone(),
+            RowChange::HostPinged { alias, .. } => alias.clone(),
             RowChange::HostRemoved(alias) => alias.clone(),
             RowChange::AccountUpserted(r) => r.uuid.clone(),
             RowChange::ProjectUpdated(r) => r.id.to_string(),
@@ -747,6 +900,7 @@ mod tests {
     fn every_row_change_variant_is_subscribable() {
         fn pinned(c: &RowChange) -> &'static str {
             match c {
+                RowChange::HostPinged { .. } => pinned_name!("host:pinged"),
                 RowChange::SessionCreated(_) => pinned_name!("session:created"),
                 RowChange::SessionUpdated(_) => pinned_name!("session:updated"),
                 RowChange::SessionKilled(_) => pinned_name!("session:killed"),
@@ -895,6 +1049,87 @@ mod tests {
             msg.payload.get("detail").and_then(|v| v.as_str()),
             Some("list_sessions"),
             "a field that has a value is untouched"
+        );
+    }
+
+    /// Replay is what makes a reconnect cost the events missed rather than a
+    /// full re-list. The sequence is the contract: it starts at 1, increases
+    /// by one, and the ring hands back exactly what came after a given point.
+    #[tokio::test]
+    async fn the_ring_replays_exactly_what_came_after_a_sequence_number() {
+        let bus = BroadcastEventBus::new(16);
+        let _rx = bus.subscribe();
+        for i in 1..=4 {
+            bus.emit(&RowChange::SessionKilled(i));
+        }
+
+        let after_two = bus
+            .replay_after(bus.generation(), 2)
+            .expect("still in the ring");
+        assert_eq!(
+            after_two.iter().map(|m| m.seq).collect::<Vec<_>>(),
+            vec![3, 4],
+            "the events after 2, in order, and nothing else"
+        );
+        assert!(
+            bus.replay_after(bus.generation(), 4).unwrap().is_empty(),
+            "a client that is fully caught up has missed nothing"
+        );
+    }
+
+    /// A restarted hub counts from 1 again, so an id minted by the last
+    /// process names events this one never sent. Replaying them under the
+    /// right numbers would be the worst outcome — a client convinced it is
+    /// current while it is not — so the generation refuses instead, and the
+    /// caller re-lists.
+    #[tokio::test]
+    async fn a_different_generation_is_refused_rather_than_replayed() {
+        let bus = BroadcastEventBus::new(16);
+        let _rx = bus.subscribe();
+        bus.emit(&RowChange::SessionKilled(1));
+
+        assert!(bus.replay_after(bus.generation() ^ 0xffff, 0).is_none());
+    }
+
+    /// A gap longer than the ring cannot be filled, and saying so is the
+    /// point: the alternative is a client that silently skipped events.
+    #[tokio::test]
+    async fn a_gap_longer_than_the_ring_is_refused() {
+        let bus = BroadcastEventBus::new(4096);
+        let _rx = bus.subscribe();
+        for i in 0..(REPLAY_RING as i64 + 10) {
+            bus.emit(&RowChange::SessionKilled(i));
+        }
+
+        assert!(
+            bus.replay_after(bus.generation(), 1).is_none(),
+            "event 2 has fallen out of the ring"
+        );
+        let recent = bus.replay_after(bus.generation(), REPLAY_RING as u64 + 5);
+        assert_eq!(recent.expect("still held").len(), 5);
+    }
+
+    /// The reason the grace window exists: a phone's connection dropping
+    /// takes the receiver count to zero, and the strict "render nothing when
+    /// nobody listens" rule would then stop recording exactly when the replay
+    /// is about to be asked for.
+    #[tokio::test]
+    async fn the_ring_keeps_recording_just_after_the_last_subscriber_leaves() {
+        let bus = BroadcastEventBus::new(16);
+        let rx = bus.subscribe();
+        bus.emit(&RowChange::SessionKilled(1));
+        drop(rx);
+        assert_eq!(bus.receiver_count(), 0);
+
+        bus.emit(&RowChange::SessionKilled(2));
+
+        let missed = bus
+            .replay_after(bus.generation(), 1)
+            .expect("still in the ring");
+        assert_eq!(
+            missed.len(),
+            1,
+            "the event that arrived while the phone was away is replayable"
         );
     }
 
