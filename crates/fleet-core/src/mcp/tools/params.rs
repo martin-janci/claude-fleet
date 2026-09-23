@@ -53,8 +53,8 @@ pub struct ListSessionsParams {
     #[serde(default)]
     pub tag: Option<String>,
     /// Named row projection for a client that draws fixed columns: "phone"
-    /// keeps only the 14 a phone's session list reads (-64% of the full
-    /// answer on a 56-row fleet). It decides the row shape, so `summary` no
+    /// keeps only the columns the phone app reads (about half of the full
+    /// answer). It decides the row shape, so `summary` no
     /// longer applies; an unknown name is refused. Omit for the full answer.
     #[serde(default)]
     pub view: Option<String>,
