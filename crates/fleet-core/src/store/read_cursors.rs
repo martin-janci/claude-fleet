@@ -197,7 +197,10 @@ mod tests {
     fn a_stream_cursors_anchor_round_trips_and_is_replaced_by_a_later_put() {
         let s = Store::open_in_memory().unwrap();
         let r = seed(&s, "reader");
-        let a1 = r#"{"at":"2026-01-01T00:00:00Z","ended_at":"2026-01-01T00:00:01Z"}"#;
+        // The store treats the anchor as opaque text; the shape shown is
+        // `service::transcript::TranscriptAnchor`'s — `at` plus a hex
+        // SHA-256 `fingerprint` of the turn's rendered text.
+        let a1 = r#"{"at":"2026-01-01T00:00:00Z","fingerprint":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}"#;
         s.put_stream_cursor(r, "session_transcript", "9", Some(9), 3, None, Some(a1))
             .unwrap();
         assert_eq!(
@@ -208,7 +211,7 @@ mod tests {
                 .as_deref(),
             Some(a1)
         );
-        let a2 = r#"{"at":"2026-01-01T00:00:05Z","ended_at":null}"#;
+        let a2 = r#"{"at":"2026-01-01T00:00:05Z","fingerprint":"60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"}"#;
         s.put_stream_cursor(r, "session_transcript", "9", Some(9), 4, None, Some(a2))
             .unwrap();
         assert_eq!(

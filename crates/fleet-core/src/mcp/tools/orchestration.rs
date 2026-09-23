@@ -106,6 +106,14 @@ impl FleetTools {
             (decision, generation, stored_anchor, stored_watermark)
         };
 
+        // `unchanged` means precisely: NO COMPLETED TURN since this reader's
+        // last read. It is keyed on `turn_seq` (+ generation), and only a
+        // Stop hook moves `turn_seq` — so an interrupted turn or a slash
+        // command, which adds to the transcript file with no Stop behind
+        // it, can be answered "unchanged" here while the session sits idle.
+        // Nothing is lost: the anchor has not moved, so that content is
+        // served with the next completed turn. Deliberately not a second
+        // watermark (Ruling 18); documented in docs/control-api.md.
         if matches!(decision, fresh::StreamStart::Unchanged) {
             return Ok(CallToolResult::success(vec![text_content(format!(
                 "(unchanged since your last read at turn {})",
