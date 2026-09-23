@@ -50,7 +50,9 @@ impl FleetTools {
         (use send_prompt's turn_seq_before). max_chars caps the text \
         (default 8000, max 64000; the END is kept). Errors: E_INVALID_STATE \
         (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). \
-        Read-only; prefer it over capture_session for the reply text.")]
+        Read-only; prefer it over capture_session for the reply text. fresh_for \
+        returns only what is new since your last read. unchanged costs no \
+        transcript read.")]
     pub(super) async fn session_transcript(
         &self,
         Extension(caller): Extension<Caller>,
@@ -59,8 +61,8 @@ impl FleetTools {
         audit(
             "session_transcript",
             &format!(
-                "session_id={} since_turn={:?} max_chars={:?}",
-                p.session_id, p.since_turn, p.max_chars
+                "session_id={} since_turn={:?} max_chars={:?} fresh_for={:?}",
+                p.session_id, p.since_turn, p.max_chars, p.fresh_for
             ),
         );
         let row =

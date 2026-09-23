@@ -667,19 +667,29 @@ pub(super) fn ok_json_compact<T: serde::Serialize>(value: &T) -> Result<CallTool
 /// The order matters too — project, THEN strip: a field the view keeps but
 /// this row has no value for must vanish like every other null, not come
 /// back as `"ci_status":null` for a client that has never seen one.
-pub(super) fn ok_json_compact_view<T: serde::Serialize>(
+/// The compact JSON string [`ok_json_compact_view`] returns — split out so a
+/// snapshot tool can hash exactly the bytes it would send.
+pub(super) fn compact_json_string<T: serde::Serialize>(
     value: &T,
     view: Option<&[&str]>,
-) -> Result<CallToolResult, McpError> {
+) -> Result<String, McpError> {
     let mut v = serde_json::to_value(value)
         .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
     if let Some(fields) = view {
         super::views::project_rows(&mut v, fields);
     }
     strip_nulls(&mut v);
-    let json = serde_json::to_string(&v)
-        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
-    Ok(CallToolResult::success(vec![text_content(json)]))
+    serde_json::to_string(&v)
+        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))
+}
+
+pub(super) fn ok_json_compact_view<T: serde::Serialize>(
+    value: &T,
+    view: Option<&[&str]>,
+) -> Result<CallToolResult, McpError> {
+    Ok(CallToolResult::success(vec![text_content(
+        compact_json_string(value, view)?,
+    )]))
 }
 
 // One home, because the hub's `/events` broadcast strips the same rows for

@@ -200,16 +200,20 @@ impl FleetTools {
     }
 
     #[tool(description = "Unified diff for one worktree file vs HEAD (untracked \
-        files render as all-added). Returns JSON {path, diff, binary, truncated}.")]
+        files render as all-added). Returns JSON {path, diff, binary, truncated}. \
+        fresh_for returns only what is new since your last read.")]
     pub(super) async fn repo_diff(
         &self,
-        Parameters(args): Parameters<repo_read::RepoFileArgs>,
+        Parameters(p): Parameters<RepoDiffParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "repo_diff",
-            &format!("session_id={} path={}", args.session_id, args.path),
+            &format!(
+                "session_id={} path={} fresh_for={:?}",
+                p.session_id, p.path, p.fresh_for
+            ),
         );
-        let v = repo_read::repo_diff(args, &self.store, &self.ssh)
+        let v = repo_read::repo_diff((&p).into(), &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
         ok_json(&v)

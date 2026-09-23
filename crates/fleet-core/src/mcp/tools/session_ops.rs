@@ -15,7 +15,8 @@ impl FleetTools {
         blocked | completed | failed | stopped | idle; stuck_kind is one of \
         auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status \
         (full rows) is one of passing | failing | pending (null when the \
-        session has no PR or its PR has no checks).")]
+        session has no PR or its PR has no checks). fresh_for returns only \
+        what is new since your last read.")]
     pub(super) async fn list_sessions(
         &self,
         Parameters(p): Parameters<ListSessionsParams>,
@@ -23,7 +24,7 @@ impl FleetTools {
         audit(
             "list_sessions",
             &format!(
-                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} view={:?} limit={:?} force={} tag={:?}",
+                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} view={:?} limit={:?} force={} tag={:?} fresh_for={:?}",
                 p.host_alias,
                 p.project_id,
                 p.status,
@@ -34,6 +35,7 @@ impl FleetTools {
                 p.limit,
                 p.force,
                 p.tag,
+                p.fresh_for,
             ),
         );
         // Parsed before the listing runs: an unknown view must cost the

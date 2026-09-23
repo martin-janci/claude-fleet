@@ -184,13 +184,17 @@ impl FleetTools {
         changes, prompts, stuck, kills, and conversation events: \
         conversation_started, conversation_ended, compact_started, \
         compact_done, turn_done). Newest-first; pass `limit` to cap \
-        (default 50). Returns the events as JSON."
+        (default 50). Returns the events as JSON. fresh_for returns only \
+        what is new since your last read."
     )]
     pub(super) async fn session_history(
         &self,
         Parameters(p): Parameters<SessionHistoryParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("session_history", &format!("session_id={}", p.session_id));
+        audit(
+            "session_history",
+            &format!("session_id={} fresh_for={:?}", p.session_id, p.fresh_for),
+        );
         let limit = p.limit.unwrap_or(50);
         let events = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
@@ -381,7 +385,8 @@ impl FleetTools {
         results arrive here as kind=task_result. mark_read \
         (default true) flips returned unread rows to read — pass false to \
         peek without consuming. A per-host token may only read inboxes of \
-        sessions on its own host (E_FORBIDDEN).")]
+        sessions on its own host (E_FORBIDDEN). fresh_for returns only what \
+        is new since your last read.")]
     pub(super) async fn inbox(
         &self,
         Extension(caller): Extension<Caller>,
@@ -390,8 +395,8 @@ impl FleetTools {
         audit(
             "inbox",
             &format!(
-                "session_id={} unread_only={} mark_read={} summary={}",
-                p.session_id, p.unread_only, p.mark_read, p.summary
+                "session_id={} unread_only={} mark_read={} summary={} fresh_for={:?}",
+                p.session_id, p.unread_only, p.mark_read, p.summary, p.fresh_for
             ),
         );
         // Master skips the lookup; a per-host token is gated to its own host

@@ -97,9 +97,9 @@ Parameters: `dry_run`, `host_alias`
 
 ### `inbox`
 
-Read a session's inbox — messages sent TO session_id, newest-first. Slim rows by default (metadata, reply_to, 80-char body preview); pass summary=false for full bodies. Task results arrive here as kind=task_result. mark_read (default true) flips returned unread rows to read — pass false to peek without consuming. A per-host token may only read inboxes of sessions on its own host (E_FORBIDDEN).
+Read a session's inbox — messages sent TO session_id, newest-first. Slim rows by default (metadata, reply_to, 80-char body preview); pass summary=false for full bodies. Task results arrive here as kind=task_result. mark_read (default true) flips returned unread rows to read — pass false to peek without consuming. A per-host token may only read inboxes of sessions on its own host (E_FORBIDDEN). fresh_for returns only what is new since your last read.
 
-Parameters: `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
+Parameters: `fresh_for`, `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 
 ### `kill_session`
 
@@ -143,9 +143,9 @@ Parameters: `has_sessions`, `limit`, `summary`
 
 ### `list_sessions`
 
-List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, tag, needs_attention (rows that want a person; each carries why and since), include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all); `force` runs a reconcile pass first instead of serving the recent cache. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null when the session has no PR or its PR has no checks).
+List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, tag, needs_attention (rows that want a person; each carries why and since), include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all); `force` runs a reconcile pass first instead of serving the recent cache. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null when the session has no PR or its PR has no checks). fresh_for returns only what is new since your last read.
 
-Parameters: `claude_status`, `force`, `host_alias`, `include_lost`, `limit`, `needs_attention`, `project_id`, `status`, `summary`, `tag`, `view`
+Parameters: `claude_status`, `force`, `fresh_for`, `host_alias`, `include_lost`, `limit`, `needs_attention`, `project_id`, `status`, `summary`, `tag`, `view`
 
 ### `list_tasks`
 
@@ -287,9 +287,9 @@ Parameters: `hash`, `path`, `session_id`
 
 ### `repo_diff`
 
-Unified diff for one worktree file vs HEAD (untracked files render as all-added). Returns JSON {path, diff, binary, truncated}.
+Unified diff for one worktree file vs HEAD (untracked files render as all-added). Returns JSON {path, diff, binary, truncated}. fresh_for returns only what is new since your last read.
 
-Parameters: `path`, `session_id`
+Parameters: `fresh_for`, `path`, `session_id`
 
 ### `repo_file`
 
@@ -389,15 +389,15 @@ Parameters: `limit`, `session_id`
 
 ### `session_history`
 
-Return the recorded event timeline for a session (status changes, prompts, stuck, kills, and conversation events: conversation_started, conversation_ended, compact_started, compact_done, turn_done). Newest-first; pass `limit` to cap (default 50). Returns the events as JSON.
+Return the recorded event timeline for a session (status changes, prompts, stuck, kills, and conversation events: conversation_started, conversation_ended, compact_started, compact_done, turn_done). Newest-first; pass `limit` to cap (default 50). Returns the events as JSON. fresh_for returns only what is new since your last read.
 
-Parameters: `limit`, `session_id`
+Parameters: `fresh_for`, `limit`, `session_id`
 
 ### `session_transcript`
 
-Read a session's Claude Code transcript (the JSONL Claude writes, not the pane) and return the last assistant turn as plain text — text blocks verbatim, one summary line per tool call, no thinking. since_turn returns every turn after that turn_seq (use send_prompt's turn_seq_before). max_chars caps the text (default 8000, max 64000; the END is kept). Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply text.
+Read a session's Claude Code transcript (the JSONL Claude writes, not the pane) and return the last assistant turn as plain text — text blocks verbatim, one summary line per tool call, no thinking. since_turn returns every turn after that turn_seq (use send_prompt's turn_seq_before). max_chars caps the text (default 8000, max 64000; the END is kept). Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply text. fresh_for returns only what is new since your last read. unchanged costs no transcript read.
 
-Parameters: `max_chars`, `session_id`, `since_turn`
+Parameters: `fresh_for`, `max_chars`, `session_id`, `since_turn`
 
 ### `set_client_trust`
 

@@ -1233,6 +1233,7 @@ async fn per_host_callers_cannot_capture_or_read_another_hosts_session() {
                         session_id,
                         since_turn: None,
                         max_chars: None,
+                        fresh_for: None,
                     }),
                 )
                 .await
@@ -1249,6 +1250,7 @@ async fn per_host_callers_cannot_capture_or_read_another_hosts_session() {
                 session_id: bare_b,
                 since_turn: None,
                 max_chars: None,
+                fresh_for: None,
             }),
         )
         .await
@@ -2755,7 +2757,16 @@ fn the_served_definition_budget_stays_bounded() {
     // merged surface is 63,630 rather than any branch's own figure. Raised to
     // that plus the customary 100 bytes. Nothing was added here — this is the
     // arithmetic of four raises landing together.
-    const BUDGET_BYTES: usize = 63_730;
+    //
+    // Raised for smart caching (cycle 2): one `fresh_for` on each of five
+    // fetch tools (list_sessions, session_history, inbox, session_transcript,
+    // repo_diff), plus repo_diff's own `RepoDiffParams` replacing the shared
+    // `RepoFileArgs` schema it used to serve. The field's doc comment was cut
+    // to one short clause first — first measured at 64,792 (1,062 B over
+    // budget, over the ~1 KB guideline), trimmed to "Your session id: only
+    // what's new since your last read." on all five, re-measured at 64,732.
+    // Raised to that plus the customary 100.
+    const BUDGET_BYTES: usize = 64_832;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3518,6 +3529,7 @@ async fn send_message_with_the_same_client_msg_id_sends_once() {
                 limit: Some(10),
                 mark_read: false,
                 summary: false,
+                fresh_for: None,
             }),
         )
         .await
@@ -3567,6 +3579,7 @@ async fn send_message_with_a_client_msg_id_already_in_flight_is_e_in_flight() {
                 limit: Some(10),
                 mark_read: false,
                 summary: false,
+                fresh_for: None,
             }),
         )
         .await
@@ -3625,6 +3638,7 @@ async fn a_send_message_that_fails_releases_its_client_msg_id_for_a_retry() {
                 limit: Some(10),
                 mark_read: false,
                 summary: false,
+                fresh_for: None,
             }),
         )
         .await
@@ -3693,6 +3707,7 @@ async fn a_client_msg_id_reused_from_send_prompt_does_not_replay_into_send_messa
                 limit: Some(10),
                 mark_read: false,
                 summary: false,
+                fresh_for: None,
             }),
         )
         .await
@@ -3867,6 +3882,128 @@ fn a_view_is_opt_in_and_the_default_answer_is_byte_identical() {
     let plain = ok_json_compact(&rows).unwrap();
     let no_view = ok_json_compact_view(&rows, None).unwrap();
     assert_eq!(text_of(&plain.content[0]), text_of(&no_view.content[0]));
+}
+
+/// `fresh_for` is inert until Tasks 5-7 wire it (smart caching, cycle 2 task
+/// 4): a caller who never names it must see nothing change. Comparing
+/// "omitted" against "explicit `fresh_for: null`" the way
+/// `a_view_is_opt_in_and_the_default_answer_is_byte_identical` compares its
+/// two paths would be tautological here — both deserialize to `None` and hit
+/// the same code either way, since nothing reads the field yet. The
+/// assertion that actually bites later is (c): once caching lands, an absent
+/// `fresh_for` must still never touch `read_cursors` — so this pins that a
+/// bare call today writes no cursor row, which a Task 5-7 regression would
+/// break silently otherwise.
+///
+/// `session_transcript` and `repo_diff` need a live SSH target to actually
+/// run in this store-only fixture, so for those two this only checks (a) the
+/// deserialized default and, further down, that their served schema carries
+/// `fresh_for` — proof by schema rather than by call.
+#[tokio::test]
+async fn fresh_for_is_opt_in_and_the_default_answer_is_byte_identical() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let sid = s
+        .upsert_session("dev", "local", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let cursor_count = |t: &FleetTools| -> i64 {
+        t.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(cursor_count(&t), 0, "fixture starts with no cursors");
+
+    // list_sessions: fully defaulted, so an empty object round-trips.
+    let p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(p.fresh_for.is_none());
+    t.list_sessions(Parameters(p)).await.unwrap();
+    assert_eq!(cursor_count(&t), 0, "list_sessions wrote a cursor unasked");
+
+    // session_history
+    let p: SessionHistoryParams =
+        serde_json::from_value(serde_json::json!({ "session_id": sid, "limit": null })).unwrap();
+    assert!(p.fresh_for.is_none());
+    t.session_history(Parameters(p)).await.unwrap();
+    assert_eq!(
+        cursor_count(&t),
+        0,
+        "session_history wrote a cursor unasked"
+    );
+
+    // inbox
+    let p: InboxParams =
+        serde_json::from_value(serde_json::json!({ "session_id": sid, "limit": null })).unwrap();
+    assert!(p.fresh_for.is_none());
+    t.inbox(Extension(Caller::master()), Parameters(p))
+        .await
+        .unwrap();
+    assert_eq!(cursor_count(&t), 0, "inbox wrote a cursor unasked");
+
+    // session_transcript — params only; a real call needs SSH.
+    let p: SessionTranscriptParams =
+        serde_json::from_value(serde_json::json!({ "session_id": sid })).unwrap();
+    assert!(p.fresh_for.is_none());
+
+    // repo_diff — params only; a real call needs SSH.
+    let p: RepoDiffParams =
+        serde_json::from_value(serde_json::json!({ "session_id": sid, "path": "x" })).unwrap();
+    assert!(p.fresh_for.is_none());
+
+    assert_eq!(
+        cursor_count(&t),
+        0,
+        "nothing in this test may ever write a cursor"
+    );
+
+    // Schema-name proof (Task 4 controller note 2): repo_diff now serves its
+    // own params, not the shared, hub-routed `repo_read::RepoFileArgs`
+    // (schema title `RepoPathParams`) that `repo_file` still serves —
+    // otherwise adding `fresh_for` here would have leaked onto `repo_file`
+    // and changed a desktop↔hub wire struct.
+    let tools = FleetTools::tool_router_for_doc().list_all();
+    let diff = tools
+        .iter()
+        .find(|t| t.name == "repo_diff")
+        .expect("repo_diff is registered");
+    let file = tools
+        .iter()
+        .find(|t| t.name == "repo_file")
+        .expect("repo_file is registered");
+    assert_eq!(
+        diff.input_schema.get("title").and_then(|v| v.as_str()),
+        Some("RepoDiffParams"),
+        "repo_diff must serve its own params struct, not RepoFileArgs"
+    );
+    assert_eq!(
+        file.input_schema.get("title").and_then(|v| v.as_str()),
+        Some("RepoPathParams"),
+        "repo_file's shared, hub-routed struct must be untouched"
+    );
+
+    // Every one of the five tools must actually offer `fresh_for` on its
+    // served schema — the proof substituted for a live call on the two tools
+    // above that this fixture cannot run without SSH.
+    for name in [
+        "list_sessions",
+        "session_history",
+        "inbox",
+        "session_transcript",
+        "repo_diff",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("{name} is registered"));
+        assert!(
+            tool.input_schema["properties"].get("fresh_for").is_some(),
+            "{name} schema lacks fresh_for"
+        );
+    }
 }
 
 /// The 64 % that is not drawn: the heaviest of these on the measured capture
