@@ -666,6 +666,61 @@ path. `deploy/hub/Caddyfile` ships with `encode zstd gzip`; a bare-binary
 deployment with no reverse proxy in front gets the unframed body but no
 compression.
 
+### Asking for fewer columns
+
+Compression makes the same answer cheaper; these two parameters make the
+answer smaller, and they stack with it.
+
+`list_sessions { view: "phone" }` returns each row projected to the 14
+columns a phone-sized session list draws — `id`, `tmux_name`,
+`friendly_name`, `last_prompt`, `host_alias`, `project_id`, `status`,
+`kind`, `claude_status`, `stuck_kind`, `current_activity`, `context_pct`,
+`last_activity_at`, `ci_status`, `pending_input`. On the same 44-session fleet that is
+**46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped**. The view is
+*named*, not a caller-supplied field list, so the hub keeps the definition of
+what a pager row is and can widen it without an app release; an unknown name
+is refused with `E_INVALID` rather than quietly answering full rows. It
+exists because neither shape fitted: the default summary row is 9 951 B but
+drops `friendly_name`, `current_activity` and `last_activity_at`, which are
+three of the fifteen a pager uses. `pending_input` is in the view for the
+same reason: it carries the dialog a blocked session is waiting on and its
+options, and without it the view is a list a phone can read but not act on —
+answering that dialog is the one thing a pager exists for.
+
+`list_projects { has_sessions: true }` keeps only the projects that hold a
+live session — the rows a client needs to turn a session's `project_id` into
+a heading. That fleet's hub listed **78 projects (6 581 B) to name the 8
+(835 B)** its sessions actually carried: −87 %, and the one call whose cost
+grows with the operator's history rather than with the fleet.
+
+Both are opt-in and additive: omit them and the bytes are what they were, so
+the wire-contract revision does not move.
+
+## `/metrics` — what each caller costs this hub
+
+```bash
+curl -s https://fleet.example.com/metrics -H "Authorization: Bearer <master token>"
+```
+
+```
+fleet_tool_calls_total{caller="client:phone"} 412
+fleet_tool_errors_total{caller="client:phone"} 3
+fleet_event_streams_open{caller="client:phone"} 1
+```
+
+Prometheus text format, **master token only** — a per-host token and a paired
+phone are both callers this reports on, and letting one read the others'
+figures would make a read-only device a traffic monitor for the operator's own
+work. A non-master token gets 403 with that sentence, not a 404: the route
+exists and the token is the problem.
+
+The dimension is the caller label, the same key the rate limiter and the
+stream cap use, so a number here lines up with a refusal in the log.
+Deliberately **no session id, no prompt, no project path and no tool name**: a
+metrics endpoint is scraped on a timer and kept for months, and a series
+labelled with a session id is an activity log of the operator's work with a
+retention policy nobody chose.
+
 ## Events
 
 A client that has listed what it needs does not have to poll for changes:
@@ -699,6 +754,22 @@ starting at `1`). It moves only when a client's assumptions about the wire
 would actually break — a field removed or renamed, never an addition — and a
 hub built before this field existed sends nothing, which a client reads as
 revision `0`. See *Version skew* below for what a client does with it.
+
+Each row frame carries an `id:` of the form `<generation>-<seq>`. A client
+that reconnects sends the last one back as `Last-Event-ID` (or as
+`?since=<id>`, for the proxies that strip the header) and the hub replays what
+it missed instead of making it re-list everything. The `ready` frame answers
+`"resumed": true` when it honoured the id, and `false` when it could not —
+because the gap was longer than the history kept (512 events, roughly thirteen
+minutes of a busy fleet's churn) or because the hub has restarted since the id
+was minted, which the `generation` half is there to catch. `false` means
+re-list; it is never a reason to assume continuity.
+
+`?fields=id,claude_status,…` keeps only those keys in each frame's payload.
+There is no fixed vocabulary — a field is whatever the row type serialises,
+and that differs per event — so every name is accepted and the `ready` frame
+echoes back the list it honoured, which is where a typo shows up. A session
+row is about 1.2 KB on the wire and a phone draws perhaps a third of it.
 
 The stream sits behind the same bearer token as `/mcp` (a change stream names
 sessions, hosts, projects and prompts), and a caller may hold eight of them at

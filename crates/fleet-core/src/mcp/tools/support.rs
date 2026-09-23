@@ -654,8 +654,28 @@ pub(super) fn ok_json<T: serde::Serialize>(value: &T) -> Result<CallToolResult, 
 /// Stripping nulls at the MCP boundary (rather than via `#[serde(skip)]` on
 /// the row struct) keeps the Tauri event bus's value→null clearing intact.
 pub(super) fn ok_json_compact<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
+    ok_json_compact_view(value, None)
+}
+
+/// [`ok_json_compact`] with an optional named projection applied first — the
+/// one place a `view` narrows a list, because this is already where the value
+/// is walked for `strip_nulls`.
+///
+/// `None` is the whole point of the signature: a caller that asks for no view
+/// takes the identical path, so the wire stays byte-for-byte what it was
+/// (`tests::a_view_is_opt_in_and_the_default_answer_is_byte_identical`).
+/// The order matters too — project, THEN strip: a field the view keeps but
+/// this row has no value for must vanish like every other null, not come
+/// back as `"ci_status":null` for a client that has never seen one.
+pub(super) fn ok_json_compact_view<T: serde::Serialize>(
+    value: &T,
+    view: Option<&[&str]>,
+) -> Result<CallToolResult, McpError> {
     let mut v = serde_json::to_value(value)
         .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+    if let Some(fields) = view {
+        super::views::project_rows(&mut v, fields);
+    }
     strip_nulls(&mut v);
     let json = serde_json::to_string(&v)
         .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;

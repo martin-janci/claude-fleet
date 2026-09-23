@@ -139,13 +139,13 @@ List the catalog's layer definitions (layers/*.yaml) and each host's role + acti
 
 List discovered projects (repos fleet can spawn sessions in). Slim rows by default (id, owner, repo, worktree_count, last_session_at); summary=false returns the full nested worktree tree, which is large — pair it with limit.
 
-Parameters: `limit`, `summary`
+Parameters: `has_sessions`, `limit`, `summary`
 
 ### `list_sessions`
 
 List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, tag, needs_attention (rows that want a person; each carries why and since), include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all); `force` runs a reconcile pass first instead of serving the recent cache. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null when the session has no PR or its PR has no checks).
 
-Parameters: `claude_status`, `force`, `host_alias`, `include_lost`, `limit`, `needs_attention`, `project_id`, `status`, `summary`, `tag`
+Parameters: `claude_status`, `force`, `host_alias`, `include_lost`, `limit`, `needs_attention`, `project_id`, `status`, `summary`, `tag`, `view`
 
 ### `list_tasks`
 
@@ -377,9 +377,9 @@ Parameters: `session_id`
 
 ### `session_conversation`
 
-Read a session conversation as structured turns — the shape of the exchange, where session_transcript gives one flat blob. Each turn carries the prompt, its timestamps, and items by kind: text, tool, subagent, compact, command, interrupt (tool inputs and results are never included). Also returns events (this conversation timeline, newest events_limit: default 50, max 200) and context (context-window usage, or null). turns defaults to 10, max 100; the character budget scales with it. Pass claude_session_id (from session_conversations) for an earlier conversation. Read-only. Errors: E_INVALID, E_INVALID_STATE, E_NO_TRANSCRIPT.
+Read a session conversation as structured turns — the shape of the exchange, where session_transcript gives one flat blob. Each turn carries the prompt, its timestamps, and items by kind: text, tool, subagent, compact, command, interrupt (tool inputs and results are never included). Also returns events (this conversation timeline, newest events_limit: default 50, max 200, 0 for none) and context (context-window usage, or null). turns defaults to 10, max 100; the character budget scales with it. Pass claude_session_id (from session_conversations) for an earlier conversation. since_turn narrows the window to what came after that turn_seq. Read-only. Errors: E_INVALID, E_INVALID_STATE, E_NO_TRANSCRIPT.
 
-Parameters: `claude_session_id`, `events_limit`, `session_id`, `turns`
+Parameters: `claude_session_id`, `events_limit`, `session_id`, `since_turn`, `turns`
 
 ### `session_conversations`
 

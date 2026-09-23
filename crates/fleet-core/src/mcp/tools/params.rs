@@ -52,6 +52,12 @@ pub struct ListSessionsParams {
     /// Only return sessions carrying this tag (see `set_session_tags`).
     #[serde(default)]
     pub tag: Option<String>,
+    /// Named row projection for a client that draws fixed columns: "phone"
+    /// keeps only the 14 a phone's session list reads (-64% of the full
+    /// answer on a 56-row fleet). It decides the row shape, so `summary` no
+    /// longer applies; an unknown name is refused. Omit for the full answer.
+    #[serde(default)]
+    pub view: Option<String>,
     /// true for only the sessions that need a person, false for only the ones
     /// that do not. The row carries the reason.
     #[serde(default)]
@@ -444,6 +450,10 @@ pub struct ListProjectsParams {
     /// roughly ten times a summary row.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Keep only projects holding a live session — the ones `list_sessions`
+    /// rows can name. Applied before `limit`. Default false: every project.
+    #[serde(default)]
+    pub has_sessions: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -553,9 +563,14 @@ pub struct SessionConversationParams {
     #[serde(default)]
     pub claude_session_id: Option<String>,
     /// Most timeline events (compactions, /clear, ops) to return with the
-    /// conversation. Defaults to 50, capped at 200.
+    /// conversation. Defaults to 50, capped at 200; 0 returns none.
     #[serde(default)]
     pub events_limit: Option<i64>,
+    /// The turn_seq you last saw: returns the turns completed since, plus the
+    /// one still running. `turns` wins; out of range (a compaction, /clear)
+    /// gives the default window.
+    #[serde(default)]
+    pub since_turn: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

@@ -14,6 +14,7 @@ pub mod events_route;
 pub mod guard;
 pub mod hooks;
 mod listener;
+pub mod metrics;
 pub mod pairing;
 pub mod report_route;
 pub mod settings;
@@ -34,7 +35,7 @@ pub use auth::normalize_allowed_hosts;
 pub use auth::Caller;
 #[cfg(test)]
 pub use auth::TokenMode;
-pub use events_route::{EventSubscriber, EventsState};
+pub use events_route::{EventFeed, EventHistory, EventSubscriber, EventsState};
 pub use guard::{ConfirmNotify, PendingConfirms, RateLimiter};
 pub use listener::{NoTls, TlsAcceptor};
 pub use pairing::{pair_url, PairingRequest, PendingPairings};
@@ -99,6 +100,9 @@ impl McpRuntime {
 #[derive(Clone)]
 pub struct McpGuards {
     pub rate: Arc<RateLimiter>,
+    /// Per-caller counters behind `GET /metrics`. See [`metrics`] for what is
+    /// counted and, more to the point, what is deliberately not.
+    pub metrics: Arc<metrics::Metrics>,
     pub confirms: Arc<PendingConfirms>,
     /// Surfaces a confirmation request to the desktop (`mcp:confirm-required`).
     pub notify: ConfirmNotify,
@@ -115,6 +119,7 @@ impl McpGuards {
     pub fn new(notify: ConfirmNotify) -> Self {
         Self {
             rate: Arc::new(RateLimiter::new()),
+            metrics: Arc::new(metrics::Metrics::new()),
             confirms: Arc::new(PendingConfirms::new()),
             notify,
             pairings: Arc::new(PendingPairings::new()),
@@ -267,6 +272,7 @@ async fn healthz() -> impl axum::response::IntoResponse {
 /// path unrouted, which is what every test that does not exercise it passes.
 #[allow(clippy::too_many_arguments)]
 fn build_app(
+    metrics_state: metrics::MetricsState,
     mcp_service: axum::routing::MethodRouter<hooks::HookState>,
     mcp_json_service: Option<axum::routing::MethodRouter<hooks::HookState>>,
     hook_state: hooks::HookState,
@@ -302,6 +308,15 @@ fn build_app(
             axum::Router::new()
                 .route("/events", axum::routing::get(events_route::handle_events))
                 .with_state(events_state),
+        )
+        // `/metrics` is authorized like the rest and then master-gated inside
+        // the handler: a per-host token and a paired phone are both callers it
+        // reports ON, so one reading the others' figures would make a
+        // read-only device a traffic monitor for the operator's own work.
+        .merge(
+            axum::Router::new()
+                .route("/metrics", axum::routing::get(metrics::handle_metrics))
+                .with_state(metrics_state),
         )
         // `/agent` likewise carries its own state, and likewise belongs BEHIND
         // `authorize`: the upgrade needs a valid bearer token, and the handler
@@ -368,6 +383,10 @@ pub(crate) fn test_app(
     agent_state: crate::agent::ws::AgentWsState,
 ) -> axum::Router {
     build_app(
+        metrics::MetricsState {
+            metrics: Arc::new(metrics::Metrics::new()),
+            streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+        },
         axum::routing::any(|| async { "MCP_OK" }),
         None,
         hooks::HookState {
@@ -511,7 +530,7 @@ pub async fn start_with_handle(
     // Hands `GET /events` a fresh subscription per connection. `None` on a
     // server whose store does not publish to a broadcast bus (the desktop),
     // where `/events` answers 503.
-    events: Option<EventSubscriber>,
+    events: Option<EventFeed>,
 ) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
     let addr = SocketAddr::from((bind, port));
     let listener = tokio::net::TcpListener::bind(addr)
@@ -549,7 +568,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
     listener: tokio::net::TcpListener,
     token: String,
     allowed_hosts: Vec<String>,
-    events: Option<EventSubscriber>,
+    events: Option<EventFeed>,
     tls: Option<A>,
 ) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
     // The bound address, not a requested one: with the listener already open
@@ -614,6 +633,11 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             Arc::clone(&guards.rate),
             base_url,
         );
+        // Cloned before `guards` moves into `FleetTools`: the route and the
+        // tool router must write and read the same counters.
+        let metrics_for_route = Arc::clone(&guards.metrics);
+        let events_state =
+            EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token());
         let tools = FleetTools::new(store, ssh, reg, tunnels, guards);
         let service = streamable_service(
             tools.clone(),
@@ -628,6 +652,10 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             Framing::Json,
         );
         let app = build_app(
+            metrics::MetricsState {
+                metrics: Arc::clone(&metrics_for_route),
+                streams: events_state.stream_limiter(),
+            },
             axum::routing::any_service(service),
             Some(axum::routing::any_service(json_service)),
             hook_state,
@@ -635,7 +663,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             pair_state,
             // The stream ends itself when the server stops, so an attached
             // client never holds the graceful drain open.
-            EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token()),
+            events_state,
             // The SAME registry `SshClient` routes agent hosts through, so a
             // connection registered here is the one `AgentTransport` dispatches
             // to. `None` on an SSH-only client (the desktop): `/agent` then
@@ -757,6 +785,10 @@ mod tests {
         // gets its own app at the end of this test.
         pair_state.attempt_interval = std::time::Duration::ZERO;
         let app = build_app(
+            metrics::MetricsState {
+                metrics: Arc::new(metrics::Metrics::new()),
+                streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            },
             any(|| async { "MCP_OK" }),
             None,
             hook_state,
@@ -1127,6 +1159,10 @@ mod tests {
             allowed_hosts: Arc::new(vec!["fleet.example.com".to_string()]),
         };
         let app2 = build_app(
+            metrics::MetricsState {
+                metrics: Arc::new(metrics::Metrics::new()),
+                streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            },
             any(|| async { "MCP_OK" }),
             None,
             hook_state2,
@@ -1186,6 +1222,10 @@ mod tests {
         let limited_pairings = Arc::new(pairing::PendingPairings::new());
         let report_state3 = report_route::ReportState::new(Arc::clone(&store));
         let app3 = build_app(
+            metrics::MetricsState {
+                metrics: Arc::new(metrics::Metrics::new()),
+                streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            },
             any(|| async { "MCP_OK" }),
             None,
             hook_state3,
@@ -1313,6 +1353,10 @@ mod tests {
             Framing::Json,
         );
         let app = build_app(
+            metrics::MetricsState {
+                metrics: Arc::new(metrics::Metrics::new()),
+                streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            },
             axum::routing::any_service(service),
             Some(axum::routing::any_service(json_service)),
             hook_state,
@@ -1470,6 +1514,43 @@ mod tests {
         );
     }
 
+    /// `/metrics` answers the master token and refuses everything else with a
+    /// sentence. A per-host token and a paired phone are both callers it
+    /// reports ON; letting either read the figures would make a read-only
+    /// device a traffic monitor for the operator's own work.
+    #[tokio::test]
+    async fn metrics_answers_the_master_token_and_refuses_the_rest() {
+        let addr = serve_real_tools().await;
+
+        // A call to count.
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        raw_round_trip(addr, &post_mcp(list)).await;
+
+        let get = |auth: &str| {
+            format!(
+                "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                 Authorization: Bearer {auth}\r\nConnection: close\r\n\r\n"
+            )
+        };
+        let r = raw_round_trip(addr, &get("s3cret")).await;
+        assert!(r.contains("200 OK"), "master:\n{r}");
+        assert!(
+            r.contains("fleet_tool_calls_total"),
+            "the exposition must carry the call counter:\n{r}"
+        );
+        assert!(
+            r.to_ascii_lowercase().contains("text/plain"),
+            "Prometheus scrapes text/plain:\n{r}"
+        );
+        // No token at all is the authorize layer's answer, not the handler's.
+        let r = raw_round_trip(
+            addr,
+            "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r.contains("401"), "unauthenticated:\n{r}");
+    }
+
     /// rmcp keeps its own DNS-rebinding Host check (loopback only by
     /// default); the fleet allowlist must reach it, or a public Host that
     /// passed fleet's `authorize` layer is still refused with 403 by rmcp.
@@ -1519,12 +1600,21 @@ mod tests {
 
     /// `GET /events` with the master token and an optional raw query string.
     fn get_events(auth: Option<&str>, query: &str) -> String {
+        get_events_resuming(auth, query, None)
+    }
+
+    /// [`get_events`] with a `Last-Event-ID`, the header a reconnecting
+    /// client sends to say where it got to.
+    fn get_events_resuming(auth: Option<&str>, query: &str, last_id: Option<&str>) -> String {
         let mut h = format!(
             "GET /events{query} HTTP/1.1\r\nHost: 127.0.0.1\r\n\
              Accept: text/event-stream\r\n"
         );
         if let Some(a) = auth {
             h.push_str(&format!("Authorization: Bearer {a}\r\n"));
+        }
+        if let Some(id) = last_id {
+            h.push_str(&format!("Last-Event-ID: {id}\r\n"));
         }
         h.push_str("\r\n");
         h
@@ -1579,14 +1669,16 @@ mod tests {
             Arc::new(RateLimiter::new()),
             "https://fleet.example.com".to_string(),
         );
-        let subscribe: EventSubscriber = {
-            let bus = Arc::clone(bus);
-            Arc::new(move || bus.subscribe())
-        };
-        let events_state = EventsState::enabled(subscribe, Arc::clone(&store))
+        // The feed, not a bare subscriber: `/events` resumes from the bus's
+        // own replay history, and a harness without it could not exercise it.
+        let events_state = EventsState::new(Some(Arc::clone(bus).into()), Arc::clone(&store))
             .with_keepalive(keepalive)
             .with_shutdown(stop);
         let app = build_app(
+            metrics::MetricsState {
+                metrics: Arc::new(metrics::Metrics::new()),
+                streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            },
             any(|| async { "MCP_OK" }),
             None,
             hook_state,
@@ -1622,9 +1714,19 @@ mod tests {
 
     impl SseConn {
         async fn open(addr: std::net::SocketAddr, auth: Option<&str>, query: &str) -> Self {
+            Self::open_resuming(addr, auth, query, None).await
+        }
+
+        /// [`SseConn::open`] with a `Last-Event-ID`.
+        async fn open_resuming(
+            addr: std::net::SocketAddr,
+            auth: Option<&str>,
+            query: &str,
+            last_id: Option<&str>,
+        ) -> Self {
             use tokio::io::AsyncWriteExt;
             let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
-            sock.write_all(get_events(auth, query).as_bytes())
+            sock.write_all(get_events_resuming(auth, query, last_id).as_bytes())
                 .await
                 .unwrap();
             Self {
@@ -1656,6 +1758,103 @@ mod tests {
             );
             &self.seen
         }
+    }
+
+    /// A reconnect costs the events missed, not a full re-list.
+    ///
+    /// Without this a phone paid 61 335 B and three round trips every time it
+    /// went through a lift, a tunnel or an app switch, because no frame
+    /// carried an `id:` and there was nothing to resume from.
+    #[tokio::test]
+    async fn a_reconnect_resumes_from_its_last_event_id() {
+        use crate::events::{BroadcastEventBus, EventBus};
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+
+        let mut first = SseConn::open(addr, Some("s3cret"), "").await;
+        first.wait_for("event: ready").await;
+        bus.session_killed(1);
+        let seen = first.wait_for("event: session:killed").await.to_string();
+        // Every row frame carries the id a resume names.
+        let id = seen
+            .lines()
+            .find_map(|l| l.strip_prefix("id: "))
+            .expect("a row frame must carry an id")
+            .trim()
+            .to_string();
+        drop(first);
+
+        // Two changes while nothing is connected: the ring's grace window is
+        // what keeps them replayable.
+        bus.session_killed(2);
+        bus.session_killed(3);
+
+        let mut again = SseConn::open_resuming(addr, Some("s3cret"), "", Some(&id)).await;
+        let head = again.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains("\"resumed\":true"),
+            "the ready frame must say the resume was honoured:\n{head}"
+        );
+        let replayed = again.wait_for(r#"data: {"id":3}"#).await.to_string();
+        assert!(
+            replayed.contains(r#"data: {"id":2}"#),
+            "both missed events replay, in order:\n{replayed}"
+        );
+        assert!(
+            !replayed.contains(r#"data: {"id":1}"#),
+            "and nothing the client already had:\n{replayed}"
+        );
+    }
+
+    /// An id this hub never minted — a restarted process, a mangled header —
+    /// must not be replayed against the current sequence. Saying so lets the
+    /// client re-list; pretending would leave it convinced it was current.
+    #[tokio::test]
+    async fn an_unknown_last_event_id_is_refused_and_says_so() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+
+        let mut sse = SseConn::open_resuming(addr, Some("s3cret"), "", Some("999999-5")).await;
+        let head = sse.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains("\"resumed\":false"),
+            "a foreign generation must not be replayed:\n{head}"
+        );
+    }
+
+    /// `?fields=` keeps a phone from decoding columns it never draws. The
+    /// measured session row is ~1 227 B of which about a third is fields no
+    /// screen reads.
+    #[tokio::test]
+    async fn fields_projects_the_payload_and_the_ready_frame_echoes_it() {
+        use crate::events::{BroadcastEventBus, EventBus};
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+
+        let mut sse = SseConn::open(addr, Some("s3cret"), "?fields=alias").await;
+        let head = sse.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains(r#""fields":["alias"]"#),
+            "the ready frame echoes what was honoured:\n{head}"
+        );
+
+        bus.host_removed("box");
+        let frame = sse.wait_for("event: host:removed").await.to_string();
+        assert!(
+            frame.contains(r#"data: {"alias":"box"}"#),
+            "the asked-for key survives:\n{frame}"
+        );
+
+        // And a key that was not asked for does not.
+        let mut narrow = SseConn::open(addr, Some("s3cret"), "?fields=nothing_like_this").await;
+        narrow.wait_for("event: ready").await;
+        bus.host_removed("box2");
+        let frame = narrow.wait_for("event: host:removed").await.to_string();
+        assert!(
+            frame.contains("data: {}"),
+            "an unasked-for key is projected away:\n{frame}"
+        );
     }
 
     /// The stream itself: authenticated, `text/event-stream`, a `ready` frame

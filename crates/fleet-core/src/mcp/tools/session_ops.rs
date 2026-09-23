@@ -23,18 +23,23 @@ impl FleetTools {
         audit(
             "list_sessions",
             &format!(
-                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} limit={:?} force={} tag={:?}",
+                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} view={:?} limit={:?} force={} tag={:?}",
                 p.host_alias,
                 p.project_id,
                 p.status,
                 p.claude_status,
                 p.include_lost,
                 p.summary,
+                p.view,
                 p.limit,
                 p.force,
                 p.tag,
             ),
         );
+        // Parsed before the listing runs: an unknown view must cost the
+        // caller a refusal, not a reconcile pass whose result it then
+        // cannot have.
+        let view = p.view.as_deref().map(SessionView::parse).transpose()?;
         let rows = if p.force {
             sessions::refresh_sessions(&self.store, &self.ssh).await
         } else {
@@ -97,12 +102,26 @@ impl FleetTools {
             // `limit` applies AFTER the filters so a filtered page is a real
             // page of matches, not the first N rows of the whole fleet.
             .take(p.limit.unwrap_or(usize::MAX));
-        if p.summary {
-            let slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
-            ok_json_compact(&slim)
-        } else {
-            let full: Vec<SessionWithController> = tagged.collect();
-            ok_json_compact(&full)
+        // A view is a projection OF the full row, so it outranks `summary`
+        // rather than composing with it: the slim shape drops
+        // `friendly_name`, `current_activity` and `last_activity_at`, which
+        // are three of the fourteen a phone draws — the exact reason that
+        // client asks for full rows today. `summary` keeps its default of
+        // true, so a caller that names a view need not also say
+        // `summary: false` to be understood.
+        match (view, p.summary) {
+            (Some(v), _) => {
+                let full: Vec<SessionWithController> = tagged.collect();
+                ok_json_compact_view(&full, Some(v.fields()))
+            }
+            (None, true) => {
+                let slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
+                ok_json_compact(&slim)
+            }
+            (None, false) => {
+                let full: Vec<SessionWithController> = tagged.collect();
+                ok_json_compact(&full)
+            }
         }
     }
 

@@ -108,6 +108,12 @@ mod tests {
                 .unwrap();
         }
         let app = build_app(
+            crate::mcp::metrics::MetricsState {
+                metrics: std::sync::Arc::new(crate::mcp::metrics::Metrics::new()),
+                streams: crate::mcp::guard::LongPollLimiter::new(
+                    crate::mcp::guard::MAX_LONG_POLLS_PER_CALLER,
+                ),
+            },
             axum::routing::any(|| async { "MCP_OK" }),
             None,
             hooks::HookState {

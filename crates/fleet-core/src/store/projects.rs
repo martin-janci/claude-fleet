@@ -1,6 +1,7 @@
 //! Projects, worktrees and worktree parent fingerprints.
 
 use super::*;
+use std::collections::HashSet;
 
 /// Ids of the sessions whose `worktree_id` is `worktree_id`: the rows a
 /// re-point or clear is about to change, for the `session:updated` events
@@ -95,6 +96,22 @@ impl Store {
         ))?;
         let rows = stmt.query_map([], map_project_row)?;
         rows.collect()
+    }
+
+    /// Ids of the projects holding at least one live session — one row per
+    /// project whatever its session count, which is what makes this cheaper
+    /// than counting in Rust over a joined listing.
+    ///
+    /// "Live" is `lost_at IS NULL`: the same rows `list_sessions` serves
+    /// with its default `include_lost: false`, so a project kept here is
+    /// exactly a project some returned session can name.
+    pub fn project_ids_with_sessions(&self) -> Result<HashSet<i64>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT project_id FROM sessions
+             WHERE project_id IS NOT NULL AND lost_at IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<HashSet<i64>>>()?)
     }
 
     /// Single-query variant that builds `Vec<ProjectTreeRow>` in one trip —

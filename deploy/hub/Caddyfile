@@ -7,6 +7,14 @@
     # 61 335 B of list answers, 9 550 B once they may be compressed.
     encode zstd gzip
 
+    # A ceiling on what any one request may push at the hub, well above the
+    # largest legitimate body (`set_clipboard` caps its content at 64 KiB;
+    # `send_prompt` with a pasted patch is the other big one). Without it the
+    # hub reads whatever a client sends before its own limits apply.
+    request_body {
+        max_size 2MB
+    }
+
     reverse_proxy fleet-hub:4180 {
         # Keeps the upstream Host loopback, so the hub accepts the request
         # regardless of how its own Host/Origin allowlist is configured.
