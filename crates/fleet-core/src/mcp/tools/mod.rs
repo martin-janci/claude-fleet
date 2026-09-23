@@ -48,6 +48,7 @@ mod session_ops;
 mod support;
 #[cfg(test)]
 mod tests;
+mod views;
 
 // `rmcp::model::*` also exports a `CancelTaskParams`. Name ours explicitly:
 // an explicit import outranks both globs, here and in every child module
@@ -55,6 +56,7 @@ mod tests;
 use params::CancelTaskParams;
 use params::*;
 use support::*;
+use views::*;
 
 pub use support::tool_deadline;
 

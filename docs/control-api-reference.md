@@ -139,13 +139,13 @@ List the catalog's layer definitions (layers/*.yaml) and each host's role + acti
 
 List discovered projects (repos fleet can spawn sessions in). Slim rows by default (id, owner, repo, worktree_count, last_session_at); summary=false returns the full nested worktree tree, which is large — pair it with limit.
 
-Parameters: `limit`, `summary`
+Parameters: `has_sessions`, `limit`, `summary`
 
 ### `list_sessions`
 
 List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, tag, include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all); `force` runs a reconcile pass first instead of serving the recent cache. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null when the session has no PR or its PR has no checks).
 
-Parameters: `claude_status`, `force`, `host_alias`, `include_lost`, `limit`, `project_id`, `status`, `summary`, `tag`
+Parameters: `claude_status`, `force`, `host_alias`, `include_lost`, `limit`, `project_id`, `status`, `summary`, `tag`, `view`
 
 ### `list_tasks`
 

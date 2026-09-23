@@ -15,9 +15,19 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit(
             "list_projects",
-            &format!("summary={} limit={:?}", p.summary, p.limit),
+            &format!(
+                "summary={} limit={:?} has_sessions={}",
+                p.summary, p.limit, p.has_sessions
+            ),
         );
-        let mut trees = projects::list_projects(&self.store).map_err(to_mcp_err)?;
+        let mut trees = if p.has_sessions {
+            projects::list_projects_with_sessions(&self.store)
+        } else {
+            projects::list_projects(&self.store)
+        }
+        .map_err(to_mcp_err)?;
+        // After the filter, so a capped page is a page of matches — the same
+        // order `list_sessions` applies its own `limit` in.
         if let Some(n) = p.limit {
             trees.truncate(n);
         }

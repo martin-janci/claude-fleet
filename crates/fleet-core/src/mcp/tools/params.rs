@@ -52,6 +52,12 @@ pub struct ListSessionsParams {
     /// Only return sessions carrying this tag (see `set_session_tags`).
     #[serde(default)]
     pub tag: Option<String>,
+    /// Named row projection for a client that draws fixed columns: "phone"
+    /// keeps only the 14 a phone's session list reads (-64% of the full
+    /// answer on a 56-row fleet). It decides the row shape, so `summary` no
+    /// longer applies; an unknown name is refused. Omit for the full answer.
+    #[serde(default)]
+    pub view: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -440,6 +446,10 @@ pub struct ListProjectsParams {
     /// roughly ten times a summary row.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Keep only projects holding a live session — the ones `list_sessions`
+    /// rows can name. Applied before `limit`. Default false: every project.
+    #[serde(default)]
+    pub has_sessions: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
