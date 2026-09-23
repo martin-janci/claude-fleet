@@ -48,6 +48,11 @@ const OPS_KINDS = new Set([
   'playbook_applied',
   'mcp_call',
   'message_sent',
+  // Fix round 1 (task-13-14): the sender's notice that a message it sent
+  // was never read before the recipient's tombstone window elapsed
+  // (`Store::sweep_retired_participants`) — without this it fell into the
+  // generic "other" chip.
+  'message_undeliverable',
 ]);
 
 const TURN_KINDS = new Set([
@@ -56,13 +61,26 @@ const TURN_KINDS = new Set([
   'compact_started',
   'compact_done',
   'turn_done',
+  // Final review, Minor 6: the `Stop` hook held the turn open for a pending
+  // question (`service/hooks.rs` `bookkeep_stop_streak`) — a turn edge, and
+  // the only place a held turn is visible at all.
+  'stop_blocked_for_message',
+]);
+
+/** Kinds that are a failure in their own right, whatever their wording. */
+const ERROR_KINDS = new Set([
+  // `STOP_BLOCK_STREAK_MAX` tripped: blocking stops and the message falls
+  // back to `additionalContext`. The design calls for this to be a VISIBLE
+  // failure, which a generic "other" chip is not.
+  'stop_block_cap_reached',
 ]);
 
 /** Which chip an event kind belongs to. `status_change` into `failed` or
  *  `blocked` counts as an error; any other status change is a turn edge. */
 export function eventCategory(e: Pick<SessionEvent, 'kind' | 'detail'>): EventCategory {
   const k = e.kind;
-  if (k === 'stuck' || k.endsWith('_failed') || k.includes('error')) return 'errors';
+  if (k === 'stuck' || k.endsWith('_failed') || k.includes('error') || ERROR_KINDS.has(k))
+    return 'errors';
   if (k === 'status_change') {
     const d = (e.detail ?? '').toLowerCase();
     return /\b(failed|blocked)\b/.test(d) ? 'errors' : 'turns';

@@ -181,6 +181,18 @@ impl Store {
     /// Insert one inter-session message (migration 015). `sent_at` is stamped
     /// here as the current unix epoch. Returns the new row id so the caller
     /// can include it in the pane-delivery header.
+    ///
+    /// Both ends must name an existing `sessions` row (`E_NOTFOUND`
+    /// otherwise). This is the chokepoint, not a courtesy check the callers
+    /// duplicate: `ensure_participant_for_session` below mints an identity
+    /// for whatever id it is handed, nothing ever retires one whose session
+    /// does not exist, so the 7-day sweep never reaches it and its sender is
+    /// never told. And because `sessions.id` is REUSED, the next session to
+    /// take that id resolves the same participant and has the dead
+    /// recipient's mail injected into its prompt context by
+    /// `list_undelivered_for_session` — not merely made visible via `inbox`.
+    /// `service::messages::send_message` checks both ends itself;
+    /// `service::tasks::complete_task` (best-effort, `let _ =`) did not.
     pub fn insert_message(
         &self,
         from_session_id: i64,
@@ -190,13 +202,45 @@ impl Store {
         reply_to: Option<i64>,
     ) -> Result<i64, crate::ipc_error::IpcError> {
         let at = now_unix();
+        for (label, id) in [("from", from_session_id), ("to", to_session_id)] {
+            let exists: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(crate::ipc_error::IpcError::new(
+                    crate::ipc_error::codes::E_NOTFOUND,
+                    format!("{label} session {id} not found"),
+                ));
+            }
+        }
+        let from_p = self.ensure_participant_for_session(from_session_id)?;
+        let to_p = self.ensure_participant_for_session(to_session_id)?;
         self.conn.execute(
             "INSERT INTO session_messages \
-                   (from_session_id, to_session_id, body, kind, sent_at, reply_to) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![from_session_id, to_session_id, body, kind, at, reply_to],
+               (from_session_id, to_session_id, from_participant_id, to_participant_id, \
+                body, kind, sent_at, reply_to) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                from_session_id,
+                to_session_id,
+                from_p,
+                to_p,
+                body,
+                kind,
+                at,
+                reply_to
+            ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        // `insert_message` is also called inside `Store::atomically`, where a
+        // rollback must announce nothing. `notify_waiters()` only wakes
+        // waiters, which then re-read the table and find nothing — a
+        // spurious wake, never a false message, so signalling here
+        // unconditionally (rather than deferring it until commit) is safe.
+        self.message_notify.notify_waiters();
+        Ok(id)
     }
 
     /// One message by id (any recipient). Used to validate `reply_to`.
@@ -214,8 +258,38 @@ impl Store {
             .map_err(crate::ipc_error::IpcError::from)
     }
 
+    /// True when `participant_id` is either end of message `id`.
+    ///
+    /// The durable way to ask "did this endpoint take part in that thread?":
+    /// `from_session_id` / `to_session_id` name the `sessions` row as it was
+    /// when the message was sent, and a move replaces that row, so a
+    /// participant comparison is the only one that survives one. False for a
+    /// message that does not exist, so a caller that already checked
+    /// existence keeps its own `E_NOTFOUND` wording.
+    pub fn message_involves_participant(
+        &self,
+        id: i64,
+        participant_id: i64,
+    ) -> Result<bool, crate::ipc_error::IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_messages \
+             WHERE id = ?1 AND (from_participant_id = ?2 OR to_participant_id = ?2))",
+            rusqlite::params![id, participant_id],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Newest-first messages addressed to `to_session_id`, capped at `limit`.
     /// When `unread_only`, only rows whose `read_at IS NULL` are returned.
+    ///
+    /// Resolved through the participant, not `to_session_id` (fix round 1,
+    /// Important 2): `sessions.id` has no AUTOINCREMENT, so a killed
+    /// session's numeric id can be reused by a later, unrelated session — a
+    /// raw `to_session_id` match would then hand that new session the dead
+    /// one's mail (and let it mark that mail read, silencing the real
+    /// sender's `message_undeliverable`). Matching `list_undelivered_for_session`
+    /// also means a moved session can read mail carried across the move, not
+    /// just have it delivered to a hook.
     pub fn list_inbox(
         &self,
         to_session_id: i64,
@@ -229,12 +303,47 @@ impl Store {
         };
         let sql = format!(
             "SELECT {MESSAGE_COLUMNS} FROM session_messages \
-             WHERE to_session_id = ?1{unread} \
+             WHERE to_participant_id = (SELECT id FROM participants WHERE session_id = ?1){unread} \
              ORDER BY sent_at DESC, id DESC LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![to_session_id, limit], map_message_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The newest inbox message for `session_id` with `id > after_id`, or
+    /// `None`. Purely id-ordered — `id`, unlike `sent_at`, is monotonic by
+    /// construction (`INTEGER PRIMARY KEY`), so a waiter that only needs to
+    /// know "is there anything newer than the last one I saw" can answer
+    /// that without depending on the wall clock: a clock regression (an NTP
+    /// step, a VM resume) can shift `sent_at` without touching `id`, and a
+    /// `sent_at`-ordered scan could then hide a genuinely newer row for the
+    /// rest of a wait's timeout. Used by [`crate::service::messages::wait_for_reply`].
+    ///
+    /// Resolved through the participant, not `session_id` (fix round 1,
+    /// Important 2 — see [`Self::list_inbox`]'s doc comment for why a raw
+    /// session id is unsafe here too: a fresh `wait_for_reply` call passes
+    /// `after_id = 0`, which would otherwise match every message ever
+    /// addressed to a reused numeric id).
+    pub fn newest_inbox_message_after(
+        &self,
+        session_id: i64,
+        after_id: i64,
+    ) -> Result<Option<SessionMessage>, crate::ipc_error::IpcError> {
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM session_messages \
+             WHERE to_participant_id = (SELECT id FROM participants WHERE session_id = ?1) \
+               AND id > ?2 \
+             ORDER BY id DESC LIMIT 1"
+        );
+        self.conn
+            .query_row(
+                &sql,
+                rusqlite::params![session_id, after_id],
+                map_message_row,
+            )
+            .optional()
+            .map_err(crate::ipc_error::IpcError::from)
     }
 
     /// Every event of kind `opened` that no LATER event of kind `closed` on
@@ -262,9 +371,20 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Mark a set of inbox messages as read. Only rows whose `to_session_id`
-    /// matches `recipient` are updated — never mark someone else's mail.
-    /// Returns the number of rows that flipped from unread to read.
+    /// Mark a set of inbox messages as read. Only rows whose recipient
+    /// PARTICIPANT resolves from `recipient`'s current session id are
+    /// updated — never mark someone else's mail. Returns the number of rows
+    /// that flipped from unread to read.
+    ///
+    /// Resolved through the participant, not `to_session_id` (fix round 1,
+    /// Important 2 — see [`Self::list_inbox`]'s doc comment): a raw
+    /// `to_session_id` match would let a session that reused a dead
+    /// session's numeric id mark the dead session's mail read, silencing
+    /// the real sender's `message_undeliverable`; and would refuse a moved
+    /// session's attempt to mark its own carried mail read (the column
+    /// still names the pre-move row), producing a false
+    /// `message_undeliverable` on the sender 7 days later for mail that was
+    /// in fact delivered and read.
     pub fn mark_messages_read(
         &self,
         ids: &[i64],
@@ -276,10 +396,53 @@ impl Store {
         let at = now_unix();
         let sql = format!(
             "UPDATE session_messages SET read_at = ?1 \
-             WHERE to_session_id = ?2 AND read_at IS NULL AND id IN ({phs})",
+             WHERE to_participant_id = (SELECT id FROM participants WHERE session_id = ?2) \
+               AND read_at IS NULL AND id IN ({phs})",
             phs = in_clause(ids.len())
         );
         let params = params_then(rusqlite::params![at, recipient], ids);
+        Ok(self.conn.execute(&sql, params.as_slice())?)
+    }
+
+    /// Messages waiting to be handed to `session_id`'s next hook response,
+    /// OLDEST first — delivery replays conversation order, where the inbox
+    /// shows the newest first.
+    ///
+    /// Resolved through the participant, not `to_session_id`, so a message
+    /// addressed before a `move_session` still reaches the moved session.
+    pub fn list_undelivered_for_session(
+        &self,
+        session_id: i64,
+        limit: i64,
+    ) -> Result<Vec<SessionMessage>, crate::ipc_error::IpcError> {
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM session_messages \
+             WHERE to_participant_id = (SELECT id FROM participants WHERE session_id = ?1) \
+               AND delivered_at IS NULL \
+             ORDER BY sent_at ASC, id ASC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![session_id, limit], map_message_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Stamp `delivered_at` on rows that do not have it yet. "Handed to a hook
+    /// response", never "the model read it" — there is no ack. Returns how
+    /// many rows flipped, so a second call reports 0.
+    pub fn mark_messages_delivered(
+        &self,
+        ids: &[i64],
+    ) -> Result<usize, crate::ipc_error::IpcError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let at = now_unix();
+        let sql = format!(
+            "UPDATE session_messages SET delivered_at = ?1 \
+             WHERE delivered_at IS NULL AND id IN ({phs})",
+            phs = in_clause(ids.len())
+        );
+        let params = params_then(rusqlite::params![at], ids);
         Ok(self.conn.execute(&sql, params.as_slice())?)
     }
 }
@@ -287,6 +450,119 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seed(s: &Store, name: &str) -> i64 {
+        s.upsert_host("local").unwrap();
+        s.upsert_session(name, "local", None, None, 0, 0, "running", None)
+            .unwrap()
+    }
+
+    /// Final review, Important 2: a participant must never exist for a
+    /// session that does not. `ensure_participant_for_session` mints one for
+    /// any id it is handed, nothing retires it, and `sessions.id` is REUSED —
+    /// so a later session taking that id inherits the dead requester's mail
+    /// and has it injected into its prompt context. `insert_message` is the
+    /// one chokepoint every sender goes through (`service::tasks::complete_task`
+    /// does not check existence itself), so it validates here.
+    #[test]
+    fn insert_message_refuses_a_session_that_does_not_exist() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let gone = 4242;
+        let err = s
+            .insert_message(a, gone, "hi", "message", None)
+            .unwrap_err();
+        assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND, "{err:?}");
+        let err = s
+            .insert_message(gone, a, "hi", "message", None)
+            .unwrap_err();
+        assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND, "{err:?}");
+        assert!(
+            s.participant_for_session(gone).unwrap().is_none(),
+            "a refused insert must not have minted an identity for a dead session"
+        );
+        assert!(
+            s.list_inbox(gone, false, 10).unwrap().is_empty(),
+            "and nothing may be addressed to it"
+        );
+    }
+
+    #[test]
+    fn undelivered_is_oldest_first_and_excludes_delivered_rows() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        s.ensure_participant_for_session(b).unwrap();
+        let m1 = s.insert_message(a, b, "one", "message", None).unwrap();
+        let m2 = s.insert_message(a, b, "two", "message", None).unwrap();
+
+        let got = s.list_undelivered_for_session(b, 10).unwrap();
+        assert_eq!(
+            got.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![m1, m2],
+            "delivery order is oldest first, unlike the newest-first inbox"
+        );
+
+        assert_eq!(s.mark_messages_delivered(&[m1]).unwrap(), 1);
+        let got = s.list_undelivered_for_session(b, 10).unwrap();
+        assert_eq!(got.iter().map(|m| m.id).collect::<Vec<_>>(), vec![m2]);
+    }
+
+    #[test]
+    fn marking_delivered_does_not_mark_read() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        s.ensure_participant_for_session(b).unwrap();
+        let m = s.insert_message(a, b, "hi", "message", None).unwrap();
+        s.mark_messages_delivered(&[m]).unwrap();
+        let row = s.get_message(m).unwrap().unwrap();
+        assert_eq!(row.read_at, None, "delivered is not read");
+        assert_eq!(
+            s.list_inbox(b, true, 10).unwrap().len(),
+            1,
+            "a delivered message is still unread in the inbox"
+        );
+    }
+
+    #[test]
+    fn mark_delivered_is_idempotent() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        s.ensure_participant_for_session(b).unwrap();
+        let m = s.insert_message(a, b, "hi", "message", None).unwrap();
+        assert_eq!(s.mark_messages_delivered(&[m]).unwrap(), 1);
+        assert_eq!(
+            s.mark_messages_delivered(&[m]).unwrap(),
+            0,
+            "a second stamp changes nothing"
+        );
+    }
+
+    #[test]
+    fn insert_message_fills_the_participant_columns() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let m = s.insert_message(a, b, "hi", "message", None).unwrap();
+        let (from_p, to_p): (Option<i64>, Option<i64>) = s
+            .conn
+            .query_row(
+                "SELECT from_participant_id, to_participant_id FROM session_messages WHERE id=?1",
+                rusqlite::params![m],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            from_p,
+            Some(s.participant_for_session(a).unwrap().unwrap().id)
+        );
+        assert_eq!(
+            to_p,
+            Some(s.participant_for_session(b).unwrap().unwrap().id)
+        );
+    }
 
     #[test]
     fn unresolved_events_are_the_opened_ones_no_later_close_resolved() {
@@ -445,6 +721,14 @@ mod tests {
     #[test]
     fn session_messages_inbox_roundtrip_and_mark_read() {
         let s = Store::open_in_memory().expect("open");
+        // The ids 1/5/9 below are REAL session rows now: `insert_message`
+        // validates that both ends exist (final review, Important 2), and
+        // this test asserts store mechanics, not the absence of that check.
+        // `sessions.id` starts at 1 and increments, so seeding nine rows
+        // makes 1, 5 and 9 exactly the rows these ids name.
+        for i in 1..=9 {
+            seed(&s, &format!("s{i}"));
+        }
         // Two messages to session 5, one decoy to session 9.
         let m1 = s.insert_message(1, 5, "hello", "message", None).unwrap();
         let m2 = s.insert_message(2, 5, "second", "task", Some(m1)).unwrap();
@@ -479,11 +763,114 @@ mod tests {
     #[test]
     fn messages_carry_reply_to() {
         let s = Store::open_in_memory().unwrap();
+        // Real rows for the same reason as
+        // `session_messages_inbox_roundtrip_and_mark_read` above.
+        for i in 1..=5 {
+            seed(&s, &format!("s{i}"));
+        }
         let m1 = s.insert_message(1, 5, "q", "message", None).unwrap();
         let m2 = s.insert_message(5, 1, "a", "reply", Some(m1)).unwrap();
         assert_eq!(s.get_message(m2).unwrap().unwrap().reply_to, Some(m1));
         assert_eq!(s.get_message(m1).unwrap().unwrap().reply_to, None);
         assert!(s.get_message(999).unwrap().is_none());
         assert_eq!(s.list_inbox(1, false, 10).unwrap()[0].reply_to, Some(m1));
+    }
+
+    /// Fix round 1, Important 2 (the reused-id half). Replaces the
+    /// assertion Task 13's rewrites dropped without a replacement
+    /// (`list_inbox(dead).is_empty()`, which used to hold only because the
+    /// old code hard-deleted a killed session's mail outright). `sessions.id`
+    /// has no AUTOINCREMENT, so a killed session's numeric id can be reused
+    /// by a later, unrelated session; without resolving through the
+    /// participant, that new session would see — and be able to mark read —
+    /// the dead session's mail, silencing the real sender's notice.
+    #[test]
+    fn a_session_reusing_a_killed_ids_row_sees_no_mail() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let m = s
+            .insert_message(a, b, "for the old beta", "message", None)
+            .unwrap();
+        s.delete_session(b).unwrap();
+
+        // `beta` was the highest-numbered row, so SQLite's ordinary
+        // max(rowid)+1 allocation reuses its exact id for the next insert
+        // with no explicit id — this assertion is the whole point of the
+        // test, not incidental.
+        let reused = seed(&s, "beta-reincarnated");
+        assert_eq!(
+            reused, b,
+            "the new row must reuse the old numeric id for this test to mean anything"
+        );
+
+        assert!(
+            s.list_inbox(reused, false, 10).unwrap().is_empty(),
+            "a session reusing a killed id must not see the dead session's mail"
+        );
+        assert_eq!(
+            s.mark_messages_read(&[m], reused).unwrap(),
+            0,
+            "and must not be able to mark it read either"
+        );
+        assert_eq!(
+            s.get_message(m).unwrap().unwrap().read_at,
+            None,
+            "the original message is untouched"
+        );
+    }
+
+    /// Fix round 1, Important 2 (the false-undeliverable half). A moved
+    /// session must be able to read and mark read the mail carried across
+    /// the move via the ORDINARY inbox API (`list_inbox`/
+    /// `mark_messages_read`), not just have it handed to a hook via
+    /// `list_undelivered_for_session`/`mark_messages_delivered` — otherwise
+    /// the mail is stuck permanently unread from the moved session's own
+    /// point of view, and a later kill + the GC retention sweep produces a
+    /// false `message_undeliverable` on the sender for mail that was in
+    /// fact delivered and read.
+    #[test]
+    fn a_moved_sessions_carried_mail_is_readable_and_marking_it_read_prevents_a_false_undeliverable_notice(
+    ) {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let src = seed(&s, "worker");
+        let dst = seed(&s, "worker-moved");
+        let m = s
+            .insert_message(a, src, "follow me", "message", None)
+            .unwrap();
+        let p = s.participant_for_session(src).unwrap().unwrap().id;
+
+        // What finalise does: re-point, then kill the source row.
+        s.repoint_participant(p, dst).unwrap();
+        s.delete_session(src).unwrap();
+
+        // The moved session can see its carried mail through the ordinary
+        // inbox, and mark it read.
+        let inbox = s.list_inbox(dst, false, 10).unwrap();
+        assert_eq!(inbox.iter().map(|x| x.id).collect::<Vec<_>>(), vec![m]);
+        assert_eq!(
+            s.mark_messages_read(&[m], dst).unwrap(),
+            1,
+            "the moved session must be able to mark its own carried mail read"
+        );
+
+        // Time passes: the moved session itself is later killed, and the
+        // retention sweep runs well past the window.
+        s.delete_session(dst).unwrap();
+        s.conn
+            .execute(
+                "UPDATE participants SET retired_at = retired_at - ?1 WHERE retired_at IS NOT NULL",
+                rusqlite::params![crate::store::RETIRED_RETENTION_SECS + 60],
+            )
+            .unwrap();
+        s.sweep_retired_participants(now_unix(), crate::store::RETIRED_RETENTION_SECS)
+            .unwrap();
+
+        let ev = s.list_session_events(a, 10).unwrap();
+        assert!(
+            !ev.iter().any(|e| e.kind == "message_undeliverable"),
+            "mail that was actually delivered and read must never produce a false undeliverable notice: {ev:?}"
+        );
     }
 }

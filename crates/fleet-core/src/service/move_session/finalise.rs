@@ -13,7 +13,7 @@
 
 use std::sync::Mutex;
 
-use crate::ipc_error::{codes, IpcError};
+use crate::ipc_error::{codes, lock, IpcError};
 use crate::store::Store;
 
 use super::{carry, locate_on, Located, MoveHooks, EVENT_MOVED};
@@ -113,18 +113,63 @@ pub(super) async fn finalise_source(
                 )
             })
             .unwrap_or((None, None));
-        hooks
+        // The address embeds the host alias and the row id changes on a
+        // move, so the durable thing is the participant: re-point it BEFORE
+        // the source is killed, and every message already addressed to this
+        // session follows to the target instead of being tombstoned with the
+        // source row (see `store::sessions::delete_session`). No participant
+        // exists when nothing was ever addressed to the source — nothing to
+        // carry, so this is a no-op then.
+        let repointed: Option<i64> = {
+            let s = lock(store)?;
+            match s.participant_for_session(a.source_row_id)? {
+                Some(p) => {
+                    s.repoint_participant(p.id, a.target_row_id)
+                        .map_err(|e| tag_step("re-pointing the participant", e))?;
+                    Some(p.id)
+                }
+                None => None,
+            }
+        };
+        if let Err(e) = hooks
             .kill_tmux_session(store, a.source_host, a.source_tmux_name)
             .await
-            .map_err(|e| {
-                tag_step(
-                    &format!(
-                        "killing the source {} on {}",
-                        a.source_tmux_name, a.source_host
+        {
+            // The kill failed, so BOTH sessions are alive and the caller is
+            // about to report `E_MOVE_PARTIAL` — a state that can last hours,
+            // until `resolve_move` runs. The re-point above must not stand
+            // through it: with the identity on the target, the still-running
+            // source has no participant at all, its `list_inbox` reads empty,
+            // and every message addressed to it is delivered to the target
+            // instead. Put it back. (A collision merge the re-point may have
+            // performed is not undone — the target's own mail has already
+            // been folded into this identity, and re-splitting it would be
+            // guesswork; it follows the identity back to the source, which is
+            // where the live endpoint is.) A failure here can only be logged:
+            // the kill error is the one that has to reach the caller.
+            if let Some(pid) = repointed {
+                match lock(store).and_then(|s| s.repoint_participant(pid, a.source_row_id)) {
+                    Ok(()) => tracing::info!(
+                        participant = pid,
+                        session_id = a.source_row_id,
+                        "move_session: the kill failed, so the participant is back on the source"
                     ),
-                    e,
-                )
-            })?;
+                    Err(re) => tracing::warn!(
+                        participant = pid,
+                        session_id = a.source_row_id,
+                        error = %re.message,
+                        "move_session: the kill failed AND the participant could not be put back; mail for the source lands on the target until resolve_move runs"
+                    ),
+                }
+            }
+            return Err(tag_step(
+                &format!(
+                    "killing the source {} on {}",
+                    a.source_tmux_name, a.source_host
+                ),
+                e,
+            ));
+        }
         source_killed = true;
         // One last look: a write between the final check and the kill means
         // the target may lack the source's last turn. Nothing is left to

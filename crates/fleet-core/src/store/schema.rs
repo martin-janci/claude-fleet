@@ -105,6 +105,19 @@ fn sessions_has_row_version(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 043: `session_messages` already has
+/// its `to_participant_id` column, and `ALTER TABLE ... ADD COLUMN` would
+/// fail again. See [`Migration`].
+fn messages_have_participant_columns(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('session_messages') \
+         WHERE name = 'to_participant_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -354,6 +367,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/042_row_version_and_prompt_ack.sql"),
         already_applied: Some(sessions_has_row_version),
     },
+    // `participants` (CREATE TABLE IF NOT EXISTS, re-runnable) plus four
+    // ADD COLUMNs, which are not — so the same guard shape as 038-042.
+    Migration {
+        version: 43,
+        sql: include_str!("../../migrations/043_participants.sql"),
+        already_applied: Some(messages_have_participant_columns),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -379,9 +399,13 @@ impl Migration {
     }
 }
 
-/// The schema version a fully migrated database reports.
+/// The schema version a fully migrated database reports. `pub(crate)` (not
+/// `pub`) so other crate-internal tests — e.g. `service::health`'s — can
+/// assert against the authoritative value instead of a literal that rots on
+/// every new migration; re-exported from `store::mod` since `schema` itself
+/// is a private submodule.
 #[cfg(test)]
-const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
+pub(crate) const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
 
 impl Store {
     pub(super) fn migrate(&self) -> Result<()> {
@@ -569,6 +593,7 @@ mod tests {
         "client_tokens",
         "conversations",
         "error_reports",
+        "participants",
     ];
 
     #[test]
@@ -622,6 +647,7 @@ mod tests {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         };
         assert!(store.has_table("handoffs").unwrap());
         assert!(session_columns(&store).contains(&"frozen_scrollback".to_string()));
@@ -688,6 +714,7 @@ mod tests {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         };
         store.migrate().unwrap();
         let (n, src, started): (i64, String, i64) = store
@@ -914,6 +941,7 @@ mod tests {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -1822,6 +1850,7 @@ mod tests {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         };
         assert_eq!(s.schema_version().unwrap(), SEED_AT);
         assert!(!s.has_table("worktree_parent_fingerprints").unwrap());
@@ -1865,5 +1894,112 @@ mod tests {
         assert_eq!(row.started_at, None);
         assert_eq!(row.last_turn_at, None);
         assert_eq!(row.ci_status, None);
+    }
+
+    // ── migration 043: participants, delivery columns, block streak ──
+
+    /// Migration 043's shape: `participants` exists with `retired_at`, the
+    /// delivery columns land on `session_messages`, and `sessions` gets its
+    /// block-streak counter. Deliberately shape-only — the empty in-memory
+    /// store has no sessions, so a join against `participants` would be
+    /// vacuous; the backfill itself is proved by
+    /// `migration_043_backfills_existing_sessions` below.
+    #[test]
+    fn migration_043_creates_participants_shape() {
+        let s = Store::open_in_memory().unwrap();
+        for (table, col) in [
+            ("participants", "retired_at"),
+            ("session_messages", "from_participant_id"),
+            ("session_messages", "to_participant_id"),
+            ("session_messages", "delivered_at"),
+            ("sessions", "stop_block_streak"),
+        ] {
+            let n: i64 = s
+                .conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{table}.{col} missing after migration 043");
+        }
+    }
+
+    /// A session that predates migration 043 gets a `participants` row of
+    /// `kind='session'`, not retired, once 043 runs — the whole point of the
+    /// backfill (a message can address it). Also proves the backfill
+    /// `INSERT ... WHERE id NOT IN (SELECT session_id FROM participants
+    /// ...)` is itself idempotent: re-running just that statement, and
+    /// separately a full guarded second pass through `migrate()`, must not
+    /// duplicate the row.
+    #[test]
+    fn migration_043_backfills_existing_sessions() {
+        let old = store_at_version(42);
+        old.upsert_host("h").unwrap();
+        let sid = old
+            .upsert_session("sess", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        old.migrate().expect("043 backfill");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+
+        let (kind, retired): (String, Option<i64>) = old
+            .conn
+            .query_row(
+                "SELECT kind, retired_at FROM participants WHERE session_id = ?1",
+                rusqlite::params![sid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "session");
+        assert_eq!(retired, None);
+
+        // Re-run just the backfill INSERT (what a second pass would execute
+        // if the ADD COLUMNs were not already there to guard it out): the
+        // `WHERE id NOT IN (...)` clause must keep this a no-op.
+        old.conn
+            .execute_batch(
+                "INSERT INTO participants (kind, session_id, created_at)
+                   SELECT 'session', id, strftime('%s','now') FROM sessions
+                   WHERE id NOT IN (SELECT session_id FROM participants WHERE session_id IS NOT NULL);",
+            )
+            .unwrap();
+        let count: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM participants WHERE session_id = ?1",
+                rusqlite::params![sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "backfill INSERT ... WHERE NOT IN must not duplicate the participant"
+        );
+
+        // A full guarded second pass: roll the recorded version back and
+        // migrate again. `messages_have_participant_columns` now sees the
+        // ADD COLUMNs already applied, so 043's whole body is skipped and
+        // only its version is re-recorded — must not error or duplicate.
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 43;")
+            .unwrap();
+        old.migrate().expect("guarded second pass over 043");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let count: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM participants WHERE session_id = ?1",
+                rusqlite::params![sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "guarded second pass over 043 must not duplicate the participant"
+        );
     }
 }

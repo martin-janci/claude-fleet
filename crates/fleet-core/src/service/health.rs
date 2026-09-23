@@ -476,7 +476,9 @@ mod tests {
         let h = health_from_store(&s);
         assert_eq!(h.version, crate::app_version::get());
         assert!(h.db_ready);
-        assert_eq!(h.schema_version, 42);
+        // Track the authoritative constant, not a literal: a literal here
+        // rots every time a new migration lands (it did, at migration 043).
+        assert_eq!(h.schema_version, crate::store::LATEST_SCHEMA_VERSION);
         // Empty store → empty roll-up.
         assert_eq!(h.sessions_total, 0);
         assert_eq!(h.hosts_total, 0);

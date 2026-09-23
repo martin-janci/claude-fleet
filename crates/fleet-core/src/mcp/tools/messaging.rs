@@ -227,19 +227,12 @@ impl FleetTools {
         ok_json_compact(&rows)
     }
 
-    #[tool(
-        description = "Send a peer-to-peer message from one session to another. \
-        The message is persisted to the recipient's inbox (read with `inbox`); \
-        set `deliver: true` to ALSO type the message into the recipient's tmux \
-        pane with a `[msg #id from name@host]:` header. The inbox row is the \
-        source of truth — it lands even if the pane delivery fails or is \
-        refused into a blocked recipient. Returns \
-        JSON with the new message id and the delivery outcome. Pass reply_to \
-        (an inbox message id) to thread an answer. A per-host token must \
-        send from a session on its own host (E_FORBIDDEN). The body is \
-        prefixed with an untrusted-content marker line unless raw=true \
-        (master token only)."
-    )]
+    #[tool(description = "Send a peer-to-peer message (to_session_id or \
+        to_addr) to the recipient's inbox; deliver=true also pastes it into \
+        the pane, wake=true nudges an idle one instead. reply_to threads an \
+        answer. Per-host token needs its own host (E_FORBIDDEN); body \
+        marked untrusted unless raw=true (master only); repeat \
+        client_msg_id to avoid a double send.")]
     pub(super) async fn send_message(
         &self,
         Extension(caller): Extension<Caller>,
@@ -249,8 +242,8 @@ impl FleetTools {
         audit(
             "send_message",
             &format!(
-                "from={} to={} kind={:?} deliver={}",
-                p.from_session_id, p.to_session_id, p.kind, p.deliver
+                "from={} to={} to_addr={:?} kind={:?} deliver={} wake={}",
+                p.from_session_id, p.to_session_id, p.to_addr, p.kind, p.deliver, p.wake
             ),
         );
         // The sender must exist and, for a per-host caller, live on that
@@ -275,19 +268,111 @@ impl FleetTools {
             &caller,
             p.raw,
         )?;
+        let label = caller.label();
+        // The key is RESERVED before the send, not written after it — see
+        // the doc comment on `send_prompt`'s identical dance. Reusing
+        // `recent_sends` here (rather than a second table) means the raw
+        // `(caller, id)` pair is shared with `send_prompt` — a caller that
+        // reused one `client_msg_id` across both tools would otherwise get
+        // `send_prompt`'s cached `{ delivered, session_id, turn_seq_before
+        // }` replayed as a `send_message` "success" with no inbox row ever
+        // written. The `send_message:` prefix gives this tool its own slice
+        // of the shared map instead; `send_prompt`'s own key stays bare so
+        // its behaviour and tests are untouched.
+        let dedupe_id = p.client_msg_id.clone();
+        let dedupe_key = dedupe_id.as_deref().map(|id| format!("send_message:{id}"));
+        if let Some(key) = dedupe_key.as_deref() {
+            match lock_sends(&self.recent_sends).reserve(&label, key) {
+                Reservation::Fresh => {}
+                Reservation::Done(hit) => {
+                    audit(
+                        "send_message",
+                        &format!(
+                            "dedupe client_msg_id={}",
+                            dedupe_id.as_deref().unwrap_or("")
+                        ),
+                    );
+                    return ok_json(&hit);
+                }
+                Reservation::Pending => {
+                    audit(
+                        "send_message",
+                        &format!(
+                            "in flight client_msg_id={}",
+                            dedupe_id.as_deref().unwrap_or("")
+                        ),
+                    );
+                    return Err(mcp_err(
+                        "E_IN_FLIGHT",
+                        "a send with this client_msg_id is still in progress",
+                        None,
+                    ));
+                }
+            }
+        }
+        // From here every exit must either complete the reservation or
+        // release it: a key left `Pending` refuses the caller's own retry,
+        // which is the one thing `client_msg_id` exists to allow.
         let args = crate::service::messages::SendMessageArgs {
             from_session_id: p.from_session_id,
             to_session_id: p.to_session_id,
+            to_addr: p.to_addr,
             body,
             kind: p.kind,
             deliver: p.deliver,
             submit: p.submit,
             reply_to: p.reply_to,
+            wake: p.wake,
         };
-        let result = crate::service::messages::send_message(args, &self.store, &self.ssh)
-            .await
-            .map_err(to_mcp_err)?;
-        ok_json(&result)
+        let sent = crate::service::messages::send_message(args, &self.store, &self.ssh).await;
+        let result = match sent {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(key) = dedupe_key.as_deref() {
+                    lock_sends(&self.recent_sends).release(&label, key);
+                }
+                return Err(to_mcp_err(e));
+            }
+        };
+        let value = serde_json::to_value(&result)
+            .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+        if let Some(key) = dedupe_key.as_deref() {
+            lock_sends(&self.recent_sends).complete(&label, key, value.clone());
+        }
+        ok_json(&value)
+    }
+
+    #[tool(description = "Block until the next message arrives for a \
+        session, or timeout_s elapses (default 120, max 600) — avoids \
+        polling inbox. Returns { status: satisfied | timeout, message }. \
+        Read-only.")]
+    pub(super) async fn wait_for_reply(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<WaitForReplyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "wait_for_reply",
+            &format!(
+                "session_id={} after_message_id={:?} timeout_s={:?}",
+                p.session_id, p.after_message_id, p.timeout_s
+            ),
+        );
+        let row =
+            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        let _permit = self.long_poll_permit(&caller, "wait_for_reply")?;
+        let got = crate::service::messages::wait_for_reply(
+            &self.store,
+            row.id,
+            p.after_message_id,
+            tasks::wait_timeout(p.timeout_s),
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&serde_json::json!({
+            "status": if got.is_some() { "satisfied" } else { "timeout" },
+            "message": got,
+        }))
     }
 
     #[tool(description = "Read a session's inbox — messages sent TO \

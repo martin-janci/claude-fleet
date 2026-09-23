@@ -11,11 +11,13 @@
 pub mod account_usage;
 pub mod account_usage_poll;
 pub mod add_project;
+pub mod address;
 pub mod attachments;
 pub mod bg_sessions;
 pub mod catalog;
 pub mod clipboard;
 pub mod context;
+pub mod delivery;
 pub mod diagnostics;
 pub mod gc;
 pub mod health;

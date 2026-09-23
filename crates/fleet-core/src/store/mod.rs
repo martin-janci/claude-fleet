@@ -13,6 +13,7 @@ mod clients;
 mod conversations;
 mod hosts_accounts;
 mod layers;
+mod participants;
 mod projects;
 mod reconcile;
 mod reports;
@@ -30,8 +31,11 @@ pub use clients::{
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
+pub use participants::{ParticipantRow, RETIRED_RETENTION_SECS};
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
+#[cfg(test)]
+pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
 
 pub struct Store {
@@ -41,6 +45,15 @@ pub struct Store {
     /// pass that probed before a kill cannot re-insert its row once the kill
     /// has reaped it. Process-local on purpose — see [`reconcile::KillMemory`].
     kills: reconcile::KillMemory,
+    /// Signalled after a `session_messages` insert commits, so a waiter wakes
+    /// on arrival instead of polling.
+    ///
+    /// Deliberately NOT the event bus: only the hub builds a subscribable bus
+    /// (`BroadcastEventBus`), while the desktop's bus forwards to Svelte and
+    /// hands out no receiver. A `Notify` on the store works in every
+    /// embedding and needs no new `RowChange` variant, so no contract golden
+    /// or `events.ts` allowlist entry moves.
+    message_notify: Arc<tokio::sync::Notify>,
 }
 
 /// The store's handle on its [`EventBus`]. Normally a pass-through; inside
@@ -97,6 +110,7 @@ impl Store {
             conn,
             bus: StoreBus::new(bus),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         };
         store.migrate()?;
         Ok(store)
@@ -132,6 +146,7 @@ impl Store {
             conn,
             bus: StoreBus::new(Arc::new(crate::events::NoopEventBus)),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -142,6 +157,7 @@ impl Store {
             conn,
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         };
         store.migrate()?;
         Ok(store)
@@ -154,6 +170,7 @@ impl Store {
             conn,
             bus: StoreBus::new(bus),
             kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
         };
         store.migrate()?;
         Ok(store)
@@ -216,6 +233,14 @@ impl Store {
 
     pub fn conn_ref(&self) -> &rusqlite::Connection {
         &self.conn
+    }
+
+    /// The store's message-arrival `Notify`, so a waiter can hold the handle
+    /// across an `.await` without holding the store lock. See the field doc
+    /// on `Store::message_notify` for why this is a `Notify` and not an
+    /// event-bus subscription.
+    pub fn message_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.message_notify.clone()
     }
 
     /// Run `f` inside a single `conn.transaction()`. Used by reconcile paths

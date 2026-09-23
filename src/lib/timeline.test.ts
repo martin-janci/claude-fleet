@@ -43,6 +43,7 @@ describe('eventCategory', () => {
     expect(eventCategory(ev(7, 'safe_kill_requested'))).toBe('ops');
     expect(eventCategory(ev(8, 'mcp_call'))).toBe('ops');
     expect(eventCategory(ev(9, 'task_started'))).toBe('ops');
+    expect(eventCategory(ev(10, 'message_undeliverable'))).toBe('ops');
   });
 
   it('maps conversation lifecycle and turn/compact kinds to turns', () => {
@@ -51,6 +52,14 @@ describe('eventCategory', () => {
     expect(eventCategory(ev(3, 'compact_started'))).toBe('turns');
     expect(eventCategory(ev(4, 'compact_done'))).toBe('turns');
     expect(eventCategory(ev(5, 'turn_done'))).toBe('turns');
+  });
+
+  // Final review, Minor 6: both `Stop`-block kinds the backend writes
+  // (`service/hooks.rs` `bookkeep_stop_streak`) were uncategorised, so the
+  // design's "visible failure" for the block cap rendered as a generic chip.
+  it('categorises the Stop-block kinds', () => {
+    expect(eventCategory(ev(1, 'stop_blocked_for_message'))).toBe('turns');
+    expect(eventCategory(ev(2, 'stop_block_cap_reached'))).toBe('errors');
   });
 
   it('puts unknown kinds in other', () => {

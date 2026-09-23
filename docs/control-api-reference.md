@@ -359,9 +359,9 @@ Parameters: `host_alias`
 
 ### `send_message`
 
-Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails or is refused into a blocked recipient. Returns JSON with the new message id and the delivery outcome. Pass reply_to (an inbox message id) to thread an answer. A per-host token must send from a session on its own host (E_FORBIDDEN). The body is prefixed with an untrusted-content marker line unless raw=true (master token only).
+Send a peer-to-peer message (to_session_id or to_addr) to the recipient's inbox; deliver=true also pastes it into the pane, wake=true nudges an idle one instead. reply_to threads an answer. Per-host token needs its own host (E_FORBIDDEN); body marked untrusted unless raw=true (master only); repeat client_msg_id to avoid a double send.
 
-Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `submit`, `to_session_id`
+Parameters: `body`, `client_msg_id`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `submit`, `to_addr`, `to_session_id`, `wake`
 
 ### `send_prompt`
 
@@ -446,6 +446,12 @@ Parameters: `prompt`, `source_session_id`
 Report ESTIMATED token usage and cost per session, host and UTC day, summed from each session's Claude Code transcript (collected every usage.interval_secs). Costs are micro-USD from a built-in per-model price table (override: usage.prices_json), not a bill. total and by_host sum the live session rows, each over its whole lifetime; by_day comes from the durable daily roll-up (killed sessions included). Optional host_alias; since_secs keeps only sessions whose usage changed in the last N seconds and scopes by_day to that window (default: every session, last 30 days). Sessions are sorted by cost, at most 200. A per-host token only sees its own host. Returns JSON.
 
 Parameters: `host_alias`, `since_secs`
+
+### `wait_for_reply`
+
+Block until the next message arrives for a session, or timeout_s elapses (default 120, max 600) — avoids polling inbox. Returns { status: satisfied | timeout, message }. Read-only.
+
+Parameters: `after_message_id`, `session_id`, `timeout_s`
 
 ### `wait_for_session`
 

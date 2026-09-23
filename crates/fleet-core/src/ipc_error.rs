@@ -128,6 +128,10 @@ pub mod codes {
     pub const E_NO_TOKEN: &str = "E_NO_TOKEN";
     /// A session tried to target itself (send_message, spawn_review…).
     pub const E_SELF_TARGET: &str = "E_SELF_TARGET";
+    /// An address parsed, but names no participant in this fleet.
+    pub const E_PARTICIPANT_UNKNOWN: &str = "E_PARTICIPANT_UNKNOWN";
+    /// The participant resolved, but is tombstoned — the endpoint is gone.
+    pub const E_PARTICIPANT_RETIRED: &str = "E_PARTICIPANT_RETIRED";
     /// A safe-kill is already in progress for the session.
     pub const E_SAFE_KILL_IN_PROGRESS: &str = "E_SAFE_KILL_IN_PROGRESS";
     /// Clipboard read/write failed.

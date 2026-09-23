@@ -626,11 +626,15 @@ impl Store {
                 &format!("DELETE FROM session_events WHERE session_id IN ({phs})"),
                 rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
-            // And the messages addressed to them (an inbox nobody can read),
-            // as `delete_session` does.
+            // Tombstone the participant rather than deleting the messages
+            // addressed to them, as `delete_session` does — a hard-deleted
+            // ghost row must not silently destroy an undelivered inbox.
             tx.execute(
-                &format!("DELETE FROM session_messages WHERE to_session_id IN ({phs})"),
-                rusqlite::params_from_iter(&pre_ghost_ids),
+                &format!(
+                    "UPDATE participants SET retired_at = ?1, session_id = NULL, client_id = NULL \
+                     WHERE session_id IN ({phs}) AND retired_at IS NULL"
+                ),
+                params_then(rusqlite::params![now], &pre_ghost_ids).as_slice(),
             )?;
             tx.execute(
                 &format!("DELETE FROM sessions WHERE id IN ({phs})"),
@@ -920,7 +924,14 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_hard_delete_reaps_the_inbox_but_keeps_sent_messages() {
+    fn reconcile_hard_delete_tombstones_the_participant_but_keeps_sent_messages_and_undelivered_mail(
+    ) {
+        // Previously named `..._reaps_the_inbox_...` and asserted
+        // `list_inbox(id, ...)` was empty after the hard-delete — that
+        // assertion encoded the pre-existing defect Task 13 fixes (a reaped
+        // ghost row used to destroy every undelivered message addressed to
+        // it). The message now survives; only the participant identity is
+        // tombstoned.
         let mut store = Store::open_in_memory().unwrap();
         store.upsert_host("alpha").unwrap();
         store.upsert_host("beta").unwrap();
@@ -930,12 +941,13 @@ mod tests {
         let peer = store
             .upsert_session("peer", "beta", None, None, 1, 1, "running", None)
             .unwrap();
-        store
+        let to_gone = store
             .insert_message(peer, id, "to the gone", "message", None)
             .unwrap();
         store
             .insert_message(id, peer, "from the gone", "message", None)
             .unwrap();
+        let participant = store.participant_for_session(id).unwrap().unwrap().id;
         // Two empty reconciles: ghost, then hard-delete.
         for ts in [10, 20] {
             store
@@ -944,9 +956,11 @@ mod tests {
         }
         assert!(store.get_session_by_id(id).unwrap().is_none());
         assert!(
-            store.list_inbox(id, false, 10).unwrap().is_empty(),
-            "an inbox nobody can read goes with the row"
+            store.get_message(to_gone).unwrap().is_some(),
+            "a hard-deleted ghost row must not destroy undelivered mail"
         );
+        let p = store.participant_by_id(participant).unwrap().unwrap();
+        assert!(p.retired_at.is_some(), "the identity is tombstoned instead");
         assert_eq!(
             store.list_inbox(peer, false, 10).unwrap().len(),
             1,
