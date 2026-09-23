@@ -52,7 +52,12 @@ use serde_json::Value;
 ///   `needsAttention`;
 /// * `current_activity` — the second line;
 /// * `context_pct`, `ci_status` — the row's two trailing badges;
-/// * `last_activity_at` — the age column, and the list's sort key.
+/// * `last_activity_at` — the age column, and the list's sort key;
+/// * `pending_input` — the dialog a blocked session is waiting on, with its
+///   options. Without it the view is a list a phone can read and not act on:
+///   the one thing a pager exists for is answering that dialog, and a row
+///   that says `claude_status: "blocked"` and nothing else forces the app
+///   back to the full 52 KB answer to find out what the question was.
 ///
 /// [`super::tests`] pins this set against the serialized row so a renamed
 /// column cannot quietly fall out of the view, and pins the list itself so
@@ -69,6 +74,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "kind",
     "last_activity_at",
     "last_prompt",
+    "pending_input",
     "project_id",
     "status",
     "stuck_kind",
