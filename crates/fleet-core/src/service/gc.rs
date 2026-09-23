@@ -2,9 +2,11 @@
 //! longer than their kind's TTL. Runs from the background tick every
 //! `gc.sweep_interval_secs`. The idle-session killer itself is opt-in via
 //! `gc.enabled` (default off); the retired-participant retention sweep (see
-//! `Store::sweep_retired_participants`) is not gated on it and runs every
-//! tick regardless, so tombstoned participants and their mail never pile up
-//! on an install that has never turned GC on.
+//! `Store::sweep_retired_participants`) and the orphan read-cursor sweep
+//! (see `Store::sweep_orphan_read_cursors`) are not gated on it and run
+//! every tick regardless, so tombstoned participants and their mail, and
+//! cursors whose reader or target session is gone, never pile up on an
+//! install that has never turned GC on.
 //!
 //! Idle reference per kind (see migration 019 `idle_since`):
 //! - `bg`: `idle_since` (claude_status ∈ idle/completed/stopped), falling
@@ -236,6 +238,16 @@ pub struct GcReport {
     /// shipped outage against an older hub.
     #[serde(default)]
     pub swept_participants: usize,
+    /// Read cursors swept because their reader, or a non-NULL target
+    /// session, no longer exists (`Store::sweep_orphan_read_cursors`), this
+    /// sweep. Same not-gated-on-`gc.enabled` reasoning as
+    /// `swept_participants` above: an orphaned cursor has no one left to
+    /// read it and no retention window, so it is cleaned on every install.
+    /// `#[serde(default)]` for the same reason as `swept_participants`: this
+    /// report crosses the hub wire, and a new field without a default is a
+    /// shipped outage against an older hub.
+    #[serde(default)]
+    pub swept_read_cursors: usize,
 }
 
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
@@ -340,6 +352,15 @@ pub async fn sweep_with(
             .unwrap_or(0),
         Err(_) => 0,
     };
+    // Same best-effort, not-gated-on-`cfg.enabled` pattern as the retention
+    // sweep just above: a cursor whose reader (or non-NULL target) is gone
+    // has no one left to serve a delta to, so it is cleaned on every
+    // install regardless of whether the destructive idle-session killer is
+    // turned on.
+    report.swept_read_cursors = match store.lock() {
+        Ok(s) => s.sweep_orphan_read_cursors().unwrap_or(0),
+        Err(_) => 0,
+    };
     report
 }
 
@@ -386,6 +407,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
             safe_kill_requested = report.safe_kill_requested,
             failed = report.failed,
             swept_participants = report.swept_participants,
+            swept_read_cursors = report.swept_read_cursors,
             "[gc] sweep"
         );
     }
@@ -686,6 +708,7 @@ mod tests {
                 safe_kill_requested: 0,
                 failed: 0,
                 swept_participants: 0,
+                swept_read_cursors: 0,
             }
         );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
@@ -709,6 +732,7 @@ mod tests {
                 safe_kill_requested: 1,
                 failed: 0,
                 swept_participants: 0,
+                swept_read_cursors: 0,
             }
         );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
@@ -762,6 +786,7 @@ mod tests {
                 safe_kill_requested: 0,
                 failed: 0,
                 swept_participants: 1,
+                swept_read_cursors: 0,
             }
         );
         let s = store.lock().unwrap();
@@ -816,6 +841,7 @@ mod tests {
                 safe_kill_requested: 0,
                 failed: 0,
                 swept_participants: 1,
+                swept_read_cursors: 0,
             },
             "the retention sweep must run regardless of gc.enabled"
         );
@@ -830,6 +856,56 @@ mod tests {
         assert!(
             ev.iter().any(|e| e.kind == "message_undeliverable"),
             "the sender must learn its message was never read even on a default install: {ev:?}"
+        );
+    }
+
+    /// Task 8: orphan read-cursor retention (`Store::sweep_orphan_read_cursors`)
+    /// must run on the SAME `sweep_with` call as the mail-retention sweep,
+    /// and — like that sweep — must NOT be gated on `gc.enabled`. A cursor
+    /// whose reader session was deleted is swept; a cursor whose reader is
+    /// still alive is kept untouched; the idle-session killer stays off
+    /// (asserted via `exec.inspects == 0`, the same proof the mail-retention
+    /// disabled-gc test above uses).
+    #[tokio::test]
+    async fn sweep_reaps_orphan_read_cursors_even_when_gc_is_disabled() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let keep = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let gone = s
+                .upsert_session("gone-reader", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            let keep = s
+                .upsert_session("keep-reader", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.put_stream_cursor(gone, "session_history", "1", Some(1), 5, None, None)
+                .unwrap();
+            s.put_stream_cursor(keep, "session_history", "2", Some(2), 5, None, None)
+                .unwrap();
+            s.delete_session(gone).unwrap();
+            keep
+        };
+        let disabled = GcConfig {
+            enabled: false,
+            ..CFG
+        };
+        let exec = fake(false);
+        let report = sweep_with(&store, &exec, &disabled, now_unix()).await;
+        assert_eq!(
+            report.swept_read_cursors, 1,
+            "the orphaned cursor (gone reader) is swept"
+        );
+        assert_eq!(
+            exec.inspects.load(Ordering::SeqCst),
+            0,
+            "the session-idle killer stays off"
+        );
+        let s = store.lock().unwrap();
+        assert!(
+            s.get_read_cursor(keep, "session_history", "2")
+                .unwrap()
+                .is_some(),
+            "the live reader's cursor is kept"
         );
     }
 
