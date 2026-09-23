@@ -58,6 +58,10 @@ pub struct ListSessionsParams {
     /// longer applies; an unknown name is refused. Omit for the full answer.
     #[serde(default)]
     pub view: Option<String>,
+    /// true for only the sessions that need a person, false for only the ones
+    /// that do not. The row carries the reason.
+    #[serde(default)]
+    pub needs_attention: Option<bool>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

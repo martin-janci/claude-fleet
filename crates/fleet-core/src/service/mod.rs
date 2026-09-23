@@ -13,6 +13,7 @@ pub mod account_usage_poll;
 pub mod add_project;
 pub mod address;
 pub mod attachments;
+pub mod attention;
 pub mod bg_sessions;
 pub mod catalog;
 pub mod clipboard;
