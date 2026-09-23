@@ -6,7 +6,9 @@
 //! (see `Store::sweep_orphan_read_cursors`) are not gated on it and run
 //! every tick regardless, so tombstoned participants and their mail, and
 //! cursors whose reader or target session is gone, never pile up on an
-//! install that has never turned GC on.
+//! install that has never turned GC on. (A session delete already drops
+//! its cursors at once, through migration 044's trigger; the cursor sweep
+//! is the backstop for rows naming an id no session ever had.)
 //!
 //! Idle reference per kind (see migration 019 `idle_since`):
 //! - `bg`: `idle_since` (claude_status ∈ idle/completed/stopped), falling
@@ -356,7 +358,9 @@ pub async fn sweep_with(
     // sweep just above: a cursor whose reader (or non-NULL target) is gone
     // has no one left to serve a delta to, so it is cleaned on every
     // install regardless of whether the destructive idle-session killer is
-    // turned on.
+    // turned on. A BACKSTOP: every session delete already drops that
+    // session's cursors at once (migration 044's trigger), so this finds
+    // only rows written with an id no session ever had.
     report.swept_read_cursors = match store.lock() {
         Ok(s) => s.sweep_orphan_read_cursors().unwrap_or(0),
         Err(_) => 0,
@@ -861,11 +865,13 @@ mod tests {
 
     /// Task 8: orphan read-cursor retention (`Store::sweep_orphan_read_cursors`)
     /// must run on the SAME `sweep_with` call as the mail-retention sweep,
-    /// and — like that sweep — must NOT be gated on `gc.enabled`. A cursor
-    /// whose reader session was deleted is swept; a cursor whose reader is
-    /// still alive is kept untouched; the idle-session killer stays off
-    /// (asserted via `exec.inspects == 0`, the same proof the mail-retention
-    /// disabled-gc test above uses).
+    /// and — like that sweep — must NOT be gated on `gc.enabled`. Since
+    /// Ruling 16 a session delete drops its cursors at once (migration 044's
+    /// trigger), so a deleted reader leaves the sweep nothing; the sweep is
+    /// the backstop for a cursor naming a reader id no session ever had,
+    /// which it removes. A cursor whose reader is alive is kept; the
+    /// idle-session killer stays off (asserted via `exec.inspects == 0`,
+    /// the same proof the mail-retention disabled-gc test above uses).
     #[tokio::test]
     async fn sweep_reaps_orphan_read_cursors_even_when_gc_is_disabled() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -878,11 +884,21 @@ mod tests {
             let keep = s
                 .upsert_session("keep-reader", "local", None, None, 0, 0, "running", None)
                 .unwrap();
-            s.put_stream_cursor(gone, "session_history", "1", Some(1), 5, None, None)
+            s.put_stream_cursor(gone, "session_history", "1", None, 5, None, None)
                 .unwrap();
-            s.put_stream_cursor(keep, "session_history", "2", Some(2), 5, None, None)
+            s.put_stream_cursor(keep, "session_history", "2", None, 5, None, None)
                 .unwrap();
             s.delete_session(gone).unwrap();
+            assert!(
+                s.get_read_cursor(gone, "session_history", "1")
+                    .unwrap()
+                    .is_none(),
+                "the delete itself dropped the gone reader's cursor (trigger)"
+            );
+            // Dangling: a reader id no session row ever had — no delete
+            // fired for it, so only the sweep can find it.
+            s.put_stream_cursor(9_001, "session_history", "3", None, 5, None, None)
+                .unwrap();
             keep
         };
         let disabled = GcConfig {
@@ -893,7 +909,7 @@ mod tests {
         let report = sweep_with(&store, &exec, &disabled, now_unix()).await;
         assert_eq!(
             report.swept_read_cursors, 1,
-            "the orphaned cursor (gone reader) is swept"
+            "exactly the dangling-reader cursor is swept"
         );
         assert_eq!(
             exec.inspects.load(Ordering::SeqCst),

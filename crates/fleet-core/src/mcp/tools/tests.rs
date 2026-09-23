@@ -5430,6 +5430,72 @@ async fn list_sessions_fresh_for_answers_changed_after_a_status_change() {
     );
 }
 
+/// Ruling 16 (reader-id reuse): `sessions.id` has no AUTOINCREMENT, so a
+/// killed-and-reaped reviewer's id goes to the NEXT session created. That
+/// new session's FIRST `list_sessions fresh_for` must carry the payload —
+/// it has never read anything — not inherit the dead reviewer's hash and
+/// answer `unchanged: true, data: null`. The replacement is seeded
+/// identically (same name, host and fields) so the fleet it sees hashes to
+/// exactly what the dead reader last saw: only the cursor can make the
+/// difference.
+#[tokio::test]
+async fn a_new_session_reusing_a_dead_readers_id_gets_a_full_first_list_sessions() {
+    let s = Store::open_in_memory().unwrap();
+    // See the comment in `list_sessions_fresh_for_answers_unchanged_on_a_repeat_read`.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let reviewer = s
+        .upsert_session("reviewer", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let params = |reader: i64| {
+        let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        p.fresh_for = Some(reader);
+        p
+    };
+    let first = t.list_sessions(Parameters(params(reviewer))).await.unwrap();
+    assert_eq!(result_json(&first)["unchanged"], false);
+
+    // The reviewer is killed and reaped; a new one is spawned at once, well
+    // inside the GC sweep's interval.
+    let reborn = {
+        let store = t.store.lock().unwrap();
+        store.delete_session(reviewer).unwrap();
+        store
+            .upsert_session("reviewer", "hosta", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    assert_eq!(reborn, reviewer, "SQLite reuses the deleted highest id");
+    let inherited: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row(
+            "SELECT COUNT(*) FROM read_cursors WHERE reader_session_id = ?1",
+            rusqlite::params![reborn],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    let v = result_json(&t.list_sessions(Parameters(params(reborn))).await.unwrap());
+    assert_eq!(
+        v["unchanged"], false,
+        "a new session's FIRST read is never unchanged: {v}"
+    );
+    assert!(
+        v["data"].is_array(),
+        "its first read carries the payload: {v}"
+    );
+    assert_eq!(
+        inherited, 0,
+        "the new session must not inherit the dead reader's cursor"
+    );
+}
+
 /// The same reader, asking with two different filter sets, must never share
 /// a cursor — the second filter's first call is a first read for THAT
 /// resource key, not a continuation of the first filter's cursor.

@@ -106,8 +106,11 @@ impl Store {
     }
 
     /// Delete cursors whose reader or (non-NULL) target session no longer
-    /// exists. Immediate, no retention window: unlike undelivered mail, a
-    /// cursor has no one to inform once its reader or target is gone.
+    /// exists. No retention window: unlike undelivered mail, a cursor has no
+    /// one to inform once its reader or target is gone. A BACKSTOP: every
+    /// session delete already drops that session's cursors in the same
+    /// statement (migration 044's `trg_read_cursors_on_session_delete`), so
+    /// this finds only rows that name an id no session ever had.
     pub fn sweep_orphan_read_cursors(&self) -> Result<usize, IpcError> {
         Ok(self.conn.execute(
             "DELETE FROM read_cursors WHERE \
@@ -234,8 +237,84 @@ mod tests {
         assert_eq!(c.anchor, None);
     }
 
+    fn cursor_count(s: &Store) -> i64 {
+        s.conn
+            .query_row("SELECT COUNT(*) FROM read_cursors", [], |x| x.get(0))
+            .unwrap()
+    }
+
+    /// Ruling 16 (reader-id reuse): `sessions.id` has no AUTOINCREMENT, so
+    /// deleting the highest-id session hands that id to the NEXT session
+    /// created. Its cursors must die with the row, at once — not whenever the
+    /// GC sweep next runs — or the new session inherits a dead session's
+    /// "already read" and its first read answers `unchanged`.
     #[test]
-    fn the_sweep_removes_cursors_whose_reader_or_target_is_gone() {
+    fn a_new_session_reusing_a_deleted_readers_id_inherits_no_cursor() {
+        let s = Store::open_in_memory().unwrap();
+        let _other = seed(&s, "other");
+        let reader = seed(&s, "reviewer");
+        s.put_snapshot_cursor(reader, "list_sessions", "all", None, "h")
+            .unwrap();
+        s.put_stream_cursor(reader, "session_history", "1", Some(1), 9, None, None)
+            .unwrap();
+        s.delete_session(reader).unwrap();
+        let reborn = seed(&s, "reviewer-2");
+        assert_eq!(reborn, reader, "SQLite reuses the highest deleted id");
+        assert!(
+            s.get_read_cursor(reborn, "list_sessions", "all")
+                .unwrap()
+                .is_none(),
+            "a reused reader id must not inherit the dead reader's snapshot cursor"
+        );
+        assert!(
+            s.get_read_cursor(reborn, "session_history", "1")
+                .unwrap()
+                .is_none(),
+            "nor its stream cursor"
+        );
+    }
+
+    /// Target-id reuse: a cursor ABOUT a deleted session goes with it, at
+    /// once, without a sweep — its events are deleted too, so event ids (and
+    /// the target id itself) can be reused under the old watermark.
+    #[test]
+    fn deleting_a_target_session_drops_cursors_about_it_without_a_sweep() {
+        let s = Store::open_in_memory().unwrap();
+        let reader = seed(&s, "reader");
+        let target = seed(&s, "target");
+        s.put_stream_cursor(
+            reader,
+            "session_history",
+            &target.to_string(),
+            Some(target),
+            4,
+            None,
+            None,
+        )
+        .unwrap();
+        s.put_snapshot_cursor(reader, "list_sessions", "all", None, "h")
+            .unwrap();
+        s.delete_session(target).unwrap();
+        assert!(
+            s.get_read_cursor(reader, "session_history", &target.to_string())
+                .unwrap()
+                .is_none(),
+            "the cursor on the deleted target must be gone immediately"
+        );
+        assert!(
+            s.get_read_cursor(reader, "list_sessions", "all")
+                .unwrap()
+                .is_some(),
+            "the live reader's other cursors are untouched"
+        );
+    }
+
+    /// Every session delete path cleans up at once (the trigger), so the
+    /// sweep is now a BACKSTOP: it finds nothing after an ordinary delete,
+    /// and still removes rows that name an id with no session behind it —
+    /// e.g. a cursor written with a dangling reader or target id.
+    #[test]
+    fn deletes_clean_up_eagerly_and_the_sweep_is_a_backstop_for_dangling_ids() {
         let s = Store::open_in_memory().unwrap();
         let reader = seed(&s, "reader");
         let target = seed(&s, "target");
@@ -262,33 +341,43 @@ mod tests {
         .unwrap();
         s.put_snapshot_cursor(keep, "list_sessions", "all", None, "h")
             .unwrap();
+        assert_eq!(cursor_count(&s), 3);
+
         s.delete_session(target).unwrap();
         assert_eq!(
-            s.sweep_orphan_read_cursors().unwrap(),
-            1,
-            "only the cursor ON the gone target"
+            cursor_count(&s),
+            2,
+            "the cursor ON the gone target went with it"
         );
         s.delete_session(reader).unwrap();
+        assert_eq!(cursor_count(&s), 2, "reader's only cursor was already gone");
         assert_eq!(
             s.sweep_orphan_read_cursors().unwrap(),
             0,
-            "its only cursor was already swept"
+            "the trigger left the sweep nothing to find"
         );
-        assert!(s
-            .get_read_cursor(keep, "session_history", &keep.to_string())
-            .unwrap()
-            .is_some());
+
+        // Backstop: rows naming ids no session ever had (a dangling reader,
+        // a dangling non-NULL target) — nothing deleted a session for these,
+        // so only the sweep can find them.
+        s.put_snapshot_cursor(9_001, "list_sessions", "all", None, "h")
+            .unwrap();
+        s.put_stream_cursor(keep, "session_history", "9002", Some(9_002), 1, None, None)
+            .unwrap();
+        assert_eq!(cursor_count(&s), 4);
+        assert_eq!(
+            s.sweep_orphan_read_cursors().unwrap(),
+            2,
+            "the sweep removes the dangling reader and the dangling target"
+        );
         assert!(
             s.get_read_cursor(keep, "list_sessions", "all")
                 .unwrap()
                 .is_some(),
             "a NULL target is not an orphan — list_sessions has no target session"
         );
+
         s.delete_session(keep).unwrap();
-        assert_eq!(
-            s.sweep_orphan_read_cursors().unwrap(),
-            2,
-            "a gone READER takes all its cursors"
-        );
+        assert_eq!(cursor_count(&s), 0, "a gone READER takes all its cursors");
     }
 }

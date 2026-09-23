@@ -29,9 +29,10 @@
 -- NULL until a `fresh_for` transcript read has happened at least once.
 --
 -- `target_session_id`: the session a cursor is ABOUT (NULL for
--- list_sessions, which has none), so the GC can drop cursors whose target
--- is gone. No foreign keys, matching the rest of this schema: dangling ids
--- are a tolerated state and the sweep is what cleans them.
+-- list_sessions, which has none), so a cursor can be dropped when its target
+-- is gone. No foreign keys, matching the rest of this schema; cleanup is the
+-- trigger below, with the GC sweep (`sweep_orphan_read_cursors`) kept as a
+-- backstop for any row that names an id no session ever had.
 CREATE TABLE IF NOT EXISTS read_cursors (
   id INTEGER PRIMARY KEY,
   reader_session_id INTEGER NOT NULL,
@@ -48,5 +49,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_read_cursors_key
   ON read_cursors(reader_session_id, tool, resource_key);
 CREATE INDEX IF NOT EXISTS idx_read_cursors_target
   ON read_cursors(target_session_id) WHERE target_session_id IS NOT NULL;
+
+-- A session's cursors die WITH its row, as the reader and as the target.
+-- `sessions.id` has no AUTOINCREMENT, so SQLite hands a deleted highest id
+-- to the next session created: a reviewer killed and reaped within the GC
+-- sweep's interval would otherwise pass its cursors to a brand-new session,
+-- whose FIRST read then answers `unchanged` (or a delta) for data it never
+-- saw — a silent skip. A trigger rather than a DELETE at each call site:
+-- cycle 1 found five separate session-delete paths (`delete_session` —
+-- kill, ghost dismissal and move all end there — the reconcile ghost reap,
+-- host removal, project removal, and a test helper), and a trigger is the
+-- one place none of them, nor a future sixth, can miss.
+CREATE TRIGGER IF NOT EXISTS trg_read_cursors_on_session_delete
+AFTER DELETE ON sessions
+BEGIN
+  DELETE FROM read_cursors
+   WHERE reader_session_id = old.id OR target_session_id = old.id;
+END;
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (44);
