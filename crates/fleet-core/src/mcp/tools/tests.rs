@@ -4386,6 +4386,147 @@ async fn a_transcript_delta_pages_oldest_first_with_more_and_skips_nothing() {
     assert!(more_pages >= 2, "at least two pages must say more remains");
 }
 
+/// A turn whose opening prompt carries no `timestamp` — `ConvTurn::at` is
+/// `None`, so it cannot be an anchor.
+fn jsonl_turn_without_at(prompt: &str, reply: &str, ended_at: &str) -> String {
+    format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"user","message":{"content":prompt}}),
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":reply}]},"timestamp":ended_at}),
+    )
+}
+
+/// Seed-read a transcript, append `turns` (each already one-or-more JSONL
+/// lines), record `stops` Stop hooks, then page with `max_chars` until
+/// `unchanged` (at most 8 calls). Returns every page's text.
+async fn page_transcript_until_unchanged(
+    appended: &[String],
+    stops: usize,
+    max_chars: usize,
+) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "seed",
+            "SEED_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+    read_transcript(&t, target, reader, None).await; // anchor := "seed"
+
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    for turn in appended {
+        jsonl.push_str(turn);
+    }
+    std::fs::write(&path, &jsonl).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        for _ in 0..stops {
+            store.record_stop_hook_for_row(target).unwrap();
+        }
+    }
+    let mut pages = Vec::new();
+    for _ in 0..8 {
+        let text = read_transcript(&t, target, reader, Some(max_chars)).await;
+        if text.starts_with("(unchanged") {
+            return pages;
+        }
+        pages.push(text);
+    }
+    panic!("paging never reached unchanged in 8 calls — a `more` loop: {pages:#?}");
+}
+
+/// Ruling 17 (transcript half): a page that ends on a turn with no `at`
+/// used to store NO new anchor, so the next call re-read from the OLD one
+/// and, with `more: true`, served the same page forever. A page now never
+/// ends with `more: true` on an unanchorable turn: it is cut back to its
+/// last anchorable turn, and the cut turn opens the next page. Here the
+/// budget fits B + C (C has no `at`) but not D, so page 1 is B alone, page
+/// 2 is C + D, and every turn is served exactly once — no reset needed.
+#[tokio::test]
+async fn a_transcript_page_ending_on_an_unanchorable_turn_is_cut_back_not_looped() {
+    let long_e = format!("{}EEEE_4", "x".repeat(40));
+    let pages = page_transcript_until_unchanged(
+        &[
+            jsonl_turn(
+                "b",
+                "BBBB_1",
+                "2026-01-01T00:01:00Z",
+                "2026-01-01T00:01:01Z",
+            ),
+            jsonl_turn_without_at("c", "CCCC_2", "2026-01-01T00:02:01Z"),
+            jsonl_turn(
+                "d",
+                "DDDD_3",
+                "2026-01-01T00:03:00Z",
+                "2026-01-01T00:03:01Z",
+            ),
+            jsonl_turn("e", &long_e, "2026-01-01T00:04:00Z", "2026-01-01T00:04:01Z"),
+        ],
+        4,
+        15,
+    )
+    .await;
+    let seen: Vec<&str> = pages
+        .iter()
+        .flat_map(|p| {
+            ["BBBB_1", "CCCC_2", "DDDD_3", "EEEE_4"]
+                .into_iter()
+                .filter(move |m| p.contains(m))
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        vec!["BBBB_1", "CCCC_2", "DDDD_3", "EEEE_4"],
+        "every turn exactly once, oldest first: {pages:#?}"
+    );
+    assert!(
+        !pages.iter().any(|p| p.contains("[cursor reset")),
+        "a cut-back needs no reset: {pages:#?}"
+    );
+}
+
+/// The degenerate case: a page whose ONLY turn is unanchorable and does
+/// not fit with the next one cannot advance by cutting back. It is
+/// answered as a visible `too_far_behind` reset (the default window,
+/// `more: false`) — it terminates, and says so, never a silent loop.
+#[tokio::test]
+async fn a_transcript_page_with_no_anchorable_turn_resets_visibly_and_terminates() {
+    let long_d = format!("{}DDDD_3", "y".repeat(40));
+    let pages = page_transcript_until_unchanged(
+        &[
+            jsonl_turn(
+                "b",
+                "BBBB_1",
+                "2026-01-01T00:01:00Z",
+                "2026-01-01T00:01:01Z",
+            ),
+            jsonl_turn_without_at("c", "CCCC_2", "2026-01-01T00:02:01Z"),
+            jsonl_turn("d", &long_d, "2026-01-01T00:03:00Z", "2026-01-01T00:03:01Z"),
+        ],
+        3,
+        15,
+    )
+    .await;
+    let all = pages.join("\n=====\n");
+    assert!(all.contains("BBBB_1"), "{all}");
+    assert!(all.contains("DDDD_3"), "the newest turn is reached: {all}");
+    assert!(
+        !all.contains("CCCC_2") && all.contains("[cursor reset: too_far_behind"),
+        "C cannot be anchored or cut back to, so it is not served — and the \
+         reset SAYS so: {all}"
+    );
+    assert!(
+        !pages.last().unwrap().contains("[more:"),
+        "the last page says nothing more remains: {all}"
+    );
+}
+
 /// An anchor the read cannot locate (the file was replaced out from under
 /// it — log rotation, or simply too far behind the tail window) resets
 /// full with `too_far_behind`, never a guess at what to serve.
@@ -4960,6 +5101,92 @@ async fn session_history_with_an_unknown_fresh_for_answers_full_and_writes_no_cu
         .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 0, "an unknown fresh_for must never get a cursor row");
+}
+
+/// Ruling 17: an unknown reader (e.g. an agent still using its
+/// pre-`move_session` id) writes no cursor, so a stream paged from id 0
+/// would hand it the SAME oldest page with `more: true` on every call —
+/// and the docs tell callers to repeat until `more` is false. It gets the
+/// DEFAULT newest-first page instead (exactly what no `fresh_for` returns),
+/// `more: false`, `cursor_reset: "reader_unknown"`: it terminates, and says
+/// why.
+#[tokio::test]
+async fn session_history_with_an_unknown_reader_terminates_with_the_default_page() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    for i in 0..5 {
+        s.insert_session_event(target, "prompt_sent", Some(&i.to_string()))
+            .unwrap();
+    }
+    let t = test_tools(s);
+    let call = |fresh_for: Option<i64>| {
+        t.session_history(Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(2),
+            fresh_for,
+        }))
+    };
+    let default_page = result_json(&call(None).await.unwrap());
+    for n in 1..=2 {
+        let v = result_json(&call(Some(999_999)).await.unwrap());
+        assert_eq!(
+            v["more"], false,
+            "call {n}: an unknown reader must not be told to page forever: {v}"
+        );
+        assert_eq!(v["cursor_reset"], "reader_unknown", "call {n}: {v}");
+        assert_eq!(
+            v["data"], default_page,
+            "call {n}: the default newest-first page, as without fresh_for"
+        );
+    }
+}
+
+/// [`session_history_with_an_unknown_reader_terminates_with_the_default_page`]'s
+/// `inbox` counterpart.
+#[tokio::test]
+async fn inbox_with_an_unknown_reader_terminates_with_the_default_page() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let sender = s
+        .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    for i in 0..5 {
+        s.insert_message(sender, target, &format!("m{i}"), "chat", None)
+            .unwrap();
+    }
+    let t = test_tools(s);
+    let call = |fresh_for: Option<i64>| {
+        t.inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(2),
+                mark_read: false,
+                summary: true,
+                fresh_for,
+            }),
+        )
+    };
+    let default_page = result_json(&call(None).await.unwrap());
+    for n in 1..=2 {
+        let v = result_json(&call(Some(999_999)).await.unwrap());
+        assert_eq!(
+            v["more"], false,
+            "call {n}: an unknown reader must not be told to page forever: {v}"
+        );
+        assert_eq!(v["cursor_reset"], "reader_unknown", "call {n}: {v}");
+        assert_eq!(
+            v["data"], default_page,
+            "call {n}: the default newest-first page, as without fresh_for"
+        );
+    }
 }
 
 #[tokio::test]

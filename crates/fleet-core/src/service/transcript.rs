@@ -2026,6 +2026,74 @@ fn default_window<'a>(turns: &[&'a ConvTurn], count: usize) -> Vec<&'a ConvTurn>
     turns[start..].to_vec()
 }
 
+/// One oldest-first page of already-positioned turns (see
+/// [`render_page`]).
+struct TranscriptPage {
+    rendered: Vec<String>,
+    more: bool,
+    /// The last served turn that HAS an `at` (see [`turn_anchor`]) — an
+    /// unanchorable turn never replaces it, so a trailing `at: None` turn
+    /// leaves the anchor on the turn before it (re-served next time, never
+    /// skipped).
+    anchor: Option<TranscriptAnchor>,
+    /// `rendered.len()` at the moment `anchor` last moved: truncating
+    /// `rendered` to this cuts the page back to its last anchorable turn.
+    rendered_at_anchor: usize,
+}
+
+/// Serve `pending` OLDEST FIRST, keeping whole turns until `max_chars`
+/// would be exceeded (`more: true` when turns remain). A single turn
+/// bigger than the whole budget is served alone, truncated from the front
+/// with its own visible marker, and still passed. See
+/// [`fetch_transcript_after`].
+fn render_page(pending: &[&ConvTurn], max_chars: usize) -> TranscriptPage {
+    let mut page = TranscriptPage {
+        rendered: Vec::new(),
+        more: false,
+        anchor: None,
+        rendered_at_anchor: 0,
+    };
+    let mut used = 0usize;
+    fn advance(page: &mut TranscriptPage, turn: &ConvTurn) {
+        if let Some(a) = turn_anchor(turn) {
+            page.anchor = Some(a);
+            page.rendered_at_anchor = page.rendered.len();
+        }
+    }
+    for (idx, turn) in pending.iter().copied().enumerate() {
+        let body = render_turn_text(turn);
+        if body.is_empty() {
+            // No renderable content (a prompt with no reply yet, say) — it
+            // still counts as served: never re-offered on the next read.
+            advance(&mut page, turn);
+            continue;
+        }
+        let body_len = body.chars().count();
+        if page.rendered.is_empty() && body_len > max_chars {
+            // One turn alone is over budget: serve it truncated from the
+            // front (the end of a reply is what a reader is waiting for),
+            // with its own visible marker — and still advance past it,
+            // rather than looping forever on the same oversized turn.
+            let dropped = body_len - max_chars;
+            let tail: String = body.chars().skip(dropped).collect();
+            page.rendered.push(format!(
+                "[session_transcript: {dropped} chars dropped from the start — raise max_chars to see more]\n{tail}"
+            ));
+            advance(&mut page, turn);
+            page.more = idx + 1 < pending.len();
+            break;
+        }
+        if !page.rendered.is_empty() && used + body_len > max_chars {
+            page.more = true;
+            break;
+        }
+        used += body_len;
+        page.rendered.push(body);
+        advance(&mut page, turn);
+    }
+    page
+}
+
 /// Fetch a `session_transcript fresh_for` page, positioned by `anchor`
 /// rather than by counting turns.
 ///
@@ -2063,6 +2131,14 @@ fn default_window<'a>(turns: &[&'a ConvTurn], count: usize) -> Vec<&'a ConvTurn>
 /// `max_chars` budget is served alone, truncated from the front with its
 /// own visible marker (mirroring [`render_tail`]'s), and the anchor still
 /// passes it: unavoidable, but never silent.
+///
+/// A turn with no `at` cannot be an anchor, so a page never ENDS on one
+/// while `more` is true (that stored no new position, and the next call
+/// re-served the same page forever): the page is cut back to its last
+/// anchorable turn, and the cut turns open the next page. If the page
+/// holds no anchorable turn at all, no cut can make progress, and the read
+/// is answered as a visible `too_far_behind` reset (the default window,
+/// `more: false`) instead.
 ///
 /// Reads the same tail [`fetch_transcript`] would (`args.max_chars`
 /// governs the byte budget via [`read_bytes_for`]) and parses it with
@@ -2128,41 +2204,32 @@ pub async fn fetch_transcript_after(
         }
     };
 
-    let mut rendered: Vec<String> = Vec::new();
-    let mut used = 0usize;
-    let mut more = false;
-    let mut served_anchor: Option<TranscriptAnchor> = None;
-    for (idx, turn) in pending.iter().copied().enumerate() {
-        let body = render_turn_text(turn);
-        if body.is_empty() {
-            // No renderable content (a prompt with no reply yet, say) — it
-            // still counts as served: never re-offered on the next read.
-            served_anchor = turn_anchor(turn).or(served_anchor);
-            continue;
+    let mut page = render_page(&pending, max_chars);
+    if page.more && page.rendered.len() > page.rendered_at_anchor {
+        // The page would end with `more: true` on a turn that has no `at`
+        // — one the anchor cannot name. Storing no new anchor would make
+        // the next call re-read from the OLD one and serve this same page
+        // forever. So a page never ends there:
+        if page.anchor.is_some() {
+            // Cut it back to its last anchorable turn; the cut turns open
+            // the next page instead (re-served, never skipped).
+            page.rendered.truncate(page.rendered_at_anchor);
+        } else {
+            // Nothing in the page can be anchored, so no cut can make
+            // progress. Answer it as a visible reset instead — the default
+            // window, `more: false`, `too_far_behind` stated — which
+            // terminates and says the turns in between were not served.
+            too_far_behind = true;
+            used_default_window = true;
+            page = render_page(&default_window(&window, args.turns), max_chars);
         }
-        let body_len = body.chars().count();
-        if rendered.is_empty() && body_len > max_chars {
-            // One turn alone is over budget: serve it truncated from the
-            // front (the end of a reply is what a reader is waiting for),
-            // with its own visible marker — and still advance past it,
-            // rather than looping forever on the same oversized turn.
-            let dropped = body_len - max_chars;
-            let tail: String = body.chars().skip(dropped).collect();
-            rendered.push(format!(
-                "[session_transcript: {dropped} chars dropped from the start — raise max_chars to see more]\n{tail}"
-            ));
-            served_anchor = turn_anchor(turn);
-            more = idx + 1 < pending.len();
-            break;
-        }
-        if !rendered.is_empty() && used + body_len > max_chars {
-            more = true;
-            break;
-        }
-        used += body_len;
-        rendered.push(body);
-        served_anchor = turn_anchor(turn);
     }
+    let TranscriptPage {
+        rendered,
+        more,
+        anchor: mut served_anchor,
+        ..
+    } = page;
     if served_anchor.is_none() && used_default_window {
         // The renderable window was empty — a just-landed prompt with no
         // reply yet, nothing else in the tail. Anchor on the LAST PARSED

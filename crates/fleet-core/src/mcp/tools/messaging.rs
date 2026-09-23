@@ -234,6 +234,16 @@ impl FleetTools {
                 fresh::StreamStart::After(after) => {
                     page_events(&s, p.session_id, after, limit).map_err(to_mcp_err)?
                 }
+                // An unknown reader gets no cursor, so paging it from id 0
+                // would hand it the same oldest page with `more: true` on
+                // every call — forever, for a caller following `more`. It
+                // gets the DEFAULT newest-first page instead (what no
+                // `fresh_for` returns), `more: false`, reason stated.
+                fresh::StreamStart::Full(Some(fresh::ResetReason::ReaderUnknown)) => (
+                    s.list_session_events(p.session_id, limit)
+                        .map_err(to_mcp_err)?,
+                    false,
+                ),
                 fresh::StreamStart::Full(_) => {
                     page_events(&s, p.session_id, 0, limit).map_err(to_mcp_err)?
                 }
@@ -530,6 +540,14 @@ impl FleetTools {
                 fresh::StreamStart::After(after) => {
                     page_inbox(&s, p.session_id, after, p.unread_only, limit).map_err(to_mcp_err)?
                 }
+                // See `session_history`: an unknown reader gets the default
+                // newest-first page with `more: false`, never an endless
+                // oldest page.
+                fresh::StreamStart::Full(Some(fresh::ResetReason::ReaderUnknown)) => (
+                    s.list_inbox(p.session_id, p.unread_only, limit)
+                        .map_err(to_mcp_err)?,
+                    false,
+                ),
                 fresh::StreamStart::Full(_) => {
                     page_inbox(&s, p.session_id, 0, p.unread_only, limit).map_err(to_mcp_err)?
                 }
