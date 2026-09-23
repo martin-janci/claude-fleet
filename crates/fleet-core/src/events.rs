@@ -35,6 +35,23 @@ pub enum RowChange {
     ConversationsChanged(i64),
     HostAdded(HostRow),
     HostProbed(HostRow),
+    /// A probe that found the host exactly as it was: only `last_pinged_at`
+    /// moved.
+    ///
+    /// Reconcile probes every host every pass and `last_pinged_at` moves on
+    /// each one, so the full row could never be diffed away — the comment in
+    /// `upsert_session_in_tx` says as much. Measured on a five-host fleet
+    /// that is three `host:probed` frames of ~265 B every 25 s to every
+    /// connected client, about 108 KB/h, to say nothing changed.
+    ///
+    /// A client that does not know the name drops it (`known_event_name`),
+    /// which is the right fallback: a missed heartbeat is cosmetic, and every
+    /// real change still arrives as a full `host:probed`.
+    HostPinged {
+        alias: String,
+        last_pinged_at: i64,
+        reachable: bool,
+    },
     HostRemoved(String),
     AccountUpserted(AccountRow),
     ProjectUpdated(ProjectRow),
@@ -215,6 +232,7 @@ impl RowChange {
             RowChange::ConversationsChanged(_) => "session:conversations",
             RowChange::HostAdded(_) => "host:added",
             RowChange::HostProbed(_) => "host:probed",
+            RowChange::HostPinged { .. } => "host:pinged",
             RowChange::HostRemoved(_) => "host:removed",
             RowChange::AccountUpserted(_) => "account:upserted",
             RowChange::ProjectUpdated(_) => "project:updated",
@@ -243,6 +261,15 @@ impl RowChange {
             RowChange::SessionEventAdded(e) => to_value(e),
             RowChange::ConversationsChanged(id) => serde_json::json!({ "session_id": id }),
             RowChange::HostAdded(r) | RowChange::HostProbed(r) => to_value(r),
+            RowChange::HostPinged {
+                alias,
+                last_pinged_at,
+                reachable,
+            } => serde_json::json!({
+                "alias": alias,
+                "last_pinged_at": last_pinged_at,
+                "reachable": reachable,
+            }),
             RowChange::HostRemoved(alias) => to_value(&HostRemovedPayload {
                 alias: alias.clone(),
             }),
@@ -411,7 +438,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 19] = [
+pub const EVENT_NAMES: [&str; 20] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -419,6 +446,7 @@ pub const EVENT_NAMES: [&str; 19] = [
     "session:conversations",
     "host:added",
     "host:probed",
+    "host:pinged",
     "host:removed",
     "account:upserted",
     "project:updated",
@@ -557,6 +585,7 @@ impl EventBus for RecordingEventBus {
             | RowChange::ConversationsChanged(id) => id.to_string(),
             RowChange::SessionEventAdded(ev) => format!("{}:{}", ev.session_id, ev.kind),
             RowChange::HostAdded(r) | RowChange::HostProbed(r) => r.alias.clone(),
+            RowChange::HostPinged { alias, .. } => alias.clone(),
             RowChange::HostRemoved(alias) => alias.clone(),
             RowChange::AccountUpserted(r) => r.uuid.clone(),
             RowChange::ProjectUpdated(r) => r.id.to_string(),
@@ -747,6 +776,7 @@ mod tests {
     fn every_row_change_variant_is_subscribable() {
         fn pinned(c: &RowChange) -> &'static str {
             match c {
+                RowChange::HostPinged { .. } => pinned_name!("host:pinged"),
                 RowChange::SessionCreated(_) => pinned_name!("session:created"),
                 RowChange::SessionUpdated(_) => pinned_name!("session:updated"),
                 RowChange::SessionKilled(_) => pinned_name!("session:killed"),
