@@ -239,22 +239,37 @@ enum ResolvedBy {
 /// is the real limit; this only bounds the query.
 const DELIVERY_SCAN_LIMIT: i64 = 64;
 
-/// Pending messages for the session this hook belongs to, packed for an
-/// `additionalContext` and stamped `delivered_at` in the same lock window.
+/// Shared core of [`take_pending_delivery`] and [`take_pending_stop_delivery`],
+/// run under a SINGLE already-held lock: resolve → conversation guard → list
+/// → decide → pack → stamp, all in one window. Splitting this into two lock
+/// acquisitions (the pre-fix shape) opened three problems at once: a
+/// conversation-guard-less reset when a nested `claude -p` (inheriting
+/// `$TMUX_PANE`) found the inbox already emptied by the real block, a second
+/// `resolve_hook_row` call for the same hook, and a TOCTOU where the decision
+/// came from one lock window and the pack from a second — a message arriving
+/// between them could be answered as plain `additionalContext` (and stamped)
+/// despite having just been decided as a block. Doing it all under one guard
+/// closes all three by construction.
 ///
-/// Called from the `/hook` handler, which must answer in milliseconds: this
-/// does ONE indexed read plus one UPDATE and never touches SSH or a hub.
+/// `for_stop`: when `true` (the `Stop` path), also reads/mutates
+/// `stop_block_streak` and returns a [`StopAction`](crate::service::delivery::StopAction);
+/// when `false` (`UserPromptSubmit`), the streak is left completely
+/// untouched and the action is always `None`.
 ///
 /// Row resolution deliberately reuses [`resolve_hook_row`] with
 /// `may_rebind = false` — delivery must never be the thing that rebinds a
 /// conversation to a row; that stays the business of the events that own it.
-pub fn take_pending_delivery(
-    store: &Arc<Mutex<Store>>,
+fn take_pending_delivery_locked(
+    s: &Store,
     payload: &HookPayload,
     ctx: &HookContext,
-) -> Option<crate::service::delivery::Packed> {
-    let s = lock(store).ok()?;
-    let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
+    for_stop: bool,
+) -> Option<(
+    crate::service::delivery::Packed,
+    Option<crate::service::delivery::StopAction>,
+)> {
+    use crate::service::delivery::{stop_action, StopAction};
+    let (row, _) = resolve_hook_row(s, payload, ctx, false).ok()??;
     // A pane match only says which pane sent the hook, not that the
     // payload's conversation is the row's current one (see
     // `resolve_hook_row` / `rebind_eligible`): a `claude -p` fired from the
@@ -266,7 +281,10 @@ pub fn take_pending_delivery(
     // silent data loss. Deliver only when the payload names the row's
     // actual current conversation; a row with no id yet (a bounded delay,
     // not a loss) or a stale/foreign id fails closed, leaving the message
-    // in the inbox.
+    // in the inbox. NOTHING past this point — not a delivery, not a streak
+    // reset, not a streak bump — may happen unless this guard passes: a
+    // foreign conversation id sharing the pane (a nested `claude -p`) must
+    // never touch the streak, whether the inbox is empty or not.
     let current = row.claude_session_id.as_deref()?;
     if payload.session_id.as_deref() != Some(current) {
         return None;
@@ -275,8 +293,20 @@ pub fn take_pending_delivery(
         .list_undelivered_for_session(row.id, DELIVERY_SCAN_LIMIT)
         .ok()?;
     if pending.is_empty() {
+        if for_stop {
+            // The legitimate reset: a turn ended with nothing pending
+            // (verified — past the conversation guard above), so a later
+            // question starts a fresh streak rather than being punished for
+            // one that already resolved.
+            let _ = s.reset_stop_block_streak(row.id);
+        }
         return None;
     }
+    let streak = if for_stop {
+        s.stop_block_streak(row.id).unwrap_or(0)
+    } else {
+        0
+    };
     // `sender_label` needs a name per sender; resolve inside this same lock
     // window, and fall back to the bare id rather than failing a delivery.
     let label = |from_id: i64| match s.get_session_by_id(from_id) {
@@ -284,11 +314,26 @@ pub fn take_pending_delivery(
         _ => format!("session {from_id}"),
     };
     let packed = crate::service::delivery::pack(&pending, &label);
+    let action = for_stop.then(|| {
+        if packed.included.is_empty() {
+            // Everything pending is individually over the packer's budget:
+            // nothing gets stamped, and the `reason` a block would carry is
+            // only the "(N more...)" tail — the question itself is never in
+            // it. A block whose reason omits the thing to answer burns a
+            // turn and tells the agent nothing, so this never blocks; the
+            // message stays reachable via `inbox`.
+            StopAction::Context
+        } else {
+            stop_action(&pending, streak)
+        }
+    });
     if packed.included.is_empty() {
-        // Everything pending is individually over budget. Still report the
-        // tail so the agent learns the messages exist, but stamp nothing —
-        // they must stay deliverable via `inbox`.
-        return Some(packed);
+        // Over budget: report the tail so the agent learns the messages
+        // exist, but stamp nothing — they must stay deliverable via `inbox`.
+        if for_stop {
+            bookkeep_stop_streak(s, row.id, streak, action);
+        }
+        return Some((packed, action));
     }
     if let Err(e) = s.mark_messages_delivered(&packed.included) {
         // A failed UPDATE here means the same messages get packed and
@@ -299,11 +344,55 @@ pub fn take_pending_delivery(
             "[hook] mark_messages_delivered failed; delivery will repeat"
         );
     }
+    if for_stop {
+        bookkeep_stop_streak(s, row.id, streak, action);
+    }
+    Some((packed, action))
+}
+
+/// The streak bookkeeping for the `Stop` path of
+/// [`take_pending_delivery_locked`], factored out so both of that function's
+/// return points share it exactly.
+fn bookkeep_stop_streak(
+    s: &Store,
+    row_id: i64,
+    streak: u32,
+    action: Option<crate::service::delivery::StopAction>,
+) {
+    match action {
+        Some(crate::service::delivery::StopAction::Block) => {
+            let _ = s.bump_stop_block_streak(row_id);
+            let _ = s.insert_session_event(row_id, "stop_blocked_for_message", None);
+        }
+        Some(crate::service::delivery::StopAction::Context) => {
+            if streak >= crate::service::delivery::STOP_BLOCK_STREAK_MAX {
+                let _ = s.insert_session_event(row_id, "stop_block_cap_reached", None);
+            }
+            let _ = s.reset_stop_block_streak(row_id);
+        }
+        None => {}
+    }
+}
+
+/// Pending messages for the session this hook belongs to, packed for an
+/// `additionalContext` and stamped `delivered_at` in the same lock window.
+///
+/// Called from the `/hook` handler, which must answer in milliseconds: this
+/// does ONE indexed read plus one UPDATE and never touches SSH or a hub.
+pub fn take_pending_delivery(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<crate::service::delivery::Packed> {
+    let s = lock(store).ok()?;
+    let (packed, _) = take_pending_delivery_locked(&s, payload, ctx, false)?;
     Some(packed)
 }
 
 /// As [`take_pending_delivery`], plus what a `Stop` should do about it, and
-/// the streak bookkeeping that keeps a block from repeating forever.
+/// the streak bookkeeping that keeps a block from repeating forever — decided
+/// and stamped under the SAME lock acquisition as the delivery itself (see
+/// [`take_pending_delivery_locked`]).
 pub fn take_pending_stop_delivery(
     store: &Arc<Mutex<Store>>,
     payload: &HookPayload,
@@ -312,37 +401,12 @@ pub fn take_pending_stop_delivery(
     crate::service::delivery::Packed,
     crate::service::delivery::StopAction,
 )> {
-    use crate::service::delivery::stop_action;
-    let (row_id, streak, pending) = {
-        let s = lock(store).ok()?;
-        let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
-        let pending = s
-            .list_undelivered_for_session(row.id, DELIVERY_SCAN_LIMIT)
-            .ok()?;
-        let streak = s.stop_block_streak(row.id).unwrap_or(0);
-        (row.id, streak, pending)
-    };
-    if pending.is_empty() {
-        let s = lock(store).ok()?;
-        let _ = s.reset_stop_block_streak(row_id);
-        return None;
-    }
-    let action = stop_action(&pending, streak);
-    let packed = take_pending_delivery(store, payload, ctx)?;
     let s = lock(store).ok()?;
-    match action {
-        crate::service::delivery::StopAction::Block => {
-            let _ = s.bump_stop_block_streak(row_id);
-            let _ = s.insert_session_event(row_id, "stop_blocked_for_message", None);
-        }
-        crate::service::delivery::StopAction::Context => {
-            if streak >= crate::service::delivery::STOP_BLOCK_STREAK_MAX {
-                let _ = s.insert_session_event(row_id, "stop_block_cap_reached", None);
-            }
-            let _ = s.reset_stop_block_streak(row_id);
-        }
-    }
-    Some((packed, action))
+    let (packed, action) = take_pending_delivery_locked(&s, payload, ctx, true)?;
+    Some((
+        packed,
+        action.expect("for_stop = true always yields an action"),
+    ))
 }
 
 /// May a hook that reached `row` through its PANE move it onto a new id?
@@ -2934,5 +2998,109 @@ mod tests {
             take_pending_delivery(&store, &payload, &ctx).expect("the real session gets its mail");
         assert_eq!(packed.included.len(), 1);
         assert!(packed.text.contains("for the real session"));
+    }
+
+    /// The Critical fix-round-1 closes: a nested `claude -p` fired from the
+    /// row's own Bash tool during a blocked turn inherits `$TMUX_PANE` and
+    /// resolves to the parent row by PANE, but carries its own fresh
+    /// (foreign) conversation id. Before the fix, `take_pending_stop_delivery`'s
+    /// pre-read called `resolve_hook_row` directly and, on an EMPTY inbox
+    /// (exactly what the real block just produced by stamping the only
+    /// message), reset the streak with NO conversation guard at all — so
+    /// this nested hook could erase the very streak the cap depends on,
+    /// letting a remote sender re-trigger unbounded blocks with nothing
+    /// more than "spawn a subagent to check X".
+    #[test]
+    fn a_stop_hook_with_a_foreign_conversation_id_never_touches_the_streak() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let row = pane_session(&store, "parent3", "%13"); // claude_session_id = OLD
+        let sender = {
+            let s = store.lock().unwrap();
+            seed(&s, "other3")
+        };
+        {
+            let s = store.lock().unwrap();
+            s.insert_message(sender, row, "need an answer", "question", None)
+                .unwrap();
+        }
+        let host = host_caller("local");
+        let pane_ctx = ctx(&host, Some("%13"));
+
+        // The real interactive session's own Stop: a genuine block. Streak
+        // goes to 1, and the question gets stamped delivered — the inbox is
+        // now empty.
+        let real_payload = HookPayload {
+            session_id: Some(OLD.into()),
+            hook_event_name: Some("Stop".into()),
+            ..Default::default()
+        };
+        let (_, action) = take_pending_stop_delivery(&store, &real_payload, &pane_ctx)
+            .expect("the real question blocks the turn");
+        assert_eq!(action, crate::service::delivery::StopAction::Block);
+        {
+            let s = store.lock().unwrap();
+            assert_eq!(s.stop_block_streak(row).unwrap(), 1);
+        }
+
+        // The nested `claude -p`'s own id — NOT the row's (OLD) — sharing
+        // the same pane, firing while the inbox is empty.
+        let nested_payload = HookPayload {
+            session_id: Some(NEW.into()),
+            hook_event_name: Some("Stop".into()),
+            ..Default::default()
+        };
+        assert!(
+            take_pending_stop_delivery(&store, &nested_payload, &pane_ctx).is_none(),
+            "a foreign conversation id sharing the pane must never see a delivery"
+        );
+
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.stop_block_streak(row).unwrap(),
+            1,
+            "a foreign conversation id's empty-inbox read must never reset the streak"
+        );
+    }
+
+    /// The legitimate twin: when the payload genuinely IS the row's current
+    /// conversation and nothing is pending, the streak DOES reset to 0 — the
+    /// guard above must not be so tight that a tripped cap never recovers.
+    #[test]
+    fn a_stop_hook_with_nothing_pending_and_the_rows_own_id_resets_the_streak() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let b = {
+            let s = store.lock().unwrap();
+            let b = seed(&s, "beta3");
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_session_id='conv-b3' WHERE id=?1",
+                    rusqlite::params![b],
+                )
+                .unwrap();
+            s.bump_stop_block_streak(b).unwrap();
+            s.bump_stop_block_streak(b).unwrap();
+            b
+        };
+        let payload = HookPayload {
+            session_id: Some("conv-b3".into()),
+            hook_event_name: Some("Stop".into()),
+            ..Default::default()
+        };
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+        };
+
+        assert!(
+            take_pending_stop_delivery(&store, &payload, &ctx).is_none(),
+            "nothing pending: no delivery"
+        );
+
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.stop_block_streak(b).unwrap(),
+            0,
+            "a legitimate Stop with nothing pending must reset the streak"
+        );
     }
 }

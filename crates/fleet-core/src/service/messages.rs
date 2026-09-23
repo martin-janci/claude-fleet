@@ -294,11 +294,15 @@ pub async fn wait_for_reply(
     loop {
         {
             let s = lock(store)?;
-            let found = s
-                .list_inbox(session_id, false, 1)?
-                .into_iter()
-                .find(|m| after_message_id.is_none_or(|a| m.id > a));
-            if let Some(m) = found {
+            // Id-ordered, not `sent_at`-ordered (`list_inbox`'s order): a
+            // waiter's job is "is there anything newer than the last id I
+            // saw", and only `id` (an `INTEGER PRIMARY KEY`, monotonic by
+            // construction) can answer that without depending on the wall
+            // clock — a clock regression must never hide a genuinely newer
+            // message for the rest of the timeout.
+            if let Some(m) =
+                s.newest_inbox_message_after(session_id, after_message_id.unwrap_or(0))?
+            {
                 return Ok(Some(m));
             }
         }

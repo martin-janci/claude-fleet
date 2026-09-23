@@ -230,6 +230,34 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The newest inbox message for `session_id` with `id > after_id`, or
+    /// `None`. Purely id-ordered — `id`, unlike `sent_at`, is monotonic by
+    /// construction (`INTEGER PRIMARY KEY`), so a waiter that only needs to
+    /// know "is there anything newer than the last one I saw" can answer
+    /// that without depending on the wall clock: a clock regression (an NTP
+    /// step, a VM resume) can shift `sent_at` without touching `id`, and a
+    /// `sent_at`-ordered scan could then hide a genuinely newer row for the
+    /// rest of a wait's timeout. Used by [`crate::service::messages::wait_for_reply`].
+    pub fn newest_inbox_message_after(
+        &self,
+        session_id: i64,
+        after_id: i64,
+    ) -> Result<Option<SessionMessage>, crate::ipc_error::IpcError> {
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM session_messages \
+             WHERE to_session_id = ?1 AND id > ?2 \
+             ORDER BY id DESC LIMIT 1"
+        );
+        self.conn
+            .query_row(
+                &sql,
+                rusqlite::params![session_id, after_id],
+                map_message_row,
+            )
+            .optional()
+            .map_err(crate::ipc_error::IpcError::from)
+    }
+
     /// Every event of kind `opened` that no LATER event of kind `closed` on
     /// the same session has resolved, oldest first: `(session_id, event_id,
     /// detail)`. Generic over the two kinds — the store stays ignorant of

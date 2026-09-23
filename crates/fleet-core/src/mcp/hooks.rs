@@ -766,7 +766,13 @@ mod tests {
             let s = store.lock().unwrap();
             let a = seed(&s, "alpha");
             let b = seed(&s, "beta");
-            let body: String = "🦀".repeat(3000);
+            // A 3-byte character (not 4, like '🦀'): byte offset 2000 then
+            // falls INSIDE a character rather than coincidentally on a
+            // boundary, so a byte-slicing implementation (`&s[..2000]`)
+            // would panic or silently cut short instead of passing a
+            // `chars().count() <= 2000` check that a 4-byte char could
+            // satisfy by accident.
+            let body: String = "€".repeat(3000);
             s.insert_message(a, b, &body, "question", None).unwrap();
             s.conn_ref()
                 .execute(
@@ -798,13 +804,13 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let reason = v["reason"].as_str().unwrap();
-        assert!(
-            reason.chars().count() <= 2000,
-            "chars={}",
-            reason.chars().count()
+        assert_eq!(
+            reason.chars().count(),
+            2000,
+            "the reason is over 2000 chars pre-truncation, so it must be truncated to EXACTLY 2000, not merely under it"
         );
         assert!(
-            reason.chars().all(|c| c == '🦀' || c.is_ascii()),
+            reason.chars().all(|c| c == '€' || c.is_ascii()),
             "no split codepoint in the truncated reason"
         );
     }
