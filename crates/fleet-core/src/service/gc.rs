@@ -1,6 +1,10 @@
 //! Session GC (PROD-1): a Settings-driven sweeper that kills sessions idle
 //! longer than their kind's TTL. Runs from the background tick every
-//! `gc.sweep_interval_secs`; opt-in via `gc.enabled` (default off).
+//! `gc.sweep_interval_secs`. The idle-session killer itself is opt-in via
+//! `gc.enabled` (default off); the retired-participant retention sweep (see
+//! `Store::sweep_retired_participants`) is not gated on it and runs every
+//! tick regardless, so tombstoned participants and their mail never pile up
+//! on an install that has never turned GC on.
 //!
 //! Idle reference per kind (see migration 019 `idle_since`):
 //! - `bg`: `idle_since` (claude_status ∈ idle/completed/stopped), falling
@@ -339,8 +343,12 @@ pub async fn sweep_with(
     report
 }
 
-/// Tick entry point: sweep when `gc.enabled` and the sweep interval has
-/// elapsed since the last sweep. Cheap when disabled (one settings read).
+/// Tick entry point: sweeps once the sweep interval has elapsed since the
+/// last tick, regardless of `gc.enabled` — that flag only gates the
+/// destructive idle-session killer inside `sweep_with`, which the
+/// mail-retention pass is not, and which must run on every install (see the
+/// module doc). Not "cheap when disabled": every due tick does a real
+/// retention sweep, not just a settings read.
 pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Option<GcReport> {
     static LAST: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> =
         std::sync::LazyLock::new(|| Mutex::new(None));
