@@ -1159,6 +1159,56 @@ impl FleetTools {
     }
 }
 
+// ---- smart caching (`fresh_for`) --------------------------------------------
+
+/// The gate every `fresh_for`-aware tool applies before
+/// [`fresh::decide_stream`] even sees the stored cursor: a `fresh_for` that
+/// names no session cannot be trusted, so it is answered as a full read with
+/// [`fresh::ResetReason::ReaderUnknown`] regardless of what the cursor says.
+/// Kept pure (no store, no I/O) so it can be tested without a fixture that
+/// can serve a real read.
+pub(super) fn stream_decision(
+    reader_exists: bool,
+    stored: Option<&crate::store::CursorRow>,
+    head: Option<i64>,
+    generation: Option<i64>,
+) -> fresh::StreamStart {
+    if !reader_exists {
+        return fresh::StreamStart::Full(Some(fresh::ResetReason::ReaderUnknown));
+    }
+    fresh::decide_stream(stored, head, generation)
+}
+
+/// The `After(since_turn)` text `session_transcript` returns: the raw delta,
+/// plus — only when [`transcript::render_tail`]'s own front-trim marker is
+/// present — a note that some of the NEW turns were themselves cut by
+/// `max_chars`. The cursor still advances past them (the caller asked for
+/// `since_turn`, got it, and can re-read wider); without this note that cut
+/// would be invisible instead of just recoverable.
+pub(super) fn format_transcript_after(raw: String, since_turn: i64) -> String {
+    if raw.starts_with("[session_transcript:") {
+        format!(
+            "{raw}\n[cursor: the oldest new turns were cut by max_chars; \
+             re-read with since_turn={since_turn} and a larger max_chars]"
+        )
+    } else {
+        raw
+    }
+}
+
+/// The `Full(reason)` text `session_transcript` returns: the raw transcript,
+/// prefixed with a cursor-reset banner when `reason` is `Some` — never a
+/// silent reset back to "just the last turn".
+pub(super) fn format_transcript_full(raw: String, reason: Option<fresh::ResetReason>) -> String {
+    match reason {
+        Some(r) => format!(
+            "[cursor reset: {} — earlier turns may not be shown; see session_conversations]\n{raw}",
+            r.as_str()
+        ),
+        None => raw,
+    }
+}
+
 // ---- per-call wall clock ----------------------------------------------------
 
 /// Cap for [`guard::Deadline::LongPoll`]: tools that are themselves bounded

@@ -1,5 +1,6 @@
 use super::*;
 use crate::ipc_error::codes;
+use crate::store::CursorRow;
 use std::time::Duration;
 
 fn text_of(c: &Content) -> &str {
@@ -4004,6 +4005,170 @@ async fn fresh_for_is_opt_in_and_the_default_answer_is_byte_identical() {
             "{name} schema lacks fresh_for"
         );
     }
+}
+
+// ---- Task 5: session_transcript wired to fresh_for -------------------------
+
+#[test]
+fn transcript_decision_treats_an_unknown_reader_as_reader_unknown_regardless_of_any_stored_cursor()
+{
+    // Even a cursor that WOULD say "unchanged" against the real store must
+    // not be trusted once the reader itself does not exist.
+    let stored = CursorRow {
+        watermark: Some(9),
+        generation: None,
+        content_hash: None,
+    };
+    assert_eq!(
+        stream_decision(false, Some(&stored), Some(9), None),
+        fresh::StreamStart::Full(Some(fresh::ResetReason::ReaderUnknown))
+    );
+    assert_eq!(
+        stream_decision(false, None, Some(9), None),
+        fresh::StreamStart::Full(Some(fresh::ResetReason::ReaderUnknown))
+    );
+}
+
+#[test]
+fn transcript_decision_passes_a_known_readers_cursor_straight_to_decide_stream() {
+    let stored = CursorRow {
+        watermark: Some(9),
+        generation: Some(1),
+        content_hash: None,
+    };
+    // Same head, moved generation: still resets, exactly as decide_stream
+    // alone would — the reader-existence gate changes nothing once the
+    // reader is real.
+    assert_eq!(
+        stream_decision(true, Some(&stored), Some(9), Some(2)),
+        fresh::StreamStart::Full(Some(fresh::ResetReason::ConversationChanged))
+    );
+    // A known reader with no stored cursor is a first, full read — no reason.
+    assert_eq!(
+        stream_decision(true, None, Some(9), None),
+        fresh::StreamStart::Full(None)
+    );
+}
+
+#[test]
+fn format_transcript_after_appends_a_cut_note_only_when_render_tail_trimmed_the_front() {
+    assert_eq!(
+        format_transcript_after("plain delta".to_string(), 7),
+        "plain delta"
+    );
+    let cut =
+        "[session_transcript: 2 chars dropped from the start — raise max_chars to see more]\ntail";
+    let out = format_transcript_after(cut.to_string(), 7);
+    assert!(out.starts_with(cut));
+    assert!(out.ends_with(
+        "[cursor: the oldest new turns were cut by max_chars; re-read with since_turn=7 and a larger max_chars]"
+    ));
+}
+
+#[test]
+fn format_transcript_full_prefixes_a_reset_banner_only_when_a_reason_is_given() {
+    assert_eq!(format_transcript_full("text".to_string(), None), "text");
+    let out = format_transcript_full("text".to_string(), Some(fresh::ResetReason::AheadOfHead));
+    assert!(out.starts_with(
+        "[cursor reset: ahead_of_head — earlier turns may not be shown; see session_conversations]\n"
+    ));
+    assert!(out.ends_with("text"));
+}
+
+#[tokio::test]
+async fn an_unchanged_transcript_read_touches_no_transcript_at_all() {
+    // A target whose transcript can NOT be read: host with no reachable
+    // ssh, no transcript path. Any read attempt would error.
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("nowhere").unwrap();
+    let reader = s
+        .upsert_session("reader", "nowhere", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "nowhere", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.set_claude_session_id(target, "conv-1").unwrap();
+    for _ in 0..3 {
+        s.record_stop_hook_for_row(target).unwrap();
+    } // turn_seq = 3
+    s.put_stream_cursor(
+        reader,
+        "session_transcript",
+        &target.to_string(),
+        Some(target),
+        3,
+        None,
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let out = t
+        .session_transcript(
+            Extension(Caller::master()),
+            Parameters(SessionTranscriptParams {
+                session_id: target,
+                since_turn: None,
+                max_chars: None,
+                fresh_for: Some(reader),
+            }),
+        )
+        .await
+        .expect("unchanged must answer without reading the transcript");
+    assert!(text_of(&out.content[0]).starts_with("(unchanged since your last read at turn 3)"));
+}
+
+/// The two cases that need a *readable* transcript (`reader_unknown` and a
+/// moved generation, per the brief) cannot be driven end-to-end in this
+/// fixture — every real read goes through SSH, and no test in this suite
+/// gets one to succeed (`transcript_for` always errors first: see
+/// `per_host_callers_cannot_capture_or_read_another_hosts_session`). Both
+/// are pinned at the decision level above
+/// (`transcript_decision_treats_an_unknown_reader_as_reader_unknown...`,
+/// and `fresh::decide_stream`'s own
+/// `a_moved_generation_resets_even_when_the_watermark_looks_current`). This
+/// test adds the store-side half: even though the ReaderUnknown branch
+/// still attempts the read (only the cursor WRITE is skipped), no cursor
+/// row is ever left behind for an unknown reader.
+#[tokio::test]
+async fn an_unknown_fresh_for_still_attempts_the_read_but_writes_no_cursor() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("nowhere").unwrap();
+    // No claude_session_id: the attempted Full-path read fails fast and
+    // deterministically (E_INVALID_STATE, no SSH round trip needed).
+    let target = s
+        .upsert_session("target", "nowhere", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let cursor_count = |t: &FleetTools| -> i64 {
+        t.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+            .unwrap()
+    };
+    let missing_reader = 999_999;
+    let err = t
+        .session_transcript(
+            Extension(Caller::master()),
+            Parameters(SessionTranscriptParams {
+                session_id: target,
+                since_turn: None,
+                max_chars: None,
+                fresh_for: Some(missing_reader),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.starts_with("E_INVALID_STATE"),
+        "unexpected error: {}",
+        err.message
+    );
+    assert_eq!(
+        cursor_count(&t),
+        0,
+        "an unknown fresh_for must never get a cursor row"
+    );
 }
 
 /// The 64 % that is not drawn: the heaviest of these on the measured capture

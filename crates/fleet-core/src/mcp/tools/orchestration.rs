@@ -67,13 +67,104 @@ impl FleetTools {
         );
         let row =
             self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
-        let text = self.transcript_for(&row, p.since_turn, p.max_chars).await?;
-        if text.trim().is_empty() {
-            return Ok(CallToolResult::success(vec![text_content(
-                "(no assistant text in the requested turns)",
-            )]));
+
+        // fresh_for absent: today's default, byte-identical, no cursor
+        // touched — this branch must stay a straight pass-through.
+        let Some(reader) = p.fresh_for else {
+            let text = self.transcript_for(&row, p.since_turn, p.max_chars).await?;
+            if text.trim().is_empty() {
+                return Ok(CallToolResult::success(vec![text_content(
+                    "(no assistant text in the requested turns)",
+                )]));
+            }
+            return Ok(CallToolResult::success(vec![text_content(text)]));
+        };
+
+        // Scope 1: everything that needs the store, resolved BEFORE the
+        // (async, SSH-backed) transcript read — never held across an await,
+        // never re-entered once released (ruling: this codebase shipped a
+        // real deadlock doing that).
+        let resource_key = row.id.to_string();
+        let (decision, generation) = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let reader_exists = s
+                .get_session_by_id(reader)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .is_some();
+            let stored = s
+                .get_read_cursor(reader, "session_transcript", &resource_key)
+                .map_err(to_mcp_err)?;
+            let generation = s.conversation_generation(row.id).map_err(to_mcp_err)?;
+            let decision = stream_decision(
+                reader_exists,
+                stored.as_ref(),
+                Some(row.turn_seq),
+                generation,
+            );
+            (decision, generation)
+        };
+
+        match decision {
+            fresh::StreamStart::Unchanged => Ok(CallToolResult::success(vec![text_content(
+                format!("(unchanged since your last read at turn {})", row.turn_seq),
+            )])),
+            fresh::StreamStart::After(since_turn) => {
+                let raw = self
+                    .transcript_for(&row, Some(since_turn), p.max_chars)
+                    .await?;
+                // Scope 2: written only now that the read has succeeded —
+                // advancing to row.turn_seq as captured in scope 1, never
+                // re-read after the await, so a turn finishing mid-read is
+                // served next time rather than skipped.
+                {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    s.put_stream_cursor(
+                        reader,
+                        "session_transcript",
+                        &resource_key,
+                        Some(row.id),
+                        row.turn_seq,
+                        generation,
+                    )
+                    .map_err(to_mcp_err)?;
+                }
+                let body = if raw.trim().is_empty() {
+                    "(no assistant text in the requested turns)".to_string()
+                } else {
+                    raw
+                };
+                Ok(CallToolResult::success(vec![text_content(
+                    format_transcript_after(body, since_turn),
+                )]))
+            }
+            fresh::StreamStart::Full(reason) => {
+                let raw = self.transcript_for(&row, None, p.max_chars).await?;
+                // The generation is stored with every transcript cursor
+                // write, including this Full path, so the next read can
+                // detect a boundary — but never for a reader that does not
+                // exist: there is no one to remember a cursor for.
+                if reason != Some(fresh::ResetReason::ReaderUnknown) {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    s.put_stream_cursor(
+                        reader,
+                        "session_transcript",
+                        &resource_key,
+                        Some(row.id),
+                        row.turn_seq,
+                        generation,
+                    )
+                    .map_err(to_mcp_err)?;
+                }
+                let body = if raw.trim().is_empty() {
+                    "(no assistant text in the requested turns)".to_string()
+                } else {
+                    raw
+                };
+                Ok(CallToolResult::success(vec![text_content(
+                    format_transcript_full(body, reason),
+                )]))
+            }
         }
-        Ok(CallToolResult::success(vec![text_content(text)]))
     }
 
     #[tool(
