@@ -700,6 +700,22 @@ would actually break — a field removed or renamed, never an addition — and a
 hub built before this field existed sends nothing, which a client reads as
 revision `0`. See *Version skew* below for what a client does with it.
 
+Each row frame carries an `id:` of the form `<generation>-<seq>`. A client
+that reconnects sends the last one back as `Last-Event-ID` (or as
+`?since=<id>`, for the proxies that strip the header) and the hub replays what
+it missed instead of making it re-list everything. The `ready` frame answers
+`"resumed": true` when it honoured the id, and `false` when it could not —
+because the gap was longer than the history kept (512 events, roughly thirteen
+minutes of a busy fleet's churn) or because the hub has restarted since the id
+was minted, which the `generation` half is there to catch. `false` means
+re-list; it is never a reason to assume continuity.
+
+`?fields=id,claude_status,…` keeps only those keys in each frame's payload.
+There is no fixed vocabulary — a field is whatever the row type serialises,
+and that differs per event — so every name is accepted and the `ready` frame
+echoes back the list it honoured, which is where a typo shows up. A session
+row is about 1.2 KB on the wire and a phone draws perhaps a third of it.
+
 The stream sits behind the same bearer token as `/mcp` (a change stream names
 sessions, hosts, projects and prompts), and a caller may hold eight of them at
 once. A subscriber that falls far enough behind gets one `lagged` frame and
