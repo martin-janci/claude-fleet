@@ -120,6 +120,17 @@ impl Store {
                 format!("participant {participant_id} is retired"),
             ));
         }
+        // Fix round 1, Important 3: the collision merge below is three
+        // statements (two message re-assignments plus a retire) followed by
+        // the claim on `new_session_id` — one transaction, or a failure
+        // partway through could leave the collision's identity retired
+        // while the survivor still doesn't own `new_session_id`; the
+        // source's own later reap would then tombstone the survivor too,
+        // and the merged mail would be swept in 7 days with no sender ever
+        // told. `tx` rolls back automatically (rusqlite's `Drop`) on any
+        // `?` return before `commit()`, matching the four tombstone sites
+        // that already run inside their caller's transaction.
+        let tx = self.conn.unchecked_transaction()?;
         if let Some(existing) = self.participant_for_session(new_session_id)? {
             if existing.id != participant_id {
                 self.conn.execute(
@@ -137,6 +148,7 @@ impl Store {
             "UPDATE participants SET session_id = ?1 WHERE id = ?2",
             rusqlite::params![new_session_id, participant_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

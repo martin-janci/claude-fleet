@@ -244,79 +244,87 @@ pub async fn sweep_with(
     now: i64,
 ) -> GcReport {
     let mut report = GcReport::default();
-    if !cfg.enabled {
-        return report;
-    }
-    let (rows, controller, reachable) = {
-        let Ok(s) = store.lock() else {
-            return report;
+    // The session-idle killer stays opt-in (`cfg.enabled`, default off): it
+    // is a destructive action against a live session. The mail-retention
+    // sweep below is NOT gated on it — it only ever touches participants
+    // retired more than 7 days ago, so it must run on every install or
+    // tombstoned participants and their mail accumulate forever (the same
+    // shape as the 22k-row / 88MB precedent this module's docs cite for
+    // unbounded bg rows) and `message_undeliverable` never fires.
+    if cfg.enabled {
+        let (rows, controller, reachable) = {
+            if let Ok(s) = store.lock() {
+                let rows = s.list_all_sessions().unwrap_or_default();
+                let controller = s.get_controller().ok().flatten();
+                let reachable: HashSet<String> = s
+                    .list_hosts()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|h| h.reachable)
+                    .map(|h| h.alias)
+                    .collect();
+                (rows, controller, reachable)
+            } else {
+                (Vec::new(), None, HashSet::new())
+            }
         };
-        let rows = s.list_all_sessions().unwrap_or_default();
-        let controller = s.get_controller().ok().flatten();
-        let reachable: HashSet<String> = s
-            .list_hosts()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|h| h.reachable)
-            .map(|h| h.alias)
-            .collect();
-        (rows, controller, reachable)
-    };
-    for p in plan(&rows, cfg, controller.as_ref(), &reachable, now) {
-        let via_claude = match p.action {
-            GcAction::Kill => false,
-            GcAction::InspectThenKill => match exec.inspect(&p.host_alias, &p.tmux_name).await {
-                Ok(insp) => needs_safe_remove(&insp),
+        for p in plan(&rows, cfg, controller.as_ref(), &reachable, now) {
+            let via_claude = match p.action {
+                GcAction::Kill => false,
+                GcAction::InspectThenKill => {
+                    match exec.inspect(&p.host_alias, &p.tmux_name).await {
+                        Ok(insp) => needs_safe_remove(&insp),
+                        Err(e) => {
+                            tracing::warn!(
+                                host = %p.host_alias,
+                                session = %p.tmux_name,
+                                error = %e,
+                                "[gc] inspect failed; using safe-remove"
+                            );
+                            true
+                        }
+                    }
+                }
+            };
+            let detail = format!(
+                "{}:{}:idle_{}s",
+                p.kind,
+                if via_claude { "safe_kill" } else { "kill" },
+                p.idle_secs
+            );
+            if let Ok(s) = store.lock() {
+                if let Err(e) = s.insert_session_event(p.session_id, "gc_killed", Some(&detail)) {
+                    tracing::warn!(
+                        session_id = p.session_id,
+                        error = %e,
+                        "[gc] session_event insert failed"
+                    );
+                }
+            }
+            let result = if via_claude {
+                exec.safe_kill(&p.host_alias, &p.tmux_name).await
+            } else {
+                exec.kill(&p.host_alias, &p.tmux_name).await
+            };
+            match result {
+                Ok(()) if via_claude => report.safe_kill_requested += 1,
+                Ok(()) => report.killed += 1,
                 Err(e) => {
+                    report.failed += 1;
                     tracing::warn!(
                         host = %p.host_alias,
                         session = %p.tmux_name,
+                        action = %detail,
                         error = %e,
-                        "[gc] inspect failed; using safe-remove"
+                        "[gc] action failed"
                     );
-                    true
-                }
-            },
-        };
-        let detail = format!(
-            "{}:{}:idle_{}s",
-            p.kind,
-            if via_claude { "safe_kill" } else { "kill" },
-            p.idle_secs
-        );
-        if let Ok(s) = store.lock() {
-            if let Err(e) = s.insert_session_event(p.session_id, "gc_killed", Some(&detail)) {
-                tracing::warn!(
-                    session_id = p.session_id,
-                    error = %e,
-                    "[gc] session_event insert failed"
-                );
-            }
-        }
-        let result = if via_claude {
-            exec.safe_kill(&p.host_alias, &p.tmux_name).await
-        } else {
-            exec.kill(&p.host_alias, &p.tmux_name).await
-        };
-        match result {
-            Ok(()) if via_claude => report.safe_kill_requested += 1,
-            Ok(()) => report.killed += 1,
-            Err(e) => {
-                report.failed += 1;
-                tracing::warn!(
-                    host = %p.host_alias,
-                    session = %p.tmux_name,
-                    action = %detail,
-                    error = %e,
-                    "[gc] action failed"
-                );
-                if let Ok(s) = store.lock() {
-                    let _ = s.insert_session_event(p.session_id, "gc_failed", Some(&e.message));
+                    if let Ok(s) = store.lock() {
+                        let _ = s.insert_session_event(p.session_id, "gc_failed", Some(&e.message));
+                    }
                 }
             }
         }
     }
-    // The mail-retention sweep, alongside the session-idle one above.
     // `sweep_retired_participants` returns `Result<usize, IpcError>`, but
     // this function returns a plain `GcReport` (not a `Result`), so a
     // failed sweep contributes 0 and the pass still completes — the same
@@ -340,9 +348,14 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
         let s = store.lock().ok()?;
         GcConfig::from_store(&s)
     };
-    if !cfg.enabled {
-        return None;
-    }
+    // Deliberately NOT gated on `cfg.enabled` here: that flag opts a fleet
+    // into the destructive session-idle killer, but `sweep_with` also runs
+    // the mail-retention sweep (participants retired > 7 days), which is not
+    // that killer and must run on every install regardless. Bailing out here
+    // on a disabled default would mean `sweep_with` is never even called, so
+    // tombstoned participants and their mail would accumulate forever. The
+    // interval gating below is shared with the retention pass rather than
+    // given its own scheduler.
     {
         let mut last = LAST.lock().ok()?;
         let due = last
@@ -364,6 +377,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
             killed = report.killed,
             safe_kill_requested = report.safe_kill_requested,
             failed = report.failed,
+            swept_participants = report.swept_participants,
             "[gc] sweep"
         );
     }
@@ -747,6 +761,66 @@ mod tests {
         assert!(
             ev.iter().any(|e| e.kind == "message_undeliverable"),
             "the sender must learn its message was never read: {ev:?}"
+        );
+    }
+
+    /// Fix round 1, Important 1: the mail-retention sweep is not the opt-in
+    /// session killer and must run on a DEFAULT (`gc.enabled = false`)
+    /// install, or tombstoned participants and their mail accumulate
+    /// forever and `message_undeliverable` never fires for anyone. Same
+    /// setup as `sweep_also_reaps_retired_participants_past_their_retention_window`,
+    /// but with `enabled: false` and asserting the session-idle side (`exec`)
+    /// is never touched.
+    #[tokio::test]
+    async fn sweep_reaps_retired_participants_even_when_gc_is_disabled() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let (sender, msg) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let a = s
+                .upsert_session("alpha", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            let b = s
+                .upsert_session("beta", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            let m = s.insert_message(a, b, "pending", "message", None).unwrap();
+            s.delete_session(b).unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE participants SET retired_at = retired_at - ?1 \
+                     WHERE retired_at IS NOT NULL",
+                    rusqlite::params![crate::store::RETIRED_RETENTION_SECS + 60],
+                )
+                .unwrap();
+            (a, m)
+        };
+        let disabled = GcConfig {
+            enabled: false,
+            ..CFG
+        };
+        let exec = fake(false);
+        let report = sweep_with(&store, &exec, &disabled, now_unix()).await;
+        assert_eq!(
+            report,
+            GcReport {
+                killed: 0,
+                safe_kill_requested: 0,
+                failed: 0,
+                swept_participants: 1,
+            },
+            "the retention sweep must run regardless of gc.enabled"
+        );
+        assert_eq!(
+            exec.inspects.load(Ordering::SeqCst),
+            0,
+            "the session-idle killer stays off"
+        );
+        let s = store.lock().unwrap();
+        assert!(s.get_message(msg).unwrap().is_none(), "the mail is gone");
+        let ev = s.list_session_events(sender, 10).unwrap();
+        assert!(
+            ev.iter().any(|e| e.kind == "message_undeliverable"),
+            "the sender must learn its message was never read even on a default install: {ev:?}"
         );
     }
 

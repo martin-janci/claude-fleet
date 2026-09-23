@@ -48,6 +48,11 @@ const OPS_KINDS = new Set([
   'playbook_applied',
   'mcp_call',
   'message_sent',
+  // Fix round 1 (task-13-14): the sender's notice that a message it sent
+  // was never read before the recipient's tombstone window elapsed
+  // (`Store::sweep_retired_participants`) — without this it fell into the
+  // generic "other" chip.
+  'message_undeliverable',
 ]);
 
 const TURN_KINDS = new Set([

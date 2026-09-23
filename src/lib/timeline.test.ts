@@ -43,6 +43,7 @@ describe('eventCategory', () => {
     expect(eventCategory(ev(7, 'safe_kill_requested'))).toBe('ops');
     expect(eventCategory(ev(8, 'mcp_call'))).toBe('ops');
     expect(eventCategory(ev(9, 'task_started'))).toBe('ops');
+    expect(eventCategory(ev(10, 'message_undeliverable'))).toBe('ops');
   });
 
   it('maps conversation lifecycle and turn/compact kinds to turns', () => {
