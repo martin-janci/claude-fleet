@@ -8,6 +8,10 @@
 //! id, pointing at `inbox`) rather than being skipped — skipping it would
 //! leave it undelivered at the head of an oldest-first queue forever,
 //! stalling delivery of everything behind it.
+//!
+//! A `Stop` block's `reason` is a second, much smaller window (2000 chars /
+//! 20 lines) onto the same queue. It is PACKED to that budget
+//! ([`pack_within`]), never truncated down to it — see that function.
 
 use crate::store::SessionMessage;
 
@@ -15,6 +19,13 @@ use crate::store::SessionMessage;
 pub const CTX_MAX_CHARS: usize = 8000;
 /// Claude Code's `additionalContext` line cap (measured, 2.1.278).
 pub const CTX_MAX_LINES: usize = 200;
+
+/// Claude Code's `Stop` block `reason` character cap — far under
+/// [`CTX_MAX_CHARS`].
+pub const REASON_MAX_CHARS: usize = 2000;
+/// Claude Code's `Stop` block `reason` line cap — far under
+/// [`CTX_MAX_LINES`], and the one nothing accounted for before.
+pub const REASON_MAX_LINES: usize = 20;
 
 /// Headroom left for the trailing "N more in the inbox" line, so adding it can
 /// never push a packed batch over either budget. Sized to the tail's actual
@@ -40,14 +51,33 @@ pub struct Packed {
     pub remaining: usize,
 }
 
-/// PURE: render `messages` (oldest first) into one `additionalContext` value.
+/// PURE: render `messages` (oldest first) into one `additionalContext` value,
+/// against the [`CTX_MAX_CHARS`] / [`CTX_MAX_LINES`] budget.
 ///
 /// `sender_label` turns a sender's session id into something human — normally
 /// `"<tmux_name>@<host_alias>"`. Taken as a closure so this stays pure and
 /// testable without a store.
 pub fn pack(messages: &[SessionMessage], sender_label: &dyn Fn(i64) -> String) -> Packed {
-    let budget_chars = CTX_MAX_CHARS.saturating_sub(TAIL_RESERVE_CHARS);
-    let budget_lines = CTX_MAX_LINES.saturating_sub(TAIL_RESERVE_LINES);
+    pack_within(messages, sender_label, CTX_MAX_CHARS, CTX_MAX_LINES)
+}
+
+/// As [`pack`], against an explicit budget.
+///
+/// A `Stop` block's `reason` has its own, much smaller caps
+/// ([`REASON_MAX_CHARS`] / [`REASON_MAX_LINES`]), and a packed batch cannot
+/// be truncated down to them afterwards: cutting the text splits a body
+/// mid-sentence, and the `"(N more…)"` tail — the only pointer at `inbox` —
+/// sits last, so it is the first thing lost. The block path packs to its own
+/// budget instead, so the same whole-messages-only invariant holds there and
+/// the tail's count is the truth for what actually rode.
+pub fn pack_within(
+    messages: &[SessionMessage],
+    sender_label: &dyn Fn(i64) -> String,
+    max_chars: usize,
+    max_lines: usize,
+) -> Packed {
+    let budget_chars = max_chars.saturating_sub(TAIL_RESERVE_CHARS);
+    let budget_lines = max_lines.saturating_sub(TAIL_RESERVE_LINES);
 
     let mut blocks: Vec<String> = Vec::new();
     let mut included: Vec<i64> = Vec::new();
@@ -278,7 +308,14 @@ mod tests {
             "the stub still gets it stamped delivered"
         );
         assert_eq!(p.remaining, 0);
-        assert!(p.text.contains('1'), "the stub must name the message id");
+        // `#1`, not a bare `1`: any stray digit in the stub's own wording
+        // (its char count, for one) satisfies `contains('1')`, so that check
+        // could not tell a stub that names the id from one that does not.
+        assert!(
+            p.text.contains("#1"),
+            "the stub must name the message id as #1: {}",
+            p.text
+        );
         assert!(
             !p.text.contains(&huge),
             "the body itself must never be inlined"
@@ -395,6 +432,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Final review, Critical 1. A `Stop` block's `reason` is capped at 2000
+    /// chars AND 20 lines; packing to that budget keeps the same invariants
+    /// the 8000/200 one has — whole bodies only, an accurate tail — which
+    /// truncating the 8000-char text could not.
+    #[test]
+    fn packing_to_the_reason_budget_keeps_whole_bodies_and_an_accurate_tail() {
+        let body = "x".repeat(400);
+        let messages: Vec<SessionMessage> = (1..=20).map(|id| msg(id, &body)).collect();
+        let p = pack_within(&messages, &label, REASON_MAX_CHARS, REASON_MAX_LINES);
+        assert!(
+            p.text.chars().count() <= REASON_MAX_CHARS,
+            "chars = {}",
+            p.text.chars().count()
+        );
+        assert!(!p.included.is_empty() && p.included.len() < messages.len());
+        assert_eq!(p.included.len() + p.remaining, messages.len());
+        assert_eq!(
+            p.text.matches(&body).count(),
+            p.included.len(),
+            "every included body rides whole, and no excluded one appears"
+        );
+        assert!(
+            p.text
+                .contains(&format!("({} more message(s) waiting", p.remaining)),
+            "the tail names the real remainder: {}",
+            p.text
+        );
+    }
+
+    /// The 20-line cap is independent of the 2000-char one: five-line bodies
+    /// stay far under 2000 chars and still blow the line budget.
+    #[test]
+    fn the_reason_line_budget_is_enforced_independently() {
+        let body = "a\nb\nc\nd\ne";
+        let messages: Vec<SessionMessage> = (1..=20).map(|id| msg(id, body)).collect();
+        let p = pack_within(&messages, &label, REASON_MAX_CHARS, REASON_MAX_LINES);
+        assert!(
+            p.text.lines().count() <= REASON_MAX_LINES,
+            "lines = {}",
+            p.text.lines().count()
+        );
+        assert!(
+            p.text.chars().count() < REASON_MAX_CHARS,
+            "chars were never the binding cap"
+        );
+        assert_eq!(p.included.len() + p.remaining, messages.len());
+    }
+
+    /// A single body over the reason budget is STUBBED, never cut: the stub
+    /// names the id and points at `inbox`, so a block carrying it still tells
+    /// the agent what to answer and where to read it.
+    #[test]
+    fn a_body_over_the_reason_budget_is_stubbed_not_cut() {
+        let body = "q".repeat(REASON_MAX_CHARS + 500);
+        let p = pack_within(&[msg(7, &body)], &label, REASON_MAX_CHARS, REASON_MAX_LINES);
+        assert_eq!(p.included, vec![7]);
+        assert!(p.text.chars().count() <= REASON_MAX_CHARS);
+        assert!(
+            !p.text.contains(&body[..200]),
+            "no part of the body is cut in: {}",
+            p.text
+        );
+        assert!(
+            p.text.contains("#7") && p.text.contains("inbox"),
+            "{}",
+            p.text
+        );
     }
 
     fn question(id: i64) -> SessionMessage {

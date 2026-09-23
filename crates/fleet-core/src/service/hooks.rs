@@ -313,28 +313,42 @@ fn take_pending_delivery_locked(
         Ok(Some(r)) => format!("{}@{}", r.tmux_name, r.host_alias),
         _ => format!("session {from_id}"),
     };
-    let packed = crate::service::delivery::pack(&pending, &label);
-    let action = for_stop.then(|| {
-        if packed.included.is_empty() {
-            // Everything pending is individually over the packer's budget:
-            // nothing gets stamped, and the `reason` a block would carry is
-            // only the "(N more...)" tail — the question itself is never in
-            // it. A block whose reason omits the thing to answer burns a
-            // turn and tells the agent nothing, so this never blocks; the
-            // message stays reachable via `inbox`.
-            StopAction::Context
-        } else {
-            stop_action(&pending, streak)
+    // A `Stop` block's `reason` has a much smaller budget than
+    // `additionalContext` (2000 chars / 20 lines against 8000 / 200), so the
+    // two paths pack DIFFERENT batches and the decision has to come first —
+    // decided on what a block would actually carry, never on the whole
+    // pending list. A question that cannot ride the block must not cause one:
+    // its `reason` would omit the very thing to answer, burning a turn and
+    // telling the agent nothing. It rides as `additionalContext` instead.
+    let (packed, action) = if for_stop {
+        let block_packed = crate::service::delivery::pack_within(
+            &pending,
+            &label,
+            crate::service::delivery::REASON_MAX_CHARS,
+            crate::service::delivery::REASON_MAX_LINES,
+        );
+        // Decide on exactly the rows the block would carry — including one
+        // that rides as an oversized-message stub, which still names its id
+        // and points at `inbox`, so an agent held by it can answer.
+        let carried: Vec<crate::store::SessionMessage> = pending
+            .iter()
+            .filter(|m| block_packed.included.contains(&m.id))
+            .cloned()
+            .collect();
+        match stop_action(&carried, streak) {
+            StopAction::Block => (block_packed, Some(StopAction::Block)),
+            StopAction::Context => (
+                crate::service::delivery::pack(&pending, &label),
+                Some(StopAction::Context),
+            ),
         }
-    });
-    if packed.included.is_empty() {
-        // Over budget: report the tail so the agent learns the messages
-        // exist, but stamp nothing — they must stay deliverable via `inbox`.
-        if for_stop {
-            bookkeep_stop_streak(s, row.id, streak, action);
-        }
-        return Some((packed, action));
-    }
+    } else {
+        (crate::service::delivery::pack(&pending, &label), None)
+    };
+    // Only what this response carries is stamped: `pack`/`pack_within` never
+    // put a partial body in `text`, and an individually oversized message
+    // rides as a stub (which IS in `included`), so `included` is empty only
+    // when `pending` is — impossible past the check above.
     if let Err(e) = s.mark_messages_delivered(&packed.included) {
         // A failed UPDATE here means the same messages get packed and
         // handed over again on the next prompt, forever — never silent.

@@ -24,11 +24,6 @@ use super::auth::Caller;
 use crate::ssh::SshClient;
 use crate::store::Store;
 
-/// Claude Code's `Stop` hook `reason` character cap, well under the packer's
-/// `CTX_MAX_CHARS` (8000): the block path truncates `packed.text` down to
-/// this on a char boundary so a multi-byte body is never split.
-const REASON_MAX_CHARS: usize = 2000;
-
 /// Axum router state for the `/hook` endpoint.
 #[derive(Clone)]
 pub struct HookState {
@@ -153,13 +148,17 @@ pub async fn handle_hook(
                             remaining = packed.remaining,
                             "[hook] blocking Stop for a pending question"
                         );
-                        // `reason` is capped by Claude Code at 2000 chars,
-                        // against the packer's 8000; truncate on a char
-                        // boundary so a multi-byte body is never split.
-                        let reason: String = packed.text.chars().take(REASON_MAX_CHARS).collect();
+                        // No truncation here, by design: the service layer
+                        // already packed this batch against `reason`'s own
+                        // 2000-char / 20-line budget (see
+                        // `delivery::pack_within`), so every body in it is
+                        // whole and the "(N more…)" tail is present and
+                        // accurate. Cutting the text at 2000 chars — what
+                        // this did before — split a body mid-sentence and
+                        // removed that tail first, since it sits last.
                         axum::Json(serde_json::json!({
                             "decision": "block",
-                            "reason": reason,
+                            "reason": packed.text,
                         }))
                         .into_response()
                     }
@@ -536,19 +535,19 @@ mod tests {
     #[tokio::test]
     async fn an_over_budget_message_gets_a_stub_and_is_stamped_delivered() {
         let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
-        let b = {
+        let (b, mid) = {
             let s = store.lock().unwrap();
             let a = seed(&s, "alpha");
             let b = seed(&s, "beta");
             let huge = "x".repeat(crate::service::delivery::CTX_MAX_CHARS + 1);
-            s.insert_message(a, b, &huge, "message", None).unwrap();
+            let mid = s.insert_message(a, b, &huge, "message", None).unwrap();
             s.conn_ref()
                 .execute(
                     "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
                     rusqlite::params![b],
                 )
                 .unwrap();
-            b
+            (b, mid)
         };
         let state = HookState {
             store: store.clone(),
@@ -578,6 +577,12 @@ mod tests {
         assert!(
             ctx.contains("inbox"),
             "the stub must point at the inbox tool: {ctx}"
+        );
+        // The `#<id>` marker, not a bare digit: the id is how the agent
+        // names the message to `inbox`, and a stub without it is useless.
+        assert!(
+            ctx.contains(&format!("#{mid}")),
+            "the stub must name the message id as #{mid}: {ctx}"
         );
         assert!(
             !ctx.contains("1 more"),
@@ -767,31 +772,19 @@ mod tests {
         );
     }
 
-    /// `reason` is capped by Claude Code at 2000 characters, well under the
-    /// packer's 8000-char budget. The block path must truncate on a char
-    /// boundary so a multi-byte body is never split mid-codepoint.
-    #[tokio::test]
-    async fn a_long_reason_is_truncated_at_2000_chars_on_a_char_boundary() {
-        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
-        {
-            let s = store.lock().unwrap();
-            let a = seed(&s, "alpha");
-            let b = seed(&s, "beta");
-            // A 3-byte character (not 4, like '🦀'): byte offset 2000 then
-            // falls INSIDE a character rather than coincidentally on a
-            // boundary, so a byte-slicing implementation (`&s[..2000]`)
-            // would panic or silently cut short instead of passing a
-            // `chars().count() <= 2000` check that a 4-byte char could
-            // satisfy by accident.
-            let body: String = "€".repeat(3000);
-            s.insert_message(a, b, &body, "question", None).unwrap();
-            s.conn_ref()
-                .execute(
-                    "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
-                    rusqlite::params![b],
-                )
-                .unwrap();
-        }
+    // ---- the block `reason` budget (final review, Critical 1) ----
+    //
+    // Claude Code caps a `Stop` block's `reason` at 2000 characters AND 20
+    // lines — both far under the packer's 8000/200 `additionalContext`
+    // budget. These are written as literals here on purpose: they are the
+    // CLI's caps, and a test that read them from the same constant the
+    // implementation packs against could not tell a wrong constant from a
+    // right one.
+    const REASON_CHARS: usize = 2000;
+    const REASON_LINES: usize = 20;
+
+    /// Drive one `Stop` hook for `conv-b` and return the decoded body.
+    async fn stop_hook_json(store: &Arc<Mutex<crate::store::Store>>) -> serde_json::Value {
         let state = HookState {
             store: store.clone(),
             ssh: Arc::new(SshClient::new()),
@@ -810,19 +803,224 @@ mod tests {
         .await
         .into_response();
         assert_eq!(res.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+        let body = axum::body::to_bytes(res.into_body(), 256 * 1024)
             .await
             .unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Two sessions with `beta` bound to `conv-b`, so a `Stop` payload
+    /// naming `conv-b` passes the conversation guard.
+    fn two_sessions(store: &Arc<Mutex<crate::store::Store>>) -> (i64, i64) {
+        let s = store.lock().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
+                rusqlite::params![b],
+            )
+            .unwrap();
+        (a, b)
+    }
+
+    /// Ids whose `delivered_at` the hook just stamped: everything that was
+    /// inserted, minus what is still undelivered.
+    fn stamped_ids(store: &Arc<Mutex<crate::store::Store>>, to: i64, all: &[i64]) -> Vec<i64> {
+        let s = store.lock().unwrap();
+        let left: Vec<i64> = s
+            .list_undelivered_for_session(to, 1000)
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        all.iter()
+            .copied()
+            .filter(|id| !left.contains(id))
+            .collect()
+    }
+
+    /// The `#<id>` markers a packed text carries, in order.
+    fn carried_ids(text: &str) -> Vec<i64> {
+        text.split('#')
+            .skip(1)
+            .filter_map(|rest| {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse().ok()
+            })
+            .collect()
+    }
+
+    /// A body that cannot fit the block budget must not be CUT to fit it:
+    /// it rides whole or it does not ride at all. Packing to the smaller
+    /// budget turns it into the same stub the `additionalContext` path uses
+    /// for an oversized message — which names the id and points at `inbox`,
+    /// so the agent can still answer. Truncating `packed.text` instead left
+    /// a half sentence and no pointer at all.
+    #[tokio::test]
+    async fn a_body_over_the_block_budget_is_never_cut_mid_body() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let (a, b) = two_sessions(&store);
+        let body = "the middle of this sentence must never be where it ends. ".repeat(50);
+        assert!(body.chars().count() > REASON_CHARS, "the premise");
+        let id = {
+            let s = store.lock().unwrap();
+            s.insert_message(a, b, &body, "question", None).unwrap()
+        };
+        let v = stop_hook_json(&store).await;
+        assert_eq!(v["decision"], "block", "a question still blocks: {v}");
         let reason = v["reason"].as_str().unwrap();
-        assert_eq!(
-            reason.chars().count(),
-            2000,
-            "the reason is over 2000 chars pre-truncation, so it must be truncated to EXACTLY 2000, not merely under it"
+        assert!(
+            reason.chars().count() <= REASON_CHARS,
+            "reason chars = {}",
+            reason.chars().count()
         );
         assert!(
-            reason.chars().all(|c| c == '€' || c.is_ascii()),
-            "no split codepoint in the truncated reason"
+            reason.contains(&body) || !reason.contains(&body[..200]),
+            "the body must ride whole or not at all, never cut: {reason}"
+        );
+        assert!(
+            reason.contains(&format!("#{id}")),
+            "the reason must name the message id: {reason}"
+        );
+        assert!(
+            reason.contains("inbox"),
+            "a body that could not ride must point at the inbox tool: {reason}"
+        );
+        assert_eq!(
+            stamped_ids(&store, b, &[id]),
+            vec![id],
+            "the stub carries the id, so it is stamped"
+        );
+    }
+
+    /// The `"(N more message(s) waiting…)"` tail is the only pointer at
+    /// `inbox` a block carries, and `pack` puts it LAST — so truncating the
+    /// text cut it first, and its count was the full-budget count anyway.
+    /// Packing to the block budget keeps it, and makes it true.
+    #[tokio::test]
+    async fn the_block_reason_keeps_the_tail_and_names_the_right_remaining_count() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let (a, b) = two_sessions(&store);
+        let mut ids = Vec::new();
+        {
+            let s = store.lock().unwrap();
+            ids.push(
+                s.insert_message(a, b, "answer me", "question", None)
+                    .unwrap(),
+            );
+            // Enough plain mail that even the 8000-char budget overflows,
+            // so the pre-fix text had a tail — at its very end, where the
+            // 2000-char cut removed it.
+            for i in 0..60 {
+                let body = format!("{i:03}{}", "m".repeat(200));
+                ids.push(s.insert_message(a, b, &body, "message", None).unwrap());
+            }
+        }
+        let v = stop_hook_json(&store).await;
+        assert_eq!(v["decision"], "block", "{v}");
+        let reason = v["reason"].as_str().unwrap();
+        assert!(
+            reason.chars().count() <= REASON_CHARS,
+            "reason chars = {}",
+            reason.chars().count()
+        );
+        let stamped = stamped_ids(&store, b, &ids);
+        let remaining = ids.len() - stamped.len();
+        assert!(remaining > 0, "the premise: not everything can ride");
+        assert!(
+            reason.contains(&format!("({remaining} more message(s) waiting")),
+            "the tail must survive and name the real remaining count ({remaining}): {reason}"
+        );
+    }
+
+    /// Only what the block actually carried may be stamped `delivered_at`.
+    /// Stamping the full-budget pack and then cutting the text to 2000 chars
+    /// marked messages delivered that the session never saw.
+    #[tokio::test]
+    async fn the_stamped_ids_are_exactly_the_ones_the_block_carried() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let (a, b) = two_sessions(&store);
+        let mut ids = Vec::new();
+        {
+            let s = store.lock().unwrap();
+            ids.push(
+                s.insert_message(a, b, "answer me", "question", None)
+                    .unwrap(),
+            );
+            for i in 0..60 {
+                let body = format!("{i:03}{}", "m".repeat(200));
+                ids.push(s.insert_message(a, b, &body, "message", None).unwrap());
+            }
+        }
+        let v = stop_hook_json(&store).await;
+        let reason = v["reason"].as_str().unwrap();
+        let mut carried = carried_ids(reason);
+        carried.sort_unstable();
+        let mut stamped = stamped_ids(&store, b, &ids);
+        stamped.sort_unstable();
+        assert_eq!(
+            stamped, carried,
+            "stamped {stamped:?} but the block carried {carried:?}"
+        );
+    }
+
+    /// `reason`'s 20-LINE cap was never accounted for anywhere: a batch of
+    /// short multi-line bodies fits 2000 chars easily and still gets cut by
+    /// the CLI.
+    #[tokio::test]
+    async fn a_multi_line_batch_respects_the_twenty_line_reason_cap() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let (a, b) = two_sessions(&store);
+        {
+            let s = store.lock().unwrap();
+            s.insert_message(a, b, "one\ntwo\nthree\nfour\nfive", "question", None)
+                .unwrap();
+            for i in 0..30 {
+                let body = format!("{i}a\n{i}b\n{i}c\n{i}d\n{i}e");
+                s.insert_message(a, b, &body, "message", None).unwrap();
+            }
+        }
+        let v = stop_hook_json(&store).await;
+        assert_eq!(v["decision"], "block", "{v}");
+        let reason = v["reason"].as_str().unwrap();
+        assert!(
+            reason.lines().count() <= REASON_LINES,
+            "reason lines = {}: {reason}",
+            reason.lines().count()
+        );
+    }
+
+    /// `stop_action` must decide on what will actually be CARRIED, not on
+    /// the whole pending list: a question that falls outside the block
+    /// budget would otherwise cause a block whose `reason` does not contain
+    /// it — a burnt turn that tells the agent nothing.
+    #[tokio::test]
+    async fn a_question_outside_the_block_budget_does_not_block() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let (a, b) = two_sessions(&store);
+        let question_id = {
+            let s = store.lock().unwrap();
+            // Oldest first: plain mail fills the 2000-char budget, and the
+            // question — inserted last — cannot be in it.
+            for i in 0..30 {
+                let body = format!("{i:03}{}", "m".repeat(200));
+                s.insert_message(a, b, &body, "message", None).unwrap();
+            }
+            s.insert_message(a, b, "answer me", "question", None)
+                .unwrap()
+        };
+        let v = stop_hook_json(&store).await;
+        assert!(
+            v.get("decision").is_none(),
+            "the question cannot ride this block, so nothing may block: {v}"
+        );
+        let ctx = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            ctx.contains(&format!("#{question_id}")) || ctx.contains("more message(s) waiting"),
+            "the question is either carried as context or reported as waiting: {ctx}"
         );
     }
 }
