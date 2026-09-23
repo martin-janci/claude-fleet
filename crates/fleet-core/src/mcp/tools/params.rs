@@ -552,11 +552,9 @@ pub struct SessionConversationParams {
     /// conversation. Defaults to 50, capped at 200.
     #[serde(default)]
     pub events_limit: Option<i64>,
-    /// Ask for only what has happened since this turn_seq (the one the
-    /// session row carried when you last read it). The window shrinks to the
-    /// turns completed since, plus the one still running — a caller that is
-    /// already caught up gets one turn instead of ten. `turns` wins when both
-    /// are given. Omit for the default window.
+    /// The turn_seq you last saw: returns the turns completed since, plus the
+    /// one still running. `turns` wins; out of range (a compaction, /clear)
+    /// gives the default window.
     #[serde(default)]
     pub since_turn: Option<i64>,
 }

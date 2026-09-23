@@ -83,11 +83,9 @@ impl FleetTools {
         default 50, max 200) and context (context-window usage, or null). turns \
         defaults to 10, max 100; the character budget scales with it. Pass \
         claude_session_id (from session_conversations) for an earlier \
-        conversation. Pass since_turn (the turn_seq you last saw) to ask only \
-        for what has happened since: the window becomes the turns completed \
-        since then plus the one still running, so a caller that is caught up \
-        reads one turn instead of ten. Read-only. Errors: E_INVALID, \
-        E_INVALID_STATE, E_NO_TRANSCRIPT."
+        conversation. since_turn narrows the window to what came after that \
+        turn_seq. Read-only. Errors: E_INVALID, E_INVALID_STATE, \
+        E_NO_TRANSCRIPT."
     )]
     pub(super) async fn session_conversation(
         &self,
