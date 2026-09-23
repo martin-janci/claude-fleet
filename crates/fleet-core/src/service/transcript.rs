@@ -307,7 +307,10 @@ pub struct ConvTurn {
     /// long the reply took so far. `None` for a turn with no assistant entry.
     #[serde(default)]
     pub ended_at: Option<String>,
-    #[serde(default)]
+    /// Deserialised leniently: an item whose `kind` this build does not
+    /// know degrades to one [`unsupported_item`] line instead of failing the
+    /// whole `Conversation`. See [`ConvItem`].
+    #[serde(default, deserialize_with = "items_tolerant")]
     pub items: Vec<ConvItem>,
     /// `<system-reminder>` bodies that rode this turn's prompt entry (or
     /// arrived alone just before it). Harness noise, never the human's
@@ -316,6 +319,32 @@ pub struct ConvTurn {
     pub reminders: Vec<String>,
 }
 
+/// One line of a turn's reply.
+///
+/// # An older client must survive a newer hub
+///
+/// This is an internally tagged enum, so serde fails the **whole**
+/// `Conversation` on a `kind` it does not know — and every release that
+/// teaches the parser a new shape (`bash` and `harness` in this one) hands
+/// exactly that payload to every client still on the previous build. The
+/// Conversation tab would show a parse error instead of one degraded line.
+///
+/// So `ConvTurn::items` is deserialised through [`items_tolerant`], which
+/// turns an item this build cannot read into an [`unsupported_item`]
+/// placeholder — the same kindness `fleet-mobile` has always done for its
+/// own copy of this enum (see the tests below).
+///
+/// The placeholder is a [`ConvItem::Harness`] block rather than a variant of
+/// its own on purpose: `harness` is a kind every renderer on the wire
+/// already folds into one quiet labelled line, so the degraded item is
+/// *visible* — named, and honest about why it is there — in the desktop
+/// panel and on a phone without either of them shipping a new branch first.
+/// A dedicated `Unsupported` kind would have been silently skipped by every
+/// renderer that predates it, which is the failure this exists to avoid.
+///
+/// Adding a variant here is still a wire change: bump `CONTRACT_REVISION`
+/// (`crates/fleet-core/src/wire_contract.rs`) so a client outside the range
+/// says so out loud instead of quietly drawing placeholders.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConvItem {
@@ -460,10 +489,60 @@ fn serde_true() -> bool {
     true
 }
 
+/// Chars of an unknown `kind` kept in the placeholder: a tag is a short
+/// snake_case word, and the string arrives from the far end of the wire.
+const UNSUPPORTED_KIND_MAX_CHARS: usize = 40;
+
+/// The one line an item this build cannot read degrades to. `kind` is the
+/// tag the far end sent (`""` when it sent none).
+///
+/// It is a [`ConvItem::Harness`] block, which every renderer already draws
+/// as one folded, labelled line — see the type docs on [`ConvItem`].
+pub fn unsupported_item(kind: &str) -> ConvItem {
+    let kind = kind.trim();
+    let kind = if kind.is_empty() {
+        "unknown".to_string()
+    } else {
+        cap_chars(kind, UNSUPPORTED_KIND_MAX_CHARS)
+    };
+    ConvItem::Harness {
+        tag: format!("unsupported item: {kind}"),
+        body: format!(
+            "This build cannot read a `{kind}` conversation item. It came from a newer hub; \
+             update claude-fleet to see what it says."
+        ),
+    }
+}
+
+/// [`ConvTurn::items`], with an unreadable item degraded to one
+/// [`unsupported_item`] line instead of failing the whole `Conversation`.
+/// Applies to an unknown `kind` and to a known one whose payload this build
+/// cannot parse — both are "a newer hub said something we do not
+/// understand", and both used to take the entire tab down with them.
+fn items_tolerant<'de, D>(d: D) -> Result<Vec<ConvItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .map(|v| {
+            ConvItem::deserialize(&v).unwrap_or_else(|_| {
+                unsupported_item(v.get("kind").and_then(|k| k.as_str()).unwrap_or(""))
+            })
+        })
+        .collect())
+}
+
 /// Cap on a compaction's carried summary text (chars).
 const COMPACT_SUMMARY_MAX_CHARS: usize = 20_000;
 /// Cap on a slash command's carried output text (chars).
 const COMMAND_OUTPUT_MAX_CHARS: usize = 4_000;
+/// Cap on one `<system-reminder>` body carried beside a turn (chars). The
+/// panel folds these into a chip and never prints them inline, and a project
+/// -instructions reminder is routinely several KB — so this is the slash
+/// command's output budget, not the compaction summary's.
+const REMINDER_MAX_CHARS: usize = 4_000;
 /// Cap on a task notification's carried report (chars). A background
 /// agent's report is routinely several KB, so this is the compaction
 /// summary's budget rather than [`SUBAGENT_RESULT_MAX_CHARS`], which was
@@ -577,32 +656,57 @@ fn prompt_text(content: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
-/// Split off every `<system-reminder>…</system-reminder>` block: the text
-/// the human actually wrote, and the reminder bodies in order. The harness
-/// appends these to a prompt (and sometimes sends one alone), so printing
-/// them verbatim turns a one-line prompt into a screen of XML.
+const REMINDER_OPEN: &str = "<system-reminder>";
+const REMINDER_CLOSE: &str = "</system-reminder>";
+
+/// One `<system-reminder>…</system-reminder>` block at the very start of
+/// `s` (leading whitespace allowed): its body and what follows it.
+fn peel_leading_reminder(s: &str) -> Option<(&str, &str)> {
+    let after_open = s.trim_start().strip_prefix(REMINDER_OPEN)?;
+    let end = after_open.find(REMINDER_CLOSE)?;
+    Some((
+        &after_open[..end],
+        &after_open[end + REMINDER_CLOSE.len()..],
+    ))
+}
+
+/// The same at the very end of `s`: its body and what precedes it.
+fn peel_trailing_reminder(s: &str) -> Option<(&str, &str)> {
+    let before_close = s.trim_end().strip_suffix(REMINDER_CLOSE)?;
+    let start = before_close.rfind(REMINDER_OPEN)?;
+    Some((&before_close[start + REMINDER_OPEN.len()..], &s[..start]))
+}
+
+/// Split off the `<system-reminder>…</system-reminder>` blocks the harness
+/// stapled onto an entry: the text the human actually wrote, and the
+/// reminder bodies in order, each capped at [`REMINDER_MAX_CHARS`].
+///
+/// **Only the edges.** The harness prepends or appends its reminders (and
+/// sometimes sends one alone); it never injects one into the middle of a
+/// sentence. A block surrounded by the human's own words is therefore quoted
+/// text — a pasted transcript excerpt someone is asking about — and excising
+/// it would rewrite their prompt. That is the same rule commands, bash lines
+/// and notifications follow: only an entry that *starts* with the tag is the
+/// harness talking.
 fn split_reminders(text: &str) -> (String, Vec<String>) {
-    const OPEN: &str = "<system-reminder>";
-    const CLOSE: &str = "</system-reminder>";
-    let mut rest = String::new();
-    let mut found = Vec::new();
-    let mut i = 0;
-    while let Some(off) = text[i..].find(OPEN) {
-        let start = i + off;
-        let body_at = start + OPEN.len();
-        let Some(off) = text[body_at..].find(CLOSE) else {
-            break;
-        };
-        let end = body_at + off;
-        rest.push_str(&text[i..start]);
-        let body = text[body_at..end].trim();
-        if !body.is_empty() {
-            found.push(body.to_string());
-        }
-        i = end + CLOSE.len();
+    let mut found: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some((body, tail)) = peel_leading_reminder(rest) {
+        found.push(body.trim().to_string());
+        rest = tail;
     }
-    rest.push_str(&text[i..]);
-    (rest, found)
+    let mut trailing: Vec<String> = Vec::new();
+    while let Some((body, head)) = peel_trailing_reminder(rest) {
+        trailing.push(body.trim().to_string());
+        rest = head;
+    }
+    trailing.reverse();
+    found.append(&mut trailing);
+    found.retain(|b| !b.is_empty());
+    for body in &mut found {
+        *body = cap_chars(body, REMINDER_MAX_CHARS);
+    }
+    (rest.to_string(), found)
 }
 
 /// Unwrap `<pasted_content …>…</pasted_content …>` to the text inside.
@@ -635,26 +739,50 @@ fn unwrap_pasted(text: &str) -> String {
     out
 }
 
-/// A user entry that is nothing but one `<tag …>…</tag>` element — the
-/// harness talking, not the human. Returns the tag name and the text inside.
+/// The shape of a tag the harness wraps its own blocks in: lowercase
+/// kebab-case with at least one inner hyphen — `system-reminder`,
+/// `task-notification`, `command-name`, `local-command-stdout`,
+/// `bash-input`, and the ones this build has not met yet.
 ///
-/// Deliberately narrow: the element must be the whole entry, and the tag
-/// must be kebab- or snake-cased. A pasted HTML snippet (`<div>`, `<p>`)
-/// and a prompt that merely *mentions* a tag both stay prompts.
+/// The rule is what the harness actually emits, not "anything hyphenated":
+/// the earlier `tag.contains('-') || tag.contains('_')` accepted
+/// `<my_config>`, so a config fragment pasted in to be analysed lost its
+/// prompt. Snake case is out (the one snake-cased block Claude Code writes,
+/// `<pasted_content …>`, has its own handling in [`unwrap_pasted`]); so are
+/// upper case and every unhyphenated HTML element.
+fn is_harness_tag(tag: &str) -> bool {
+    tag.len() >= 3
+        && tag.contains('-')
+        && !tag.starts_with('-')
+        && !tag.ends_with('-')
+        && !tag.contains("--")
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A user entry that is nothing but one `<tag>…</tag>` element — the harness
+/// talking, not the human. Returns the tag name and the text inside.
+///
+/// Deliberately narrow: the element must be the whole entry, the tag must
+/// look like one of the harness's own ([`is_harness_tag`]), and the open tag
+/// must carry no attributes — the harness writes none, and requiring that is
+/// also what keeps an attribute holding a `>` (`<a-b title="x>y">`) from
+/// leaking its tail into the body. A pasted HTML snippet (`<div>`, `<p>`),
+/// a pasted config (`<my_config>`) and a prompt that merely *mentions* a tag
+/// all stay prompts.
 fn lone_block(text: &str) -> Option<(String, String)> {
     let t = text.trim();
     let rest = t.strip_prefix('<')?;
-    let name_end = rest.find(|c: char| c == '>' || c.is_whitespace())?;
+    // The first `>` closes the open tag, because a harness tag holds nothing
+    // but its own name: anything else (a space, an attribute, a quote) fails
+    // `is_harness_tag` below rather than being parsed around.
+    let name_end = rest.find('>')?;
     let tag = &rest[..name_end];
-    let named = !tag.is_empty()
-        && tag
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        && (tag.contains('-') || tag.contains('_'));
-    if !named {
+    if !is_harness_tag(tag) {
         return None;
     }
-    let open_len = 1 + rest.find('>')? + 1;
+    let open_len = 1 + name_end + 1;
     let close = format!("</{tag}>");
     let body = t.strip_suffix(&close)?.get(open_len..)?;
     // A second copy of the close tag means this was not one lone element.
@@ -1242,10 +1370,24 @@ fn prompt_chars(turn: &ConvTurn) -> usize {
     turn.prompt.as_deref().map_or(0, |p| p.chars().count())
 }
 
+/// The reminder bodies a turn carries. They are serialised with the turn
+/// (on the hub wire, in the `session_conversation` answer, in the panel), so
+/// a budget that does not count them is not a budget: before they moved out
+/// of `ConvTurn::prompt` they were counted, and a `/clear`-heavy session
+/// carries one multi-KB project-instructions block per cycle.
+fn reminder_chars(turn: &ConvTurn) -> usize {
+    turn.reminders.iter().map(|r| r.chars().count()).sum()
+}
+
+/// Everything a turn puts on the wire that the char budget governs.
+fn turn_chars(turn: &ConvTurn) -> usize {
+    prompt_chars(turn) + reminder_chars(turn) + turn.items.iter().map(item_chars).sum::<usize>()
+}
+
 /// Keep the last `max_turns` turns, then drop the oldest items (and a turn
-/// once it has none left) until prompts + items fit `max_chars`. The newest
-/// item is never dropped; see [`fit_last_turn`] for what happens when the
-/// last turn alone is over budget.
+/// once it has none left) until prompts + items + reminders fit `max_chars`.
+/// The newest item is never dropped; see [`fit_last_turn`] for what happens
+/// when the last turn alone is over budget.
 pub fn trim_conversation(
     mut turns: Vec<ConvTurn>,
     max_turns: usize,
@@ -1256,10 +1398,7 @@ pub fn trim_conversation(
         turns.drain(..turns.len() - max_turns);
         truncated = true;
     }
-    let mut total: usize = turns
-        .iter()
-        .map(|t| prompt_chars(t) + t.items.iter().map(item_chars).sum::<usize>())
-        .sum();
+    let mut total: usize = turns.iter().map(turn_chars).sum();
     while total > max_chars && !turns.is_empty() {
         if turns.len() == 1 && turns[0].items.len() <= 1 {
             truncated |= fit_last_turn(&mut turns[0], max_chars);
@@ -1270,7 +1409,7 @@ pub fn trim_conversation(
             total -= item_chars(&first.items.remove(0));
         }
         if first.items.is_empty() {
-            total -= prompt_chars(first);
+            total -= prompt_chars(first) + reminder_chars(first);
             turns.remove(0);
         }
         truncated = true;
@@ -1283,14 +1422,24 @@ pub fn trim_conversation(
     }
 }
 
-/// Fit a lone turn holding at most one item into `max_chars`. The reply
-/// keeps what the prompt leaves over, but never less than half the budget
-/// (and never less than one char, so a Text item is never blanked); its text
-/// is cut from the front, since the end of a reply is what a reader waits
-/// for. The prompt then gets the rest and keeps its head. Tool summaries are
-/// one short line and are left whole. Returns whether anything was cut.
+/// Fit a lone turn holding at most one item into `max_chars`. Its reminders
+/// go first (nobody wrote them, and the panel folds them away anyway). The
+/// reply then keeps what the prompt leaves over, but never less than half
+/// the budget (and never less than one char, so a Text item is never
+/// blanked); its text is cut from the front, since the end of a reply is
+/// what a reader waits for. The prompt then gets the rest and keeps its
+/// head. Tool summaries are one short line and are left whole. Returns
+/// whether anything was cut.
 fn fit_last_turn(turn: &mut ConvTurn, max_chars: usize) -> bool {
     let mut cut = false;
+    // The reminders go first. They are harness noise the panel folds into a
+    // chip, they are the one text here nobody wrote, and leaving them would
+    // make `truncated` a lie: the loop above can strip this turn to a single
+    // item and still hand back kilobytes of stapled-on reminder.
+    if reminder_chars(turn) > 0 && turn_chars(turn) > max_chars {
+        turn.reminders.clear();
+        cut = true;
+    }
     let item_len = turn.items.first().map_or(0, item_chars);
     let item_budget = item_len
         .min(
@@ -4107,21 +4256,165 @@ mod tests {
         );
     }
 
+    /// The accepting case, which the two tests this replaces never reached:
+    /// both of their inputs were rejected on other grounds (one does not start
+    /// with a tag, the other's tag has no hyphen), so they passed whatever
+    /// [`lone_block`] did with a tag it *accepts*.
     #[test]
-    fn a_prompt_that_merely_contains_a_tag_stays_a_prompt() {
-        let text = "look at this: <ci-monitor-event>x</ci-monitor-event> — why?";
+    fn a_snake_case_tag_the_harness_never_emits_stays_a_prompt() {
+        // `<my_config>` was folded into a Harness item — prompt dropped, body
+        // cut at COMMAND_OUTPUT_MAX_CHARS — purely because the tag held an
+        // underscore. A pasted config fragment is the human's words.
+        let text = "<my_config>\nkey = value\n</my_config>";
         let t = parse_conversation(&jl(&[user(serde_json::json!(text)), asst("ok")]));
         assert_eq!(
             t[0].prompt.as_deref(),
             Some(text),
-            "only a lone block folds"
+            "a pasted fragment is a prompt"
+        );
+        assert!(
+            !t[0]
+                .items
+                .iter()
+                .any(|i| matches!(i, ConvItem::Harness { .. })),
+            "and it is not folded away: {:?}",
+            t[0].items
+        );
+        // The shapes the replaced tests covered, kept as one line each.
+        for text in [
+            "<div class=\"row\">hi</div>",
+            "see <ci-monitor-event>x</ci-monitor-event> — why?",
+        ] {
+            let t = parse_conversation(&jl(&[user(serde_json::json!(text)), asst("ok")]));
+            assert_eq!(t[0].prompt.as_deref(), Some(text));
+        }
+    }
+
+    #[test]
+    fn a_tagged_element_with_attributes_is_a_prompt_and_never_leaks_its_attribute() {
+        // `open_len` took the FIRST `>`, which for `<a-b title="x>y">` sits
+        // inside the attribute: `y">` leaked into the folded body. A harness
+        // block carries no attributes at all, so this stays a prompt.
+        let text = "<a-b title=\"x>y\">body</a-b>";
+        let t = parse_conversation(&jl(&[user(serde_json::json!(text)), asst("ok")]));
+        assert_eq!(
+            t[0].prompt.as_deref(),
+            Some(text),
+            "attributes mean it is not a harness block"
+        );
+        assert!(
+            !format!("{:?}", t[0].items).contains("y\">"),
+            "no attribute text leaks into an item: {:?}",
+            t[0].items
+        );
+    }
+
+    // ─── Round-20 F5 / F6 / F14 ────────────────────────────────────────────
+
+    #[test]
+    fn a_reminder_is_capped_like_every_other_carried_text() {
+        let long = "x".repeat(REMINDER_MAX_CHARS * 3);
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!(format!(
+                "<system-reminder>{long}</system-reminder>\n\nhello"
+            ))),
+            asst("ok"),
+        ]));
+        assert_eq!(t[0].prompt.as_deref(), Some("hello"));
+        assert_eq!(
+            t[0].reminders[0].chars().count(),
+            REMINDER_MAX_CHARS + 1,
+            "cut to the cap, plus the ellipsis"
+        );
+        assert!(t[0].reminders[0].ends_with('…'));
+    }
+
+    #[test]
+    fn trim_conversation_counts_reminders_so_truncated_tells_the_truth() {
+        let kept_chars = |c: &Conversation| -> usize {
+            c.turns
+                .iter()
+                .map(|t| {
+                    prompt_chars(t)
+                        + t.items.iter().map(item_chars).sum::<usize>()
+                        + t.reminders.iter().map(|r| r.chars().count()).sum::<usize>()
+                })
+                .sum()
+        };
+        let turn = |p: &str| ConvTurn {
+            prompt: Some(p.into()),
+            at: None,
+            ended_at: None,
+            items: vec![ConvItem::Text {
+                text: "i".repeat(10),
+            }],
+            reminders: vec!["r".repeat(500)],
+        };
+        // Two turns, ~1 022 chars of which 1 000 are reminders: a 100 budget
+        // has to see them.
+        let c = trim_conversation(vec![turn("a"), turn("b")], 10, 100);
+        assert!(c.truncated);
+        assert!(
+            kept_chars(&c) <= 100,
+            "reminders ride the budget too; kept {}",
+            kept_chars(&c)
+        );
+        // And the lone-turn path: the turn cannot be dropped, so the budget
+        // is only honest if the reminder goes.
+        let c = trim_conversation(vec![turn("a")], 10, 100);
+        assert!(
+            c.truncated,
+            "a turn still carrying its reminder is truncated"
+        );
+        assert!(
+            kept_chars(&c) <= 100,
+            "kept {} of a 100 budget",
+            kept_chars(&c)
         );
     }
 
     #[test]
-    fn a_pasted_html_snippet_is_not_mistaken_for_a_harness_block() {
-        let text = "<div class=\"row\">hi</div>";
+    fn a_reminder_quoted_inside_a_prompt_is_left_where_the_human_put_it() {
+        // A pasted transcript excerpt. The harness staples reminders onto the
+        // edges of an entry; one in the middle of a sentence is quoted text,
+        // and excising it rewrites what the human wrote.
+        let text = "why did this fire? <system-reminder>Plan mode is active</system-reminder> \
+                    — I never asked for it";
         let t = parse_conversation(&jl(&[user(serde_json::json!(text)), asst("ok")]));
-        assert_eq!(t[0].prompt.as_deref(), Some(text), "html stays a prompt");
+        assert_eq!(
+            t[0].prompt.as_deref(),
+            Some(text),
+            "the quoted block stays in the sentence"
+        );
+        assert!(t[0].reminders.is_empty(), "and is not lifted into the chip");
+    }
+
+    #[test]
+    fn an_unknown_item_kind_degrades_to_one_line_instead_of_failing_the_parse() {
+        // A newer hub sends a `ConvItem` variant this build has never heard
+        // of. The whole Conversation must still parse — see the module docs
+        // on ConvItem and the fleet-mobile note above.
+        let wire = serde_json::json!({
+            "turns": [{
+                "prompt": "hi", "at": null, "ended_at": null, "reminders": [],
+                "items": [
+                    {"kind": "text", "text": "before"},
+                    {"kind": "quantum_thing", "payload": {"a": 1}},
+                    {"kind": "text", "text": "after"},
+                ],
+            }],
+            "truncated": false, "context": null, "events": [],
+        });
+        let c: Conversation = serde_json::from_value(wire)
+            .expect("an unknown item kind must not fail the whole conversation");
+        assert_eq!(c.turns[0].items.len(), 3, "the items either side survive");
+        let ConvItem::Harness { tag, body } = &c.turns[0].items[1] else {
+            panic!(
+                "the unknown item is not a placeholder: {:?}",
+                c.turns[0].items[1]
+            );
+        };
+        assert!(tag.contains("quantum_thing"), "the tag names it: {tag}");
+        assert!(body.contains("quantum_thing"), "so does the body: {body}");
     }
 }

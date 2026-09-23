@@ -2616,13 +2616,23 @@ fn the_served_definition_budget_stays_bounded() {
     /// main's `keys` and `when` raises: each side was measured without the
     /// other, so the merged surface came to 58,957; raised to that plus 100
     /// bytes of headroom.
-    // Raised deliberately from 59_057 when `session_activity` joined the
-    // router: a hub client had no live indicator at all without it (the
-    // command was local-only, so a remote desktop saw nothing move for the
-    // length of a turn). The budget is a ratchet against description creep,
-    // not against tools that earn their place — so it moves with a reason
-    // written down, and only that far.
-    const BUDGET_BYTES: usize = 59_400;
+    /// Raised deliberately from 59,057 when `session_activity` joined the
+    /// router: a hub client had no live indicator at all without it (the
+    /// command was local-only, so a remote desktop saw nothing move for the
+    /// length of a turn). The budget is a ratchet against description creep,
+    /// not against tools that earn their place — so it moves with a reason
+    /// written down, and only that far.
+    ///
+    /// Raised from 59,400 to 59,486 on 2026-09-23 (code-review round 20,
+    /// F18): 59,400 was set against the 58,957 baseline the *previous* entry
+    /// measured, not against a re-measurement, and left 14 bytes of headroom
+    /// — a single word added to any description would have failed CI. The
+    /// surface was re-measured at **59,386 bytes over 78 tools served to the
+    /// master token** (the number the run below prints), so the constant is
+    /// that plus the customary 100 bytes. No description was trimmed and no
+    /// tool was added for this raise; it only writes down what is already
+    /// served.
+    const BUDGET_BYTES: usize = 59_486;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -2656,10 +2666,21 @@ fn the_served_definition_budget_stays_bounded() {
     ] {
         println!("{label}: {n} tools / {b} bytes (~{} tokens)", b * 10 / 37);
     }
+    // The measured number, stated as such: every raise of the constant above
+    // quotes one of these, so the next one has a figure to quote rather than
+    // a baseline inherited from an older entry.
+    println!(
+        "master surface measured at {bytes} bytes of the {BUDGET_BYTES} budget \
+         ({} bytes of headroom)",
+        BUDGET_BYTES.saturating_sub(bytes)
+    );
     assert!(
         bytes <= BUDGET_BYTES,
         "the tool surface grew to {bytes} bytes, over the {BUDGET_BYTES} budget: \
-         trim a description, or raise the constant on purpose"
+         trim a description, or raise the constant on purpose — to {} (the \
+         measurement plus the customary 100 bytes of headroom), and say in the \
+         constant's doc comment what was measured and when",
+        bytes + 100
     );
     assert!(
         ro_bytes < bytes / 2,

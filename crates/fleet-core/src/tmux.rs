@@ -1160,6 +1160,104 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
     }
 }
 
+/// Writing a fake executable that a test is about to run, without the
+/// `ETXTBSY` race that turned `main` red twice (code-review round 20, F1).
+///
+/// `fs::write` + `set_permissions` + exec is not safe in a multi-threaded
+/// test binary: another test's `fork()` landing between the `open(O_WRONLY)`
+/// and the `close()` inherits the write fd, and an exec of that inode then
+/// fails with "Text file busy". `O_CLOEXEC` does not help — the fd is closed
+/// *at* exec, which is exactly when the kernel checks for writers.
+///
+/// [`write_exec`] closes the window in three steps, and the third is the one
+/// that actually closes it:
+///
+///  1. the body goes to a sibling path and is `rename`d into place, so the
+///     final name never names a half-written or not-yet-`chmod`ded file;
+///  2. the `File` is dropped — closed — *before* the rename, so this thread
+///     holds no writer by the time the final name exists;
+///  3. the file is then exec'd once with `--fleet-probe`, retrying while that
+///     exec reports `ETXTBSY`. Steps 1–2 alone do NOT close the race:
+///     `rename` keeps the inode, so a child forked during the write still
+///     holds a writer on the very inode the final name now points at. A
+///     *successful* exec is the only available proof that no writer is left —
+///     and none can appear afterwards, because nothing opens the file again.
+///
+/// Every body written through this module must therefore start with
+/// [`PROBE_GUARD`], which answers the probe before any of the body's own side
+/// effects run (several fakes count their invocations, and a test asserts the
+/// exact count).
+///
+/// Only Linux enforces this on `exec` (the inode's writer count); Darwin does
+/// not, so the flake never reproduces on a developer's Mac and both red runs
+/// were on the Linux runners (`rust (ubuntu-24.04)` and `hub-headless`). A
+/// green local suite says nothing about it — step 3 is what makes it safe by
+/// construction rather than by luck.
+///
+/// Lives in `tmux.rs` rather than in a module of its own so `ssh.rs`'s fakes
+/// can share it without adding a file to the crate root.
+#[cfg(test)]
+pub(crate) mod fake_exec {
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    /// The shell line that answers [`write_exec`]'s probe and nothing else.
+    /// No test passes `--fleet-probe` itself.
+    pub(crate) const PROBE_GUARD: &str = "case \"$1\" in --fleet-probe) exit 0;; esac\n";
+
+    /// `ETXTBSY` — 26 on both Linux and macOS, the only two platforms this
+    /// crate's tests run on.
+    const ETXTBSY: i32 = 26;
+
+    /// Write `body` to `dir/name` as a 0755 file that is safe to exec
+    /// immediately, and hand back its path. `body` must carry
+    /// [`PROBE_GUARD`] ahead of anything with a side effect.
+    pub(crate) fn write_exec(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            body.contains(PROBE_GUARD),
+            "a fake exec must carry the probe guard: {body}"
+        );
+        let path = dir.join(name);
+        let tmp = dir.join(format!(".{name}.fleet-tmp"));
+        {
+            let mut f = std::fs::File::create(&tmp).expect("create the fake");
+            f.write_all(body.as_bytes()).expect("write the fake");
+            f.set_permissions(std::fs::Permissions::from_mode(0o755))
+                .expect("chmod the fake");
+            f.sync_all().expect("fsync the fake");
+            // Explicit, because it is load-bearing: the handle is closed
+            // here, before the rename below publishes the name.
+            drop(f);
+        }
+        std::fs::rename(&tmp, &path).expect("publish the fake");
+        wait_until_executable(&path);
+        path
+    }
+
+    /// Exec `path` with `--fleet-probe` until the exec is not refused with
+    /// `ETXTBSY` any more. Returning means the inode has no writer left.
+    fn wait_until_executable(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match std::process::Command::new(path)
+                .arg("--fleet-probe")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(_) => return,
+                Err(e) if e.raw_os_error() == Some(ETXTBSY) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("{} never became executable: {e}", path.display()),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1530,20 +1628,21 @@ mod tests {
     /// fake `claude` recorded. `with_cl` also puts a fake `cl` on PATH.
     #[cfg(unix)]
     fn run_pane_command(shell: &str, cmd: &str, with_cl: bool) -> Vec<String> {
-        use std::os::unix::fs::PermissionsExt;
+        use super::fake_exec::{write_exec, PROBE_GUARD};
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("argv.log");
+        // Never `fs::write` + `set_permissions` here: see `fake_exec`'s doc
+        // comment — that shape is what made this very test fail with an
+        // empty argv log on CI (round 20, F1).
         let write = |name: &str, body: String| {
-            let path = dir.path().join(name);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            write_exec(dir.path(), name, &body);
         };
         // `--resume` fails (no such conversation) so the chain has to reach
         // `--session-id`; everything else succeeds.
         write(
             "claude",
             format!(
-                "#!/bin/sh\nprintf 'claude %s\\n' \"$*\" >> '{}'\ncase \"$*\" in *--resume*) exit 1;; esac\nexit 0\n",
+                "#!/bin/sh\n{PROBE_GUARD}printf 'claude %s\\n' \"$*\" >> '{}'\ncase \"$*\" in *--resume*) exit 1;; esac\nexit 0\n",
                 log.display()
             ),
         );
@@ -1551,13 +1650,13 @@ mod tests {
             write(
                 "cl",
                 format!(
-                    "#!/bin/sh\nprintf 'cl %s\\n' \"$*\" >> '{}'\nexit 0\n",
+                    "#!/bin/sh\n{PROBE_GUARD}printf 'cl %s\\n' \"$*\" >> '{}'\nexit 0\n",
                     log.display()
                 ),
             );
         }
         // The trailing `exec ${SHELL:-/bin/zsh} -l` must terminate, not hang.
-        write("fake-shell", "#!/bin/sh\nexit 0\n".to_string());
+        write("fake-shell", format!("#!/bin/sh\n{PROBE_GUARD}exit 0\n"));
         let status = std::process::Command::new(shell)
             .arg("-c")
             .arg(cmd)
@@ -1575,11 +1674,27 @@ mod tests {
             "{shell}: {}",
             String::from_utf8_lossy(&status.stderr)
         );
-        std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
-            .collect()
+        // NOT `unwrap_or_default`: an absent or empty log means the fake
+        // `claude` never ran at all, and the pane command's own
+        // `a || b || c; exec $SHELL` shape hides that — every `cl`/`claude`
+        // attempt can fail (126 on an ETXTBSY exec) and the trailing `exec
+        // fake-shell` still exits 0, so the assert above passes and the
+        // caller compares against an empty vec. Name the real cause here
+        // instead of letting it masquerade as a fallback-logic bug.
+        let logged = std::fs::read_to_string(&log).unwrap_or_else(|e| {
+            panic!(
+                "{shell}: no argv log at {} ({e}) — the fake `claude`/`cl` never ran, \
+                 so this says nothing about the fallback chain",
+                log.display()
+            )
+        });
+        assert!(
+            !logged.trim().is_empty(),
+            "{shell}: the argv log at {} is empty — the fake `claude`/`cl` never ran, \
+             so this says nothing about the fallback chain",
+            log.display()
+        );
+        logged.lines().map(str::to_string).collect()
     }
 
     #[cfg(unix)]

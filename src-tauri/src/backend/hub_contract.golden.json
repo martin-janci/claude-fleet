@@ -1,5 +1,5 @@
 {
-  "revision": 3,
+  "revision": 4,
   "types": {
     "AccountRow": [
       "display_name",
@@ -44,6 +44,12 @@
       "hash",
       "subject"
     ],
+    "ConvItem::Bash": [
+      "command",
+      "kind",
+      "stderr",
+      "stdout"
+    ],
     "ConvItem::Command": [
       "args",
       "kind",
@@ -55,6 +61,11 @@
       "pre_tokens",
       "summary",
       "trigger"
+    ],
+    "ConvItem::Harness": [
+      "body",
+      "kind",
+      "tag"
     ],
     "ConvItem::Interrupt": [
       "during_tool",

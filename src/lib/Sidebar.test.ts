@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
@@ -445,6 +445,73 @@ describe('Sidebar (sessions-grouped view)', () => {
     await fireEvent.click(sessRows[0]);
     await fireEvent.click(sessRows[0]);
     expect(get(selectedSession)).toBeNull();
+  });
+
+  // UX-132 / round-20 F4. `:focus-within` puts the row's action buttons in
+  // the tab order, but `keydown` bubbles from the focused <button> up to the
+  // row, and a button's activation is the DEFAULT ACTION of that keydown —
+  // so an ancestor calling preventDefault() while the event bubbles cancels
+  // it. jsdom does not synthesise the click, but it does model
+  // `defaultPrevented` exactly as a browser does, and that flag is the whole
+  // mechanism: a cancelled keydown is an action that never happens.
+  describe('keyboard events from nested controls', () => {
+    function keydown(el: Element, key: string): KeyboardEvent {
+      const e = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      el.dispatchEvent(e);
+      return e;
+    }
+
+    for (const key of ['Enter', ' ']) {
+      it(`${key === ' ' ? 'Space' : key} on a row action button is left to the button`, async () => {
+        const sess = sessionFor(1, 'dev-foo');
+        mockBackend(fakeProjects, [sess]);
+        render(Sidebar);
+        await tick(); await tick();
+        const btn = await screen.findByTestId('restart-session');
+        const e = keydown(btn, key);
+        await tick();
+        // The row must not cancel the button's default action.
+        expect(e.defaultPrevented).toBe(false);
+        // …and must not quietly navigate somewhere else either.
+        expect(get(selectedSession)).toBeNull();
+      });
+    }
+
+    it('Enter on the row itself still selects the session', async () => {
+      const sess = sessionFor(1, 'dev-foo');
+      mockBackend(fakeProjects, [sess]);
+      render(Sidebar);
+      await tick(); await tick();
+      const row = (await screen.findAllByTestId('sess-row'))[0];
+      const e = keydown(row, 'Enter');
+      await tick();
+      // The row IS a role="button": Space/Enter on it must scroll nothing.
+      expect(e.defaultPrevented).toBe(true);
+      expect(get(selectedSession)?.id).toBe(sess.id);
+    });
+
+    it('Enter on the project row\'s + button does not collapse the project', async () => {
+      mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+      render(Sidebar);
+      await tick(); await tick();
+      const projRow = await screen.findByTestId('proj-row');
+      const plus = within(projRow).getByLabelText('New session');
+      keydown(plus, 'Enter');
+      await tick();
+      // Collapsing would unmount the children — the button's own action
+      // (open the new-session dialog) would then be aimed at a folded tree.
+      expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+    });
+
+    it('Enter on the project row itself still collapses it', async () => {
+      mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+      render(Sidebar);
+      await tick(); await tick();
+      const projRow = await screen.findByTestId('proj-row');
+      keydown(projRow, 'Enter');
+      await tick();
+      expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+    });
   });
 
   // FE-1: default tmux names are project-derived, so the same name on two
@@ -1276,6 +1343,25 @@ describe('Sidebar triage (W2 Track D)', () => {
     await fireEvent.click(pill);
     await tick();
     expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+  });
+
+  // UX-08: at zero there is nothing to warn about, so the glyph and the
+  // "(0)" go away — but the pill itself must stay, or the filter becomes
+  // unreachable the moment the queue drains.
+  it('the "Needs you" pill drops the warning glyph and the count at zero', async () => {
+    const fine = { ...sessionFor(1, 'dev-fine'), claude_status: 'working' as const };
+    mockBackend(fakeProjects, [fine]);
+    render(Sidebar);
+    await tick(); await tick();
+    const pill = screen.getByTestId('needs-you-filter');
+    expect(pill).toBeTruthy();
+    expect(pill.textContent?.trim()).toBe('Needs you');
+    expect(pill.textContent).not.toContain('⚠');
+    expect(pill.textContent).not.toContain('(0)');
+    // Still a working filter, not a dead label.
+    await fireEvent.click(pill);
+    await tick();
+    expect(pill.getAttribute('aria-pressed')).toBe('true');
   });
 
   it('the "Needs you" pill ignores a stuck_kind on an external (Outside fleet) row', async () => {

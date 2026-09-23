@@ -11,7 +11,7 @@
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
-  import { loadSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
+  import { loadSessions, applySessionEvents, sessions, hasNoPane, showFriendlyNames } from './lib/sessions';
   import { loadHosts, applyHostEvents, hosts } from './lib/hosts';
   import { viewHostSessions } from './lib/host_actions';
   import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
@@ -514,6 +514,9 @@
     session: $selectedSession,
     hostAlias: $selectedSession?.host_alias ?? hostsPreselect,
     branch: null,
+    // The app's one name policy: the chip and the prompt prefix name the
+    // session the same way the sidebar row and the terminal header do.
+    friendly: $showFriendlyNames,
   });
 
   function onHostsFilterSidebar(alias: string) {
@@ -893,13 +896,18 @@
 <style>
   .layout {
     display: grid;
-    height: calc(100vh - 24px);
+    /* The footer is fixed at the bottom; this is the rest. Read off the same
+       token the footer sizes itself from — hardcoding 24px here left the page
+       1px taller than the viewport, because the footer's border was not in it. */
+    height: calc(100vh - var(--status-h));
     width: 100vw;
     background: var(--bg);
   }
   .status {
-    height: 24px;
-    line-height: 24px;
+    /* border-box: --status-h is the occupied height, border included. */
+    box-sizing: border-box;
+    height: var(--status-h);
+    line-height: calc(var(--status-h) - 1px);
     padding: 0 0.75rem;
     background: var(--bg-pane);
     border-top: 1px solid var(--border);

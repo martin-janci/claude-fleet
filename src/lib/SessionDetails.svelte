@@ -200,7 +200,18 @@
   // pruned registration, moved checkout, dead tmux). The backend emits the
   // row events; the toast just says what it did.
   let repairing = $state(false);
+  // Same consequence as Restart, so the same guard: an explicit repair may
+  // respawn a LIVE pane, killing whatever claude is doing in it. It used to be
+  // one click, sitting between Restart and Recreate, which both confirm.
+  let confirmingRepair = $state(false);
+  function askRepair() {
+    confirmingRepair = true;
+  }
+  function cancelRepair() {
+    confirmingRepair = false;
+  }
   async function onRepair() {
+    confirmingRepair = false;
     if (repairing) return;
     repairing = true;
     // Explicit: the user asked, so this may unregister a stale entry, adopt a
@@ -656,7 +667,7 @@
       {#if !hasNoPane(session) && session.project_id !== null}
         <button
           class="ghost"
-          onclick={onRepair}
+          onclick={askRepair}
           disabled={repairing || repairBlocked !== null}
           title={repairBlocked ?? 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
           data-testid="repair-from-details"
@@ -785,6 +796,23 @@
     This stops the claude process in <code>{session.tmux_name}</code> on
     <code>{session.host_alias}</code> and starts a fresh one. Anything it is working
     on right now is lost; the tmux session and the worktree are kept. Continue?
+  </ConfirmDialog>
+{/if}
+
+{#if confirmingRepair}
+  <ConfirmDialog
+    title="Repair workspace?"
+    confirmLabel="Repair"
+    danger
+    busy={repairing}
+    onconfirm={onRepair}
+    oncancel={cancelRepair}
+    confirmTestId="confirm-repair-details"
+  >
+    This may re-register the worktree for <code>{session.tmux_name}</code> on
+    <code>{session.host_alias}</code>, recreate its branch and respawn the pane —
+    which stops the claude running in it, losing whatever it is working on. The
+    worktree's files are kept. Continue?
   </ConfirmDialog>
 {/if}
 

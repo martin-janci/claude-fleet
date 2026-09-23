@@ -46,10 +46,59 @@ export const INFO_TIMEOUT_MS = 4000;
 /** Long enough to reach an `Undo` without hurrying. */
 export const ACTION_TIMEOUT_MS = 8000;
 
+/**
+ * Hard ceiling on the visible stack. Dedup only collapses IDENTICAL
+ * code+message pairs, so N failing sessions still push N distinct sticky
+ * errors — and the column is bottom-anchored, so an unbounded stack grows
+ * straight off the top of the viewport.
+ */
+export const MAX_TOASTS = 5;
+
 export const toasts = writable<Toast[]>([]);
+
+/**
+ * How many toasts the cap has thrown away since the stack was last empty.
+ * The UI shows this: dropping something silently would make `Dismiss all (5)`
+ * a lie about how much went wrong. Resets to 0 the moment nothing is left.
+ */
+export const droppedToasts = writable<number>(0);
 
 let nextId = 1;
 const timers = new Map<number, ReturnType<typeof setTimeout>>();
+
+function clearTimer(id: number): void {
+  const t = timers.get(id);
+  if (t) {
+    clearTimeout(t);
+    timers.delete(id);
+  }
+}
+
+/**
+ * Trim an over-full stack. Which end to drop from is the whole decision:
+ *
+ *  - Never the newest. A sticky error discarded on arrival is a worse bug
+ *    than the one this cap fixes — the user never learns it failed at all.
+ *  - Transients (`sticky: false`) go first, oldest first: they were going to
+ *    disappear on their own in a few seconds anyway.
+ *  - Only when no transient is left does an old sticky error go, again oldest
+ *    first, and every drop is counted so the UI can say how many.
+ */
+function capped(arr: Toast[]): Toast[] {
+  if (arr.length <= MAX_TOASTS) return arr;
+  const over = arr.length - MAX_TOASTS;
+  const drop = new Set<number>();
+  // `arr.length - 1` everywhere: the last entry is the one that just arrived.
+  for (let i = 0; i < arr.length - 1 && drop.size < over; i++) {
+    if (!arr[i].sticky) drop.add(i);
+  }
+  for (let i = 0; i < arr.length - 1 && drop.size < over; i++) {
+    drop.add(i);
+  }
+  for (const i of drop) clearTimer(arr[i].id);
+  droppedToasts.update((n) => n + drop.size);
+  return arr.filter((_, i) => !drop.has(i));
+}
 
 function keyOf(code: string | null, message: string): string {
   return `${code ?? ''}\u0000${message}`;
@@ -77,7 +126,7 @@ export function push(opts: PushOptions): number {
     return existing.id;
   }
   const id = nextId++;
-  toasts.update((arr) => [...arr, { id, kind, code, message: opts.message, sticky, count: 1, action }]);
+  toasts.update((arr) => capped([...arr, { id, kind, code, message: opts.message, sticky, count: 1, action }]));
   if (!sticky) arm(id, timeout);
   return id;
 }
@@ -92,12 +141,11 @@ function arm(id: number, ms: number): void {
 }
 
 export function dismiss(id: number): void {
-  const t = timers.get(id);
-  if (t) {
-    clearTimeout(t);
-    timers.delete(id);
-  }
+  clearTimer(id);
   toasts.update((arr) => (arr.some((x) => x.id === id) ? arr.filter((x) => x.id !== id) : arr));
+  // Nothing left on screen means the flood is over: the "+N not shown" note
+  // has nothing to qualify any more, and must not outlive the stack.
+  if (get(toasts).length === 0) droppedToasts.set(0);
 }
 
 /** Run a toast's action (if it still has one) and dismiss the toast. */
@@ -111,6 +159,7 @@ export function clearToasts(): void {
   for (const t of timers.values()) clearTimeout(t);
   timers.clear();
   toasts.set([]);
+  droppedToasts.set(0);
 }
 
 /** Sticky error toast for a backend `IpcError`, keeping its `E_*` code

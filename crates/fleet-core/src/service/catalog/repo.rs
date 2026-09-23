@@ -43,16 +43,61 @@ fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, IpcErro
     let mut cmd = std::process::Command::new("git");
     cmd.args(args).current_dir(dir);
     // Tests must not depend on (or be broken by) the host's own global git
-    // config: isolate every git invocation the production code makes from
-    // it. This has no effect on release builds — `git config user.email`
-    // there still resolves the normal local -> global -> system chain, so a
-    // real global identity is honoured and the claude-fleet fallback only
-    // kicks in when git itself has none.
+    // config or identity environment: isolate every git invocation the
+    // production code makes from both. This has no effect on release builds
+    // — `git config user.email` there still resolves the normal local ->
+    // global -> system chain, so a real global identity is honoured and the
+    // claude-fleet fallback only kicks in when git itself has none.
+    //
+    // Per COMMAND, never `std::env::set_var`: this is one multi-threaded
+    // test binary with ~158 `Command::new` sites (each `fork`/`exec` reads
+    // `environ`) and dozens of `env::var` reads running in parallel, so
+    // mutating the process environment from a test thread is a real
+    // use-after-free race on glibc — the rule `service/projects.rs` already
+    // writes down. It also leaked `GIT_CONFIG_GLOBAL=/dev/null` into every
+    // later test in the binary that shells out to git (round 20, F17).
     #[cfg(test)]
-    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1");
+    test_git_isolation(&mut cmd);
     cmd.output()
         .map_err(|e| IpcError::new(E_CATALOG_GIT, format!("spawn git: {e}")))
+}
+
+/// Make one `git` invocation ignore whoever is running it, scoped to that
+/// `Command` and nothing else. Two layers can contribute an identity, and
+/// the second is the one that is easy to miss:
+///
+///  - **config.** `has_identity` asks `git config user.email`, which falls
+///    back to the global file. On a clean runner a fresh repo has none and
+///    `commit` takes its fallback branch; on a developer's machine it has
+///    one and that branch is unreachable. `/dev/null` reads as an empty
+///    config; both platforms this is built on have it, and nothing here
+///    runs on Windows.
+///  - **environment.** `GIT_AUTHOR_EMAIL` and friends override *every*
+///    config layer, including a repository's own `--local` setting. An agent
+///    harness sets them so its commits are attributed correctly, and with
+///    them set `commit_keeps_configured_identity` fails even though the test
+///    had just written a local identity — which is what makes this the wrong
+///    thing to diagnose as "the global config leaked in".
+///
+/// Green in CI and red locally is the worse of the two failures, because it
+/// is the pattern that teaches people to ignore a red local suite.
+#[cfg(test)]
+fn test_git_isolation(cmd: &mut std::process::Command) {
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    for name in [
+        "GIT_CONFIG_SYSTEM",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMITTER_DATE",
+        // Git's last resort before it gives up guessing.
+        "EMAIL",
+    ] {
+        cmd.env_remove(name);
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, IpcError> {
@@ -901,18 +946,7 @@ mod tests {
     #[test]
     fn git_ensure_head_and_pull_on_a_local_repo() {
         let origin = tmp("origin");
-        let run = |dir: &std::path::Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
+        let run = git_run;
         run(&origin, &["init", "-q", "-b", "main"]);
         run(&origin, &["config", "user.email", "t@t"]);
         run(&origin, &["config", "user.name", "t"]);
@@ -1009,12 +1043,18 @@ mod tests {
         );
     }
 
+    /// A `git` the tests drive themselves, isolated exactly like the one
+    /// `git_output` runs (`test_git_isolation`) — per command, so nothing
+    /// here touches the process environment other threads are reading.
+    fn test_git(dir: &std::path::Path, args: &[&str]) -> std::process::Command {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(args).current_dir(dir);
+        super::test_git_isolation(&mut cmd);
+        cmd
+    }
+
     fn git_run(dir: &std::path::Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
+        let out = test_git(dir, args).output().unwrap();
         assert!(
             out.status.success(),
             "{args:?}: {}",
@@ -1022,62 +1062,12 @@ mod tests {
         );
     }
 
-    /// Make git in this test binary ignore whoever is running it.
-    ///
-    /// These tests are about which identity a commit ends up with, so anything
-    /// the machine can contribute to that has to go. Two layers can, and the
-    /// second is the one that is easy to miss:
-    ///
-    ///  - **config.** `has_identity` asks `git config user.email`, which falls
-    ///    back to the global file. On a clean runner a fresh repo has none and
-    ///    `commit` takes its fallback branch; on a developer's machine it has
-    ///    one and that branch is unreachable.
-    ///  - **environment.** `GIT_AUTHOR_EMAIL` and friends override *every*
-    ///    config layer, including a repository's own `--local` setting. An
-    ///    agent harness sets them so its commits are attributed correctly, and
-    ///    with them set `commit_keeps_configured_identity` fails even though
-    ///    the test had just written a local identity — which is what makes
-    ///    this the wrong thing to diagnose as "the global config leaked in".
-    ///
-    /// Green in CI and red locally is the worse of the two failures, because
-    /// it is the pattern that teaches people to ignore a red local suite.
-    ///
-    /// Scoped to this process, so the environment the tests run *in* is
-    /// untouched. That is the point rather than a side effect: a test whose
-    /// result depends on the machine is a test that is not about the code, and
-    /// everything here that passes on a runner already depends on neither.
-    /// This makes local match CI rather than the other way round.
-    fn isolate_git_config() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            // `/dev/null` reads as an empty config. Both platforms this is
-            // built on have it; nothing here runs on Windows.
-            std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
-            std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
-            for name in [
-                "GIT_AUTHOR_NAME",
-                "GIT_AUTHOR_EMAIL",
-                "GIT_AUTHOR_DATE",
-                "GIT_COMMITTER_NAME",
-                "GIT_COMMITTER_EMAIL",
-                "GIT_COMMITTER_DATE",
-                // Git's last resort before it gives up guessing.
-                "EMAIL",
-            ] {
-                std::env::remove_var(name);
-            }
-        });
-    }
-
     fn init_repo(root: &std::path::Path) {
-        isolate_git_config();
         git_run(root, &["init", "-q", "-b", "main"]);
     }
 
     fn commit_author_email(root: &std::path::Path) -> String {
-        let out = std::process::Command::new("git")
-            .args(["log", "-1", "--format=%ae"])
-            .current_dir(root)
+        let out = test_git(root, &["log", "-1", "--format=%ae"])
             .output()
             .unwrap();
         assert!(out.status.success());

@@ -73,6 +73,11 @@
      *  still works. */
     readOnly?: boolean;
     onSelectSession: (sess: SessionRow, e?: MouseEvent) => void;
+    /** Handles Enter/Space on the ROW. It must ignore events that bubbled
+     *  up from a nested control (the action cluster, the select box, the
+     *  rename input): activating a `<button>` is the default action of its
+     *  own keydown, so calling `preventDefault()` here would cancel it.
+     *  Sidebar's implementation guards on `e.target === e.currentTarget`. */
     onKeySession: (e: KeyboardEvent, sess: SessionRow) => void;
     toggleSelected: (sess: SessionRow) => void;
     beginRename: (sess: SessionRow, e?: Event) => unknown;
