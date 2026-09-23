@@ -453,6 +453,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::LongPoll,
     },
+    // messaging.rs — a bounded wait over the inbox, same class as
+    // wait_for_session.
+    ToolPolicy {
+        name: "wait_for_reply",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::LongPoll,
+    },
     ToolPolicy {
         name: "session_transcript",
         access: Access::Client,

@@ -57,7 +57,7 @@ the host's detail in the **Hosts** view (⌘I):
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
   `session_history`, `session_conversations`, `inbox`, `peer_status`,
   `session_transcript`, `repo_*`,
-  `get_clipboard`, `wait_for_session`, `wait_for_task`, `list_tasks`, …).
+  `get_clipboard`, `wait_for_session`, `wait_for_reply`, `wait_for_task`, `list_tasks`, …).
   Anything that sends, kills, deletes, provisions, dispatches, writes the
   clipboard, or writes a session row (including `set_friendly_name`, so an
   agent on a `readonly` host cannot set its sidebar label) returns
@@ -505,6 +505,15 @@ the sender took part in; `E_NOTFOUND` / `E_INVALID` otherwise) and `inbox`
 rows carry it back. `set_session_tags { session_id, tags }` replaces a
 session's labels (up to 16 of 1–32 chars from `[A-Za-z0-9_.:-]`) and
 `list_sessions { tag }` filters on them; summary rows include `tags`.
+
+**Addressing and reply waits.** `send_message` also accepts `to_addr` (a
+fleet address, `<fleet>/session/<host>/<name>`) as an alternative to
+`to_session_id` — `to_addr` wins when both are set. Repeat `client_msg_id`
+to retry a send without delivering twice, the same discipline as
+`send_prompt`. `wait_for_reply` (`{ session_id,
+after_message_id?, timeout_s? }`) long-polls the inbox for the next message
+newer than `after_message_id`, the same bounded-wait budget as
+`wait_for_session`.
 
 ## Provisioning hosts
 

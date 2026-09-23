@@ -10,6 +10,7 @@
 
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
+use crate::service::pane_intel::ClaudeStatus;
 use crate::service::sessions;
 use crate::ssh::SshClient;
 use crate::store::{SessionMessage, Store};
@@ -19,6 +20,13 @@ use std::sync::{Arc, Mutex};
 pub struct SendMessageArgs {
     pub from_session_id: i64,
     pub to_session_id: i64,
+    /// Fleet address of the recipient — `<fleet>/session/<host>/<name>`,
+    /// `<fleet>/client/<name>` or `<fleet>/hub`. Alternative to
+    /// `to_session_id`; when set, this wins. `Client` and `Hub` addresses
+    /// parse but are refused as recipients this cycle (`E_UNSUPPORTED`) —
+    /// the participant rows exist so a later cycle can route to them.
+    #[serde(default)]
+    pub to_addr: Option<String>,
     pub body: String,
     /// Tag the message; defaults to `"message"`. Receivers can filter on it
     /// (e.g. `"task"`, `"reply"`, `"alert"`).
@@ -98,7 +106,12 @@ pub async fn send_message(
             "message body must be non-empty",
         ));
     }
-    if args.from_session_id == args.to_session_id {
+    // Resolved BEFORE the self-target check and every downstream lookup: a
+    // session addressing ITSELF by `to_addr` must not sail past
+    // `E_SELF_TARGET` just because `args.to_session_id` (unused in the
+    // address case) happens to be 0.
+    let to_session_id = resolve_to_session_id(&args, store)?;
+    if args.from_session_id == to_session_id {
         return Err(IpcError::new(
             codes::E_SELF_TARGET,
             "from_session_id and to_session_id must differ",
@@ -119,10 +132,10 @@ pub async fn send_message(
                     format!("from session {} not found", args.from_session_id),
                 )
             })?;
-            let to = s.get_session_by_id(args.to_session_id)?.ok_or_else(|| {
+            let to = s.get_session_by_id(to_session_id)?.ok_or_else(|| {
                 IpcError::new(
                     codes::E_NOTFOUND,
-                    format!("to session {} not found", args.to_session_id),
+                    format!("to session {to_session_id} not found"),
                 )
             })?;
             // A reply must point at a real message the sender took part in;
@@ -149,7 +162,7 @@ pub async fn send_message(
             // Inbox row — the source of truth.
             let id = s.insert_message(
                 args.from_session_id,
-                args.to_session_id,
+                to_session_id,
                 &args.body,
                 kind,
                 args.reply_to,
@@ -158,12 +171,12 @@ pub async fn send_message(
             s.insert_session_event(
                 args.from_session_id,
                 "message_sent",
-                Some(&format!("to={} {}", args.to_session_id, detail)),
+                Some(&format!("to={to_session_id} {detail}")),
             )?;
             s.insert_session_event(
-                args.to_session_id,
+                to_session_id,
                 "message_received",
-                Some(&format!("from={} {}", args.from_session_id, detail)),
+                Some(&format!("from={} {detail}", args.from_session_id)),
             )?;
             Ok((id, from, to))
         })?
@@ -172,7 +185,9 @@ pub async fn send_message(
     let mut delivered_to_pane = false;
     let mut deliver_error: Option<String> = None;
     if args.deliver {
-        if to_row.claude_status.as_deref() == Some("blocked") || to_row.stuck_kind.is_some() {
+        if to_row.claude_status.as_deref() == Some(ClaudeStatus::Blocked.as_str())
+            || to_row.stuck_kind.is_some()
+        {
             deliver_error = Some(format!(
                 "session {} is waiting on {}; the message is in its inbox but was not typed into the dialog",
                 to_row.id,
@@ -201,6 +216,52 @@ pub async fn send_message(
         delivered_to_pane,
         deliver_error,
     })
+}
+
+/// Resolve `args.to_session_id` from `args.to_addr` when set, otherwise pass
+/// `args.to_session_id` through unchanged. `to_addr` wins when both are set.
+///
+/// `Client` and `Hub` addresses parse but are refused as recipients this
+/// cycle (`E_UNSUPPORTED`): the participant rows exist so a later cycle can
+/// route to them, and refusing is honest about what is built. A foreign
+/// fleet is refused the same way, naming the missing hub link.
+fn resolve_to_session_id(args: &SendMessageArgs, store: &Mutex<Store>) -> Result<i64, IpcError> {
+    let Some(raw) = args.to_addr.as_deref() else {
+        return Ok(args.to_session_id);
+    };
+    let addr = crate::service::address::parse(raw)?;
+    let fleet = crate::service::address::local_fleet_id(store)?;
+    if crate::service::address::is_foreign(&addr, &fleet) {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "that address names another fleet; a hub-to-hub link is not built yet",
+        ));
+    }
+    match addr {
+        crate::service::address::Addr::Session { host, name, .. } => {
+            let s = lock(store)?;
+            let row = s.get_session(&name, &host)?.ok_or_else(|| {
+                IpcError::new(
+                    codes::E_PARTICIPANT_UNKNOWN,
+                    format!("no session {name} on {host}"),
+                )
+            })?;
+            if let Some(p) = s.participant_for_session(row.id)? {
+                if p.retired_at.is_some() {
+                    return Err(IpcError::new(
+                        codes::E_PARTICIPANT_RETIRED,
+                        format!("session {name} on {host} is gone"),
+                    ));
+                }
+            }
+            Ok(row.id)
+        }
+        crate::service::address::Addr::Client { .. }
+        | crate::service::address::Addr::Hub { .. } => Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "only session addresses can receive a message today",
+        )),
+    }
 }
 
 /// Return inbox messages for `session_id`. When `mark_read`, unread rows in
@@ -331,6 +392,7 @@ mod tests {
         SendMessageArgs {
             from_session_id: from,
             to_session_id: to,
+            to_addr: None,
             body: body.to_string(),
             kind: None,
             deliver: false,
@@ -517,6 +579,66 @@ mod tests {
         let inbox = s.list_inbox(b, false, 10).unwrap();
         assert_eq!(inbox.len(), 1, "the message still lands in the inbox");
         assert_eq!(inbox[0].body, "ping");
+    }
+
+    // ---- to_addr ----
+
+    #[tokio::test]
+    async fn send_accepts_an_address_instead_of_a_session_id() {
+        let (store, ssh, a, b) = fixture();
+        let mut m = args(a, 0, "by address");
+        m.to_session_id = 0;
+        m.to_addr = Some("/session/local/beta".into());
+        let res = send_message(m, &store, &ssh).await.unwrap();
+        let inbox = list_inbox(b, false, 10, false, &store).unwrap();
+        assert_eq!(inbox[0].id, res.id);
+        assert_eq!(inbox[0].body, "by address");
+    }
+
+    #[tokio::test]
+    async fn an_address_naming_nothing_is_e_participant_unknown() {
+        let (store, ssh, a, _b) = fixture();
+        let mut m = args(a, 0, "nowhere");
+        m.to_session_id = 0;
+        m.to_addr = Some("/session/local/ghost".into());
+        let err = send_message(m, &store, &ssh).await.unwrap_err();
+        assert_eq!(err.code, "E_PARTICIPANT_UNKNOWN");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_address_is_e_validate_and_writes_nothing() {
+        let (store, ssh, a, b) = fixture();
+        let mut m = args(a, 0, "bad");
+        m.to_session_id = 0;
+        m.to_addr = Some("nonsense".into());
+        let err = send_message(m, &store, &ssh).await.unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+        assert!(list_inbox(b, false, 10, false, &store).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_foreign_fleet_is_refused_until_cycle_three() {
+        let (store, ssh, a, _b) = fixture();
+        let mut m = args(a, 0, "over there");
+        m.to_session_id = 0;
+        m.to_addr = Some("some-other-fleet/session/mac/x".into());
+        let err = send_message(m, &store, &ssh).await.unwrap_err();
+        assert_eq!(err.code, "E_UNSUPPORTED");
+        assert!(
+            err.message.contains("hub"),
+            "the message must name why: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn addressing_yourself_by_address_is_e_self_target() {
+        let (store, ssh, a, _b) = fixture();
+        let mut m = args(a, 0, "hi me");
+        m.to_session_id = 0;
+        m.to_addr = Some("/session/local/alpha".into());
+        let err = send_message(m, &store, &ssh).await.unwrap_err();
+        assert_eq!(err.code, "E_SELF_TARGET");
     }
 
     #[tokio::test]

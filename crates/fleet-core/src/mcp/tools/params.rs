@@ -351,6 +351,10 @@ pub struct SendMessageParams {
     pub from_session_id: i64,
     /// Recipient's fleet session id.
     pub to_session_id: i64,
+    /// Recipient's fleet address, alternative to to_session_id (wins if
+    /// both set).
+    #[serde(default)]
+    pub to_addr: Option<String>,
     /// Message body. Free text; the recipient sees it verbatim.
     pub body: String,
     /// Optional tag — `message` (default), `task`, `reply`, `alert`, …
@@ -374,6 +378,22 @@ pub struct SendMessageParams {
     /// E_NOTFOUND / E_INVALID otherwise. `inbox` rows carry it back.
     #[serde(default)]
     pub reply_to: Option<i64>,
+    /// Caller-chosen id; a repeat replays the first result instead of
+    /// delivering twice (E_IN_FLIGHT while still in progress).
+    #[serde(default)]
+    pub client_msg_id: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct WaitForReplyParams {
+    /// Your fleet session id (from whoami / list_sessions).
+    pub session_id: i64,
+    /// Only a message newer than this id (the last one you saw).
+    #[serde(default)]
+    pub after_message_id: Option<i64>,
+    /// Seconds to wait (default 120, max 600).
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

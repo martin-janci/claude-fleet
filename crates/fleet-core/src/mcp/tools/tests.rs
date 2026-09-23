@@ -1488,7 +1488,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 78);
+    assert_eq!(served, 79);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2622,7 +2622,17 @@ fn the_served_definition_budget_stays_bounded() {
     // length of a turn). The budget is a ratchet against description creep,
     // not against tools that earn their place — so it moves with a reason
     // written down, and only that far.
-    const BUDGET_BYTES: usize = 59_400;
+    //
+    // Raised from 59,400 to 60,018 for `wait_for_reply` (a whole new tool:
+    // name, description and its own `WaitForReplyParams` schema) and
+    // `send_message`'s two new fields (`to_addr`, `client_msg_id`),
+    // fleet-mesh addressing and delivery task 11. Both tool descriptions
+    // and every new field doc were cut to one short clause first, matching
+    // the `force` / `client_msg_id` precedent above: a new tool's name plus
+    // its params schema, and each added field's `"default"` / `"type"` /
+    // property-wrapper cost, is structural and text cannot pay it off.
+    // Measured at 59,918; raised to that plus 100 bytes of headroom.
+    const BUDGET_BYTES: usize = 60_018;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3309,4 +3319,177 @@ fn a_pending_entry_older_than_its_own_ttl_is_swept() {
         matches!(r.reserve("m", "a"), Reservation::Fresh),
         "a crashed send may not pin its client_msg_id"
     );
+}
+
+// ---- send_message's client_msg_id: the same dedupe table as send_prompt,
+// mirrored at the tool layer (fleet-mesh addressing and delivery task 11) ----
+
+fn send_message_params(
+    from: i64,
+    to: i64,
+    body: &str,
+    client_msg_id: Option<&str>,
+) -> SendMessageParams {
+    SendMessageParams {
+        from_session_id: from,
+        to_session_id: to,
+        to_addr: None,
+        body: body.to_string(),
+        kind: None,
+        deliver: false,
+        submit: true,
+        raw: false,
+        reply_to: None,
+        client_msg_id: client_msg_id.map(str::to_string),
+    }
+}
+
+#[tokio::test]
+async fn send_message_with_the_same_client_msg_id_sends_once() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let a = s
+        .upsert_session("alpha", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let b = s
+        .upsert_session("beta", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let first = t
+        .send_message(
+            Extension(Caller::master()),
+            Parameters(send_message_params(a, b, "once", Some("abc-123"))),
+        )
+        .await
+        .unwrap();
+    let second = t
+        .send_message(
+            Extension(Caller::master()),
+            Parameters(send_message_params(a, b, "once", Some("abc-123"))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        text_of(&first.content[0]),
+        text_of(&second.content[0]),
+        "a retry with the same client_msg_id replays the first result"
+    );
+    let inbox = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: b,
+                unread_only: false,
+                limit: Some(10),
+                mark_read: false,
+                summary: false,
+            }),
+        )
+        .await
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_str(text_of(&inbox.content[0])).unwrap();
+    assert_eq!(
+        rows.as_array().unwrap().len(),
+        1,
+        "a retry must not deliver twice"
+    );
+}
+
+/// The `Pending` arm is the point of reserving BEFORE the send: a
+/// `client_msg_id` already in flight (from another concurrent call, or —
+/// here — reserved directly) is refused rather than delivered a second time
+/// or blocked forever.
+#[tokio::test]
+async fn send_message_with_a_client_msg_id_already_in_flight_is_e_in_flight() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let a = s
+        .upsert_session("alpha", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let b = s
+        .upsert_session("beta", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let _ = lock_sends(&t.recent_sends).reserve(&Caller::master().label(), "in-flight");
+    let e = t
+        .send_message(
+            Extension(Caller::master()),
+            Parameters(send_message_params(a, b, "x", Some("in-flight"))),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_IN_FLIGHT"), "{}", e.message);
+    let inbox = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: b,
+                unread_only: false,
+                limit: Some(10),
+                mark_read: false,
+                summary: false,
+            }),
+        )
+        .await
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_str(text_of(&inbox.content[0])).unwrap();
+    assert_eq!(
+        rows.as_array().unwrap().len(),
+        0,
+        "a call refused as in-flight must not deliver"
+    );
+}
+
+/// A send that failed frees its key: a caller retrying after an error (the
+/// one thing `client_msg_id` is for) must be able to deliver, not be told
+/// `E_IN_FLIGHT` forever.
+#[tokio::test]
+async fn a_send_message_that_fails_releases_its_client_msg_id_for_a_retry() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let a = s
+        .upsert_session("alpha", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let b = s
+        .upsert_session("beta", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    // First attempt targets a session that does not exist -> the service
+    // layer's `E_NOTFOUND`, which must release the reservation rather than
+    // leave it `Pending`.
+    let first_err = t
+        .send_message(
+            Extension(Caller::master()),
+            Parameters(send_message_params(a, 9999, "ghost", Some("retry-me"))),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        first_err.message.starts_with("E_NOTFOUND"),
+        "{}",
+        first_err.message
+    );
+    // The retry, same client_msg_id, now against a real recipient: it must
+    // be allowed to deliver, not answered E_IN_FLIGHT.
+    t.send_message(
+        Extension(Caller::master()),
+        Parameters(send_message_params(a, b, "ghost", Some("retry-me"))),
+    )
+    .await
+    .expect("a retry after a failed send must be allowed to deliver");
+    let inbox = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: b,
+                unread_only: false,
+                limit: Some(10),
+                mark_read: false,
+                summary: false,
+            }),
+        )
+        .await
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_str(text_of(&inbox.content[0])).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
 }
