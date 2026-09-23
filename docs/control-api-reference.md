@@ -143,9 +143,9 @@ Parameters: `limit`, `summary`
 
 ### `list_sessions`
 
-List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, tag, include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all); `force` runs a reconcile pass first instead of serving the recent cache. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null when the session has no PR or its PR has no checks).
+List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, tag, needs_attention (rows that want a person; each carries why and since), include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all); `force` runs a reconcile pass first instead of serving the recent cache. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null when the session has no PR or its PR has no checks).
 
-Parameters: `claude_status`, `force`, `host_alias`, `include_lost`, `limit`, `project_id`, `status`, `summary`, `tag`
+Parameters: `claude_status`, `force`, `host_alias`, `include_lost`, `limit`, `needs_attention`, `project_id`, `status`, `summary`, `tag`
 
 ### `list_tasks`
 

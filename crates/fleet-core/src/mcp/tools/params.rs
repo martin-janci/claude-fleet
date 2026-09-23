@@ -52,6 +52,10 @@ pub struct ListSessionsParams {
     /// Only return sessions carrying this tag (see `set_session_tags`).
     #[serde(default)]
     pub tag: Option<String>,
+    /// true for only the sessions that need a person, false for only the ones
+    /// that do not. The row carries the reason.
+    #[serde(default)]
+    pub needs_attention: Option<bool>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

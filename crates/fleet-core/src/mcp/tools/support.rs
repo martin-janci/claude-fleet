@@ -674,8 +674,28 @@ pub(super) use crate::json::strip_nulls;
 #[derive(serde::Serialize)]
 pub(super) struct SessionWithController {
     pub(super) is_controller: bool,
+    /// Why this session needs a person, and since when — `None` when it does
+    /// not. See [`crate::service::attention`] for what counts.
+    ///
+    /// Computed on read and stamped here rather than stored, so there is no
+    /// column that can go stale and no migration to carry. Here rather than
+    /// on the row type itself, because the row is what the desktop
+    /// deserialises straight back into `SessionRow`: a derived field on it
+    /// would be a wire field the store cannot fill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) needs_attention: Option<crate::service::attention::Attention>,
     #[serde(flatten)]
     pub(super) row: crate::store::SessionRow,
+}
+
+impl SessionWithController {
+    pub(super) fn new(is_controller: bool, row: crate::store::SessionRow) -> Self {
+        Self {
+            is_controller,
+            needs_attention: crate::service::attention::needs_attention(&row),
+            row,
+        }
+    }
 }
 
 /// A paired client as the control API reports it. Built field by field from

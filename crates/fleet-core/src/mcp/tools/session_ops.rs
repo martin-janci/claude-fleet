@@ -8,6 +8,7 @@ impl FleetTools {
     #[tool(description = "List tmux sessions across reachable hosts. Slim \
         summary rows by default; pass summary=false for the full SessionRow. \
         Optional filters: host_alias, project_id, status, claude_status, tag, \
+        needs_attention (rows that want a person; each carries why and since), \
         include_lost (default false drops ghosts); `limit` caps the row count \
         after filtering (default: all); `force` runs a reconcile pass first \
         instead of serving the recent cache. claude_status is one of working | \
@@ -76,13 +77,22 @@ impl FleetTools {
                         return false;
                     }
                 }
+                // Free: the rows are already in hand under one store lock, so
+                // this is one predicate more over what was read anyway — and
+                // it is the difference between a phone fetching 44 rows to
+                // find 3 and fetching 3.
+                if let Some(want) = p.needs_attention {
+                    if crate::service::attention::needs_attention(row).is_some() != want {
+                        return false;
+                    }
+                }
                 true
             })
             .map(|row| {
                 let is_controller = controller
                     .as_ref()
                     .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
-                SessionWithController { is_controller, row }
+                SessionWithController::new(is_controller, row)
             })
             // `limit` applies AFTER the filters so a filtered page is a real
             // page of matches, not the first N rows of the whole fleet.
@@ -174,7 +184,7 @@ impl FleetTools {
         // only thing that mints one (`ensure_local_fleet_id`).
         let fleet_id =
             crate::service::address::stored_local_fleet_id(&self.store).map_err(to_mcp_err)?;
-        let mut payload = serde_json::to_value(SessionWithController { is_controller, row })
+        let mut payload = serde_json::to_value(SessionWithController::new(is_controller, row))
             .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
         if let serde_json::Value::Object(map) = &mut payload {
             map.insert(

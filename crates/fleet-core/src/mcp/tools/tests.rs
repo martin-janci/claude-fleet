@@ -110,6 +110,35 @@ fn readonly_token_is_refused_mutating_tools_and_allowed_reads() {
     assert!(enforce_mode(&Caller::master(), "provision_hosts").is_ok());
 }
 
+/// The reason a session needs a person rides on the row a client already
+/// fetches, and is absent — not null, not false — when it does not. A client
+/// that never looks at the key is unaffected; one that does gets the answer
+/// without a second call.
+#[test]
+fn a_listed_row_carries_why_it_needs_a_person_and_nothing_when_it_does_not() {
+    let store = Store::open_in_memory().unwrap();
+    store.upsert_host("mefistos").unwrap();
+    let calm = store
+        .upsert_session("dev-calm", "mefistos", None, None, 1, 1, "running", None)
+        .unwrap();
+    let json = |row: crate::store::SessionRow| {
+        serde_json::to_value(super::support::SessionWithController::new(false, row)).unwrap()
+    };
+    let calm_row = store.get_session_by_id(calm).unwrap().unwrap();
+    let mut blocked_row = calm_row.clone();
+    blocked_row.claude_status = Some("blocked".to_string());
+
+    assert_eq!(
+        json(blocked_row).get("needs_attention"),
+        Some(&serde_json::json!({ "reason": "waiting", "since": 1 })),
+        "the reason and since are on the row"
+    );
+    assert!(
+        json(calm_row).get("needs_attention").is_none(),
+        "absent, not null: a row that needs nobody says nothing"
+    );
+}
+
 #[test]
 fn session_id_addressing_is_gated_on_the_resolved_host() {
     let store = Store::open_in_memory().unwrap();
@@ -2681,7 +2710,14 @@ fn the_served_definition_budget_stays_bounded() {
     // the other, so neither figure covers the merged surface. Measured
     // together at 62,540; raised to that plus the customary 100 bytes of
     // headroom.
-    const BUDGET_BYTES: usize = 62_640;
+    //
+    // Raised from 62_640 to 62_885 for `list_sessions`'s `needs_attention`:
+    // the filter's schema property and its two short clauses. That surface
+    // had exactly 100 bytes of headroom, so no wording could have paid for
+    // it. Measured at 62_785; raised to that plus the customary 100. What it
+    // buys is the question a phone is opened to ask: 51 968 B of rows to
+    // find the three that want an answer becomes 1 668 B.
+    const BUDGET_BYTES: usize = 62_885;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
