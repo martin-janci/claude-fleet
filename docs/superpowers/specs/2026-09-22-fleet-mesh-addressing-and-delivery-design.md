@@ -78,7 +78,11 @@ hub.
 **Migration 043** adds:
 
 - `fleet_id` — a UUID minted once per store, exposed by `whoami` and
-  `/healthz`. New: fleets have no identity today.
+  `/healthz`. New: fleets have no identity today. **As built it is minted
+  lazily on first use that needs it (an address comparison), not by a read:
+  `whoami` reports `null` until then, because `whoami` is callable by a
+  readonly token and a read must never cause a write.** Clients must treat the
+  field as nullable.
 - table `participants` — one row per addressable endpoint:
   `id INTEGER PRIMARY KEY`, `kind TEXT` (`session` | `client` | `hub`),
   `session_id INTEGER` (set for `kind='session'`, re-pointed on a move),
@@ -143,7 +147,16 @@ The two hooks differ in kind, not degree:
 
 So: `block` only for messages that genuinely require an answer —
 `kind == "question"`, or a `wait_for_reply` pending on the other side;
-everything else `additionalContext`. **With a hard cap**: one message may
+everything else `additionalContext`.
+
+**As built, the block path packs independently against `reason`'s own
+2000-character / 20-line budget** — it does not truncate the 8000-char
+`additionalContext` batch. Truncating it was the original instruction and it
+was wrong: it cut bodies mid-sentence and cut the "N more waiting" tail first,
+since that tail sits last. Only the messages actually carried in the block are
+stamped `delivered_at`. A question too large for 2000 characters rides the
+block as a stub naming its id and pointing at `inbox`, so it stays actionable
+rather than silently absent. **With a hard cap**: one message may
 block a `Stop` at most once, and at most **3** consecutive `Stop` blocks per
 session regardless of how many senders are queued
 (`STOP_BLOCK_STREAK_MAX = 3`). Without the cap a session can be shut inside a
