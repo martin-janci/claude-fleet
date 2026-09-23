@@ -4556,6 +4556,7 @@ async fn a_history_cursor_that_falls_behind_pages_through_everything() {
     assert_eq!(ids.len(), 5);
     let t = test_tools(s);
     let mut seen = Vec::new();
+    let mut more_pages = 0;
     for _ in 0..4 {
         let out = t
             .session_history(Parameters(SessionHistoryParams {
@@ -4566,6 +4567,9 @@ async fn a_history_cursor_that_falls_behind_pages_through_everything() {
             .await
             .unwrap();
         let v = result_json(&out);
+        if v["more"] == true {
+            more_pages += 1;
+        }
         for e in v["data"].as_array().unwrap() {
             seen.push(e["id"].as_i64().unwrap());
         }
@@ -4576,6 +4580,10 @@ async fn a_history_cursor_that_falls_behind_pages_through_everything() {
     assert_eq!(
         seen, ids,
         "every event exactly once, in order, none skipped"
+    );
+    assert!(
+        more_pages >= 2,
+        "5 events at limit 2 must truncate at least twice: {more_pages}"
     );
 }
 
@@ -4715,6 +4723,69 @@ async fn inbox_fresh_for_with_mark_read_false_leaves_read_at_untouched() {
     assert!(
         msgs[0].read_at.is_none(),
         "mark_read: false must leave read_at untouched even through fresh_for"
+    );
+}
+
+/// The fix-round-1 regression: a cursor keyed only by `session_id` would
+/// let an `unread_only:true` read advance past a row an `unread_only:false`
+/// read from the SAME reader never got to return (or the reverse) — a skip
+/// across filters. `unread_only` is part of the resource key so the two
+/// stay independent sequences.
+#[tokio::test]
+async fn inbox_fresh_for_keeps_unread_only_true_and_false_cursors_independent() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let sender = s
+        .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.insert_message(sender, target, "hi", "chat", None)
+        .unwrap();
+    let t = test_tools(s);
+
+    let out1 = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: true,
+                limit: Some(50),
+                mark_read: true,
+                summary: true,
+                fresh_for: Some(reader),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&out1)["data"].as_array().unwrap().len(), 1);
+
+    // The SAME reader, now asking unread_only:false: this must be answered
+    // as its own, independent first read — not "unchanged" leftovers from
+    // the unread_only:true cursor above.
+    let out2 = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(50),
+                mark_read: false,
+                summary: true,
+                fresh_for: Some(reader),
+            }),
+        )
+        .await
+        .unwrap();
+    let v2 = result_json(&out2);
+    assert_eq!(
+        v2["data"].as_array().unwrap().len(),
+        1,
+        "unread_only:false must still see the message — a separate cursor, not the true one's leftovers: {v2}"
     );
 }
 

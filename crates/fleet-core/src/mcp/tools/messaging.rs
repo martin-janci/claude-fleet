@@ -195,7 +195,11 @@ impl FleetTools {
             "session_history",
             &format!("session_id={} fresh_for={:?}", p.session_id, p.fresh_for),
         );
-        let limit = p.limit.unwrap_or(50);
+        // ≥ 1: 0 or negative would either loop `more:true, data:[]` forever
+        // (history/inbox's paging is `limit`-driven, not offset-driven) or,
+        // unclamped, reach `session_events_after` as an effectively
+        // unlimited SQL `LIMIT`.
+        let limit = p.limit.unwrap_or(50).max(1);
 
         // fresh_for absent: today's default, byte-identical, no cursor
         // touched.
@@ -234,6 +238,13 @@ impl FleetTools {
                 fresh::StreamStart::Full(r) => r,
                 _ => None,
             };
+            let unchanged = matches!(decision, fresh::StreamStart::Unchanged);
+            let mut data = serde_json::to_value(&rows)
+                .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+            crate::json::strip_nulls(&mut data);
+            // The cursor advances only now that serialisation succeeded — a
+            // failure building the response must not silently mark rows as
+            // delivered.
             if let (Some(last), false) = (
                 rows.last().map(|e| e.id),
                 reset == Some(fresh::ResetReason::ReaderUnknown),
@@ -249,10 +260,6 @@ impl FleetTools {
                 )
                 .map_err(to_mcp_err)?;
             }
-            let unchanged = matches!(decision, fresh::StreamStart::Unchanged);
-            let mut data = serde_json::to_value(&rows)
-                .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
-            crate::json::strip_nulls(&mut data);
             fresh::envelope(unchanged, reset, more, data)
         };
         ok_json(&payload)
@@ -468,7 +475,10 @@ impl FleetTools {
                 "the inbox's session",
             )?;
         }
-        let limit = p.limit.unwrap_or(50);
+        // ≥ 1, matching session_history: 0 or negative would either page
+        // forever (`more:true, data:[]`) or reach the store as an
+        // effectively unlimited SQL `LIMIT`.
+        let limit = p.limit.unwrap_or(50).max(1);
 
         // fresh_for absent: today's default, byte-identical, no cursor
         // touched.
@@ -489,7 +499,12 @@ impl FleetTools {
             };
         };
 
-        let resource_key = p.session_id.to_string();
+        // `unread_only` is part of the resource key: a `true` cursor and a
+        // `false` cursor watch different, independent sequences of "what
+        // this reader has seen" — sharing one would let a `true` read
+        // advance past rows a later `false` read never got to return (a
+        // skip across filters), or vice versa.
+        let resource_key = format!("{}:{}", p.session_id, p.unread_only);
         let payload = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             let reader_exists = s
@@ -517,7 +532,9 @@ impl FleetTools {
             };
             // mark_read applies to the rows actually returned — exactly as
             // the non-fresh_for path, just sourced from this page instead of
-            // list_inbox's own newest-first fetch.
+            // list_inbox's own newest-first fetch. Best-effort, matching
+            // `service::messages::list_inbox`: a failure here must not fail
+            // the read that already succeeded.
             if p.mark_read {
                 let ids: Vec<i64> = rows
                     .iter()
@@ -525,14 +542,24 @@ impl FleetTools {
                     .map(|m| m.id)
                     .collect();
                 if !ids.is_empty() {
-                    s.mark_messages_read(&ids, p.session_id)
-                        .map_err(to_mcp_err)?;
+                    let _ = s.mark_messages_read(&ids, p.session_id);
                 }
             }
-            if let (Some(last), false) = (
-                rows.last().map(|m| m.id),
-                reset == Some(fresh::ResetReason::ReaderUnknown),
-            ) {
+            let last_id = rows.last().map(|m| m.id);
+            let unchanged = matches!(decision, fresh::StreamStart::Unchanged);
+            let mut data = if p.summary {
+                let slim: Vec<InboxSummary> = rows.into_iter().map(InboxSummary::from).collect();
+                serde_json::to_value(&slim)
+            } else {
+                serde_json::to_value(&rows)
+            }
+            .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+            crate::json::strip_nulls(&mut data);
+            // The cursor advances only now that serialisation succeeded — a
+            // failure building the response must not silently mark rows as
+            // delivered.
+            if let (Some(last), false) = (last_id, reset == Some(fresh::ResetReason::ReaderUnknown))
+            {
                 s.put_stream_cursor(
                     reader,
                     "inbox",
@@ -544,15 +571,6 @@ impl FleetTools {
                 )
                 .map_err(to_mcp_err)?;
             }
-            let unchanged = matches!(decision, fresh::StreamStart::Unchanged);
-            let mut data = if p.summary {
-                let slim: Vec<InboxSummary> = rows.into_iter().map(InboxSummary::from).collect();
-                serde_json::to_value(&slim)
-            } else {
-                serde_json::to_value(&rows)
-            }
-            .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
-            crate::json::strip_nulls(&mut data);
             fresh::envelope(unchanged, reset, more, data)
         };
         ok_json(&payload)
@@ -585,9 +603,13 @@ fn page_events(
     after: i64,
     limit: i64,
 ) -> Result<(Vec<crate::store::SessionEvent>, bool), IpcError> {
-    let mut rows = s.session_events_after(session_id, after, limit + 1)?;
+    let limit = limit.max(1);
+    // `saturating_add`, not `+`: callers already clamp `limit` to ≥ 1, but
+    // an unclamped `i64::MAX` here would panic (debug) or wrap (release)
+    // instead of just capping the page at `MAX_READ_BYTES`-scale reality.
+    let mut rows = s.session_events_after(session_id, after, limit.saturating_add(1))?;
     let more = rows.len() as i64 > limit;
-    rows.truncate(limit.max(0) as usize);
+    rows.truncate(limit as usize);
     Ok((rows, more))
 }
 
@@ -599,8 +621,9 @@ fn page_inbox(
     unread_only: bool,
     limit: i64,
 ) -> Result<(Vec<crate::store::SessionMessage>, bool), IpcError> {
-    let mut rows = s.inbox_after(session_id, after, unread_only, limit + 1)?;
+    let limit = limit.max(1);
+    let mut rows = s.inbox_after(session_id, after, unread_only, limit.saturating_add(1))?;
     let more = rows.len() as i64 > limit;
-    rows.truncate(limit.max(0) as usize);
+    rows.truncate(limit as usize);
     Ok((rows, more))
 }
