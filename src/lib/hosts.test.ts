@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { hosts, loadHosts, addHost, probeHost, deleteHost, hideHost, resetTombstonesForTests } from './hosts';
+import { hosts, loadHosts, addHost, probeHost, deleteHost, hideHost, applyHostEvents, resetTombstonesForTests } from './hosts';
 
 const sampleLocal = {
   alias: 'local',
@@ -29,6 +29,28 @@ beforeEach(() => {
 });
 
 describe('hosts store', () => {
+  // A probe that found the host exactly as it was sends three fields instead
+  // of the whole row: reconcile probes every host every pass, so the full row
+  // could never be diffed away and every client paid for it.
+  it('a pinged event patches the row it already holds', () => {
+    hosts.set([sampleLocal]);
+
+    applyHostEvents([{ type: 'pinged', alias: 'local', last_pinged_at: 99, reachable: true }]);
+
+    const row = get(hosts)[0];
+    expect(row.last_pinged_at).toBe(99);
+    expect(row.claude_version).toBe('2.1.145');
+    expect(row.transport).toBe('ssh');
+  });
+
+  it('a pinged event for a host we do not hold invents nothing', () => {
+    hosts.set([sampleLocal]);
+
+    applyHostEvents([{ type: 'pinged', alias: 'ghosty', last_pinged_at: 99, reachable: false }]);
+
+    expect(get(hosts).map((h) => h.alias)).toEqual(['local']);
+  });
+
   it('loadHosts populates the store on success', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([sampleLocal]);
     const r = await loadHosts();

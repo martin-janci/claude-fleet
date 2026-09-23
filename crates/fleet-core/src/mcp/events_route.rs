@@ -39,6 +39,53 @@ use tokio_util::sync::CancellationToken;
 /// embedder built (and the desktop can pass none at all).
 pub type EventSubscriber = Arc<dyn Fn() -> Receiver<EventMessage> + Send + Sync>;
 
+/// What a stream needs to answer a `Last-Event-ID`: the events after a
+/// sequence number, or `None` when the gap is longer than the history kept.
+pub type EventReplay = Arc<dyn Fn(u64, u64) -> Option<Vec<EventMessage>> + Send + Sync>;
+
+/// Everything `/events` needs from a bus: a fresh subscription per
+/// connection, and — when the bus keeps one — the history to resume from.
+///
+/// One value rather than two parameters threaded side by side through
+/// `start` and `start_with_listener`, so a caller cannot supply a
+/// subscription and forget the history that belongs with it.
+#[derive(Clone)]
+pub struct EventFeed {
+    pub subscribe: EventSubscriber,
+    pub history: Option<EventHistory>,
+}
+
+impl From<Arc<crate::events::BroadcastEventBus>> for EventFeed {
+    fn from(bus: Arc<crate::events::BroadcastEventBus>) -> Self {
+        let generation = bus.generation();
+        let replay_bus = Arc::clone(&bus);
+        Self {
+            subscribe: {
+                let bus = Arc::clone(&bus);
+                Arc::new(move || bus.subscribe())
+            },
+            history: Some(EventHistory {
+                generation,
+                replay: Arc::new(move |g, seq| replay_bus.replay_after(g, seq)),
+            }),
+        }
+    }
+}
+
+/// A bus that can be resumed from.
+///
+/// Separate from [`EventSubscriber`] because a stream works without it: a
+/// route built with no history simply never replays, and a reconnecting
+/// client re-lists exactly as it always has.
+#[derive(Clone)]
+pub struct EventHistory {
+    /// Identifies this process's sequence, so a restarted hub refuses a
+    /// `Last-Event-ID` minted by the last one instead of replaying the wrong
+    /// events under the right numbers.
+    pub generation: u64,
+    pub replay: EventReplay,
+}
+
 /// How often an idle stream sends a `:` comment line. Long enough not to be
 /// chatter, short enough to hold a connection open through the idle timeouts
 /// of a phone's NAT, a reverse tunnel and any proxy in between (the MCP
@@ -60,6 +107,8 @@ pub const TOO_MANY_STREAMS: &str = "too many concurrent event streams";
 struct EventSource {
     subscribe: EventSubscriber,
     store: Arc<Mutex<Store>>,
+    /// `None` on a bus that keeps no history; the stream then never replays.
+    history: Option<EventHistory>,
 }
 
 /// Per-request state of the `/events` route.
@@ -92,7 +141,11 @@ impl EventsState {
     /// revoked client.
     pub fn enabled(subscribe: EventSubscriber, store: Arc<Mutex<Store>>) -> Self {
         Self {
-            source: Some(EventSource { subscribe, store }),
+            source: Some(EventSource {
+                subscribe,
+                store,
+                history: None,
+            }),
             streams: LongPollLimiter::new(super::guard::MAX_LONG_POLLS_PER_CALLER),
             keepalive: KEEPALIVE_INTERVAL,
             shutdown: CancellationToken::new(),
@@ -109,6 +162,15 @@ impl EventsState {
         }
     }
 
+    /// Let a reconnecting client resume from its `Last-Event-ID` instead of
+    /// re-listing everything.
+    pub fn with_history(mut self, history: EventHistory) -> Self {
+        if let Some(src) = self.source.as_mut() {
+            src.history = Some(history);
+        }
+        self
+    }
+
     /// End every open stream when `token` is cancelled — the server's own
     /// shutdown token, so stopping does not wait out the drain timeout.
     pub fn with_shutdown(mut self, token: CancellationToken) -> Self {
@@ -123,11 +185,17 @@ impl EventsState {
         self
     }
 
-    /// [`EventsState::enabled`] when a source was configured, else
+    /// [`EventsState::enabled`] when a feed was configured, else
     /// [`EventsState::disabled`].
-    pub fn new(subscribe: Option<EventSubscriber>, store: Arc<Mutex<Store>>) -> Self {
-        match subscribe {
-            Some(s) => Self::enabled(s, store),
+    pub fn new(feed: Option<EventFeed>, store: Arc<Mutex<Store>>) -> Self {
+        match feed {
+            Some(f) => {
+                let state = Self::enabled(f.subscribe, store);
+                match f.history {
+                    Some(h) => state.with_history(h),
+                    None => state,
+                }
+            }
             None => Self::disabled(),
         }
     }
@@ -151,6 +219,62 @@ impl EventsState {
 #[derive(Deserialize, Default)]
 pub struct EventsQuery {
     kinds: Option<String>,
+    /// `?fields=id,claude_status,…` — keep only these keys in each frame's
+    /// payload. A phone decodes about half the columns a session row carries
+    /// and pays for all of them, ~1 200 times an hour.
+    fields: Option<String>,
+    /// `?since=<generation>-<seq>` — the `Last-Event-ID` fallback, for the
+    /// proxies that strip the header.
+    since: Option<String>,
+}
+
+/// Keep only `fields` at the top level of a frame payload.
+///
+/// Top level only, and only when the payload is an object: nested values
+/// belong to the field that carries them, and a scalar payload (`{"id":7}`
+/// from `session:killed`) has nothing to project.
+fn project(payload: &serde_json::Value, fields: &[String]) -> serde_json::Value {
+    match payload {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .filter(|(k, _)| fields.iter().any(|f| f == *k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Split a `?fields=` value the way [`wanted_kinds`] splits `?kinds=`.
+///
+/// Unlike kinds there is no closed vocabulary to check against — a field name
+/// is whatever a row type happens to serialize, and that set differs per event
+/// — so every non-empty entry is accepted and the `ready` frame echoes the
+/// list back. A client that misspells one sees it in the echo rather than in a
+/// column that is silently always absent.
+fn wanted_fields(q: &EventsQuery) -> Option<Vec<String>> {
+    let asked: Vec<String> = q
+        .fields
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!asked.is_empty()).then_some(asked)
+}
+
+/// A frame id: this hub's generation and the event's position in it.
+fn frame_id(generation: u64, seq: u64) -> String {
+    format!("{generation}-{seq}")
+}
+
+/// Undo [`frame_id`]. `None` for anything that is not one — including the
+/// empty string a browser's `EventSource` sends before it has seen an id.
+fn parse_frame_id(raw: &str) -> Option<(u64, u64)> {
+    let (gen, seq) = raw.trim().split_once('-')?;
+    Some((gen.parse().ok()?, seq.parse().ok()?))
 }
 
 /// What a `?kinds=` value asked for, split into the kinds this server knows
@@ -226,6 +350,11 @@ fn unix_now() -> i64 {
 /// honest recovery, and it beats streaming on with a silent hole in it.
 enum Phase {
     Ready,
+    /// Draining the replay the client's `Last-Event-ID` asked for. Strictly
+    /// in sequence order and never interleaved with live frames: the live
+    /// receiver is buffering meanwhile, and anything it holds that the replay
+    /// already covered is dropped by sequence number in [`Phase::Live`].
+    Replay,
     Live,
     Done,
 }
@@ -236,6 +365,19 @@ enum Phase {
 struct StreamState {
     rx: Receiver<EventMessage>,
     kinds: Option<Vec<String>>,
+    /// `?fields=` — keep only these keys of each row payload.
+    fields: Option<Vec<String>>,
+    /// This hub's sequence generation, stamped into every `id:`.
+    generation: u64,
+    /// The events the resume asked for, oldest first, popped front to back.
+    replay: std::collections::VecDeque<EventMessage>,
+    /// Whether the client's `Last-Event-ID` was honoured; echoed in `ready`.
+    resumed: bool,
+    /// The highest sequence number already written to this connection.
+    /// A live frame at or below it was covered by the replay and is dropped
+    /// rather than sent twice — which for a `session:killed` followed by a
+    /// re-create would otherwise be sent out of order.
+    sent_through: u64,
     phase: Phase,
     _permit: LongPollPermit,
     label: String,
@@ -260,8 +402,8 @@ fn client_is_live(store: &Mutex<Store>, id: i64) -> bool {
         tracing::warn!("[events] store lock poisoned; ending the stream");
         return false;
     };
-    match s.active_client_tokens() {
-        Ok(rows) => rows.iter().any(|r| r.id == id),
+    match s.client_token_is_live(id) {
+        Ok(live) => live,
         Err(e) => {
             tracing::warn!(error = %e.message, "[events] could not re-check the client; ending the stream");
             false
@@ -274,12 +416,27 @@ fn sse_event(name: &str, payload: &serde_json::Value) -> Event {
     Event::default().event(name).data(payload.to_string())
 }
 
+/// One row frame: projected if the client asked for fields, and carrying the
+/// `id:` a reconnect resumes from.
+fn row_event(msg: &EventMessage, fields: Option<&Vec<String>>, generation: u64) -> Event {
+    let payload = match fields {
+        Some(f) => project(&msg.payload, f),
+        None => msg.payload.clone(),
+    };
+    sse_event(msg.name, &payload).id(frame_id(generation, msg.seq))
+}
+
 /// `GET /events`.
 pub(super) async fn handle_events(
     State(state): State<EventsState>,
     Extension(caller): Extension<Caller>,
     Query(query): Query<EventsQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
+    let resume_header = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let Some(source) = state.source.clone() else {
         // Deliberately a plain-text 503 with the reason in the body: a client
         // that asked for a stream on a server that has none should be able to
@@ -298,6 +455,7 @@ pub(super) async fn handle_events(
     };
     let keepalive = state.keepalive;
     let shutdown = state.shutdown.clone();
+    let fields = wanted_fields(&query);
     let RequestedKinds { accepted, unknown } = wanted_kinds(&query);
     if !unknown.is_empty() {
         tracing::warn!(
@@ -316,12 +474,39 @@ pub(super) async fn handle_events(
     // Subscribe BEFORE the first frame goes out: a change emitted between the
     // client's request and its first read must still reach it.
     let rx = (source.subscribe)();
-    tracing::debug!(caller = %label, kinds = ?accepted, "[events] stream opened");
+    // Resume, if the client asked to and the bus can. `Last-Event-ID` is the
+    // standard header; `?since=` is the same value for the proxies that strip
+    // it. A gap the history cannot cover is not an error — the client gets
+    // today's behaviour, told plainly in the `ready` frame.
+    let asked_from = resume_header
+        .as_deref()
+        .or(query.since.as_deref())
+        .and_then(parse_frame_id);
+    let (replayed, resumed_from) = match (&source.history, asked_from) {
+        (Some(h), Some((gen, seq))) => match (h.replay)(gen, seq) {
+            Some(events) => (events, Some(seq)),
+            None => (Vec::new(), None),
+        },
+        _ => (Vec::new(), None),
+    };
+    let generation = source.history.as_ref().map(|h| h.generation).unwrap_or(0);
+    tracing::debug!(
+        caller = %label,
+        kinds = ?accepted,
+        fields = ?fields,
+        replayed = replayed.len(),
+        "[events] stream opened"
+    );
 
     let stream = futures_util::stream::unfold(
         StreamState {
             rx,
             kinds: accepted,
+            fields,
+            generation,
+            resumed: resumed_from.is_some(),
+            sent_through: resumed_from.unwrap_or(0),
+            replay: replayed.into_iter().collect(),
             phase: Phase::Ready,
             _permit: permit,
             label,
@@ -337,72 +522,121 @@ pub(super) async fn handle_events(
             },
         },
         |mut st| async move {
-            match st.phase {
-                Phase::Done => None,
-                Phase::Ready => {
-                    st.phase = Phase::Live;
-                    let ready = serde_json::json!({
-                        "version": crate::app_version::get(),
-                        "now": unix_now(),
-                        "kinds": accepted_list(st.kinds.as_ref()),
-                        // The wire-contract revision (see `wire_contract`
-                        // for what moves it): purely additive next to
-                        // `version` and `now` above, so an older client
-                        // that has never heard of it just ignores it.
-                        "contract": crate::wire_contract::CONTRACT_REVISION,
-                    });
-                    Some((Ok::<Event, Infallible>(sse_event("ready", &ready)), st))
-                }
-                Phase::Live => loop {
-                    // Cloned out of `st` so the two select branches do not
-                    // borrow it at once.
-                    let cancel = st.shutdown.clone();
-                    let label = st.label.clone();
-                    let client = st.client.clone();
-                    let received = tokio::select! {
-                        // The server is stopping: end the body now rather
-                        // than hold its drain open.
-                        _ = cancel.cancelled() => {
-                            tracing::debug!(caller = %label, "[events] stream closed: server stopping");
-                            return None;
-                        }
-                        // One beat: is the paired client still paired?
-                        _ = st.heartbeat.tick() => {
-                            if let Some((store, id)) = &client {
-                                if !client_is_live(store, *id) {
-                                    tracing::info!(
-                                        caller = %label,
-                                        "[events] stream closed: the client was revoked"
-                                    );
-                                    return None;
-                                }
-                            }
-                            continue;
-                        }
-                        r = st.rx.recv() => r,
-                    };
-                    match received {
-                        Ok(msg) if matches(st.kinds.as_ref(), &msg) => {
-                            let ev = sse_event(msg.name, &msg.payload);
-                            return Some((Ok(ev), st));
-                        }
-                        // A kind this client did not ask for: keep waiting
-                        // rather than ending the stream.
-                        Ok(_) => continue,
-                        Err(RecvError::Lagged(n)) => {
-                            tracing::warn!(
-                                caller = %st.label,
-                                skipped = n,
-                                "[events] subscriber fell behind; closing the stream"
-                            );
-                            st.phase = Phase::Done;
-                            let ev = sse_event("lagged", &serde_json::json!({ "skipped": n }));
-                            return Some((Ok(ev), st));
-                        }
-                        // The bus went away (the process is shutting down).
-                        Err(RecvError::Closed) => return None,
+            // A loop, so a phase that finishes can re-dispatch on the next
+            // one within the same poll: the replay running dry has no frame
+            // of its own to yield and must fall through to the live branch.
+            loop {
+                match st.phase {
+                    Phase::Done => return None,
+                    Phase::Ready => {
+                        st.phase = if st.replay.is_empty() {
+                            Phase::Live
+                        } else {
+                            Phase::Replay
+                        };
+                        let ready = serde_json::json!({
+                            "version": crate::app_version::get(),
+                            "now": unix_now(),
+                            "kinds": accepted_list(st.kinds.as_ref()),
+                            // The wire-contract revision (see `wire_contract`
+                            // for what moves it): purely additive next to
+                            // `version` and `now` above, so an older client
+                            // that has never heard of it just ignores it.
+                            "contract": crate::wire_contract::CONTRACT_REVISION,
+                            // What this stream actually honoured, echoed the way
+                            // `kinds` is: a misspelled field name is then visible
+                            // here rather than as a column that is always absent.
+                            "fields": st.fields,
+                            // Whether the `Last-Event-ID` was honoured. `false`
+                            // means re-list: either the gap was longer than the
+                            // history kept, or this hub has restarted since the
+                            // id was minted. Saying so is the point — a client
+                            // that assumed continuity would show a stale fleet.
+                            "resumed": st.resumed,
+                        });
+                        return Some((Ok::<Event, Infallible>(sse_event("ready", &ready)), st));
                     }
-                },
+                    // One replayed frame per poll, in sequence order.
+                    Phase::Replay => {
+                        let mut next = None;
+                        while let Some(msg) = st.replay.pop_front() {
+                            if matches(st.kinds.as_ref(), &msg) {
+                                next = Some(msg);
+                                break;
+                            }
+                        }
+                        match next {
+                            Some(msg) => {
+                                st.sent_through = msg.seq;
+                                let ev = row_event(&msg, st.fields.as_ref(), st.generation);
+                                return Some((Ok(ev), st));
+                            }
+                            // Nothing left to replay: go live in this same poll,
+                            // rather than yielding a frame that does not exist.
+                            None => {
+                                st.phase = Phase::Live;
+                                continue;
+                            }
+                        }
+                    }
+                    Phase::Live => loop {
+                        // Cloned out of `st` so the two select branches do not
+                        // borrow it at once.
+                        let cancel = st.shutdown.clone();
+                        let label = st.label.clone();
+                        let client = st.client.clone();
+                        let received = tokio::select! {
+                            // The server is stopping: end the body now rather
+                            // than hold its drain open.
+                            _ = cancel.cancelled() => {
+                                tracing::debug!(caller = %label, "[events] stream closed: server stopping");
+                                return None;
+                            }
+                            // One beat: is the paired client still paired?
+                            _ = st.heartbeat.tick() => {
+                                if let Some((store, id)) = &client {
+                                    if !client_is_live(store, *id) {
+                                        tracing::info!(
+                                            caller = %label,
+                                            "[events] stream closed: the client was revoked"
+                                        );
+                                        return None;
+                                    }
+                                }
+                                continue;
+                            }
+                            r = st.rx.recv() => r,
+                        };
+                        match received {
+                            // Already written to this connection by the replay:
+                            // the receiver was subscribed before the replay was
+                            // taken, so the overlap is expected, and sending it
+                            // again would put a `session:killed` after the
+                            // re-create that followed it.
+                            Ok(msg) if msg.seq <= st.sent_through => continue,
+                            Ok(msg) if matches(st.kinds.as_ref(), &msg) => {
+                                st.sent_through = msg.seq;
+                                let ev = row_event(&msg, st.fields.as_ref(), st.generation);
+                                return Some((Ok(ev), st));
+                            }
+                            // A kind this client did not ask for: keep waiting
+                            // rather than ending the stream.
+                            Ok(_) => continue,
+                            Err(RecvError::Lagged(n)) => {
+                                tracing::warn!(
+                                    caller = %st.label,
+                                    skipped = n,
+                                    "[events] subscriber fell behind; closing the stream"
+                                );
+                                st.phase = Phase::Done;
+                                let ev = sse_event("lagged", &serde_json::json!({ "skipped": n }));
+                                return Some((Ok(ev), st));
+                            }
+                            // The bus went away (the process is shutting down).
+                            Err(RecvError::Closed) => return None,
+                        }
+                    },
+                }
             }
         },
     );
@@ -420,6 +654,8 @@ mod tests {
     fn q(kinds: Option<&str>) -> EventsQuery {
         EventsQuery {
             kinds: kinds.map(str::to_string),
+            fields: None,
+            since: None,
         }
     }
 
@@ -427,6 +663,57 @@ mod tests {
         EventMessage {
             name,
             payload: serde_json::Value::Null,
+            seq: 1,
+        }
+    }
+
+    /// A frame id names the sequence AND the process that minted it, so a
+    /// restarted hub cannot be resumed against as though it were the same one.
+    #[test]
+    fn a_frame_id_round_trips_and_a_malformed_one_is_none() {
+        assert_eq!(parse_frame_id(&frame_id(7, 42)), Some((7, 42)));
+        // A browser's EventSource sends an empty id before it has seen one.
+        for bad in ["", "   ", "42", "abc-1", "7-", "-7", "7-x"] {
+            assert_eq!(parse_frame_id(bad), None, "{bad:?} is not a frame id");
+        }
+    }
+
+    #[test]
+    fn project_keeps_asked_for_keys_and_leaves_a_scalar_payload_alone() {
+        let row = serde_json::json!({"id": 7, "claude_status": "working", "tmux_pane_id": "%3"});
+        let fields = vec!["id".to_string(), "claude_status".to_string()];
+        assert_eq!(
+            project(&row, &fields),
+            serde_json::json!({"id": 7, "claude_status": "working"})
+        );
+        // A key that does not exist on this event is simply absent, not an error.
+        assert_eq!(
+            project(&row, &["nothing".to_string()]),
+            serde_json::json!({})
+        );
+        // Not every payload is a row: `sync:progress` and friends are scalars
+        // and have nothing to project.
+        let scalar = serde_json::json!(3);
+        assert_eq!(project(&scalar, &fields), scalar);
+    }
+
+    #[test]
+    fn wanted_fields_drops_empties_and_none_means_the_whole_row() {
+        let with = |f: &str| EventsQuery {
+            kinds: None,
+            fields: Some(f.to_string()),
+            since: None,
+        };
+        assert_eq!(
+            wanted_fields(&with("id, claude_status ,")),
+            Some(vec!["id".to_string(), "claude_status".to_string()])
+        );
+        for empty in ["", ",", "  "] {
+            assert_eq!(
+                wanted_fields(&with(empty)),
+                None,
+                "an empty filter must mean the whole row, not an empty one"
+            );
         }
     }
 

@@ -35,7 +35,7 @@ pub use auth::normalize_allowed_hosts;
 pub use auth::Caller;
 #[cfg(test)]
 pub use auth::TokenMode;
-pub use events_route::{EventSubscriber, EventsState};
+pub use events_route::{EventFeed, EventHistory, EventSubscriber, EventsState};
 pub use guard::{ConfirmNotify, PendingConfirms, RateLimiter};
 pub use listener::{NoTls, TlsAcceptor};
 pub use pairing::{pair_url, PairingRequest, PendingPairings};
@@ -530,7 +530,7 @@ pub async fn start_with_handle(
     // Hands `GET /events` a fresh subscription per connection. `None` on a
     // server whose store does not publish to a broadcast bus (the desktop),
     // where `/events` answers 503.
-    events: Option<EventSubscriber>,
+    events: Option<EventFeed>,
 ) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
     let addr = SocketAddr::from((bind, port));
     let listener = tokio::net::TcpListener::bind(addr)
@@ -568,7 +568,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
     listener: tokio::net::TcpListener,
     token: String,
     allowed_hosts: Vec<String>,
-    events: Option<EventSubscriber>,
+    events: Option<EventFeed>,
     tls: Option<A>,
 ) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
     // The bound address, not a requested one: with the listener already open
@@ -1600,12 +1600,21 @@ mod tests {
 
     /// `GET /events` with the master token and an optional raw query string.
     fn get_events(auth: Option<&str>, query: &str) -> String {
+        get_events_resuming(auth, query, None)
+    }
+
+    /// [`get_events`] with a `Last-Event-ID`, the header a reconnecting
+    /// client sends to say where it got to.
+    fn get_events_resuming(auth: Option<&str>, query: &str, last_id: Option<&str>) -> String {
         let mut h = format!(
             "GET /events{query} HTTP/1.1\r\nHost: 127.0.0.1\r\n\
              Accept: text/event-stream\r\n"
         );
         if let Some(a) = auth {
             h.push_str(&format!("Authorization: Bearer {a}\r\n"));
+        }
+        if let Some(id) = last_id {
+            h.push_str(&format!("Last-Event-ID: {id}\r\n"));
         }
         h.push_str("\r\n");
         h
@@ -1660,11 +1669,9 @@ mod tests {
             Arc::new(RateLimiter::new()),
             "https://fleet.example.com".to_string(),
         );
-        let subscribe: EventSubscriber = {
-            let bus = Arc::clone(bus);
-            Arc::new(move || bus.subscribe())
-        };
-        let events_state = EventsState::enabled(subscribe, Arc::clone(&store))
+        // The feed, not a bare subscriber: `/events` resumes from the bus's
+        // own replay history, and a harness without it could not exercise it.
+        let events_state = EventsState::new(Some(Arc::clone(bus).into()), Arc::clone(&store))
             .with_keepalive(keepalive)
             .with_shutdown(stop);
         let app = build_app(
@@ -1707,9 +1714,19 @@ mod tests {
 
     impl SseConn {
         async fn open(addr: std::net::SocketAddr, auth: Option<&str>, query: &str) -> Self {
+            Self::open_resuming(addr, auth, query, None).await
+        }
+
+        /// [`SseConn::open`] with a `Last-Event-ID`.
+        async fn open_resuming(
+            addr: std::net::SocketAddr,
+            auth: Option<&str>,
+            query: &str,
+            last_id: Option<&str>,
+        ) -> Self {
             use tokio::io::AsyncWriteExt;
             let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
-            sock.write_all(get_events(auth, query).as_bytes())
+            sock.write_all(get_events_resuming(auth, query, last_id).as_bytes())
                 .await
                 .unwrap();
             Self {
@@ -1741,6 +1758,103 @@ mod tests {
             );
             &self.seen
         }
+    }
+
+    /// A reconnect costs the events missed, not a full re-list.
+    ///
+    /// Without this a phone paid 61 335 B and three round trips every time it
+    /// went through a lift, a tunnel or an app switch, because no frame
+    /// carried an `id:` and there was nothing to resume from.
+    #[tokio::test]
+    async fn a_reconnect_resumes_from_its_last_event_id() {
+        use crate::events::{BroadcastEventBus, EventBus};
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+
+        let mut first = SseConn::open(addr, Some("s3cret"), "").await;
+        first.wait_for("event: ready").await;
+        bus.session_killed(1);
+        let seen = first.wait_for("event: session:killed").await.to_string();
+        // Every row frame carries the id a resume names.
+        let id = seen
+            .lines()
+            .find_map(|l| l.strip_prefix("id: "))
+            .expect("a row frame must carry an id")
+            .trim()
+            .to_string();
+        drop(first);
+
+        // Two changes while nothing is connected: the ring's grace window is
+        // what keeps them replayable.
+        bus.session_killed(2);
+        bus.session_killed(3);
+
+        let mut again = SseConn::open_resuming(addr, Some("s3cret"), "", Some(&id)).await;
+        let head = again.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains("\"resumed\":true"),
+            "the ready frame must say the resume was honoured:\n{head}"
+        );
+        let replayed = again.wait_for(r#"data: {"id":3}"#).await.to_string();
+        assert!(
+            replayed.contains(r#"data: {"id":2}"#),
+            "both missed events replay, in order:\n{replayed}"
+        );
+        assert!(
+            !replayed.contains(r#"data: {"id":1}"#),
+            "and nothing the client already had:\n{replayed}"
+        );
+    }
+
+    /// An id this hub never minted — a restarted process, a mangled header —
+    /// must not be replayed against the current sequence. Saying so lets the
+    /// client re-list; pretending would leave it convinced it was current.
+    #[tokio::test]
+    async fn an_unknown_last_event_id_is_refused_and_says_so() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+
+        let mut sse = SseConn::open_resuming(addr, Some("s3cret"), "", Some("999999-5")).await;
+        let head = sse.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains("\"resumed\":false"),
+            "a foreign generation must not be replayed:\n{head}"
+        );
+    }
+
+    /// `?fields=` keeps a phone from decoding columns it never draws. The
+    /// measured session row is ~1 227 B of which about a third is fields no
+    /// screen reads.
+    #[tokio::test]
+    async fn fields_projects_the_payload_and_the_ready_frame_echoes_it() {
+        use crate::events::{BroadcastEventBus, EventBus};
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+
+        let mut sse = SseConn::open(addr, Some("s3cret"), "?fields=alias").await;
+        let head = sse.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains(r#""fields":["alias"]"#),
+            "the ready frame echoes what was honoured:\n{head}"
+        );
+
+        bus.host_removed("box");
+        let frame = sse.wait_for("event: host:removed").await.to_string();
+        assert!(
+            frame.contains(r#"data: {"alias":"box"}"#),
+            "the asked-for key survives:\n{frame}"
+        );
+
+        // And a key that was not asked for does not.
+        let mut narrow = SseConn::open(addr, Some("s3cret"), "?fields=nothing_like_this").await;
+        narrow.wait_for("event: ready").await;
+        bus.host_removed("box2");
+        let frame = narrow.wait_for("event: host:removed").await.to_string();
+        assert!(
+            frame.contains("data: {}"),
+            "an unasked-for key is projected away:\n{frame}"
+        );
     }
 
     /// The stream itself: authenticated, `text/event-stream`, a `ready` frame
