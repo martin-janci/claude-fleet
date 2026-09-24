@@ -44,6 +44,8 @@ export interface TrackerRow {
   credential_hint?: string | null;
   auth_kind?: string | null;
   username?: string | null;
+  /** The org its tickets belong to (work graph M5); absent = unassigned. */
+  org_id?: number | null;
 }
 
 /** A work item, local or from a tracker. */

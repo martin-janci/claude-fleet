@@ -156,6 +156,7 @@ mod tests {
             account_uuid: None,
             provisioned: true,
             transport: "ssh".to_string(),
+            org_id: None,
         }
     }
 

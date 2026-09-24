@@ -49,6 +49,8 @@ export interface WorkLink {
   preselected?: boolean;
   /** Why a live session's link ended (`branch_changed`, `pr_changed`). */
   end_reason?: string | null;
+  /** The link's org (work graph M5): its item's, else its session's. */
+  org_id?: number | null;
 }
 
 /** One evidence line of a link (`service::work::resolve::Evidence`). */
@@ -79,9 +81,43 @@ async function decide(cmd: string, args: Record<string, unknown>): Promise<Resul
   return r;
 }
 
-/** Say the session works on `ref`; it becomes the session's primary work. */
-export function linkSessionWork(sessionId: number, ref: WorkRef): Promise<Result<SessionRow>> {
-  return decide('link_session_work', { session_id: sessionId, ...ref });
+/** Say the session works on `ref`; it becomes the session's primary work.
+ *  `forceCrossOrg`: the person saw the cross-org refusal and meant it. */
+export function linkSessionWork(
+  sessionId: number,
+  ref: WorkRef,
+  opts: { forceCrossOrg?: boolean } = {},
+): Promise<Result<SessionRow>> {
+  return decide('link_session_work', {
+    session_id: sessionId,
+    ...ref,
+    ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
+  });
+}
+
+/** Work graph M5: the refusal to link work of one org to a session of
+ *  another (data integrity, not access control), read from an error. */
+export interface CrossOrgRefusal {
+  workOrgId: number;
+  sessionOrgId: number;
+}
+
+export function crossOrgOf(e: { code: string; details?: unknown }): CrossOrgRefusal | null {
+  const d = e.details as { cross_org?: boolean; work_org_id?: number; session_org_id?: number } | undefined;
+  if (e.code !== 'E_FORBIDDEN' || !d?.cross_org) return null;
+  if (typeof d.work_org_id !== 'number' || typeof d.session_org_id !== 'number') return null;
+  return { workOrgId: d.work_org_id, sessionOrgId: d.session_org_id };
+}
+
+/** The sentence the UI shows before offering "Link anyway". */
+export function crossOrgSentence(
+  what: string,
+  c: CrossOrgRefusal,
+  orgName: (id: number) => string | undefined,
+): string {
+  const w = orgName(c.workOrgId) ?? `organisation ${c.workOrgId}`;
+  const s = orgName(c.sessionOrgId) ?? `organisation ${c.sessionOrgId}`;
+  return `${what} belongs to ${w}, and this session to ${s}. Fleet does not link one company's work to another's session by mistake.`;
 }
 
 /** "Not this": the session does not work on `ref`. Sticky. */
@@ -91,8 +127,16 @@ export function rejectSessionWork(sessionId: number, ref: WorkRef): Promise<Resu
 
 /** Confirm a detected suggestion (work graph M4.4): it becomes the
  *  session's primary work. */
-export function confirmSessionWork(sessionId: number, linkId: number): Promise<Result<SessionRow>> {
-  return decide('confirm_session_work', { session_id: sessionId, link_id: linkId });
+export function confirmSessionWork(
+  sessionId: number,
+  linkId: number,
+  opts: { forceCrossOrg?: boolean } = {},
+): Promise<Result<SessionRow>> {
+  return decide('confirm_session_work', {
+    session_id: sessionId,
+    link_id: linkId,
+    ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
+  });
 }
 
 /** "Not this" for one detected link (a suggestion or an auto link, e.g. the

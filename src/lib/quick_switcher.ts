@@ -17,6 +17,7 @@ import { readPref, writePref } from './prefs';
 import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
 import type { TicketRow } from './trackers';
+import { rowMatches, sessionFilterRow, type FilterRow } from './sidebar_index';
 
 /** A cached tracker ticket and the section it is listed under. */
 export interface SwitcherTicket {
@@ -381,4 +382,42 @@ export function placeForTicket(
   const s = hits[0];
   if (!s || s.project_id == null) return null;
   return { project: byId.get(s.project_id)!, host: s.host_alias };
+}
+
+/** A ticket as a filter row (work graph M5.5): its tracker's org as its
+ *  scope, `*` for an unassigned tracker (no scope hides it). */
+export function ticketFilterRow(
+  t: TicketRow,
+  trackerOrg: ReadonlyMap<number, number | null | undefined>,
+): FilterRow {
+  const org = t.tracker_id != null ? trackerOrg.get(t.tracker_id) : undefined;
+  return {
+    host: null,
+    scope: org != null ? `org:${org}` : '*',
+    trackerId: t.tracker_id ?? null,
+    statusCategory: t.status_category ?? null,
+    assignees: t.assignees ?? [],
+    live: (t.live_session_ids ?? []).length > 0,
+    archived: false,
+  };
+}
+
+/** ⌘K under the sidebar's scope: sessions and tickets through the same
+ *  `rowMatches` the sidebar uses; hosts, projects and actions pass. */
+export function scopeEntries(
+  entries: readonly SwitcherEntry[],
+  scope: string,
+  sessionScope: (s: SessionRow) => string,
+  trackerOrg: ReadonlyMap<number, number | null | undefined>,
+): SwitcherEntry[] {
+  if (scope === 'all') return [...entries];
+  return entries.filter((e) => {
+    if (e.kind === 'session' && e.session) {
+      return rowMatches(sessionFilterRow(e.session, sessionScope), { scope });
+    }
+    if (e.kind === 'ticket' && e.ticket) {
+      return rowMatches(ticketFilterRow(e.ticket, trackerOrg), { scope });
+    }
+    return true;
+  });
 }

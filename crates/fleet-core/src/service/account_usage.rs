@@ -1166,6 +1166,7 @@ mod tests {
             account_uuid: account.map(str::to_string),
             provisioned: true,
             transport: "ssh".to_string(),
+            org_id: None,
         }
     }
 

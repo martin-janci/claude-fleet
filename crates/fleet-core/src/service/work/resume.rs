@@ -17,6 +17,7 @@
 use super::handover;
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::service::orgs::OrgScope;
 use crate::service::pane_intel::StuckKind;
 use crate::service::sessions::{self, NewSessionArgs};
 use crate::ssh::SshClient;
@@ -128,6 +129,10 @@ pub struct ResumeArgs {
     /// The (edited) brief for `brief`; the built one when absent.
     #[serde(default)]
     pub brief: Option<String>,
+    /// Resume another org's work onto a session of this org anyway (work
+    /// graph M5's integrity rule, as for a link).
+    #[serde(default)]
+    pub force_cross_org: bool,
 }
 
 fn mode(mode: &str, why_not: Option<String>) -> ResumeMode {
@@ -193,12 +198,21 @@ pub fn plan_resume(
     key: &str,
     link_id: Option<i64>,
     host_alias: Option<&str>,
+    scope: &OrgScope,
 ) -> Result<ResumePlan, IpcError> {
+    crate::service::orgs::require_key(s, scope, key)?;
     let key = crate::store::normalize_work_ref(key)?;
-    let item = s.work_item_by_key(&key)?;
-    let live: Vec<LiveWork> = s
-        .live_work_sessions_for_key(&key)?
+    let item = match s.work_item_by_key(&key)? {
+        Some(i) if scope.sees_org(s.item_org(i.id)?) => Some(i),
+        _ => None,
+    };
+    let mut live_links = s.live_work_sessions_for_key(&key)?;
+    for (l, _) in live_links.iter_mut() {
+        l.org_id = s.link_org(l)?;
+    }
+    let live: Vec<LiveWork> = live_links
         .into_iter()
+        .filter(|(l, _)| scope.sees_link(l))
         .map(|(_, r)| LiveWork {
             session_id: r.id,
             host_alias: r.host_alias,
@@ -206,7 +220,8 @@ pub fn plan_resume(
             friendly_name: r.friendly_name,
         })
         .collect();
-    let ended = s.ended_work_links_for_key(&key)?;
+    let mut ended = s.ended_work_links_for_key(&key)?;
+    crate::service::orgs::scope_links(s, scope, &mut ended)?;
     let candidates: Vec<ResumeCandidate> = ended.iter().map(candidate).collect();
     let chosen = match link_id {
         Some(id) => Some(
@@ -336,6 +351,10 @@ pub fn plan_resume(
 
 /// [`plan_resume`], plus the handover brief when `with_brief` (one git probe
 /// on the landing host, off the lock).
+///
+/// The brief is written for the Claude that will read it — the one on the
+/// landing host — so it holds only what that host's org scope may read
+/// (work graph M5), whoever asked for the plan.
 pub async fn resume_plan(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -343,13 +362,29 @@ pub async fn resume_plan(
     link_id: Option<i64>,
     host_alias: Option<&str>,
     with_brief: bool,
+    scope: &OrgScope,
 ) -> Result<ResumePlan, IpcError> {
     let (mut plan, gathered) = {
         let s = lock(store)?;
-        let plan = plan_resume(&s, key, link_id, host_alias)?;
+        let plan = plan_resume(&s, key, link_id, host_alias, scope)?;
         let gathered = if with_brief {
             let target = probe_target_for(&s, &plan);
-            Some(handover::gather_stored(&s, key, target)?)
+            // Two readers, and the brief is only what BOTH may read: the
+            // caller (who sees the plan now) and the landing host (whose
+            // Claude reads it later) — the plan's host, else the one asked
+            // for (even when it cannot be used now), else the past
+            // session's. A per-host token is its own reader whatever host
+            // it names, so it cannot borrow another org's scope.
+            let landing = plan.host_alias.as_deref().or(host_alias).or(plan
+                .candidates
+                .iter()
+                .find(|c| Some(c.link_id) == plan.link_id)
+                .and_then(|c| c.host_alias.as_deref()));
+            let reader = match (scope, landing) {
+                (OrgScope::All, Some(h)) => OrgScope::for_host(&s, h)?,
+                _ => scope.clone(),
+            };
+            Some(handover::gather_stored(&s, key, target, &reader)?)
         } else {
             None
         };
@@ -483,6 +518,7 @@ pub async fn resume_with<F, Fut>(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
     args: &ResumeArgs,
+    scope: &OrgScope,
     spawn: F,
 ) -> Result<(SessionRow, Option<i64>), IpcError>
 where
@@ -507,11 +543,38 @@ where
         args.link_id,
         args.host_alias.as_deref(),
         with_brief,
+        scope,
     )
     .await?;
+    // A per-host token resumes only onto its own host.
+    if let Some(h) = scope.host() {
+        let target = plan.host_alias.as_deref().unwrap_or("an unknown host");
+        if target != h {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                format!("the resumed session is on host {target}; this token is bound to {h}"),
+            ));
+        }
+    }
     let new_args = {
         let s = lock(store)?;
-        resume_session_args(&s, &plan, &args.mode)?
+        let new_args = resume_session_args(&s, &plan, &args.mode)?;
+        // The resumed session links the work: the same integrity rule as a
+        // link, for every caller (M5).
+        if let Some(pid) = plan.project_id {
+            let work_org = match s.work_item_by_key(&plan.key)? {
+                Some(i) => s.item_org(i.id)?,
+                None => None,
+            };
+            let session_org = s.org_for_new_session(&new_args.host_alias, pid)?;
+            crate::service::orgs::check_cross_org(
+                work_org,
+                session_org,
+                &plan.key,
+                args.force_cross_org,
+            )?;
+        }
+        new_args
     };
     let row = spawn(new_args).await?;
     let handover = {
@@ -541,8 +604,9 @@ pub async fn resume_work(
     ssh: &Arc<SshClient>,
     reg: &Arc<CancellationRegistry>,
     args: &ResumeArgs,
+    scope: &OrgScope,
 ) -> Result<SessionRow, IpcError> {
-    let (row, handover) = resume_with(store, ssh, args, |a| {
+    let (row, handover) = resume_with(store, ssh, args, scope, |a| {
         sessions::new_session(a, store.as_ref(), ssh, reg)
     })
     .await?;
@@ -752,7 +816,7 @@ mod tests {
     fn a_reachable_host_with_its_worktree_allows_every_mode() {
         let (st, pid) = fixture();
         let s = st.lock().unwrap();
-        let p = plan_resume(&s, "abc-1", None, None).unwrap();
+        let p = plan_resume(&s, "abc-1", None, None, &OrgScope::All).unwrap();
         assert_eq!(
             modes(&p),
             vec![("last", true), ("brief", true), ("fresh", true)]
@@ -778,7 +842,7 @@ mod tests {
         let (st, _) = fixture();
         let s = st.lock().unwrap();
         s.conn_ref().execute("DELETE FROM worktrees", []).unwrap();
-        let p = plan_resume(&s, "ABC-1", None, None).unwrap();
+        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
         assert!(!p.worktree_present);
         assert!(p.modes.iter().all(|m| m.ok));
         let a = resume_session_args(&s, &p, "last").unwrap();
@@ -793,7 +857,7 @@ mod tests {
         let s = st.lock().unwrap();
         s.update_host_probe("h", false, None, None, 0).unwrap();
         s.upsert_host("g").unwrap();
-        let p = plan_resume(&s, "ABC-1", None, None).unwrap();
+        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
         assert!(p.modes.iter().all(|m| !m.ok));
         assert!(p.modes[0]
             .reason
@@ -804,7 +868,7 @@ mod tests {
         let err = resume_session_args(&s, &p, "fresh").err().expect("refused");
         assert_eq!(err.code, codes::E_INVALID_STATE);
 
-        let p = plan_resume(&s, "ABC-1", None, Some("g")).unwrap();
+        let p = plan_resume(&s, "ABC-1", None, Some("g"), &OrgScope::All).unwrap();
         assert_eq!(
             modes(&p),
             vec![("last", false), ("brief", true), ("fresh", true)]
@@ -829,7 +893,7 @@ mod tests {
         let s = st.lock().unwrap();
         s.mark_purged_work_unresumable(pid, &["h".to_string()])
             .unwrap();
-        let p = plan_resume(&s, "ABC-1", None, None).unwrap();
+        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
         assert_eq!(
             modes(&p),
             vec![("last", false), ("brief", true), ("fresh", true)]
@@ -846,7 +910,7 @@ mod tests {
             .unwrap();
         s.set_claude_session_id(live, "c-1").unwrap();
         // The rebind carried the work onto `live`: it is live now.
-        let p = plan_resume(&s, "ABC-1", None, None).unwrap();
+        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
         assert_eq!(p.live.len(), 1);
         assert!(p.modes.iter().all(|m| !m.ok));
         assert!(p.modes[0].reason.as_deref().unwrap().contains("jump"));
@@ -854,7 +918,7 @@ mod tests {
         // Unlinked, it still holds the conversation: `last` stays off.
         let link = s.session_work_links(live).unwrap()[0].id;
         s.unlink_session_work(live, link).unwrap();
-        let p = plan_resume(&s, "ABC-1", None, None).unwrap();
+        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
         assert_eq!(
             modes(&p),
             vec![("last", false), ("brief", true), ("fresh", true)]
@@ -870,13 +934,15 @@ mod tests {
     fn unknown_keys_links_and_modes_are_refused() {
         let (st, _) = fixture();
         let s = st.lock().unwrap();
-        let p = plan_resume(&s, "NOPE-1", None, None).unwrap();
+        let p = plan_resume(&s, "NOPE-1", None, None, &OrgScope::All).unwrap();
         assert!(p.modes.iter().all(|m| !m.ok));
         assert_eq!(
-            plan_resume(&s, "ABC-1", Some(999), None).unwrap_err().code,
+            plan_resume(&s, "ABC-1", Some(999), None, &OrgScope::All)
+                .unwrap_err()
+                .code,
             codes::E_NOTFOUND
         );
-        let p = plan_resume(&s, "ABC-1", None, None).unwrap();
+        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
         assert_eq!(
             resume_session_args(&s, &p, "sideways")
                 .err()
@@ -899,7 +965,7 @@ mod tests {
         let spawned = Arc::new(Mutex::new(None));
         let seen = Arc::clone(&spawned);
         let st2 = Arc::clone(&st);
-        let (row, handover) = resume_with(&st, &ssh, &args, |a| async move {
+        let (row, handover) = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
             *seen.lock().unwrap() =
                 Some((a.host_alias.clone(), a.resume_claude_session_id.clone()));
             let s = st2.lock().unwrap();

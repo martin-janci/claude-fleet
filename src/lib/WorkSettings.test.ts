@@ -84,7 +84,10 @@ describe('Settings → Work, standalone', () => {
     await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
     await fireEvent.click(screen.getByTestId('connect-submit'));
     await waitFor(() => expect(screen.queryByTestId('connect-form')).toBeNull());
-    const cmds = inv.mock.calls.map((c) => c[0]).filter((c) => c !== 'list_trackers');
+    // The Organisations section (work graph M5) reads its own lists on mount.
+    const cmds = inv.mock.calls
+      .map((c) => c[0])
+      .filter((c) => !['list_trackers', 'list_orgs', 'org_suggestions'].includes(c as string));
     expect(cmds).toEqual(['add_tracker', 'set_tracker_credential', 'test_tracker']);
     const cred = inv.mock.calls.find((c) => c[0] === 'set_tracker_credential')![1] as {
       args: { tracker_id: number; username: string; secret: string };
@@ -106,7 +109,11 @@ describe('Settings → Work, standalone', () => {
     await tick();
     expect(screen.getByTestId('connect-url-error')).toBeInTheDocument();
     expect((screen.getByTestId('connect-submit') as HTMLButtonElement).disabled).toBe(true);
-    expect(inv.mock.calls.map((c) => c[0])).toEqual(['list_trackers']);
+    expect(
+      inv.mock.calls
+        .map((c) => c[0])
+        .filter((c) => !['list_orgs', 'org_suggestions'].includes(c as string)),
+    ).toEqual(['list_trackers']);
   });
 
   it('shows a failed test in the form', async () => {

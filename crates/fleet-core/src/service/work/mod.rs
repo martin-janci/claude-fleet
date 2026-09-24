@@ -11,6 +11,7 @@ pub mod resolve;
 pub mod resume;
 
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::service::orgs::{self, OrgScope};
 use crate::store::{SessionRow, Store, WorkLinkRow, WorkTarget};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -24,7 +25,7 @@ pub struct WorkArgs {
     /// Or: ended (past) links to this key.
     #[serde(default)]
     pub key: Option<String>,
-    /// links|context|resume_plan|purge_impact|tickets|lookup|trackers
+    /// links|context|resume_plan|purge_impact|tickets|lookup|trackers|scopes|orgs|org_suggestions
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     /// Ended link.
@@ -106,6 +107,9 @@ pub struct WorkLinkArgs {
     /// trust_project: on/off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<bool>,
+    /// Link across orgs anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_cross_org: Option<bool>,
 }
 
 /// `work_link { action: trust_project }`: the projects whose branch keys
@@ -160,26 +164,86 @@ pub enum WorkAction {
     Lookup,
     /// The trackers (no secrets).
     Trackers,
+    /// The scope selector's entries: named orgs, uncovered owners, the rest
+    /// (work graph M5).
+    Scopes,
+    /// The orgs with their rules, hosts and trackers (read-only).
+    Orgs,
+    /// Proposed orgs from owners and tracker sites (never applied).
+    OrgSuggestions,
 }
+
+/// Every `work` action, by name — the ONLY place an action is parsed from,
+/// so the org isolation matrix (`mcp::tools::tests_isolation`) can require a
+/// row for each: a new action without one fails that test.
+pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
+    ("links", WorkAction::Links),
+    ("context", WorkAction::Context),
+    ("resume_plan", WorkAction::ResumePlan),
+    ("purge_impact", WorkAction::PurgeImpact),
+    ("tickets", WorkAction::Tickets),
+    ("lookup", WorkAction::Lookup),
+    ("trackers", WorkAction::Trackers),
+    ("scopes", WorkAction::Scopes),
+    ("orgs", WorkAction::Orgs),
+    ("org_suggestions", WorkAction::OrgSuggestions),
+];
+
+/// Every `work_link` action. The tool refuses any other name before
+/// dispatching, so an action cannot be added without appearing here — and
+/// so in the isolation matrix.
+pub const WORK_LINK_ACTIONS: &[&str] = &[
+    "link",
+    "reject",
+    "unlink",
+    "confirm",
+    "trust_project",
+    "resume",
+    "start",
+];
+
+/// The desktop's Routed work commands and the hub action each one calls
+/// (`command`, `tool`, `action`). `src-tauri`'s routing tests hold this to
+/// its verdict table, and the isolation matrix to the action lists above.
+pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
+    ("session_work_links", "work", "links"),
+    ("work_resume_plan", "work", "resume_plan"),
+    ("work_purge_impact", "work", "purge_impact"),
+    ("list_trackers", "work", "trackers"),
+    ("work_tickets", "work", "tickets"),
+    ("work_lookup", "work", "lookup"),
+    ("work_scopes", "work", "scopes"),
+    ("list_orgs", "work", "orgs"),
+    ("org_suggestions", "work", "org_suggestions"),
+    ("link_session_work", "work_link", "link"),
+    ("reject_session_work", "work_link", "reject"),
+    ("unlink_session_work", "work_link", "unlink"),
+    ("confirm_session_work", "work_link", "confirm"),
+    ("set_work_project_trust", "work_link", "trust_project"),
+    ("resume_work", "work_link", "resume"),
+    ("start_work", "work_link", "start"),
+];
 
 impl WorkArgs {
     pub fn parsed_action(&self) -> Result<WorkAction, IpcError> {
-        match self.action.as_deref().unwrap_or("links") {
-            "links" => Ok(WorkAction::Links),
-            "context" => Ok(WorkAction::Context),
-            "resume_plan" => Ok(WorkAction::ResumePlan),
-            "purge_impact" => Ok(WorkAction::PurgeImpact),
-            "tickets" => Ok(WorkAction::Tickets),
-            "lookup" => Ok(WorkAction::Lookup),
-            "trackers" => Ok(WorkAction::Trackers),
-            other => Err(IpcError::new(
-                codes::E_INVALID,
-                format!(
-                    "unknown work action {other:?}; one of links, context, resume_plan, \
-                     purge_impact, tickets, lookup, trackers"
-                ),
-            )),
-        }
+        let name = self.action.as_deref().unwrap_or("links");
+        WORK_ACTIONS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, a)| *a)
+            .ok_or_else(|| {
+                IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "unknown work action {name:?}; one of {}",
+                        WORK_ACTIONS
+                            .iter()
+                            .map(|(n, _)| *n)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )
+            })
     }
 
     fn required_key(&self) -> Result<&str, IpcError> {
@@ -194,9 +258,11 @@ pub async fn work_context(
     args: &WorkArgs,
     store: &Mutex<Store>,
     ssh: &std::sync::Arc<crate::ssh::SshClient>,
+    scope: &OrgScope,
 ) -> Result<WorkContext, IpcError> {
     let key = crate::store::normalize_work_ref(args.required_key()?)?;
-    let input = handover::gather_handover(store, ssh.as_ref(), &key, None).await?;
+    orgs::require_key(&*lock(store)?, scope, &key)?;
+    let input = handover::gather_handover(store, ssh.as_ref(), &key, None, scope).await?;
     Ok(WorkContext {
         text: handover::build_context(&input),
         key,
@@ -208,6 +274,7 @@ pub async fn work_resume_plan(
     args: &WorkArgs,
     store: &Mutex<Store>,
     ssh: &std::sync::Arc<crate::ssh::SshClient>,
+    scope: &OrgScope,
 ) -> Result<resume::ResumePlan, IpcError> {
     resume::resume_plan(
         store,
@@ -216,19 +283,38 @@ pub async fn work_resume_plan(
         args.link_id,
         args.host_alias.as_deref(),
         args.with_brief.unwrap_or(false),
+        scope,
     )
     .await
 }
 
 /// `work { action: purge_impact, project_id, host_aliases }`.
-pub fn work_purge_impact(args: &WorkArgs, store: &Mutex<Store>) -> Result<PurgeImpact, IpcError> {
+///
+/// A per-host token asks only about its own host, and hears only the keys
+/// whose work it may read.
+pub fn work_purge_impact(
+    args: &WorkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+) -> Result<PurgeImpact, IpcError> {
     let pid = args
         .project_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "purge_impact needs project_id"))?;
     let hosts = args.host_aliases.clone().unwrap_or_default();
-    Ok(PurgeImpact {
-        keys: lock(store)?.work_keys_for_purge(pid, &hosts)?,
-    })
+    if let Some(h) = scope.host() {
+        if let Some(other) = hosts.iter().find(|x| x.as_str() != h) {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                format!("the purge is on host {other}; this token is bound to {h}"),
+            ));
+        }
+    }
+    let s = lock(store)?;
+    let mut keys = s.work_keys_for_purge(pid, &hosts)?;
+    if !scope.is_all() {
+        keys.retain(|k| orgs::require_key(&s, scope, k).is_ok());
+    }
+    Ok(PurgeImpact { keys })
 }
 
 /// `work_link { action: resume, key, mode, link_id?, host_alias?, brief? }`.
@@ -237,8 +323,9 @@ pub async fn work_resume(
     store: &std::sync::Arc<Mutex<Store>>,
     ssh: &std::sync::Arc<crate::ssh::SshClient>,
     reg: &std::sync::Arc<crate::cancel::CancellationRegistry>,
+    scope: &OrgScope,
 ) -> Result<SessionRow, IpcError> {
-    resume::resume_work(store, ssh, reg, &resume_args(args)?).await
+    resume::resume_work(store, ssh, reg, &resume_args(args)?, scope).await
 }
 
 /// `work { action: lookup }`'s reference: `url`, else `key`.
@@ -260,6 +347,7 @@ pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::Sta
         brief: args.brief.clone(),
         name: args.name.clone(),
         worktree: args.worktree.clone(),
+        force_cross_org: args.force_cross_org.unwrap_or(false),
     }
 }
 
@@ -274,6 +362,7 @@ pub fn resume_args(args: &WorkLinkArgs) -> Result<resume::ResumeArgs, IpcError> 
         link_id: args.link_id,
         host_alias: args.host_alias.clone(),
         brief: args.brief.clone(),
+        force_cross_org: args.force_cross_org.unwrap_or(false),
     })
 }
 
@@ -282,8 +371,20 @@ pub const RECENT_LINKS_MAX: i64 = 200;
 
 /// `{session_id}` → that session's live links (confirmed and rejected,
 /// primary first); `{key}` → ended links to the key (past work). Exactly one.
-pub fn work(args: &WorkArgs, store: &Mutex<Store>) -> Result<Vec<WorkLinkRow>, IpcError> {
+/// A per-host token reads only links inside its orgs, and past links only of
+/// its own host's sessions (`orgs::scope_links`).
+pub fn work(
+    args: &WorkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+) -> Result<Vec<WorkLinkRow>, IpcError> {
     let s = lock(store)?;
+    let mut links = work_unscoped(args, &s)?;
+    orgs::scope_links(&s, scope, &mut links)?;
+    Ok(links)
+}
+
+fn work_unscoped(args: &WorkArgs, s: &Store) -> Result<Vec<WorkLinkRow>, IpcError> {
     match (args.session_id, args.key.as_deref()) {
         (Some(id), None) => s.session_work_links(id),
         (None, Some(key)) => s.ended_work_links_for_key(key),
@@ -311,7 +412,17 @@ pub fn work(args: &WorkArgs, store: &Mutex<Store>) -> Result<Vec<WorkLinkRow>, I
 
 /// Apply one link decision and return the session's updated row (its `work`
 /// is the new primary link, or none).
-pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow, IpcError> {
+///
+/// Under a per-host token's scope (work graph M5) the target must be inside
+/// its orgs: an item id or link id outside answers exactly as an unknown one,
+/// a key as a key nothing is linked to. For every caller, linking or
+/// confirming work of one org on a session of another is refused unless
+/// `force_cross_org` ([`orgs::check_cross_org`]).
+pub fn work_link<'a>(
+    args: &'a WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+) -> Result<SessionRow, IpcError> {
     if matches!(args.action.as_str(), "resume" | "start" | "trust_project") {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -325,6 +436,44 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
         )
     })?;
     let s = lock(store)?;
+    let force = args.force_cross_org.unwrap_or(false);
+    // The target's org, checked against the scope (visibility) before
+    // anything is written.
+    // An item id outside the scope answers as an unknown id. A KEY outside
+    // it links as the bare key it is to this caller (`WorkTarget::Ref`) —
+    // exactly what an unknown key does — so neither answer says the other
+    // org has it.
+    let visible_target = |t: WorkTarget<'a>| -> Result<(WorkTarget<'a>, Option<i64>), IpcError> {
+        let org = s.work_target_org(t)?;
+        if scope.sees_org(org) {
+            return Ok((t, org));
+        }
+        match t {
+            WorkTarget::Key(k) | WorkTarget::Ref(k) => Ok((WorkTarget::Ref(k), None)),
+            WorkTarget::Item(id) => Err(orgs::not_found("work item", id)),
+        }
+    };
+    // A link id must be one of this session's live links, and visible.
+    let visible_link = |link_id: i64| -> Result<WorkLinkRow, IpcError> {
+        let mut l = s
+            .session_work_links(session_id)?
+            .into_iter()
+            .find(|l| l.id == link_id)
+            .ok_or_else(|| {
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {session_id} has no live work link {link_id}"),
+                )
+            })?;
+        l.org_id = s.link_org(&l)?;
+        if !scope.sees_link(&l) {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {session_id} has no live work link {link_id}"),
+            ));
+        }
+        Ok(l)
+    };
     let target = || -> Result<WorkTarget<'_>, IpcError> {
         match (args.item_id, args.key.as_deref()) {
             (Some(id), None) => Ok(WorkTarget::Item(id)),
@@ -338,26 +487,48 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
     match args.action.as_str() {
         "link" => {
             let source = args.source.as_deref().unwrap_or("manual");
-            s.link_session_work(session_id, target()?, source)?;
+            let (t, org) = visible_target(target()?)?;
+            orgs::check_cross_org(org, s.session_org(session_id)?, &target_name(t), force)?;
+            s.link_session_work(session_id, t, source)?;
         }
         // `reject { link_id }` decides one suggestion (work graph M4.4);
         // `reject { key | item_id }` any target.
         "reject" if args.link_id.is_some() && args.key.is_none() && args.item_id.is_none() => {
-            detect::decide(&s, session_id, args.link_id.unwrap_or_default(), false)?;
+            let link_id = args.link_id.unwrap_or_default();
+            if !scope.is_all() {
+                visible_link(link_id)?;
+            }
+            detect::decide(&s, session_id, link_id, false)?;
         }
         "reject" => {
-            s.reject_session_work(session_id, target()?)?;
+            let (t, _) = visible_target(target()?)?;
+            s.reject_session_work(session_id, t)?;
         }
         "confirm" => {
             let link_id = args
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "confirm needs link_id"))?;
+            if let Ok(l) = visible_link(link_id) {
+                // Confirming a guess makes it a link: the same integrity rule.
+                let org = l.item_id.map(|i| s.item_org(i)).transpose()?.flatten();
+                orgs::check_cross_org(
+                    org,
+                    s.session_org(session_id)?,
+                    &format!("work link {link_id}"),
+                    force,
+                )?;
+            } else if !scope.is_all() {
+                visible_link(link_id)?;
+            }
             detect::decide(&s, session_id, link_id, true)?;
         }
         "unlink" => {
             let link_id = args
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "unlink needs link_id"))?;
+            if !scope.is_all() {
+                visible_link(link_id)?;
+            }
             if !s.unlink_session_work(session_id, link_id)? {
                 return Err(IpcError::new(
                     codes::E_NOTFOUND,
@@ -381,6 +552,14 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
     }
     s.get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
+}
+
+/// A target as a sentence names it.
+fn target_name(t: WorkTarget<'_>) -> String {
+    match t {
+        WorkTarget::Item(id) => format!("work item {id}"),
+        WorkTarget::Key(k) | WorkTarget::Ref(k) => k.to_uppercase(),
+    }
 }
 
 #[cfg(test)]
@@ -414,6 +593,7 @@ mod tests {
                 ..link(sid, "link")
             },
             &st,
+            &OrgScope::All,
         )
         .unwrap();
         let w = row.work.expect("primary work");
@@ -428,6 +608,7 @@ mod tests {
                 ..Default::default()
             },
             &st,
+            &OrgScope::All,
         )
         .unwrap();
         assert_eq!(links.len(), 1);
@@ -438,6 +619,7 @@ mod tests {
                 ..link(sid, "unlink")
             },
             &st,
+            &OrgScope::All,
         )
         .unwrap();
         assert_eq!(row.work, None);
@@ -447,6 +629,7 @@ mod tests {
                 ..link(sid, "unlink")
             },
             &st,
+            &OrgScope::All,
         )
         .unwrap_err();
         assert_eq!(err.code, codes::E_NOTFOUND);
@@ -457,6 +640,7 @@ mod tests {
                 ..link(sid, "reject")
             },
             &st,
+            &OrgScope::All,
         )
         .unwrap();
         assert_eq!(row.work, None);
@@ -466,6 +650,7 @@ mod tests {
                 ..Default::default()
             },
             &st,
+            &OrgScope::All,
         )
         .unwrap();
         assert_eq!(links[0].state, "rejected");
@@ -497,11 +682,14 @@ mod tests {
                 ..link(sid, "confirm")
             },
             &st,
+            &OrgScope::All,
         )
         .unwrap();
         assert_eq!(row.work.unwrap().link_id, first.link_id);
         assert_eq!(
-            work_link(&link(sid, "confirm"), &st).unwrap_err().code,
+            work_link(&link(sid, "confirm"), &st, &OrgScope::All)
+                .unwrap_err()
+                .code,
             codes::E_INVALID
         );
         let err = work_link(
@@ -510,6 +698,7 @@ mod tests {
                 ..link(sid, "reject")
             },
             &st,
+            &OrgScope::All,
         )
         .unwrap_err();
         assert_eq!(err.code, codes::E_NOTFOUND);
@@ -559,11 +748,13 @@ mod tests {
                 ..link(sid, "link")
             },
         ] {
-            let err = work_link(&args, &st).unwrap_err();
+            let err = work_link(&args, &st, &OrgScope::All).unwrap_err();
             assert_eq!(err.code, codes::E_INVALID, "{args:?}");
         }
         assert!(
-            work(&WorkArgs::default(), &st).unwrap().is_empty(),
+            work(&WorkArgs::default(), &st, &OrgScope::All)
+                .unwrap()
+                .is_empty(),
             "recent: none"
         );
         let both = WorkArgs {
@@ -571,13 +762,17 @@ mod tests {
             key: Some("A-1".into()),
             ..Default::default()
         };
-        assert_eq!(work(&both, &st).unwrap_err().code, codes::E_INVALID);
+        assert_eq!(
+            work(&both, &st, &OrgScope::All).unwrap_err().code,
+            codes::E_INVALID
+        );
         let err = work_link(
             &WorkLinkArgs {
                 key: Some("A-1".into()),
                 ..link(sid + 99, "link")
             },
             &st,
+            &OrgScope::All,
         )
         .unwrap_err();
         assert_eq!(err.code, codes::E_NOTFOUND);

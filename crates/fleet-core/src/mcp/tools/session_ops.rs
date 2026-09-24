@@ -19,6 +19,7 @@ impl FleetTools {
         what is new since your last read.")]
     pub(super) async fn list_sessions(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListSessionsParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -53,8 +54,18 @@ impl FleetTools {
             s.get_controller()
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?
         };
+        // Work graph M5: a per-host token lists only the sessions its org
+        // may see (D7, `isolate_sessions`), and each row without the work
+        // of other orgs — here, before `fresh_for` hashes the page, and not
+        // only in the result gate.
+        let scope = self.org_scope(&caller)?;
         let tagged = rows
             .into_iter()
+            .filter(|row| scope.sees_row(row))
+            .map(|mut row| {
+                scope.redact_row(&mut row);
+                row
+            })
             .filter(|row| {
                 if !p.include_lost && row.lost_at.is_some() {
                     return false;
@@ -201,13 +212,17 @@ impl FleetTools {
         sharing the same project and worktree. Returns JSON.")]
     pub(super) async fn related_sessions(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<sessions::RelatedSessionsArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "related_sessions",
             &format!("session_id={}", args.session_id),
         );
-        ok_json_compact(&sessions::related_sessions(args, &self.store).map_err(to_mcp_err)?)
+        let scope = self.org_scope(&caller)?;
+        ok_json_compact(
+            &sessions::related_sessions_scoped(args, &self.store, &scope).map_err(to_mcp_err)?,
+        )
     }
 
     #[tool(description = "Mark the calling session as the fleet controller; \
@@ -252,6 +267,7 @@ impl FleetTools {
         candidates, pick yours and use session_id from then on.")]
     pub(super) async fn whoami(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<WhoamiParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("whoami", &format!("tmux={}", p.tmux_name));
@@ -260,7 +276,9 @@ impl FleetTools {
         // (non-reentrant) `std::sync::Mutex`.
         let (row, is_controller) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            let row = sessions::find_session_by_tmux_name(&s, &p.tmux_name).map_err(to_mcp_err)?;
+            let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
+            let row = sessions::find_session_by_tmux_name_scoped(&s, &p.tmux_name, &scope)
+                .map_err(to_mcp_err)?;
             let controller = s
                 .get_controller()
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?;

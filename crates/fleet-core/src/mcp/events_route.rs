@@ -330,15 +330,16 @@ fn accepted_list(kinds: Option<&Vec<String>>) -> Vec<String> {
 }
 
 /// Kinds a host-bound caller (a per-host token: every in-session Claude)
-/// never receives. `work` frames name tracker tickets from every host; until
-/// orgs exist (roadmap M5) a host's token sees only the tracker items linked
-/// to sessions on its own host, through `work { … }`, and none on the stream
-/// (the M3 plan's decision 6).
+/// never receives. `work` frames name tracker tickets from every host and
+/// carry no session to scope them by; a host's token reads its own orgs'
+/// tickets through `work { … }` (the M3 plan's decision 6, kept by M5 —
+/// stricter than an org filter, and nothing on a host needs the stream).
+/// `session` frames are fenced per frame instead ([`fence_frame`]).
 pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work"];
 
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
 /// what they asked for.
-fn fence_host_bound(caller: &Caller, kinds: Option<Vec<String>>) -> Option<Vec<String>> {
+pub(crate) fn fence_host_bound(caller: &Caller, kinds: Option<Vec<String>>) -> Option<Vec<String>> {
     if caller.host_alias.is_none() {
         return kinds;
     }
@@ -353,6 +354,54 @@ fn fence_host_bound(caller: &Caller, kinds: Option<Vec<String>>) -> Option<Vec<S
             .filter(|k| !HOST_BOUND_HIDDEN_KINDS.contains(&k.as_str()))
             .collect(),
     )
+}
+
+/// The org boundary on one frame for a host-bound stream (work graph M5):
+/// `None` drops it — a session of an org isolated from the host (D7);
+/// otherwise the payload, with every session row's work outside the scope
+/// taken out. The frame's own row carries `org_id` (computed when it was
+/// emitted), so this is a cheap in-memory check, no store read per frame.
+/// Frames of other kinds, and a `session:killed` id, pass unchanged.
+///
+/// A session frame that is not a row — `session:event`,
+/// `session:conversations` — names its session by `session_id`; `lookup`
+/// answers that session's `(host, org)` from the store, and is only asked
+/// when some org isolates its sessions (otherwise sessions are not fenced).
+pub(crate) fn fence_frame(
+    scope: &crate::service::orgs::OrgScope,
+    msg: &EventMessage,
+    lookup: &dyn Fn(i64) -> Option<(String, Option<i64>)>,
+) -> Option<serde_json::Value> {
+    if scope.is_all() || msg.kind() != "session" || !msg.payload.is_object() {
+        return Some(msg.payload.clone());
+    }
+    let p = &msg.payload;
+    let host = p.get("host_alias").and_then(serde_json::Value::as_str);
+    let org = p.get("org_id").and_then(serde_json::Value::as_i64);
+    let isolating = matches!(scope, crate::service::orgs::OrgScope::Host { isolated, .. } if !isolated.is_empty());
+    match (
+        host,
+        p.get("session_id").and_then(serde_json::Value::as_i64),
+    ) {
+        (Some(h), _) => {
+            if !scope.sees_session(h, org) {
+                return None;
+            }
+        }
+        (None, Some(sid)) if isolating => {
+            if let Some((h, o)) = lookup(sid) {
+                if !scope.sees_session(&h, o) {
+                    return None;
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut v = p.clone();
+    scope.redact_json(&mut v, &|m| {
+        m.get("org_id").and_then(serde_json::Value::as_i64)
+    });
+    Some(v)
 }
 
 fn matches(kinds: Option<&Vec<String>>, msg: &EventMessage) -> bool {
@@ -414,6 +463,15 @@ struct StreamState {
     client: Option<(Arc<Mutex<Store>>, i64)>,
     /// Fires on the keep-alive beat; each tick re-checks [`StreamState::client`].
     heartbeat: tokio::time::Interval,
+    /// The caller's org scope (work graph M5), applied to every frame.
+    scope: crate::service::orgs::OrgScope,
+    /// For a per-host token: the store and caller to re-read the scope on
+    /// every beat. A host moved to another org (or an org that turned
+    /// `isolate_sessions` on) ends the stream, so the client reconnects
+    /// under its new scope rather than reading on under the old one.
+    rescope: Option<(Arc<Mutex<Store>>, Caller)>,
+    /// The org generation `scope` was read at (`service::orgs::org_generation`).
+    scope_generation: u64,
 }
 
 /// Is that `client_tokens` row still live (present and not revoked)?
@@ -442,14 +500,33 @@ fn sse_event(name: &str, payload: &serde_json::Value) -> Event {
     Event::default().event(name).data(payload.to_string())
 }
 
-/// One row frame: projected if the client asked for fields, and carrying the
-/// `id:` a reconnect resumes from.
-fn row_event(msg: &EventMessage, fields: Option<&Vec<String>>, generation: u64) -> Event {
-    let payload = match fields {
-        Some(f) => project(&msg.payload, f),
-        None => msg.payload.clone(),
+/// One row frame: fenced for a host-bound stream, projected if the client
+/// asked for fields, and carrying the `id:` a reconnect resumes from. `None`
+/// when the fence drops it.
+fn row_event(
+    msg: &EventMessage,
+    fields: Option<&Vec<String>>,
+    generation: u64,
+    scope: &crate::service::orgs::OrgScope,
+    store: Option<&Mutex<Store>>,
+) -> Option<Event> {
+    let lookup = |sid: i64| -> Option<(String, Option<i64>)> {
+        let s = store?.lock().ok()?;
+        let row = s.get_session_by_id(sid).ok()??;
+        Some((row.host_alias, row.org_id))
     };
-    sse_event(msg.name, &payload).id(frame_id(generation, msg.seq))
+    let fenced = fence_frame(scope, msg, &lookup)?;
+    let payload = match fields {
+        Some(f) => project(&fenced, f),
+        None => fenced,
+    };
+    Some(sse_event(msg.name, &payload).id(frame_id(generation, msg.seq)))
+}
+
+/// The scope a stream holds, refreshed on the keep-alive beat.
+fn read_scope(store: &Mutex<Store>, caller: &Caller) -> Option<crate::service::orgs::OrgScope> {
+    let s = store.lock().ok()?;
+    caller.org_scope(&s).ok()
 }
 
 /// `GET /events`.
@@ -492,6 +569,23 @@ pub(super) async fn handle_events(
             "[events] ignoring unrecognised ?kinds= values"
         );
     }
+    // The org boundary (work graph M5). A scope that cannot be read ends the
+    // request rather than streaming unfenced.
+    let scope_generation = crate::service::orgs::org_generation();
+    let scope = match read_scope(&source.store, &caller) {
+        Some(sc) => sc,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the caller's scope could not be read",
+            )
+                .into_response()
+        }
+    };
+    let rescope = caller
+        .host_alias
+        .is_some()
+        .then(|| (Arc::clone(&source.store), caller.clone()));
     // A paired client's authorization was checked once, at connect; the
     // stream then outlives it, so it re-checks the row on every beat.
     let client = caller
@@ -547,6 +641,9 @@ pub(super) async fn handle_events(
                 i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 i
             },
+            scope,
+            rescope,
+            scope_generation,
         },
         |mut st| async move {
             // A loop, so a phase that finishes can re-dispatch on the next
@@ -595,8 +692,17 @@ pub(super) async fn handle_events(
                         match next {
                             Some(msg) => {
                                 st.sent_through = msg.seq;
-                                let ev = row_event(&msg, st.fields.as_ref(), st.generation);
-                                return Some((Ok(ev), st));
+                                let store = st.rescope.as_ref().map(|(s, _)| Arc::clone(s));
+                                match row_event(
+                                    &msg,
+                                    st.fields.as_ref(),
+                                    st.generation,
+                                    &st.scope,
+                                    store.as_deref(),
+                                ) {
+                                    Some(ev) => return Some((Ok(ev), st)),
+                                    None => continue,
+                                }
                             }
                             // Nothing left to replay: go live in this same poll,
                             // rather than yielding a frame that does not exist.
@@ -612,6 +718,7 @@ pub(super) async fn handle_events(
                         let cancel = st.shutdown.clone();
                         let label = st.label.clone();
                         let client = st.client.clone();
+                        let rescope = st.rescope.clone();
                         let received = tokio::select! {
                             // The server is stopping: end the body now rather
                             // than hold its drain open.
@@ -630,6 +737,15 @@ pub(super) async fn handle_events(
                                         return None;
                                     }
                                 }
+                                if let Some((store, c)) = &rescope {
+                                    if read_scope(store, c).as_ref() != Some(&st.scope) {
+                                        tracing::info!(
+                                            caller = %label,
+                                            "[events] stream closed: the host's org scope changed"
+                                        );
+                                        return None;
+                                    }
+                                }
                                 continue;
                             }
                             r = st.rx.recv() => r,
@@ -643,8 +759,34 @@ pub(super) async fn handle_events(
                             Ok(msg) if msg.seq <= st.sent_through => continue,
                             Ok(msg) if matches(st.kinds.as_ref(), &msg) => {
                                 st.sent_through = msg.seq;
-                                let ev = row_event(&msg, st.fields.as_ref(), st.generation);
-                                return Some((Ok(ev), st));
+                                // An org change since the scope was read:
+                                // re-read it before this frame goes out, and
+                                // end the stream if it moved.
+                                if let Some((store, c)) = &st.rescope {
+                                    let now = crate::service::orgs::org_generation();
+                                    if now != st.scope_generation {
+                                        if read_scope(store, c).as_ref() != Some(&st.scope) {
+                                            tracing::info!(
+                                                caller = %st.label,
+                                                "[events] stream closed: the host's org scope changed"
+                                            );
+                                            return None;
+                                        }
+                                        st.scope_generation = now;
+                                    }
+                                }
+                                let store = st.rescope.as_ref().map(|(s, _)| Arc::clone(s));
+                                match row_event(
+                                    &msg,
+                                    st.fields.as_ref(),
+                                    st.generation,
+                                    &st.scope,
+                                    store.as_deref(),
+                                ) {
+                                    Some(ev) => return Some((Ok(ev), st)),
+                                    // Fenced out: keep waiting.
+                                    None => continue,
+                                }
                             }
                             // A kind this client did not ask for: keep waiting
                             // rather than ending the stream.

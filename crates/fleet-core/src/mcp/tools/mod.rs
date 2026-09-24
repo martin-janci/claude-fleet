@@ -49,6 +49,8 @@ mod session_ops;
 mod support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_isolation;
 mod views;
 
 // `rmcp::model::*` also exports a `CancelTaskParams`. Name ours explicitly:
@@ -296,7 +298,7 @@ impl ServerHandler for FleetTools {
         if let Err(e) = enforce_mode(&caller, &tool).and_then(|()| enforce_admin(&caller, &tool)) {
             return tool_error_result(e);
         }
-        context.extensions.insert(caller);
+        context.extensions.insert(caller.clone());
         let tcc = ToolCallContext::new(self, request, context);
         // Tool-execution failures travel as `is_error` results; only rmcp's
         // own protocol errors (unknown tool, bad arguments) stay JSON-RPC.
@@ -311,10 +313,17 @@ impl ServerHandler for FleetTools {
             Err(_) => true,
         };
         self.guards.metrics.record_call(&label, failed);
-        match answer {
+        let mut out = match answer {
             Ok(result) => Ok(result),
             Err(e) => tool_error_result(e),
+        };
+        // Work graph M5: whatever tool answered — a result or an error's
+        // details — a per-host token never receives session rows' work of
+        // another org.
+        if let (Ok(result), true) = (out.as_mut(), caller.host_alias.is_some()) {
+            self.redact_work_for(&caller, result);
         }
+        out
     }
 
     /// The tools this caller may actually call, slimmed and annotated —
