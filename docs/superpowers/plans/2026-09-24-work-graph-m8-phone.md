@@ -307,3 +307,14 @@ Each task is one reviewable PR. Hub tasks run in the **Worker** environment (car
      itself, dashed with `?` for a suggestion (only on a row without a
      link), struck through when unavailable; hidden under a work group's
      own heading.
+- **2026-09-24, M8.1–M8.5 merged** into fleet-mobile `main` as
+  martin-janci/fleet-mobile#32 (merge `9b9212e`; CI green on JVM, the
+  Android emulator and the iOS simulator). It was built in parallel with the
+  M8.1 / M8.2 entries above, which describe fleet-mobile's
+  `claude/cloud-fleet-work-graph-m8` branch; that branch is superseded and was
+  not merged. #32 follows the corrected decision 3 (an update without `work` /
+  `work_suggested` clears them). Its own departures from the task text are in
+  the fleet-mobile design appendix: the session screen's work lives in a
+  `SessionWorkViewModel`; Start here leaves the project to the hub unless one
+  is picked (`E_AMBIGUOUS` narrows to the candidates); the resume plan is read
+  when a ticket is tapped; *My work* is read once per connection.
