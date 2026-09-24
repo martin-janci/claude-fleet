@@ -34,6 +34,7 @@ pub mod onboarding;
 pub mod operator;
 pub mod outcome;
 pub mod pane_intel;
+pub mod peer;
 pub mod playbooks;
 pub mod projects;
 pub mod provision;
