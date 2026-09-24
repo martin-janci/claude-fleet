@@ -1,10 +1,177 @@
 # Work graph: work items, trackers, work-aware sessions — discovery & design
 
-Status: **analysis / proposal, nothing implemented.** Answers the "Cloud Fleet
+Status: **analysis / proposal, nothing implemented — revision 2 (see §0).** Answers the "Cloud Fleet
 takeover prompt" (Work Graph, Work Items, External Trackers & Intelligent
 Session Lifecycle), sections A–M of its §40, against the code at `57447e8`.
 
 "Cloud Fleet" in the prompt is this repository, `claude-fleet`.
+
+---
+
+## 0. Revision 2 (after the specialist review) — supersedes D–M where they differ
+
+Round-1 review: `../reviews/2026-09-24-work-graph-specialist-review.md`
+(C1–C29 are its corrections). Roadmap: `../2026-09-24-work-graph-roadmap.md`.
+Sections A–C below still stand; D–M are kept as the revision-1 record and are
+overridden by this section wherever they disagree.
+
+### 0.1 Principles that changed
+
+1. **Work exists before any tracker.** A branch key, a local item or a pasted
+   URL is enough to group, start and resume work. Trackers *enrich*
+   (title, status, url); they never gate.
+2. **Organisations are optional.** Default scope = GitHub owner (derived, no
+   setup). A named org exists to merge/split owners and — once used — is the
+   security boundary for per-host tokens.
+3. **State signals are current, not accumulated.** Branch and PR head are
+   re-derived; when they change, links they created end. Only event signals
+   (prompt, URL, agent declaration) produce suggestions with evidence.
+4. **The link, not the session, carries lifecycle.** Unchanged from rev 1,
+   now enforced by a trigger instead of call sites.
+5. **Nothing is a separate app.** No Work tab: tickets live in ⌘K, context in
+   Details, the overview in a Today view, grouping in the sidebar.
+
+### 0.2 Schema (migration `045_work_graph.sql`, re-runnable)
+
+```sql
+CREATE TABLE IF NOT EXISTS orgs(id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE, color TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS org_rules(id INTEGER PRIMARY KEY AUTOINCREMENT,
+  org_id INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  owner TEXT, repo TEXT, path_prefix TEXT, host_alias TEXT);   -- text-keyed (C22); 'local' owner never matches
+CREATE TABLE IF NOT EXISTS trackers(id INTEGER PRIMARY KEY AUTOINCREMENT,
+  org_id INTEGER REFERENCES orgs(id) ON DELETE SET NULL,
+  provider TEXT NOT NULL,                  -- jira | github | asana | linear
+  instance_id TEXT, site_url TEXT, api_base TEXT,   -- cloudId vs browse url (C23+)
+  transport TEXT NOT NULL DEFAULT 'direct',          -- direct | via_host:<alias>
+  config TEXT, state TEXT NOT NULL DEFAULT 'unconfigured',
+  last_sync_at INTEGER, last_error TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS tracker_secrets(tracker_id INTEGER PRIMARY KEY
+  REFERENCES trackers(id) ON DELETE CASCADE, value TEXT, credential_ref TEXT);  -- never on a read path
+CREATE TABLE IF NOT EXISTS work_items(id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,                    -- local | jira | github | asana | linear
+  tracker_id INTEGER REFERENCES trackers(id) ON DELETE SET NULL,
+  external_id TEXT, key TEXT, aliases TEXT, title TEXT NOT NULL, url TEXT,
+  kind TEXT, hierarchy_level INTEGER,
+  status_name TEXT, status_category TEXT NOT NULL DEFAULT 'todo',  -- todo|in_progress|done|unknown
+  resolution TEXT,                         -- completed|not_planned|duplicate|NULL (C26)
+  parent_id INTEGER REFERENCES work_items(id) ON DELETE SET NULL,
+  containers TEXT, assignees TEXT, iteration TEXT, meta TEXT,
+  updated_ext INTEGER, status_changed_at INTEGER, fetched_at INTEGER,
+  unavailable_at INTEGER, unavailable_reason TEXT,           -- not "gone" (C25)
+  created_at INTEGER NOT NULL, UNIQUE(tracker_id, external_id));
+CREATE TABLE IF NOT EXISTS work_links(id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id INTEGER REFERENCES work_items(id) ON DELETE CASCADE,
+  ref_kind TEXT, ref_key TEXT,             -- unresolved key / url / PR, bound later
+  participant_id INTEGER REFERENCES participants(id) ON DELETE SET NULL,  -- C4
+  claude_session_id TEXT,                  -- conversation window start (NULL = whole session)
+  role TEXT NOT NULL DEFAULT 'work',       -- work | review | worker
+  state TEXT NOT NULL,                     -- suggested | confirmed | rejected
+  source TEXT NOT NULL,                    -- manual | started | agent | branch | pr | url | prompt | resumed | forked | inherited
+  strength TEXT NOT NULL,                  -- explicit | strong | weak
+  is_primary INTEGER NOT NULL DEFAULT 0, evidence TEXT,   -- denormalised (C13)
+  created_at INTEGER NOT NULL, decided_at INTEGER, decided_by TEXT, ended_at INTEGER,
+  snap_host TEXT, snap_tmux TEXT, snap_name TEXT, snap_repo TEXT, snap_worktree TEXT,
+  snap_branch TEXT, snap_claude_ids TEXT, snap_pr_url TEXT,
+  CHECK (item_id IS NOT NULL OR ref_key IS NOT NULL));
+CREATE TABLE IF NOT EXISTS work_journal(id INTEGER PRIMARY KEY AUTOINCREMENT,
+  participant_id INTEGER REFERENCES participants(id) ON DELETE SET NULL,
+  item_id INTEGER REFERENCES work_items(id) ON DELETE SET NULL,
+  claude_session_id TEXT, at INTEGER NOT NULL,
+  kind TEXT NOT NULL,       -- conversation|progress|compact_summary|outcome|handover|note|status_change|decision
+  source TEXT NOT NULL, body TEXT, meta TEXT);
+-- Snapshot at END (C3, C5): every retire site UPDATEs participants before DELETE FROM sessions.
+CREATE TRIGGER IF NOT EXISTS trg_work_links_end AFTER UPDATE OF retired_at ON participants
+WHEN OLD.retired_at IS NULL AND NEW.retired_at IS NOT NULL BEGIN
+  UPDATE work_links SET ended_at = NEW.retired_at,
+    snap_host = (SELECT host_alias FROM sessions WHERE id = OLD.session_id),
+    snap_tmux = (SELECT tmux_name  FROM sessions WHERE id = OLD.session_id),
+    snap_claude_ids = (SELECT json_group_array(claude_session_id) FROM conversations
+                        WHERE session_id = OLD.session_id)
+    /* … name, repo, worktree, branch, pr_url likewise */
+  WHERE participant_id = OLD.id AND ended_at IS NULL;
+END;
+```
+
+Plus `hosts.org_id` (guarded `ALTER`, `already_applied` fn, `schema.rs`
+043 pattern) when orgs ship, and **eager participant minting** on the
+reconcile INSERT path (C1). No `projects.org_id`, no `work_observations`.
+
+### 0.3 Resolution (replaces §G rules)
+
+| Signal | Kind | Tier | Source of data |
+|---|---|---|---|
+| user action / Start from item | event | explicit | command |
+| agent declares (`work_link` action) | event | explicit | MCP |
+| **current** branch key | state | strong | transcript `gitBranch` (tail already read by `context::refresh`), fallback `worktrees.branch` |
+| PR `headRefName` / `closingIssuesReferences` | state | strong | extended `gh pr view --json` |
+| ticket **URL** in a prompt | event | strong (host names the tracker) | UserPromptSubmit |
+| key in the first prompt of a conversation, sole candidate | event | strong→suggested, pre-selected | UserPromptSubmit |
+| key elsewhere in prompts; commit trailers | event | weak | hook / probe |
+| repo/owner → org | config | scope only | `org_rules` |
+
+Rules: manual decisions final (reject sticky per participant+item);
+explicit → confirmed; one strong → confirmed (`auto` marker + Undo toast);
+several strong → suggested; weak → suggested, decays at the next conversation
+boundary; state-signal change ends the auto link it made; fleet-injected text
+is excluded (loop guard); >3 keys in one prompt = reference list (dump guard);
+same key in two trackers → never auto. Keys are recognised only against known
+prefixes (probe) **or**, with no tracker, as unresolved refs from branch
+names only. Reviews and task workers inherit the parent's primary link with
+`role`.
+
+### 0.4 Provider (replaces §F trait)
+
+```rust
+trait TrackerProvider: Send + Sync {
+    fn caps(&self) -> Caps;                               // query_lang, hierarchy, iterations, human_keys, incremental, write_*
+    async fn probe(&self) -> Result<TrackerInfo>;         // instance_id, me(accountId), key_prefixes, tz
+    async fn views(&self) -> Result<Vec<TrackerView>>;
+    async fn list(&self, view: &ViewRef, since: Option<&SyncMark>, cur: Option<Cursor>) -> Result<Page<WorkItemSnapshot>>;
+    async fn fetch(&self, refs: &[ItemRef]) -> Result<Vec<Fetched>>;   // Found | Unavailable{reason}
+    fn recognize(&self, text: &str, ctx: &RecognizeCtx) -> Vec<ItemRef>; // key | url | #n (repo-relative)
+}
+```
+
+Over an `HttpTransport` trait: `Direct` (reqwest minimal features + ring,
+or the lifted `remote.rs` client — whichever passes `cargo deny`) and
+`ViaHost` (curl/`gh`/`acli` on a host; token never enters fleet). Jira
+specifics: C23–C29. Sync is a `FleetTasks` method (C20); per-view time
+watermarks with overlap; every linked item refreshed by id each tick; events
+only on real change.
+
+### 0.5 API surface (replaces §E tool list)
+
+MCP (budget C21): `work` (read: items, links, context, journal),
+`work_link` (link / unlink / reject / primary / declare / start / resume),
+`work_admin` (orgs, rules, trackers, credentials — **Master**). Tauri commands
+map many-to-one onto them. Verdicts: `work`, `work_link` **Routed**;
+`work_admin` **LocalOnly** ("configure on the hub"), with a
+`fleet-hub tracker add|set-credential|test` CLI. UI gated on the hub's tool
+list, no contract bump. Events: kind `work`. `SessionRow.work` (read-only
+primary link summary, `#[serde(default)]`) + `PHONE_SESSION_FIELDS`.
+
+### 0.6 Lifecycle (refines §H)
+
+Archive = link `ended_at` (trigger). Archive action on a live session defaults
+to **UI-only** (collapses into Done); killing is an explicit Tidy-up choice via
+safe kill. Resume: continue last conversation / fresh with brief / fresh;
+a resumed `claude_session_id` matching an ended link re-attaches it
+automatically (C7). Brief = `hub`-participant message via `additionalContext`
++ short start prompt, never typed into a trust dialog (C16). Purge warns on
+linked conversations (C6).
+
+### 0.7 Decisions — resolved by default vs still the user's
+
+Defaulted: Jira Cloud first (DC later with PAT + v2 + Epic Link); credentials
+in `tracker_secrets` + `env:`/`file:` refs; transport per 0.4; auto-link on a
+single strong signal; branch from key+title, edited in dialog; sync scope =
+assigned-to-me + favourites + linked; poll, no webhooks.
+
+Still the user's (see roadmap "Decisions"): provider order after Jira
+(Asana is the user's Company-B tracker), whether "done" may ever kill a live
+session automatically, write-back scope, whether org isolation for host
+tokens is needed from day one.
 
 ---
 
