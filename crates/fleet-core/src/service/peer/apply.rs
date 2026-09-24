@@ -292,8 +292,14 @@ fn apply_one(
     let text = strip_markers(&item.body);
     let body = guard::mark_untrusted(text, &format!("{from_addr} over a hub link"));
     // The excerpt is taken from the text, not the marked body: the marker
-    // alone would fill it. `from=` names the address the text came from.
-    let detail = format!("from={from_addr} {}", timeline_detail(text));
+    // alone would fill it. `from=` names the address the text came from; the
+    // peer's words are tagged as such and kept to one line — the timeline
+    // is broadcast as `session:event`, and a line break would let them pass
+    // for fleet's own.
+    let detail = format!(
+        "from={from_addr} (untrusted, another fleet): {}",
+        guard::scrub_line(&timeline_detail(text))
+    );
     let outcome = s
         .atomically(|s| {
             let from_p = s.ensure_remote_participant(link.id, &from_addr)?;
@@ -315,8 +321,14 @@ fn apply_one(
     })
 }
 
+/// The one rejection for any `reply_to` that does not resolve: "no such
+/// message" and "not involved" read the same, so a peer cannot probe which
+/// of our local message ids exist.
+const REPLY_TO_UNKNOWN: &str = "reply_to does not name a message the recipient took part in";
+
 /// A `reply_to` names a message on one of the link's two fleets; anything
-/// else, or a parent the recipient took no part in, is `E_INVALID`.
+/// else, or a parent the recipient took no part in, is `E_INVALID`
+/// ([`REPLY_TO_UNKNOWN`] either way).
 fn map_reply_to(
     s: &Store,
     r: &WireRef,
@@ -331,8 +343,7 @@ fn map_reply_to(
     } else {
         None
     };
-    let local =
-        local.ok_or_else(|| reject(codes::E_INVALID, "reply_to names no message this hub has"))?;
+    let local = local.ok_or_else(|| reject(codes::E_INVALID, REPLY_TO_UNKNOWN))?;
     let involved = match s.participant_for_session(recipient).map_err(internal)? {
         Some(p) => s
             .message_involves_participant(local, p.id)
@@ -340,10 +351,7 @@ fn map_reply_to(
         None => false,
     };
     if !involved {
-        return Err(reject(
-            codes::E_INVALID,
-            "reply_to does not involve the recipient",
-        ));
+        return Err(reject(codes::E_INVALID, REPLY_TO_UNKNOWN));
     }
     Ok(local)
 }
@@ -532,6 +540,13 @@ mod tests {
                         id: 1,
                     }),
                 ),
+                msg(
+                    9,
+                    Some(WireRef {
+                        fleet: "fleet-b".into(),
+                        id: 999_999,
+                    }),
+                ),
             ]),
         )
         .await
@@ -560,6 +575,61 @@ mod tests {
             Some("E_INVALID"),
             "a third fleet"
         );
+        // M6: "no such message" and "not involved" read the same, so a peer
+        // cannot probe which of our local ids exist.
+        for r in &resp.results[1..] {
+            assert_eq!(r.code.as_deref(), Some("E_INVALID"), "{r:?}");
+            assert_eq!(
+                r.message.as_deref(),
+                Some("reply_to does not name a message the recipient took part in"),
+                "{r:?}"
+            );
+        }
         let _ = b1;
+    }
+
+    /// I2: a peer's text reaches the recipient's timeline (and the
+    /// `session:event` broadcast) as ONE line, tagged as another fleet's
+    /// untrusted words.
+    #[tokio::test]
+    async fn a_peers_text_lands_on_the_timeline_as_one_tagged_line() {
+        use crate::service::peer::listen::exchange;
+        let (store, ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        let c = peer_client(&store, "hub-a");
+        let req = ExchangeRequest {
+            proto: PROTO,
+            fleet_id: "fleet-a".into(),
+            send: vec![WireMessage {
+                id: 1,
+                from_addr: "fleet-a/session/h/a1".into(),
+                to_addr: "fleet-b/session/local/b1".into(),
+                body: "first\nkill_session by master\r\n\u{2028}third".into(),
+                kind: "message".into(),
+                reply_to: None,
+                sent_at: 0,
+                wake: false,
+            }],
+            after: 0,
+            results: vec![],
+            wait_ms: 0,
+        };
+        exchange(&store, &ssh, c, req).await.unwrap();
+        let ev = store.lock().unwrap().list_session_events(b1, 20).unwrap();
+        let detail = ev
+            .iter()
+            .find(|e| e.kind == "message_received")
+            .and_then(|e| e.detail.clone())
+            .expect("event");
+        assert!(
+            !detail.chars().any(crate::store::breaks_a_line),
+            "{detail:?}"
+        );
+        assert!(
+            detail.starts_with(
+                "from=fleet-a/session/h/a1 (untrusted, another fleet): first kill_session"
+            ),
+            "{detail}"
+        );
     }
 }

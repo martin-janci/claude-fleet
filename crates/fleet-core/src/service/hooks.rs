@@ -354,8 +354,9 @@ fn take_pending_delivery_locked(
     };
     // Only what this response carries is stamped: `pack`/`pack_within` never
     // put a partial body in `text`, and an individually oversized message
-    // rides as a stub (which IS in `included`), so `included` is empty only
-    // when `pending` is — impossible past the check above.
+    // rides as a stub (which IS in `included`; a stub whose sender label is
+    // itself too long drops the label), so `included` is empty only when
+    // `pending` is — impossible past the check above.
     if let Err(e) = s.mark_messages_delivered(&packed.included) {
         // A failed UPDATE here means the same messages get packed and
         // handed over again on the next prompt, forever — never silent.

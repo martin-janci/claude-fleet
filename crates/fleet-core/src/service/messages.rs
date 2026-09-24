@@ -125,8 +125,12 @@ pub async fn send_message(
     let target = resolve_target(&args, store)?;
     let to_session_id = match target {
         Target::Local(id) => id,
-        Target::Remote { link_id, addr } => {
-            return send_remote(args, link_id, &addr, store);
+        Target::Remote {
+            link_id,
+            addr,
+            fleet,
+        } => {
+            return send_remote(args, link_id, &addr, &fleet, store);
         }
     };
     if args.from_session_id == to_session_id {
@@ -372,7 +376,11 @@ fn merge_error(existing: Option<String>, new: String) -> String {
 /// Where a `send_message` goes: a local session, or a peer hub's outbox.
 enum Target {
     Local(i64),
-    Remote { link_id: i64, addr: String },
+    Remote {
+        link_id: i64,
+        addr: String,
+        fleet: String,
+    },
 }
 
 /// Resolve `args.to_session_id` / `args.to_addr` to where the message
@@ -406,6 +414,7 @@ fn resolve_target(args: &SendMessageArgs, store: &Mutex<Store>) -> Result<Target
             Some(l) => Ok(Target::Remote {
                 link_id: l.id,
                 addr: crate::service::address::render(&addr),
+                fleet: peer.clone(),
             }),
             None => Err(IpcError::new(
                 codes::E_UNSUPPORTED,
@@ -446,10 +455,12 @@ fn resolve_target(args: &SendMessageArgs, store: &Mutex<Store>) -> Result<Target
 /// Queue a message for a peer hub. Nothing is typed into any pane: `deliver`
 /// is refused, and the recipient's hub decides the wake (a fixed nudge,
 /// never the body). The exchange loop picks the row up from the outbox.
+/// `peer_fleet` is the fleet `to_addr` names (the link's).
 fn send_remote(
     args: SendMessageArgs,
     link_id: i64,
     to_addr: &str,
+    peer_fleet: &str,
     store: &Mutex<Store>,
 ) -> Result<SendMessageResult, IpcError> {
     if args.deliver {
@@ -468,8 +479,10 @@ fn send_remote(
         ));
     }
     let kind = args.kind.as_deref().unwrap_or("message");
-    // The peer's own rule: refused here, not a week later as undeliverable.
-    crate::service::peer::validate::check_kind(kind)
+    // The peer's own rules: refused here, not a week later as undeliverable.
+    crate::service::peer::validate::check_kind_for_link(kind)
+        .map_err(|r| IpcError::new(r.code, format!("to another fleet, {}", r.message)))?;
+    crate::service::peer::validate::check_addr_len("the recipient address", to_addr)
         .map_err(|r| IpcError::new(r.code, format!("to another fleet, {}", r.message)))?;
     // Must be called before `lock(store)` below: it takes the store lock
     // internally, and the store mutex must never be locked while already
@@ -498,6 +511,20 @@ fn send_remote(
                         args.from_session_id
                     ),
                 ));
+            }
+            // A parent from a third fleet would hand this peer that fleet's
+            // id and message id — and the peer refuses it anyway.
+            if let Some((parent_fleet, _)) = s.remote_ref_of(parent_id)? {
+                if parent_fleet != peer_fleet {
+                    return Err(IpcError::new(
+                        codes::E_INVALID,
+                        format!(
+                            "reply_to message {parent_id} came from another fleet; \
+                             a reply across a link threads only onto a local message \
+                             or one from {peer_fleet}"
+                        ),
+                    ));
+                }
             }
         }
         let from_addr = crate::service::address::render(&crate::service::address::Addr::Session {
@@ -1001,6 +1028,91 @@ mod tests {
             .map(|r| r.kind)
             .collect();
         assert_eq!(kinds, vec!["message", "task_result"]);
+    }
+
+    /// I3 + M4: a recipient address over `PEER_ADDR_MAX`, and the kind
+    /// `question` (which holds a session's stop), are refused before they
+    /// queue — the peer would refuse both.
+    #[tokio::test]
+    async fn an_overlong_address_or_a_question_is_refused_before_it_queues() {
+        let (store, ssh, a, _b) = fixture();
+        let link = {
+            let s = store.lock().unwrap();
+            let id = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+        };
+        let mut long = args(a, 0, "hi");
+        long.to_addr = Some(format!(
+            "fleet-b/session/h/{}",
+            "n".repeat(crate::service::peer::wire::PEER_ADDR_MAX)
+        ));
+        let e = send_message(long, &store, &ssh).await.unwrap_err();
+        assert_eq!(e.code, codes::E_VALIDATE, "{}", e.message);
+        let mut q = args(a, 0, "hi");
+        q.to_addr = Some("fleet-b/session/h/b1".into());
+        q.kind = Some("question".into());
+        let e = send_message(q, &store, &ssh).await.unwrap_err();
+        assert_eq!(e.code, codes::E_VALIDATE, "{}", e.message);
+        assert!(
+            e.message.contains("cannot hold a session's stop"),
+            "{}",
+            e.message
+        );
+        assert!(store
+            .lock()
+            .unwrap()
+            .pending_outbox(link, 0, 50)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// M5: a reply across a link may thread onto a local message or one
+    /// from the target fleet, never onto one from a third fleet — that would
+    /// hand the peer a third fleet's id and message id.
+    #[tokio::test]
+    async fn a_reply_to_a_third_fleets_message_is_refused() {
+        let (store, ssh, a, _b) = fixture();
+        let (link_b, from_b, from_c) = {
+            let s = store.lock().unwrap();
+            let link_b = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(link_b, "fleet-b").unwrap();
+            let link_c = s.insert_dialer_link("https://c.example", "t2").unwrap();
+            s.adopt_dialer_fleet(link_c, "fleet-c").unwrap();
+            let pb = s
+                .ensure_remote_participant(link_b, "fleet-b/session/h/b1")
+                .unwrap();
+            let pc = s
+                .ensure_remote_participant(link_c, "fleet-c/session/h/c1")
+                .unwrap();
+            let crate::store::Inbound::Inserted(from_b) = s
+                .insert_inbound_remote("fleet-b", 7, pb, a, "from b", "message", None)
+                .unwrap()
+            else {
+                panic!("inserted")
+            };
+            let crate::store::Inbound::Inserted(from_c) = s
+                .insert_inbound_remote("fleet-c", 7, pc, a, "from c", "message", None)
+                .unwrap()
+            else {
+                panic!("inserted")
+            };
+            (link_b, from_b, from_c)
+        };
+        let reply = |parent: i64| {
+            let mut m = args(a, 0, "re");
+            m.to_addr = Some("fleet-b/session/h/b1".into());
+            m.reply_to = Some(parent);
+            m
+        };
+        let e = send_message(reply(from_c), &store, &ssh).await.unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{}", e.message);
+        assert!(store
+            .lock()
+            .unwrap()
+            .pending_outbox(link_b, 0, 50)
+            .unwrap()
+            .is_empty());
+        send_message(reply(from_b), &store, &ssh).await.unwrap();
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 //! PURE checks on what a peer sends. A failed check rejects one item, never
 //! the whole exchange (except `check_batch`, which refuses the request).
 
-use super::wire::{WireMessage, PEER_BATCH_MAX, PEER_BODY_MAX};
+use super::wire::{WireMessage, PEER_ADDR_MAX, PEER_BATCH_MAX, PEER_BODY_MAX};
 use crate::service::address::{self, Addr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,12 +64,42 @@ pub fn check_kind(kind: &str) -> Result<(), Rejection> {
     Ok(())
 }
 
+/// An address that may cross a link: at most [`PEER_ADDR_MAX`] bytes. It
+/// becomes the sender label of a recipient's hook delivery, which has a
+/// hard character budget. Checked before parsing, so the refusal never
+/// echoes an oversized value.
+pub fn check_addr_len(label: &str, addr: &str) -> Result<(), Rejection> {
+    if addr.len() > PEER_ADDR_MAX {
+        return Err(reject(
+            "E_VALIDATE",
+            format!("{label} is over {PEER_ADDR_MAX} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+/// `question` asks the recipient's `Stop` hook to hold the session until it
+/// answers; a message from another fleet may not do that. Checked on both
+/// sides, like [`check_kind`].
+pub fn check_kind_for_link(kind: &str) -> Result<(), Rejection> {
+    check_kind(kind)?;
+    if kind == "question" {
+        return Err(reject(
+            "E_VALIDATE",
+            "a message from another fleet cannot hold a session's stop (kind question)",
+        ));
+    }
+    Ok(())
+}
+
 /// `peer_fleet` is the link's pinned fleet; `own_fleet` is ours.
 pub fn check_inbound(
     m: &WireMessage,
     peer_fleet: &str,
     own_fleet: &str,
 ) -> Result<Checked, Rejection> {
+    check_addr_len("from_addr", &m.from_addr)?;
+    check_addr_len("to_addr", &m.to_addr)?;
     let from = address::parse(&m.from_addr)
         .map_err(|e| reject("E_VALIDATE", format!("from_addr: {}", e.message)))?;
     match &from {
@@ -102,7 +132,7 @@ pub fn check_inbound(
             ))
         }
     };
-    check_kind(&m.kind)?;
+    check_kind_for_link(&m.kind)?;
     if m.body.is_empty() {
         return Err(reject("E_VALIDATE", "body is empty"));
     }
@@ -214,6 +244,57 @@ mod tests {
             let e = check_inbound(&ok, "fleet-a", "fleet-b").unwrap_err();
             assert_eq!(e.code, "E_VALIDATE", "{kind:?}");
         }
+    }
+
+    /// I3: an address over `PEER_ADDR_MAX` bytes is refused either way, so
+    /// a peer cannot make a recipient's hook label too large to deliver.
+    #[test]
+    fn an_address_over_the_cap_is_refused() {
+        use crate::service::peer::wire::PEER_ADDR_MAX;
+        let pad =
+            |prefix: &str, total: usize| format!("{prefix}{}", "n".repeat(total - prefix.len()));
+        let from_ok = pad("fleet-a/session/h/", PEER_ADDR_MAX);
+        let to_ok = pad("fleet-b/session/h/", PEER_ADDR_MAX);
+        assert!(check_inbound(
+            &m(&from_ok, "fleet-b/session/h/b1", "hi"),
+            "fleet-a",
+            "fleet-b"
+        )
+        .is_ok());
+        assert!(check_inbound(
+            &m("fleet-a/session/h/a1", &to_ok, "hi"),
+            "fleet-a",
+            "fleet-b"
+        )
+        .is_ok());
+        let from_long = pad("fleet-a/session/h/", PEER_ADDR_MAX + 1);
+        let to_long = pad("fleet-b/session/h/", 8 * 1024);
+        for (from, to) in [
+            (from_long.as_str(), "fleet-b/session/h/b1"),
+            ("fleet-a/session/h/a1", to_long.as_str()),
+        ] {
+            let e = check_inbound(&m(from, to, "hi"), "fleet-a", "fleet-b").unwrap_err();
+            assert_eq!(e.code, "E_VALIDATE");
+            assert!(
+                e.message.len() < 200,
+                "the refusal does not echo it: {}",
+                e.message.len()
+            );
+        }
+    }
+
+    /// M4: `question` holds the recipient's Stop hook; a peer may not send it.
+    #[test]
+    fn a_question_cannot_cross_a_link() {
+        let mut q = m("fleet-a/session/h/a1", "fleet-b/session/h/b1", "hi");
+        q.kind = "question".into();
+        let e = check_inbound(&q, "fleet-a", "fleet-b").unwrap_err();
+        assert_eq!(e.code, "E_VALIDATE");
+        assert!(
+            e.message.contains("cannot hold a session's stop"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]
