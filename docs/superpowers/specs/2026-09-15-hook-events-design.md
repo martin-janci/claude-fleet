@@ -62,7 +62,13 @@ Every notification also records a timeline event `notification` whose detail is 
 (no state change fleet needs, or only fire while the agent view is open).
 
 Not installed, and why: `SessionStart` (Claude Code accepts only `command` /
-`mcp_tool` hooks there), `SubagentStart/Stop`, `PreCompact`. `allowedHttpHookUrls`
+`mcp_tool` hooks there), `SubagentStart/Stop`, `PreCompact`.
+
+> **Superseded (2026-09-24):** `SessionStart` (as an async `command` hook that
+> curls `/hook`), `PreCompact` and `PostCompact` ARE installed since the
+> conversation-events work (`2026-09-18-conversation-events-design.md`); see
+> `FLEET_HOOK_EVENTS` in `service/hooks_install.rs`. `SubagentStart/Stop`
+> remain uninstalled. `allowedHttpHookUrls`
 is never written: defining it at user level would block every other http hook the
 user has.
 
