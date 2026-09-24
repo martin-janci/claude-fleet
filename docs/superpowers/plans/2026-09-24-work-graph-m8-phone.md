@@ -247,6 +247,32 @@ Each task is one reviewable PR. Hub tasks run in the **Worker** environment (car
      it). `FleetSnapshotTest` should pin "an update without `work` clears
      the chip", the opposite of the task text above.
   5. No `CONTRACT_REVISION` bump, no new tool, no verdict change.
+- **2026-09-24, M8.1 landed** in fleet-mobile on
+  `claude/cloud-fleet-work-graph-m8` (45f140a), stacked on `main` 5752abf.
+  Verified with `./gradlew :shared:jvmTest` (all green) and the iOS main and
+  test compiles (`compileKotlinIosArm64`, `compileTestKotlinIosSimulatorArm64`,
+  no `e:` lines); `./gradlew build` was not run (no Android SDK in the
+  container). Deviations from the task text, and why:
+  1. **Decision 3 as corrected above**: an update without `work` /
+     `work_suggested` clears them; `FleetSnapshotTest` pins that against
+     a row captured from the hub's serializer, and pins the opposite for
+     `work:item`'s non-columns (`live_session_ids`, `views`), which ARE
+     carried over, as `isController` is.
+  2. **`HubCapabilities`** also records actions the hub refused as unknown
+     (`forgetAction`, `HubError.isUnknownAction`), so M8.3's fallback is a
+     one-liner; `known` stays false for a hub that cannot answer
+     `tools/list`, which never fails the connection (a 401 still routes to
+     Pair). `tools/list` runs alongside the re-list and on a resumed stream.
+  3. **Wrappers beyond the table**: `workTrackers` (M8.2's "My work" chip
+     hides without a tracker), `unlinkWork` and `linkWork` (M8.3's Clear
+     and Set work…). All `work_link` calls ride the lifecycle mount.
+  4. **`HubError.Tool.details`** carries the refusal's structured details:
+     `existingSessionId` for `E_EXISTS` (M8.4's Jump), candidates for
+     `E_AMBIGUOUS`. A details object that would repeat the token is dropped.
+  5. **The ticket cache** lives in `FleetSnapshot.tickets`, seeded by a
+     screen (`FleetState.remember`) and kept current by `work:item`; a
+     re-list keeps it (there is no all-tickets call worth making on every
+     reconnect).
 - **2026-09-24, merged over M5 (#264).** M5 had grown its own action tables
   in `service/work/mod.rs` — `WORK_ACTIONS` with `scopes` / `orgs` /
   `org_suggestions`, `WORK_LINK_ACTIONS` as plain names that the org
