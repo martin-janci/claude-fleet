@@ -369,7 +369,12 @@ pub async fn sweep_with(
     // queued on a removed link, fails back to its sender. Ungated, like the
     // two sweeps above: it is bookkeeping, not the idle killer.
     if let Ok(s) = store.lock() {
-        let _ = s.sweep_peer_outbox(now, crate::store::PEER_PENDING_MAX_SECS);
+        if let Err(e) = s.sweep_peer_outbox(now, crate::store::PEER_PENDING_MAX_SECS) {
+            // G24: this used to be `let _ =`, silently dropping both the
+            // error and the count — an operator had no way to learn the
+            // outbox sweep stopped running.
+            tracing::warn!(error = %e, "[gc] peer outbox sweep failed");
+        }
     }
     report
 }
