@@ -29,7 +29,10 @@ pub enum SshFailureKind {
     Handshake,
     /// The ControlMaster under a multiplexed call died.
     MuxBroken,
-    /// Exit 255 with wording none of the above recognise.
+    /// Exit 255 with wording none of the above recognise. Also the landing
+    /// spot for any future variant an older reader does not know yet, so a
+    /// newer writer's row never fails to deserialize on an older binary.
+    #[serde(other)]
     Unknown,
 }
 
@@ -65,7 +68,9 @@ impl SshFailureKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshFailure {
     pub kind: SshFailureKind,
-    pub host_alias: String,
+    /// The ssh destination ssh was invoked with (an ssh config alias or
+    /// hostname), not the fleet host alias.
+    pub ssh_alias: String,
     /// The end of ssh's stderr, bounded (see [`tail`]).
     pub raw_tail: String,
 }
@@ -85,7 +90,7 @@ const TAIL_LINES: usize = 40;
 const TAIL_BYTES: usize = 4096;
 
 /// Classify an ssh run. `None` unless ssh itself exited 255.
-pub fn classify(host_alias: &str, exit_code: Option<i32>, stderr: &str) -> Option<SshFailure> {
+pub fn classify(ssh_alias: &str, exit_code: Option<i32>, stderr: &str) -> Option<SshFailure> {
     if exit_code != Some(255) {
         return None;
     }
@@ -94,7 +99,7 @@ pub fn classify(host_alias: &str, exit_code: Option<i32>, stderr: &str) -> Optio
         .unwrap_or(SshFailureKind::Unknown);
     Some(SshFailure {
         kind,
-        host_alias: host_alias.to_string(),
+        ssh_alias: ssh_alias.to_string(),
         raw_tail: tail(stderr),
     })
 }
@@ -251,7 +256,7 @@ mod tests {
         assert!(classify("h", Some(1), "Host key verification failed.").is_none());
         assert!(classify("h", None, "Host key verification failed.").is_none());
         let f = classify("mac", Some(255), "Host key verification failed.\n").unwrap();
-        assert_eq!(f.host_alias, "mac");
+        assert_eq!(f.ssh_alias, "mac");
         assert_eq!(f.raw_tail, "Host key verification failed.\n");
     }
 
@@ -288,10 +293,22 @@ mod tests {
     }
 
     #[test]
+    fn unknown_kind_is_forward_compatible_and_round_trips() {
+        assert_eq!(
+            serde_json::from_str::<SshFailureKind>("\"future_kind\"").unwrap(),
+            SshFailureKind::Unknown
+        );
+        let round_tripped: SshFailureKind =
+            serde_json::from_str(&serde_json::to_string(&SshFailureKind::HostKeyChanged).unwrap())
+                .unwrap();
+        assert_eq!(round_tripped, SshFailureKind::HostKeyChanged);
+    }
+
+    #[test]
     fn serializes_snake_case() {
         let f = classify("mac", Some(255), "Host key verification failed.\n").unwrap();
         let v = serde_json::to_value(&f).unwrap();
         assert_eq!(v["kind"], "host_key_unknown");
-        assert_eq!(v["host_alias"], "mac");
+        assert_eq!(v["ssh_alias"], "mac");
     }
 }
