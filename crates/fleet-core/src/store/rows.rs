@@ -950,7 +950,11 @@ pub(super) fn params_then<'a, T: rusqlite::ToSql>(
         .collect()
 }
 
-pub(super) fn now_unix() -> i64 {
+/// Unix seconds, now. `pub` (not `pub(super)`) so a caller outside the store
+/// — `fleet-hub peer remove`, in particular — has one definition to import
+/// rather than a local duplicate; `service/gc.rs`, `service/health.rs` and a
+/// few others still carry their own private copies predating this export.
+pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

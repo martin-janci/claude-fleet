@@ -336,7 +336,11 @@ Index by area (names only; see the reference for details):
 - **Hub links** — `peer_exchange` (hub-to-hub federation: a linked hub's
   `peer` token long-polls it to trade messages and acknowledgements; the one
   tool a peer token reaches, and no other token reaches it, so it is listed
-  to peer tokens only).
+  to peer tokens only), `list_peer_links` (this hub's links to other fleets'
+  hubs — fleet, role, state, pending count, last exchange and error, never a
+  token; a read, but master token only, since it names other fleets — the
+  `fleet-hub peer add|list|remove` commands drive the same links straight on
+  `state.db`).
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →

@@ -1547,7 +1547,8 @@ fn capture_default_cap_matches_docs() {
 /// count is 73 with `list_host_worktrees`, 74 with `resolve_move`, and 80
 /// with restore_host_sessions/discover_lost_sessions. The fleet-mesh
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
-/// the merged count is 81.)
+/// the merged count is 81.) 82 with `peer_exchange`; 83 with
+/// `list_peer_links`.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1568,7 +1569,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 82);
+    assert_eq!(served, 83);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1702,12 +1703,15 @@ fn readonly_tools_are_client_tools_or_the_documented_list_clients_exception() {
     // guard.rs's own doc comment on READONLY_TOOLS: `list_clients` is the
     // one tool that is BOTH master-only (ADMIN_TOOLS) and readable by a
     // readonly token (READONLY_TOOLS) — every OTHER tool a readonly caller
-    // may reach must also be something a full client may reach.
+    // may reach must also be something a full client may reach. `list_peer_links`
+    // is the same shape for the same reason (it names other fleets).
     for name in guard::READONLY_TOOLS {
         assert!(
-            guard::CLIENT_TOOLS.contains(name) || *name == "list_clients",
+            guard::CLIENT_TOOLS.contains(name)
+                || *name == "list_clients"
+                || *name == "list_peer_links",
             "{name} is in READONLY_TOOLS but is neither in CLIENT_TOOLS nor the \
-             documented list_clients special case"
+             documented list_clients/list_peer_links special case"
         );
     }
 }
@@ -1935,6 +1939,25 @@ fn list_clients_is_master_only() {
         );
     }
     assert!(enforce_admin(&Caller::master(), "list_clients").is_ok());
+}
+
+/// `list_peer_links` names every fleet this hub is linked to — the same
+/// "who else can see this" reasoning as `list_clients` above, so it gets the
+/// same master-only gate even though the read mutates nothing.
+#[test]
+fn list_peer_links_is_master_only() {
+    assert!(enforce_admin(&Caller::master(), "list_peer_links").is_ok());
+    for (label, c) in every_caller_kind() {
+        if c.is_master() {
+            continue;
+        }
+        assert!(
+            enforce_mode(&c, "list_peer_links")
+                .and_then(|()| enforce_admin(&c, "list_peer_links"))
+                .is_err(),
+            "{label}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2878,7 +2901,12 @@ fn the_served_definition_budget_stays_bounded() {
     // budget, over the ~1 KB guideline), trimmed to "Your session id: only
     // what's new since your last read." on all five, re-measured at 64,732.
     // Raised to that plus the customary 100.
-    const BUDGET_BYTES: usize = 64_832;
+    //
+    // Raised for hub federation, task 9: `list_peer_links` joined the master
+    // surface (`peer_exchange` alone does not count — it is peer-only, see
+    // the `peer` entry logged below). Measured at 64,929; raised to that plus
+    // the customary 100.
+    const BUDGET_BYTES: usize = 65_029;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

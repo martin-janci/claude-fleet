@@ -365,6 +365,12 @@ pub async fn sweep_with(
         Ok(s) => s.sweep_orphan_read_cursors().unwrap_or(0),
         Err(_) => 0,
     };
+    // Hub↔hub outbox: a message a peer never took within 7 days, or one
+    // queued on a removed link, fails back to its sender. Ungated, like the
+    // two sweeps above: it is bookkeeping, not the idle killer.
+    if let Ok(s) = store.lock() {
+        let _ = s.sweep_peer_outbox(now, crate::store::PEER_PENDING_MAX_SECS);
+    }
     report
 }
 
@@ -922,6 +928,63 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "the live reader's cursor is kept"
+        );
+    }
+
+    /// Task 9: the hub↔hub outbox sweep runs inside `sweep_with`, same
+    /// not-gated-on-`gc.enabled` shape as the mail-retention and orphan
+    /// read-cursor sweeps above — a week-old pending row to a peer fails back
+    /// to its sender even on a default (`enabled: false`) install.
+    #[tokio::test]
+    async fn sweep_fails_a_week_old_peer_outbox_row_even_when_gc_is_disabled() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let (sender, link) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let a1 = s
+                .upsert_session("a1", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+            let to = s
+                .ensure_remote_participant(link, "fleet-b/session/h/b1")
+                .unwrap();
+            let m = s
+                .insert_outbound_remote(
+                    a1,
+                    "fleet-a/session/local/a1",
+                    to,
+                    "x",
+                    "message",
+                    None,
+                    false,
+                )
+                .unwrap();
+            s.conn_ref()
+                .execute("UPDATE session_messages SET sent_at = 0 WHERE id = ?1", [m])
+                .unwrap();
+            (a1, link)
+        };
+        let disabled = GcConfig {
+            enabled: false,
+            ..CFG
+        };
+        let exec = fake(false);
+        let now = crate::store::PEER_PENDING_MAX_SECS + 1;
+        sweep_with(&store, &exec, &disabled, now).await;
+        assert_eq!(
+            exec.inspects.load(Ordering::SeqCst),
+            0,
+            "the session-idle killer stays off"
+        );
+        let s = store.lock().unwrap();
+        assert!(
+            s.pending_outbox(link, 0, 50).unwrap().is_empty(),
+            "the stale row is off the outbox"
+        );
+        let ev = s.list_session_events(sender, 10).unwrap();
+        assert!(
+            ev.iter().any(|e| e.kind == "message_undeliverable"),
+            "the sender must learn its message was never taken by the peer: {ev:?}"
         );
     }
 

@@ -135,6 +135,10 @@ List all registered hosts with their reachability, claude/tmux versions, and lin
 
 List the catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app. Returns JSON.
 
+### `list_peer_links`
+
+List this hub's links to other fleets' hubs: fleet, role, state, pending count, last exchange and error. Never a token. Read-only, master token only.
+
 ### `list_projects`
 
 List discovered projects (repos fleet can spawn sessions in). Slim rows by default (id, owner, repo, worktree_count, last_session_at); summary=false returns the full nested worktree tree, which is large — pair it with limit.

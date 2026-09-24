@@ -3,6 +3,7 @@
 //! work is `service::peer::listen::exchange`; this is the wire.
 
 use super::*;
+use crate::ipc_error::lock;
 
 #[tool_router(router = peer_router, vis = "pub(super)")]
 impl FleetTools {
@@ -39,5 +40,17 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
         ok_json_compact(&resp)
+    }
+
+    #[tool(description = "List this hub's links to other fleets' hubs: \
+        fleet, role, state, pending count, last exchange and error. Never a \
+        token. Read-only, master token only.")]
+    pub(super) async fn list_peer_links(&self) -> Result<CallToolResult, McpError> {
+        audit("list_peer_links", "");
+        let rows = lock(&self.store)
+            .map_err(to_mcp_err)?
+            .peer_link_summaries()
+            .map_err(to_mcp_err)?;
+        ok_json_compact(&rows)
     }
 }
