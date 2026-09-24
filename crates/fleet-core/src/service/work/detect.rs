@@ -275,6 +275,7 @@ fn candidate(target: String, signal: Signal, strength: Strength, ev: Evidence) -
         ambiguous: false,
         first_prompt_sole: false,
         tracker_id: None,
+        untracked: false,
         evidence: ev,
     }
 }
@@ -330,13 +331,18 @@ fn state_candidates(
             pr.push(c);
         }
     }
+    // A GitHub issue ref is only a bare `owner/repo#n` until a GitHub
+    // tracker exists (M6): never auto-linked before then (R3u).
+    let github_tracker = tv.ctx.trackers.iter().any(|t| t.provider == "github");
     for r in sig.closing.iter().filter(|r| tv.admits(r)) {
-        pr.push(candidate(
+        let mut c = candidate(
             r.clone(),
             Signal::PrClosing,
             Strength::Strong,
             evidence(Signal::PrClosing, r, now, conv),
-        ));
+        );
+        c.untracked = r.contains('#') && !github_tracker;
+        pr.push(c);
     }
     let mut events = Vec::new();
     for (signal, refs) in [
@@ -458,6 +464,7 @@ fn prompt_candidates(
                 ambiguous: tv.ambiguous(&m.key, m.tracker_id),
                 first_prompt_sole: sole && !dump,
                 tracker_id: m.tracker_id,
+                untracked: false,
                 evidence: ev,
             }
         })

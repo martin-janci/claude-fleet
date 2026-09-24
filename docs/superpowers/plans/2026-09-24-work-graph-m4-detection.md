@@ -340,8 +340,7 @@ checks apply, plus `REGEN_*` whenever tools or verdicts change.
      live while the PR does; trailers are `trailer` events that decay. A
      closed PR withdraws the PR's suggestions and ends its auto link. A
      GitHub closing ref with no GitHub tracker (M6) stays a bare
-     `owner/repo#n` reference — suggested, or auto-linked when it is the
-     sole strong candidate of a trusted project. `#n` uses the project's
+     `owner/repo#n` reference and is only ever suggested (rule R3u, below). `#n` uses the project's
      repo, else the PR URL's. An older `gh` without the new fields (or
      `--jq`) falls back to the basic fields and leaves the stored signals
      alone.
@@ -381,3 +380,13 @@ checks apply, plus `REGEN_*` whenever tools or verdicts change.
       design of this pass); the phone does not show suggestions (M8); the
       remote-host SessionStart measurement; the manual acceptance on a real
       fleet.
+- **2026-09-24, R3u (the user's call on the open question).** A PR closing
+  ref that no configured tracker can resolve — a GitHub `owner/repo#n` while
+  there is no GitHub tracker (M6) — is never linked automatically, not even
+  as the sole strong candidate of a trusted project: it has no title or
+  status, and in a Jira shop the real ticket is usually the branch key, so
+  an auto link would only make a `owner/repo#42` work group to undo. It is a
+  pre-selected suggestion (rule R3u) instead. Any tracked sighting of the
+  same target (the PR head naming it) makes it tracked again, and a GitHub
+  tracker lifts the rule. Tests: two resolver table rows and a store-level
+  test in `detect/tests.rs`.

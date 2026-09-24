@@ -355,7 +355,7 @@ fn pr_signals_link_the_closing_ref_and_a_closed_pr_withdraws_its_suggestions() {
                 "acme/api#42".into(),
                 "suggested".into(),
                 "pr".into(),
-                Some("R3b".into())
+                Some("R3u".into())
             ),
             (
                 "acme/api#9".into(),
@@ -373,6 +373,25 @@ fn pr_signals_link_the_closing_ref_and_a_closed_pr_withdraws_its_suggestions() {
         left,
         vec!["trailer".to_string()],
         "a trailer is an event: it decays, not withdraws"
+    );
+}
+
+/// R3u: without a GitHub tracker a closing `owner/repo#n` is never linked by
+/// itself, even as the sole candidate of a trusted project.
+#[test]
+fn an_untracked_closing_ref_is_only_suggested_in_a_trusted_project() {
+    let f = fx();
+    trust(&f);
+    let sid = session(&f, "dev", "c1");
+    f.s.set_pr_signals("h", "dev", Some(r#"{"closing":["acme/api#42"]}"#))
+        .unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(row.work, None, "no auto link, no work group");
+    let sg = row.work_suggested.expect("a suggestion");
+    assert_eq!(
+        (sg.key.as_deref(), sg.rule.as_deref(), sg.preselected),
+        (Some("acme/api#42"), Some("R3u"), true)
     );
 }
 

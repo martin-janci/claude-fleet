@@ -354,7 +354,7 @@ Index by area (names only; see the reference for details):
   submitted prompts (keys, Jira / Linear / Asana / GitHub ticket URLs,
   `#n` against the session's own repo). Each link carries `state`
   (`confirmed` | `suggested` | `rejected`), `strength` (`explicit` |
-  `strong` | `weak`), `rule` (the resolver rule, R2–R8 of design §0.3) and
+  `strong` | `weak`), `rule` (the resolver rule, R2–R8 and R3u of design §0.3.1) and
   `evidence` (what was seen: signal, matched text, a ±40-character redacted
   prompt snippet unless `work.evidence_snippets` is off, when, which
   conversation) — `work { session_id }` returns it all. A session row's

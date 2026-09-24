@@ -132,6 +132,7 @@ a tier the most recent decision. Nothing is learned.
 | R2 | `explicit` (`started`, `agent`, and fleet's carries `resumed` / `forked` / `inherited`) | confirmed (written by those paths, not the resolver) |
 | R3 | exactly one strong STATE candidate (branch key, PR head key, PR closing ref) in a trusted project | confirmed, auto (source `branch` / `pr`), Undo toast |
 | R3b | the same in an untrusted project | a pre-selected suggestion |
+| R3u | the same, but no tracker can resolve it (a GitHub `owner/repo#n` closing ref before a GitHub tracker exists, M6) | a pre-selected suggestion, even in a trusted project |
 | R4 | several strong state candidates | all suggested, none pre-selected |
 | R5 | a ticket URL in a prompt | confirmed when it is the sole reference of a conversation's first prompt, else suggested; a sole KEY there is a pre-selected suggestion |
 | R6 | a weak candidate (a prompt key elsewhere, `#n`, keys in the PR title / body, commit trailers) | suggested |

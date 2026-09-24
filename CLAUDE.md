@@ -183,7 +183,7 @@ lookup / start — `service/trackers/`, `store/trackers.rs`,
 Tracker secrets are read ONLY by `Store::resolve_tracker_credential`.
 Work graph M4 (detection) is landed: one recogniser in Rust and TS over a
 shared fixture (`service/work/recognize.rs`, `src/lib/work_keys.ts`), the
-pure resolver (`service/work/resolve.rs`, rules R1–R9; state signals are
+pure resolver (`service/work/resolve.rs`, rules R1–R9 and R3u; state signals are
 current, rejections are final), `detect.rs` wiring the prompt / Stop / PR
 probe / sync triggers, migration 049, `SessionRow.work_suggested` (a guess
 never groups a session), and the chip / popover / batch review UI. The

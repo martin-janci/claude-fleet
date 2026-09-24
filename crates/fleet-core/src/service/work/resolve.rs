@@ -14,6 +14,7 @@
 //! | R2 | `explicit` (`started`, `agent`, carried links) | confirmed (not made here) |
 //! | R3 | exactly one strong state candidate, trusted project | confirmed, auto |
 //! | R3b | the same, untrusted project | a pre-selected suggestion |
+//! | R3u | the same, but no tracker can resolve it (`owner/repo#n` without a GitHub tracker) | a pre-selected suggestion, even when trusted |
 //! | R4 | several strong state candidates | all suggested, none pre-selected |
 //! | R5 | a ticket URL in a prompt | confirmed when it is the sole candidate of a conversation's first prompt, else suggested |
 //! | R6 | a weak candidate (prompt key, trailer, `#n`) | suggested; decays at the next conversation boundary unless seen again |
@@ -134,6 +135,10 @@ pub struct Candidate {
     pub first_prompt_sole: bool,
     /// The tracker a URL's host named, for binding.
     pub tracker_id: Option<i64>,
+    /// No configured tracker can resolve it (a GitHub `owner/repo#n` with no
+    /// GitHub tracker): a bare reference with no title or status, so it is
+    /// never linked automatically, not even in a trusted project (R3u).
+    pub untracked: bool,
     pub evidence: Evidence,
 }
 
@@ -269,16 +274,20 @@ fn merge(cands: impl IntoIterator<Item = Candidate>) -> BTreeMap<String, Merged>
             }
             Some(m) => {
                 m.evidence.push(c.evidence.clone());
-                let (ambiguous, sole, tracker) = (c.ambiguous, c.first_prompt_sole, c.tracker_id);
+                let (ambiguous, sole, tracker, untracked) =
+                    (c.ambiguous, c.first_prompt_sole, c.tracker_id, c.untracked);
                 if c.strength > m.lead.strength
                     || (c.strength == m.lead.strength && c.signal < m.lead.signal)
                 {
                     let old = std::mem::replace(&mut m.lead, c);
                     m.lead.ambiguous |= old.ambiguous;
+                    // Any tracked sighting of the target makes it tracked.
+                    m.lead.untracked &= old.untracked;
                     m.lead.first_prompt_sole |= old.first_prompt_sole;
                     m.lead.tracker_id = m.lead.tracker_id.or(old.tracker_id);
                 } else {
                     m.lead.ambiguous |= ambiguous;
+                    m.lead.untracked &= untracked;
                     m.lead.first_prompt_sole |= sole;
                     m.lead.tracker_id = m.lead.tracker_id.or(tracker);
                 }
@@ -394,6 +403,8 @@ pub fn resolve(input: &ResolveInput) -> Vec<LinkChange> {
             ("R6", false, false)
         } else if !sole {
             ("R4", false, false)
+        } else if c.untracked {
+            ("R3u", false, true)
         } else if input.trusted {
             ("R3", true, false)
         } else {

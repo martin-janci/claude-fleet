@@ -25,6 +25,7 @@ fn cand(target: &str, signal: Signal, strength: Strength) -> Candidate {
         ambiguous: false,
         first_prompt_sole: false,
         tracker_id: None,
+        untracked: false,
         evidence: ev(signal, target),
     }
 }
@@ -156,6 +157,33 @@ fn the_rule_table() {
                 ..input()
             },
             expect: &["create ABC-1 confirmed R3 branch", "primary ABC-1"],
+        },
+        Row {
+            name: "R3u: a sole closing ref no tracker can resolve is only suggested, even trusted",
+            input: ResolveInput {
+                pr: Some(vec![Candidate {
+                    untracked: true,
+                    ..cand("o/r#42", Signal::PrClosing, Strength::Strong)
+                }]),
+                trusted: true,
+                ..input()
+            },
+            expect: &["create o/r#42 suggested R3u pr pre"],
+        },
+        Row {
+            name: "R3u: a tracked sighting of the same target makes it tracked again",
+            input: ResolveInput {
+                pr: Some(vec![
+                    Candidate {
+                        untracked: true,
+                        ..cand("o/r#42", Signal::PrClosing, Strength::Strong)
+                    },
+                    cand("o/r#42", Signal::PrHead, Strength::Strong),
+                ]),
+                trusted: true,
+                ..input()
+            },
+            expect: &["create o/r#42 confirmed R3 pr", "primary o/r#42"],
         },
         Row {
             name: "R8: a key two trackers claim is never automatic",
