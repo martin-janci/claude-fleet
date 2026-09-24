@@ -556,8 +556,8 @@ impl FleetTools {
     }
 
     #[tool(description = "Work links: {session_id} → its live links; \
-        {key} → ended (past) links. action context|resume_plan {key}; \
-        purge_impact.")]
+        {key} → ended (past) links; neither → recently ended. action \
+        context|resume_plan {key}; purge_impact.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,

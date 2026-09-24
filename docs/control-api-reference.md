@@ -473,7 +473,7 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links. action context|resume_plan {key}; purge_impact.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact.
 
 Parameters: `action`, `host_alias`, `host_aliases`, `key`, `link_id`, `project_id`, `session_id`, `with_brief`
 

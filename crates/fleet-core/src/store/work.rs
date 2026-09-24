@@ -791,6 +791,22 @@ impl Store {
         Ok(out)
     }
 
+    /// Confirmed links that ended at or after `since` (past work, for the
+    /// sidebar's past-only groups), newest first, at most `limit`.
+    pub fn recent_ended_work_links(
+        &self,
+        since: i64,
+        limit: i64,
+    ) -> Result<Vec<WorkLinkRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LINK_COLUMNS} FROM work_links \
+             WHERE ended_at IS NOT NULL AND ended_at >= ?1 AND state = 'confirmed' \
+             ORDER BY ended_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![since, limit], map_link)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// session id → its primary work, for every live session that has one.
     pub fn primary_work_by_session(&self) -> Result<HashMap<i64, WorkSummary>, IpcError> {
         let mut stmt = self.conn.prepare(
@@ -992,6 +1008,28 @@ mod tests {
         assert_eq!(p.snap_host.as_deref(), Some("h"));
         assert_eq!(p.snap_tmux.as_deref(), Some("dev-login"));
         assert_eq!(p.snap_name.as_deref(), Some("Fix login"));
+    }
+
+    #[test]
+    fn recently_ended_links_are_listed_newest_first() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "a");
+        let b = seed(&s, "b");
+        let live = seed(&s, "live");
+        for (sid, key) in [(a, "ABC-1"), (b, "DEF-2"), (live, "GHI-3")] {
+            s.link_session_work(sid, WorkTarget::Key(key), "manual")
+                .unwrap();
+        }
+        s.delete_session(a).unwrap();
+        s.delete_session(b).unwrap();
+        let recent = s.recent_ended_work_links(0, 10).unwrap();
+        assert_eq!(recent.len(), 2, "live links are not past work");
+        assert!(recent.iter().all(|l| l.ended_at.is_some()));
+        assert!(s
+            .recent_ended_work_links(now_unix() + 60, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(s.recent_ended_work_links(0, 1).unwrap().len(), 1);
     }
 
     #[test]

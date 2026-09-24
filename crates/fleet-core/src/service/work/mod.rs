@@ -185,6 +185,9 @@ pub fn resume_args(args: &WorkLinkArgs) -> Result<resume::ResumeArgs, IpcError> 
     })
 }
 
+/// Most recently ended links one `work {}` read returns.
+pub const RECENT_LINKS_MAX: i64 = 200;
+
 /// `{session_id}` → that session's live links (confirmed and rejected,
 /// primary first); `{key}` → ended links to the key (past work). Exactly one.
 pub fn work(args: &WorkArgs, store: &Mutex<Store>) -> Result<Vec<WorkLinkRow>, IpcError> {
@@ -192,9 +195,24 @@ pub fn work(args: &WorkArgs, store: &Mutex<Store>) -> Result<Vec<WorkLinkRow>, I
     match (args.session_id, args.key.as_deref()) {
         (Some(id), None) => s.session_work_links(id),
         (None, Some(key)) => s.ended_work_links_for_key(key),
-        _ => Err(IpcError::new(
+        // Neither: work that ended recently (`work.recent_days`), so past-only
+        // work has a group to show in.
+        (None, None) => {
+            let days = crate::service::settings::resolve(
+                crate::service::settings::WORK_RECENT_DAYS,
+                s.get_setting(crate::service::settings::WORK_RECENT_DAYS)?
+                    .as_deref(),
+            )
+            .parse::<i64>()
+            .unwrap_or(14);
+            s.recent_ended_work_links(
+                crate::service::catalog::now_secs() - days * 86_400,
+                RECENT_LINKS_MAX,
+            )
+        }
+        (Some(_), Some(_)) => Err(IpcError::new(
             codes::E_INVALID,
-            "pass exactly one of session_id or key",
+            "pass at most one of session_id or key",
         )),
     }
 }
@@ -367,16 +385,16 @@ mod tests {
             let err = work_link(&args, &st).unwrap_err();
             assert_eq!(err.code, codes::E_INVALID, "{args:?}");
         }
-        for args in [
-            WorkArgs::default(),
-            WorkArgs {
-                session_id: Some(sid),
-                key: Some("A-1".into()),
-                ..Default::default()
-            },
-        ] {
-            assert_eq!(work(&args, &st).unwrap_err().code, codes::E_INVALID);
-        }
+        assert!(
+            work(&WorkArgs::default(), &st).unwrap().is_empty(),
+            "recent: none"
+        );
+        let both = WorkArgs {
+            session_id: Some(sid),
+            key: Some("A-1".into()),
+            ..Default::default()
+        };
+        assert_eq!(work(&both, &st).unwrap_err().code, codes::E_INVALID);
         let err = work_link(
             &WorkLinkArgs {
                 key: Some("A-1".into()),
