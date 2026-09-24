@@ -493,6 +493,27 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "work_scopes",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "scopes" }),
+            r#"[{"id":1,"label":"Company A","session_count":2,"needs_you":1}]"#,
+            Box::new(|b, s, _| block_on(commands::orgs::routed::work_scopes(b, s)).map(|_| ())),
+        ),
+        (
+            "list_orgs",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "orgs" }),
+            r#"[{"id":1,"name":"Company A","created_at":1,"rules":[{"id":2,"org_id":1,"owner":"acme"}],"hosts":["h"],"trackers":[]}]"#,
+            Box::new(|b, s, _| block_on(commands::orgs::routed::list_orgs(b, s)).map(|_| ())),
+        ),
+        (
+            "org_suggestions",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "org_suggestions" }),
+            r#"[{"name":"acme","owner":"acme","sessions":2,"reason":"2 live sessions under acme/*"}]"#,
+            Box::new(|b, s, _| block_on(commands::orgs::routed::org_suggestions(b, s)).map(|_| ())),
+        ),
+        (
             "work_tickets",
             "work",
             json!({ "session_id": null, "key": null, "action": "tickets",
@@ -3097,6 +3118,7 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/trackers.rs",
         include_str!("../commands/trackers.rs"),
     ),
+    ("commands/orgs.rs", include_str!("../commands/orgs.rs")),
     (
         "commands/worktrees.rs",
         include_str!("../commands/worktrees.rs"),

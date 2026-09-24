@@ -159,6 +159,11 @@ pub struct WorkLinkRow {
     /// Why a live session's link ended (`branch_changed`, `pr_changed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<String>,
+    /// The link's org (work graph M5): its tracker item's, else its
+    /// session's (live) or the session's org when it ended (past work).
+    /// Filled by [`Store::fill_link_orgs`]; `None` = unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
 }
 
 fn default_role() -> String {
@@ -211,6 +216,10 @@ pub struct WorkSummary {
     /// Live link suggestions the session has, still to decide.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub suggestions: u32,
+    /// The link's org (work graph M5): its tracker's, else the session's.
+    /// `None` = unassigned. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -277,10 +286,10 @@ fn is_ticket_key(s: &str) -> bool {
 const LINK_COLUMNS: &str = "id, item_id, ref_key, participant_id, state, source, is_primary, \
      created_at, decided_at, ended_at, snap_host, snap_tmux, snap_name, snap_project_id, \
      snap_worktree, snap_branch, snap_pr_url, snap_claude_ids, role, resumable, \
-     claude_session_id, strength, rule, evidence, preselected, end_reason";
+     claude_session_id, strength, rule, evidence, preselected, end_reason, snap_org_id";
 
 /// Columns of [`LINK_COLUMNS`] (a join's `l.` prefix is added by callers).
-pub(super) const LINK_COLUMN_COUNT: usize = 26;
+pub(super) const LINK_COLUMN_COUNT: usize = 27;
 
 /// [`LINK_COLUMNS`] with every column prefixed by `alias.`.
 pub(super) fn link_columns_prefixed(alias: &str) -> String {
@@ -322,6 +331,8 @@ pub(super) fn map_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkLinkRow> {
             .unwrap_or_default(),
         preselected: r.get::<_, i64>(24)? != 0,
         end_reason: r.get(25)?,
+        // The snapshot's org; `Store::fill_link_orgs` resolves the rest.
+        org_id: r.get(26)?,
     })
 }
 

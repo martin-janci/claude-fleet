@@ -222,6 +222,7 @@ fn row(
         work: None,
         work_rejected: vec![],
         work_suggested: None,
+        org_id: None,
     }
 }
 

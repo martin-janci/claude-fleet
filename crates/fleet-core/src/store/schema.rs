@@ -154,6 +154,17 @@ fn work_links_has_evidence(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 050 (work graph M5): its last ADD
+/// COLUMN (`work_links.snap_org_id`) present means the whole migration is.
+fn work_links_has_snap_org(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'snap_org_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -444,6 +455,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 49,
         sql: include_str!("../../migrations/049_work_detection.sql"),
         already_applied: Some(work_links_has_evidence),
+    },
+    // Work graph M5: `orgs`, `org_rules`, `hosts.org_id`,
+    // `work_links.snap_org_id` and its retirement trigger — ADD COLUMNs, so
+    // the same guard.
+    Migration {
+        version: 50,
+        sql: include_str!("../../migrations/050_orgs.sql"),
+        already_applied: Some(work_links_has_snap_org),
     },
 ];
 
@@ -2025,7 +2044,9 @@ mod tests {
     #[test]
     fn migration_043_backfills_existing_sessions() {
         let old = store_at_version(42);
-        old.upsert_host("h").unwrap();
+        old.conn
+            .execute("INSERT INTO hosts (alias) VALUES ('h')", [])
+            .unwrap();
         let sid = raw_session(&old, "sess");
 
         old.migrate().expect("043 backfill");
@@ -2094,7 +2115,9 @@ mod tests {
     #[test]
     fn migration_045_gives_every_session_a_participant() {
         let old = store_at_version(44);
-        old.upsert_host("h").unwrap();
+        old.conn
+            .execute("INSERT INTO hosts (alias) VALUES ('h')", [])
+            .unwrap();
         let quiet = raw_session(&old, "quiet");
         let count = |s: &Store, sid: i64| -> i64 {
             s.conn

@@ -2912,7 +2912,13 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M4.4: `work_link` gains confirm / reject-by-link_id /
     // trust_project (one new parameter, `on`, and a longer description);
     // no new tool. Measured at 68,385 on 2026-09-24 (+172); plus 100.
-    const BUDGET_BYTES: usize = 68_485;
+    // Work graph M5.1 + M5.2: `work` gains scopes / orgs / org_suggestions
+    // (no parameter) and `work_admin` gains the org actions with eight
+    // one-word parameters (org_id, color, isolate_sessions, owner, repo,
+    // path_prefix, host_alias, rule_id); its description was cut to "see
+    // action" to pay part of it. No new tool. Measured at 69,012 on
+    // 2026-09-24 (+627); plus 100.
+    const BUDGET_BYTES: usize = 69_112;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

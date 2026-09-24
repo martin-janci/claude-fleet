@@ -24,7 +24,7 @@ pub struct WorkArgs {
     /// Or: ended (past) links to this key.
     #[serde(default)]
     pub key: Option<String>,
-    /// links|context|resume_plan|purge_impact|tickets|lookup|trackers
+    /// links|context|resume_plan|purge_impact|tickets|lookup|trackers|scopes|orgs|org_suggestions
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     /// Ended link.
@@ -160,6 +160,13 @@ pub enum WorkAction {
     Lookup,
     /// The trackers (no secrets).
     Trackers,
+    /// The scope selector's entries: named orgs, uncovered owners, the rest
+    /// (work graph M5).
+    Scopes,
+    /// The orgs with their rules, hosts and trackers (read-only).
+    Orgs,
+    /// Proposed orgs from owners and tracker sites (never applied).
+    OrgSuggestions,
 }
 
 impl WorkArgs {
@@ -172,11 +179,14 @@ impl WorkArgs {
             "tickets" => Ok(WorkAction::Tickets),
             "lookup" => Ok(WorkAction::Lookup),
             "trackers" => Ok(WorkAction::Trackers),
+            "scopes" => Ok(WorkAction::Scopes),
+            "orgs" => Ok(WorkAction::Orgs),
+            "org_suggestions" => Ok(WorkAction::OrgSuggestions),
             other => Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
                     "unknown work action {other:?}; one of links, context, resume_plan, \
-                     purge_impact, tickets, lookup, trackers"
+                     purge_impact, tickets, lookup, trackers, scopes, orgs, org_suggestions"
                 ),
             )),
         }

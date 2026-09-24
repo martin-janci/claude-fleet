@@ -2,6 +2,7 @@
 
 mod config;
 mod demo;
+mod org;
 mod out;
 mod pair;
 mod reports;
@@ -103,6 +104,17 @@ enum Cmd {
     Tracker {
         #[command(subcommand)]
         cmd: tracker::TrackerCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Name organisations, their placement rules, and which org each host
+    /// and tracker belongs to (work graph M5). Needs a running hub.
+    ///
+    /// A host's org is its token's boundary: that host's Claude reads only
+    /// its org's and unassigned work.
+    Org {
+        #[command(subcommand)]
+        cmd: org::OrgCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -217,6 +229,7 @@ async fn main() -> ExitCode {
             ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
         },
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
+        Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
             since,

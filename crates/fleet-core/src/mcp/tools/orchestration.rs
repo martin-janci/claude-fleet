@@ -558,7 +558,7 @@ impl FleetTools {
     #[tool(description = "Work links: {session_id} → its live links; \
         {key} → ended (past) links; neither → recently ended. action \
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
-        {key|url}; trackers.")]
+        {key|url}; trackers; scopes; orgs; org_suggestions.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -630,6 +630,18 @@ impl FleetTools {
             }
             WorkAction::Trackers => ok_json_compact(
                 &crate::service::trackers::tickets::trackers(&self.store, tracker_scope(&caller))
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Scopes => ok_json_compact(
+                &crate::service::orgs::scopes(&self.store, &self.org_scope(&caller)?)
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::OrgSuggestions => ok_json_compact(
+                &crate::service::orgs::org_suggestions(&self.store, &self.org_scope(&caller)?)
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Orgs => ok_json_compact(
+                &crate::service::orgs::org_details(&self.store, &self.org_scope(&caller)?)
                     .map_err(to_mcp_err)?,
             ),
         }
@@ -723,8 +735,8 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Trackers (Jira): list, add, update, \
-        set_credential, test, remove. Never returns a secret.")]
+    #[tool(description = "Trackers (Jira) and orgs; see action. Never \
+        returns a secret.")]
     pub(super) async fn work_admin(
         &self,
         Extension(caller): Extension<Caller>,
@@ -750,7 +762,7 @@ impl FleetTools {
                 .map_err(to_mcp_err)?;
                 ok_json(&report)
             }
-            AdminAction::Remove => {
+            action if action.is_removal() => {
                 self.confirm_gate(
                     "work_admin",
                     args.confirm_nonce.as_deref(),
@@ -761,6 +773,15 @@ impl FleetTools {
             }
             _ => ok_json(&a::admin_sync(&args, &self.store).map_err(to_mcp_err)?),
         }
+    }
+
+    /// The caller's org scope (work graph M5), read under a short lock.
+    pub(super) fn org_scope(
+        &self,
+        caller: &Caller,
+    ) -> Result<crate::service::orgs::OrgScope, McpError> {
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        caller.org_scope(&s).map_err(to_mcp_err)
     }
 
     /// A per-host token reads a key's context or resume plan only when some

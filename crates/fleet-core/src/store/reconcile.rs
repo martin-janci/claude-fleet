@@ -872,6 +872,7 @@ mod tests {
             work: None,
             work_rejected: vec![],
             work_suggested: None,
+            org_id: None,
         }
     }
 
@@ -887,6 +888,7 @@ mod tests {
             account_uuid: None,
             provisioned: false,
             transport: "ssh".to_string(),
+            org_id: None,
         }
     }
 
