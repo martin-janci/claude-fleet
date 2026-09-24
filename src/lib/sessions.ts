@@ -228,6 +228,14 @@ showFriendlyNames.subscribe((v) => writePref('show-friendly-names', v));
 export const showRowDetails = writable<boolean>(readPref('rows.details', true, isBool));
 showRowDetails.subscribe((v) => writePref('rows.details', v));
 
+// Sidebar grouping — `project` (the tree by repository) or `work` (sessions
+// that carry a work key grouped by it first, the rest still under their
+// project; see work_keys.ts). Persisted across restarts.
+export type SidebarGroupBy = 'project' | 'work';
+const isGroupBy = (v: unknown): v is SidebarGroupBy => v === 'project' || v === 'work';
+export const sidebarGroupBy = writable<SidebarGroupBy>(readPref('sidebar.group', 'project', isGroupBy));
+sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
+
 // `force: true` (the sidebar Refresh button) makes the backend run a fleet
 // reconcile pass now; the default returns stored rows while the last pass is
 // within the configured interval, so window-focus reloads stay cheap.

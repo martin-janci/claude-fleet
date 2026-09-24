@@ -34,6 +34,7 @@
   import { hubConnection } from './hub_connection';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import { pendingInputFor } from './pending_input';
+  import { describeWorkKey, type WorkKey } from './work_keys';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -49,6 +50,7 @@
     relatedCount,
     nowSec,
     readOnly = false,
+    workKey = null,
     onSelectSession,
     onKeySession,
     toggleSelected,
@@ -75,6 +77,10 @@
      *  chip only, no rename / restart / recreate / kill actions. Selecting
      *  still works. */
     readOnly?: boolean;
+    /** The row's work key (work_keys.ts), drawn as a chip after the name.
+     *  Null when it has none, or when the row already sits under its work
+     *  group's header, which names the key. */
+    workKey?: WorkKey | null;
     onSelectSession: (sess: SessionRow, e?: MouseEvent) => void;
     /** Handles Enter/Space on the ROW. It must ignore events that bubbled
      *  up from a nested control (the action cluster, the select box, the
@@ -287,6 +293,9 @@
             <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
           {/if}
           <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
+          {#if workKey}
+            <span class="work-chip" data-testid="work-chip" title={describeWorkKey(workKey)}>{workKey.key}</span>
+          {/if}
           {#if sess.stuck_kind}
             <!-- Stuck outranks claude_status: one red chip, no green "working"
                  next to it to soften the signal. -->
@@ -655,6 +664,16 @@
     flex-shrink: 0;
     white-space: nowrap;
     text-transform: uppercase;
+  }
+  .work-chip {
+    flex: 0 0 auto;
+    font-size: 0.65rem;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    padding: 0 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg-muted);
+    white-space: nowrap;
   }
   .pr-link {
     font-size: 0.65rem;

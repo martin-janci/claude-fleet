@@ -10,6 +10,7 @@
     restartSession,
     purgeProject,
     showBgAgents,
+    sidebarGroupBy,
     sameSession,
     hasNoPane,
     type SessionRow,
@@ -39,13 +40,20 @@
     buildSessionsByProject,
     buildOutsideFleet,
     buildRelatedCountById,
+    buildSessionsByWork,
     sessionVisible,
     sortProjectsBySeverity,
+    sortWorkGroups,
     type SessionPredicate,
+    type WorkGroup,
   } from './sidebar_index';
+  import { workGroupPrSummary, workKeyFor, worktreeBranchById } from './work_keys';
   import {
+    ciStatusColor,
+    ciStatusLabel,
     countNeedsYou,
     needsYou,
+    severity,
     worstSeverityByProject,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
@@ -209,6 +217,8 @@
   // is open by default — most users have one or two projects and want to
   // see their sessions immediately.
   let collapsed: Set<number> = $state(new Set());
+  // Work groups the user collapsed ("group by work" mode), by key.
+  let collapsedWork: Set<string> = $state(new Set());
 
   let sidebarEl: HTMLElement | undefined = $state();
 
@@ -223,6 +233,12 @@
       const next = new Set(collapsed);
       next.delete(sess.project_id);
       collapsed = next;
+    }
+    const workKey = workKeyed?.get(sess.id)?.key;
+    if (workKey !== undefined && collapsedWork.has(workKey)) {
+      const next = new Set(collapsedWork);
+      next.delete(workKey);
+      collapsedWork = next;
     }
     void tick().then(() => {
       const el = sidebarEl?.querySelector<HTMLElement>(`[data-session-id="${sess.id}"]`);
@@ -357,11 +373,55 @@
 
   // --- Memoised indices (rebuilt once per $sessions change, not per row) ---
 
+  // ── Group by work (roadmap M1) ──
+  // worktree id → branch, and the sessions that carry a work key (tag,
+  // branch or worktree name — see work_keys.ts). Only built in work mode.
+  const branchById = $derived(worktreeBranchById($projects));
+  const workIndex = $derived(
+    $sidebarGroupBy === 'work'
+      ? buildSessionsByWork($sessions, $hostFilter, $showBgAgents, rowPredicate, (s) =>
+          workKeyFor(s, branchById),
+        )
+      : null,
+  );
+  const workKeyed = $derived(workIndex?.keyed ?? null);
+  function workGroupMatchesSearch(g: WorkGroup, q: string): boolean {
+    if (!q) return true;
+    const needle = q.toLowerCase();
+    if (g.key.toLowerCase().includes(needle)) return true;
+    return g.sessions.some((s) => sessionMatchesSearch(s, needle));
+  }
+  const workGroups = $derived(
+    workIndex
+      ? sortWorkGroups(
+          workIndex.groups.filter((g) => workGroupMatchesSearch(g, searchQuery)),
+          severity,
+        )
+      : [],
+  );
+  // The project tree (and "Other sessions") keep only what no work group
+  // took: hybrid grouping, no "Unclassified" bucket. In project mode this is
+  // just the triage predicate.
+  const treePredicate = $derived.by((): SessionPredicate => {
+    const keyed = workKeyed;
+    const base = rowPredicate;
+    if (!keyed || keyed.size === 0) return base;
+    return (s) => !keyed.has(s.id) && (base ? base(s) : true);
+  });
+
+  function toggleWorkCollapse(key: string) {
+    const next = new Set(collapsedWork);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    collapsedWork = next;
+  }
+
+
   // Map: project_id → sessions filtered by current hostFilter. This derived
   // value is read directly in the template so Svelte tracks it reactively —
   // using a plain function via {@const} doesn't establish the dependency.
   const filteredSessionsByProject = $derived(
-    buildSessionsByProject($sessions, $hostFilter, $showBgAgents, rowPredicate),
+    buildSessionsByProject($sessions, $hostFilter, $showBgAgents, treePredicate),
   );
 
 
@@ -384,7 +444,7 @@
       (s) =>
         s.project_id === null &&
         s.kind !== 'external' &&
-        sessionVisible(s, $hostFilter, $showBgAgents, rowPredicate),
+        sessionVisible(s, $hostFilter, $showBgAgents, treePredicate),
     ),
   );
 
@@ -732,9 +792,10 @@
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
-  {#snippet sessionRow(sess: SessionRow, readOnly = false)}
+  {#snippet sessionRow(sess: SessionRow, readOnly = false, inWorkGroup = false)}
     <SessionRowItem
       {sess}
+      workKey={inWorkGroup || readOnly ? null : workKeyFor(sess, branchById)}
       {selectMode}
       isChecked={selectedIds.has(sess.id)}
       isRenaming={renaming !== null && renaming.id === sess.id}
@@ -782,6 +843,48 @@
   <div class="scroller">
     {#if !$onboardingDismissed}
       <OnboardingCard onaddhost={openAddHost} onnewsession={openNewSession} />
+    {/if}
+    {#if workGroups.length > 0}
+      <ul class="tree work-tree" data-testid="work-groups">
+        {#each workGroups as g (g.key)}
+          {@const isCollapsed = collapsedWork.has(g.key)}
+          {@const pr = workGroupPrSummary(g.sessions)}
+          <li class="proj">
+            <div
+              class="proj-row work-row"
+              data-testid="work-row"
+              title="Sessions whose tag, branch or worktree names {g.key}"
+              role="button"
+              tabindex="0"
+              onclick={() => toggleWorkCollapse(g.key)}
+              onkeydown={(e) => {
+                if (!fromRowItself(e)) return;
+                if (e.key === 'Enter' || e.key === ' ') toggleWorkCollapse(g.key);
+              }}
+            >
+              <span class="caret" class:collapsed={isCollapsed}>▾</span>
+              <span class="label"><span class="work-key">{g.key}</span></span>
+              {#if pr.prCount > 0}
+                <span
+                  class="work-pr"
+                  data-testid="work-pr"
+                  title="{pr.prCount} pull request{pr.prCount === 1 ? '' : 's'}{pr.ci ? ` · CI ${pr.ci}` : ''}"
+                >PR{pr.prCount > 1 ? ` ×${pr.prCount}` : ''}{#if pr.ci}<span
+                      class="work-ci"
+                      style="color: {ciStatusColor(pr.ci)};"> {ciStatusLabel(pr.ci)}</span
+                    >{/if}</span>
+              {/if}
+              <span class="count">{g.sessions.length}</span>
+            </div>
+
+            {#if !isCollapsed}
+              {#each g.sessions as sess (sess.id)}
+                {@render sessionRow(sess, false, true)}
+              {/each}
+            {/if}
+          </li>
+        {/each}
+      </ul>
     {/if}
     {#if filtered.length > 0}
       <ul class="tree">
@@ -831,7 +934,7 @@
           </li>
         {/each}
       </ul>
-    {:else if !loadError && orphanSessions.length === 0}
+    {:else if !loadError && orphanSessions.length === 0 && workGroups.length === 0}
       <p class="empty" data-testid="sidebar-empty">
         {hubSkewEmptyMessage ??
           ($projects.length === 0
@@ -1115,6 +1218,15 @@
   }
   .owner { color: var(--fg-muted); font-weight: 400; }
   .repo { color: var(--fg); }
+  .work-key {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-weight: 600;
+  }
+  .work-pr {
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
   .count {
     font-size: 0.7rem;
     color: var(--fg-muted);

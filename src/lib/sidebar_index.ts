@@ -6,6 +6,7 @@
 // module so Sidebar.test.ts can spy on them and assert the call count
 // deterministically instead of measuring jsdom wall-clock.
 import type { SessionRow } from './sessions';
+import type { WorkKey } from './work_keys';
 
 /** Optional per-row predicate layered on top of the host / bg filters
  *  (the "N stuck" and "needs attention" pills). `null` = no extra filter. */
@@ -88,4 +89,55 @@ export function sortProjectsBySeverity<T extends { project: { id: number } }>(
     .map((row, i) => ({ row, i, sev: severityByProject.get(row.project.id) ?? -1 }))
     .sort((a, b) => b.sev - a.sev || a.i - b.i)
     .map((x) => x.row);
+}
+
+/** One work group of the sidebar's "group by work" mode. */
+export interface WorkGroup {
+  key: string;
+  sessions: SessionRow[];
+}
+
+/** Sessions grouped by work key, for the sidebar's "group by work" mode.
+ *
+ *  Hybrid by design: only sessions that carry a key are grouped here.
+ *  `keyed` names every such session — under ANY filter — so the caller can
+ *  leave the rest under their project headers (no "Unclassified" bucket:
+ *  ad-hoc work is not a defect). `groups` holds only the rows visible under
+ *  the host / bg-agent / predicate filters, and drops a group that has none.
+ *  Groups come out in first-seen order, i.e. the store's recency order;
+ *  sorting by severity is the caller's (`sortWorkGroups`). */
+export function buildSessionsByWork(
+  sessions: readonly SessionRow[],
+  hostFilter: string,
+  showBgAgents: boolean,
+  predicate: SessionPredicate,
+  keyOf: (s: SessionRow) => WorkKey | null,
+): { groups: WorkGroup[]; keyed: Map<number, WorkKey> } {
+  const keyed = new Map<number, WorkKey>();
+  const byKey = new Map<string, SessionRow[]>();
+  for (const s of sessions) {
+    if (s.kind === 'external') continue;
+    const k = keyOf(s);
+    if (!k) continue;
+    keyed.set(s.id, k);
+    if (!sessionVisible(s, hostFilter, showBgAgents, predicate)) continue;
+    if (!byKey.has(k.key)) byKey.set(k.key, []);
+    byKey.get(k.key)!.push(s);
+  }
+  return {
+    groups: [...byKey.entries()].map(([key, rows]) => ({ key, sessions: rows })),
+    keyed,
+  };
+}
+
+/** Work groups by the worst severity among their sessions (descending);
+ *  ties keep the incoming (recency) order — the same rule as projects. */
+export function sortWorkGroups(
+  groups: readonly WorkGroup[],
+  severityOf: (s: SessionRow) => number,
+): WorkGroup[] {
+  return groups
+    .map((g, i) => ({ g, i, sev: Math.max(-1, ...g.sessions.map(severityOf)) }))
+    .sort((a, b) => b.sev - a.sev || a.i - b.i)
+    .map((x) => x.g);
 }

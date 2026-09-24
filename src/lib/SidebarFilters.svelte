@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { sessions, showBgAgents, showFriendlyNames, showRowDetails } from './sessions';
+  import { sessions, showBgAgents, showFriendlyNames, showRowDetails, sidebarGroupBy } from './sessions';
   import { hosts, hostFilter } from './hosts';
   import { hintAnchor } from './hints';
   import { accountByUuid } from './accounts';
@@ -217,6 +217,18 @@
     >
       ≡ details {$showRowDetails ? 'on' : 'off'}
     </button>
+    <button
+      class="pill"
+      class:active={$sidebarGroupBy === 'work'}
+      data-testid="group-by-toggle"
+      aria-pressed={$sidebarGroupBy === 'work'}
+      title={$sidebarGroupBy === 'work'
+        ? 'Group sessions by project'
+        : 'Group sessions by work: a ticket key (ABC-123) in a tag, branch or worktree name'}
+      onclick={() => sidebarGroupBy.update((v) => (v === 'work' ? 'project' : 'work'))}
+    >
+      ⧉ by {$sidebarGroupBy}
+    </button>
   </nav>
 
   {#if loadError}
@@ -269,7 +281,7 @@
   .icon-btn:disabled { opacity: 0.6; cursor: progress; }
 
   .recency { display: flex; gap: 0.25rem; }
-  .bg-toggle { display: flex; gap: 0.25rem; }
+  .bg-toggle { display: flex; gap: 0.25rem; flex-wrap: wrap; }
   .triage { display: flex; gap: 0.25rem; flex-wrap: wrap; align-items: center; }
   .triage-pill.hot { color: #e64a4a; border-color: rgba(230, 74, 74, 0.5); }
   .triage-pill.active { background: rgba(230, 74, 74, 0.12); }

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
+import { readPref } from './prefs';
 
 // Three sample projects. Sessions are attached per-test so we can verify
 // the new "hide projects without sessions" behavior.
@@ -62,7 +63,7 @@ import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, loadProjects } from './projects';
-import { sessions, loadSessions, showBgAgents, showRowDetails, resetTombstonesForTests, type SessionRow } from './sessions';
+import { sessions, loadSessions, showBgAgents, showRowDetails, sidebarGroupBy, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectedSession, selectSession, selectSessionExplicitly } from './selection';
 import { hosts, loadHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
 import { accounts, loadAccounts } from './accounts';
@@ -1802,5 +1803,101 @@ describe('Sidebar: a hub contract skew', () => {
     await tick(); await tick();
     const empty = await screen.findByTestId('sidebar-empty');
     expect(empty.textContent).toContain('No projects yet');
+  });
+});
+
+describe('Sidebar — group by work (roadmap M1)', () => {
+  // A worktree whose branch names a ticket, on project 1.
+  const workProjects = [
+    {
+      ...fakeProjects[0],
+      worktrees: [
+        ...fakeProjects[0].worktrees,
+        { id: 12, project_id: 1, host_alias: 'local', name: 'abc-123-login', path: '/r/cf-wt', branch: 'abc-123-login' },
+      ],
+    },
+    fakeProjects[1],
+  ];
+
+  beforeEach(() => {
+    sidebarGroupBy.set('project');
+  });
+
+  it('project mode keeps the tree, and shows the work key as a chip on the row', async () => {
+    const keyed = { ...sessionFor(1, 'dev-login'), worktree_id: 12 };
+    mockBackend(workProjects, [keyed, sessionFor(2, 'dev-pos')]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('work-groups')).toBeNull();
+    expect(await screen.findAllByTestId('proj-row')).toHaveLength(2);
+    const chip = await screen.findByTestId('work-chip');
+    expect(chip).toHaveTextContent('ABC-123');
+    expect(chip.getAttribute('title')).toContain('branch abc-123-login');
+  });
+
+  it('work mode groups keyed sessions by key and leaves the rest under their project', async () => {
+    const a = { ...sessionFor(1, 'dev-login'), worktree_id: 12 };
+    const b = { ...sessionFor(2, 'dev-pos-fix'), tags: ['ABC-123'] };
+    const plain = sessionFor(2, 'dev-pos');
+    mockBackend(workProjects, [a, b, plain]);
+    render(Sidebar);
+    await tick(); await tick();
+
+    await fireEvent.click(screen.getByTestId('group-by-toggle'));
+    await tick();
+
+    const workRows = await screen.findAllByTestId('work-row');
+    expect(workRows).toHaveLength(1);
+    expect(workRows[0]).toHaveTextContent('ABC-123');
+    expect(workRows[0]).toHaveTextContent('2');
+    const group = screen.getByTestId('work-groups');
+    expect(within(group).getAllByTestId('sess-row')).toHaveLength(2);
+    // Inside its group the key is in the header, not repeated on the row.
+    expect(within(group).queryByTestId('work-chip')).toBeNull();
+
+    // Only the unkeyed session remains in the project tree: project 1 had
+    // nothing else, so it is gone; project 2 keeps dev-pos.
+    const projRows = screen.getAllByTestId('proj-row');
+    expect(projRows).toHaveLength(1);
+    expect(projRows[0]).toHaveTextContent('pos-frontend');
+    expect(projRows[0]).toHaveTextContent('1');
+
+    const isStr = (v: unknown): v is string => typeof v === 'string';
+    expect(readPref('sidebar.group', 'unset', isStr)).toBe('work');
+  });
+
+  it('a work group header collapses its sessions', async () => {
+    const a = { ...sessionFor(1, 'dev-login'), tags: ['PAY-7'] };
+    mockBackend(workProjects, [a]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    const group = await screen.findByTestId('work-groups');
+    expect(within(group).getAllByTestId('sess-row')).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('work-row'));
+    await tick();
+    expect(within(group).queryAllByTestId('sess-row')).toHaveLength(0);
+  });
+
+  it('rolls up PRs and the worst CI state on the group header', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'], pr_url: 'https://x/pull/1', ci_status: 'passing' as const };
+    const b = { ...sessionFor(1, 'dev-b'), tags: ['PAY-7'], pr_url: 'https://x/pull/2', ci_status: 'failing' as const };
+    mockBackend(workProjects, [a, b]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    const pr = await screen.findByTestId('work-pr');
+    expect(pr).toHaveTextContent('PR ×2');
+    expect(pr.getAttribute('title')).toContain('CI failing');
+  });
+
+  it('with nothing keyed, work mode looks exactly like project mode', async () => {
+    mockBackend(workProjects, [sessionFor(1, 'dev-a'), sessionFor(2, 'dev-b')]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('work-groups')).toBeNull();
+    expect(await screen.findAllByTestId('proj-row')).toHaveLength(2);
+    expect(screen.queryByTestId('sidebar-empty')).toBeNull();
   });
 });
