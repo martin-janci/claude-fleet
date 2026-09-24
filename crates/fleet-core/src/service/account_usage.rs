@@ -966,6 +966,8 @@ fn first_line(s: &str) -> String {
 ///   isolation lines, so its presence proves the script ran), and
 /// - the LAST non-empty stderr line is one of ssh's own connect-failure
 ///   messages (matched as a prefix, not anywhere in the text).
+///
+/// The ssh wording lives in `ssh_diag::classify`.
 fn connection_never_established(stdout: &str, stderr: &str) -> bool {
     if stdout
         .lines()
@@ -973,22 +975,7 @@ fn connection_never_established(stdout: &str, stderr: &str) -> bool {
     {
         return false;
     }
-    let Some(last) = stderr
-        .lines()
-        .map(|l| l.trim_matches(|c: char| c == '\r' || c.is_whitespace()))
-        .rfind(|l| !l.is_empty())
-    else {
-        return false;
-    };
-    const PREFIXES: &[&str] = &[
-        "ssh: connect to host ",
-        "ssh: Could not resolve hostname",
-        "Permission denied (",
-        "Host key verification failed.",
-        "kex_exchange_identification:",
-    ];
-    PREFIXES.iter().any(|p| last.starts_with(p))
-        || (last.starts_with("Connection closed by ") && last.contains(" port "))
+    crate::ssh_diag::classify::connect_failure_kind(stderr).is_some()
 }
 
 /// How one host's run ended, for the fallback decision.
