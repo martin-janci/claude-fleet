@@ -54,10 +54,14 @@ pub struct Packed {
 /// PURE: render `messages` (oldest first) into one `additionalContext` value,
 /// against the [`CTX_MAX_CHARS`] / [`CTX_MAX_LINES`] budget.
 ///
-/// `sender_label` turns a sender's session id into something human — normally
-/// `"<tmux_name>@<host_alias>"`. Taken as a closure so this stays pure and
-/// testable without a store.
-pub fn pack(messages: &[SessionMessage], sender_label: &dyn Fn(i64) -> String) -> Packed {
+/// `sender_label` turns a message into something human to name its sender —
+/// normally `"<tmux_name>@<host_alias>"` for a local sender, or the remote
+/// address (migration 045) for one on another fleet. Taken as a closure so
+/// this stays pure and testable without a store.
+pub fn pack(
+    messages: &[SessionMessage],
+    sender_label: &dyn Fn(&SessionMessage) -> String,
+) -> Packed {
     pack_within(messages, sender_label, CTX_MAX_CHARS, CTX_MAX_LINES)
 }
 
@@ -72,7 +76,7 @@ pub fn pack(messages: &[SessionMessage], sender_label: &dyn Fn(i64) -> String) -
 /// the tail's count is the truth for what actually rode.
 pub fn pack_within(
     messages: &[SessionMessage],
-    sender_label: &dyn Fn(i64) -> String,
+    sender_label: &dyn Fn(&SessionMessage) -> String,
     max_chars: usize,
     max_lines: usize,
 ) -> Packed {
@@ -85,7 +89,7 @@ pub fn pack_within(
     let mut lines = 0usize;
 
     for m in messages {
-        let who = sender_label(m.from_session_id);
+        let who = sender_label(m);
         let block = format!(
             "[fleet msg #{id} from {who}]: {body}",
             id = m.id,
@@ -212,10 +216,27 @@ mod tests {
             sent_at: 1_700_000_000 + id,
             read_at: None,
             reply_to: None,
+            from_addr: None,
+            to_addr: None,
         }
     }
-    fn label(_: i64) -> String {
+    fn label(_: &SessionMessage) -> String {
         "alpha@local".into()
+    }
+
+    #[test]
+    fn a_remote_sender_is_labelled_by_its_address() {
+        let mut m = msg(1, "hello");
+        m.from_session_id = 0;
+        m.from_addr = Some("fleet-a/session/h/a1".into());
+        let label = |m: &SessionMessage| {
+            m.from_addr
+                .clone()
+                .unwrap_or_else(|| format!("session {}", m.from_session_id))
+        };
+        let p = pack(&[m], &label);
+        assert!(p.text.contains("from fleet-a/session/h/a1"), "{}", p.text);
+        assert!(!p.text.contains("session 0"), "{}", p.text);
     }
 
     #[test]

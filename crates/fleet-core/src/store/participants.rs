@@ -277,7 +277,7 @@ impl Store {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (mid, sender, unread) in &orphans {
-            if *unread {
+            if *unread && *sender != 0 {
                 let _ = self.insert_session_event(
                     *sender,
                     "message_undeliverable",
@@ -312,11 +312,13 @@ impl Store {
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             for (mid, sender) in unread {
-                let _ = self.insert_session_event(
-                    sender,
-                    "message_undeliverable",
-                    Some(&format!("message {mid} was never read; recipient is gone")),
-                );
+                if sender != 0 {
+                    let _ = self.insert_session_event(
+                        sender,
+                        "message_undeliverable",
+                        Some(&format!("message {mid} was never read; recipient is gone")),
+                    );
+                }
             }
             self.conn.execute(
                 "DELETE FROM session_messages WHERE to_participant_id = ?1",

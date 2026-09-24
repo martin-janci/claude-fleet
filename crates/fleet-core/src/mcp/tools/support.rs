@@ -845,6 +845,12 @@ pub(super) struct InboxSummary {
     pub(super) reply_to: Option<i64>,
     pub(super) body_chars: usize,
     pub(super) body_preview: String,
+    /// The remote sender's address (migration 045) when `from_session_id`
+    /// is `0`; absent for a local message, matching `SessionMessage`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) from_addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) to_addr: Option<String>,
 }
 
 pub(super) const INBOX_PREVIEW_CHARS: usize = 80;
@@ -863,6 +869,8 @@ impl From<crate::store::SessionMessage> for InboxSummary {
             reply_to: m.reply_to,
             body_chars,
             body_preview,
+            from_addr: m.from_addr,
+            to_addr: m.to_addr,
         }
     }
 }

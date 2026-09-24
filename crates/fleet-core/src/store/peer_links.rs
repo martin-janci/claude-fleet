@@ -896,4 +896,55 @@ mod tests {
         let json = serde_json::to_string(&s.peer_link_summaries().unwrap()).unwrap();
         assert!(!json.contains("secret-token-value"), "{json}");
     }
+
+    #[test]
+    fn a_remote_end_reads_back_as_its_address_and_a_local_row_is_unchanged() {
+        let s = Store::open_in_memory().unwrap();
+        let b1 = seed(&s, "b1");
+        let b2 = seed(&s, "b2");
+        let link = s
+            .ensure_listener_link(client(&s, "hub-a"), "fleet-a")
+            .unwrap();
+        let from = s
+            .ensure_remote_participant(link.id, "fleet-a/session/h/a1")
+            .unwrap();
+        s.insert_inbound_remote("fleet-a", 1, from, b1, "hi", "message", None)
+            .unwrap();
+        s.insert_message(b2, b1, "local", "message", None).unwrap();
+        let inbox = s.list_inbox(b1, false, 10).unwrap();
+        let remote = inbox.iter().find(|m| m.body == "hi").unwrap();
+        assert_eq!(remote.from_addr.as_deref(), Some("fleet-a/session/h/a1"));
+        assert_eq!(remote.from_session_id, 0);
+        let local = inbox.iter().find(|m| m.body == "local").unwrap();
+        let json = serde_json::to_value(local).unwrap();
+        assert!(
+            json.get("from_addr").is_none() && json.get("to_addr").is_none(),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn a_retired_recipient_of_a_remote_message_writes_no_event_for_session_zero() {
+        let s = Store::open_in_memory().unwrap();
+        let b1 = seed(&s, "b1");
+        let link = s
+            .ensure_listener_link(client(&s, "hub-a"), "fleet-a")
+            .unwrap();
+        let from = s
+            .ensure_remote_participant(link.id, "fleet-a/session/h/a1")
+            .unwrap();
+        s.insert_inbound_remote("fleet-a", 1, from, b1, "hi", "message", None)
+            .unwrap();
+        s.delete_session(b1).unwrap();
+        s.sweep_retired_participants(i64::MAX / 2, 0).unwrap();
+        let n: i64 = s
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session_id = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
 }
