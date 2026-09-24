@@ -68,7 +68,20 @@ pub async fn exchange(
         .collect();
     apply_results(store, link.id, &rejections)?;
     lock(store)?.handover_upto(link.id, req.after)?;
-    let results = apply_inbound(store, ssh, &link, &own, &req.send).await;
+    // A store fault is ours, not the item's: the exchange fails with a
+    // non-terminal E_INTERNAL, the dialer backs off and resends, and the
+    // items stored before the fault come back as duplicates. The store's
+    // own words stay in our log, not in the peer's `last_error`.
+    let results = match apply_inbound(store, ssh, &link, &own, &req.send).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(link_id = link.id, error = %e.message, "[peer] storing a peer's message failed; it will be resent");
+            return Err(IpcError::new(
+                codes::E_INTERNAL,
+                "this hub could not store a message just now; resend it",
+            ));
+        }
+    };
 
     let wait = Duration::from_millis(req.wait_ms.min(PEER_WAIT_MAX_MS));
     let deadline = tokio::time::Instant::now() + wait;
@@ -517,6 +530,59 @@ mod tests {
                 .local_id_for_remote("fleet-a", 1)
                 .unwrap(),
             first
+        );
+    }
+
+    /// A store fault while applying one item is this hub's hiccup, not the
+    /// peer's fault: the exchange fails with E_INTERNAL (the dialer
+    /// retries), nothing is rejected, and the retry stores each item once.
+    #[tokio::test]
+    async fn a_store_fault_fails_the_exchange_instead_of_rejecting_the_item() {
+        let (store, ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        let c = peer_client(&store, "hub-a");
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute_batch(
+                "CREATE TEMP TRIGGER boom BEFORE INSERT ON session_messages \
+                 WHEN NEW.body LIKE '%boom%' \
+                 BEGIN SELECT RAISE(ABORT, 'injected store fault'); END;",
+            )
+            .unwrap();
+        let mut r = req("fleet-a");
+        r.send = vec![item(1, "fine"), item(2, "boom"), item(3, "after")];
+        let e = exchange(&store, &ssh, c, r.clone()).await.unwrap_err();
+        assert_eq!(e.code, "E_INTERNAL");
+        assert!(
+            !e.message.contains("injected"),
+            "store detail leaked: {}",
+            e.message
+        );
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute_batch("DROP TRIGGER temp.boom;")
+            .unwrap();
+        let resp = exchange(&store, &ssh, c, r).await.unwrap();
+        assert_eq!(
+            resp.results,
+            vec![
+                WireResult::accepted(1),
+                WireResult::accepted(2),
+                WireResult::accepted(3)
+            ]
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .list_inbox(b1, false, 10)
+                .unwrap()
+                .len(),
+            3
         );
     }
 

@@ -79,6 +79,10 @@ pub enum LinkExit {
     Incompatible,
     /// The handshake merged this row into an older link for the same fleet.
     Rebound(i64),
+    /// The row changed under this loop — new credentials from a re-pair, or
+    /// revoked — so its writes no longer apply. The supervisor starts the
+    /// row again on its current credentials.
+    Superseded,
 }
 
 /// `peer_exchange` over HTTP(S). Holds the link's token: no `Debug`.
@@ -145,13 +149,22 @@ fn read_answer(status: u16, body: &str) -> Result<ExchangeResponse, CallError> {
     let envelope: serde_json::Value = serde_json::from_str(&payload)
         .map_err(|e| CallError::Transport(format!("unreadable answer: {e}")))?;
     if let Some(err) = envelope.get("error") {
-        // rmcp answers an unknown tool with a JSON-RPC error: an older hub.
         let message = err
             .get("message")
             .and_then(|m| m.as_str())
             .unwrap_or("")
             .to_string();
-        return Err(classify(codes::E_UNSUPPORTED, message));
+        // Only rmcp's "no such method / no such tool" (rmcp 1.7 answers an
+        // unknown tool with -32602 "tool not found") means an older hub.
+        // Any other protocol error may be transient: retried.
+        let rpc = err.get("code").and_then(|c| c.as_i64());
+        let unknown =
+            rpc == Some(-32601) || (rpc == Some(-32602) && message.contains("tool not found"));
+        return Err(if unknown {
+            classify(codes::E_UNSUPPORTED, message)
+        } else {
+            classify(codes::E_HUB_PROTOCOL, message)
+        });
     }
     let result = envelope
         .get("result")
@@ -189,16 +202,27 @@ enum Settled {
     Exit(LinkExit),
 }
 
+/// One loop per dialer link. `token` is the credential the loop was
+/// started with (the one `call` sends): every state or progress write the
+/// loop makes is fenced on it, so a loop a re-pair has outlived cannot
+/// write over the row, and it stops as `Superseded` once it sees the row
+/// carry another token.
 pub async fn run_link(
     store: Arc<Mutex<Store>>,
     ssh: Arc<SshClient>,
     link_id: i64,
+    token: String,
     call: Arc<dyn PeerCall>,
     cancel: CancellationToken,
 ) -> LinkExit {
     let mut backoff = Backoff::new();
     let Ok(notify) = lock(&store).map(|s| s.message_notify()) else {
         return LinkExit::Cancelled;
+    };
+    let fence = Fence {
+        store: &store,
+        link_id,
+        token: &token,
     };
     // The first exchange of a loop never parks: it is the handshake (or the
     // resume after a restart), and its answer settles the link's state now
@@ -211,6 +235,9 @@ pub async fn run_link(
             Ok(None) => return LinkExit::Revoked,
             Err(e) => {
                 tracing::warn!(link_id, error = %e.message, "[peer] cannot read the link; retrying");
+                if !fence.state(LINK_RETRYING, &format!("{}: {}", e.code, e.message)) {
+                    return LinkExit::Superseded;
+                }
                 if sleep_or_cancel(&cancel, backoff.next()).await {
                     return LinkExit::Cancelled;
                 }
@@ -219,6 +246,9 @@ pub async fn run_link(
         };
         if link.revoked_at.is_some() {
             return LinkExit::Revoked;
+        }
+        if link.token.as_deref() != Some(token.as_str()) {
+            return LinkExit::Superseded;
         }
         let idle = send.is_empty() && rejects.is_empty();
         let parks = idle && !first && link.fleet_id.is_some();
@@ -236,13 +266,13 @@ pub async fn run_link(
             biased;
             _ = cancel.cancelled() => return LinkExit::Cancelled,
             r = call.exchange(&req, timeout) => Some(r),
-            _ = wake_parked(&store, &notify, link_id), if parks => None,
+            _ = wake_parked(&store, &notify, link_id, &token), if parks => None,
         };
         // `None`: the parked poll was dropped to send now (D2, D7 — `after`
         // did not move, so whatever it would have carried comes again).
         let Some(result) = outcome else { continue };
         match result {
-            Ok(resp) => match settle(&store, &ssh, &link, &own, &req, resp).await {
+            Ok(resp) => match settle(&fence, &ssh, &link, &own, &req, resp).await {
                 Ok(Settled::Ok) => {
                     first = false;
                     backoff.reset();
@@ -260,12 +290,9 @@ pub async fn run_link(
                 Ok(Settled::Exit(exit)) => return exit,
                 Err(e) => {
                     tracing::warn!(link_id, error = %e.message, "[peer] applying an exchange failed; retrying");
-                    set_state(
-                        &store,
-                        link_id,
-                        LINK_RETRYING,
-                        &format!("{}: {}", e.code, e.message),
-                    );
+                    if !fence.state(LINK_RETRYING, &format!("{}: {}", e.code, e.message)) {
+                        return LinkExit::Superseded;
+                    }
                     if sleep_or_cancel(&cancel, backoff.next()).await {
                         return LinkExit::Cancelled;
                     }
@@ -273,7 +300,9 @@ pub async fn run_link(
             },
             Err(CallError::Transport(why)) => {
                 tracing::debug!(link_id, error = %why, "[peer] exchange failed; backing off");
-                set_state(&store, link_id, LINK_RETRYING, &why);
+                if !fence.state(LINK_RETRYING, &why) {
+                    return LinkExit::Superseded;
+                }
                 if sleep_or_cancel(&cancel, backoff.next()).await {
                     return LinkExit::Cancelled;
                 }
@@ -285,9 +314,39 @@ pub async fn run_link(
                     (LINK_REFUSED, LinkExit::Refused)
                 };
                 tracing::warn!(link_id, code = %code, "[peer] the peer refused the link; stopping");
-                set_state(&store, link_id, state, &format!("{code}: {message}"));
-                return exit;
+                return fence.terminal(state, &format!("{code}: {message}"), exit);
             }
+        }
+    }
+}
+
+/// The loop's writes to its own row, fenced on the token it was started
+/// with. Holds the token: no `Debug`.
+struct Fence<'a> {
+    store: &'a Mutex<Store>,
+    link_id: i64,
+    token: &'a str,
+}
+
+impl Fence<'_> {
+    /// `false` only when the row no longer carries this loop's token (a
+    /// re-pair) or was revoked: the loop is stale and must stop. A store
+    /// error cannot tell, so it counts as written and the loop goes on.
+    fn state(&self, state: &str, why: &str) -> bool {
+        lock(self.store)
+            .and_then(|s| {
+                s.set_dialer_link_state(self.link_id, self.token, state, Some(why), now_unix())
+            })
+            .unwrap_or(true)
+    }
+
+    /// Write a terminal state and end with `exit` — or `Superseded` when the
+    /// row has moved on, so the supervisor starts it on its new credentials.
+    fn terminal(&self, state: &str, why: &str, exit: LinkExit) -> LinkExit {
+        if self.state(state, why) {
+            exit
+        } else {
+            LinkExit::Superseded
         }
     }
 }
@@ -321,50 +380,57 @@ fn read_link(store: &Mutex<Store>, link_id: i64) -> Result<Option<Snapshot>, Ipc
     Ok(Some((own, link, send, rejects)))
 }
 
-fn set_state(store: &Mutex<Store>, link_id: i64, state: &str, why: &str) {
-    if let Ok(s) = lock(store) {
-        let _ = s.set_peer_link_state(link_id, state, Some(why), now_unix());
-    }
-}
-
-/// Apply one successful exchange.
+/// Apply one successful exchange. `Err` leaves `after` and
+/// `pending_rejects` as they were, so the same page comes again.
 async fn settle(
-    store: &Arc<Mutex<Store>>,
+    fence: &Fence<'_>,
     ssh: &Arc<SshClient>,
     link: &PeerLinkRow,
     own: &str,
     req: &ExchangeRequest,
     resp: ExchangeResponse,
 ) -> Result<Settled, IpcError> {
+    let store = fence.store;
     if resp.proto != PROTO {
-        lock(store)?.set_peer_link_state(
-            link.id,
+        let why = format!("the peer speaks proto {}, not {PROTO}", resp.proto);
+        return Ok(Settled::Exit(fence.terminal(
             LINK_INCOMPATIBLE,
-            Some(&format!(
-                "the peer speaks proto {}, not {PROTO}",
-                resp.proto
-            )),
-            now_unix(),
-        )?;
-        return Ok(Settled::Exit(LinkExit::Incompatible));
+            &why,
+            LinkExit::Incompatible,
+        )));
     }
     let mut link = link.clone();
     match link.fleet_id.as_deref() {
         None => {
-            let kept = lock(store)?.adopt_dialer_fleet(link.id, &resp.fleet_id)?;
+            let adopted = lock(store)?.adopt_dialer_fleet(link.id, &resp.fleet_id);
+            let kept = match adopted {
+                Ok(kept) => kept,
+                // This hub already LISTENS for that fleet: one link per
+                // fleet, and retrying cannot change which side dials.
+                Err(e) if e.code == codes::E_EXISTS => {
+                    return Ok(Settled::Exit(fence.terminal(
+                        LINK_REFUSED,
+                        &format!(
+                            "E_EXISTS: fleet {} is already linked the other way \
+                             (it dials this hub); remove one of the two links",
+                            resp.fleet_id
+                        ),
+                        LinkExit::Refused,
+                    )));
+                }
+                Err(e) => return Err(e),
+            };
             if kept != link.id {
                 return Ok(Settled::Exit(LinkExit::Rebound(kept)));
             }
             link.fleet_id = Some(resp.fleet_id.clone());
         }
         Some(f) if f != resp.fleet_id => {
-            lock(store)?.set_peer_link_state(
-                link.id,
+            return Ok(Settled::Exit(fence.terminal(
                 LINK_REFUSED,
-                Some("E_FORBIDDEN: the peer answered as another fleet"),
-                now_unix(),
-            )?;
-            return Ok(Settled::Exit(LinkExit::Refused));
+                "E_FORBIDDEN: the peer answered as another fleet",
+                LinkExit::Refused,
+            )));
         }
         Some(_) => {}
     }
@@ -382,8 +448,10 @@ async fn settle(
         .collect();
     let short = sent.iter().any(|id| !results.iter().any(|r| r.id == *id));
     apply_results(store, link.id, &results)?;
+    // A store fault here is `Err`: nothing below runs, `after` stays put and
+    // the page is handed over again.
     let rejects: Vec<WireResult> = apply_inbound(store, ssh, &link, own, &resp.messages)
-        .await
+        .await?
         .into_iter()
         .filter(|r| r.status == ResultStatus::Rejected)
         .collect();
@@ -401,13 +469,35 @@ async fn settle(
     } else {
         Some(serde_json::to_string(&rejects).unwrap_or_default())
     };
-    lock(store)?.set_peer_link_progress(link.id, after, rejects_json.as_deref(), now_unix())?;
+    // The items above were stored one transaction each, and the watermark
+    // is written only now, separately (the plan's shape, not one big
+    // transaction). That is safe because every inbound insert is idempotent
+    // on (remote_fleet_id, remote_message_id): a crash between the two
+    // leaves `after` behind, the peer hands the page over again, and each
+    // item already stored comes back as a duplicate — accepted, not stored
+    // twice (D7; crash-table row 2).
+    let wrote = lock(store)?.set_dialer_link_progress(
+        link.id,
+        fence.token,
+        after,
+        rejects_json.as_deref(),
+        now_unix(),
+    )?;
+    if !wrote {
+        return Ok(Settled::Exit(LinkExit::Superseded));
+    }
     Ok(if short { Settled::Short } else { Settled::Ok })
 }
 
 /// Resolves when a parked poll should be dropped: the outbox got a row, or
-/// the link was revoked or removed (the loop then exits on its next read).
-async fn wake_parked(store: &Mutex<Store>, notify: &tokio::sync::Notify, link_id: i64) {
+/// the link was revoked, removed or re-paired onto other credentials (the
+/// loop then exits on its next read).
+async fn wake_parked(
+    store: &Mutex<Store>,
+    notify: &tokio::sync::Notify,
+    link_id: i64,
+    token: &str,
+) {
     loop {
         // Registered BEFORE the read, so a row inserted between the read
         // and the wait still wakes it.
@@ -417,7 +507,9 @@ async fn wake_parked(store: &Mutex<Store>, notify: &tokio::sync::Notify, link_id
         let wake = lock(store)
             .and_then(|s| {
                 Ok(s.has_pending_outbox(link_id, 0)?
-                    || s.peer_link(link_id)?.is_none_or(|l| l.revoked_at.is_some()))
+                    || s.peer_link(link_id)?.is_none_or(|l| {
+                        l.revoked_at.is_some() || l.token.as_deref() != Some(token)
+                    }))
             })
             .unwrap_or(false);
         if wake {
@@ -510,6 +602,36 @@ mod tests {
             "result": {"isError": true, "content": [{"type": "text", "text": "E_FORBIDDEN: no"}]},
         }));
         assert_eq!(refused(read_answer(200, &text_only)), "E_FORBIDDEN");
+    }
+
+    /// M2: only rmcp's unknown-method / unknown-tool shapes mean an older
+    /// hub (incompatible); every other JSON-RPC error is retried.
+    #[test]
+    fn only_an_unknown_tool_is_incompatible() {
+        let rpc = |code: i64, message: &str| {
+            sse(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message},
+            }))
+        };
+        for (code, message) in [(-32601, "Method not found"), (-32602, "tool not found")] {
+            match read_answer(200, &rpc(code, message)) {
+                Err(CallError::Refused { code, .. }) => assert_eq!(code, "E_UNSUPPORTED"),
+                other => panic!("{code}: not incompatible: {:?}", other.map(|_| ())),
+            }
+        }
+        for (code, message) in [
+            (
+                -32602,
+                "failed to deserialize parameters: missing field `proto`",
+            ),
+            (-32603, "internal error"),
+            (-32000, "server busy"),
+        ] {
+            match read_answer(200, &rpc(code, message)) {
+                Err(CallError::Transport(_)) => {}
+                other => panic!("{code} {message}: not retried: {:?}", other.map(|_| ())),
+            }
+        }
     }
 
     #[test]
@@ -623,6 +745,7 @@ mod tests {
             store.clone(),
             ssh,
             link,
+            "t".into(),
             mute.clone(),
             cancel.clone(),
         ));

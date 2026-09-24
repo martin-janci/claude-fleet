@@ -30,6 +30,9 @@ enum Fault {
     Transport,
     /// Answer the next call started with this listener error code.
     Refuse(&'static str),
+    /// Hold the next call started until the test releases it, then answer
+    /// it with this listener error code: a call in flight across a re-pair.
+    HoldThenRefuse(&'static str),
 }
 
 #[derive(Default)]
@@ -54,6 +57,9 @@ struct Loopback {
     parked: AtomicUsize,
     /// Calls dropped by the dialer before they answered.
     dropped: AtomicUsize,
+    /// A `HoldThenRefuse` call is waiting for `release`.
+    held: AtomicBool,
+    release: tokio::sync::Notify,
 }
 
 /// Counts a call as parked while it is, and as dropped if the dialer drops
@@ -81,7 +87,7 @@ impl Loopback {
         match f {
             Fault::DropWhenSending => a.drop_when_sending = true,
             Fault::DropWhenCarrying => a.drop_when_carrying = true,
-            Fault::Transport | Fault::Refuse(_) => a.next = Some(f),
+            Fault::Transport | Fault::Refuse(_) | Fault::HoldThenRefuse(_) => a.next = Some(f),
         }
     }
     fn fired(&self) -> Vec<Fault> {
@@ -106,6 +112,12 @@ impl PeerCall for Loopback {
             return Err(CallError::Transport("peer is down".into()));
         }
         match next {
+            Some(f @ Fault::HoldThenRefuse(code)) => {
+                self.held.store(true, Ordering::SeqCst);
+                self.release.notified().await;
+                self.fire(f);
+                return Err(classify(code, "no".into()));
+            }
             Some(Fault::Transport) => {
                 self.fire(Fault::Transport);
                 return Err(CallError::Transport("connect refused".into()));
@@ -194,6 +206,8 @@ fn pair_of(a_fleet: &str, b_fleet: &str) -> Pair {
         calls: AtomicUsize::new(0),
         parked: AtomicUsize::new(0),
         dropped: AtomicUsize::new(0),
+        held: AtomicBool::new(false),
+        release: tokio::sync::Notify::new(),
     });
     Pair {
         a,
@@ -230,14 +244,28 @@ impl Pair {
     fn start(&self) -> tokio::task::JoinHandle<LinkExit> {
         self.start_link(self.link)
     }
+    /// A loop on `link` with the credentials the row carries now, as the
+    /// supervisor would start it.
     fn start_link(&self, link: i64) -> tokio::task::JoinHandle<LinkExit> {
+        let token = self.token_of(link);
         tokio::spawn(run_link(
             self.a.clone(),
             self.a_ssh.clone(),
             link,
+            token,
             self.call.clone(),
             self.cancel.clone(),
         ))
+    }
+    fn token_of(&self, link: i64) -> String {
+        self.a
+            .lock()
+            .unwrap()
+            .peer_link(link)
+            .unwrap()
+            .unwrap()
+            .token
+            .unwrap()
     }
     async fn send_a_to_b(&self, body: &str) -> i64 {
         let m = args(self.a1, "fleet-b/session/local/b1", body);
@@ -447,6 +475,7 @@ async fn a_dialer_that_crashed_before_its_watermark_stores_the_batch_once() {
         p.a.clone(),
         p.a_ssh.clone(),
         p.link,
+        p.token_of(p.link),
         p.call.clone(),
         restart.clone(),
     ));
@@ -512,6 +541,7 @@ async fn either_hub_restarting_resumes_from_the_rows() {
         p.a.clone(),
         p.a_ssh.clone(),
         p.link,
+        p.token_of(p.link),
         p.call.clone(),
         restart.clone(),
     ));
@@ -771,6 +801,200 @@ async fn a_re_pair_rebinds_onto_the_older_row_and_its_pending_rows_go_out() {
     assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
 }
 
+// ---- fix round 1 --------------------------------------------------------------
+
+/// I1: a loop started with credentials that a re-pair has since replaced
+/// cannot write over the row. Its call is in flight across the re-pair and
+/// comes back refused (the old token is revoked); the row keeps the new
+/// credentials and stays `retrying`, and a loop on them connects.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_loops_refusal_cannot_clobber_a_re_paired_row() {
+    let p = pair();
+    let stale = p.start();
+    p.handshake().await;
+    p.parked().await;
+    p.call.arm(Fault::HoldThenRefuse("E_UNAUTHORIZED"));
+    p.send_a_to_b("queued across the re-pair").await;
+    p.until("the stale call is in flight", || {
+        p.call.held.load(Ordering::SeqCst)
+    })
+    .await;
+    {
+        let s = p.a.lock().unwrap();
+        let tmp = s
+            .insert_dialer_link("https://b2.example", "t2-new-token")
+            .unwrap();
+        assert_eq!(s.adopt_dialer_fleet(tmp, "fleet-b").unwrap(), p.link);
+    }
+    p.call.release.notify_one();
+    let exit = tokio::time::timeout(Duration::from_secs(5), stale)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        p.call.fired(),
+        vec![Fault::HoldThenRefuse("E_UNAUTHORIZED")]
+    );
+    let row = p.row();
+    assert_eq!(row.state, "retrying", "{:?}", row.last_error);
+    assert!(row.last_error.is_none(), "{:?}", row.last_error);
+    assert_eq!(row.token.as_deref(), Some("t2-new-token"));
+    assert_eq!(exit, LinkExit::Superseded);
+    let h = p.start();
+    p.until("connected on the new credentials", || {
+        p.row().state == "connected" && p.b_inbox().len() == 1
+    })
+    .await;
+    p.cancel.cancel();
+    assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
+}
+
+fn inject_store_fault(s: &Mutex<Store>) {
+    s.lock()
+        .unwrap()
+        .conn_ref()
+        .execute_batch(
+            "CREATE TEMP TRIGGER boom BEFORE INSERT ON session_messages \
+             WHEN NEW.body LIKE '%boom%' \
+             BEGIN SELECT RAISE(ABORT, 'injected store fault'); END;",
+        )
+        .unwrap();
+}
+
+fn heal_store_fault(s: &Mutex<Store>) {
+    s.lock()
+        .unwrap()
+        .conn_ref()
+        .execute_batch("DROP TRIGGER temp.boom;")
+        .unwrap();
+}
+
+fn undeliverable(store: &Mutex<Store>, session: i64) -> usize {
+    Pair::events(store, session)
+        .iter()
+        .filter(|e| e.kind == "message_undeliverable")
+        .count()
+}
+
+/// A store fault on the listener while it applies A's item is not A's
+/// fault: the exchange fails (E_INTERNAL, retried), nothing is rejected,
+/// and the retry delivers the item once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_fault_on_the_listener_is_retried_not_rejected() {
+    let p = pair();
+    let h = p.start();
+    p.handshake().await;
+    p.parked().await;
+    inject_store_fault(&p.b);
+    p.send_a_to_b("boom").await;
+    p.until("retrying on E_INTERNAL", || {
+        let r = p.row();
+        r.state == "retrying"
+            && r.last_error
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("E_INTERNAL")
+    })
+    .await;
+    assert_eq!(p.a_pending(), 1);
+    assert_eq!(undeliverable(&p.a, p.a1), 0);
+    heal_store_fault(&p.b);
+    p.until("delivered", || p.b_inbox().len() == 1).await;
+    p.until("accepted", || p.a_pending() == 0).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(p.b_inbox().len(), 1);
+    assert_eq!(undeliverable(&p.a, p.a1), 0);
+    p.cancel.cancel();
+    h.await.unwrap();
+}
+
+/// The dialer's side: a store fault while applying B's item leaves `after`
+/// where it was and rejects nothing; the next exchange stores it once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_fault_on_the_dialer_is_retried_not_rejected() {
+    let p = pair();
+    let h = p.start();
+    p.handshake().await;
+    p.parked().await;
+    inject_store_fault(&p.a);
+    let m = p.send_b_to_a("boom").await;
+    p.until("retrying", || {
+        let r = p.row();
+        r.state == "retrying" && r.last_error.is_some()
+    })
+    .await;
+    let row = p.row();
+    assert!(row.after < m, "after moved past an unstored item");
+    assert!(row.pending_rejects.is_none(), "{:?}", row.pending_rejects);
+    assert_eq!(undeliverable(&p.b, p.b1), 0);
+    heal_store_fault(&p.a);
+    p.until("stored", || p.a_inbox().len() == 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(p.a_inbox().len(), 1);
+    assert_eq!(undeliverable(&p.b, p.b1), 0);
+    p.cancel.cancel();
+    h.await.unwrap();
+}
+
+/// M3: a fleet this hub already listens for cannot also be dialled; that
+/// does not heal by retrying, so the link is refused and says why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fleet_already_linked_the_other_way_is_refused_not_retried() {
+    let p = pair();
+    let c = peer_client(&p.a, "hub-b");
+    p.a.lock()
+        .unwrap()
+        .ensure_listener_link(c, "fleet-b")
+        .unwrap();
+    let exit = tokio::time::timeout(Duration::from_secs(5), p.start())
+        .await
+        .expect("the loop stops")
+        .unwrap();
+    assert_eq!(exit, LinkExit::Refused);
+    let row = p.row();
+    assert_eq!(row.state, "refused");
+    assert!(
+        row.last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("already linked the other way"),
+        "{:?}",
+        row.last_error
+    );
+}
+
+/// M4: a link whose state cannot be read says so on the row while it
+/// retries, and recovers once the read works.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_that_cannot_be_read_says_so_and_recovers() {
+    let p = pair();
+    p.a.lock()
+        .unwrap()
+        .conn_ref()
+        .execute_batch("ALTER TABLE participants RENAME TO participants_away;")
+        .unwrap();
+    let h = p.start();
+    p.until("the read error is on the row", || {
+        p.row().last_error.is_some()
+    })
+    .await;
+    let row = p.row();
+    assert_eq!(row.state, "retrying");
+    assert!(
+        row.last_error.as_deref().unwrap().contains("participants"),
+        "{:?}",
+        row.last_error
+    );
+    p.a.lock()
+        .unwrap()
+        .conn_ref()
+        .execute_batch("ALTER TABLE participants_away RENAME TO participants;")
+        .unwrap();
+    p.until("connected", || p.row().state == "connected").await;
+    p.cancel.cancel();
+    h.await.unwrap();
+}
+
 // ---- the supervisor -----------------------------------------------------------
 
 struct Unreachable {
@@ -836,6 +1060,169 @@ async fn the_supervisor_runs_a_dialer_link_and_stops_it_once_revoked() {
         settled,
         "a revoked link is no longer dialled"
     );
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(6), h)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// B's `/mcp` as a `HubTransport`: the bearer names a peer client token on
+/// B (401 once revoked, as the auth layer answers), the body is the
+/// `tools/call` envelope `HttpPeerCall` sends, and the answer is framed as
+/// rmcp frames it. Records which bearer each call carried.
+struct HubOverLoopback {
+    b: Arc<Mutex<Store>>,
+    b_ssh: Arc<SshClient>,
+    clients: Mutex<Vec<(String, i64)>>,
+    seen: Mutex<Vec<String>>,
+}
+
+impl HubOverLoopback {
+    fn calls_with(&self, bearer: &str) -> usize {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| b.as_str() == bearer)
+            .count()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::http_client::HubTransport for HubOverLoopback {
+    async fn post_json(
+        &self,
+        _url: &str,
+        bearer: &str,
+        body: String,
+    ) -> Result<crate::http_client::HubResponse, String> {
+        self.seen.lock().unwrap().push(bearer.to_string());
+        let client = self
+            .clients
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(t, _)| t == bearer)
+            .map(|(_, id)| *id);
+        let live = client
+            .map(|id| self.b.lock().unwrap().client_token_is_live(id).unwrap())
+            .unwrap_or(false);
+        let (Some(client), true) = (client, live) else {
+            return Ok(crate::http_client::HubResponse {
+                status: 401,
+                body: String::new(),
+            });
+        };
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let req: ExchangeRequest =
+            serde_json::from_value(envelope["params"]["arguments"].clone()).unwrap();
+        let result = match super::listen::exchange(&self.b, &self.b_ssh, client, req).await {
+            Ok(resp) => serde_json::json!({
+                "content": [{"type": "text", "text": serde_json::to_string(&resp).unwrap()}],
+            }),
+            Err(e) => serde_json::json!({
+                "isError": true,
+                "content": [{"type": "text", "text": format!("{}: {}", e.code, e.message)}],
+                "structuredContent": {"code": e.code, "message": e.message, "details": null},
+            }),
+        };
+        let answer = serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": result});
+        Ok(crate::http_client::HubResponse {
+            status: 200,
+            body: format!("event: message\ndata: {answer}\n\n"),
+        })
+    }
+}
+
+/// I1, the supervisor half: a re-pair moves new credentials onto a row
+/// whose loop is running. The old loop is stopped and a new one runs with
+/// the new token — and only that one dials from then on.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_supervisor_restarts_a_running_link_on_new_credentials() {
+    const OLD: &str = "old-token-0000000000000000";
+    const NEW: &str = "new-token-1111111111111111";
+    let (a, a_ssh) = hub("fleet-a");
+    let (b, b_ssh) = hub("fleet-b");
+    let a1 = session(&a, "a1");
+    let b1 = session(&b, "b1");
+    let c_old = peer_client(&b, "hub-a");
+    let link = a
+        .lock()
+        .unwrap()
+        .insert_dialer_link("https://b.example", OLD)
+        .unwrap();
+    let transport = Arc::new(HubOverLoopback {
+        b: b.clone(),
+        b_ssh,
+        clients: Mutex::new(vec![(OLD.to_string(), c_old)]),
+        seen: Mutex::new(vec![]),
+    });
+    let cancel = CancellationToken::new();
+    let h = super::supervisor::spawn_peer_supervisor(
+        a.clone(),
+        a_ssh.clone(),
+        transport.clone(),
+        cancel.clone(),
+    );
+    let row = || a.lock().unwrap().peer_link(link).unwrap().unwrap();
+    let wait = |what: &'static str, f: &dyn Fn() -> bool| {
+        let ok = (0..200).any(|_| {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            false
+        });
+        assert!(ok, "timed out waiting for: {what}");
+    };
+    tokio::task::block_in_place(|| {
+        wait("connected on the old token", &|| row().state == "connected")
+    });
+    // The re-pair: B pairs a new token and revokes the old one; A's
+    // handshake on the new token moves it onto the running row.
+    let c_new = peer_client(&b, "hub-a-2");
+    transport
+        .clients
+        .lock()
+        .unwrap()
+        .push((NEW.to_string(), c_new));
+    b.lock().unwrap().revoke_client_token("hub-a").unwrap();
+    {
+        let s = a.lock().unwrap();
+        let tmp = s.insert_dialer_link("https://b.example", NEW).unwrap();
+        assert_eq!(s.adopt_dialer_fleet(tmp, "fleet-b").unwrap(), link);
+    }
+    tokio::task::block_in_place(|| {
+        wait("a loop on the new token", &|| {
+            transport.calls_with(NEW) > 0 && row().state == "connected"
+        })
+    });
+    let old_calls = transport.calls_with(OLD);
+    let m = crate::service::messages::send_message(
+        args(a1, "fleet-b/session/local/b1", "after the re-pair"),
+        &a,
+        &a_ssh,
+    )
+    .await
+    .unwrap();
+    tokio::task::block_in_place(|| {
+        wait("delivered on the new token", &|| {
+            b.lock().unwrap().list_inbox(b1, false, 10).unwrap().len() == 1
+        })
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(transport.calls_with(OLD), old_calls, "the old loop is gone");
+    let r = row();
+    assert_eq!(r.state, "connected");
+    assert_eq!(r.token.as_deref(), Some(NEW));
+    assert!(a
+        .lock()
+        .unwrap()
+        .pending_outbox(link, 0, 10)
+        .unwrap()
+        .is_empty());
+    let _ = m;
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(6), h)
         .await

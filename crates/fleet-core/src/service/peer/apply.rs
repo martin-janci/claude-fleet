@@ -115,18 +115,23 @@ pub fn apply_results(
 
 /// Insert each item the peer sent, one transaction per item, and wake an
 /// idle recipient with [`wake_nudge`] after the store lock is released.
-/// Returns one result per item, in order; a failed item is a `rejected`
-/// result, never a failed exchange.
+/// Returns one result per item, in order. An item that is the PEER's fault
+/// (it fails validation, names no recipient or a retired one, or a bad
+/// `reply_to`) is a `rejected` result. A fault of OURS — the store failed —
+/// is not the item's verdict: the application stops at that item and the
+/// whole call is `Err`, so the item is offered again (the items before it
+/// are stored; their resend is a duplicate, accepted again).
 pub async fn apply_inbound(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     link: &PeerLinkRow,
     own_fleet: &str,
     items: &[WireMessage],
-) -> Vec<WireResult> {
+) -> Result<Vec<WireResult>, IpcError> {
     let peer_fleet = link.fleet_id.clone().unwrap_or_default();
     let mut out = Vec::with_capacity(items.len());
     let mut to_wake: Vec<(i64, i64)> = Vec::new();
+    let mut failed: Option<IpcError> = None;
     for item in items {
         // `apply_one` is sync and returns its guard with it: nothing below
         // runs under the store lock.
@@ -141,7 +146,16 @@ pub async fn apply_inbound(
                 out.push(WireResult::accepted(item.id));
             }
             Ok(Applied::Duplicate) => out.push(WireResult::accepted(item.id)),
-            Err((code, message)) => out.push(WireResult::rejected(item.id, code, message)),
+            Err(ItemError::Reject(code, message)) => {
+                out.push(WireResult::rejected(item.id, code, message))
+            }
+            Err(ItemError::Store(e)) => {
+                failed = Some(IpcError::new(
+                    codes::E_INTERNAL,
+                    format!("storing message {} failed: {}", item.id, e.message),
+                ));
+                break;
+            }
         }
     }
     for (recipient, nudge) in wake_plan(&to_wake) {
@@ -167,7 +181,12 @@ pub async fn apply_inbound(
         )
         .await;
     }
-    out
+    // The wakes above still ran for what WAS stored: its resend is a
+    // duplicate, and a duplicate never wakes.
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
 }
 
 /// The recipient's row as it is now; `None` when it is gone or the store is
@@ -200,10 +219,19 @@ fn peer_code(code: Option<&str>) -> &str {
     }
 }
 
-type Refusal = (&'static str, String);
+/// Why one item was not applied: the peer's fault (a per-item rejection)
+/// or ours (the store failed — the whole application stops).
+enum ItemError {
+    Reject(&'static str, String),
+    Store(IpcError),
+}
 
-fn internal(e: IpcError) -> Refusal {
-    (codes::E_INTERNAL, e.message)
+fn internal(e: IpcError) -> ItemError {
+    ItemError::Store(e)
+}
+
+fn reject(code: &'static str, message: impl Into<String>) -> ItemError {
+    ItemError::Reject(code, message.into())
 }
 
 /// Every leading untrusted-marker line, not only the first: a peer that
@@ -224,12 +252,12 @@ fn apply_one(
     peer_fleet: &str,
     own_fleet: &str,
     item: &WireMessage,
-) -> Result<Applied, Refusal> {
+) -> Result<Applied, ItemError> {
     let Checked {
         from_addr,
         to_host,
         to_name,
-    } = check_inbound(item, peer_fleet, own_fleet).map_err(|r| (r.code, r.message))?;
+    } = check_inbound(item, peer_fleet, own_fleet).map_err(|r| reject(r.code, r.message))?;
     let s = lock(store).map_err(internal)?;
     // A resend of an item we already hold is accepted again before any
     // other check: its first arrival passed them, and a recipient retired
@@ -244,14 +272,14 @@ fn apply_one(
         .get_session(&to_name, &to_host)
         .map_err(|e| internal(e.into()))?
         .ok_or_else(|| {
-            (
+            reject(
                 codes::E_PARTICIPANT_UNKNOWN,
                 format!("no session {to_name} on {to_host}"),
             )
         })?;
     if let Some(p) = s.participant_for_session(row.id).map_err(internal)? {
         if p.retired_at.is_some() {
-            return Err((
+            return Err(reject(
                 codes::E_PARTICIPANT_RETIRED,
                 format!("session {to_name} on {to_host} is gone"),
             ));
@@ -295,7 +323,7 @@ fn map_reply_to(
     peer_fleet: &str,
     own_fleet: &str,
     recipient: i64,
-) -> Result<i64, Refusal> {
+) -> Result<i64, ItemError> {
     let local = if r.fleet == own_fleet {
         s.get_message(r.id).map_err(internal)?.map(|m| m.id)
     } else if r.fleet == peer_fleet {
@@ -303,12 +331,8 @@ fn map_reply_to(
     } else {
         None
     };
-    let local = local.ok_or_else(|| {
-        (
-            codes::E_INVALID,
-            "reply_to names no message this hub has".to_string(),
-        )
-    })?;
+    let local =
+        local.ok_or_else(|| reject(codes::E_INVALID, "reply_to names no message this hub has"))?;
     let involved = match s.participant_for_session(recipient).map_err(internal)? {
         Some(p) => s
             .message_involves_participant(local, p.id)
@@ -316,9 +340,9 @@ fn map_reply_to(
         None => false,
     };
     if !involved {
-        return Err((
+        return Err(reject(
             codes::E_INVALID,
-            "reply_to does not involve the recipient".into(),
+            "reply_to does not involve the recipient",
         ));
     }
     Ok(local)

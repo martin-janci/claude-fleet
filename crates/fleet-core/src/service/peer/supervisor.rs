@@ -89,6 +89,7 @@ pub fn spawn_peer_supervisor(
                     store.clone(),
                     ssh.clone(),
                     l.id,
+                    token.clone(),
                     call,
                     child.clone(),
                 ));

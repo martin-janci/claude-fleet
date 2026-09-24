@@ -376,6 +376,45 @@ impl Store {
         Ok(())
     }
 
+    /// [`Self::set_peer_link_state`] for a dialer loop: applies only while the
+    /// row still carries `token`, the credentials the loop was started with.
+    /// A loop outlived by a re-pair (new token moved onto its row) cannot
+    /// write over the row. Returns whether the row was written.
+    pub fn set_dialer_link_state(
+        &self,
+        id: i64,
+        token: &str,
+        state: &str,
+        last_error: Option<&str>,
+        now: i64,
+    ) -> Result<bool, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE peer_links SET state = ?1, last_error = ?2, last_exchange_at = ?3 \
+             WHERE id = ?4 AND token = ?5 AND revoked_at IS NULL",
+            rusqlite::params![state, last_error, now, id, token],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// [`Self::set_peer_link_progress`], fenced on `token` like
+    /// [`Self::set_dialer_link_state`].
+    pub fn set_dialer_link_progress(
+        &self,
+        id: i64,
+        token: &str,
+        after: i64,
+        pending_rejects: Option<&str>,
+        now: i64,
+    ) -> Result<bool, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE peer_links SET after = ?1, pending_rejects = ?2, state = 'connected', \
+                                   last_error = NULL, last_exchange_at = ?3 \
+             WHERE id = ?4 AND token = ?5 AND revoked_at IS NULL",
+            rusqlite::params![after, pending_rejects, now, id, token],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Revoke link `id`: stamps `revoked_at`, revokes its listener client
     /// token (if any), and fails every pending outbox row on it. Returns how
     /// many rows were failed.
@@ -756,6 +795,38 @@ mod tests {
     }
     const B: &str = "fleet-b";
     const ADDR: &str = "fleet-b/session/h/b1";
+
+    /// I1: a dialer loop's writes are fenced on the token it started with.
+    /// After a re-pair moves a new token onto the row, the old loop's state
+    /// and progress writes change nothing; the new token's do.
+    #[test]
+    fn a_dialer_write_applies_only_under_the_token_it_was_made_with() {
+        let s = Store::open_in_memory().unwrap();
+        let link = s.insert_dialer_link("https://b.example", "old").unwrap();
+        s.adopt_dialer_fleet(link, B).unwrap();
+        let tmp = s.insert_dialer_link("https://b2.example", "new").unwrap();
+        assert_eq!(s.adopt_dialer_fleet(tmp, B).unwrap(), link);
+        assert!(!s
+            .set_dialer_link_state(link, "old", LINK_REFUSED, Some("E_UNAUTHORIZED: x"), 5)
+            .unwrap());
+        assert!(!s
+            .set_dialer_link_progress(link, "old", 9, Some("[]"), 5)
+            .unwrap());
+        let row = s.peer_link(link).unwrap().unwrap();
+        assert_eq!((row.state.as_str(), row.after), (LINK_RETRYING, 0));
+        assert!(row.last_error.is_none() && row.pending_rejects.is_none());
+        assert!(s.set_dialer_link_progress(link, "new", 9, None, 5).unwrap());
+        assert!(s
+            .set_dialer_link_state(link, "new", LINK_RETRYING, Some("HTTP 502"), 6)
+            .unwrap());
+        let row = s.peer_link(link).unwrap().unwrap();
+        assert_eq!(row.after, 9);
+        assert_eq!(row.last_error.as_deref(), Some("HTTP 502"));
+        s.revoke_peer_link(link, 7).unwrap();
+        assert!(!s
+            .set_dialer_link_state(link, "new", LINK_CONNECTED, None, 8)
+            .unwrap());
+    }
 
     #[test]
     fn a_listener_link_pins_its_fleet_to_its_token() {
