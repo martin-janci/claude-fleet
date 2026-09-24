@@ -327,6 +327,46 @@ mod tests {
             .unwrap()
     }
 
+    /// Migration 045: identity is minted with the row, not on first mail, so
+    /// anything anchored on the participant (a move's re-point, work links)
+    /// never finds a session without one.
+    #[test]
+    fn every_new_session_row_has_a_live_participant_at_once() {
+        let s = Store::open_in_memory().unwrap();
+        let sid = seed(&s, "fresh");
+        let p = s
+            .participant_for_session(sid)
+            .unwrap()
+            .expect("minted on insert");
+        assert_eq!(p.kind, "session");
+        assert_eq!(p.retired_at, None);
+        assert_eq!(
+            s.ensure_participant_for_session(sid).unwrap(),
+            p.id,
+            "ensure finds the minted identity rather than forking a second"
+        );
+    }
+
+    /// `sessions.id` is reused. The dead session's participant was retired
+    /// (and unbound) by the delete, so the row that takes its id gets a new
+    /// identity — never the dead one's mail.
+    #[test]
+    fn a_reused_session_id_gets_a_fresh_identity() {
+        let s = Store::open_in_memory().unwrap();
+        let first = seed(&s, "first");
+        let dead = s.participant_for_session(first).unwrap().unwrap().id;
+        s.delete_session(first).unwrap();
+        let second = seed(&s, "second");
+        let p = s.participant_for_session(second).unwrap().expect("minted");
+        assert_ne!(p.id, dead);
+        assert!(s
+            .participant_by_id(dead)
+            .unwrap()
+            .unwrap()
+            .retired_at
+            .is_some());
+    }
+
     #[test]
     fn ensure_is_idempotent_and_returns_the_same_id() {
         let s = Store::open_in_memory().unwrap();

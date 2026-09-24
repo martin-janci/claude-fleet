@@ -377,6 +377,13 @@ const MIGRATIONS: &[Migration] = &[
     // `read_cursors` (smart caching, cycle 2): CREATE TABLE / INDEX IF NOT
     // EXISTS only, so re-running it is a no-op — no `already_applied` guard.
     Migration::plain(44, include_str!("../../migrations/044_read_cursors.sql")),
+    // A participant for every session row, minted by trigger on INSERT, plus
+    // a backfill. `CREATE TRIGGER IF NOT EXISTS` and an `INSERT ... WHERE
+    // NOT IN`, so re-running it is a no-op — no `already_applied` guard.
+    Migration::plain(
+        45,
+        include_str!("../../migrations/045_session_participants.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2005,5 +2012,41 @@ mod tests {
             count, 1,
             "guarded second pass over 043 must not duplicate the participant"
         );
+    }
+
+    /// Migration 045 backfills the sessions created after 043 that never
+    /// messaged anyone (and so never got a participant), and from then on the
+    /// trigger mints one per insert. Re-running it duplicates nothing.
+    #[test]
+    fn migration_045_gives_every_session_a_participant() {
+        let old = store_at_version(44);
+        old.upsert_host("h").unwrap();
+        let quiet = old
+            .upsert_session("quiet", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let count = |s: &Store, sid: i64| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM participants WHERE session_id = ?1",
+                    rusqlite::params![sid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(count(&old, quiet), 0, "044 minted nothing on insert");
+
+        old.migrate().expect("045");
+        assert_eq!(count(&old, quiet), 1, "the backfill gave it one");
+        let later = old
+            .upsert_session("later", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        assert_eq!(count(&old, later), 1, "the trigger mints on insert");
+
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 45;")
+            .unwrap();
+        old.migrate().expect("re-run 045");
+        assert_eq!(count(&old, quiet), 1);
+        assert_eq!(count(&old, later), 1);
     }
 }
