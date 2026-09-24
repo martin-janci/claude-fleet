@@ -1,0 +1,563 @@
+[
+ {
+  "name": "upper key",
+  "text": "ABC-123",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-123",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-123",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "key in a branch",
+  "text": "feature/ABC-123-refresh-token",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-123",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-123",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "lower-case branch key",
+  "text": "abc-123-fix-login",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-123",
+    "tracker_id": null,
+    "provider": null,
+    "text": "abc-123",
+    "upper_written": false
+   }
+  ]
+ },
+ {
+  "name": "linear-style branch",
+  "text": "user/eng-42-slug",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ENG-42",
+    "tracker_id": null,
+    "provider": null,
+    "text": "eng-42",
+    "upper_written": false
+   }
+  ]
+ },
+ {
+  "name": "underscore after the number",
+  "text": "ABC-123_fix",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-123",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-123",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "digit in an upper prefix",
+  "text": "ENG2-7",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ENG2-7",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ENG2-7",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "after a colon",
+  "text": "work:PAY-9",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "PAY-9",
+    "tracker_id": null,
+    "provider": null,
+    "text": "PAY-9",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "plain words",
+  "text": "fix-the-login-bug",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "denied lower prefix: release",
+  "text": "release-2024",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "denied lower prefix: hotfix",
+  "text": "hotfix-2-login",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "encoding",
+  "text": "utf-8",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "hash name",
+  "text": "sha-256",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "runtime version",
+  "text": "python-3-upgrade",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "letter before the prefix",
+  "text": "XABC-12x",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "letters after the number",
+  "text": "ABC-12abc",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "a version is not a key",
+  "text": "dependabot/npm_and_yarn/lodash-4.17.21",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "a digit in a lower prefix",
+  "text": "v2-3",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "empty",
+  "text": "",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "denied word in capitals is a key",
+  "text": "FIX-12",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "FIX-12",
+    "tracker_id": null,
+    "provider": null,
+    "text": "FIX-12",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "several keys, in order",
+  "text": "ABC-1-and-DEF-2",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-1",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-1",
+    "upper_written": true
+   },
+   {
+    "kind": "key",
+    "key": "DEF-2",
+    "tracker_id": null,
+    "provider": null,
+    "text": "DEF-2",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "a full stop ends a sentence, not a version",
+  "text": "see ABC-12. then go",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-12",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-12",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "mixed-case prefix counts as lower",
+  "text": "Abc-5 x",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-5",
+    "tracker_id": null,
+    "provider": null,
+    "text": "Abc-5",
+    "upper_written": false
+   }
+  ]
+ },
+ {
+  "name": "prefix too long",
+  "text": "ABCDEFGHIJK-1",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "number too long",
+  "text": "ABC-12345678",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "known prefixes restrict keys",
+  "text": "ABC-1 ENG-2 abc-3",
+  "ctx": {
+   "prefixes": [
+    "ABC"
+   ]
+  },
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-1",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-1",
+    "upper_written": true
+   },
+   {
+    "kind": "key",
+    "key": "ABC-3",
+    "tracker_id": null,
+    "provider": null,
+    "text": "abc-3",
+    "upper_written": false
+   }
+  ]
+ },
+ {
+  "name": "known prefixes drop GPT-4",
+  "text": "ask GPT-4 about ABC-7",
+  "ctx": {
+   "prefixes": [
+    "ABC"
+   ]
+  },
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-7",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-7",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "jira browse url with a configured host",
+  "text": "https://acme.atlassian.net/browse/ABC-123",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 1,
+     "host": "acme.atlassian.net",
+     "provider": "jira"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "kind": "url",
+    "key": "ABC-123",
+    "tracker_id": 1,
+    "provider": "jira",
+    "text": "https://acme.atlassian.net/browse/ABC-123",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "the host settles which of two jira sites",
+  "text": "see https://other.atlassian.net/browse/abc-5, thanks",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 1,
+     "host": "acme.atlassian.net",
+     "provider": "jira"
+    },
+    {
+     "id": 2,
+     "host": "other.atlassian.net",
+     "provider": "jira"
+    }
+   ],
+   "prefixes": [
+    "ABC"
+   ]
+  },
+  "expect": [
+   {
+    "kind": "url",
+    "key": "ABC-5",
+    "tracker_id": 2,
+    "provider": "jira",
+    "text": "https://other.atlassian.net/browse/abc-5",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "jira url on an unknown host",
+  "text": "https://jira.example.com/browse/OPS-4",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "url",
+    "key": "OPS-4",
+    "tracker_id": null,
+    "provider": "jira",
+    "text": "https://jira.example.com/browse/OPS-4",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "jira selectedIssue",
+  "text": "https://acme.atlassian.net/jira/software/projects/ABC/boards/1?selectedIssue=ABC-77&x=1",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 1,
+     "host": "acme.atlassian.net",
+     "provider": "jira"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "kind": "url",
+    "key": "ABC-77",
+    "tracker_id": 1,
+    "provider": "jira",
+    "text": "https://acme.atlassian.net/jira/software/projects/ABC/boards/1?selectedIssue=ABC-77&x=1",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "linear issue url",
+  "text": "(https://linear.app/acme/issue/ENG-42/fix-login)",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "url",
+    "key": "ENG-42",
+    "tracker_id": null,
+    "provider": "linear",
+    "text": "https://linear.app/acme/issue/ENG-42/fix-login",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "asana classic url",
+  "text": "https://app.asana.com/0/1111/2222/f",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "url",
+    "key": "asana:2222",
+    "tracker_id": null,
+    "provider": "asana",
+    "text": "https://app.asana.com/0/1111/2222/f",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "asana project task url",
+  "text": "https://app.asana.com/1/99/project/1111/task/3333",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "url",
+    "key": "asana:3333",
+    "tracker_id": null,
+    "provider": "asana",
+    "text": "https://app.asana.com/1/99/project/1111/task/3333",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "github issue url",
+  "text": "Fixes https://github.com/Acme/API/issues/42.",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "url",
+    "key": "acme/api#42",
+    "tracker_id": null,
+    "provider": "github",
+    "text": "https://github.com/Acme/API/issues/42",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "keys inside other urls are not keys",
+  "text": "https://github.com/acme/api/tree/abc-123-login",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "a url and a key",
+  "text": "ABC-1 https://acme.atlassian.net/browse/ABC-2",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 1,
+     "host": "acme.atlassian.net",
+     "provider": "jira"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-1",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-1",
+    "upper_written": true
+   },
+   {
+    "kind": "url",
+    "key": "ABC-2",
+    "tracker_id": 1,
+    "provider": "jira",
+    "text": "https://acme.atlassian.net/browse/ABC-2",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "bare #n needs the session repo",
+  "text": "fixes #42",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "bare #n with the session repo",
+  "text": "fixes #42 and #7.",
+  "ctx": {
+   "repo": "Acme/api"
+  },
+  "expect": [
+   {
+    "kind": "repo_issue",
+    "key": "acme/api#42",
+    "tracker_id": null,
+    "provider": "github",
+    "text": "#42",
+    "upper_written": false
+   },
+   {
+    "kind": "repo_issue",
+    "key": "acme/api#7",
+    "tracker_id": null,
+    "provider": "github",
+    "text": "#7",
+    "upper_written": false
+   }
+  ]
+ },
+ {
+  "name": "not an anchor or an entity",
+  "text": "a#1 &#123; x/#9 #12ab",
+  "ctx": {
+   "repo": "acme/api"
+  },
+  "expect": []
+ },
+ {
+  "name": "unicode around a key",
+  "text": "é ABC-1 ü",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-1",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-1",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "a snake-case run before an upper key",
+  "text": "feature_ABC-1",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "key",
+    "key": "ABC-1",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-1",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "a rejected key-shaped token is consumed whole",
+  "text": "long_snake_ABC-1",
+  "ctx": {},
+  "expect": []
+ }
+]

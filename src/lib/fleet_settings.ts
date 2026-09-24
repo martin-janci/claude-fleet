@@ -37,6 +37,9 @@ export const SETTING_KEYS = {
   workJournalDays: 'work.journal_days',
   workRecentDays: 'work.recent_days',
   workSyncIntervalSecs: 'work.sync_interval_secs',
+  workTrustedBranchProjects: 'work.trusted_branch_projects',
+  workEvidenceSnippets: 'work.evidence_snippets',
+  workSessionStartContext: 'work.session_start_context',
 } as const;
 
 /** Derived, read-only entry in the `get_fleet_settings` map: JSON object of
@@ -111,6 +114,9 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'work.journal_days': '90',
   'work.recent_days': '14',
   'work.sync_interval_secs': '300',
+  'work.trusted_branch_projects': '[]',
+  'work.evidence_snippets': 'true',
+  'work.session_start_context': 'false',
 };
 
 export type FleetSettings = Record<string, string>;

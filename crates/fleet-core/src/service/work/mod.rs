@@ -3,8 +3,11 @@
 //! agnostic entry the MCP tools `work` / `work_link` and the desktop commands
 //! share, so a paired desktop and a local one answer the same way.
 
+pub mod detect;
 pub mod handover;
 pub mod harvest;
+pub mod recognize;
+pub mod resolve;
 pub mod resume;
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -62,7 +65,7 @@ pub struct WorkLinkArgs {
     /// Fleet session id.
     #[serde(default)]
     pub session_id: Option<i64>,
-    /// link|reject|unlink|resume|start
+    /// link|reject|unlink|confirm|trust_project|resume|start
     pub action: String,
     /// Work key, e.g. ABC-123, or a free-form name.
     #[serde(default)]
@@ -100,6 +103,33 @@ pub struct WorkLinkArgs {
     /// Start: worktree name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// trust_project: on/off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<bool>,
+}
+
+/// `work_link { action: trust_project }`: the projects whose branch keys
+/// now link automatically.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectTrust {
+    #[serde(default)]
+    pub trusted: Vec<i64>,
+}
+
+/// `work_link { action: trust_project, project_id, on }`.
+pub fn trust_project(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<ProjectTrust, IpcError> {
+    let pid = args
+        .project_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "trust_project needs project_id"))?;
+    let on = args
+        .on
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "trust_project needs on"))?;
+    let s = lock(store)?;
+    Ok(ProjectTrust {
+        trusted: detect::set_project_trust(&s, pid, on)?
+            .into_iter()
+            .collect(),
+    })
 }
 
 /// `work { action: context }`: the full handover context of a key.
@@ -282,10 +312,10 @@ pub fn work(args: &WorkArgs, store: &Mutex<Store>) -> Result<Vec<WorkLinkRow>, I
 /// Apply one link decision and return the session's updated row (its `work`
 /// is the new primary link, or none).
 pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow, IpcError> {
-    if args.action == "resume" || args.action == "start" {
+    if matches!(args.action.as_str(), "resume" | "start" | "trust_project") {
         return Err(IpcError::new(
             codes::E_INVALID,
-            format!("{} is asynchronous; use its own entry point", args.action),
+            format!("{} has its own entry point", args.action),
         ));
     }
     let session_id = args.session_id.ok_or_else(|| {
@@ -310,8 +340,19 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
             let source = args.source.as_deref().unwrap_or("manual");
             s.link_session_work(session_id, target()?, source)?;
         }
+        // `reject { link_id }` decides one suggestion (work graph M4.4);
+        // `reject { key | item_id }` any target.
+        "reject" if args.link_id.is_some() && args.key.is_none() && args.item_id.is_none() => {
+            detect::decide(&s, session_id, args.link_id.unwrap_or_default(), false)?;
+        }
         "reject" => {
             s.reject_session_work(session_id, target()?)?;
+        }
+        "confirm" => {
+            let link_id = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "confirm needs link_id"))?;
+            detect::decide(&s, session_id, link_id, true)?;
         }
         "unlink" => {
             let link_id = args
@@ -328,10 +369,15 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "unknown work_link action {other:?}; one of link, reject, unlink, resume, start"
+                    "unknown work_link action {other:?}; one of link, reject, unlink, confirm, \
+                     trust_project, resume, start"
                 ),
             ))
         }
+    }
+    // A decision can leave a sole candidate or free a primary (M4.3).
+    if let Err(e) = detect::resolve_session(&s, session_id) {
+        tracing::debug!(error = %e.message, "[work] resolve after a decision failed");
     }
     s.get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
@@ -423,6 +469,73 @@ mod tests {
         )
         .unwrap();
         assert_eq!(links[0].state, "rejected");
+    }
+
+    /// Work graph M4.4: confirm / reject a suggestion by link id, and trust
+    /// a project, through the one entry both transports share.
+    #[test]
+    fn suggestions_are_decided_by_link_id_and_projects_trusted() {
+        let (st, sid) = store();
+        let pid = {
+            let s = st.lock().unwrap();
+            s.create_local_work_item(Some("PAY-7"), "Retry").unwrap();
+            detect::on_prompt(&s, sid, "see PAY-7 and PAY-8", false).unwrap();
+            s.upsert_project("acme", "api", "/src/api").unwrap()
+        };
+        let sg = |st: &Mutex<Store>| {
+            st.lock()
+                .unwrap()
+                .get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work_suggested
+        };
+        let first = sg(&st).expect("a suggestion");
+        let row = work_link(
+            &WorkLinkArgs {
+                link_id: Some(first.link_id),
+                ..link(sid, "confirm")
+            },
+            &st,
+        )
+        .unwrap();
+        assert_eq!(row.work.unwrap().link_id, first.link_id);
+        assert_eq!(
+            work_link(&link(sid, "confirm"), &st).unwrap_err().code,
+            codes::E_INVALID
+        );
+        let err = work_link(
+            &WorkLinkArgs {
+                link_id: Some(9999),
+                ..link(sid, "reject")
+            },
+            &st,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND);
+
+        let t = trust_project(
+            &WorkLinkArgs {
+                action: "trust_project".into(),
+                project_id: Some(pid),
+                on: Some(true),
+                ..Default::default()
+            },
+            &st,
+        )
+        .unwrap();
+        assert_eq!(t.trusted, vec![pid]);
+        let missing = trust_project(
+            &WorkLinkArgs {
+                action: "trust_project".into(),
+                project_id: Some(pid + 50),
+                on: Some(true),
+                ..Default::default()
+            },
+            &st,
+        )
+        .unwrap_err();
+        assert_eq!(missing.code, codes::E_NOTFOUND);
     }
 
     #[test]

@@ -244,6 +244,13 @@ pub struct SessionRow {
     /// branch/tag fallback) must not show these. Empty for most rows.
     #[serde(default)]
     pub work_rejected: Vec<String>,
+    /// The session's top link SUGGESTION (work graph M4: a guess no one has
+    /// decided), with the number of live suggestions in `suggestions`.
+    /// Kept apart from `work` on purpose: a peer older than M4 reads only
+    /// `work`, so it can never mistake a guess for a link — and a guess
+    /// never moves a session into a work group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_suggested: Option<WorkSummary>,
 }
 
 impl SessionRow {
@@ -293,7 +300,8 @@ pub(super) const SESSION_COLUMNS: &str =
                            CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
                          'status_name', i.status_name, 'url', i.url, \
                          'unavailable', json(CASE WHEN i.unavailable_at IS NOT NULL \
-                                                  THEN 'true' ELSE 'false' END)) \
+                                                  THEN 'true' ELSE 'false' END), \
+                         'state', l.state, 'strength', l.strength, 'rule', l.rule) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.is_primary = 1 AND l.state = 'confirmed' \
@@ -305,7 +313,29 @@ pub(super) const SESSION_COLUMNS: &str =
                          AND l.state = 'rejected' \
         LEFT JOIN work_items i ON i.id = l.item_id \
        WHERE p.session_id = sessions.id AND p.retired_at IS NULL \
-         AND COALESCE(i.key, l.ref_key) IS NOT NULL) AS work_rejected";
+         AND COALESCE(i.key, l.ref_key) IS NOT NULL) AS work_rejected, \
+     (SELECT json_object('link_id', l.id, 'item_id', l.item_id, \
+                         'key', COALESCE(i.key, l.ref_key), 'title', COALESCE(i.title, ''), \
+                         'source', l.source, 'state', l.state, 'strength', l.strength, \
+                         'rule', l.rule, \
+                         'preselected', json(CASE WHEN l.preselected = 1 \
+                                                  THEN 'true' ELSE 'false' END), \
+                         'status_category', \
+                           CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                         'status_name', i.status_name, 'url', i.url, \
+                         'suggestions', (SELECT COUNT(*) FROM work_links s2 \
+                                          WHERE s2.participant_id = p.id \
+                                            AND s2.ended_at IS NULL \
+                                            AND s2.state = 'suggested')) \
+        FROM participants p \
+        JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
+                         AND l.state = 'suggested' \
+        LEFT JOIN work_items i ON i.id = l.item_id \
+       WHERE p.session_id = sessions.id AND p.retired_at IS NULL \
+       ORDER BY l.preselected DESC, \
+                CASE l.strength WHEN 'strong' THEN 0 ELSE 1 END, \
+                COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
+       LIMIT 1) AS work_suggested";
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -388,8 +418,20 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         },
         pending_input: decode_pending_input(row.get(51)?),
         lost_reason: row.get(53)?,
-        work: decode_work(row.get(54)?),
+        work: decode_work(row.get(54)?).map(|mut w| {
+            w.suggestions = 0;
+            w
+        }),
         work_rejected: decode_tags(row.get(55)?),
+        work_suggested: decode_work(row.get(56)?),
+    })
+    .map(|mut r| {
+        // The primary's `suggestions` counts what is still to decide, which
+        // only the suggestion subselect reads.
+        if let (Some(w), Some(sg)) = (r.work.as_mut(), r.work_suggested.as_ref()) {
+            w.suggestions = sg.suggestions;
+        }
+        r
     })
 }
 

@@ -7,7 +7,7 @@ import {
   sortProjectsBySeverity,
   sortWorkGroups,
 } from './sidebar_index';
-import type { WorkKey } from './work_keys';
+import { workKeyFor, type WorkKey } from './work_keys';
 import type { SessionRow } from './sessions';
 
 let nextId = 1;
@@ -136,6 +136,22 @@ describe('buildSessionsByWork / sortWorkGroups', () => {
       ['DEF-2', [b.id]],
     ]);
     expect([...keyed.keys()].sort()).toEqual([a1.id, a2.id, b.id].sort());
+  });
+
+  it('a suggestion never regroups: only a confirmed link makes a work group (M4.4)', () => {
+    const suggested = row({
+      tags: ['ABC-1'],
+      work_suggested: {
+        link_id: 3, item_id: null, key: 'ABC-1', title: '', source: 'branch', state: 'suggested',
+      },
+    });
+    const linked = row({
+      work: { link_id: 4, item_id: null, key: 'ABC-1', title: '', source: 'branch', state: 'confirmed' },
+    });
+    const real = (s: SessionRow) => workKeyFor(s, new Map());
+    const { groups, keyed } = buildSessionsByWork([suggested, linked], 'all', true, null, real);
+    expect(groups.map((g) => [g.key, g.sessions.map((s) => s.id)])).toEqual([['ABC-1', [linked.id]]]);
+    expect(keyed.has(suggested.id)).toBe(false);
   });
 
   it('filters rows but still reports every keyed session', () => {

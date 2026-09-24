@@ -1,11 +1,15 @@
 import { describe, it, expect } from 'vitest';
+import fixture from '../../crates/fleet-core/src/service/work/testdata/recognize_cases.json';
 import {
   describeWorkKey,
+  extractTicketRefs,
   extractWorkKey,
   keyFromTicketUrl,
   workGroupPrSummary,
   workKeyFor,
   worktreeBranchById,
+  type RecognizeCtx,
+  type TicketRef,
 } from './work_keys';
 import type { SessionRow } from './sessions';
 import type { ProjectTreeRow } from './projects';
@@ -170,5 +174,25 @@ describe('keyFromTicketUrl', () => {
     ['https://'],
   ])('ignores %s', (text) => {
     expect(keyFromTicketUrl(text)).toBeNull();
+  });
+});
+
+// The recogniser's shared fixture (work graph M4.1): the same cases the hub's
+// `recognize.rs` runs, so the two can never drift.
+
+describe('extractTicketRefs (shared fixture)', () => {
+  const cases = fixture as unknown as {
+    name: string;
+    text: string;
+    ctx: RecognizeCtx;
+    expect: TicketRef[];
+  }[];
+
+  it('has its cases', () => {
+    expect(cases.length).toBeGreaterThanOrEqual(30);
+  });
+
+  it.each(cases.map((c) => [c.name, c] as const))('%s', (_name, c) => {
+    expect(extractTicketRefs(c.text, c.ctx)).toEqual(c.expect);
   });
 });

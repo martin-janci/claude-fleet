@@ -137,6 +137,28 @@ pub struct WorkLinkRow {
     /// conversations would resume from.
     #[serde(default = "default_true")]
     pub resumable: bool,
+    // --- detection (migration 049, work graph M4); all default, so an older
+    // hub's row still reads.
+    /// The conversation the link was decided in (a suggestion: last seen
+    /// in); `None` for links older than M4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_session_id: Option<String>,
+    /// explicit | strong | weak; `None` for links older than M4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<String>,
+    /// The resolver rule that made it (R3, R5 …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    /// Why: what was seen, oldest first (`service::work::resolve::Evidence`
+    /// objects: signal, rule, text, snippet?, at, conversation?, note?).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<serde_json::Value>,
+    /// A suggestion shown pre-selected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preselected: bool,
+    /// Why a live session's link ended (`branch_changed`, `pr_changed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
 }
 
 fn default_role() -> String {
@@ -173,6 +195,26 @@ pub struct WorkSummary {
     /// The tracker no longer answers for the item (C25).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unavailable: bool,
+    // --- explanation (work graph M4); absent from an older hub.
+    /// confirmed | suggested.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    /// explicit | strong | weak; absent for links older than M4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<String>,
+    /// The resolver rule that made it (R3, R5 …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    /// A suggestion shown pre-selected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preselected: bool,
+    /// Live link suggestions the session has, still to decide.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub suggestions: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// What to link a session to.
@@ -234,9 +276,22 @@ fn is_ticket_key(s: &str) -> bool {
 
 const LINK_COLUMNS: &str = "id, item_id, ref_key, participant_id, state, source, is_primary, \
      created_at, decided_at, ended_at, snap_host, snap_tmux, snap_name, snap_project_id, \
-     snap_worktree, snap_branch, snap_pr_url, snap_claude_ids, role, resumable";
+     snap_worktree, snap_branch, snap_pr_url, snap_claude_ids, role, resumable, \
+     claude_session_id, strength, rule, evidence, preselected, end_reason";
 
-fn map_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkLinkRow> {
+/// Columns of [`LINK_COLUMNS`] (a join's `l.` prefix is added by callers).
+pub(super) const LINK_COLUMN_COUNT: usize = 26;
+
+/// [`LINK_COLUMNS`] with every column prefixed by `alias.`.
+pub(super) fn link_columns_prefixed(alias: &str) -> String {
+    LINK_COLUMNS
+        .split(", ")
+        .map(|c| format!("{alias}.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub(super) fn map_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkLinkRow> {
     Ok(WorkLinkRow {
         id: r.get(0)?,
         item_id: r.get(1)?,
@@ -258,6 +313,15 @@ fn map_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkLinkRow> {
         snap_claude_ids: r.get(17)?,
         role: r.get(18)?,
         resumable: r.get::<_, i64>(19)? != 0,
+        claude_session_id: r.get(20)?,
+        strength: r.get(21)?,
+        rule: r.get(22)?,
+        evidence: r
+            .get::<_, Option<String>>(23)?
+            .and_then(|e| serde_json::from_str(&e).ok())
+            .unwrap_or_default(),
+        preselected: r.get::<_, i64>(24)? != 0,
+        end_reason: r.get(25)?,
     })
 }
 
@@ -389,20 +453,24 @@ impl Store {
                 }
                 Ok((Some(id), None))
             }
-            WorkTarget::Key(raw) => {
-                let key = normalize_work_ref(raw)?;
-                // A tracker item exactly one tracker has (by key or alias)
-                // wins; else a local item; else a bare key a later sync
-                // binds. The key is kept on a tracker link too, for history
-                // and for a tracker that is later removed.
-                if let Some(item) = self.tracker_item_for_key(&key)? {
-                    return Ok((Some(item.id), Some(key)));
-                }
-                match self.local_work_item_by_key(&key)? {
-                    Some(item) => Ok((Some(item.id), None)),
-                    None => Ok((None, Some(key))),
-                }
-            }
+            WorkTarget::Key(raw) => self.resolve_work_key(&normalize_work_ref(raw)?),
+        }
+    }
+
+    /// `(item_id, ref_key)` for a normalised key: a tracker item exactly one
+    /// tracker has (by key or alias) wins; else a local item; else a bare key
+    /// a later sync binds. The key is kept on a tracker link too, for history
+    /// and for a tracker that is later removed.
+    pub(super) fn resolve_work_key(
+        &self,
+        key: &str,
+    ) -> Result<(Option<i64>, Option<String>), IpcError> {
+        if let Some(item) = self.tracker_item_for_key(key)? {
+            return Ok((Some(item.id), Some(key.to_string())));
+        }
+        match self.local_work_item_by_key(key)? {
+            Some(item) => Ok((Some(item.id), None)),
+            None => Ok((None, Some(key.to_string()))),
         }
     }
 
@@ -473,19 +541,26 @@ impl Store {
             )?;
         }
         let id = match existing {
+            // A decision over a suggestion keeps its evidence and rule, so
+            // the link can still say what proposed it.
             Some(id) => {
                 self.conn.execute(
                     "UPDATE work_links SET state = ?1, source = ?2, is_primary = ?3, \
-                     decided_at = ?4 WHERE id = ?5",
-                    rusqlite::params![state, source, primary as i64, now, id],
+                     decided_at = ?4, strength = 'explicit', preselected = 0, \
+                     claude_session_id = COALESCE((SELECT claude_session_id FROM sessions \
+                                                   WHERE id = ?6), claude_session_id) \
+                     WHERE id = ?5",
+                    rusqlite::params![state, source, primary as i64, now, id, session_id],
                 )?;
                 id
             }
             None => {
                 self.conn.execute(
                     "INSERT INTO work_links (item_id, ref_key, participant_id, state, source, \
-                                             is_primary, created_at, decided_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                                             is_primary, created_at, decided_at, strength, \
+                                             claude_session_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 'explicit', \
+                             (SELECT claude_session_id FROM sessions WHERE id = ?8))",
                     rusqlite::params![
                         item_id,
                         ref_key,
@@ -493,7 +568,8 @@ impl Store {
                         state,
                         source,
                         primary as i64,
-                        now
+                        now,
+                        session_id
                     ],
                 )?;
                 self.conn.last_insert_rowid()
@@ -614,6 +690,13 @@ impl Store {
         source: &str,
         role: &str,
     ) -> Result<bool, IpcError> {
+        // A carry is a decision fleet makes for the person: it settles a
+        // live suggestion of the same target rather than sitting beside it.
+        self.conn.execute(
+            "DELETE FROM work_links WHERE participant_id = ?1 AND ended_at IS NULL \
+               AND state = 'suggested' AND item_id IS ?2 AND ref_key IS ?3",
+            rusqlite::params![participant, item_id, ref_key],
+        )?;
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
                AND ended_at IS NULL AND item_id IS ?2 AND ref_key IS ?3)",
@@ -632,8 +715,8 @@ impl Store {
         let now = now_unix();
         self.conn.execute(
             "INSERT INTO work_links (item_id, ref_key, participant_id, state, source, role, \
-                                     is_primary, created_at, decided_at) \
-             VALUES (?1, ?2, ?3, 'confirmed', ?4, ?5, ?6, ?7, ?7)",
+                                     is_primary, created_at, decided_at, strength) \
+             VALUES (?1, ?2, ?3, 'confirmed', ?4, ?5, ?6, ?7, ?7, 'explicit')",
             rusqlite::params![
                 item_id,
                 ref_key,
@@ -765,7 +848,11 @@ impl Store {
         else {
             return Ok(false);
         };
-        if !self.session_work_links(child_session)?.is_empty() {
+        if self
+            .session_work_links(child_session)?
+            .iter()
+            .any(|l| l.state != "suggested")
+        {
             return Ok(false);
         }
         let participant = self.work_participant(child_session)?;
@@ -867,7 +954,7 @@ impl Store {
                  ORDER BY COALESCE(l.decided_at, l.created_at) DESC, l.id DESC"
             ))?;
             let rows = stmt.query_map(rusqlite::params![key], |r| {
-                Ok((map_link(r)?, r.get::<_, i64>(20)?))
+                Ok((map_link(r)?, r.get::<_, i64>(LINK_COLUMN_COUNT)?))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
@@ -922,6 +1009,8 @@ impl Store {
                     status_name: r.get(7)?,
                     url: r.get(8)?,
                     unavailable: r.get::<_, Option<bool>>(9)?.unwrap_or(false),
+                    state: "confirmed".into(),
+                    ..Default::default()
                 },
             ))
         })?;
@@ -1162,6 +1251,8 @@ mod tests {
                 key: Some("ABC-9".into()),
                 title: "Login".into(),
                 source: "manual".into(),
+                state: "confirmed".into(),
+                strength: Some("explicit".into()),
                 ..Default::default()
             })
         );

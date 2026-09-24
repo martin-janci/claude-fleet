@@ -180,6 +180,28 @@ pub async fn handle_hook(
                     _ => StatusCode::NO_CONTENT.into_response(),
                 };
             }
+            // SessionStart answers only when installed synchronously (work
+            // graph M4.5, `work.session_start_context`): an async command
+            // hook discards the body anyway.
+            if event == "SessionStart" {
+                return match crate::service::hooks::session_start_context(
+                    &state.store,
+                    &payload,
+                    &ctx,
+                ) {
+                    Some(text) if !text.is_empty() => {
+                        tracing::debug!(event, "[hook] carrying work context");
+                        axum::Json(serde_json::json!({
+                            "hookSpecificOutput": {
+                                "hookEventName": event,
+                                "additionalContext": text,
+                            }
+                        }))
+                        .into_response()
+                    }
+                    _ => StatusCode::NO_CONTENT.into_response(),
+                };
+            }
             if event != "UserPromptSubmit" {
                 return StatusCode::NO_CONTENT.into_response();
             }
@@ -260,6 +282,60 @@ mod tests {
             StatusCode::FORBIDDEN,
             "a paired client must never report hook events"
         );
+    }
+
+    /// Work graph M4.5: a SessionStart answers `hookSpecificOutput` with the
+    /// work context when the setting is on, and 204 otherwise.
+    #[tokio::test]
+    async fn session_start_answers_additional_context_only_when_enabled() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session("dev", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "c1").unwrap();
+            s.link_session_work(id, crate::store::WorkTarget::Key("ABC-1"), "manual")
+                .unwrap();
+        }
+        let call = |store: Arc<Mutex<crate::store::Store>>| async move {
+            let payload = HookPayload {
+                session_id: Some("c1".into()),
+                hook_event_name: Some("SessionStart".into()),
+                source: Some("startup".into()),
+                ..Default::default()
+            };
+            handle_hook(
+                State(HookState {
+                    store,
+                    ssh: Arc::new(SshClient::new()),
+                }),
+                Extension(Caller::master()),
+                axum::http::HeaderMap::new(),
+                Json(payload),
+            )
+            .await
+            .into_response()
+        };
+        assert_eq!(call(store.clone()).await.status(), StatusCode::NO_CONTENT);
+        crate::service::settings::set(
+            &store.lock().unwrap(),
+            crate::service::settings::WORK_SESSION_START_CONTEXT,
+            "true",
+        )
+        .unwrap();
+        let resp = call(store.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        assert!(v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("ABC-1"));
     }
 
     #[test]

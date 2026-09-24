@@ -173,6 +173,7 @@ mod tests {
             pending_input: None,
             work: None,
             work_rejected: vec![],
+            work_suggested: None,
         }
     }
 

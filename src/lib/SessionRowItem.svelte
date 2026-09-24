@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import {
     recreateSession,
     dismissGhostSession,
@@ -36,7 +37,19 @@
   import { pendingInputFor } from './pending_input';
   import type { WorkKey } from './work_keys';
   import WorkChip from './WorkChip.svelte';
-  import { linkSessionWork, rejectSessionWork, unlinkSessionWork } from './work';
+  import {
+    confirmSessionWork,
+    describeEvidence,
+    linkSessionWork,
+    rejectSessionWork,
+    rejectWorkLink,
+    sessionWorkLinks,
+    setWorkProjectTrust,
+    unlinkSessionWork,
+    workWhy,
+    type WorkLink,
+  } from './work';
+  import { fleetSettings, SETTING_KEYS } from './fleet_settings';
   import type { Result } from './result';
 
   // Rename and selection state stay in the Sidebar (they must survive a
@@ -235,6 +248,104 @@
     void workAction(() => unlinkSessionWork(sess.id, linkId), 'Clear work failed');
   }
 
+  // ── Detection (work graph M4.4): the suggestion chip, its evidence, and
+  // the decisions. A suggestion never regroups the row; only Confirm does.
+  const suggestion = $derived(sess.work_suggested ?? null);
+  const suggestionKey = $derived<WorkKey | null>(
+    suggestion && (suggestion.key || suggestion.title)
+      ? {
+          key: (suggestion.key || suggestion.title) as string,
+          source: 'link',
+          from: suggestion.title,
+          why: workWhy({ ...suggestion, state: 'suggested' }),
+        }
+      : null,
+  );
+  let workLinks = $state<WorkLink[] | null>(null);
+  let workInput = $state<HTMLInputElement | null>(null);
+  let trustedOverride = $state<boolean | null>(null);
+  const projectTrusted = $derived.by(() => {
+    if (trustedOverride !== null) return trustedOverride;
+    try {
+      const ids: unknown = JSON.parse($fleetSettings[SETTING_KEYS.workTrustedBranchProjects] ?? '[]');
+      return Array.isArray(ids) && sess.project_id != null && ids.includes(sess.project_id);
+    } catch {
+      return false;
+    }
+  });
+
+  async function loadWorkLinks() {
+    const r = await sessionWorkLinks(sess.id);
+    workLinks = r.ok && Array.isArray(r.value) ? r.value : [];
+  }
+
+  function openWorkMenu(e?: Event) {
+    e?.stopPropagation();
+    workMenuOpen = true;
+    workDraft = '';
+    void loadWorkLinks();
+  }
+
+  /** The links the popover explains: suggestions, then the primary. */
+  const explained = $derived(
+    (workLinks ?? []).filter((l) => l.state === 'suggested' || (l.is_primary && l.state === 'confirmed')),
+  );
+
+  function linkLabel(l: WorkLink): string {
+    return l.ref_key ?? (l.item_id != null ? `item ${l.item_id}` : 'work');
+  }
+
+  function confirmLink(linkId: number, e?: Event) {
+    e?.stopPropagation();
+    void workAction(() => confirmSessionWork(sess.id, linkId), 'Confirm failed');
+  }
+
+  function rejectLink(linkId: number, e?: Event) {
+    e?.stopPropagation();
+    void workAction(() => rejectWorkLink(sess.id, linkId), 'Not this failed');
+  }
+
+  function pickAnother(e: Event) {
+    e.stopPropagation();
+    workInput?.focus();
+  }
+
+  async function toggleTrust(e: Event) {
+    e.stopPropagation();
+    const pid = sess.project_id;
+    if (pid == null) return;
+    const on = (e.currentTarget as HTMLInputElement).checked;
+    const r = await setWorkProjectTrust(pid, on);
+    if (!r.ok) {
+      pushError(r.error, 'Trust failed');
+      return;
+    }
+    trustedOverride = r.value.includes(pid);
+  }
+
+  /** `y` / `n` decide the row's top suggestion, `l` links or picks. */
+  function onRowKey(e: KeyboardEvent) {
+    if (e.target === e.currentTarget && !e.metaKey && !e.ctrlKey && !e.altKey && workBlocked === null) {
+      if (e.key === 'y' && suggestion) {
+        e.preventDefault();
+        confirmLink(suggestion.link_id);
+        return;
+      }
+      if (e.key === 'n' && suggestion) {
+        e.preventDefault();
+        rejectLink(suggestion.link_id);
+        return;
+      }
+      if (e.key === 'l') {
+        e.preventDefault();
+        openWorkMenu();
+        void tick().then(() => workInput?.focus());
+        return;
+      }
+    }
+    onKeySession(e, sess);
+  }
+
   function onWorkKey(e: KeyboardEvent) {
     e.stopPropagation();
     if (e.key === 'Enter') setWork(e);
@@ -256,7 +367,7 @@
   tabindex="0"
   ondblclick={(e) => sess.status !== 'ghost' && !readOnly && beginLabelEdit(sess, e)}
   onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
-  onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onKeySession(e, sess)}
+  onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onRowKey(e)}
   use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
 >
   {#if selectMode && !readOnly}
@@ -365,6 +476,14 @@
           {#if workKey}
             <WorkChip {workKey} />
           {/if}
+          {#if suggestionKey && suggestion}
+            <WorkChip
+              workKey={suggestionKey}
+              suggested
+              testid="work-suggestion"
+              onclick={(e) => (workBlocked === null ? openWorkMenu(e) : e.stopPropagation())}
+            />
+          {/if}
           {#if sess.stuck_kind}
             <!-- Stuck outranks claude_status: one red chip, no green "working"
                  next to it to soften the signal. -->
@@ -409,7 +528,7 @@
             <button
               class="icon-btn small"
               data-testid="work-menu"
-              onclick={toggleWorkMenu}
+              onclick={(e) => (workMenuOpen ? toggleWorkMenu(e) : openWorkMenu(e))}
               disabled={workBlocked !== null}
               title={workBlocked ?? 'Work: set, "Not this", clear'}
               aria-label="Work"
@@ -463,7 +582,40 @@
             role="group"
             aria-label="Work for {primaryName}"
           >
+            {#if explained.length > 0}
+              <div class="work-why" data-testid="work-why">
+                {#each explained as l (l.id)}
+                  <div class="why-link" data-testid="why-link" data-state={l.state}>
+                    <span class="why-key">{linkLabel(l)}</span>
+                    <span class="why-what">{workWhy(l)}</span>
+                    {#each l.evidence ?? [] as ev, i (i)}
+                      <span class="why-ev" data-testid="why-evidence" title={ev.snippet ?? ''}>{describeEvidence(ev)}</span>
+                    {/each}
+                    {#if l.state === 'suggested'}
+                      <span class="why-actions">
+                        <button class="work-btn" data-testid="why-confirm" disabled={workBusy}
+                          title="Confirm (↵ / y)" onclick={(e) => confirmLink(l.id, e)}>Confirm</button>
+                        <button class="work-btn" data-testid="why-reject" disabled={workBusy}
+                          title="Not this (⌫ / n): never suggested again" onclick={(e) => rejectLink(l.id, e)}>Not this</button>
+                        <button class="work-btn" data-testid="why-pick" disabled={workBusy}
+                          title="Type or paste another key or ticket URL" onclick={pickAnother}>Pick another…</button>
+                      </span>
+                    {/if}
+                  </div>
+                {/each}
+                {#if sess.project_id != null}
+                  <!-- The label only stops the row's own click (it would
+                       select the session); the checkbox is the control. -->
+                  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+                  <label class="why-trust" onclick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" data-testid="why-trust" checked={projectTrusted} onchange={toggleTrust} />
+                    Trust branch keys in this repo
+                  </label>
+                {/if}
+              </div>
+            {/if}
             <input
+              bind:this={workInput}
               class="work-input"
               data-testid="work-input"
               aria-label="Work key or name"
@@ -787,6 +939,41 @@
     flex-shrink: 0;
     white-space: nowrap;
     text-transform: uppercase;
+  }
+  .work-why {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    width: 100%;
+    font-size: 0.7rem;
+  }
+  .why-link {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.15rem 0.4rem;
+    align-items: baseline;
+  }
+  .why-key {
+    font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .why-what,
+  .why-ev {
+    color: var(--fg-muted);
+  }
+  .why-ev {
+    flex-basis: 100%;
+    padding-left: 0.6rem;
+  }
+  .why-actions {
+    display: flex;
+    gap: 0.3rem;
+    flex-basis: 100%;
+  }
+  .why-trust {
+    display: flex;
+    gap: 0.3rem;
+    align-items: center;
+    color: var(--fg-muted);
   }
   .work-menu {
     display: flex;

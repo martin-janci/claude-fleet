@@ -255,6 +255,15 @@
     automationBusy = false;
     if (!r.ok) automationError = r.error.message;
   }
+  /** Projects in the `work.trusted_branch_projects` id set. */
+  function trustedProjectCount(raw: string | undefined): number {
+    try {
+      const v: unknown = JSON.parse(raw ?? '[]');
+      return Array.isArray(v) ? v.length : 0;
+    } catch {
+      return 0;
+    }
+  }
   function toggleSetting(key: SettingKey) {
     void applySetting(key, settingBool($fleetSettings, key) ? 'false' : 'true');
   }
@@ -1052,6 +1061,36 @@
           data-testid="work-sync-interval"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workSyncIntervalSecs, 'Tracker sync', e)} />
         <span class="hook-desc" id="work-sync-interval-desc">seconds between tracker (Jira) sync passes (0 = off; read at launch)</span>
+      </div>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.workEvidenceSnippets)}
+          disabled={automationBusy}
+          data-testid="work-evidence-snippets"
+          onchange={() => toggleSetting(SETTING_KEYS.workEvidenceSnippets)} />
+        Keep a short, redacted prompt snippet as evidence for a detected ticket
+      </label>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.workSessionStartContext)}
+          disabled={automationBusy}
+          data-testid="work-session-start-context"
+          onchange={() => toggleSetting(SETTING_KEYS.workSessionStartContext)} />
+        Give Claude the linked ticket at session start (makes the start hook wait up to 2 s when the hub is down; applies when hooks are reinstalled)
+      </label>
+      <div class="mcp-field">
+        <span class="lbl">trusted branch keys</span>
+        <span class="hook-desc" data-testid="work-trusted-projects">
+          {trustedProjectCount($fleetSettings[SETTING_KEYS.workTrustedBranchProjects])} project(s) link a sole branch key automatically (set per project from a work chip)
+        </span>
+        <button
+          class="btn"
+          type="button"
+          disabled={automationBusy || trustedProjectCount($fleetSettings[SETTING_KEYS.workTrustedBranchProjects]) === 0}
+          data-testid="work-trusted-clear"
+          onclick={() => void applySetting(SETTING_KEYS.workTrustedBranchProjects, '[]')}>Trust none</button>
       </div>
       {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
     </section>

@@ -31,6 +31,9 @@ pub enum Kind {
     /// pass `validate::host_alias`, every path `validate_base_path`. `{}`
     /// means "no per-host overrides".
     PathMap,
+    /// JSON array of positive integer ids (`[3, 7]`), stored sorted and
+    /// without duplicates. `[]` means "none".
+    IdSet,
     /// JSON object `{ "<model fragment>": {input, output, cache_write,
     /// cache_read} }` in USD per million tokens (`service::usage`). `{}`
     /// means "built-in prices only".
@@ -165,6 +168,20 @@ pub const WORK_RECENT_DAYS: &str = "work.recent_days";
 /// Seconds between tracker sync passes (work graph M3); `0` turns the sync
 /// off. Values under a minute are raised to one.
 pub const WORK_SYNC_INTERVAL_SECS: &str = "work.sync_interval_secs";
+
+/// Project ids whose branch keys are trusted (work graph M4, rule R3): a
+/// sole branch key there links automatically, with Undo; elsewhere it is a
+/// pre-selected suggestion. Set by the popover's checkbox, or automatically
+/// after three branch suggestions confirmed in a project.
+pub const WORK_TRUSTED_BRANCH_PROJECTS: &str = "work.trusted_branch_projects";
+/// Keep a ±40-character, redacted snippet of the prompt around a detected
+/// key as evidence (work graph M4). Off keeps only the matched text.
+pub const WORK_EVIDENCE_SNIPPETS: &str = "work.evidence_snippets";
+/// SessionStart hands Claude the linked ticket's context (work graph M4.5,
+/// decision D5). Off until measured: turning it on makes the SessionStart
+/// hook synchronous, which can add up to ~2 s to a start when the hub is
+/// down. Takes effect when the hooks are next installed.
+pub const WORK_SESSION_START_CONTEXT: &str = "work.session_start_context";
 
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
@@ -339,7 +356,43 @@ pub const SPECS: &[Spec] = &[
         default: "300",
         kind: Kind::Secs,
     },
+    Spec {
+        key: WORK_TRUSTED_BRANCH_PROJECTS,
+        default: "[]",
+        kind: Kind::IdSet,
+    },
+    Spec {
+        key: WORK_EVIDENCE_SNIPPETS,
+        default: "true",
+        kind: Kind::Bool,
+    },
+    Spec {
+        key: WORK_SESSION_START_CONTEXT,
+        default: "false",
+        kind: Kind::Bool,
+    },
 ];
+
+/// Most ids one `Kind::IdSet` holds.
+pub const ID_SET_MAX: usize = 1000;
+
+/// Parse + validate a `Kind::IdSet` value: a JSON array of positive
+/// integers, at most [`ID_SET_MAX`].
+pub fn parse_id_set(raw: &str) -> Result<std::collections::BTreeSet<i64>, IpcError> {
+    let ids: Vec<i64> = serde_json::from_str(raw.trim()).map_err(|_| {
+        IpcError::new(
+            codes::E_INVALID,
+            "must be a JSON array of positive integer ids",
+        )
+    })?;
+    if ids.len() > ID_SET_MAX || ids.iter().any(|&i| i <= 0) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("must hold at most {ID_SET_MAX} positive integer ids"),
+        ));
+    }
+    Ok(ids.into_iter().collect())
+}
 
 /// Floor for `repair.tick_interval_secs`: `0` would repair on every pass.
 pub const REPAIR_TICK_MIN_SECS: u64 = 60;
@@ -432,6 +485,9 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             format!("{key} must be one of: {}", options.join(", ")),
         )),
         Kind::PathMap => parse_path_map(key, v).map(|_| ()),
+        Kind::IdSet => parse_id_set(v)
+            .map(|_| ())
+            .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key} {}", e.message))),
         Kind::PriceMap => crate::service::usage::parse_price_overrides(v).map(|_| ()),
     }
 }
@@ -493,6 +549,8 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
     let v = value.trim();
     let stored = match spec(key).map(|sp| sp.kind) {
         Some(Kind::PathMap) => serde_json::to_string(&parse_path_map(key, v)?)
+            .map_err(|e| IpcError::new(codes::E_INVALID, e.to_string()))?,
+        Some(Kind::IdSet) => serde_json::to_string(&parse_id_set(v)?)
             .map_err(|e| IpcError::new(codes::E_INVALID, e.to_string()))?,
         Some(Kind::PriceMap) => {
             serde_json::to_string(&crate::service::usage::parse_price_overrides(v)?)

@@ -295,6 +295,8 @@ export const ROUTED_ACTIONS = [
   'link_session_work',
   'reject_session_work',
   'unlink_session_work',
+  'confirm_session_work',
+  'set_work_project_trust',
   'start_work',
 ] as const;
 

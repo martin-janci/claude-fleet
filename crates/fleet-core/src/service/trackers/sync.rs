@@ -318,10 +318,17 @@ impl TrackerSync {
 
         // 5. bind.
         let s = lock(store).map_err(|e| TrackerError::Invalid(e.message))?;
-        pass.bound_sessions = s
+        let bound = s
             .bind_tracker_refs(t.id)
-            .map_err(|e| TrackerError::Invalid(e.message))?
-            .len();
+            .map_err(|e| TrackerError::Invalid(e.message))?;
+        pass.bound_sessions = bound.len();
+        // A key that became known late re-resolves its sessions (work graph
+        // M4.3); only the sessions this bind touched.
+        for sid in bound {
+            if let Err(e) = crate::service::work::detect::resolve_session(&s, sid) {
+                tracing::debug!(error = %e.message, "[work] resolve after bind failed");
+            }
+        }
         Ok(())
     }
 

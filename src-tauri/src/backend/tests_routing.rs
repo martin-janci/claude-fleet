@@ -1023,6 +1023,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         session_id: 7,
                         key: None,
                         item_id: Some(3),
+                        link_id: None,
                     },
                     s,
                 ))
@@ -1041,6 +1042,43 @@ fn routed_mutation_cases() -> Vec<Case> {
                     commands::work::UnlinkSessionWorkArgs {
                         session_id: 7,
                         link_id: 5,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "confirm_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "confirm", "key": null, "item_id": null,
+                    "link_id": 5, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::confirm_session_work(
+                    b,
+                    commands::work::ConfirmSessionWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_work_project_trust",
+            "work_link",
+            json!({ "session_id": null, "action": "trust_project", "key": null,
+                    "item_id": null, "link_id": null, "source": null,
+                    "project_id": 3, "on": true }),
+            r#"{"trusted":[3]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_work_project_trust(
+                    b,
+                    commands::work::SetWorkProjectTrustArgs {
+                        project_id: 3,
+                        on: true,
                     },
                     s,
                 ))
@@ -1723,6 +1761,7 @@ fn standalone_work_links_are_decided_in_the_local_store() {
                 session_id: 99,
                 key: Some("ABC-1".into()),
                 item_id: None,
+                link_id: None,
             },
             &st,
         )),

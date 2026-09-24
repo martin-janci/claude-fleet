@@ -221,6 +221,7 @@ fn row(
         pending_input: None,
         work: None,
         work_rejected: vec![],
+        work_suggested: None,
     }
 }
 
@@ -4087,6 +4088,64 @@ async fn reconcile_populates_pr_url_and_ci_status_and_throttles_the_probe() {
     let s = store.lock().unwrap();
     let a = s.get_session("dev-a", "local").unwrap().unwrap();
     assert_eq!(a.pr_url.as_deref(), Some("https://github.com/o/r/pull/9"));
+}
+
+/// Work detection through reconcile (M4.2 / M4.3): the probe's PR fields
+/// and commit trailers reach the session's links in the same pass, and a
+/// later "no PR" withdraws what the PR alone proposed.
+#[tokio::test]
+async fn reconcile_turns_pr_signals_into_link_suggestions() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stdout = "__FLEET_PR__\tdev-a\t0\t{\"url\":\"https://github.com/o/r/pull/9\",\
+                  \"statusCheckRollup\":[],\"headRefName\":\"topic\",\"title\":\"Login\",\
+                  \"body\":\"\",\"closingIssuesReferences\":[{\"number\":42,\
+                  \"repository\":{\"name\":\"r\",\"owner\":{\"login\":\"o\"}}}]}\n\
+                  __FLEET_TRAILERS__\tdev-a\tRefs: #7\n";
+    let shell = Arc::new(CannedShell {
+        stdout: stdout.to_string(),
+        calls: Arc::clone(&calls),
+    });
+    let live = vec![repo_session(
+        "dev-a",
+        "/home/u/projects/github.com/o/r/.worktrees/a",
+    )];
+    let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let deps = ReconcileDeps::fake_with_shell(
+        move |_alias| {
+            Box::new(ScriptedTmux {
+                sessions: live.clone(),
+                delay: std::time::Duration::from_millis(0),
+                hang: false,
+                probes: Arc::clone(&probes),
+            })
+        },
+        std::time::Duration::from_secs(5),
+        shell,
+    );
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+    }
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let s = store.lock().unwrap();
+    let a = s.get_session("dev-a", "local").unwrap().unwrap();
+    let mut keys: Vec<(Option<String>, String)> = s
+        .session_work_links(a.id)
+        .unwrap()
+        .into_iter()
+        .map(|l| (l.ref_key, l.source))
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            (Some("o/r#42".into()), "pr".into()),
+            (Some("o/r#7".into()), "trailer".into())
+        ]
+    );
+    assert_eq!(a.work, None, "suggestions only: the project is not trusted");
+    assert_eq!(a.work_suggested.unwrap().suggestions, 2);
 }
 
 #[tokio::test]

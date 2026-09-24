@@ -77,6 +77,7 @@
   ],
   "routed": [
     "cancel_task",
+    "confirm_session_work",
     "delete_worktree",
     "discover_lost_sessions",
     "dismiss_ghost_session",
@@ -122,6 +123,7 @@
     "session_history",
     "session_work_links",
     "set_session_friendly_name",
+    "set_work_project_trust",
     "spawn_review",
     "start_work",
     "unlink_session_work",

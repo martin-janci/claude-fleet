@@ -120,6 +120,45 @@ prefixes (probe) **or**, with no tracker, as unresolved refs from branch
 names only. Reviews and task workers inherit the parent's primary link with
 `role`.
 
+#### 0.3.1 As landed in M4 (2026-09-24) — the final rules and the chip
+
+The resolver is `service::work::resolve::resolve`, a pure function; the
+store applies its changes (`store::work_detect`). Tiers, not scores; inside
+a tier the most recent decision. Nothing is learned.
+
+| Rule | Condition | Outcome |
+|---|---|---|
+| R1 | a person's `confirmed` / `rejected` decision | final: the resolver never changes it |
+| R2 | `explicit` (`started`, `agent`, and fleet's carries `resumed` / `forked` / `inherited`) | confirmed (written by those paths, not the resolver) |
+| R3 | exactly one strong STATE candidate (branch key, PR head key, PR closing ref) in a trusted project | confirmed, auto (source `branch` / `pr`), Undo toast |
+| R3b | the same in an untrusted project | a pre-selected suggestion |
+| R3u | the same, but no tracker can resolve it (a GitHub `owner/repo#n` closing ref before a GitHub tracker exists, M6) | a pre-selected suggestion, even in a trusted project |
+| R4 | several strong state candidates | all suggested, none pre-selected |
+| R5 | a ticket URL in a prompt | confirmed when it is the sole reference of a conversation's first prompt, else suggested; a sole KEY there is a pre-selected suggestion |
+| R6 | a weak candidate (a prompt key elsewhere, `#n`, keys in the PR title / body, commit trailers) | suggested |
+| R7 | a state signal's value changes | the confirmed auto link it made ENDS (`end_reason` `branch_changed` / `pr_changed`, snapshotted as past work); a suggestion it made is withdrawn; manual / started / agent links stay |
+| R8 | a key whose prefix two trackers claim (a URL's host settles it) | never automatic: a suggestion |
+| R9 | a rejected (participant, target) pair | never proposed again, from any signal |
+| decay | an EVENT suggestion (prompt, URL, trailer) from an earlier conversation, not seen in this one | removed at the boundary |
+| primary | live confirmed links ranked by (decided in the current conversation, explicit > strong > weak, most recent decision) | it moves only when a run loses its primary or confirms a link — never re-ranks decisions |
+
+Guards: a prompt carrying a `[claude-fleet` marker, equal (first 200 chars)
+to the prompt fleet itself sent, or contained in a handover brief is not
+evidence (loop guard); a prompt naming more than three distinct references
+makes them all weak, none pre-selected, noted `reference` (dump guard).
+With any tracker, keys must carry a tracker's prefix; with none, a prompt
+key counts only when fleet already knows it (a local item or a link) —
+unknown keys come from branch names only.
+
+Chip vocabulary (sidebar row): **solid** = a confirmed link; a small **ring**
+beside the key = linked automatically (R3 / R5; the tooltip names the source
+and rule); **dashed with `?`** = a suggestion (`SessionRow.work_suggested`,
+never a work group). The row's popover lists the evidence ("branch
+`abc-123-login` since 09:05 · R3", "mentioned ABC-99 in a prompt at 10:12
+(reference) · R6") with Confirm / Not this / Pick another… and "Trust branch
+keys in this repo"; `y` / `n` decide the top suggestion on a focused row and
+the "N link suggestions · Review" sheet decides them in bulk (j/k, y/n).
+
 ### 0.4 Provider (replaces §F trait)
 
 ```rust

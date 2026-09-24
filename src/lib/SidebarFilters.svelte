@@ -5,6 +5,7 @@
   import { accountByUuid } from './accounts';
   import { attentionIdleMinutes } from './notify';
   import Attention from './Attention.svelte';
+  import LinkReview from './LinkReview.svelte';
   import { RECENCY_VALUES, type Recency } from './session_status';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -162,6 +163,7 @@
     </button>
   </nav>
   <Attention />
+  <LinkReview />
 
   {#if selectedCount > 0}
     <div class="bulk-bar" data-testid="bulk-bar" role="toolbar" aria-label="bulk actions">
