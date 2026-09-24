@@ -16,7 +16,7 @@
 //! rather than re-implementing; nothing here duplicates that.
 
 /// First offset of `needle` in `haystack`.
-pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
@@ -25,7 +25,7 @@ pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// The numeric status code out of an HTTP/1.x response head's status line —
 /// the token after the HTTP version, not a substring match: a reason phrase
 /// or a header that happens to carry " 200" must not count.
-pub(crate) fn parse_status(head: &str) -> Result<u16, String> {
+pub fn parse_status(head: &str) -> Result<u16, String> {
     let status_line = head.lines().next().unwrap_or_default();
     status_line
         .split_whitespace()
@@ -36,7 +36,7 @@ pub(crate) fn parse_status(head: &str) -> Result<u16, String> {
 
 /// Does this response head declare `Transfer-Encoding: chunked`? Header names
 /// are case-insensitive and the value may be a list (`gzip, chunked`).
-pub(crate) fn head_is_chunked(head: &str) -> bool {
+pub fn head_is_chunked(head: &str) -> bool {
     head.lines().skip(1).any(|line| {
         line.split_once(':').is_some_and(|(name, value)| {
             name.trim().eq_ignore_ascii_case("transfer-encoding")
@@ -54,7 +54,7 @@ pub(crate) fn head_is_chunked(head: &str) -> bool {
 /// stream cannot, because a chunk boundary falls wherever the hub flushed and
 /// the next size line may not have arrived yet — this is what `events.rs`'s
 /// `SseBody` feeds one socket read at a time.
-pub(crate) struct Dechunker {
+pub struct Dechunker {
     chunked: bool,
     /// Bytes left in the chunk being read.
     remaining: usize,
@@ -63,7 +63,7 @@ pub(crate) struct Dechunker {
 }
 
 impl Dechunker {
-    pub(crate) fn new(chunked: bool) -> Self {
+    pub fn new(chunked: bool) -> Self {
         Self {
             chunked,
             remaining: 0,
@@ -71,12 +71,12 @@ impl Dechunker {
         }
     }
 
-    pub(crate) fn finished(&self) -> bool {
+    pub fn finished(&self) -> bool {
         self.done
     }
 
     /// Take whatever payload `raw` now yields, leaving the rest in place.
-    pub(crate) fn take(&mut self, raw: &mut Vec<u8>) -> Result<Vec<u8>, String> {
+    pub fn take(&mut self, raw: &mut Vec<u8>) -> Result<Vec<u8>, String> {
         if !self.chunked {
             return Ok(std::mem::take(raw));
         }
@@ -132,7 +132,7 @@ impl Dechunker {
 /// Over BYTES: a chunk size is a byte count and says nothing about character
 /// boundaries, so a chunk may legitimately end halfway through a character.
 /// The caller decodes the joined result.
-pub(crate) fn dechunk(body: &[u8]) -> Result<Vec<u8>, String> {
+pub fn dechunk(body: &[u8]) -> Result<Vec<u8>, String> {
     let mut raw = body.to_vec();
     Dechunker::new(true).take(&mut raw)
 }
