@@ -1534,23 +1534,8 @@ impl SshExec for LocalExec {
 /// roaming, the remote sshd restarting) — as opposed to 255 because the host
 /// is down. The former deserves a fresh master and one more try.
 pub(crate) fn is_mux_failure(out: &Output) -> bool {
-    if out.status.code() != Some(255) {
-        return false;
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    [
-        "mux_client_request_session",
-        "Control socket",
-        "read from master failed",
-        // ssh's own wording for a dropped control/session channel — not the
-        // bare "Broken pipe", which a REMOTE command's own stderr can emit
-        // (e.g. a remote `foo | head` hitting SIGPIPE) and which must not
-        // trigger a reset+retry of what may be a non-idempotent command.
-        "send disconnect: Broken pipe",
-        "Connection closed by remote host",
-    ]
-    .iter()
-    .any(|needle| stderr.contains(needle))
+    out.status.code() == Some(255)
+        && crate::ssh_diag::classify::mentions_mux_failure(&String::from_utf8_lossy(&out.stderr))
 }
 
 fn cache_dir() -> PathBuf {
