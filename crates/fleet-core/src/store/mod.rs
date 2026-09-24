@@ -25,6 +25,7 @@ mod tasks;
 #[cfg(test)]
 mod test_support;
 mod timeline;
+mod trackers;
 mod usage;
 mod work;
 mod work_journal;
@@ -41,6 +42,11 @@ pub use rows::*;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
+pub use trackers::{
+    is_allowed_tracker_host, normalize_site_url, validate_credential_ref, Secret, TrackerConfig,
+    TrackerCredential, TrackerRow, TrackerViewRow, TRACKER_AUTH_KINDS, TRACKER_PROVIDERS,
+    TRACKER_STATES,
+};
 pub use work::{
     normalize_work_ref, WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, WORK_LINK_SOURCES,
 };

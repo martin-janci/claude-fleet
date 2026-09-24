@@ -112,6 +112,7 @@ pub fn collect(
         hosts,
         tokens,
         sessions,
+        tracker_secrets,
     ) = {
         let s = lock(store)?;
         let cfg = crate::mcp::settings::McpSettings::read(&s)?;
@@ -125,6 +126,7 @@ pub fn collect(
             s.list_hosts()?,
             s.list_host_tokens()?,
             s.list_all_sessions()?,
+            s.tracker_secret_literals()?,
         )
     };
 
@@ -133,6 +135,9 @@ pub fn collect(
     if let Some(m) = &master_set {
         secrets.push(m.clone());
     }
+    // Tracker credentials (work graph M3): the token and its Basic-auth
+    // encoding, whichever an error string or log line might carry.
+    secrets.extend(tracker_secrets);
     let token_modes: BTreeMap<&str, &str> = tokens
         .iter()
         .map(|t| (t.host_alias.as_str(), t.mode.as_str()))
@@ -281,6 +286,8 @@ mod tests {
     /// A token that matches none of the redaction patterns — only the
     /// literal known-secret pass can catch it.
     const ODD_TOK: &str = "odd-shaped-host-token-Zq9";
+    /// A tracker credential of no recognisable shape (work graph M3).
+    const TRACKER_TOK: &str = "jira-odd-shaped-secret-7Q";
 
     fn seeded_store() -> Mutex<Store> {
         let s = Store::open_in_memory().unwrap();
@@ -292,6 +299,11 @@ mod tests {
         s.upsert_host_token("mefistos", HOST_TOK).unwrap();
         s.upsert_host_token("turanga", ODD_TOK).unwrap();
         s.set_host_token_mode("turanga", "readonly").unwrap();
+        let t = s
+            .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+            .unwrap();
+        s.set_tracker_credential(t.id, "basic", Some("me@acme.com"), Some(TRACKER_TOK), None)
+            .unwrap();
         Mutex::new(s)
     }
 
@@ -328,6 +340,7 @@ mod tests {
                 "INFO hook Authorization: Bearer {MASTER}\n\
                  INFO GET /hook?token={HOST_TOK}\n\
                  WARN odd token {ODD_TOK} seen\n\
+                 WARN jira sync failed with {TRACKER_TOK}\n\
                  INFO plain line\n"
             ),
         )
@@ -336,7 +349,7 @@ mod tests {
         let store = seeded_store();
         let b = collect(&store, inputs(tmp.path(), &logs)).unwrap();
 
-        for secret in [MASTER, HOST_TOK, ODD_TOK] {
+        for secret in [MASTER, HOST_TOK, ODD_TOK, TRACKER_TOK] {
             assert!(
                 !b.text.contains(secret),
                 "bundle leaked {secret}:\n{}",
@@ -360,7 +373,7 @@ mod tests {
         );
         assert!(b.text.contains("reconcile.interval_secs = "));
         assert!(b.text.contains("INFO plain line"));
-        assert!(b.text.contains("== Recent log (last 4 lines) =="));
+        assert!(b.text.contains("== Recent log (last 5 lines) =="));
         assert_eq!(b.log_dir, logs.display().to_string());
         assert!(b.log_file.unwrap().ends_with("claude-fleet.2026-09-11.log"));
     }

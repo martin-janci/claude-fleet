@@ -1266,12 +1266,21 @@ pub fn strip_marker(text: &str) -> &str {
 
 /// Argument keys whose values are free text an agent authored (or a secret):
 /// never persisted, only their length.
-const REDACT_KEYS: &[&str] = &["prompt", "body", "content", "start_command"];
+/// `initial_prompt` and `brief` (work graph) may carry third-party ticket text.
+const REDACT_KEYS: &[&str] = &[
+    "prompt",
+    "body",
+    "content",
+    "start_command",
+    "initial_prompt",
+    "brief",
+];
 /// Argument keys dropped from the summary entirely: a confirmation nonce is
 /// a one-time credential and must not land in the timeline, and `value` is
 /// `set_secret`'s secret value — not even its length may be persisted (a
-/// length still leaks information about a secret).
-const SKIP_KEYS: &[&str] = &["confirm_nonce", "value"];
+/// length still leaks information about a secret). `secret` is `work_admin`'s
+/// tracker credential, for the same reason.
+const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// Replace every character that could end a line downstream — see
@@ -1755,10 +1764,19 @@ mod tests {
         assert!(!s.contains("hunter2"), "{s}");
         assert!(!s.contains("value"), "{s}");
         assert_eq!(s, "host_alias=mefistos name=FOO");
-        for k in ["body", "content", "start_command"] {
+        for k in [
+            "body",
+            "content",
+            "start_command",
+            "initial_prompt",
+            "brief",
+        ] {
             let a = serde_json::json!({ k: "xyz" });
             assert_eq!(redact_args(a.as_object()), format!("{k}=<3 chars>"));
         }
+        // `work_admin`'s tracker credential: dropped entirely.
+        let tracker = serde_json::json!({ "secret": "ATATT-unique-9", "tracker_id": 1 });
+        assert_eq!(redact_args(tracker.as_object()), "tracker_id=1");
     }
 
     /// The audit row is written before any tool validates its arguments, so
