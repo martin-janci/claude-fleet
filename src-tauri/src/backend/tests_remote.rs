@@ -1508,55 +1508,6 @@ fn invalid_utf8_in_a_chunked_response_decodes_lossily_via_split_response() {
 
 // --- the trust store, loaded off the runtime and never cached as a failure ---
 
-/// `load_native_certs` is blocking file I/O — and on macOS a keychain query,
-/// which can be slow or prompt. Calling it straight from an `async fn` parks a
-/// runtime worker, and there are only as many workers as cores.
-///
-/// A source assertion rather than a behavioural one because the defect is a
-/// *thread*, and nothing in-process can observe which thread a blocking read
-/// happened on. It is the same shape as
-/// `startup::tests::lib_rs_cannot_start_a_background_task_behind_this_modules_back`,
-/// and it catches the regression that matters: someone calling the builder
-/// directly again.
-#[test]
-fn the_trust_store_is_never_loaded_on_a_runtime_worker() {
-    let src = include_str!("remote.rs");
-    let calls: Vec<&str> = src
-        .lines()
-        .filter(|l| l.contains("build_tls_connector") && !l.trim_start().starts_with("//"))
-        .collect();
-    assert_eq!(
-        calls.len(),
-        2,
-        "expected exactly the definition and the spawn_blocking call, got: {calls:#?}"
-    );
-    assert!(
-        calls
-            .iter()
-            .any(|l| l.contains("spawn_blocking(build_tls_connector)")),
-        "the only call must go through spawn_blocking: {calls:#?}"
-    );
-    assert!(
-        !src.contains("load_native_certs()") || src.matches("load_native_certs()").count() == 1,
-        "the platform trust store is read in one place only"
-    );
-}
-
-/// The `OnceLock` holds a `TlsConnector`, not a `Result<TlsConnector, _>`.
-///
-/// That distinction is the whole of the second half of the finding: a trust
-/// store that was momentarily unreadable — a keychain still locked just after
-/// login, a profile not yet mounted — used to poison every https call for the
-/// life of the process, so the app had to be restarted to recover from a
-/// condition that had already cleared. A cell that cannot hold an error cannot
-/// cache one; the type is the guarantee, and this test is what stops the type
-/// quietly widening again.
-#[test]
-fn a_failed_trust_store_read_is_not_remembered() {
-    let src = include_str!("remote.rs");
-    assert!(
-        src.contains("static CONNECTOR: std::sync::OnceLock<tokio_rustls::TlsConnector>"),
-        "CONNECTOR must not be a OnceLock<Result<..>>: a cached failure \
-         survives the condition that caused it, and only a restart clears it"
-    );
-}
+// The two trust-store source assertions (`the_trust_store_is_never_loaded_on_a_runtime_worker`,
+// `a_failed_trust_store_read_is_not_remembered`) moved with the code to
+// `fleet_core::net::tls` (work graph M3.0).

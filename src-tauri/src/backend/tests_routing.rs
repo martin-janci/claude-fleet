@@ -484,6 +484,52 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "list_trackers",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "trackers" }),
+            r#"[{"id":1,"provider":"jira","name":"acme","site_url":"https://acme.atlassian.net","state":"ok","created_at":1}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::list_trackers(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "work_tickets",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "tickets",
+                    "view": "mine", "query": "login", "limit": 20 }),
+            r#"[{"id":3,"source":"jira","key":"ABC-1","title":"Login","status_category":"todo","created_at":1,"updated_at":1}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::work_tickets(
+                    b,
+                    commands::trackers::WorkTicketsArgs {
+                        tracker_id: None,
+                        view: Some("mine".into()),
+                        query: Some("login".into()),
+                        limit: Some(20),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_lookup",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "lookup",
+                    "url": "https://acme.atlassian.net/browse/ABC-1" }),
+            r#"{"id":3,"source":"jira","key":"ABC-1","title":"Login","status_category":"todo","created_at":1,"updated_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::work_lookup(
+                    b,
+                    commands::trackers::WorkLookupArgs {
+                        reference: "https://acme.atlassian.net/browse/ABC-1".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "work_purge_impact",
             "work",
             json!({ "session_id": null, "key": null, "action": "purge_impact",
@@ -910,6 +956,31 @@ fn routed_mutation_cases() -> Vec<Case> {
                         item_id: None,
                     },
                     s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "start_work",
+            "work_link",
+            // Only the start fields travel.
+            json!({ "session_id": null, "action": "start", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": null, "project_id": 3, "host_alias": "h",
+                    "with_brief": true }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::start_work(
+                    b,
+                    commands::trackers::StartWorkArgs {
+                        reference: Some("ABC-1".into()),
+                        project_id: Some(3),
+                        host_alias: Some("h".into()),
+                        with_brief: true,
+                        ..Default::default()
+                    },
+                    s,
+                    &ssh(),
+                    &fleet_core::cancel::CancellationRegistry::new(),
                 ))
                 .map(|_| ())
             }),
@@ -2983,6 +3054,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("commands/tasks.rs", include_str!("../commands/tasks.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
     ("commands/work.rs", include_str!("../commands/work.rs")),
+    (
+        "commands/trackers.rs",
+        include_str!("../commands/trackers.rs"),
+    ),
     (
         "commands/worktrees.rs",
         include_str!("../commands/worktrees.rs"),

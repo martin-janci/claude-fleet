@@ -163,6 +163,16 @@ pub fn tail_lines(dir: &Path, n: usize) -> Vec<String> {
 static BEARER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(bearer)(\s+)([A-Za-z0-9\-._~+/]{8,}=*)").expect("bearer regex")
 });
+/// `Basic` plus a candidate base64 value (group 3): an HTTP Basic
+/// `Authorization` header, which is `base64(user:secret)` (a Jira Cloud
+/// email + API token). Masked under the same [`is_token_shaped`] rule as
+/// `Bearer`, so "Basic authentication" survives.
+static BASIC_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(basic)(\s+)([A-Za-z0-9+/]{8,}={0,2})").expect("basic regex")
+});
+/// An Atlassian API token (`ATATT…`), wherever it appears.
+static ATLASSIAN_TOKEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"ATATT[A-Za-z0-9_\-=]{20,}").expect("atlassian token regex"));
 static QUERY_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)([?&](?:access_)?token=)[^&\s"'#]+"#).expect("query token regex")
 });
@@ -221,8 +231,9 @@ fn mask_matches<'a>(
 }
 
 /// Mask anything that looks like a bearer token: a token-shaped value after
-/// `Bearer` (see [`is_token_shaped`]; "the bearer of" and "Bearer
-/// authentication" survive), `?token=` / `&token=` query values, and runs
+/// `Bearer` or `Basic` (see [`is_token_shaped`]; "the bearer of" and "Basic
+/// authentication" survive), Atlassian API tokens (`ATATT…`, work graph
+/// M3), `?token=` / `&token=` query values, and runs
 /// of exactly 64 hex digits (see [`HEX_RUN_RE`]). Text with nothing to mask
 /// is returned borrowed and unchanged.
 pub fn redact(input: &str) -> Cow<'_, str> {
@@ -230,6 +241,14 @@ pub fn redact(input: &str) -> Cow<'_, str> {
     if let Cow::Owned(s) = mask_matches(&BEARER_RE, &out, |c| {
         is_token_shaped(&c[3]).then(|| format!("{}{}{REDACTED}", &c[1], &c[2]))
     }) {
+        out = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = mask_matches(&BASIC_RE, &out, |c| {
+        is_token_shaped(&c[3]).then(|| format!("{}{}{REDACTED}", &c[1], &c[2]))
+    }) {
+        out = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = ATLASSIAN_TOKEN_RE.replace_all(&out, REDACTED) {
         out = Cow::Owned(s);
     }
     if let Cow::Owned(s) = QUERY_TOKEN_RE.replace_all(&out, format!("${{1}}{REDACTED}")) {
@@ -702,6 +721,30 @@ mod tests {
             redact("Bearer authentication with Bearer tok-98765"),
             "Bearer authentication with Bearer [REDACTED]"
         );
+    }
+
+    #[test]
+    fn redacts_basic_auth_and_atlassian_tokens() {
+        // base64("me@acme.com:ATATT3xFf…")
+        let b64 = "bWVAYWNtZS5jb206QVRBVFQzeEZmR0YwYWJjZGVmZ2hpams=";
+        assert_eq!(
+            redact(&format!("Authorization: Basic {b64}")),
+            "Authorization: Basic [REDACTED]"
+        );
+        assert_eq!(
+            redact(&format!(r#"{{"authorization":"basic {b64}"}}"#)),
+            r#"{"authorization":"basic [REDACTED]"}"#
+        );
+        assert_eq!(
+            redact("uses Basic authentication over TLS"),
+            "uses Basic authentication over TLS"
+        );
+        let tok = "ATATT3xFfGF0T2hpc0lzTm90QVJlYWxUb2tlbg-_=AbCd";
+        assert_eq!(
+            redact(&format!("jira said no to {tok}.")),
+            "jira said no to [REDACTED]."
+        );
+        assert_eq!(redact("ATATT short"), "ATATT short");
     }
 
     #[test]

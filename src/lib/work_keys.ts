@@ -31,6 +31,13 @@ export interface WorkKey {
   /** The text the key was found in (a tag, branch or worktree name); for a
    *  link, the work item's title (may be empty). */
   from: string;
+  /** A linked tracker item's status (work graph M3), for the chip's dot. */
+  status?: {
+    category: string;
+    name: string | null;
+    url: string | null;
+    unavailable: boolean;
+  };
 }
 
 // `[A-Za-z][A-Za-z0-9_]{1,9}` is a Jira-style project key (2-10 chars);
@@ -107,7 +114,21 @@ export function workKeyFor(
   branchById: ReadonlyMap<number, string>,
 ): WorkKey | null {
   const linked = s.work?.key || s.work?.title;
-  if (s.work && linked) return { key: linked, source: 'link', from: s.work.title };
+  if (s.work && linked) {
+    const w = s.work;
+    const status =
+      w.status_category || w.unavailable
+        ? {
+            category: w.status_category ?? 'unknown',
+            name: w.status_name ?? null,
+            url: w.url ?? null,
+            unavailable: !!w.unavailable,
+          }
+        : undefined;
+    return status
+      ? { key: linked, source: 'link', from: w.title, status }
+      : { key: linked, source: 'link', from: w.title };
+  }
   const rejected = new Set(s.work_rejected ?? []);
   const recognise = (text: string): string | null => {
     const key = extractWorkKey(text);
@@ -129,8 +150,16 @@ export function workKeyFor(
   return null;
 }
 
-/** One-line explanation of why a session is in its work group. */
+/** One-line explanation of why a session is in its work group, with the
+ *  ticket's status when a tracker knows it. */
 export function describeWorkKey(w: WorkKey): string {
+  const base = describeSource(w);
+  if (!w.status) return base;
+  if (w.status.unavailable) return `${base} · unavailable in the tracker`;
+  return w.status.name ? `${base} · ${w.status.name}` : base;
+}
+
+function describeSource(w: WorkKey): string {
   switch (w.source) {
     case 'link':
       return w.from && w.from !== w.key
@@ -161,4 +190,30 @@ export function workGroupPrSummary(rows: readonly SessionRow[]): {
     if (i > worst) worst = i;
   }
   return { prCount: prs.size, ci: worst >= 0 ? order[worst] : null };
+}
+
+/** A work group header's ticket line (work graph M3): the title and status
+ *  of the first session in the group linked to `key`, when any carries one. */
+export function workGroupTicket(
+  key: string,
+  rows: readonly SessionRow[],
+): { title: string; status: WorkKey['status'] } | null {
+  for (const s of rows) {
+    const w = s.work;
+    if (!w || w.key !== key) continue;
+    if (!w.title && !w.status_category && !w.unavailable) continue;
+    return {
+      title: w.title,
+      status:
+        w.status_category || w.unavailable
+          ? {
+              category: w.status_category ?? 'unknown',
+              name: w.status_name ?? null,
+              url: w.url ?? null,
+              unavailable: !!w.unavailable,
+            }
+          : undefined,
+    };
+  }
+  return null;
 }

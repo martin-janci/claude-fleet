@@ -150,6 +150,10 @@ pub mod codes {
     /// The caller exceeded a per-caller rate limit (`broadcast_prompt`);
     /// `details.retry_after_secs` says when to retry.
     pub const E_RATE_LIMITED: &str = "E_RATE_LIMITED";
+    /// A tracker (Jira …) refused or could not be reached; `details.state`
+    /// says how (auth_failed | rate_limited | unreachable | captcha |
+    /// unconfigured). The cache still answers; this is only a live call.
+    pub const E_TRACKER: &str = "E_TRACKER";
     /// `move_session` with `strict: true` only: the source worktree has
     /// uncommitted changes (`details.dirty_files`). Without `strict` a move
     /// carries them instead of refusing.

@@ -1,0 +1,6 @@
+[
+  { "id": "summary", "key": "summary", "name": "Summary", "custom": false, "schema": { "type": "string", "system": "summary" } },
+  { "id": "customfield_10014", "key": "customfield_10014", "name": "Epic Link", "custom": true, "schema": { "type": "any", "custom": "com.pyxis.greenhopper.jira:gh-epic-link", "customId": 10014 } },
+  { "id": "customfield_10020", "key": "customfield_10020", "name": "Iteration", "custom": true, "schema": { "type": "array", "items": "json", "custom": "com.pyxis.greenhopper.jira:gh-sprint", "customId": 10020 } },
+  { "id": "customfield_10099", "key": "customfield_10099", "name": "Sprint", "custom": true, "schema": { "type": "string", "custom": "com.atlassian.jira.plugin.system.customfieldtypes:textfield", "customId": 10099 } }
+]

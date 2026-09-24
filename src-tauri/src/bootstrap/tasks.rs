@@ -23,6 +23,7 @@ use crate::bootstrap::mcp::maybe_start_mcp;
 use fleet_core::events::EventBus;
 use fleet_core::service::account_usage::UsageCache;
 use fleet_core::service::tick::{spawn_account_usage_tick, spawn_reconcile_tick};
+use fleet_core::service::trackers::sync::spawn_tracker_sync;
 use fleet_core::service::tunnel::TunnelSupervisor;
 use fleet_core::store::Store;
 use fleet_core::{cancel, mcp, ssh};
@@ -127,6 +128,16 @@ impl FleetTasks for RealFleetTasks {
             Arc::clone(&self.ssh),
             Arc::clone(&self.usage_cache),
             Arc::clone(&self.bus),
+            tokio_util::sync::CancellationToken::new(),
+        ));
+    }
+
+    /// The tracker sync tick (work graph M3.3): `work.sync_interval_secs`,
+    /// `0` = off. Never cancelled, for the same reason as the reconcile tick.
+    fn start_tracker_sync(&self) {
+        std::mem::drop(spawn_tracker_sync(
+            Arc::clone(&self.store),
+            fleet_core::service::trackers::direct_transport(),
             tokio_util::sync::CancellationToken::new(),
         ));
     }

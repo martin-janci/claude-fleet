@@ -1615,7 +1615,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 83);
+    assert_eq!(served, 84);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2871,7 +2871,16 @@ fn the_served_definition_budget_stays_bounded() {
     // the two existing tools (no new tool), but their eight parameters cost
     // schema bytes whatever the wording; descriptions stay one clause.
     // Measured at 66,421 on 2026-09-24; raised to that plus 100.
-    const BUDGET_BYTES: usize = 66_521;
+    // Raised for work graph M3.1: `work_admin`, the one new tool the M3 plan
+    // allows (trackers and credentials, master only), ten parameters of
+    // one clause each. Measured at 67,312 on 2026-09-24; plus 100.
+    // Raised for work graph M3.4: `work` gains tickets / lookup / trackers
+    // (tracker_id, view, query, limit, url) and `work_link` gains start
+    // (url, project_id, with_brief) — eight parameters on the two existing
+    // tools, no new tool. Measured at 68,066 on 2026-09-24; plus 100.
+    // M3.5: start's `name` / `worktree`, so the New-session dialog's edits
+    // reach a ticket start. Measured at 68,213 on 2026-09-24; plus 100.
+    const BUDGET_BYTES: usize = 68_313;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

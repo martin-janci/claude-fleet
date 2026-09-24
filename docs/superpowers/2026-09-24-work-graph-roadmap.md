@@ -265,6 +265,41 @@ list every deviation). Verified with `cargo fmt`, `clippy -D warnings`,
 - no secret on any read path;
 - a paired desktop runs no sync (`tests_startup.rs`).
 
+**Status (2026-09-24): landed** on `claude/cloud-fleet-work-graph-m3`
+(stacked on the M0–M2 branch), per
+`plans/2026-09-24-work-graph-m3-trackers-and-jira.md` (its *Revisions* list
+every deviation). Verified with `cargo fmt`, `clippy -D warnings`
+(workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub),
+`cargo deny check`, `pnpm check` / `pnpm test`, and `scripts/hub-e2e.sh`
+(102/102); no test talks to a real Jira. The manual acceptance on a real
+Jira Cloud site is still to do.
+
+- **M3.0 transport** (7260779): option A — the desktop's TLS/HTTP/1.1
+  client lifted into `fleet-core::net` (zero new crates); `HttpTransport`,
+  `DirectTransport` (https only, host policy before connect, no redirects,
+  body cap, timeout), `FakeTransport`.
+- **M3.1 schema, secrets, admin** (b44a5e4, 98debf2): migration 048
+  (`trackers`, `tracker_secrets`, `tracker_views`, tracker columns on
+  `work_items`); secrets only through `resolve_tracker_credential`,
+  `env:`/`file:` refs; the `*.atlassian.net` fence; redaction of Basic auth
+  and `ATATT…`, diagnostics literals; `work_admin` (Master, confirm-gated
+  remove), `fleet-hub tracker …` (token from stdin/env/ref, never argv),
+  five `LocalOnly` desktop commands; events kind `work`, never on a
+  host-bound `/events` stream.
+- **M3.2 Jira adapter** (33d6f44): the `TrackerProvider` trait and
+  `JiraCloud` per C23–C29, over sanitised fixtures.
+- **M3.3 sync** (d149570): the `FleetTasks` tick (hub and standalone
+  desktop only), views + linked-by-id + keys typed before connecting,
+  retro-binding, unavailable-not-gone, events only on real change,
+  `status_change` journal rows, `work.sync_interval_secs`.
+- **M3.4 API** (6ed000a): `work { tickets | lookup | trackers }`,
+  `work_link { start }`, the per-host fence, four Routed commands.
+- **M3.5 UI** (d147523): ⌘K tickets and lookup, Enter / ⌘↵, the dialog's
+  ticket mode with an editable brief, status on chips and work headers,
+  Settings → Work, the retro-link reveal.
+- **M3.6 docs**: `docs/hub.md` → *Trackers*, `docs/concepts.md` → *Work*,
+  `docs/control-api.md`, the control skill.
+
 ### M4: smarter detection and explanations
 
 - **More signals:**
@@ -439,3 +474,10 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   Tauri, the sidebar's past work and Resume). The tool budget was raised by
   734 B for eight parameters on `work` / `work_link`; no new tool, no
   contract bump. Deviations are in the M2 plan's *Revisions*.
+- 2026-09-24: M3 landed on `claude/cloud-fleet-work-graph-m3` (trackers,
+  Jira Cloud read-only, sync, tickets / lookup / start, the UI). The tool
+  budget grew by 1,792 B in three steps for `work_admin` (the one new tool)
+  and eleven parameters on `work` / `work_link`; no contract bump. Deviations
+  (relative JQL windows instead of timezone formatting, locally evaluated
+  views, `tracker_views.enabled`, and more) are in the M3 plan's
+  *Revisions*.

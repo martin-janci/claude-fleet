@@ -55,6 +55,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std", "registry", "tracing-log", "smallvec"] }
 tracing-appender = "0.2"
 
+# Outbound HTTPS for tracker providers (work graph M3.0, `net/`): the same
+# `tokio-rustls` (ring only) + platform-trust-store pair the desktop already
+# used to reach a hub, lifted here, so no second TLS stack and no new crate
+# enters `Cargo.lock`. See the M3 plan's Revisions for why not `reqwest`.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+
 # Asset catalog (docs/superpowers/specs/2026-09-14-asset-catalog-design.md)
 serde_yaml = "0.9"
 sha2 = "0.10"

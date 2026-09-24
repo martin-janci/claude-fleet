@@ -25,6 +25,9 @@ pub const JOURNAL_KINDS: &[&str] = &[
     "outcome",
     "note",
     "handover",
+    // A tracker item's status moved (work graph M3), on the conversation of
+    // each live session working on it.
+    "status_change",
 ];
 
 /// `source` values.

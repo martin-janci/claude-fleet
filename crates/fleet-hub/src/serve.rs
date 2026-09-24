@@ -825,6 +825,13 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         Arc::clone(&bus) as Arc<dyn EventBus>,
         ticks_cancel.clone(),
     );
+    // Trackers (work graph M3.3): the hub owns its fleet, so it syncs them
+    // (`work.sync_interval_secs`, `0` = off). A paired desktop never does.
+    let tracker_handle = fleet_core::service::trackers::sync::spawn_tracker_sync(
+        Arc::clone(&store),
+        fleet_core::service::trackers::direct_transport(),
+        ticks_cancel.clone(),
+    );
 
     wait_for_signal().await?;
     tracing::info!("fleet-hub stopping");
@@ -857,6 +864,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         tick_handles.push(h);
     }
     tick_handles.push(usage_handle);
+    if let Some(h) = tracker_handle {
+        tick_handles.push(h);
+    }
     await_ticks(tick_handles, TICK_SHUTDOWN_TIMEOUT).await;
     tunnels.stop_all();
     ssh.shutdown_all();

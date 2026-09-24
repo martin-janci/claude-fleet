@@ -87,6 +87,11 @@ pub fn verdict(command: &str) -> Option<&'static Verdict> {
 }
 
 /// The twenty Assets commands that all refuse for the same reason.
+/// Trackers (work graph M3.1): the hub's `work_admin` is master-only.
+const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet administration: the \
+     hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
+     configure them on the hub with `fleet-hub tracker add|set-credential|test`";
+
 const CATALOG_IS_A_CHECKOUT: &str =
     "the asset catalog is a git checkout on the machine that owns the fleet, and the hub has \
      no tool for this; work on the catalog there";
@@ -245,7 +250,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     // Work links (roadmap M1b.2): four commands, two tools. Reads and link
-    // decisions route; tracker admin (later) is the LocalOnly half (C17).
+    // decisions route; tracker admin (M3.1, below) is the LocalOnly half (C17).
     ("session_work_links", Verdict::Routed { tool: "work" }),
     ("link_session_work", Verdict::Routed { tool: "work_link" }),
     ("reject_session_work", Verdict::Routed { tool: "work_link" }),
@@ -254,6 +259,45 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("work_resume_plan", Verdict::Routed { tool: "work" }),
     ("resume_work", Verdict::Routed { tool: "work_link" }),
     ("work_purge_impact", Verdict::Routed { tool: "work" }),
+    // Work graph M3.1: trackers and their credentials are fleet
+    // administration. The hub's `work_admin` is master-only, and a paired
+    // desktop is a client, never the master (review C17).
+    (
+        "add_tracker",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    (
+        "update_tracker",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    (
+        "set_tracker_credential",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    (
+        "test_tracker",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    (
+        "remove_tracker",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    // Work graph M3.4: reading tickets and starting work route like every
+    // other work read and decision.
+    ("list_trackers", Verdict::Routed { tool: "work" }),
+    ("work_tickets", Verdict::Routed { tool: "work" }),
+    ("work_lookup", Verdict::Routed { tool: "work" }),
+    ("start_work", Verdict::Routed { tool: "work_link" }),
     (
         "session_conversation",
         Verdict::Routed {

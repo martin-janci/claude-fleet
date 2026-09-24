@@ -83,6 +83,16 @@ pub enum RowChange {
     SyncProgress(SyncProgress),
     /// A step boundary of an in-flight move. Not a store row.
     MoveProgress(MoveProgress),
+    /// A tracker item's normalised row changed (work graph M3). Emitted
+    /// only on a real change: a sync pass that finds nothing new is silent.
+    /// Never sent to a host-bound `/events` stream (the interim fence of
+    /// the M3 plan's decision 6).
+    WorkItemUpdated(crate::store::WorkItemRow),
+    /// A tracker's row changed: state, config, credential presence. Carries
+    /// no secret (`TrackerRow` cannot).
+    TrackerUpdated(crate::store::TrackerRow),
+    /// A tracker was removed.
+    TrackerRemoved(i64),
 }
 
 #[derive(Serialize, Clone)]
@@ -248,6 +258,9 @@ impl RowChange {
             RowChange::CatalogLoaded(_) => "catalog:loaded",
             RowChange::SyncProgress(_) => "sync:progress",
             RowChange::MoveProgress(_) => "move:progress",
+            RowChange::WorkItemUpdated(_) => "work:item",
+            RowChange::TrackerUpdated(_) => "work:tracker",
+            RowChange::TrackerRemoved(_) => "work:tracker_removed",
         }
     }
 
@@ -293,6 +306,9 @@ impl RowChange {
             RowChange::CatalogLoaded(s) => to_value(s),
             RowChange::SyncProgress(p) => to_value(p),
             RowChange::MoveProgress(p) => to_value(p),
+            RowChange::WorkItemUpdated(r) => to_value(r),
+            RowChange::TrackerUpdated(r) => to_value(r),
+            RowChange::TrackerRemoved(id) => serde_json::json!({ "id": id }),
         }
     }
 }
@@ -466,7 +482,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 20] = [
+pub const EVENT_NAMES: [&str; 23] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -487,12 +503,15 @@ pub const EVENT_NAMES: [&str; 20] = [
     "catalog:loaded",
     "sync:progress",
     "move:progress",
+    "work:item",
+    "work:tracker",
+    "work:tracker_removed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 11] = [
+pub const EVENT_KINDS: [&str; 12] = [
     "session",
     "host",
     "account",
@@ -504,6 +523,7 @@ pub const EVENT_KINDS: [&str; 11] = [
     "catalog",
     "sync",
     "move",
+    "work",
 ];
 
 /// Seconds since the Unix epoch (0 on a clock set before 1970).
@@ -745,6 +765,9 @@ impl EventBus for RecordingEventBus {
             RowChange::MoveProgress(p) => {
                 format!("{}:{}:{}", p.session_id, p.step.as_str(), p.state.as_str())
             }
+            RowChange::WorkItemUpdated(r) => r.id.to_string(),
+            RowChange::TrackerUpdated(r) => format!("{}:{}", r.id, r.state),
+            RowChange::TrackerRemoved(id) => id.to_string(),
         };
         self.names.lock().unwrap().push(e.name());
         self.events
@@ -935,6 +958,9 @@ mod tests {
                 RowChange::CatalogLoaded(_) => pinned_name!("catalog:loaded"),
                 RowChange::SyncProgress(_) => pinned_name!("sync:progress"),
                 RowChange::MoveProgress(_) => pinned_name!("move:progress"),
+                RowChange::WorkItemUpdated(_) => pinned_name!("work:item"),
+                RowChange::TrackerUpdated(_) => pinned_name!("work:tracker"),
+                RowChange::TrackerRemoved(_) => pinned_name!("work:tracker_removed"),
             }
         }
         // And for every variant a test can build without a full store row,
@@ -945,6 +971,7 @@ mod tests {
             RowChange::HostRemoved("h".into()),
             RowChange::AccountUpserted(AccountRow::default()),
             RowChange::WorktreeRemoved(1),
+            RowChange::TrackerRemoved(1),
             RowChange::AssetInventoryUpdated(AssetInventoryRow::default()),
             RowChange::AssetInventoryCleared {
                 host_alias: "h".into(),

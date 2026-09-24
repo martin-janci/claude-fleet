@@ -129,7 +129,7 @@ pub(crate) fn hub_conn(
 }
 
 /// Call one MCP tool on the running hub and return its JSON result.
-async fn call_tool(
+pub(crate) async fn call_tool(
     conn: &HubConn,
     tool: &str,
     arguments: serde_json::Value,

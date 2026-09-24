@@ -130,6 +130,18 @@ fn work_links_has_role(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 048: `work_items` already has its
+/// `aliases` column, and `ALTER TABLE ... ADD COLUMN` would fail again. See
+/// [`Migration`].
+fn work_items_has_aliases(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'aliases'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -406,6 +418,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 47,
         sql: include_str!("../../migrations/047_work_journal.sql"),
         already_applied: Some(work_links_has_role),
+    },
+    // Work graph M3: `trackers`, `tracker_secrets`, `tracker_views` and the
+    // tracker columns of `work_items` — ADD COLUMNs, so the 038-047 guard.
+    Migration {
+        version: 48,
+        sql: include_str!("../../migrations/048_trackers.sql"),
+        already_applied: Some(work_items_has_aliases),
     },
 ];
 
@@ -2082,5 +2101,38 @@ mod tests {
         old.migrate().expect("re-run 045");
         assert_eq!(count(&old, quiet), 1);
         assert_eq!(count(&old, later), 1);
+    }
+
+    /// Migration 048 (work graph M3): the tracker tables and the new
+    /// `work_items` columns land on a database with work items, and a re-run
+    /// (the guard) keeps both the tracker and the item's new attributes.
+    #[test]
+    fn migration_048_adds_trackers_and_item_columns_and_reruns_safely() {
+        let old = store_at_version(47);
+        old.conn
+            .execute_batch(
+                "INSERT INTO work_items (source, key, title, created_at, updated_at) \
+                 VALUES ('local', 'ABC-1', 'x', 1, 1);",
+            )
+            .unwrap();
+        old.migrate().expect("048 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let t = old
+            .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "UPDATE work_items SET aliases = '[\"OLD-1\"]', status_name = 'In Review';",
+            )
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 48;")
+            .unwrap();
+        old.migrate().expect("re-running 048 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(old.get_tracker(t.id).unwrap().is_some());
+        let item = old.work_item_by_key("ABC-1").unwrap().unwrap();
+        assert_eq!(item.aliases, vec!["OLD-1"]);
+        assert_eq!(item.status_name.as_deref(), Some("In Review"));
     }
 }

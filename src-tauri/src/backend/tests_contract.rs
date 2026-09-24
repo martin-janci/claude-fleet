@@ -104,6 +104,7 @@ pub(crate) fn sample_session() -> SessionRow {
             key: Some("ABC-123".into()),
             title: "Login".into(),
             source: "manual".into(),
+            ..Default::default()
         }),
         work_rejected: vec!["XYZ-9".into()],
     }

@@ -557,7 +557,8 @@ impl FleetTools {
 
     #[tool(description = "Work links: {session_id} → its live links; \
         {key} → ended (past) links; neither → recently ended. action \
-        context|resume_plan {key}; purge_impact.")]
+        context|resume_plan {key}; purge_impact; tickets (cached); lookup \
+        {key|url}; trackers.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -603,13 +604,41 @@ impl FleetTools {
                 }
                 ok_json(&w::work_purge_impact(&args, &self.store).map_err(to_mcp_err)?)
             }
+            WorkAction::Tickets => {
+                let rows = crate::service::trackers::tickets::tickets(
+                    &self.store,
+                    args.tracker_id,
+                    args.view.as_deref(),
+                    args.query.as_deref(),
+                    args.limit,
+                    tracker_scope(&caller),
+                )
+                .map_err(to_mcp_err)?;
+                ok_json_compact(&rows)
+            }
+            WorkAction::Lookup => {
+                let reference = w::lookup_reference(&args).map_err(to_mcp_err)?;
+                let t = crate::service::trackers::tickets::lookup(
+                    &self.store,
+                    reference,
+                    tracker_scope(&caller),
+                    crate::service::trackers::direct_transport(),
+                )
+                .await
+                .map_err(to_mcp_err)?;
+                ok_json(&t)
+            }
+            WorkAction::Trackers => ok_json_compact(
+                &crate::service::trackers::tickets::trackers(&self.store, tracker_scope(&caller))
+                    .map_err(to_mcp_err)?,
+            ),
         }
     }
 
     #[tool(description = "Decide a session's work: action link (becomes its \
         primary; key or item_id), reject (sticky 'not this'), unlink \
         (link_id). Returns the updated row. resume {key, mode}: new session \
-        on past work.")]
+        on past work. start {key|url|item_id}: new session on a ticket.")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -652,6 +681,21 @@ impl FleetTools {
                     .map_err(to_mcp_err)?;
             return ok_json(&row);
         }
+        if args.action == "start" {
+            // The host fence (a per-host token starts only its own host's
+            // tickets, on its own host) is inside `start_work`'s scope.
+            let row = crate::service::trackers::tickets::start_work(
+                &self.store,
+                &self.ssh,
+                &self.reg,
+                &crate::service::work::start_args(&args),
+                tracker_scope(&caller),
+                crate::service::trackers::direct_transport(),
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&row);
+        }
         let sid = args.session_id.ok_or_else(|| {
             mcp_err(
                 "E_INVALID",
@@ -662,6 +706,46 @@ impl FleetTools {
         self.resolve_target_row(&caller, Some(sid), None, None, "the session")?;
         let row = crate::service::work::work_link(&args, &self.store).map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(description = "Trackers (Jira): list, add, update, \
+        set_credential, test, remove. Never returns a secret.")]
+    pub(super) async fn work_admin(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::trackers::admin::WorkAdminArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::trackers::admin::{self as a, AdminAction};
+        // Master-only enforcement already happened centrally
+        // (`enforce_admin`, `work_admin` is `Access::Master`). The audit line
+        // is built by hand: the secret never reaches it, not even as a length.
+        let summary = args.audit_summary();
+        audit("work_admin", &summary);
+        match AdminAction::parse(&args.action).map_err(to_mcp_err)? {
+            AdminAction::Test => {
+                let id = args
+                    .tracker_id
+                    .ok_or_else(|| mcp_err("E_INVALID", "test needs tracker_id", None))?;
+                let report = a::test_tracker(
+                    id,
+                    &self.store,
+                    crate::service::trackers::direct_transport(),
+                )
+                .await
+                .map_err(to_mcp_err)?;
+                ok_json(&report)
+            }
+            AdminAction::Remove => {
+                self.confirm_gate(
+                    "work_admin",
+                    args.confirm_nonce.as_deref(),
+                    &summary,
+                    &caller,
+                )?;
+                ok_json(&a::admin_sync(&args, &self.store).map_err(to_mcp_err)?)
+            }
+            _ => ok_json(&a::admin_sync(&args, &self.store).map_err(to_mcp_err)?),
+        }
     }
 
     /// A per-host token reads a key's context or resume plan only when some
@@ -691,5 +775,14 @@ impl FleetTools {
                 None,
             ))
         }
+    }
+}
+
+/// Which tickets a caller may see (work graph M3.4, the plan's decision 6):
+/// a per-host token only its own host's linked items, everyone else all.
+fn tracker_scope(caller: &Caller) -> crate::service::trackers::tickets::Scope<'_> {
+    match caller.host_alias.as_deref() {
+        Some(h) => crate::service::trackers::tickets::Scope::Host(h),
+        None => crate::service::trackers::tickets::Scope::All,
     }
 }

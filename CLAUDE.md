@@ -107,7 +107,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 137
+  verdict is written down once, in `backend/verdicts.rs`, for all 145
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -173,10 +173,14 @@ reached `main` only on 2026-09-22: PR #161 was merged into the stacked branch
 landed on its own, so for three days this paragraph described half a feature.
 When a stacked PR says MERGED, check what it was merged INTO.
 
-The work graph's M0–M2 are landed (work links anchored on participants,
+The work graph's M0–M3 are landed (work links anchored on participants,
 group-by-work, and M2's work journal, carry rules, handover brief and resume
-— `work` / `work_link` actions, `service/work/`); read
+— `work` / `work_link` actions, `service/work/`; M3's trackers: Jira Cloud
+read-only over `fleet-core::net`, the sync tick, `work_admin`, tickets /
+lookup / start — `service/trackers/`, `store/trackers.rs`,
+`store/tracker_items.rs`); read
 `docs/superpowers/2026-09-24-work-graph-roadmap.md` before touching them.
+Tracker secrets are read ONLY by `Store::resolve_tracker_credential`.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

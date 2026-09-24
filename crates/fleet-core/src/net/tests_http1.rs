@@ -1,6 +1,8 @@
-//! Tests for [`super`] (`backend::http1`): the response-head parsing and
-//! chunked-transfer decoding shared by `remote.rs`'s one-shot `POST /mcp` and
-//! `events.rs`'s streaming `GET /events`.
+//! Tests for [`super`] (`net::http1`): the response-head parsing and
+//! chunked-transfer decoding shared by the desktop's `remote.rs` one-shot
+//! `POST /mcp`, its `events.rs` streaming `GET /events`, and
+//! [`crate::net::https`]'s tracker client. (Lifted from `src-tauri`'s
+//! `backend/http1.rs` with work graph M3.0.)
 //!
 //! Every test here used to live beside one of the two callers, testing the
 //! callers' own now-removed copy of this logic directly:

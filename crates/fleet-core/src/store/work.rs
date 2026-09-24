@@ -46,6 +46,49 @@ pub struct WorkItemRow {
     pub status_category: String,
     pub created_at: i64,
     pub updated_at: i64,
+    // --- tracker attributes (migration 048, work graph M3); all default, so
+    // an older hub's row still reads. Identity is (tracker_id, external_id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    /// Former keys (a moved or renamed issue), upper case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// The tracker's type name (Story, Bug, Epic …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Jira `issuetype.hierarchyLevel`: 1 epic, 0 standard, -1 subtask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy_level: Option<i64>,
+    /// The tracker's own status name ("In Review").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+    /// completed | not_planned | duplicate, once resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<i64>,
+    /// Display names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignees: Vec<String>,
+    /// The current sprint's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<String>,
+    /// The tracker's own `updated`, unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_ext: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_changed_at: Option<i64>,
+    /// When fleet last read it from the tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<i64>,
+    /// Missing is not gone (C25): the tracker stopped answering for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_at: Option<i64>,
+    /// not_found_or_no_permission | tracker_removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 /// One session ↔ work link. `participant_id` is `None` once the retired
@@ -105,7 +148,7 @@ fn default_true() -> bool {
 }
 
 /// A live session's primary work, for the session row and the sidebar.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkSummary {
     pub link_id: i64,
     #[serde(default)]
@@ -117,6 +160,19 @@ pub struct WorkSummary {
     #[serde(default)]
     pub title: String,
     pub source: String,
+    // --- the tracker item's status (work graph M3), absent for a bare key,
+    // a local item, or a hub older than M3.
+    /// todo | in_progress | done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_category: Option<String>,
+    /// The tracker's own status name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The tracker no longer answers for the item (C25).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
 }
 
 /// What to link a session to.
@@ -205,9 +261,19 @@ fn map_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkLinkRow> {
     })
 }
 
-const ITEM_COLUMNS: &str = "id, source, key, title, url, status_category, created_at, updated_at";
+pub(super) const ITEM_COLUMNS: &str =
+    "id, source, key, title, url, status_category, created_at, updated_at, \
+     tracker_id, external_id, aliases, kind, hierarchy_level, status_name, resolution, parent_id, \
+     assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
+     unavailable_reason";
 
-fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
+/// A JSON array column as a list; anything unreadable is empty.
+fn json_list(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
     Ok(WorkItemRow {
         id: r.get(0)?,
         source: r.get(1)?,
@@ -217,6 +283,21 @@ fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         status_category: r.get(5)?,
         created_at: r.get(6)?,
         updated_at: r.get(7)?,
+        tracker_id: r.get(8)?,
+        external_id: r.get(9)?,
+        aliases: json_list(r.get(10)?),
+        kind: r.get(11)?,
+        hierarchy_level: r.get(12)?,
+        status_name: r.get(13)?,
+        resolution: r.get(14)?,
+        parent_id: r.get(15)?,
+        assignees: json_list(r.get(16)?),
+        iteration: r.get(17)?,
+        updated_ext: r.get(18)?,
+        status_changed_at: r.get(19)?,
+        fetched_at: r.get(20)?,
+        unavailable_at: r.get(21)?,
+        unavailable_reason: r.get(22)?,
     })
 }
 
@@ -310,6 +391,13 @@ impl Store {
             }
             WorkTarget::Key(raw) => {
                 let key = normalize_work_ref(raw)?;
+                // A tracker item exactly one tracker has (by key or alias)
+                // wins; else a local item; else a bare key a later sync
+                // binds. The key is kept on a tracker link too, for history
+                // and for a tracker that is later removed.
+                if let Some(item) = self.tracker_item_for_key(&key)? {
+                    return Ok((Some(item.id), Some(key)));
+                }
                 match self.local_work_item_by_key(&key)? {
                     Some(item) => Ok((Some(item.id), None)),
                     None => Ok((None, Some(key))),
@@ -371,7 +459,8 @@ impl Store {
             .query_row(
                 "SELECT id FROM work_links \
                  WHERE participant_id = ?1 AND ended_at IS NULL \
-                   AND item_id IS ?2 AND ref_key IS ?3",
+                   AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2)) \
+                 ORDER BY id LIMIT 1",
                 rusqlite::params![participant, item_id, ref_key],
                 |r| r.get(0),
             )
@@ -811,7 +900,9 @@ impl Store {
     pub fn primary_work_by_session(&self) -> Result<HashMap<i64, WorkSummary>, IpcError> {
         let mut stmt = self.conn.prepare(
             "SELECT p.session_id, l.id, l.item_id, COALESCE(i.key, l.ref_key), \
-                    COALESCE(i.title, ''), l.source \
+                    COALESCE(i.title, ''), l.source, \
+                    CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                    i.status_name, i.url, i.unavailable_at IS NOT NULL \
              FROM work_links l \
              JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
              LEFT JOIN work_items i ON i.id = l.item_id \
@@ -827,6 +918,10 @@ impl Store {
                     key: r.get(3)?,
                     title: r.get(4)?,
                     source: r.get(5)?,
+                    status_category: r.get(6)?,
+                    status_name: r.get(7)?,
+                    url: r.get(8)?,
+                    unavailable: r.get::<_, Option<bool>>(9)?.unwrap_or(false),
                 },
             ))
         })?;
@@ -1067,6 +1162,7 @@ mod tests {
                 key: Some("ABC-9".into()),
                 title: "Login".into(),
                 source: "manual".into(),
+                ..Default::default()
             })
         );
         assert!(row.row_version > before.row_version);

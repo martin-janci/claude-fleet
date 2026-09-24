@@ -547,15 +547,29 @@ pub async fn resume_work(
     })
     .await?;
     if handover.is_some() {
-        let store = Arc::clone(store);
-        let ssh = Arc::clone(ssh);
-        let prompt = start_prompt(&args.key);
-        let (id, host, tmux) = (row.id, row.host_alias.clone(), row.tmux_name.clone());
-        crate::rt::spawn(async move {
-            send_start_prompt(store, ssh, id, host, tmux, prompt).await;
-        });
+        spawn_start_prompt(
+            Arc::clone(store),
+            Arc::clone(ssh),
+            &row,
+            start_prompt(&args.key),
+        );
     }
     Ok(row)
+}
+
+/// Type `prompt` into `row`'s pane once its REPL is ready, in the
+/// background (see [`send_start_prompt`] for what it never types into).
+/// Shared by a brief resume and a brief start (work graph M3.4).
+pub fn spawn_start_prompt(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<SshClient>,
+    row: &SessionRow,
+    prompt: String,
+) {
+    let (id, host, tmux) = (row.id, row.host_alias.clone(), row.tmux_name.clone());
+    crate::rt::spawn(async move {
+        send_start_prompt(store, ssh, id, host, tmux, prompt).await;
+    });
 }
 
 /// What the pane says about typing into it now.

@@ -473,15 +473,21 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers.
 
-Parameters: `action`, `host_alias`, `host_aliases`, `key`, `link_id`, `project_id`, `session_id`, `with_brief`
+Parameters: `action`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `project_id`, `query`, `session_id`, `tracker_id`, `url`, `view`, `with_brief`
+
+### `work_admin`
+
+Trackers (Jira): list, add, update, set_credential, test, remove. Never returns a secret.
+
+Parameters: `action`, `auth_kind`, `confirm_nonce`, `credential_ref`, `name`, `provider`, `secret`, `site_url`, `tracker_id`, `username`
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'), unlink (link_id). Returns the updated row. resume {key, mode}: new session on past work.
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'), unlink (link_id). Returns the updated row. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket.
 
-Parameters: `action`, `brief`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `session_id`, `source`
+Parameters: `action`, `brief`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `name`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -514,6 +520,15 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::work_resume_plan`
 - `commands::work::resume_work`
 - `commands::work::work_purge_impact`
+- `commands::trackers::add_tracker`
+- `commands::trackers::update_tracker`
+- `commands::trackers::set_tracker_credential`
+- `commands::trackers::test_tracker`
+- `commands::trackers::remove_tracker`
+- `commands::trackers::list_trackers`
+- `commands::trackers::work_tickets`
+- `commands::trackers::work_lookup`
+- `commands::trackers::start_work`
 - `commands::sessions::session_history`
 - `commands::sessions::session_conversations`
 - `commands::sessions::session_conversation`
