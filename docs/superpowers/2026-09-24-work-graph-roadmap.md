@@ -459,8 +459,9 @@ The order serves the user's real setup. Decision D1 below may reorder it.
 client token sees `work` but not `work_link`, and no client `work_admin`. No
 contract bump. **M8.1** (fleet-mobile's model, `tools/list` discovery,
 work transport and the `work` event kind) landed on fleet-mobile's
-`claude/cloud-fleet-work-graph-m8`; M8.2–M8.5 (the screens and docs) are not
-started. Note the plan's Revisions item 4 (an absent `work` on a row means
+`claude/cloud-fleet-work-graph-m8`, and **M8.2** (group by work, the
+"My work" chip, the row's work chip) on top of it; M8.3–M8.5 (the session
+screen, tickets / Start / Resume, docs) are not started. Note the plan's Revisions item 4 (an absent `work` on a row means
 none).
 
 ### M9: beyond

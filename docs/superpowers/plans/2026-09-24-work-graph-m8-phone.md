@@ -282,3 +282,28 @@ Each task is one reviewable PR. Hub tasks run in the **Worker** environment (car
   M8.0's `WorkLinkAction` enum and its string-to-enum dispatch refactor were
   dropped rather than re-threaded through M5's fences (no behaviour depended
   on them). The enums cost +72 B over M5 (69,171; `BUDGET_BYTES` 69,271).
+- **2026-09-24, M8.2 landed** in fleet-mobile on the same branch (42c2868),
+  stacked on M8.1. Verified with the full `./gradlew build` (0 `e:` lines;
+  with an Android SDK installed in the container, so M8.1 is now
+  build-verified too) and `:androidApp:compileDebugAndroidTestKotlin`; the
+  extended `SessionsFilterLayoutTest` itself runs only in CI's emulator job.
+  Deviations and choices:
+  1. **Work groups are per host**, inside each host group and before its
+     projects, as this plan says — unlike the desktop, whose work groups
+     span hosts. The table tests are named after `buildSessionsByWork`'s
+     cases, with "filters rows but still reports every keyed session"
+     becoming "filters rows and groups per host".
+  2. **Order:** groups with someone waiting first (the phone's one
+     severity), then the most recently active (the desktop's tie order),
+     then the key.
+  3. **The heading** takes status and title from the ticket cache when it
+     has the item, since a `work:item` frame does not restamp session rows.
+  4. **"My work"** loads through a new `WorkActions` seam (trackers, then
+     `tickets(mine)`) when the hub serves `work`, and again on a pull to
+     refresh; the answer seeds the ticket cache for M8.4. A failure keeps
+     what was known. The chip appears only once "mine" has answered.
+  5. **The row chip** follows design §0.3.1: solid when a person or agent
+     linked it (or `strength: explicit`), a ring when the hub linked it by
+     itself, dashed with `?` for a suggestion (only on a row without a
+     link), struck through when unavailable; hidden under a work group's
+     own heading.
