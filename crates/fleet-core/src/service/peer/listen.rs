@@ -5,8 +5,8 @@
 use super::apply::{apply_inbound, apply_results, outbox_to_wire};
 use super::validate::{check_batch, check_fleet_id};
 use super::wire::{
-    ExchangeRequest, ExchangeResponse, ResultStatus, WireResult, PEER_BATCH_MAX, PEER_WAIT_MAX_MS,
-    PROTO,
+    cap_page, ExchangeRequest, ExchangeResponse, ResultStatus, WireResult, PEER_BATCH_MAX,
+    PEER_WAIT_MAX_MS, PROTO,
 };
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::ssh::SshClient;
@@ -110,7 +110,10 @@ pub async fn exchange(
             let mut rows = s.pending_outbox(link.id, req.after, PEER_BATCH_MAX as i64 + 1)?;
             let more = rows.len() > PEER_BATCH_MAX;
             rows.truncate(PEER_BATCH_MAX);
-            (outbox_to_wire(&s, &own, rows)?, more)
+            // Cut by size too, and say so: the dialer's answer cap and any
+            // proxy in between bound the bytes, not the count.
+            let (page, cut) = cap_page(outbox_to_wire(&s, &own, rows)?);
+            (page, more || cut)
         };
         let now = tokio::time::Instant::now();
         if !messages.is_empty()
@@ -627,5 +630,55 @@ mod tests {
             "{:?}",
             t0.elapsed()
         );
+    }
+
+    /// I4: the listener's page is cut by size, not only by count, and says
+    /// `more`; the rest comes on the next exchange. Fifty worst-case bodies
+    /// (control characters escape to six bytes each) are far over the cap.
+    #[tokio::test]
+    async fn the_listeners_page_is_capped_by_size_and_says_more() {
+        let (store, ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        let c = peer_client(&store, "hub-a");
+        exchange(&store, &ssh, c, req("fleet-a")).await.unwrap();
+        let link = store
+            .lock()
+            .unwrap()
+            .live_peer_link_for_fleet("fleet-a")
+            .unwrap()
+            .unwrap();
+        let body = "\u{1}".repeat(PEER_BODY_MAX);
+        {
+            let s = store.lock().unwrap();
+            let to = s
+                .ensure_remote_participant(link.id, "fleet-a/session/h/a1")
+                .unwrap();
+            for _ in 0..PEER_BATCH_MAX {
+                s.insert_outbound_remote(
+                    b1,
+                    "fleet-b/session/local/b1",
+                    to,
+                    &body,
+                    "message",
+                    None,
+                    false,
+                )
+                .unwrap();
+            }
+        }
+        let first = exchange(&store, &ssh, c, req("fleet-a")).await.unwrap();
+        let bytes: usize = first
+            .messages
+            .iter()
+            .map(|m| serde_json::to_string(m).unwrap().len())
+            .sum();
+        assert!(!first.messages.is_empty());
+        assert!(bytes <= PEER_PAGE_MAX_BYTES, "{bytes} bytes in one page");
+        assert!(first.more, "cut by size says more");
+        let mut next = req("fleet-a");
+        next.after = first.messages.last().unwrap().id;
+        let second = exchange(&store, &ssh, c, next).await.unwrap();
+        assert!(!second.messages.is_empty(), "the rest comes next");
+        assert!(second.messages[0].id > first.messages.last().unwrap().id);
     }
 }

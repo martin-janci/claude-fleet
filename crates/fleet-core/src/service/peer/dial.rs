@@ -9,10 +9,10 @@
 
 use super::apply::{apply_inbound, apply_results, outbox_to_wire};
 use super::backoff::{is_terminal, Backoff};
-use super::validate::check_batch;
+use super::validate::{check_batch, check_fleet_id};
 use super::wire::{
-    ExchangeRequest, ExchangeResponse, ResultStatus, WireResult, PEER_BATCH_MAX, PEER_WAIT_MAX_MS,
-    PROTO,
+    cap_page, ExchangeRequest, ExchangeResponse, ResultStatus, WireResult, PEER_BATCH_MAX,
+    PEER_WAIT_MAX_MS, PROTO,
 };
 use crate::http_client::HubTransport;
 use crate::ipc_error::{codes, lock, IpcError};
@@ -368,7 +368,9 @@ fn read_link(store: &Mutex<Store>, link_id: i64) -> Result<Option<Snapshot>, Ipc
         return Ok(None);
     };
     let rows = s.pending_outbox(link_id, 0, PEER_BATCH_MAX as i64)?;
-    let send = outbox_to_wire(&s, &own, rows)?;
+    // Cut by size too: the rest goes on the next exchange, which follows at
+    // once (a non-empty send never parks).
+    let (send, _) = cap_page(outbox_to_wire(&s, &own, rows)?);
     let mut rejects: Vec<WireResult> = link
         .pending_rejects
         .as_deref()
@@ -399,22 +401,36 @@ async fn settle(
             LinkExit::Incompatible,
         )));
     }
+    // The peer's fleet id is checked before it is stored, compared, or put
+    // in any message: it is the peer's word, shown in `peer list`.
+    if check_fleet_id(&resp.fleet_id).is_err() {
+        return Ok(Settled::Exit(fence.terminal(
+            LINK_INCOMPATIBLE,
+            "the peer sent an invalid fleet id",
+            LinkExit::Incompatible,
+        )));
+    }
+    if resp.fleet_id == own {
+        return Ok(Settled::Exit(fence.terminal(
+            LINK_REFUSED,
+            "the peer answered with this hub's own fleet id",
+            LinkExit::Refused,
+        )));
+    }
     let mut link = link.clone();
     match link.fleet_id.as_deref() {
         None => {
             let adopted = lock(store)?.adopt_dialer_fleet(link.id, &resp.fleet_id);
             let kept = match adopted {
                 Ok(kept) => kept,
-                // This hub already LISTENS for that fleet: one link per
-                // fleet, and retrying cannot change which side dials.
+                // That fleet already has a link — a working dialer row
+                // (this handshake may not take it over) or a listener row
+                // (it dials us). One link per fleet, and retrying cannot
+                // change that: terminal on THIS row; the other is untouched.
                 Err(e) if e.code == codes::E_EXISTS => {
                     return Ok(Settled::Exit(fence.terminal(
                         LINK_REFUSED,
-                        &format!(
-                            "E_EXISTS: fleet {} is already linked the other way \
-                             (it dials this hub); remove one of the two links",
-                            resp.fleet_id
-                        ),
+                        &format!("E_EXISTS: {}", e.message),
                         LinkExit::Refused,
                     )));
                 }
@@ -763,5 +779,127 @@ mod tests {
         );
         cancel.cancel();
         assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
+    }
+
+    /// A peer that answers every call as `fleet_id`, with nothing else.
+    struct AnswersAs(String);
+
+    #[async_trait::async_trait]
+    impl PeerCall for AnswersAs {
+        async fn exchange(
+            &self,
+            _req: &ExchangeRequest,
+            _timeout: Duration,
+        ) -> Result<ExchangeResponse, CallError> {
+            Ok(ExchangeResponse {
+                proto: PROTO,
+                fleet_id: self.0.clone(),
+                results: vec![],
+                messages: vec![],
+                more: false,
+            })
+        }
+    }
+
+    /// Run a fresh dialer row against a peer answering as `fleet`; the exit
+    /// (or `None` if the loop is still running after 3 s) and the row.
+    async fn handshake_as(fleet: &str) -> (Option<LinkExit>, PeerLinkRow) {
+        let (store, ssh) = hub("fleet-a");
+        let link = store
+            .lock()
+            .unwrap()
+            .insert_dialer_link("https://b.example", "t")
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let h = tokio::spawn(run_link(
+            store.clone(),
+            ssh,
+            link,
+            "t".into(),
+            Arc::new(AnswersAs(fleet.to_string())),
+            cancel.clone(),
+        ));
+        let exit = match tokio::time::timeout(Duration::from_secs(3), h).await {
+            Ok(done) => Some(done.unwrap()),
+            Err(_) => {
+                cancel.cancel();
+                None
+            }
+        };
+        let row = store.lock().unwrap().peer_link(link).unwrap().unwrap();
+        (exit, row)
+    }
+
+    /// I1: the fleet id a peer answers with is checked before it is stored:
+    /// a malformed one (a line break, any length) is `incompatible`, and the
+    /// row pins nothing.
+    // multi_thread: a peer that answers instantly must not starve the
+    // timeout that ends the test if the loop never stops.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_answering_an_invalid_fleet_id_is_incompatible() {
+        for bad in ["fleet\nb".to_string(), "f".repeat(5000), String::new()] {
+            let (exit, row) = handshake_as(&bad).await;
+            assert_eq!(exit, Some(LinkExit::Incompatible), "{:?}", bad.len());
+            assert_eq!(row.state, LINK_INCOMPATIBLE);
+            assert!(
+                row.fleet_id.is_none(),
+                "{:?}",
+                row.fleet_id.map(|f| f.len())
+            );
+            let why = row.last_error.unwrap_or_default();
+            assert!(why.contains("the peer sent an invalid fleet id"), "{why}");
+            assert!(why.len() < 200, "the bad id is not echoed");
+        }
+    }
+
+    /// I1: a peer answering with THIS hub's fleet id is refused.
+    // multi_thread: a peer that answers instantly must not starve the
+    // timeout that ends the test if the loop never stops.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_answering_with_our_own_fleet_id_is_refused() {
+        let (exit, row) = handshake_as("fleet-a").await;
+        assert_eq!(exit, Some(LinkExit::Refused));
+        assert_eq!(row.state, LINK_REFUSED);
+        assert!(row.fleet_id.is_none());
+        let why = row.last_error.unwrap_or_default();
+        assert!(why.contains("this hub's own fleet id"), "{why}");
+    }
+
+    /// I4: the dialer's `send` page is cut by size — fifty worst-case
+    /// bodies are far over the cap — and never to nothing.
+    #[test]
+    fn the_dialers_send_page_is_capped_by_size() {
+        use crate::service::peer::wire::{PEER_BODY_MAX, PEER_PAGE_MAX_BYTES};
+        let (store, _ssh) = hub("fleet-a");
+        let a1 = session(&store, "a1");
+        let link = {
+            let s = store.lock().unwrap();
+            let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(link, "fleet-b").unwrap();
+            let to = s
+                .ensure_remote_participant(link, "fleet-b/session/h/b1")
+                .unwrap();
+            let body = "\u{1}".repeat(PEER_BODY_MAX);
+            for _ in 0..PEER_BATCH_MAX {
+                s.insert_outbound_remote(
+                    a1,
+                    "fleet-a/session/local/a1",
+                    to,
+                    &body,
+                    "message",
+                    None,
+                    false,
+                )
+                .unwrap();
+            }
+            link
+        };
+        let (_, _, send, _) = read_link(&store, link).unwrap().unwrap();
+        let bytes: usize = send
+            .iter()
+            .map(|m| serde_json::to_string(m).unwrap().len())
+            .sum();
+        assert!(!send.is_empty());
+        assert!(bytes <= PEER_PAGE_MAX_BYTES, "{bytes} bytes in one send");
     }
 }

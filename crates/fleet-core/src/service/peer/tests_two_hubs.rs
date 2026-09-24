@@ -195,7 +195,23 @@ fn pair_of(a_fleet: &str, b_fleet: &str) -> Pair {
         .unwrap()
         .insert_dialer_link("https://b.example", "t")
         .unwrap();
-    let call = Arc::new(Loopback {
+    let call = loopback(&b, &b_ssh, client_id);
+    Pair {
+        a,
+        a_ssh,
+        a1,
+        b,
+        b_ssh,
+        b1,
+        link,
+        call,
+        cancel: CancellationToken::new(),
+    }
+}
+
+/// A fake transport onto hub `b`'s listener, as the client `client_id`.
+fn loopback(b: &Arc<Mutex<Store>>, b_ssh: &Arc<SshClient>, client_id: i64) -> Arc<Loopback> {
+    Arc::new(Loopback {
         b: b.clone(),
         b_ssh: b_ssh.clone(),
         client_id,
@@ -208,18 +224,7 @@ fn pair_of(a_fleet: &str, b_fleet: &str) -> Pair {
         dropped: AtomicUsize::new(0),
         held: AtomicBool::new(false),
         release: tokio::sync::Notify::new(),
-    });
-    Pair {
-        a,
-        a_ssh,
-        a1,
-        b,
-        b_ssh,
-        b1,
-        link,
-        call,
-        cancel: CancellationToken::new(),
-    }
+    })
 }
 
 fn pair() -> Pair {
@@ -801,6 +806,67 @@ async fn a_re_pair_rebinds_onto_the_older_row_and_its_pending_rows_go_out() {
     assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
 }
 
+/// C1: a newly paired hub C whose handshake claims fleet-b — which A
+/// already has a connected link to — cannot take that link over. The claim
+/// ends refused on C's own row, naming the live link; the live link keeps
+/// its url, token and state, and A's next message still goes to B.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_peer_claiming_a_connected_links_fleet_is_refused() {
+    let p = pair();
+    let h = p.start();
+    p.handshake().await;
+    p.until("connected", || p.row().state == "connected").await;
+    // Hub C answers as fleet-b.
+    let (c, c_ssh) = hub("fleet-b");
+    let c_client = peer_client(&c, "hub-a");
+    let claimant =
+        p.a.lock()
+            .unwrap()
+            .insert_dialer_link("https://c.example", "t-c")
+            .unwrap();
+    let exit = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::spawn(run_link(
+            p.a.clone(),
+            p.a_ssh.clone(),
+            claimant,
+            "t-c".into(),
+            loopback(&c, &c_ssh, c_client),
+            p.cancel.clone(),
+        )),
+    )
+    .await
+    .expect("the claimant's loop stops")
+    .unwrap();
+    assert_eq!(exit, LinkExit::Refused);
+    let (live, claim) = {
+        let s = p.a.lock().unwrap();
+        (
+            s.peer_link(p.link).unwrap().unwrap(),
+            s.peer_link(claimant)
+                .unwrap()
+                .expect("the claimant row stays"),
+        )
+    };
+    assert_eq!(live.url.as_deref(), Some("https://b.example"));
+    assert_eq!(live.token.as_deref(), Some("t"));
+    assert_eq!(live.state, "connected");
+    assert_eq!(claim.state, "refused");
+    assert!(claim.fleet_id.is_none());
+    let why = claim.last_error.unwrap_or_default();
+    assert!(
+        why.contains(&format!(
+            "fleet fleet-b is already linked (link {})",
+            p.link
+        )) && why.contains("fleet-hub peer remove"),
+        "{why}"
+    );
+    p.send_a_to_b("still to b").await;
+    p.until("B has it", || p.b_inbox().len() == 1).await;
+    p.cancel.cancel();
+    assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
+}
+
 // ---- fix round 1 --------------------------------------------------------------
 
 /// I1: a loop started with credentials that a re-pair has since replaced
@@ -821,6 +887,10 @@ async fn a_stale_loops_refusal_cannot_clobber_a_re_paired_row() {
     .await;
     {
         let s = p.a.lock().unwrap();
+        // A re-pair merges only into a stopped row (C1): the row reads
+        // `refused` while the stale loop's call is still in flight.
+        s.set_peer_link_state(p.link, "refused", Some("E_UNAUTHORIZED: gone"), 0)
+            .unwrap();
         let tmp = s
             .insert_dialer_link("https://b2.example", "t2-new-token")
             .unwrap();
@@ -1190,6 +1260,9 @@ async fn the_supervisor_restarts_a_running_link_on_new_credentials() {
     b.lock().unwrap().revoke_client_token("hub-a").unwrap();
     {
         let s = a.lock().unwrap();
+        // A re-pair merges only into a stopped row (C1).
+        s.set_peer_link_state(link, "refused", Some("E_UNAUTHORIZED: gone"), 0)
+            .unwrap();
         let tmp = s.insert_dialer_link("https://b.example", NEW).unwrap();
         assert_eq!(s.adopt_dialer_fleet(tmp, "fleet-b").unwrap(), link);
     }

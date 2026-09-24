@@ -158,17 +158,22 @@ impl Store {
     }
 
     /// The dialer's handshake answer. If another live dialer row already has
-    /// this fleet (a re-pair after a refusal), the new url and token move onto
-    /// that row and this one is dropped, so its pending rows stay attached.
+    /// this fleet and that row has STOPPED (`refused` or `incompatible` — a
+    /// re-pair after a refusal), the new url and token move onto that row and
+    /// this one is dropped, so its pending rows stay attached. A live row in
+    /// any other state is a working link: this handshake cannot take it over
+    /// (any newly paired hub could otherwise claim a third fleet's id and
+    /// receive its messages), so it is `E_EXISTS` and nothing changes. A
+    /// fleet this hub already listens for is `E_EXISTS` too.
     pub fn adopt_dialer_fleet(&self, id: i64, fleet_id: &str) -> Result<i64, IpcError> {
         self.atomically(|s| {
-            let other: Option<i64> = s
+            let other: Option<(i64, String)> = s
                 .conn
                 .query_row(
-                    "SELECT id FROM peer_links WHERE fleet_id = ?1 AND revoked_at IS NULL \
+                    "SELECT id, state FROM peer_links WHERE fleet_id = ?1 AND revoked_at IS NULL \
                      AND role = 'dialer' AND id != ?2",
                     rusqlite::params![fleet_id, id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
             match other {
@@ -178,10 +183,28 @@ impl Store {
                             "UPDATE peer_links SET fleet_id = ?1 WHERE id = ?2",
                             rusqlite::params![fleet_id, id],
                         )
-                        .map_err(map_live_fleet_conflict)?;
+                        .map_err(|e| match map_live_fleet_conflict(e) {
+                            c if c.code == codes::E_EXISTS => IpcError::new(
+                                codes::E_EXISTS,
+                                format!(
+                                    "fleet {fleet_id} is already linked the other way \
+                                     (it dials this hub); remove one of the two links"
+                                ),
+                            ),
+                            other => other,
+                        })?;
                     Ok(id)
                 }
-                Some(keep) => {
+                Some((live, state)) if state != LINK_REFUSED && state != LINK_INCOMPATIBLE => {
+                    Err(IpcError::new(
+                        codes::E_EXISTS,
+                        format!(
+                            "fleet {fleet_id} is already linked (link {live}); remove it \
+                             first with `fleet-hub peer remove {live}`"
+                        ),
+                    ))
+                }
+                Some((keep, _)) => {
                     s.conn.execute(
                         "UPDATE peer_links SET \
                            url = (SELECT url FROM peer_links WHERE id = ?1), \
@@ -804,6 +827,9 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         let link = s.insert_dialer_link("https://b.example", "old").unwrap();
         s.adopt_dialer_fleet(link, B).unwrap();
+        // A re-pair merges only into a stopped row (C1).
+        s.set_peer_link_state(link, LINK_REFUSED, Some("E_UNAUTHORIZED: gone"), 1)
+            .unwrap();
         let tmp = s.insert_dialer_link("https://b2.example", "new").unwrap();
         assert_eq!(s.adopt_dialer_fleet(tmp, B).unwrap(), link);
         assert!(!s
@@ -963,6 +989,53 @@ mod tests {
         assert_eq!(row.token.as_deref(), Some("t2"));
         assert_eq!(row.state, LINK_RETRYING);
         assert!(s.peer_link(new).unwrap().is_none());
+    }
+
+    /// C1: a newly paired hub whose handshake claims a fleet that already has
+    /// a working (or merely retrying) dialer link cannot take that link over:
+    /// the claim is refused naming the link, the live row keeps its url,
+    /// token and state, and the new row is left as it was. Only a `refused`
+    /// or `incompatible` row takes new credentials (a re-pair).
+    #[test]
+    fn a_new_row_cannot_take_over_a_live_link_for_its_fleet() {
+        let s = Store::open_in_memory().unwrap();
+        let live = s.insert_dialer_link("https://b.example", "t-b").unwrap();
+        assert_eq!(s.adopt_dialer_fleet(live, B).unwrap(), live);
+        s.set_peer_link_progress(live, 3, None, 1).unwrap();
+        for state in [LINK_CONNECTED, LINK_RETRYING] {
+            s.set_peer_link_state(live, state, None, 2).unwrap();
+            let claimant = s.insert_dialer_link("https://evil.example", "t-c").unwrap();
+            let e = s.adopt_dialer_fleet(claimant, B).unwrap_err();
+            assert_eq!(e.code, crate::ipc_error::codes::E_EXISTS, "{state}");
+            assert!(
+                e.message
+                    .contains(&format!("fleet {B} is already linked (link {live})"))
+                    && e.message.contains("fleet-hub peer remove"),
+                "{}",
+                e.message
+            );
+            let row = s.peer_link(live).unwrap().unwrap();
+            assert_eq!(row.url.as_deref(), Some("https://b.example"));
+            assert_eq!(row.token.as_deref(), Some("t-b"));
+            assert_eq!((row.state.as_str(), row.after), (state, 3));
+            let c = s
+                .peer_link(claimant)
+                .unwrap()
+                .expect("the claimant row stays");
+            assert!(c.fleet_id.is_none());
+        }
+        // A refused or incompatible row is the re-pair case: it merges.
+        for state in [LINK_REFUSED, LINK_INCOMPATIBLE] {
+            s.set_peer_link_state(live, state, Some("E_UNAUTHORIZED: x"), 3)
+                .unwrap();
+            let again = s
+                .insert_dialer_link("https://b2.example", &format!("t-{state}"))
+                .unwrap();
+            assert_eq!(s.adopt_dialer_fleet(again, B).unwrap(), live, "{state}");
+            let row = s.peer_link(live).unwrap().unwrap();
+            assert_eq!(row.token.as_deref(), Some(format!("t-{state}").as_str()));
+            assert_eq!(row.state, LINK_RETRYING);
+        }
     }
 
     /// `idx_peer_links_live_fleet` is unique on `fleet_id` among live rows,
