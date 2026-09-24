@@ -112,6 +112,29 @@ by key, and names stop being "yes". **Tests:**
 - the builder `buildSessionsByWork`;
 - regex cases (`abc-123-x`, `XABC-12`, `UTF-8`, `SHA-256`).
 
+**Status (2026-09-24):**
+
+- **M1a (frontend, verified with pnpm check / test / build):**
+  - `work_keys.ts` recognises keys in tags, the worktree branch or the
+    worktree name.
+  - "⧉ by work" hybrid grouping with a PR/CI roll-up, and a key chip on rows.
+  - The New session dialog shows a work note, a duplicate guard ("Open it")
+    and turns a pasted ticket URL into its key.
+  - The frontend recognition stays as the fallback when a row has no
+    `SessionRow.work`.
+- **M1b.1 (storage):**
+  - Migration 046 (`work_items`, `work_links`, and the end-with-snapshot
+    trigger on participant retirement) plus `store/work.rs`.
+  - The SQL was exercised in SQLite 3.45. The Rust awaits `cargo test` in the
+    Worker environment.
+- **M1b.2 (next; needs cargo for `REGEN_DOCS` and `REGEN_HUB_VERDICTS`):**
+  - `SessionRow.work` (`#[serde(default)]`, from `primary_work_by_session`)
+    and a `work` event kind.
+  - MCP `work` (read) and `work_link` (link / reject / unlink / declare),
+    with guard rows and a budget check.
+  - Tauri commands with Routed verdicts, and the frontend store.
+  - Row chip actions: set key, *Not this*, clear.
+
 ### M2: resume and work memory
 
 - **Archived work:**
