@@ -104,6 +104,21 @@ impl Caller {
         self.client.as_ref().is_some_and(|c| c.trusted)
     }
 
+    /// The work graph's org scope for this caller (M5) — the ONE place a
+    /// caller becomes a scope. The master and a paired client read every
+    /// org (the org is a view there); a per-host token is bounded by its
+    /// host's org, read from the store now, so a host moved by the master
+    /// is fenced from its next call on.
+    pub fn org_scope(
+        &self,
+        store: &crate::store::Store,
+    ) -> Result<crate::service::orgs::OrgScope, crate::ipc_error::IpcError> {
+        match &self.host_alias {
+            None => Ok(crate::service::orgs::OrgScope::All),
+            Some(h) => crate::service::orgs::OrgScope::for_host(store, h),
+        }
+    }
+
     /// Short identity label for audit rows and rate-limit buckets.
     pub fn label(&self) -> String {
         match (&self.host_alias, &self.client) {

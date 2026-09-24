@@ -5,6 +5,12 @@
   import { accountByUuid } from './accounts';
   import { attentionIdleMinutes } from './notify';
   import Attention from './Attention.svelte';
+  import ScopeAttention from './ScopeAttention.svelte';
+  import { scopes, scopeSelectorShown, scopeFilter, effectiveScope, UNASSIGNED } from './orgs';
+  import { scopeChordLabel } from './app_views';
+  import { detectMac } from './terminal_keys';
+
+  const scopeTitle = `Organisation scope (${scopeChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator))})`;
   import LinkReview from './LinkReview.svelte';
   import { RECENCY_VALUES, type Recency } from './session_status';
   import { hubStatus, hubActionBlocked } from './hub';
@@ -66,6 +72,24 @@
 
 <header class="sidebar-header" data-testid="sidebar-chrome-top">
   <div class="row">
+    {#if $scopeSelectorShown}
+      <!-- Work graph M5: the org scope — a view, never a boundary here. Only
+           with two or more scopes, so a one-company fleet sees no chrome. -->
+      <select
+        class="scope"
+        data-testid="scope-select"
+        aria-label="Organisation scope"
+        title={scopeTitle}
+        value={$effectiveScope}
+        onchange={(e) => scopeFilter.set((e.currentTarget as HTMLSelectElement).value)}
+      >
+        <option value="all">All</option>
+        {#each $scopes as sc (sc.id)}
+          <option value={sc.id}>{sc.label}</option>
+        {/each}
+        <option value={UNASSIGNED}>Unassigned</option>
+      </select>
+    {/if}
     <input
       class="search"
       placeholder="Search sessions, projects…"
@@ -163,6 +187,7 @@
     </button>
   </nav>
   <Attention />
+  <ScopeAttention />
   <LinkReview />
 
   {#if selectedCount > 0}
@@ -263,6 +288,16 @@
     border-radius: 5px;
   }
   .search::placeholder { color: var(--fg-muted); }
+  .scope {
+    flex: 0 0 auto;
+    max-width: 7.5rem;
+    font-size: 0.8rem;
+    padding: 0.25rem 0.3rem;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    border-radius: 5px;
+  }
 
   .icon-btn {
     background: transparent;

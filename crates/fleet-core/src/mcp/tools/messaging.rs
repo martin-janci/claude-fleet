@@ -166,10 +166,12 @@ impl FleetTools {
                 Some(serde_json::json!({ "retry_after_secs": secs })),
             ));
         }
+        let scope = self.org_scope(&caller)?;
         let filter = sessions::BroadcastFilter {
             host: p.host,
             project_id: p.project_id,
             status: p.status,
+            scope: (!scope.is_all()).then_some(scope),
         };
         let submit = p.submit.unwrap_or(true);
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
@@ -189,12 +191,14 @@ impl FleetTools {
     )]
     pub(super) async fn session_history(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<SessionHistoryParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "session_history",
             &format!("session_id={} fresh_for={:?}", p.session_id, p.fresh_for),
         );
+        self.require_visible_session(&caller, p.session_id)?;
         let limit = p.limit.unwrap_or(50);
 
         // fresh_for absent: today's default, byte-identical, no cursor
@@ -403,7 +407,18 @@ impl FleetTools {
             reply_to: p.reply_to,
             wake: p.wake,
         };
-        let sent = crate::service::messages::send_message(args, &self.store, &self.ssh).await;
+        let scope = match self.org_scope(&caller) {
+            Ok(sc) => sc,
+            Err(e) => {
+                if let Some(key) = dedupe_key.as_deref() {
+                    lock_sends(&self.recent_sends).release(&label, key);
+                }
+                return Err(e);
+            }
+        };
+        let sent =
+            crate::service::messages::send_message_scoped(args, &self.store, &self.ssh, &scope)
+                .await;
         let result = match sent {
             Ok(r) => r,
             Err(e) => {
@@ -607,11 +622,13 @@ impl FleetTools {
         one session. Cheap pre-check before send_message or broadcast_prompt.")]
     pub(super) async fn peer_status(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<PeerStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("peer_status", &format!("session_id={}", p.session_id));
-        let status =
-            crate::service::messages::peer_status(p.session_id, &self.store).map_err(to_mcp_err)?;
+        let scope = self.org_scope(&caller)?;
+        let status = crate::service::messages::peer_status(p.session_id, &self.store, &scope)
+            .map_err(to_mcp_err)?;
         ok_json(&status)
     }
 }

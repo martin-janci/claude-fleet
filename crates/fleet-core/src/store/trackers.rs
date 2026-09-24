@@ -109,6 +109,9 @@ pub struct TrackerRow {
     /// The account the credential belongs to (Jira: the email). Not a secret.
     #[serde(default)]
     pub username: Option<String>,
+    /// The org its items belong to (work graph M5); `None` = unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
 }
 
 /// One query a sync runs.
@@ -321,7 +324,7 @@ fn secret_hint(value: &str) -> Option<String> {
 
 const TRACKER_COLUMNS: &str = "t.id, t.provider, t.name, t.instance_id, t.site_url, t.transport, \
      t.config, t.state, t.last_sync_at, t.last_error, t.created_at, \
-     s.auth_kind, s.username, s.value, s.credential_ref";
+     s.auth_kind, s.username, s.value, s.credential_ref, t.org_id";
 
 fn map_tracker(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerRow> {
     let config: Option<String> = r.get(6)?;
@@ -350,6 +353,7 @@ fn map_tracker(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerRow> {
         credential_hint: hint,
         auth_kind: r.get(11)?,
         username: r.get(12)?,
+        org_id: r.get(15)?,
     })
     // `value` is dropped here: it was read only to compute the hint.
 }

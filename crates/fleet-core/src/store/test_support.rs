@@ -50,3 +50,20 @@ pub(super) fn reconcile_one(
     .unwrap();
     s.get_session(name, "local").unwrap().unwrap()
 }
+
+/// A tracker item `key` (external id `ext`) of `tracker_id`, status todo.
+pub(crate) fn tracker_item(s: &Store, tracker_id: i64, ext: &str, key: &str, title: &str) -> i64 {
+    s.upsert_tracker_item(
+        tracker_id,
+        &TrackerItemWrite {
+            external_id: ext.into(),
+            key: Some(key.into()),
+            title: title.into(),
+            status_name: "To Do".into(),
+            status_category: "todo".into(),
+            ..Default::default()
+        },
+    )
+    .expect("tracker item")
+    .id
+}

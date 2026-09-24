@@ -31,7 +31,9 @@
     placeForTicket,
     type SwitcherEntry,
     type SwitcherTicket,
+    scopeEntries,
   } from './quick_switcher';
+  import { effectiveScope, scopeOf } from './orgs';
   import { workTickets, workLookup, startWork, trackers, type TicketRow } from './trackers';
   import { workKeyFor, worktreeBranchById } from './work_keys';
   import { settingsOpen } from './app_views';
@@ -89,11 +91,17 @@
       new Set(ticketRows.map((e) => (e.ticket?.key ?? '').toUpperCase())),
     ),
   );
-  const entries = $derived([
-    ...buildEntries($sessions, $projects, $hosts),
-    ...ticketRows,
-    ...(lookupRow ? [lookupRow] : []),
-  ]);
+  // Work graph M5: the sidebar's org scope narrows ⌘K too (one
+  // `rowMatches` for both, so they never disagree).
+  const trackerOrg = $derived(new Map($trackers.map((t) => [t.id, t.org_id ?? null])));
+  const entries = $derived(
+    scopeEntries(
+      [...buildEntries($sessions, $projects, $hosts), ...ticketRows, ...(lookupRow ? [lookupRow] : [])],
+      $effectiveScope,
+      $scopeOf,
+      trackerOrg,
+    ),
+  );
   const ranked: SwitcherEntry[] = $derived(rankEntries(entries, query, $recentSessions));
   const items: PickerItem[] = $derived(
     ranked.map((e) => ({

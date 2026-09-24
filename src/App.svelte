@@ -1,5 +1,6 @@
 <script lang="ts">
   import { applyWorkEvents, loadTrackers, sessionsMentioning } from './lib/trackers';
+  import { loadOrgs, cycleScope } from './lib/orgs';
   import type { WorkEvent } from './lib/trackers';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import Pane from './lib/Pane.svelte';
@@ -264,10 +265,17 @@
     // Trackers (work graph M3): their state badges, chip staleness and the
     // quick switcher's tickets. A hub older than M3 has no answer.
     void loadTrackers();
+    // Orgs (work graph M5): the scope selector, colour bars and Settings.
+    // Org changes arrive as `session:updated` for the rows they move; the
+    // list itself is refreshed with the trackers.
+    void loadOrgs();
     // A tracker's `last_sync_at` moves every pass without a frame (the sync
     // pushes only real changes), so the chips' "synced … ago" and stale
     // clock read a copy refreshed here.
-    trackerRefresh = setInterval(() => void loadTrackers(), 120_000);
+    trackerRefresh = setInterval(() => {
+      void loadTrackers();
+      void loadOrgs();
+    }, 120_000);
     // Account usage: same reasoning — not on the critical bootstrap path,
     // loaded after the subscription so no `account_usage:updated` is missed.
     //
@@ -573,6 +581,7 @@
     else if (chord === 'session-view') flipSessionView();
     else if (chord === 'settings') settingsOpen.set(true);
     else if (chord === 'agent') void toggleAgent();
+    else if (chord === 'scope') cycleScope();
   }
 
   function onKeydown(e: KeyboardEvent) {

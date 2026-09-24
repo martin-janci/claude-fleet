@@ -255,6 +255,7 @@ mod tests {
             account_uuid: Some(account.to_string()),
             provisioned: true,
             transport: "ssh".to_string(),
+            org_id: None,
         }
     }
 

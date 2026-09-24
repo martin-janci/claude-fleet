@@ -32,6 +32,7 @@ pub mod move_session;
 pub mod names;
 pub mod onboarding;
 pub mod operator;
+pub mod orgs;
 pub mod outcome;
 pub mod pane_intel;
 pub mod playbooks;

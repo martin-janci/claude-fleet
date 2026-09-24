@@ -247,3 +247,12 @@ Each task is one reviewable PR. Hub tasks run in the **Worker** environment (car
      it). `FleetSnapshotTest` should pin "an update without `work` clears
      the chip", the opposite of the task text above.
   5. No `CONTRACT_REVISION` bump, no new tool, no verdict change.
+- **2026-09-24, merged over M5 (#264).** M5 had grown its own action tables
+  in `service/work/mod.rs` — `WORK_ACTIONS` with `scopes` / `orgs` /
+  `org_suggestions`, `WORK_LINK_ACTIONS` as plain names that the org
+  isolation matrix and the desktop's routed commands check — and threaded
+  the org scope through every `work_link` branch. The merge keeps all of
+  that as M5 wrote it and generates M8.0's schema enums from those tables;
+  M8.0's `WorkLinkAction` enum and its string-to-enum dispatch refactor were
+  dropped rather than re-threaded through M5's fences (no behaviour depended
+  on them). The enums cost +72 B over M5 (69,171; `BUDGET_BYTES` 69,271).

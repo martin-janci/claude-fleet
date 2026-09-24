@@ -22,6 +22,7 @@
   } from './trackers';
   import { hubStatus, hubBlock, ownsTheFleet } from './hub';
   import { pushError, push } from './toasts';
+  import OrgSettings from './OrgSettings.svelte';
 
   let {
     now = () => Math.floor(Date.now() / 1000),
@@ -214,6 +215,8 @@
       </div>
     </form>
   {/if}
+
+  <OrgSettings />
 </section>
 
 <style>

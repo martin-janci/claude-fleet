@@ -175,6 +175,22 @@ const REASONS = {
     'the hub tests its trackers with its own credentials, and a client is never the fleet’s administrator — use `fleet-hub tracker test`',
   remove_tracker:
     'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
+  // Organisations (work graph M5): the per-host tokens' boundary is set on
+  // the hub only; `work_admin` is master-only.
+  add_org:
+    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org add`',
+  update_org:
+    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org set`',
+  remove_org:
+    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org rm`',
+  add_org_rule:
+    'which org a session belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org rule add`',
+  remove_org_rule:
+    'which org a session belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org rule rm`',
+  assign_host_org:
+    'a host’s org is its token’s boundary, set only by the fleet’s administrator — use `fleet-hub org assign-host`',
+  assign_tracker_org:
+    'which org a tracker belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org assign-tracker`',
 
   // --- things about THIS machine ------------------------------------------
   // (No `terminal` key: the terminal is not blocked by being a hub client.
