@@ -154,12 +154,13 @@ pub fn health_from_store(s: &Store) -> Health {
         stuck: summary.stuck,
         usage_by_host: summary.usage_by_host,
         usage_by_day: usage::recent_days(s, now_unix(), usage::HEALTH_DAYS, None),
-        peer_links_down: s
-            .peer_link_summaries()
-            .unwrap_or_default()
-            .iter()
-            .filter(|l| l.revoked_at.is_none() && l.state != crate::store::LINK_CONNECTED)
-            .count() as u32,
+        // G14c: a listener link never goes anywhere near `LINK_CONNECTED` on
+        // its own (it has no retry loop of its own to write a different
+        // `state`), so a filter on `state` alone — the old computation here —
+        // never counted a stalled listener as down. `Store::peer_links_down`
+        // also watches a listener's client token and its last served
+        // exchange.
+        peer_links_down: s.peer_links_down(now_unix()).unwrap_or_default(),
     }
 }
 
@@ -567,6 +568,43 @@ mod tests {
             .unwrap();
         let h = health_from_store(&store);
         assert_eq!(h.peer_links_down, 1);
+    }
+
+    /// G14c: a LISTENER link has no `state` of its own that goes stale (it
+    /// only ever holds `LINK_CONNECTED`), so the old `state != connected`
+    /// filter above never counted a stalled listener as down at all. It now
+    /// counts as down when it has never served an exchange (or the last one
+    /// is stale) OR its client token has been revoked — a fresh exchange on
+    /// a live token is the only way it reads as up.
+    #[test]
+    fn health_from_store_counts_a_revoked_or_stale_listener_link_as_down() {
+        let store = Store::open_in_memory().unwrap();
+        let c = store
+            .insert_client_token("hub-a", &format!("{:0>64}", "hub-a".len()), "peer")
+            .unwrap()
+            .id;
+        let link = store.ensure_listener_link(c, "fleet-a").unwrap();
+        assert_eq!(
+            health_from_store(&store).peer_links_down,
+            1,
+            "never exchanged yet"
+        );
+
+        store
+            .set_peer_link_state(link.id, crate::store::LINK_CONNECTED, None, now_unix())
+            .unwrap();
+        assert_eq!(
+            health_from_store(&store).peer_links_down,
+            0,
+            "a fresh served exchange on a live token is up"
+        );
+
+        store.revoke_client_token("hub-a").unwrap();
+        assert_eq!(
+            health_from_store(&store).peer_links_down,
+            1,
+            "a revoked token is down even with a fresh last_exchange_at"
+        );
     }
 
     /// The pin on `#[serde(default)]` for this ONE field (unlike the rest of
