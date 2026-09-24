@@ -531,23 +531,42 @@ fn send_remote(
             .map_err(|r| IpcError::new(r.code, format!("to another fleet, {}", r.message)))?;
         let to_p = s.ensure_remote_participant(link_id, to_addr)?;
         if let Some(parent_id) = args.reply_to {
-            // G2 (review): the OLD check asked only whether the parent
-            // involved the SENDER's own participant, and separately refused
-            // a parent from a third fleet — neither of which is what the
+            // Sender-participation (cycle 1, unchanged by G2): "a reply
+            // must point at a real message the sender took part in; an
+            // arbitrary id would let an agent forge a thread." G2 ADDS a
+            // condition on top of this — it does not replace it. A sender
+            // with no participant at all has never sent or received
+            // anything, so it cannot be part of any thread.
+            let mine = s.participant_for_session(args.from_session_id)?;
+            let involved = match mine {
+                Some(p) => s.message_involves_participant(parent_id, p.id)?,
+                None => false,
+            };
+            if !involved {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "reply_to message {parent_id} does not involve session {}",
+                        args.from_session_id
+                    ),
+                ));
+            }
+            // G2 (review): the sender-participation check above is
+            // necessary but not sufficient — it says nothing about what the
             // RECEIVING peer actually validates. `wire_ref_for` sends a
             // local parent as `{own_fleet, id}`; the peer's own
             // `map_reply_to` accepts that shape only when the parent
             // involves ITS OWN recipient participant on this link. A parent
             // the sender took part in but never exchanged with `to_addr`
-            // (e.g. a purely local thread) sailed past the old check,
-            // queued, and only came back a round trip later as
+            // (e.g. a purely local thread) sailed past the sender check
+            // alone, queued, and only came back a round trip later as
             // `message_undeliverable`.
             //
-            // Accept only what the peer will recognise: a parent it sent us
-            // (it will recognise its own `{peer_fleet, id}`), or a parent we
-            // already exchanged with the SAME remote participant (the peer
-            // will recognise `{own_fleet, id}` against a row it sent onto
-            // this link).
+            // So ALSO require what the peer will recognise: a parent it
+            // sent us (it will recognise its own `{peer_fleet, id}`), or a
+            // parent we already exchanged with the SAME remote participant
+            // (the peer will recognise `{own_fleet, id}` against a row it
+            // sent onto this link).
             let from_target_fleet = s
                 .remote_ref_of(parent_id)?
                 .is_some_and(|(origin_fleet, _)| origin_fleet == peer_fleet);
@@ -1241,6 +1260,61 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    /// G2 correction: the sender-participation check from cycle 1 ("a reply
+    /// must point at a real message the sender took part in; an arbitrary
+    /// id would let an agent forge a thread") is NOT replaced by the
+    /// target-recipient check above — G2 ADDS a condition, it does not
+    /// substitute one. A session that never took part in a thread must
+    /// stay refused even when that thread happens to satisfy the new
+    /// target check (it was exchanged with the same remote recipient):
+    /// otherwise any local session could forge a reply onto any OTHER
+    /// session's remote conversation just by naming its id.
+    #[tokio::test]
+    async fn a_session_cannot_thread_onto_a_message_it_took_no_part_in_even_when_the_target_matches(
+    ) {
+        let (store, ssh, a, b) = fixture();
+        let link = {
+            let s = store.lock().unwrap();
+            let id = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+        };
+        // `a` exchanges with the remote recipient — this is the parent `b`
+        // will try to forge a reply onto.
+        let mut first = args(a, 0, "hi b");
+        first.to_addr = Some("fleet-b/session/h/b1".into());
+        let parent = send_message(first, &store, &ssh).await.unwrap().id;
+        // Give `b` a participant row of its own (an unrelated local
+        // message), so the refusal below is specifically about `b` not
+        // being part of THIS thread — not about `b` having no participant
+        // at all.
+        send_message(args(b, a, "unrelated"), &store, &ssh)
+            .await
+            .unwrap();
+        // `b` never sent or received `parent`; it must be refused even
+        // though `parent` WAS exchanged with the same remote recipient
+        // `b` is now addressing.
+        let mut forged = args(b, 0, "sneaky reply");
+        forged.to_addr = Some("fleet-b/session/h/b1".into());
+        forged.reply_to = Some(parent);
+        let e = send_message(forged, &store, &ssh).await.unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{}", e.message);
+        assert!(
+            e.message.contains(&format!("does not involve session {b}")),
+            "{}",
+            e.message
+        );
+        // Only `a`'s own send queued; `b`'s forged reply must not have.
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .pending_outbox(link, 0, 50)
+                .unwrap()
+                .len(),
+            1
         );
     }
 
