@@ -125,6 +125,9 @@ export const EMPTY_REPORT: TidyReport = {
 /** The last tidy report and reopened list (refreshed by `refreshTidy`). */
 export const tidyReport = writable<TidyReport>(EMPTY_REPORT);
 export const reopenedWork = writable<ReopenedWork[]>([]);
+/** Successful reads of the reopened list: the first is the baseline a
+ *  "reopened" toast is measured against. */
+export const reopenedLoads = writable(0);
 
 /** Re-read the candidates and the reopened list. Errors keep the last value
  *  (an older hub without the actions answers E_INVALID: nothing to show). */
@@ -134,7 +137,15 @@ export async function refreshTidy(): Promise<void> {
     invokeCmd<ReopenedWork[]>('work_reopened'),
   ]);
   if (t.ok && t.value) tidyReport.set({ ...EMPTY_REPORT, ...t.value });
-  if (r.ok && Array.isArray(r.value)) reopenedWork.set(r.value);
+  if (r.ok && Array.isArray(r.value)) {
+    reopenedWork.set(r.value);
+    reopenedLoads.update((n) => n + 1);
+  }
+}
+
+/** Items of `list` not in `seen` (a newly reopened item toasts once). */
+export function newlyReopened(seen: ReadonlySet<number>, list: ReopenedWork[]): ReopenedWork[] {
+  return list.filter((w) => !seen.has(w.item_id));
 }
 
 // ── pure helpers ──
@@ -237,4 +248,41 @@ export async function dismissReopened(itemId: number): Promise<Result<{ dismisse
   const r = await invokeCmd<{ dismissed: boolean }>('dismiss_reopened', { args: { item_id: itemId } });
   if (r.ok) reopenedWork.update((list) => list.filter((w) => w.item_id !== itemId));
   return r;
+}
+
+// ── group-by-work (M7.3) ──
+
+/** A work group's sessions split into those shown and those archived into
+ *  its Done section. A row that needs the user is never collapsed away,
+ *  archived or not. */
+export function splitArchived<T extends { work?: { archived_at?: number | null } | null }>(
+  sessions: T[],
+  needsYou: (s: T) => boolean = () => false,
+): { live: T[]; archived: T[] } {
+  const live: T[] = [];
+  const archived: T[] = [];
+  for (const s of sessions) {
+    if (s.work?.archived_at != null && !needsYou(s)) archived.push(s);
+    else live.push(s);
+  }
+  return { live, archived };
+}
+
+/** Reopened work by key, for the group headers' badge. */
+export function reopenedByKey(list: ReopenedWork[]): Map<string, ReopenedWork> {
+  const out = new Map<string, ReopenedWork>();
+  for (const w of list) if (w.key) out.set(w.key, w);
+  return out;
+}
+
+/** "reopened · 2 past sessions". */
+export function reopenedBadge(w: ReopenedWork): string {
+  return `reopened · ${w.past_sessions} past session${w.past_sessions === 1 ? '' : 's'}`;
+}
+
+/** Dry run: the candidates auto-tidy would act on with `reasons` allowed —
+ *  whether or not it is on (the backend's `auto` flag says only "on and
+ *  allowed"). Safe kill or archive only, never a plain kill. */
+export function autoTidyPreview(cands: TidyCandidate[], reasons: ReadonlySet<string>): TidyCandidate[] {
+  return cands.filter((c) => (c.action === 'safe_kill' || c.action === 'archive') && reasons.has(c.reason));
 }

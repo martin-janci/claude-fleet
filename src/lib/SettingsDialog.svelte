@@ -50,7 +50,7 @@
     type SettingKey,
     type ProjectsLayout,
   } from './fleet_settings';
-  import { TIDY_REASON_LABELS } from './tidy';
+  import { TIDY_REASON_LABELS, autoTidyPreview, refreshTidy, tidyReport, tidyReasonLabel, formatIdle, type TidyCandidate } from './tidy';
   import { refreshProjects } from './projects';
   import {
     hubStatus,
@@ -267,6 +267,19 @@
     } catch {
       return 0;
     }
+  }
+  // Work graph M7.3: "Show what auto-tidy would do" — the current
+  // candidates auto-tidy would act on with the ticked reasons.
+  let dryRun = $state<TidyCandidate[] | null>(null);
+  let dryRunBusy = $state(false);
+  async function showDryRun() {
+    dryRunBusy = true;
+    await refreshTidy();
+    dryRunBusy = false;
+    dryRun = autoTidyPreview(
+      $tidyReport.candidates,
+      parseAutoTidyReasons($fleetSettings[SETTING_KEYS.workAutoTidyReasons]),
+    );
   }
   function toggleSetting(key: SettingKey) {
     void applySetting(key, settingBool($fleetSettings, key) ? 'false' : 'true');
@@ -1137,6 +1150,26 @@
           </label>
         {/each}
       </div>
+      <div class="mcp-field">
+        <button class="btn" type="button" data-testid="work-auto-tidy-dry-run" disabled={dryRunBusy}
+          onclick={() => void showDryRun()}>Show what auto-tidy would do</button>
+      </div>
+      {#if dryRun !== null}
+        <div class="hook-desc" data-testid="work-auto-tidy-preview">
+          {#if dryRun.length === 0}
+            Nothing right now.
+          {:else}
+            Auto-tidy would {settingBool($fleetSettings, SETTING_KEYS.workAutoTidy) ? '' : '(once turned on) '}safe-kill or archive:
+            <ul>
+              {#each dryRun as c (c.session_id)}
+                <li data-testid="work-auto-tidy-preview-row">
+                  {c.label || c.tmux_name} on {c.host_alias}{c.key ? ` · ${c.key}` : ''} — {tidyReasonLabel(c.reason)}, idle {formatIdle(c.idle_secs)}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      {/if}
       <div class="mcp-field">
         <span class="lbl">trusted branch keys</span>
         <span class="hook-desc" data-testid="work-trusted-projects">
