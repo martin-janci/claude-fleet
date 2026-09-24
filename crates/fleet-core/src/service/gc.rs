@@ -32,6 +32,8 @@ use crate::store::{SessionRow, Store};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+pub mod tidy;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcConfig {
     pub enabled: bool,
@@ -455,7 +457,12 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn row(id: i64, kind: &str, idle_since: Option<i64>, last_activity_at: i64) -> SessionRow {
+    pub(super) fn row(
+        id: i64,
+        kind: &str,
+        idle_since: Option<i64>,
+        last_activity_at: i64,
+    ) -> SessionRow {
         SessionRow {
             id,
             row_version: 0,
