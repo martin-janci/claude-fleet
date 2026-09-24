@@ -3832,7 +3832,7 @@ fn one_full_row() -> serde_json::Value {
 /// Dropping an entry must be a deliberate edit: the failure it prevents is a
 /// phone drawing a blank column against a hub that believes it answered.
 #[test]
-fn the_phone_view_is_exactly_the_sixteen_columns_a_pager_uses() {
+fn the_phone_view_is_exactly_the_seventeen_columns_a_pager_uses() {
     assert_eq!(
         PHONE_SESSION_FIELDS,
         &[
@@ -3851,6 +3851,7 @@ fn the_phone_view_is_exactly_the_sixteen_columns_a_pager_uses() {
             "project_id",
             "status",
             "stuck_kind",
+            "tags",
             "tmux_name",
         ]
     );
@@ -5478,6 +5479,17 @@ fn the_phone_view_drops_the_columns_no_screen_reads() {
     for kept in PHONE_SESSION_FIELDS {
         assert!(obj.contains_key(*kept), "{kept} fell out of the phone view");
     }
+}
+
+/// The phone's tags editor starts from the row's `tags` and
+/// `set_session_tags` replaces the whole list, so a view without them made a
+/// phone that added one tag delete all the others.
+#[test]
+fn the_phone_view_keeps_tags_so_a_phone_edit_does_not_wipe_them() {
+    let mut rows = one_full_row();
+    rows[0]["tags"] = serde_json::json!(["mobile", "wip"]);
+    project_rows(&mut rows, PHONE_SESSION_FIELDS);
+    assert_eq!(rows[0]["tags"], serde_json::json!(["mobile", "wip"]));
 }
 
 /// A projection that is not an array of rows is left alone rather than

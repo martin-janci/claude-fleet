@@ -107,7 +107,7 @@ impl FleetTools {
         // A view is a projection OF the full row, so it outranks `summary`
         // rather than composing with it: the slim shape drops
         // `friendly_name`, `current_activity` and `last_activity_at`, which
-        // are three of the fourteen a phone draws — the exact reason that
+        // are three of the columns a phone draws — the exact reason that
         // client asks for full rows today. `summary` keeps its default of
         // true, so a caller that names a view need not also say
         // `summary: false` to be understood.

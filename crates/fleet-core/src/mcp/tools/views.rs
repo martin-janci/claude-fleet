@@ -37,10 +37,10 @@ use serde_json::Value;
 /// The `list_sessions` fields `view: "phone"` keeps.
 ///
 /// Derived from what the phone actually draws, not from what its model
-/// declares: `SessionRow.kt` deserialises 28 fields, but `branch`, `tags`,
+/// declares: `SessionRow.kt` deserialises 28 fields, but `branch`,
 /// `pr_url`, `turn_seq`, `lost_at`, `created_at`, `started_at`,
 /// `last_stop_at`, `last_turn_at`, `usage_*` and `parent_session_id` have no
-/// reader on any screen. The 14 here are the ones with one:
+/// reader on any screen. The 17 here are the ones with one:
 ///
 /// * `id` — the row key and every action's address;
 /// * `tmux_name`, `friendly_name`, `last_prompt` — `SessionRow.displayName`
@@ -62,7 +62,11 @@ use serde_json::Value;
 ///   options. Without it the view is a list a phone can read and not act on:
 ///   the one thing a pager exists for is answering that dialog, and a row
 ///   that says `claude_status: "blocked"` and nothing else forces the app
-///   back to the full 52 KB answer to find out what the question was.
+///   back to the full 52 KB answer to find out what the question was;
+/// * `tags` — the session screen's tags editor starts from them, and
+///   `set_session_tags` REPLACES the whole list. Projected away, a phone
+///   re-list held `[]`, so adding one tag from the phone silently deleted
+///   every other tag the session had.
 ///
 /// [`super::tests`] pins this set against the serialized row so a renamed
 /// column cannot quietly fall out of the view, and pins the list itself so
@@ -84,6 +88,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "project_id",
     "status",
     "stuck_kind",
+    "tags",
     "tmux_name",
 ];
 
