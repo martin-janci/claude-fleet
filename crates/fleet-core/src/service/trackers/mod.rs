@@ -468,8 +468,10 @@ impl TrackerNet {
                     "no trusted CLI is known for {p} trackers"
                 ))),
             },
-            TransportKind::ViaHost(h) => Err(TrackerError::Refused(format!(
-                "this build cannot reach a tracker through {h} yet"
+            TransportKind::ViaHost(h) => Ok(Arc::new(crate::net::via_host::CurlTransport::new(
+                ssh(&h)?,
+                h,
+                policy,
             ))),
         }
     }

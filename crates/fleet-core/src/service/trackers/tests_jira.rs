@@ -642,3 +642,51 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
 }
 
 crate::conformance_suite!(JiraHarness);
+
+/// M6.3 acceptance 4 in miniature: a tracker only reachable from host X is
+/// read through X with `curl`; the credential is on stdin, in no argv.
+#[tokio::test]
+async fn a_via_host_tracker_is_read_through_curl_on_its_host() {
+    use crate::service::trackers::{provider_for, TrackerNet};
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    let body = fixture("bulkfetch.json").to_string();
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n";
+    let ssh = FakeSsh::new();
+    ssh.on_host(
+        "vpnbox",
+        Match::contains("/rest/api/3/issue/bulkfetch"),
+        Reply::ok(&format!(
+            "__fleet_status__=200\n__fleet_head__={}\n{head}{body}",
+            head.len()
+        )),
+    );
+    let mut row = crate::store::Store::open_in_memory()
+        .unwrap()
+        .add_tracker("jira", "Acme", SITE)
+        .unwrap();
+    row.transport = "via_host:vpnbox".into();
+    let p = provider_for(
+        &row,
+        Some(cred()),
+        &TrackerNet::with_ssh(Arc::new(ssh.clone())),
+    )
+    .unwrap();
+    let got = p.fetch(&[ItemRef::Id("10101".into())]).await.unwrap();
+    assert!(matches!(&got[0], Fetched::Found(s) if s.key.as_deref() == Some("ABC-101")));
+    let call = &ssh.calls_for("vpnbox")[0];
+    let secret = cred().secret.expose().to_string();
+    let basic = cred().literals()[1].clone();
+    assert!(!call.command().contains(&secret) && !call.command().contains(&basic));
+    let stdin = call.stdin_str().unwrap();
+    assert!(stdin.contains(&format!("Authorization: Basic {basic}")));
+    // The host fence is the provider's: a via_host Jira still only talks
+    // to *.atlassian.net.
+    let evil = crate::net::https::Request::get("https://evil.example.com/x");
+    let t = TrackerNet::with_ssh(Arc::new(ssh.clone()))
+        .transport_for(&row)
+        .unwrap();
+    assert!(matches!(
+        t.send(evil).await,
+        Err(TransportError::Refused(_))
+    ));
+}
