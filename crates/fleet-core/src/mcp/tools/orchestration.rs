@@ -664,6 +664,46 @@ impl FleetTools {
         ok_json(&row)
     }
 
+    #[tool(description = "Trackers (Jira): list, add, update, \
+        set_credential, test, remove. Never returns a secret.")]
+    pub(super) async fn work_admin(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::trackers::admin::WorkAdminArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::trackers::admin::{self as a, AdminAction};
+        // Master-only enforcement already happened centrally
+        // (`enforce_admin`, `work_admin` is `Access::Master`). The audit line
+        // is built by hand: the secret never reaches it, not even as a length.
+        let summary = args.audit_summary();
+        audit("work_admin", &summary);
+        match AdminAction::parse(&args.action).map_err(to_mcp_err)? {
+            AdminAction::Test => {
+                let id = args
+                    .tracker_id
+                    .ok_or_else(|| mcp_err("E_INVALID", "test needs tracker_id", None))?;
+                let report = a::test_tracker(
+                    id,
+                    &self.store,
+                    crate::service::trackers::direct_transport(),
+                )
+                .await
+                .map_err(to_mcp_err)?;
+                ok_json(&report)
+            }
+            AdminAction::Remove => {
+                self.confirm_gate(
+                    "work_admin",
+                    args.confirm_nonce.as_deref(),
+                    &summary,
+                    &caller,
+                )?;
+                ok_json(&a::admin_sync(&args, &self.store).map_err(to_mcp_err)?)
+            }
+            _ => ok_json(&a::admin_sync(&args, &self.store).map_err(to_mcp_err)?),
+        }
+    }
+
     /// A per-host token reads a key's context or resume plan only when some
     /// of that work ran on its own host.
     fn require_key_on_callers_host(

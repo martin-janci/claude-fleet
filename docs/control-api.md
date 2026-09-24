@@ -348,6 +348,20 @@ Index by area (names only; see the reference for details):
   the keys a purge would leave without resumable conversations. A per-host
   token reads context and plans only for work that ran on its host, and
   resumes only onto it.
+  Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
+  on a paired desktop the Settings → Work section says "configure on the
+  hub") manages them: `list`, `add { site_url }` (the site, or any ticket URL
+  on it; only `https://<name>.atlassian.net` is accepted), `update
+  { tracker_id, name }`, `set_credential { tracker_id, username, secret |
+  credential_ref }` (`env:NAME` or `file:/path`, read by the hub at use),
+  `test { tracker_id }` (probe the site: account, key prefixes, sprint
+  projects, views; the tracker's `state` becomes `ok` or says why not) and
+  `remove { tracker_id }` (confirm-gated; its items stay, marked
+  unavailable). No answer, event, log line or error ever carries the secret:
+  a tracker row has only `has_credential` and a `…abcd` hint. The hub's
+  operator has the same over loopback: `fleet-hub tracker
+  list|add|set-credential|test|remove`, which reads the token from stdin or
+  `--from-env`, never from argv.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never

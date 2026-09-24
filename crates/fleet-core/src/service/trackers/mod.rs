@@ -8,6 +8,7 @@
 //! from the sync tick, `work_admin`'s `test`, or a `work { lookup }` that
 //! falls through the cache. Nothing in M1/M2 waits on a tracker.
 
+pub mod admin;
 pub mod jira;
 
 use crate::net::https::{DirectTransport, HttpTransport};

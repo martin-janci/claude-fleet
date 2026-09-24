@@ -7,6 +7,7 @@ mod pair;
 mod reports;
 mod serve;
 mod tls;
+mod tracker;
 
 use clap::{Parser, Subcommand};
 use config::HubOptions;
@@ -92,6 +93,16 @@ enum Cmd {
     Client {
         #[command(subcommand)]
         cmd: ClientCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Add, test and remove issue trackers (Jira Cloud). Needs a running hub.
+    ///
+    /// The API token is read from stdin, `--from-env` or a `--ref`, never
+    /// from an argument.
+    Tracker {
+        #[command(subcommand)]
+        cmd: tracker::TrackerCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -205,6 +216,7 @@ async fn main() -> ExitCode {
             ClientCmd::Trust { name } => pair::client_trust(&opts, &env, &name, true).await,
             ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
         },
+        Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
             since,

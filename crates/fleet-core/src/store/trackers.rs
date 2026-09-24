@@ -21,6 +21,7 @@
 //!   tracker's own secret alike.
 
 use super::{now_unix, Store};
+use crate::events::EventBus as _;
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -662,6 +663,21 @@ impl Store {
             rusqlite::params![instance_id, json, id],
         )?;
         Ok(n > 0)
+    }
+
+    /// Emit `work:tracker` with the row as it now stands (no secret: see
+    /// [`TrackerRow`]). Callers emit only after a write that changed it.
+    pub fn emit_tracker(&self, id: i64) -> Result<(), IpcError> {
+        if let Some(row) = self.get_tracker(id)? {
+            self.bus
+                .emit(&crate::events::RowChange::TrackerUpdated(row));
+        }
+        Ok(())
+    }
+
+    /// Emit `work:tracker_removed`.
+    pub fn emit_tracker_removed(&self, id: i64) {
+        self.bus.emit(&crate::events::RowChange::TrackerRemoved(id));
     }
 
     // --- views --------------------------------------------------------------

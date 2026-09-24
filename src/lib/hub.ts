@@ -164,6 +164,17 @@ const REASONS = {
     'these are a fleet owner’s per-host tokens; this desktop is a paired client and has none',
   mcp_configure:
     'starting a second control API against a fleet that already has one is the failure remote mode exists to prevent',
+  // Trackers (work graph M3): the hub's work_admin is master-only.
+  add_tracker:
+    'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker add`',
+  update_tracker:
+    'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker`',
+  set_tracker_credential:
+    'tracker credentials live on the hub, and a client is never the fleet’s administrator — use `fleet-hub tracker set-credential`',
+  test_tracker:
+    'the hub tests its trackers with its own credentials, and a client is never the fleet’s administrator — use `fleet-hub tracker test`',
+  remove_tracker:
+    'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
 
   // --- things about THIS machine ------------------------------------------
   // (No `terminal` key: the terminal is not blocked by being a hub client.

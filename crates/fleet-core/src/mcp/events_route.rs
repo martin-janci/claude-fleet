@@ -329,6 +329,32 @@ fn accepted_list(kinds: Option<&Vec<String>>) -> Vec<String> {
     }
 }
 
+/// Kinds a host-bound caller (a per-host token: every in-session Claude)
+/// never receives. `work` frames name tracker tickets from every host; until
+/// orgs exist (roadmap M5) a host's token sees only the tracker items linked
+/// to sessions on its own host, through `work { … }`, and none on the stream
+/// (the M3 plan's decision 6).
+pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work"];
+
+/// Narrow the requested kinds for a host-bound caller; everyone else keeps
+/// what they asked for.
+fn fence_host_bound(caller: &Caller, kinds: Option<Vec<String>>) -> Option<Vec<String>> {
+    if caller.host_alias.is_none() {
+        return kinds;
+    }
+    let all = kinds.unwrap_or_else(|| {
+        crate::events::EVENT_KINDS
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect()
+    });
+    Some(
+        all.into_iter()
+            .filter(|k| !HOST_BOUND_HIDDEN_KINDS.contains(&k.as_str()))
+            .collect(),
+    )
+}
+
 fn matches(kinds: Option<&Vec<String>>, msg: &EventMessage) -> bool {
     match kinds {
         None => true,
@@ -457,6 +483,7 @@ pub(super) async fn handle_events(
     let shutdown = state.shutdown.clone();
     let fields = wanted_fields(&query);
     let RequestedKinds { accepted, unknown } = wanted_kinds(&query);
+    let accepted = fence_host_bound(&caller, accepted);
     if !unknown.is_empty() {
         tracing::warn!(
             caller = %label,
@@ -749,6 +776,23 @@ mod tests {
         let account = wanted_kinds(&q(Some("account"))).accepted;
         assert!(matches(account.as_ref(), &ev("account:upserted")));
         assert!(!matches(account.as_ref(), &ev("account_usage:updated")));
+    }
+
+    #[test]
+    fn a_host_bound_stream_never_carries_work_frames() {
+        let host = Caller {
+            host_alias: Some("mefistos".into()),
+            client: None,
+            mode: crate::mcp::auth::TokenMode::Full,
+        };
+        let fenced = fence_host_bound(&host, None).unwrap();
+        assert!(!fenced.iter().any(|k| k == "work"));
+        assert!(fenced.iter().any(|k| k == "session"));
+        assert!(!matches(Some(&fenced), &ev("work:item")));
+        let asked = fence_host_bound(&host, Some(vec!["work".into()])).unwrap();
+        assert!(!matches(Some(&asked), &ev("work:tracker")));
+        // Master and paired clients see everything they asked for.
+        assert_eq!(fence_host_bound(&Caller::master(), None), None);
     }
 
     #[test]

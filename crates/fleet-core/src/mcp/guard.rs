@@ -538,6 +538,17 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // Trackers and their credentials (work graph M3): fleet admin, so the
+    // master only — on a paired desktop every command behind it is
+    // `LocalOnly` (review C17). Confirm-gated for `remove`; `test` talks to
+    // the tracker, hence the lifecycle deadline.
+    ToolPolicy {
+        name: "work_admin",
+        access: Access::Master,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Lifecycle,
+    },
     // repo.rs
     ToolPolicy {
         name: "list_projects",
@@ -1408,10 +1419,11 @@ mod tests {
             "move_session",
             "resolve_move",
             "apply_sync",
+            "work_admin",
         ] {
             assert!(needs_confirmation(t), "{t} must be confirm-gated");
         }
-        assert_eq!(CONFIRM_TOOLS.len(), 9);
+        assert_eq!(CONFIRM_TOOLS.len(), 10);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
     }
@@ -1662,6 +1674,8 @@ mod tests {
             "pair_client",
             "revoke_client",
             "set_client_trust",
+            // Trackers and their credentials (work graph M3).
+            "work_admin",
         ] {
             assert!(is_admin_tool(t), "{t}");
             assert!(!is_readonly_tool(t), "{t}");

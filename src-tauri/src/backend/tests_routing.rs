@@ -2984,6 +2984,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
     ("commands/work.rs", include_str!("../commands/work.rs")),
     (
+        "commands/trackers.rs",
+        include_str!("../commands/trackers.rs"),
+    ),
+    (
         "commands/worktrees.rs",
         include_str!("../commands/worktrees.rs"),
     ),

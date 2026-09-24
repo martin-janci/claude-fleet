@@ -2,6 +2,7 @@
   "local_only": [
     "add_host",
     "add_project",
+    "add_tracker",
     "assets_inventory",
     "assets_scan_hosts",
     "catalog_add_resource",
@@ -53,6 +54,7 @@
     "purge_project",
     "refresh_account_usage",
     "remove_host",
+    "remove_tracker",
     "repo_checkout",
     "repo_checkout_commit",
     "repo_commit_create",
@@ -68,7 +70,10 @@
     "set_account_nickname",
     "set_fleet_setting",
     "set_host_token_mode",
-    "tunnel_status"
+    "set_tracker_credential",
+    "test_tracker",
+    "tunnel_status",
+    "update_tracker"
   ],
   "routed": [
     "cancel_task",
