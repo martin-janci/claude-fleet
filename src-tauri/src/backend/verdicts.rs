@@ -292,6 +292,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: TRACKERS_ARE_ADMIN,
         },
     ),
+    // Work graph M3.4: reading tickets and starting work route like every
+    // other work read and decision.
+    ("list_trackers", Verdict::Routed { tool: "work" }),
+    ("work_tickets", Verdict::Routed { tool: "work" }),
+    ("work_lookup", Verdict::Routed { tool: "work" }),
+    ("start_work", Verdict::Routed { tool: "work_link" }),
     (
         "session_conversation",
         Verdict::Routed {

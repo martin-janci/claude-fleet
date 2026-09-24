@@ -11,6 +11,7 @@
 pub mod admin;
 pub mod jira;
 pub mod sync;
+pub mod tickets;
 
 use crate::net::https::{DirectTransport, HttpTransport};
 use crate::store::{TrackerConfig, TrackerCredential, TrackerRow};

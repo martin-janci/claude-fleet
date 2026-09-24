@@ -90,6 +90,7 @@
     "list_projects",
     "list_sessions",
     "list_tasks",
+    "list_trackers",
     "list_worktrees",
     "move_session",
     "new_bg_session",
@@ -122,9 +123,12 @@
     "session_work_links",
     "set_session_friendly_name",
     "spawn_review",
+    "start_work",
     "unlink_session_work",
+    "work_lookup",
     "work_purge_impact",
-    "work_resume_plan"
+    "work_resume_plan",
+    "work_tickets"
   ],
   "routed_unless": [
     {

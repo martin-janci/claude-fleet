@@ -21,7 +21,7 @@ pub struct WorkArgs {
     /// Or: ended (past) links to this key.
     #[serde(default)]
     pub key: Option<String>,
-    /// links|context|resume_plan|purge_impact
+    /// links|context|resume_plan|purge_impact|tickets|lookup|trackers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     /// Ended link.
@@ -39,6 +39,21 @@ pub struct WorkArgs {
     /// Purge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_aliases: Option<Vec<String>>,
+    /// Tickets: one tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker_id: Option<i64>,
+    /// mine|sprint|recent|filter:<id>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    /// Tickets: text filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Tickets: max rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Lookup: a ticket URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -47,7 +62,7 @@ pub struct WorkLinkArgs {
     /// Fleet session id.
     #[serde(default)]
     pub session_id: Option<i64>,
-    /// link|reject|unlink|resume
+    /// link|reject|unlink|resume|start
     pub action: String,
     /// Work key, e.g. ABC-123, or a free-form name.
     #[serde(default)]
@@ -70,6 +85,15 @@ pub struct WorkLinkArgs {
     /// Edited brief.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brief: Option<String>,
+    /// Start: a ticket URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Start: the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    /// Start: brief Claude with the ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_brief: Option<bool>,
 }
 
 /// `work { action: context }`: the full handover context of a key.
@@ -94,6 +118,12 @@ pub enum WorkAction {
     Context,
     ResumePlan,
     PurgeImpact,
+    /// Tracker tickets from the cache (work graph M3.4).
+    Tickets,
+    /// One ticket by key or URL: the cache, else one live fetch.
+    Lookup,
+    /// The trackers (no secrets).
+    Trackers,
 }
 
 impl WorkArgs {
@@ -103,10 +133,14 @@ impl WorkArgs {
             "context" => Ok(WorkAction::Context),
             "resume_plan" => Ok(WorkAction::ResumePlan),
             "purge_impact" => Ok(WorkAction::PurgeImpact),
+            "tickets" => Ok(WorkAction::Tickets),
+            "lookup" => Ok(WorkAction::Lookup),
+            "trackers" => Ok(WorkAction::Trackers),
             other => Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "unknown work action {other:?}; one of links, context, resume_plan, purge_impact"
+                    "unknown work action {other:?}; one of links, context, resume_plan, \
+                     purge_impact, tickets, lookup, trackers"
                 ),
             )),
         }
@@ -171,6 +205,26 @@ pub async fn work_resume(
     resume::resume_work(store, ssh, reg, &resume_args(args)?).await
 }
 
+/// `work { action: lookup }`'s reference: `url`, else `key`.
+pub fn lookup_reference(args: &WorkArgs) -> Result<&str, IpcError> {
+    args.url
+        .as_deref()
+        .or(args.key.as_deref())
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "lookup needs key or url"))
+}
+
+/// The start half of [`WorkLinkArgs`] (work graph M3.4).
+pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::StartArgs {
+    crate::service::trackers::tickets::StartArgs {
+        reference: args.url.clone().or(args.key.clone()),
+        item_id: args.item_id,
+        project_id: args.project_id,
+        host_alias: args.host_alias.clone(),
+        with_brief: args.with_brief.unwrap_or(false) || args.brief.is_some(),
+        brief: args.brief.clone(),
+    }
+}
+
 /// The resume half of [`WorkLinkArgs`].
 pub fn resume_args(args: &WorkLinkArgs) -> Result<resume::ResumeArgs, IpcError> {
     Ok(resume::ResumeArgs {
@@ -220,10 +274,10 @@ pub fn work(args: &WorkArgs, store: &Mutex<Store>) -> Result<Vec<WorkLinkRow>, I
 /// Apply one link decision and return the session's updated row (its `work`
 /// is the new primary link, or none).
 pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow, IpcError> {
-    if args.action == "resume" {
+    if args.action == "resume" || args.action == "start" {
         return Err(IpcError::new(
             codes::E_INVALID,
-            "resume is asynchronous; use work_resume",
+            format!("{} is asynchronous; use its own entry point", args.action),
         ));
     }
     let session_id = args.session_id.ok_or_else(|| {
@@ -265,7 +319,9 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
         other => {
             return Err(IpcError::new(
                 codes::E_INVALID,
-                format!("unknown work_link action {other:?}; one of link, reject, unlink, resume"),
+                format!(
+                    "unknown work_link action {other:?}; one of link, reject, unlink, resume, start"
+                ),
             ))
         }
     }

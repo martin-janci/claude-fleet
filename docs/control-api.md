@@ -362,6 +362,29 @@ Index by area (names only; see the reference for details):
   operator has the same over loopback: `fleet-hub tracker
   list|add|set-credential|test|remove`, which reads the token from stdin or
   `--from-env`, never from argv.
+  Reading tickets (M3.4): `work { action: "tickets", tracker_id?, view?,
+  query?, limit? }` serves the sync's **cache** (never a live call); `view`
+  is `mine` (assigned to the tracker account, not done), `sprint` (in an
+  active sprint), `recent` (updated within 14 days) or `filter:<id>` (a
+  favourite filter), each row with the live sessions already on it.
+  `work { action: "lookup", key | url }` answers one ticket from the cache,
+  or fetches it once and caches it (a URL names its site; an unknown site is
+  `E_NOTFOUND` with the `site_url` to add). `work { action: "trackers" }`
+  lists the trackers (no secrets). `work_link { action: "start", key | url |
+  item_id, project_id?, host_alias?, with_brief?, brief? }` starts work on a
+  ticket in one call: a live session on the key is `E_EXISTS` (details name
+  it — jump, do not start a second); the project defaults to where that key
+  prefix last ran (else `E_AMBIGUOUS` with candidates), the host likewise;
+  the worktree is `slug(key + title)`, the session's name `KEY title`, and it
+  is linked `started`. With a brief, the ticket's context (its description
+  fenced as untrusted) rides the first hook's `additionalContext` and a short
+  start prompt is typed only into a ready REPL. A per-host token reads,
+  looks up and starts only tickets linked to sessions on its own host, and
+  starts only there (`E_FORBIDDEN` says why); it never receives `work:*`
+  frames on `/events`. Events: `work:item`, `work:tracker`,
+  `work:tracker_removed` — emitted only when something a reader sees
+  changed; a session's `work` carries its item's `status_category`,
+  `status_name`, `url` and `unavailable`.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never

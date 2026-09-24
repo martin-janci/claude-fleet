@@ -552,6 +552,79 @@ impl Store {
         Ok(())
     }
 
+    /// Every tracker item (of `tracker_id`, or of every tracker), with its
+    /// meta, newest `updated` first.
+    pub fn tracker_items(
+        &self,
+        tracker_id: Option<i64>,
+    ) -> Result<Vec<(WorkItemRow, ItemMeta)>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS}, meta FROM work_items \
+             WHERE tracker_id IS NOT NULL AND (?1 IS NULL OR tracker_id = ?1) \
+             ORDER BY COALESCE(updated_ext, 0) DESC, id DESC"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![tracker_id], |r| {
+            let meta: Option<String> = r.get(23)?;
+            Ok((map_item(r)?, ItemMeta::parse(meta.as_deref())))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Items linked to sessions on `host`: a live link whose session runs
+    /// there, or an ended link that ran there. The per-host token's fence
+    /// (M3 plan, decision 6).
+    pub fn work_item_ids_on_host(&self, host: &str) -> Result<Vec<i64>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT l.item_id FROM work_links l \
+             LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             LEFT JOIN sessions s ON s.id = p.session_id \
+             WHERE l.item_id IS NOT NULL AND l.state = 'confirmed' AND \
+               ((l.ended_at IS NULL AND s.host_alias = ?1) OR \
+                (l.ended_at IS NOT NULL AND l.snap_host = ?1))",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![host], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Where work on `prefix`-keys last ran: `(project_id, host)` of the
+    /// newest confirmed link, live or ended.
+    pub fn last_place_for_prefix(&self, prefix: &str) -> Result<Option<(i64, String)>, IpcError> {
+        if prefix.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT COALESCE(s.project_id, l.snap_project_id), COALESCE(s.host_alias, l.snap_host) \
+                 FROM work_links l \
+                 LEFT JOIN work_items i ON i.id = l.item_id \
+                 LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 LEFT JOIN sessions s ON s.id = p.session_id AND l.ended_at IS NULL \
+                 WHERE l.state = 'confirmed' \
+                   AND UPPER(COALESCE(i.key, l.ref_key)) LIKE ?1 || '-%' \
+                   AND COALESCE(s.project_id, l.snap_project_id) IS NOT NULL \
+                   AND COALESCE(s.host_alias, l.snap_host) IS NOT NULL \
+                 ORDER BY COALESCE(l.ended_at, l.decided_at, l.created_at) DESC, l.id DESC \
+                 LIMIT 1",
+                rusqlite::params![prefix.to_ascii_uppercase()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// The host that most recently ran a session of `project_id`.
+    pub fn last_host_for_project(&self, project_id: i64) -> Result<Option<String>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT host_alias FROM sessions WHERE project_id = ?1 AND host_alias <> 'local' \
+                 ORDER BY COALESCE(last_turn_at, started_at, 0) DESC, id DESC LIMIT 1",
+                rusqlite::params![project_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// An item's `meta`, for the reads that use its description or view
     /// membership.
     pub fn work_item_meta(&self, id: i64) -> Result<ItemMeta, IpcError> {
