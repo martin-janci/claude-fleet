@@ -27,6 +27,7 @@ pub mod service;
 pub mod shell;
 pub mod ssh;
 pub mod ssh_config;
+pub mod ssh_diag;
 #[cfg(test)]
 pub mod ssh_fake;
 pub mod store;

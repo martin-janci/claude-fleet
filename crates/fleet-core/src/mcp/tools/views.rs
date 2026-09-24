@@ -36,11 +36,10 @@ use serde_json::Value;
 
 /// The `list_sessions` fields `view: "phone"` keeps.
 ///
-/// Derived from what the phone actually draws, not from what its model
-/// declares: `SessionRow.kt` deserialises 28 fields, but `branch`,
-/// `pr_url`, `turn_seq`, `lost_at`, `created_at`, `started_at`,
-/// `last_stop_at`, `last_turn_at`, `usage_*` and `parent_session_id` have no
-/// reader on any screen. The 17 here are the ones with one:
+/// Derived from what the phone actually reads, not from what its model
+/// declares: `SessionRow.kt` deserialises 28 fields, but `branch`, `pr_url`,
+/// `lost_at`, `created_at`, `worktree_id` and `parent_session_id` have no
+/// reader on any screen. The ones here each have one:
 ///
 /// * `id` — the row key and every action's address;
 /// * `tmux_name`, `friendly_name`, `last_prompt` — `SessionRow.displayName`
@@ -62,13 +61,23 @@ use serde_json::Value;
 ///   options. Without it the view is a list a phone can read and not act on:
 ///   the one thing a pager exists for is answering that dialog, and a row
 ///   that says `claude_status: "blocked"` and nothing else forces the app
-///   back to the full 52 KB answer to find out what the question was;
-/// * `tags` — the session screen's tags editor starts from them, and
-///   `set_session_tags` REPLACES the whole list. Projected away, a phone
-///   re-list held `[]`, so adding one tag from the phone silently deleted
-///   every other tag the session had;
+///   back to the full 52 KB answer to find out what the question was.
+/// * `is_controller` — the session card refuses Restart and Kill on the
+///   controller; projected away it reads as `false`, and the phone would
+///   offer to kill the session driving it;
+/// * `tags` — the card's tag editor starts from the row's current tags;
+/// * `turn_seq` — whether a row change is a new turn, which is what decides
+///   that a conversation needs re-reading at all;
+/// * `safe_kill_state` — a retirement already armed, so the card shows it
+///   rather than offering it again;
+/// * `started_at`, `last_turn_at`, `last_stop_at`, `usage_cost_micros`,
+///   `usage_model` — the session screen's status strip: elapsed time, cost
+///   and model;
 /// * `work` — the session's primary work link (key, title): the row's key
 ///   chip and the grouping by work. Small, and null for most rows.
+///
+/// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
+/// them: the first cut of this view was taken against the list screen alone.
 ///
 /// [`super::tests`] pins this set against the serialized row so a renamed
 /// column cannot quietly fall out of the view, and pins the list itself so
@@ -82,16 +91,24 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "friendly_name",
     "host_alias",
     "id",
+    "is_controller",
     "kind",
     "last_activity_at",
     "last_prompt",
+    "last_stop_at",
+    "last_turn_at",
     "needs_attention",
     "pending_input",
     "project_id",
+    "safe_kill_state",
+    "started_at",
     "status",
     "stuck_kind",
     "tags",
     "tmux_name",
+    "turn_seq",
+    "usage_cost_micros",
+    "usage_model",
     "work",
 ];
 

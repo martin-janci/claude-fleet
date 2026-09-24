@@ -3936,7 +3936,7 @@ fn one_full_row() -> serde_json::Value {
 /// Dropping an entry must be a deliberate edit: the failure it prevents is a
 /// phone drawing a blank column against a hub that believes it answered.
 #[test]
-fn the_phone_view_is_exactly_the_eighteen_columns_a_pager_uses() {
+fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
     assert_eq!(
         PHONE_SESSION_FIELDS,
         &[
@@ -3947,16 +3947,24 @@ fn the_phone_view_is_exactly_the_eighteen_columns_a_pager_uses() {
             "friendly_name",
             "host_alias",
             "id",
+            "is_controller",
             "kind",
             "last_activity_at",
             "last_prompt",
+            "last_stop_at",
+            "last_turn_at",
             "needs_attention",
             "pending_input",
             "project_id",
+            "safe_kill_state",
+            "started_at",
             "status",
             "stuck_kind",
             "tags",
             "tmux_name",
+            "turn_seq",
+            "usage_cost_micros",
+            "usage_model",
             "work",
         ]
     );
@@ -5560,7 +5568,7 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     );
 }
 
-/// The 64 % that is not drawn: the heaviest of these on the measured capture
+/// The columns no screen reads: the heaviest of these on the measured capture
 /// were `claude_session_id` (2 773 B over 56 rows) and `account_uuid`
 /// (2 160 B). Dropping them is also why a phone stops holding them at all.
 #[test]
@@ -5573,10 +5581,8 @@ fn the_phone_view_drops_the_columns_no_screen_reads() {
         "account_uuid",
         "usage_cache_read_tokens",
         "usage_input_tokens",
-        "usage_model",
         "context_source",
         "safe_kill_nonce",
-        "is_controller",
         "row_version",
     ] {
         assert!(!obj.contains_key(gone), "{gone} survived the phone view");

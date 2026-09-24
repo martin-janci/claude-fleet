@@ -415,8 +415,7 @@ dialog — derived alongside `current_activity` on the same reconcile pass.
 
 Responses are sized for MCP token limits: `list_sessions` and `list_projects`
 return slim summary rows by default and accept `limit` (`list_sessions` also
-takes `view: "phone"`, a named projection to the 18 columns a phone's session
-list draws, and `list_projects` takes `has_sessions: true`, which keeps only
+takes `view: "phone"`, a named projection to the columns the phone app reads, and `list_projects` takes `has_sessions: true`, which keeps only
 the projects a live session can name — see *Asking for fewer columns* in
 `docs/hub.md`); `list_worktrees`
 answers `{total, worktrees}` with slim rows, at most 100 of them (`limit`,
