@@ -5,6 +5,7 @@
 
 pub mod handover;
 pub mod harvest;
+pub mod recognize;
 pub mod resume;
 
 use crate::ipc_error::{codes, lock, IpcError};

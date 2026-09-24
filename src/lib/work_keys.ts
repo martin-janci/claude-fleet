@@ -40,13 +40,22 @@ export interface WorkKey {
   };
 }
 
-// `[A-Za-z][A-Za-z0-9_]{1,9}` is a Jira-style project key (2-10 chars);
-// the look-behind / look-ahead keep it from matching inside a longer token
-// (`XABC-12`, `ABC-12abc`) or a version (`ABC-1.2`).
-const KEY_RE = /(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9_]{1,9})-(\d{1,7})(?![A-Za-z0-9.])/g;
+// The recogniser is shared with the hub (work graph M4.1):
+// `crates/fleet-core/src/service/work/recognize.rs` is its Rust twin, and both
+// run `crates/fleet-core/src/service/work/testdata/recognize_cases.json`, so
+// the desktop's fallback and the hub's detection agree on what text names.
+//
+// `[A-Za-z][A-Za-z0-9_]{1,9}` is a Jira-style project key (2-10 chars); the
+// look-behind / look-ahead keep it from matching inside a longer token
+// (`XABC-12`, `ABC-12abc`); a `.` and a digit after the number is a version
+// (`lodash-4.17`), a sentence's full stop is not.
+const KEY_RE = /(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9_]{1,9})-(\d{1,7})(?![A-Za-z0-9]|\.\d)/g;
+const URL_RE = /https?:\/\/[^\s<>"'`()[\]]+/gi;
+const ISSUE_RE = /#(\d{1,7})(?![A-Za-z0-9_])/g;
 
 /** Lower-case prefixes that name something other than a ticket. Checked only
- *  for keys that were not written in upper case. */
+ *  for keys that were not written in upper case. Keep in sync with `DENY` in
+ *  `recognize.rs` (the shared fixture exercises both). */
 const DENY = new Set([
   'utf', 'sha', 'md', 'iso', 'rfc', 'cve', 'ipv', 'http', 'python', 'node', 'java',
   'release', 'hotfix', 'fix', 'bugfix', 'bug', 'feature', 'feat', 'chore', 'patch',
@@ -56,19 +65,162 @@ const DENY = new Set([
   'master', 'revert', 'dependabot', 'renovate', 'spike', 'poc', 'demo',
 ]);
 
+/** What recognition knows besides the text (mirrors `RecognizeCtx`). */
+export interface RecognizeCtx {
+  /** Every tracker's key prefixes; non-empty restricts keys to them. */
+  prefixes?: readonly string[];
+  /** Configured trackers, so a URL's host names its tracker. */
+  trackers?: readonly { id: number; host: string; provider?: string }[];
+  /** The session's GitHub `owner/repo`, for a bare `#123`. */
+  repo?: string | null;
+}
+
+/** One recognised reference (mirrors the Rust `Match`, minus its span). */
+export interface TicketRef {
+  kind: 'key' | 'url' | 'repo_issue';
+  /** `ABC-123`, `owner/repo#42`, `asana:<task>`. */
+  key: string;
+  tracker_id: number | null;
+  provider: string | null;
+  /** The matched text as written. */
+  text: string;
+  upper_written: boolean;
+}
+
+function keyAccepted(prefix: string, ctx: RecognizeCtx): boolean | null {
+  const upper = /[A-Z]/.test(prefix) && !/[a-z]/.test(prefix);
+  if (!upper) {
+    if (!/^[A-Za-z]+$/.test(prefix)) return null;
+    if (DENY.has(prefix.toLowerCase())) return null;
+  }
+  const known = ctx.prefixes ?? [];
+  if (known.length && !known.some((p) => p.toUpperCase() === prefix.toUpperCase())) return null;
+  return upper;
+}
+
+/** The key a whole URL segment / query value is, or null. */
+function wholeKey(v: string): string | null {
+  const m = /^([A-Za-z][A-Za-z0-9_]{1,9})-(\d{1,7})$/.exec(v);
+  return m ? `${m[1].toUpperCase()}-${m[2]}` : null;
+}
+
+function decode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+function ticketUrl(raw: string): { key: string; provider: string; host: string } | null {
+  const rest = raw.slice(raw.indexOf('://') + 3);
+  const cut = rest.search(/[/?#]/);
+  const authority = cut < 0 ? rest : rest.slice(0, cut);
+  const tail = cut < 0 ? '' : rest.slice(cut);
+  const host = (authority.split('@').pop() ?? '').split(':')[0].toLowerCase();
+  const noFrag = tail.split('#')[0];
+  const q = noFrag.indexOf('?');
+  const path = decode(q < 0 ? noFrag : noFrag.slice(0, q));
+  const query = q < 0 ? '' : noFrag.slice(q + 1);
+  const segs = path.split('/').filter((x) => x);
+  if (host === 'github.com' || host === 'www.github.com') {
+    const [o, r, kind, n] = segs;
+    if (kind === 'issues' && n && /^\d{1,9}$/.test(n)) {
+      return { key: `${o.toLowerCase()}/${r.toLowerCase()}#${n}`, provider: 'github', host };
+    }
+    return null;
+  }
+  if (host === 'app.asana.com') {
+    let task: string | undefined;
+    if (segs[0] === '0' && segs.length >= 3) task = segs[2];
+    else if (segs[0] === '1' && segs[2] === 'project' && segs[4] === 'task') task = segs[5];
+    return task && /^\d{1,24}$/.test(task) ? { key: `asana:${task}`, provider: 'asana', host } : null;
+  }
+  if (host === 'linear.app') {
+    const k = segs[1] === 'issue' && segs[2] ? wholeKey(segs[2]) : null;
+    return k ? { key: k, provider: 'linear', host } : null;
+  }
+  for (const pair of query.split('&')) {
+    if (pair.startsWith('selectedIssue=')) {
+      const k = wholeKey(decode(pair.slice('selectedIssue='.length)));
+      if (k) return { key: k, provider: 'jira', host };
+    }
+  }
+  const i = segs.indexOf('browse');
+  const k = i >= 0 && segs[i + 1] ? wholeKey(segs[i + 1]) : null;
+  return k ? { key: k, provider: 'jira', host } : null;
+}
+
+/** Every ticket reference in `text` — keys, ticket URLs (Jira, Linear, Asana,
+ *  GitHub) and, with `ctx.repo`, a bare `#123` — in order of appearance. The
+ *  same answer the hub's `recognize` gives (see the shared fixture). */
+export function extractTicketRefs(text: string | null | undefined, ctx: RecognizeCtx = {}): TicketRef[] {
+  if (!text) return [];
+  const found: { at: number; ref: TicketRef }[] = [];
+  const urls: [number, number][] = [];
+  for (const m of text.matchAll(URL_RE)) {
+    const raw = m[0].replace(/[.,;:!?]+$/, '');
+    const at = m.index ?? 0;
+    urls.push([at, at + raw.length]);
+    const t = ticketUrl(raw);
+    if (!t) continue;
+    const tracker = (ctx.trackers ?? []).find((x) => x.host.toLowerCase() === t.host);
+    found.push({
+      at,
+      ref: {
+        kind: 'url',
+        key: t.key,
+        tracker_id: tracker ? tracker.id : null,
+        provider: t.provider,
+        text: raw,
+        upper_written: true,
+      },
+    });
+  }
+  const inUrl = (i: number) => urls.some(([a, b]) => i >= a && i < b);
+  for (const m of text.matchAll(KEY_RE)) {
+    const at = m.index ?? 0;
+    if (inUrl(at)) continue;
+    const [whole, prefix, num] = m;
+    const upper = keyAccepted(prefix, ctx);
+    if (upper === null) continue;
+    found.push({
+      at,
+      ref: {
+        kind: 'key',
+        key: `${prefix.toUpperCase()}-${num}`,
+        tracker_id: null,
+        provider: null,
+        text: whole,
+        upper_written: upper,
+      },
+    });
+  }
+  const repo = ctx.repo;
+  if (repo && repo.includes('/')) {
+    for (const m of text.matchAll(ISSUE_RE)) {
+      const at = m.index ?? 0;
+      const before = at > 0 ? text[at - 1] : '';
+      if (inUrl(at) || /[A-Za-z0-9&#/]/.test(before)) continue;
+      found.push({
+        at,
+        ref: {
+          kind: 'repo_issue',
+          key: `${repo.toLowerCase()}#${m[1]}`,
+          tracker_id: null,
+          provider: 'github',
+          text: m[0],
+          upper_written: false,
+        },
+      });
+    }
+  }
+  return found.sort((a, b) => a.at - b.at).map((f) => f.ref);
+}
+
 /** The first work key in `text`, normalised to upper case, or null. */
 export function extractWorkKey(text: string | null | undefined): string | null {
-  if (!text) return null;
-  for (const m of text.matchAll(KEY_RE)) {
-    const [, prefix, num] = m;
-    const upperWritten = prefix === prefix.toUpperCase() && /[A-Z]/.test(prefix);
-    if (!upperWritten) {
-      if (!/^[A-Za-z]+$/.test(prefix)) continue;
-      if (DENY.has(prefix.toLowerCase())) continue;
-    }
-    return `${prefix.toUpperCase()}-${num}`;
-  }
-  return null;
+  return extractTicketRefs(text).find((r) => r.kind === 'key')?.key ?? null;
 }
 
 /** The work key in a pasted ticket URL — Jira `/browse/ABC-123` or
@@ -77,19 +229,16 @@ export function extractWorkKey(text: string | null | undefined): string | null {
 export function keyFromTicketUrl(text: string): string | null {
   const t = text.trim();
   if (!/^https?:\/\/\S+$/i.test(t)) return null;
+  const ref = extractTicketRefs(t).find((r) => r.kind === 'url');
+  if (ref && /^[A-Z][A-Z0-9_]{1,9}-\d{1,7}$/.test(ref.key)) return ref.key;
+  // Not a known ticket URL shape: a key anywhere in its path still names it.
   let u: URL;
   try {
     u = new URL(t);
   } catch {
     return null;
   }
-  let path = u.pathname;
-  try {
-    path = decodeURIComponent(path);
-  } catch {
-    /* keep the raw path */
-  }
-  return extractWorkKey(u.searchParams.get('selectedIssue')) ?? extractWorkKey(path);
+  return extractWorkKey(decode(u.pathname).replace(/\//g, ' '));
 }
 
 /** worktree id → branch, over every worktree the projects store holds. */
