@@ -433,6 +433,12 @@ pub(super) async fn handle_events(
     Query(query): Query<EventsQuery>,
     headers: axum::http::HeaderMap,
 ) -> Response {
+    // A hub link's only door is `peer_exchange` on `/mcp`; this route is not
+    // it. Checked before anything else — a stream slot, a subscription — is
+    // taken.
+    if let Some(refusal) = super::auth::refuses_peer(&caller) {
+        return refusal;
+    }
     let resume_header = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
@@ -808,5 +814,28 @@ mod tests {
         assert_eq!(msg.payload["id"], 7);
         bus.emit(&RowChange::HostRemoved("box".into()));
         assert_eq!(rx.recv().await.unwrap().kind(), "host");
+    }
+
+    /// `handle_events` needs a live `EventFeed` to drive end to end, so there
+    /// is no handler-level HTTP harness in this file (unlike `report_route`'s
+    /// `app()`); the peer gate is a pure fn precisely so it can be checked
+    /// here without building one. `handle_events` itself calls this same fn
+    /// first thing, so a caller refused here is refused before a stream ever
+    /// opens.
+    #[test]
+    fn a_peer_caller_is_refused_and_anyone_else_is_not() {
+        use super::super::auth::{refuses_peer, ClientRef, TokenMode};
+        let peer = Caller {
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 1,
+                name: "hub-b".into(),
+                trusted: false,
+            }),
+            mode: TokenMode::Peer,
+        };
+        let resp = refuses_peer(&peer).expect("a peer must be refused");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(refuses_peer(&Caller::master()).is_none());
     }
 }

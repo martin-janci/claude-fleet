@@ -35,6 +35,12 @@ pub async fn handle_report(
     body: axum::body::Bytes,
 ) -> StatusCode {
     use crate::ipc_error::codes;
+    // A hub link's only door is `peer_exchange` on `/mcp`; this route is not
+    // it. `auth::refuses_peer` is the same gate `/events` applies — kept in
+    // one place so the two routes cannot drift on who counts as a peer.
+    if crate::mcp::auth::refuses_peer(&caller).is_some() {
+        return StatusCode::FORBIDDEN;
+    }
     let batch: ReportBatch = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => {
@@ -202,6 +208,24 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// A peer token (a linked hub) is refused both routes: `/report` is not
+    /// `peer_exchange`, and `/reports` is master-only already. A hub link's
+    /// only door is `peer_exchange` on `/mcp`.
+    #[tokio::test]
+    async fn a_peer_token_is_refused_both_routes() {
+        let (addr, store) = app().await;
+        {
+            let s = store.lock().unwrap();
+            s.insert_client_token("hub-b", &auth::sha256_hex("peer-tok"), "peer")
+                .unwrap();
+        }
+        assert_eq!(
+            http(addr, "POST", "/report", "peer-tok", &batch(1)).await.0,
+            403
+        );
+        assert_eq!(http(addr, "GET", "/reports", "peer-tok", "").await.0, 403);
     }
 
     #[tokio::test]

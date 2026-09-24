@@ -10,10 +10,12 @@ use crate::ipc_error::codes;
 /// short enough that a name cannot be used to pad a log line or a prompt.
 pub const MAX_CLIENT_NAME_LEN: usize = 64;
 
-/// The two modes a client token may carry. Anything else is refused at the
-/// insert: `TokenMode::parse` reads an unknown string as `readonly`, so a
-/// typo would silently downgrade a client rather than fail.
-pub const CLIENT_MODES: &[&str] = &["full", "readonly"];
+/// The three modes a client token may carry. Anything else is refused at the
+/// insert: `TokenMode::parse_client` reads an unknown string as `readonly`,
+/// so a typo would silently downgrade a client rather than fail. `peer`
+/// identifies a linked hub (federation) rather than an operator's own
+/// device — see `TokenMode::Peer` and `set_client_trust`.
+pub const CLIENT_MODES: &[&str] = &["full", "readonly", "peer"];
 
 /// The three line separators [`char::is_control`] does NOT cover. A renderer,
 /// a terminal, a JSON log viewer or an LLM reading a transcript may all treat
@@ -239,6 +241,18 @@ impl Store {
         let name = name.trim();
         let at = now_unix();
         let n = if trusted {
+            let is_peer: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM client_tokens \
+                     WHERE name = ?1 AND revoked_at IS NULL AND mode = 'peer')",
+                rusqlite::params![name],
+                |r| r.get(0),
+            )?;
+            if is_peer {
+                return Err(crate::ipc_error::IpcError::new(
+                    codes::E_VALIDATE,
+                    format!("'{name}' is a peer hub link; a peer is never trusted"),
+                ));
+            }
             self.conn.execute(
                 "UPDATE client_tokens SET trusted_at = COALESCE(trusted_at, ?2) \
                  WHERE name = ?1 AND revoked_at IS NULL",
@@ -415,11 +429,11 @@ mod tests {
         assert_eq!(s.revoke_client_token(" phone ").unwrap().name, "phone");
     }
 
-    /// `mode` feeds `TokenMode::parse`, which reads anything it does not know
-    /// as `readonly` — a typo would silently downgrade a client instead of
-    /// failing. Only the two real values are accepted.
+    /// `mode` feeds `TokenMode::parse_client`, which reads anything it does
+    /// not know as `readonly` — a typo would silently downgrade a client
+    /// instead of failing. Only the three real values are accepted.
     #[test]
-    fn mode_must_be_full_or_readonly() {
+    fn mode_must_be_a_known_client_mode() {
         let s = store();
         for bad in ["", "Full", "admin", "read-only"] {
             let e = s
@@ -429,6 +443,20 @@ mod tests {
         }
         s.insert_client_token("phone", "aa11", "full").unwrap();
         s.insert_client_token("kiosk", "bb22", "readonly").unwrap();
+        s.insert_client_token("hub-b", "cc33", "peer").unwrap();
+    }
+
+    /// A `peer` token is a linked hub, never an operator's own device: trust
+    /// (which unmarks a client's prompts as the operator's own words) must
+    /// stay refused for it.
+    #[test]
+    fn a_peer_client_is_never_trusted() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_client_token("hub-b", &"a".repeat(64), "peer")
+            .unwrap();
+        let e = s.set_client_trust("hub-b", true).unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_VALIDATE);
+        assert!(e.message.contains("peer"), "{}", e.message);
     }
 
     /// Revoking twice in the same second used to re-fetch by

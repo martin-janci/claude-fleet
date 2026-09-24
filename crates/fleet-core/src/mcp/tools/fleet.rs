@@ -201,6 +201,13 @@ impl FleetTools {
         let name = crate::store::validate_client_name(&p.name).map_err(to_mcp_err)?;
         let mode = p.mode.unwrap_or_else(|| "full".to_string());
         crate::store::validate_client_mode(&mode).map_err(to_mcp_err)?;
+        if mode == "peer" && p.trusted {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                "a peer hub link is never trusted; drop trusted",
+                None,
+            ));
+        }
         audit(
             "pair_client",
             &format!(

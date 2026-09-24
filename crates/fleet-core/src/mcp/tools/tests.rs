@@ -2009,6 +2009,37 @@ async fn pair_client_refuses_a_name_a_live_client_already_holds() {
     );
 }
 
+/// A peer token is a linked hub, never an operator's own device — pairing
+/// one `trusted` makes no sense (`set_client_trust` refuses it too, at the
+/// store layer) and is caught here, before a code is ever minted.
+#[tokio::test]
+async fn pair_client_refuses_a_trusted_peer_but_allows_an_untrusted_one() {
+    let (tools, guards, _store) = client_tools();
+    let err = tools
+        .pair_client(Parameters(PairClientParams {
+            name: "hub-b".into(),
+            mode: Some("peer".into()),
+            ttl_s: None,
+            trusted: true,
+        }))
+        .await
+        .expect_err("trusted peer must be refused");
+    assert!(err.message.starts_with("E_VALIDATE"), "{}", err.message);
+    assert!(guards.pairings.is_empty(), "no code was minted");
+
+    let r = tools
+        .pair_client(Parameters(PairClientParams {
+            name: "hub-b".into(),
+            mode: Some("peer".into()),
+            ttl_s: None,
+            trusted: false,
+        }))
+        .await
+        .expect("untrusted peer is fine");
+    let v = result_json(&r);
+    assert_eq!(v["mode"], "peer");
+}
+
 #[tokio::test]
 async fn list_clients_never_returns_the_token_hash() {
     let (tools, _guards, store) = client_tools();
@@ -2245,7 +2276,7 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
 
 // ---- what the router SERVES (scope, slimming, hints) ----
 
-/// The five caller shapes the server actually sees.
+/// The six caller shapes the server actually sees.
 fn every_caller_kind() -> Vec<(&'static str, Caller)> {
     vec![
         ("master", Caller::master()),
@@ -2256,6 +2287,7 @@ fn every_caller_kind() -> Vec<(&'static str, Caller)> {
             "client readonly",
             client_caller("phone", TokenMode::Readonly),
         ),
+        ("client peer", client_caller("hub-b", TokenMode::Peer)),
     ]
 }
 
@@ -2276,6 +2308,35 @@ fn the_served_tool_list_matches_the_call_gates() {
                 if callable { "listed" } else { "hidden" }
             );
         }
+    }
+}
+
+/// A peer token (a linked hub) reaches exactly one tool — `peer_exchange` —
+/// and nothing else reaches that tool. Until Task 7 adds the tool itself,
+/// the router carries no `peer_exchange` entry, so this loop covers every
+/// registered tool; Task 7 must skip `peer_exchange` in this loop once it
+/// exists.
+#[test]
+fn a_peer_token_reaches_only_peer_exchange_and_nothing_else_reaches_it() {
+    let peer = client_caller("hub-b", TokenMode::Peer);
+    for t in FleetTools::tool_router_for_doc().list_all() {
+        let name = t.name.to_string();
+        assert!(
+            enforce_mode(&peer, &name).is_err(),
+            "a peer token must be refused {name}"
+        );
+        assert!(
+            !present::visible_to(&peer, &name),
+            "{name} served to a peer"
+        );
+    }
+    assert!(enforce_mode(&peer, crate::mcp::auth::PEER_TOOL).is_ok());
+    for (label, c) in every_caller_kind() {
+        if c.mode == TokenMode::Peer {
+            continue;
+        }
+        let e = enforce_mode(&c, crate::mcp::auth::PEER_TOOL);
+        assert!(e.is_err(), "{label} must be refused peer_exchange");
     }
 }
 
