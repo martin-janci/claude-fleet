@@ -255,6 +255,16 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("link_session_work", Verdict::Routed { tool: "work_link" }),
     ("reject_session_work", Verdict::Routed { tool: "work_link" }),
     ("unlink_session_work", Verdict::Routed { tool: "work_link" }),
+    // Work graph M4.4: decide a detected suggestion, and trust a project's
+    // branch keys — both actions of the existing `work_link`.
+    (
+        "confirm_session_work",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    (
+        "set_work_project_trust",
+        Verdict::Routed { tool: "work_link" },
+    ),
     // Work graph M2.4: resume past work, and what a purge would strand.
     ("work_resume_plan", Verdict::Routed { tool: "work" }),
     ("resume_work", Verdict::Routed { tool: "work_link" }),

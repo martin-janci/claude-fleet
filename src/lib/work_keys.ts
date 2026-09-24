@@ -31,6 +31,11 @@ export interface WorkKey {
   /** The text the key was found in (a tag, branch or worktree name); for a
    *  link, the work item's title (may be empty). */
   from: string;
+  /** Detection linked it without a person (work graph M4): the chip shows
+   *  a small dot and the tooltip says why. */
+  auto?: boolean;
+  /** The link's "why" (`from the branch · rule R3`). */
+  why?: string;
   /** A linked tracker item's status (work graph M3), for the chip's dot. */
   status?: {
     category: string;
@@ -274,10 +279,16 @@ export function workKeyFor(
             unavailable: !!w.unavailable,
           }
         : undefined;
-    return status
-      ? { key: linked, source: 'link', from: w.title, status }
-      : { key: linked, source: 'link', from: w.title };
+    const out: WorkKey = { key: linked, source: 'link', from: w.title };
+    if (status) out.status = status;
+    if (w.strength && AUTO_LINK_SOURCES.includes(w.source)) out.auto = true;
+    if (w.rule || AUTO_LINK_SOURCES.includes(w.source)) out.why = linkWhy(w.source, w.rule);
+    return out;
   }
+  // A hub with detection (work graph M4) already recognised this row and
+  // proposes its key as a suggestion: a guess never moves a session into a
+  // work group, so the fallback stays out of its way.
+  if (s.work_suggested) return null;
   const rejected = new Set(s.work_rejected ?? []);
   const recognise = (text: string): string | null => {
     const key = extractWorkKey(text);
@@ -299,6 +310,22 @@ export function workKeyFor(
   return null;
 }
 
+/** Link sources detection writes (mirrors `AUTO_SOURCES` in `work.ts`, kept
+ *  here so this module stays free of command wrappers). */
+const AUTO_LINK_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt'];
+
+function linkWhy(source: string, rule: string | null | undefined): string {
+  const label: Record<string, string> = {
+    branch: 'the branch',
+    pr: 'the pull request',
+    trailer: 'a commit trailer',
+    url: 'a ticket URL in a prompt',
+    prompt: 'a prompt',
+  };
+  const from = label[source] ? `linked from ${label[source]}` : `linked (${source})`;
+  return rule ? `${from} · rule ${rule}` : from;
+}
+
 /** One-line explanation of why a session is in its work group, with the
  *  ticket's status when a tracker knows it. */
 export function describeWorkKey(w: WorkKey): string {
@@ -310,10 +337,14 @@ export function describeWorkKey(w: WorkKey): string {
 
 function describeSource(w: WorkKey): string {
   switch (w.source) {
-    case 'link':
+    case 'link': {
+      const why = w.why ? ` (${w.why})` : ' (linked)';
       return w.from && w.from !== w.key
-        ? `${w.key} — ${w.from} (linked)`
-        : `${w.key} — linked to this session`;
+        ? `${w.key} — ${w.from}${why}`
+        : w.why
+          ? `${w.key} — ${w.why}`
+          : `${w.key} — linked to this session`;
+    }
     case 'tag':
       return `${w.key} — from the session tag "${w.from}"`;
     case 'branch':

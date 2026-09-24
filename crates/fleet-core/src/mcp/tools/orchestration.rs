@@ -636,9 +636,11 @@ impl FleetTools {
     }
 
     #[tool(description = "Decide a session's work: action link (becomes its \
-        primary; key or item_id), reject (sticky 'not this'), unlink \
-        (link_id). Returns the updated row. resume {key, mode}: new session \
-        on past work. start {key|url|item_id}: new session on a ticket.")]
+        primary; key or item_id), reject (sticky 'not this'; or a \
+        suggestion's link_id), confirm (link_id), unlink (link_id). Returns \
+        the updated row. trust_project {project_id, on}. resume {key, mode}: \
+        new session on past work. start {key|url|item_id}: new session on a \
+        ticket.")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -680,6 +682,19 @@ impl FleetTools {
                     .await
                     .map_err(to_mcp_err)?;
             return ok_json(&row);
+        }
+        if args.action == "trust_project" {
+            // Trust is fleet configuration, not one host's to change.
+            if caller.host_alias.is_some() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "trust_project is not available to a per-host token",
+                    None,
+                ));
+            }
+            return ok_json(
+                &crate::service::work::trust_project(&args, &self.store).map_err(to_mcp_err)?,
+            );
         }
         if args.action == "start" {
             // The host fence (a per-host token starts only its own host's

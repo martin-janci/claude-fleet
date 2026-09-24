@@ -485,9 +485,9 @@ Parameters: `action`, `auth_kind`, `confirm_nonce`, `credential_ref`, `name`, `p
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'), unlink (link_id). Returns the updated row. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket.
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket.
 
-Parameters: `action`, `brief`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `name`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -517,6 +517,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::link_session_work`
 - `commands::work::reject_session_work`
 - `commands::work::unlink_session_work`
+- `commands::work::confirm_session_work`
+- `commands::work::set_work_project_trust`
 - `commands::work::work_resume_plan`
 - `commands::work::resume_work`
 - `commands::work::work_purge_impact`

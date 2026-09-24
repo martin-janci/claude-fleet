@@ -294,6 +294,8 @@ pub fn run() {
             commands::work::link_session_work,
             commands::work::reject_session_work,
             commands::work::unlink_session_work,
+            commands::work::confirm_session_work,
+            commands::work::set_work_project_trust,
             commands::work::work_resume_plan,
             commands::work::resume_work,
             commands::work::work_purge_impact,

@@ -991,6 +991,35 @@ async fn work_tools_are_gated_to_the_callers_host() {
     );
 }
 
+/// Work graph M4.4: trusting a project's branch keys is fleet configuration
+/// — never a per-host token's — while the master may.
+#[tokio::test]
+async fn trust_project_is_refused_to_a_per_host_token() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, pid, _) = two_host_store();
+    let t = test_tools(s);
+    let args = || WorkLinkArgs {
+        action: "trust_project".into(),
+        project_id: Some(pid),
+        on: Some(true),
+        ..Default::default()
+    };
+    forbidden(
+        t.work_link(
+            Extension(host_caller("hostb", TokenMode::Full)),
+            Parameters(args()),
+        )
+        .await
+        .unwrap_err(),
+    );
+    let ok = result_json(
+        &t.work_link(Extension(Caller::master()), Parameters(args()))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(ok["trusted"], serde_json::json!([pid]));
+}
+
 #[tokio::test]
 async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     let (s, pid, on_b) = two_host_store();
@@ -2880,7 +2909,10 @@ fn the_served_definition_budget_stays_bounded() {
     // tools, no new tool. Measured at 68,066 on 2026-09-24; plus 100.
     // M3.5: start's `name` / `worktree`, so the New-session dialog's edits
     // reach a ticket start. Measured at 68,213 on 2026-09-24; plus 100.
-    const BUDGET_BYTES: usize = 68_313;
+    // Work graph M4.4: `work_link` gains confirm / reject-by-link_id /
+    // trust_project (one new parameter, `on`, and a longer description);
+    // no new tool. Measured at 68,385 on 2026-09-24 (+172); plus 100.
+    const BUDGET_BYTES: usize = 68_485;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

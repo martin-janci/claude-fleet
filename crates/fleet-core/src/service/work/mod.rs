@@ -471,6 +471,73 @@ mod tests {
         assert_eq!(links[0].state, "rejected");
     }
 
+    /// Work graph M4.4: confirm / reject a suggestion by link id, and trust
+    /// a project, through the one entry both transports share.
+    #[test]
+    fn suggestions_are_decided_by_link_id_and_projects_trusted() {
+        let (st, sid) = store();
+        let pid = {
+            let s = st.lock().unwrap();
+            s.create_local_work_item(Some("PAY-7"), "Retry").unwrap();
+            detect::on_prompt(&s, sid, "see PAY-7 and PAY-8", false).unwrap();
+            s.upsert_project("acme", "api", "/src/api").unwrap()
+        };
+        let sg = |st: &Mutex<Store>| {
+            st.lock()
+                .unwrap()
+                .get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work_suggested
+        };
+        let first = sg(&st).expect("a suggestion");
+        let row = work_link(
+            &WorkLinkArgs {
+                link_id: Some(first.link_id),
+                ..link(sid, "confirm")
+            },
+            &st,
+        )
+        .unwrap();
+        assert_eq!(row.work.unwrap().link_id, first.link_id);
+        assert_eq!(
+            work_link(&link(sid, "confirm"), &st).unwrap_err().code,
+            codes::E_INVALID
+        );
+        let err = work_link(
+            &WorkLinkArgs {
+                link_id: Some(9999),
+                ..link(sid, "reject")
+            },
+            &st,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND);
+
+        let t = trust_project(
+            &WorkLinkArgs {
+                action: "trust_project".into(),
+                project_id: Some(pid),
+                on: Some(true),
+                ..Default::default()
+            },
+            &st,
+        )
+        .unwrap();
+        assert_eq!(t.trusted, vec![pid]);
+        let missing = trust_project(
+            &WorkLinkArgs {
+                action: "trust_project".into(),
+                project_id: Some(pid + 50),
+                on: Some(true),
+                ..Default::default()
+            },
+            &st,
+        )
+        .unwrap_err();
+        assert_eq!(missing.code, codes::E_NOTFOUND);
+    }
+
     #[test]
     fn malformed_requests_are_refused() {
         let (st, sid) = store();

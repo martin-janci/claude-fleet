@@ -28,7 +28,8 @@ pub struct LinkSessionWorkArgs {
     pub item_id: Option<i64>,
 }
 
-/// Say a session does NOT work on a key or item (sticky).
+/// Say a session does NOT work on a key or item (sticky) — or, with
+/// `link_id` alone, on one detected suggestion ("Not this", work graph M4.4).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RejectSessionWorkArgs {
     pub session_id: i64,
@@ -36,6 +37,22 @@ pub struct RejectSessionWorkArgs {
     pub key: Option<String>,
     #[serde(default)]
     pub item_id: Option<i64>,
+    #[serde(default)]
+    pub link_id: Option<i64>,
+}
+
+/// Confirm one detected suggestion: it becomes the session's primary work.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfirmSessionWorkArgs {
+    pub session_id: i64,
+    pub link_id: i64,
+}
+
+/// Trust (or stop trusting) branch keys in a project (rule R3).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetWorkProjectTrustArgs {
+    pub project_id: i64,
+    pub on: bool,
 }
 
 /// Remove one live link of a session.
@@ -140,6 +157,24 @@ pub async fn reject_session_work(
 }
 
 #[tauri::command]
+pub async fn confirm_session_work(
+    args: ConfirmSessionWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::confirm_session_work(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn set_work_project_trust(
+    args: SetWorkProjectTrustArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<work::ProjectTrust, IpcError> {
+    routed::set_work_project_trust(&backend, args, &store).await
+}
+
+#[tauri::command]
 pub async fn unlink_session_work(
     args: UnlinkSessionWorkArgs,
     backend: State<'_, Arc<FleetBackend>>,
@@ -192,13 +227,47 @@ pub(crate) mod routed {
             action: "reject".into(),
             key: args.key,
             item_id: args.item_id,
-            link_id: None,
+            link_id: args.link_id,
             source: None,
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("reject_session_work", &args).await,
             None => work::work_link(&args, store),
+        }
+    }
+
+    pub async fn confirm_session_work(
+        backend: &FleetBackend,
+        args: ConfirmSessionWorkArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        let args = WorkLinkArgs {
+            session_id: Some(args.session_id),
+            action: "confirm".into(),
+            link_id: Some(args.link_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("confirm_session_work", &args).await,
+            None => work::work_link(&args, store),
+        }
+    }
+
+    pub async fn set_work_project_trust(
+        backend: &FleetBackend,
+        args: SetWorkProjectTrustArgs,
+        store: &Mutex<Store>,
+    ) -> Result<work::ProjectTrust, IpcError> {
+        let args = WorkLinkArgs {
+            action: "trust_project".into(),
+            project_id: Some(args.project_id),
+            on: Some(args.on),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("set_work_project_trust", &args).await,
+            None => work::trust_project(&args, store),
         }
     }
 
