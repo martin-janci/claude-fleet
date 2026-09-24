@@ -2614,6 +2614,7 @@ curl() { echo HIJACKED; }
                 "ssh: Could not resolve hostname h: nodename nor servname provided",
             ),
             ("", "Permission denied (publickey)."),
+            ("", "martin@h: Permission denied (publickey)."),
             ("", "Host key verification failed."),
             (
                 "",
