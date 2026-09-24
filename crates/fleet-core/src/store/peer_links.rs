@@ -20,8 +20,10 @@ const LINK_COLUMNS: &str = "id, fleet_id, role, url, token, client_id, after, \
     pending_rejects, state, last_exchange_at, last_error, created_at, revoked_at";
 
 /// One row of `peer_links`. Deliberately NOT `Serialize` — `token` is a
-/// secret; use [`PeerLinkSummary`] wherever a link is reported outward.
-#[derive(Debug, Clone)]
+/// secret; use [`PeerLinkSummary`] wherever a link is reported outward. Its
+/// `Debug` is hand-written for the same reason: the token prints as
+/// `<redacted>`.
+#[derive(Clone)]
 pub struct PeerLinkRow {
     pub id: i64,
     pub fleet_id: Option<String>,
@@ -36,6 +38,26 @@ pub struct PeerLinkRow {
     pub last_error: Option<String>,
     pub created_at: i64,
     pub revoked_at: Option<i64>,
+}
+
+impl std::fmt::Debug for PeerLinkRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerLinkRow")
+            .field("id", &self.id)
+            .field("fleet_id", &self.fleet_id)
+            .field("role", &self.role)
+            .field("url", &self.url)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("client_id", &self.client_id)
+            .field("after", &self.after)
+            .field("pending_rejects", &self.pending_rejects)
+            .field("state", &self.state)
+            .field("last_exchange_at", &self.last_exchange_at)
+            .field("last_error", &self.last_error)
+            .field("created_at", &self.created_at)
+            .field("revoked_at", &self.revoked_at)
+            .finish()
+    }
 }
 
 /// The reportable shape of a link: everything but the secret token, plus the
@@ -208,12 +230,39 @@ impl Store {
                 return Ok(row);
             }
             // A re-pair of a fleet already linked: rebind its live row to the
-            // new token so pending rows stay attached.
-            let n = s.conn.execute(
-                "UPDATE peer_links SET client_id = ?1, state = 'connected', last_error = NULL \
-                 WHERE fleet_id = ?2 AND role = 'listener' AND revoked_at IS NULL",
-                rusqlite::params![client_id, fleet_id],
-            )?;
+            // new token so pending rows stay attached — but ONLY once the old
+            // token is revoked (or gone). A second live token claiming the
+            // fleet is refused: otherwise any paired peer could claim another
+            // fleet's id and take over its link (its outbox, its sender
+            // addresses, its watermark).
+            let live: Option<(i64, Option<i64>)> = s
+                .conn
+                .query_row(
+                    "SELECT id, client_id FROM peer_links \
+                     WHERE fleet_id = ?1 AND role = 'listener' AND revoked_at IS NULL",
+                    [fleet_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let mut n = 0;
+            if let Some((link_id, old_client)) = live {
+                if let Some(old) = old_client {
+                    if s.client_token_is_live(old)? {
+                        return Err(IpcError::new(
+                            codes::E_FORBIDDEN,
+                            format!(
+                                "fleet {fleet_id} is already linked to another peer token; \
+                                 revoke that client first (fleet-hub client revoke <name>)"
+                            ),
+                        ));
+                    }
+                }
+                n = s.conn.execute(
+                    "UPDATE peer_links SET client_id = ?1, state = 'connected', last_error = NULL \
+                     WHERE id = ?2",
+                    rusqlite::params![client_id, link_id],
+                )?;
+            }
             if n == 0 {
                 s.conn
                     .execute(
@@ -301,9 +350,11 @@ impl Store {
         last_error: Option<&str>,
         now: i64,
     ) -> Result<(), IpcError> {
+        // `revoked_at IS NULL`: a handler parked across a revoke must not
+        // write a revoked link back to life when it returns.
         self.conn.execute(
             "UPDATE peer_links SET state = ?1, last_error = ?2, last_exchange_at = ?3 \
-             WHERE id = ?4",
+             WHERE id = ?4 AND revoked_at IS NULL",
             rusqlite::params![state, last_error, now, id],
         )?;
         Ok(())
@@ -319,7 +370,7 @@ impl Store {
         self.conn.execute(
             "UPDATE peer_links SET after = ?1, pending_rejects = ?2, state = 'connected', \
                                    last_error = NULL, last_exchange_at = ?3 \
-             WHERE id = ?4",
+             WHERE id = ?4 AND revoked_at IS NULL",
             rusqlite::params![after, pending_rejects, now, id],
         )?;
         Ok(())
@@ -503,16 +554,22 @@ impl Store {
         )?)
     }
 
-    pub fn mark_peer_accepted(&self, ids: &[i64]) -> Result<usize, IpcError> {
+    /// `pending` → `accepted` for those of `ids` that are on link
+    /// `link_id` — a peer's results settle its own link's rows only.
+    pub fn mark_peer_accepted(&self, link_id: i64, ids: &[i64]) -> Result<usize, IpcError> {
         if ids.is_empty() {
             return Ok(0);
         }
         let sql = format!(
+            // `?1` comes first in the text: each bare `?` of the IN list then
+            // numbers on from it (2, 3, …), matching `params_then`'s order.
             "UPDATE session_messages SET peer_state = 'accepted' \
-             WHERE peer_state = 'pending' AND id IN ({phs})",
+             WHERE peer_state = 'pending' \
+               AND to_participant_id IN (SELECT id FROM participants WHERE peer_link_id = ?1) \
+               AND id IN ({phs})",
             phs = super::in_clause(ids.len())
         );
-        let params = super::params_then(&[], ids);
+        let params = super::params_then(&[&link_id], ids);
         Ok(self.conn.execute(&sql, params.as_slice())?)
     }
 
@@ -543,8 +600,29 @@ impl Store {
         Ok(true)
     }
 
-    pub fn mark_peer_undeliverable(&self, id: i64, reason: &str) -> Result<bool, IpcError> {
-        self.atomically(|s| s.fail_pending_locked(id, reason))
+    /// Fail pending row `id` — only when it is on link `link_id`, so a
+    /// peer's rejection cannot reach another link's rows. The sweep and
+    /// `revoke_peer_link` fail rows by their own selection and call
+    /// `fail_pending_locked` directly.
+    pub fn mark_peer_undeliverable(
+        &self,
+        link_id: i64,
+        id: i64,
+        reason: &str,
+    ) -> Result<bool, IpcError> {
+        self.atomically(|s| {
+            let on_link: bool = s.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_messages m \
+                                 JOIN participants p ON p.id = m.to_participant_id \
+                                WHERE m.id = ?1 AND p.peer_link_id = ?2)",
+                rusqlite::params![id, link_id],
+                |r| r.get(0),
+            )?;
+            if !on_link {
+                return Ok(false);
+            }
+            s.fail_pending_locked(id, reason)
+        })
     }
 
     /// `pending` → `accepted` for this link's rows at or below `after` — the
@@ -666,6 +744,115 @@ mod tests {
         assert_eq!(s.ensure_listener_link(c, "fleet-a").unwrap().id, l.id);
         let e = s.ensure_listener_link(c, "fleet-x").unwrap_err();
         assert_eq!(e.code, crate::ipc_error::codes::E_FORBIDDEN);
+    }
+
+    /// C1: a second live peer token claiming a fleet already linked to
+    /// another live token is refused, and the link keeps its token — else
+    /// any paired hub could take over another fleet's link (its outbox, its
+    /// sender addresses, its watermark).
+    #[test]
+    fn a_live_peer_token_cannot_take_over_another_tokens_fleet() {
+        let s = Store::open_in_memory().unwrap();
+        let c1 = client(&s, "hub-a");
+        let link = s.ensure_listener_link(c1, "fleet-a").unwrap();
+        let c2 = client(&s, "hub-intruder");
+        let e = s.ensure_listener_link(c2, "fleet-a").unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_FORBIDDEN);
+        assert!(
+            e.message.contains("revoke that client first"),
+            "{}",
+            e.message
+        );
+        assert_eq!(s.peer_link(link.id).unwrap().unwrap().client_id, Some(c1));
+    }
+
+    /// C1, the legitimate re-pair: once the old token is revoked, a new
+    /// token for the same fleet rebinds the live row, so the pending outbox
+    /// rows stay attached to it.
+    #[test]
+    fn after_the_old_token_is_revoked_a_new_token_rebinds_and_keeps_pending_rows() {
+        let s = Store::open_in_memory().unwrap();
+        let a1 = seed(&s, "a1");
+        let c1 = client(&s, "hub-a");
+        let link = s.ensure_listener_link(c1, "fleet-a").unwrap();
+        let to = s
+            .ensure_remote_participant(link.id, "fleet-a/session/h/x")
+            .unwrap();
+        s.insert_outbound_remote(
+            a1,
+            "fleet-b/session/local/a1",
+            to,
+            "x",
+            "message",
+            None,
+            false,
+        )
+        .unwrap();
+        s.revoke_client_token("hub-a").unwrap();
+        let c2 = client(&s, "hub-a-again");
+        let again = s.ensure_listener_link(c2, "fleet-a").unwrap();
+        assert_eq!(again.id, link.id);
+        assert_eq!(again.client_id, Some(c2));
+        assert_eq!(s.pending_outbox(link.id, 0, 50).unwrap().len(), 1);
+    }
+
+    /// I1, store half: settling is scoped to the link — the dialer's
+    /// `apply_results(link, …)` rests on this for `accepted` entries.
+    #[test]
+    fn settling_a_row_on_another_link_changes_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        let a1 = seed(&s, "a1");
+        let l1 = s.insert_dialer_link("https://b.example", "t1").unwrap();
+        let l2 = s.insert_dialer_link("https://c.example", "t2").unwrap();
+        let to = s
+            .ensure_remote_participant(l2, "fleet-c/session/h/c1")
+            .unwrap();
+        let m = s
+            .insert_outbound_remote(
+                a1,
+                "fleet-a/session/local/a1",
+                to,
+                "x",
+                "message",
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(s.mark_peer_accepted(l1, &[m]).unwrap(), 0);
+        assert!(!s.mark_peer_undeliverable(l1, m, "E_X: no").unwrap());
+        assert_eq!(s.pending_outbox(l2, 0, 50).unwrap().len(), 1);
+        assert_eq!(s.mark_peer_accepted(l2, &[m]).unwrap(), 1);
+    }
+
+    /// M3: a state write never brings a revoked link back — a listener
+    /// handler parked across a revoke writes `connected` when it returns.
+    #[test]
+    fn a_revoked_link_is_never_resurrected_by_a_state_write() {
+        let s = Store::open_in_memory().unwrap();
+        let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+        s.set_peer_link_state(link, LINK_RETRYING, Some("boom"), 1)
+            .unwrap();
+        s.revoke_peer_link(link, 2).unwrap();
+        s.set_peer_link_state(link, LINK_CONNECTED, None, 9)
+            .unwrap();
+        s.set_peer_link_progress(link, 5, None, 9).unwrap();
+        let row = s.peer_link(link).unwrap().unwrap();
+        assert_eq!(row.state, LINK_RETRYING);
+        assert_eq!(row.last_exchange_at, Some(1));
+        assert_eq!(row.after, 0);
+    }
+
+    /// M6: the row carries the plaintext token; `{:?}` must not.
+    #[test]
+    fn debug_never_prints_the_token() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s
+            .insert_dialer_link("https://b.example", "secret-token-value")
+            .unwrap();
+        let row = s.peer_link(id).unwrap().unwrap();
+        let dbg = format!("{row:?}");
+        assert!(!dbg.contains("secret-token-value"), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
     }
 
     #[test]
@@ -823,9 +1010,12 @@ mod tests {
             )
             .unwrap();
         assert!(s
-            .mark_peer_undeliverable(m, "E_PARTICIPANT_UNKNOWN: no session b1 on h")
+            .mark_peer_undeliverable(link, m, "E_PARTICIPANT_UNKNOWN: no session b1 on h")
             .unwrap());
-        assert!(!s.mark_peer_undeliverable(m, "again").unwrap(), "only once");
+        assert!(
+            !s.mark_peer_undeliverable(link, m, "again").unwrap(),
+            "only once"
+        );
         let ev = s.list_session_events(a1, 50).unwrap();
         let hit = ev
             .iter()

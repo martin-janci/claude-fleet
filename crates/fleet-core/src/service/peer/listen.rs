@@ -4,7 +4,10 @@
 
 use super::apply::{apply_inbound, apply_results, outbox_to_wire};
 use super::validate::{check_batch, check_fleet_id};
-use super::wire::{ExchangeRequest, ExchangeResponse, PEER_BATCH_MAX, PEER_WAIT_MAX_MS, PROTO};
+use super::wire::{
+    ExchangeRequest, ExchangeResponse, ResultStatus, WireResult, PEER_BATCH_MAX, PEER_WAIT_MAX_MS,
+    PROTO,
+};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::ssh::SshClient;
 use crate::store::{Store, LINK_CONNECTED};
@@ -45,8 +48,16 @@ pub async fn exchange(
     }
     let link = lock(store)?.ensure_listener_link(client_id, &req.fleet_id)?;
     // Rejections first, then the watermark: a rejected id must not be swept
-    // into `accepted` by the handover.
-    apply_results(store, &req.results)?;
+    // into `accepted` by the handover. Only the rejections apply here — the
+    // listener hands rows over by `after` alone, so an `accepted` entry past
+    // the watermark cannot drop a row the dialer never stored.
+    let rejections: Vec<WireResult> = req
+        .results
+        .iter()
+        .filter(|r| r.status == ResultStatus::Rejected)
+        .cloned()
+        .collect();
+    apply_results(store, link.id, &rejections)?;
     lock(store)?.handover_upto(link.id, req.after)?;
     let results = apply_inbound(store, ssh, &link, &own, &req.send).await;
 
@@ -268,6 +279,112 @@ mod tests {
                 .filter(|e| e.kind == "message_undeliverable")
                 .count(),
             1
+        );
+    }
+
+    /// I1: one peer's results can settle only its own link's rows. Link A's
+    /// peer names link C's pending ids — as a rejection and as an
+    /// acceptance (which the listener ignores anyway: it accepts by `after`
+    /// only) — and link C's rows stay pending.
+    #[tokio::test]
+    async fn a_peers_results_cannot_settle_another_links_rows() {
+        let (store, ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        let ca = peer_client(&store, "hub-a");
+        let cc = peer_client(&store, "hub-c");
+        exchange(&store, &ssh, ca, req("fleet-a")).await.unwrap();
+        exchange(&store, &ssh, cc, req("fleet-c")).await.unwrap();
+        let link_c = store
+            .lock()
+            .unwrap()
+            .live_peer_link_for_fleet("fleet-c")
+            .unwrap()
+            .unwrap();
+        let (m1, m2) = {
+            let s = store.lock().unwrap();
+            let to = s
+                .ensure_remote_participant(link_c.id, "fleet-c/session/h/c1")
+                .unwrap();
+            (
+                s.insert_outbound_remote(
+                    b1,
+                    "fleet-b/session/local/b1",
+                    to,
+                    "one",
+                    "message",
+                    None,
+                    false,
+                )
+                .unwrap(),
+                s.insert_outbound_remote(
+                    b1,
+                    "fleet-b/session/local/b1",
+                    to,
+                    "two",
+                    "message",
+                    None,
+                    false,
+                )
+                .unwrap(),
+            )
+        };
+        let mut hostile = req("fleet-a");
+        hostile.results = vec![
+            WireResult::rejected(m1, "E_PARTICIPANT_UNKNOWN", "nope"),
+            WireResult::accepted(m2),
+        ];
+        exchange(&store, &ssh, ca, hostile).await.unwrap();
+        let s = store.lock().unwrap();
+        let pending: Vec<i64> = s
+            .pending_outbox(link_c.id, 0, 50)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(pending, vec![m1, m2]);
+        assert!(!s
+            .list_session_events(b1, 50)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "message_undeliverable"));
+    }
+
+    /// I1, the listener half: its own peer's `accepted` entries are not
+    /// applied either — the listener hands rows over by `after` alone.
+    #[tokio::test]
+    async fn the_listener_ignores_an_accepted_result_past_the_watermark() {
+        let (store, ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        let c = peer_client(&store, "hub-a");
+        exchange(&store, &ssh, c, req("fleet-a")).await.unwrap();
+        let link = store
+            .lock()
+            .unwrap()
+            .live_peer_link_for_fleet("fleet-a")
+            .unwrap()
+            .unwrap();
+        let m = {
+            let s = store.lock().unwrap();
+            let to = s
+                .ensure_remote_participant(link.id, "fleet-a/session/h/a1")
+                .unwrap();
+            s.insert_outbound_remote(
+                b1,
+                "fleet-b/session/local/b1",
+                to,
+                "one",
+                "message",
+                None,
+                false,
+            )
+            .unwrap()
+        };
+        let mut ack = req("fleet-a");
+        ack.results = vec![WireResult::accepted(m)];
+        let resp = exchange(&store, &ssh, c, ack).await.unwrap();
+        assert_eq!(
+            resp.messages.iter().map(|w| w.id).collect::<Vec<_>>(),
+            vec![m]
         );
     }
 

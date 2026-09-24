@@ -29,11 +29,14 @@ pub(crate) mod testkit {
             .unwrap()
     }
 
+    /// A peer client token row. The digest is the name's hex, padded — unique
+    /// per name (up to 32 bytes), where a length-derived one collided.
     pub fn peer_client(store: &Mutex<Store>, name: &str) -> i64 {
+        let hex: String = name.bytes().map(|b| format!("{b:02x}")).collect();
         store
             .lock()
             .unwrap()
-            .insert_client_token(name, &format!("{:0>64}", name.len()), "peer")
+            .insert_client_token(name, &format!("{hex:0>64}"), "peer")
             .unwrap()
             .id
     }

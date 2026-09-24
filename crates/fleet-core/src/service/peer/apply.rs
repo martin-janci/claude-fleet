@@ -59,18 +59,23 @@ pub fn outbox_to_wire(
         .collect()
 }
 
-/// Settle our outbox from a peer's per-item results: `accepted` rows leave
-/// `pending`, a `rejected` row becomes `undeliverable` with a
-/// `message_undeliverable` event for its sender. Applying one twice is a
-/// no-op (both only touch `pending` rows).
-pub fn apply_results(store: &Mutex<Store>, results: &[WireResult]) -> Result<(), IpcError> {
+/// Settle link `link_id`'s outbox from its peer's per-item results:
+/// `accepted` rows leave `pending`, a `rejected` row becomes `undeliverable`
+/// with a `message_undeliverable` event for its sender. Only rows on
+/// `link_id` are touched — a result naming another link's row is ignored.
+/// Applying one twice is a no-op (both only touch `pending` rows).
+pub fn apply_results(
+    store: &Mutex<Store>,
+    link_id: i64,
+    results: &[WireResult],
+) -> Result<(), IpcError> {
     let s = lock(store)?;
     let accepted: Vec<i64> = results
         .iter()
         .filter(|r| r.status == ResultStatus::Accepted)
         .map(|r| r.id)
         .collect();
-    s.mark_peer_accepted(&accepted)?;
+    s.mark_peer_accepted(link_id, &accepted)?;
     for r in results
         .iter()
         .filter(|r| r.status == ResultStatus::Rejected)
@@ -80,7 +85,7 @@ pub fn apply_results(store: &Mutex<Store>, results: &[WireResult]) -> Result<(),
             r.code.as_deref().unwrap_or(codes::E_INTERNAL),
             r.message.as_deref().unwrap_or("refused by the peer hub")
         );
-        s.mark_peer_undeliverable(r.id, &reason)?;
+        s.mark_peer_undeliverable(link_id, r.id, &reason)?;
     }
     Ok(())
 }
