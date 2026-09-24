@@ -635,6 +635,19 @@ impl Store {
         Ok(n)
     }
 
+    /// A resume started `session_id` for work `key`: link it with source
+    /// `resumed` (a no-op when the rebind's carry already did). Emits the row.
+    pub fn link_resumed_work(&self, session_id: i64, key: &str) -> Result<bool, IpcError> {
+        let (item_id, ref_key) = self.resolve_work_target(WorkTarget::Key(key))?;
+        let participant = self.work_participant(session_id)?;
+        let wrote = self.carry_link(participant, item_id, ref_key.as_deref(), "resumed", "work")?;
+        if wrote {
+            self.bump_session_for_work(session_id)?;
+            self.emit_session(session_id)?;
+        }
+        Ok(wrote)
+    }
+
     /// [`Self::inherit_work`] for a task worker (`dispatch_task`, a
     /// background agent's requester), emitting the worker's row when it
     /// gained a link. Not part of `set_parent_session_id`: a move also sets

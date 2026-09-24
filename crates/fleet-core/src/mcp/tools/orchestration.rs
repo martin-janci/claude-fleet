@@ -556,30 +556,60 @@ impl FleetTools {
     }
 
     #[tool(description = "Work links: {session_id} → its live links; \
-        {key} → ended (past) links to that key.")]
+        {key} → ended (past) links. action context|resume_plan {key}; \
+        purge_impact.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<crate::service::work::WorkArgs>,
     ) -> Result<CallToolResult, McpError> {
+        use crate::service::work::{self as w, WorkAction};
         audit(
             "work",
-            &format!("session_id={:?} key={:?}", args.session_id, args.key),
+            &format!(
+                "action={:?} session_id={:?} key={:?} link_id={:?} host_alias={:?}",
+                args.action, args.session_id, args.key, args.link_id, args.host_alias
+            ),
         );
-        if let Some(id) = args.session_id {
-            self.resolve_target_row(&caller, Some(id), None, None, "the session")?;
+        match args.parsed_action().map_err(to_mcp_err)? {
+            WorkAction::Links => {
+                if let Some(id) = args.session_id {
+                    self.resolve_target_row(&caller, Some(id), None, None, "the session")?;
+                }
+                let mut links = w::work(&args, &self.store).map_err(to_mcp_err)?;
+                // Past work of other hosts is not a per-host token's to read.
+                if let Some(h) = &caller.host_alias {
+                    links.retain(|l| l.ended_at.is_none() || l.snap_host.as_deref() == Some(h));
+                }
+                ok_json_compact(&links)
+            }
+            WorkAction::Context => {
+                self.require_key_on_callers_host(&caller, args.key.as_deref())?;
+                let ctx = w::work_context(&args, &self.store, &self.ssh)
+                    .await
+                    .map_err(to_mcp_err)?;
+                ok_json(&ctx)
+            }
+            WorkAction::ResumePlan => {
+                self.require_key_on_callers_host(&caller, args.key.as_deref())?;
+                let plan = w::work_resume_plan(&args, &self.store, &self.ssh)
+                    .await
+                    .map_err(to_mcp_err)?;
+                ok_json_compact(&plan)
+            }
+            WorkAction::PurgeImpact => {
+                for h in args.host_aliases.iter().flatten() {
+                    require_host(&caller, h, "the purge")?;
+                }
+                ok_json(&w::work_purge_impact(&args, &self.store).map_err(to_mcp_err)?)
+            }
         }
-        let mut links = crate::service::work::work(&args, &self.store).map_err(to_mcp_err)?;
-        // Past work of other hosts is not a per-host token's to read.
-        if let Some(h) = &caller.host_alias {
-            links.retain(|l| l.ended_at.is_none() || l.snap_host.as_deref() == Some(h));
-        }
-        ok_json_compact(&links)
     }
 
     #[tool(description = "Decide a session's work: action link (becomes its \
         primary; key or item_id), reject (sticky 'not this'), unlink \
-        (link_id). Returns the updated row.")]
+        (link_id). Returns the updated row. resume {key, mode}: new session \
+        on past work.")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -588,12 +618,78 @@ impl FleetTools {
         audit(
             "work_link",
             &format!(
-                "session_id={} action={} key={:?} item_id={:?} link_id={:?} source={:?}",
-                args.session_id, args.action, args.key, args.item_id, args.link_id, args.source
+                "session_id={:?} action={} key={:?} item_id={:?} link_id={:?} source={:?} mode={:?} host_alias={:?}",
+                args.session_id,
+                args.action,
+                args.key,
+                args.item_id,
+                args.link_id,
+                args.source,
+                args.mode,
+                args.host_alias
             ),
         );
-        self.resolve_target_row(&caller, Some(args.session_id), None, None, "the session")?;
+        if args.action == "resume" {
+            let ra = crate::service::work::resume_args(&args).map_err(to_mcp_err)?;
+            // A per-host token resumes only onto its own host.
+            if caller.host_alias.is_some() {
+                let plan = {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    crate::service::work::resume::plan_resume(
+                        &s,
+                        &ra.key,
+                        ra.link_id,
+                        ra.host_alias.as_deref(),
+                    )
+                    .map_err(to_mcp_err)?
+                };
+                let host = plan.host_alias.as_deref().unwrap_or("an unknown host");
+                require_host(&caller, host, "the resumed session")?;
+            }
+            let row =
+                crate::service::work::resume::resume_work(&self.store, &self.ssh, &self.reg, &ra)
+                    .await
+                    .map_err(to_mcp_err)?;
+            return ok_json(&row);
+        }
+        let sid = args.session_id.ok_or_else(|| {
+            mcp_err(
+                "E_INVALID",
+                format!("{} needs session_id", args.action),
+                None,
+            )
+        })?;
+        self.resolve_target_row(&caller, Some(sid), None, None, "the session")?;
         let row = crate::service::work::work_link(&args, &self.store).map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    /// A per-host token reads a key's context or resume plan only when some
+    /// of that work ran on its own host.
+    fn require_key_on_callers_host(
+        &self,
+        caller: &Caller,
+        key: Option<&str>,
+    ) -> Result<(), McpError> {
+        let Some(h) = caller.host_alias.as_deref() else {
+            return Ok(());
+        };
+        let Some(key) = key else {
+            return Ok(());
+        };
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let live = s.live_work_sessions_for_key(key).map_err(to_mcp_err)?;
+        let ended = s.ended_work_links_for_key(key).map_err(to_mcp_err)?;
+        let touches = live.iter().any(|(_, r)| r.host_alias == h)
+            || ended.iter().any(|l| l.snap_host.as_deref() == Some(h));
+        if touches {
+            Ok(())
+        } else {
+            Err(mcp_err(
+                "E_FORBIDDEN",
+                format!("no work on {key} ran on host {h}; this token is bound to {h}"),
+                None,
+            ))
+        }
     }
 }

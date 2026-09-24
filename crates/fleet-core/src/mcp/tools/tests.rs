@@ -912,7 +912,7 @@ async fn work_tools_are_gated_to_the_callers_host() {
     let (s, _, on_b) = two_host_store();
     let t = test_tools(s);
     let link = |key: &str| WorkLinkArgs {
-        session_id: on_b,
+        session_id: Some(on_b),
         action: "link".into(),
         key: Some(key.into()),
         ..Default::default()
@@ -928,7 +928,7 @@ async fn work_tools_are_gated_to_the_callers_host() {
             Extension(a.clone()),
             Parameters(WorkArgs {
                 session_id: Some(on_b),
-                key: None,
+                ..Default::default()
             }),
         )
         .await
@@ -950,15 +950,45 @@ async fn work_tools_are_gated_to_the_callers_host() {
         t.work(
             Extension(c),
             Parameters(WorkArgs {
-                session_id: None,
                 key: Some("ABC-1".into()),
+                ..Default::default()
             }),
         )
     };
-    let seen = result_json(&by_key(b).await.unwrap());
+    let seen = result_json(&by_key(b.clone()).await.unwrap());
     assert_eq!(seen.as_array().map(Vec::len), Some(1), "{seen}");
-    let hidden = result_json(&by_key(a).await.unwrap());
+    let hidden = result_json(&by_key(a.clone()).await.unwrap());
     assert_eq!(hidden, serde_json::json!([]));
+
+    // M2.4: the resume plan and context of that work are hostb's to read,
+    // and hosta cannot resume it.
+    let plan = |c: Caller| {
+        t.work(
+            Extension(c),
+            Parameters(WorkArgs {
+                key: Some("ABC-1".into()),
+                action: Some("resume_plan".into()),
+                ..Default::default()
+            }),
+        )
+    };
+    let p = result_json(&plan(b).await.unwrap());
+    assert_eq!(p["key"], "ABC-1");
+    assert!(p["modes"].as_array().is_some_and(|m| m.len() == 3), "{p}");
+    forbidden(plan(a.clone()).await.unwrap_err());
+    forbidden(
+        t.work_link(
+            Extension(a),
+            Parameters(WorkLinkArgs {
+                action: "resume".into(),
+                key: Some("ABC-1".into()),
+                mode: Some("fresh".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
 }
 
 #[tokio::test]
@@ -2835,7 +2865,13 @@ fn the_served_definition_budget_stays_bounded() {
     // Measured at 65,687 on 2026-09-24; raised to that plus the customary
     // 100. M0.6 (tighten the existing descriptions) is still open and is
     // where this is paid back.
-    const BUDGET_BYTES: usize = 65_787;
+    //
+    // Raised again for work graph M2.4: the `work` read actions (context,
+    // resume_plan, purge_impact) and `work_link { action: resume }` go on
+    // the two existing tools (no new tool), but their eight parameters cost
+    // schema bytes whatever the wording; descriptions stay one clause.
+    // Measured at 66,421 on 2026-09-24; raised to that plus 100.
+    const BUDGET_BYTES: usize = 66_521;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

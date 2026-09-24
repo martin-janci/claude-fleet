@@ -107,6 +107,7 @@
     "resolve_move",
     "restart_session",
     "restore_host_sessions",
+    "resume_work",
     "safe_kill_session",
     "send_prompt",
     "session_activity",
@@ -116,7 +117,9 @@
     "session_work_links",
     "set_session_friendly_name",
     "spawn_review",
-    "unlink_session_work"
+    "unlink_session_work",
+    "work_purge_impact",
+    "work_resume_plan"
   ],
   "routed_unless": [
     {

@@ -530,12 +530,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // `resume` starts a session: the lifecycle deadline.
     ToolPolicy {
         name: "work_link",
         access: Access::Client,
         readonly: false,
         confirm: false,
-        deadline: Deadline::Quick,
+        deadline: Deadline::Lifecycle,
     },
     // repo.rs
     ToolPolicy {

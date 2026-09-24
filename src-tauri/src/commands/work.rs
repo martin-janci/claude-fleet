@@ -1,13 +1,18 @@
 //! Tauri commands for a session's work links (roadmap M1b.2): read them, and
 //! link / reject / unlink. Thin wrappers over `service::work`.
 //!
-//! Four commands map onto two hub tools: `session_work_links` → `work`, and
-//! the three decisions → `work_link` with the action filled in here, so a
-//! paired desktop decides on the hub exactly as a local one decides here.
+//! Seven commands map onto two hub tools: `session_work_links`,
+//! `work_resume_plan` and `work_purge_impact` → `work`, and the three
+//! decisions plus `resume_work` → `work_link`, with the action filled in
+//! here, so a paired desktop decides and resumes on the hub exactly as a
+//! local one does here (work graph M2.4 added the resume half).
 
 use crate::backend::FleetBackend;
+use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
-use fleet_core::service::work::{self, WorkArgs, WorkLinkArgs};
+use fleet_core::service::work::resume::ResumePlan;
+use fleet_core::service::work::{self, PurgeImpact, WorkArgs, WorkLinkArgs};
+use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store, WorkLinkRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -38,6 +43,71 @@ pub struct RejectSessionWorkArgs {
 pub struct UnlinkSessionWorkArgs {
     pub session_id: i64,
     pub link_id: i64,
+}
+
+/// What a resume of a work key would do, and which modes are possible.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkResumePlanArgs {
+    pub key: String,
+    #[serde(default)]
+    pub link_id: Option<i64>,
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// Include the handover brief (one git probe on the landing host).
+    #[serde(default)]
+    pub with_brief: bool,
+}
+
+/// Resume past work: `mode` `last` | `brief` | `fresh`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResumeWorkArgs {
+    pub key: String,
+    pub mode: String,
+    #[serde(default)]
+    pub link_id: Option<i64>,
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// The brief as the person edited it in the preview.
+    #[serde(default)]
+    pub brief: Option<String>,
+}
+
+/// The work keys a purge of `project_id` on `host_aliases` strands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkPurgeImpactArgs {
+    pub project_id: i64,
+    #[serde(default)]
+    pub host_aliases: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn work_resume_plan(
+    args: WorkResumePlanArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<ResumePlan, IpcError> {
+    routed::work_resume_plan(&backend, args, &store, &ssh).await
+}
+
+#[tauri::command]
+pub async fn resume_work(
+    args: ResumeWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
+) -> Result<SessionRow, IpcError> {
+    routed::resume_work(&backend, args, &store, &ssh, &reg).await
+}
+
+#[tauri::command]
+pub async fn work_purge_impact(
+    args: WorkPurgeImpactArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<PurgeImpact, IpcError> {
+    routed::work_purge_impact(&backend, args, &store).await
 }
 
 /// A session's live links (`session_id`), or the ended links to a key (`key`).
@@ -98,12 +168,13 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
     ) -> Result<SessionRow, IpcError> {
         let args = WorkLinkArgs {
-            session_id: args.session_id,
+            session_id: Some(args.session_id),
             action: "link".into(),
             key: args.key,
             item_id: args.item_id,
             link_id: None,
             source: Some("manual".into()),
+            ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("link_session_work", &args).await,
@@ -117,12 +188,13 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
     ) -> Result<SessionRow, IpcError> {
         let args = WorkLinkArgs {
-            session_id: args.session_id,
+            session_id: Some(args.session_id),
             action: "reject".into(),
             key: args.key,
             item_id: args.item_id,
             link_id: None,
             source: None,
+            ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("reject_session_work", &args).await,
@@ -136,16 +208,76 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
     ) -> Result<SessionRow, IpcError> {
         let args = WorkLinkArgs {
-            session_id: args.session_id,
+            session_id: Some(args.session_id),
             action: "unlink".into(),
             key: None,
             item_id: None,
             link_id: Some(args.link_id),
             source: None,
+            ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("unlink_session_work", &args).await,
             None => work::work_link(&args, store),
+        }
+    }
+
+    pub async fn work_resume_plan(
+        backend: &FleetBackend,
+        args: WorkResumePlanArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<ResumePlan, IpcError> {
+        let args = WorkArgs {
+            key: Some(args.key),
+            action: Some("resume_plan".into()),
+            link_id: args.link_id,
+            host_alias: args.host_alias,
+            with_brief: Some(args.with_brief),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_resume_plan", &args).await,
+            None => work::work_resume_plan(&args, store, ssh).await,
+        }
+    }
+
+    pub async fn resume_work(
+        backend: &FleetBackend,
+        args: ResumeWorkArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<SessionRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "resume".into(),
+            key: Some(args.key),
+            link_id: args.link_id,
+            mode: Some(args.mode),
+            host_alias: args.host_alias,
+            brief: args.brief,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("resume_work", &args).await,
+            None => work::work_resume(&args, store, ssh, reg).await,
+        }
+    }
+
+    pub async fn work_purge_impact(
+        backend: &FleetBackend,
+        args: WorkPurgeImpactArgs,
+        store: &Mutex<Store>,
+    ) -> Result<PurgeImpact, IpcError> {
+        let args = WorkArgs {
+            action: Some("purge_impact".into()),
+            project_id: Some(args.project_id),
+            host_aliases: Some(args.host_aliases),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_purge_impact", &args).await,
+            None => work::work_purge_impact(&args, store),
         }
     }
 }

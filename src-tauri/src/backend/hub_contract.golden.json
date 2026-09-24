@@ -210,9 +210,50 @@
       "project",
       "worktrees"
     ],
+    "PurgeImpact": [
+      "keys"
+    ],
     "RepoTree": [
       "entries",
       "truncated"
+    ],
+    "ResumePlan": [
+      "branch",
+      "brief",
+      "candidates",
+      "host_alias",
+      "hosts",
+      "key",
+      "link_id",
+      "live",
+      "modes",
+      "project_id",
+      "title",
+      "worktree",
+      "worktree_present"
+    ],
+    "ResumePlan.candidates": [
+      "branch",
+      "conversations",
+      "ended_at",
+      "host_alias",
+      "last_claude_session_id",
+      "link_id",
+      "name",
+      "pr_url",
+      "resumable",
+      "worktree"
+    ],
+    "ResumePlan.live": [
+      "friendly_name",
+      "host_alias",
+      "session_id",
+      "tmux_name"
+    ],
+    "ResumePlan.modes": [
+      "mode",
+      "ok",
+      "reason"
     ],
     "SessionEvent": [
       "at",

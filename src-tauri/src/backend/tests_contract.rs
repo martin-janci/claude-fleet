@@ -9,6 +9,8 @@ use fleet_core::service::repo_read::{
 use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversation};
 use fleet_core::service::tunnel::TunnelHealth;
 use fleet_core::service::usage::DayUsage;
+use fleet_core::service::work::resume::{LiveWork, ResumeCandidate, ResumeMode, ResumePlan};
+use fleet_core::service::work::PurgeImpact;
 use fleet_core::service::worktrees::{HostWorktrees, WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
     AccountRow, ConversationRow, HostRow, PendingInput, PendingOption, ProjectRow, SessionContext,
@@ -356,6 +358,44 @@ fn sample_work_link() -> WorkLinkRow {
     }
 }
 
+fn sample_resume_plan() -> ResumePlan {
+    ResumePlan {
+        key: "ABC-123".into(),
+        title: Some("Fix login".into()),
+        live: vec![LiveWork {
+            session_id: 1,
+            host_alias: "trn".into(),
+            tmux_name: "demo".into(),
+            friendly_name: Some("Fix login".into()),
+        }],
+        candidates: vec![ResumeCandidate {
+            link_id: 5,
+            ended_at: Some(3),
+            name: Some("Fix login".into()),
+            host_alias: Some("trn".into()),
+            branch: Some("abc-123-login".into()),
+            worktree: Some("abc-123-login".into()),
+            pr_url: Some("https://example.com/pr/1".into()),
+            conversations: 2,
+            last_claude_session_id: Some("c1".into()),
+            resumable: true,
+        }],
+        link_id: Some(5),
+        host_alias: Some("trn".into()),
+        project_id: Some(8),
+        branch: Some("abc-123-login".into()),
+        worktree: Some("abc-123-login".into()),
+        worktree_present: true,
+        modes: vec![ResumeMode {
+            mode: "last".into(),
+            ok: false,
+            reason: Some("live".into()),
+        }],
+        hosts: vec!["trn".into()],
+        brief: Some("# Handover".into()),
+    }
+}
+
 fn sample_changed_file() -> ChangedFile {
     ChangedFile {
         path: "src/lib.rs".into(),
@@ -383,6 +423,17 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     };
     put("SessionRow", wire_keys(&sample_session()));
     put("WorkLinkRow", wire_keys(&sample_work_link()));
+    let plan = sample_resume_plan();
+    put("ResumePlan", wire_keys(&plan));
+    put("ResumePlan.live", wire_keys(&plan.live[0]));
+    put("ResumePlan.candidates", wire_keys(&plan.candidates[0]));
+    put("ResumePlan.modes", wire_keys(&plan.modes[0]));
+    put(
+        "PurgeImpact",
+        wire_keys(&PurgeImpact {
+            keys: vec!["ABC-123".into()],
+        }),
+    );
     put("HostRow", wire_keys(&sample_host()));
     put("AccountRow", wire_keys(&sample_account()));
     put("SessionEvent", wire_keys(&sample_event()));

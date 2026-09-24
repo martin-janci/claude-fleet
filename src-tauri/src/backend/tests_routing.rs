@@ -455,7 +455,46 @@ fn routed_read_cases() -> Vec<Case> {
                     b,
                     fleet_core::service::work::WorkArgs {
                         session_id: Some(7),
-                        key: None,
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_resume_plan",
+            "work",
+            json!({ "session_id": null, "key": "ABC-1", "action": "resume_plan",
+                    "host_alias": "h", "with_brief": true }),
+            r#"{"key":"ABC-1","modes":[{"mode":"last","ok":true}]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_resume_plan(
+                    b,
+                    commands::work::WorkResumePlanArgs {
+                        key: "ABC-1".into(),
+                        link_id: None,
+                        host_alias: Some("h".into()),
+                        with_brief: true,
+                    },
+                    s,
+                    &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_purge_impact",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "purge_impact",
+                    "project_id": 3, "host_aliases": ["h"] }),
+            r#"{"keys":["ABC-1"]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_purge_impact(
+                    b,
+                    commands::work::WorkPurgeImpactArgs {
+                        project_id: 3,
+                        host_aliases: vec!["h".into()],
                     },
                     s,
                 ))
@@ -871,6 +910,31 @@ fn routed_mutation_cases() -> Vec<Case> {
                         item_id: None,
                     },
                     s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "resume_work",
+            "work_link",
+            // Only the resume fields travel; an older hub never sees them
+            // for the other work_link commands.
+            json!({ "session_id": null, "action": "resume", "key": "ABC-1", "item_id": null,
+                    "link_id": 4, "source": null, "mode": "brief", "brief": "edited" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::resume_work(
+                    b,
+                    commands::work::ResumeWorkArgs {
+                        key: "ABC-1".into(),
+                        mode: "brief".into(),
+                        link_id: Some(4),
+                        host_alias: None,
+                        brief: Some("edited".into()),
+                    },
+                    s,
+                    &ssh(),
+                    &fleet_core::cancel::CancellationRegistry::new(),
                 ))
                 .map(|_| ())
             }),
@@ -1566,7 +1630,7 @@ fn standalone_work_links_are_decided_in_the_local_store() {
         &local,
         fleet_core::service::work::WorkArgs {
             session_id: Some(99),
-            key: None,
+            ..Default::default()
         },
         &st,
     ))

@@ -473,15 +473,15 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links to that key.
+Work links: {session_id} → its live links; {key} → ended (past) links. action context|resume_plan {key}; purge_impact.
 
-Parameters: `key`, `session_id`
+Parameters: `action`, `host_alias`, `host_aliases`, `key`, `link_id`, `project_id`, `session_id`, `with_brief`
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'), unlink (link_id). Returns the updated row.
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'), unlink (link_id). Returns the updated row. resume {key, mode}: new session on past work.
 
-Parameters: `action`, `item_id`, `key`, `link_id`, `session_id`, `source`
+Parameters: `action`, `brief`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `session_id`, `source`
 
 ## Tauri IPC commands
 
@@ -511,6 +511,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::link_session_work`
 - `commands::work::reject_session_work`
 - `commands::work::unlink_session_work`
+- `commands::work::work_resume_plan`
+- `commands::work::resume_work`
+- `commands::work::work_purge_impact`
 - `commands::sessions::session_history`
 - `commands::sessions::session_conversations`
 - `commands::sessions::session_conversation`

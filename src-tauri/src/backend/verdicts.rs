@@ -250,6 +250,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("link_session_work", Verdict::Routed { tool: "work_link" }),
     ("reject_session_work", Verdict::Routed { tool: "work_link" }),
     ("unlink_session_work", Verdict::Routed { tool: "work_link" }),
+    // Work graph M2.4: resume past work, and what a purge would strand.
+    ("work_resume_plan", Verdict::Routed { tool: "work" }),
+    ("resume_work", Verdict::Routed { tool: "work_link" }),
+    ("work_purge_impact", Verdict::Routed { tool: "work" }),
     (
         "session_conversation",
         Verdict::Routed {

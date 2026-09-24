@@ -5,6 +5,7 @@
 
 pub mod handover;
 pub mod harvest;
+pub mod resume;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::store::{SessionRow, Store, WorkLinkRow, WorkTarget};
@@ -20,14 +21,33 @@ pub struct WorkArgs {
     /// Or: ended (past) links to this key.
     #[serde(default)]
     pub key: Option<String>,
+    /// links|context|resume_plan|purge_impact
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Ended link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<i64>,
+    /// Target host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_alias: Option<String>,
+    /// Add the brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_brief: Option<bool>,
+    /// Purge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    /// Purge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_aliases: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkLinkParams")]
 pub struct WorkLinkArgs {
     /// Fleet session id.
-    pub session_id: i64,
-    /// link | reject | unlink
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// link|reject|unlink|resume
     pub action: String,
     /// Work key, e.g. ABC-123, or a free-form name.
     #[serde(default)]
@@ -41,6 +61,128 @@ pub struct WorkLinkArgs {
     /// manual (default) | agent
     #[serde(default)]
     pub source: Option<String>,
+    /// last|brief|fresh
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Target host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_alias: Option<String>,
+    /// Edited brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+}
+
+/// `work { action: context }`: the full handover context of a key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkContext {
+    pub key: String,
+    pub text: String,
+}
+
+/// `work { action: purge_impact }`: the keys a purge would leave without
+/// resumable conversations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeImpact {
+    #[serde(default)]
+    pub keys: Vec<String>,
+}
+
+/// The `work` read actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkAction {
+    Links,
+    Context,
+    ResumePlan,
+    PurgeImpact,
+}
+
+impl WorkArgs {
+    pub fn parsed_action(&self) -> Result<WorkAction, IpcError> {
+        match self.action.as_deref().unwrap_or("links") {
+            "links" => Ok(WorkAction::Links),
+            "context" => Ok(WorkAction::Context),
+            "resume_plan" => Ok(WorkAction::ResumePlan),
+            "purge_impact" => Ok(WorkAction::PurgeImpact),
+            other => Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "unknown work action {other:?}; one of links, context, resume_plan, purge_impact"
+                ),
+            )),
+        }
+    }
+
+    fn required_key(&self) -> Result<&str, IpcError> {
+        self.key
+            .as_deref()
+            .ok_or_else(|| IpcError::new(codes::E_INVALID, "this work action needs key"))
+    }
+}
+
+/// `work { action: context, key }`.
+pub async fn work_context(
+    args: &WorkArgs,
+    store: &Mutex<Store>,
+    ssh: &std::sync::Arc<crate::ssh::SshClient>,
+) -> Result<WorkContext, IpcError> {
+    let key = crate::store::normalize_work_ref(args.required_key()?)?;
+    let input = handover::gather_handover(store, ssh.as_ref(), &key, None).await?;
+    Ok(WorkContext {
+        text: handover::build_context(&input),
+        key,
+    })
+}
+
+/// `work { action: resume_plan, key, link_id?, host_alias?, with_brief? }`.
+pub async fn work_resume_plan(
+    args: &WorkArgs,
+    store: &Mutex<Store>,
+    ssh: &std::sync::Arc<crate::ssh::SshClient>,
+) -> Result<resume::ResumePlan, IpcError> {
+    resume::resume_plan(
+        store,
+        ssh,
+        args.required_key()?,
+        args.link_id,
+        args.host_alias.as_deref(),
+        args.with_brief.unwrap_or(false),
+    )
+    .await
+}
+
+/// `work { action: purge_impact, project_id, host_aliases }`.
+pub fn work_purge_impact(args: &WorkArgs, store: &Mutex<Store>) -> Result<PurgeImpact, IpcError> {
+    let pid = args
+        .project_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "purge_impact needs project_id"))?;
+    let hosts = args.host_aliases.clone().unwrap_or_default();
+    Ok(PurgeImpact {
+        keys: lock(store)?.work_keys_for_purge(pid, &hosts)?,
+    })
+}
+
+/// `work_link { action: resume, key, mode, link_id?, host_alias?, brief? }`.
+pub async fn work_resume(
+    args: &WorkLinkArgs,
+    store: &std::sync::Arc<Mutex<Store>>,
+    ssh: &std::sync::Arc<crate::ssh::SshClient>,
+    reg: &std::sync::Arc<crate::cancel::CancellationRegistry>,
+) -> Result<SessionRow, IpcError> {
+    resume::resume_work(store, ssh, reg, &resume_args(args)?).await
+}
+
+/// The resume half of [`WorkLinkArgs`].
+pub fn resume_args(args: &WorkLinkArgs) -> Result<resume::ResumeArgs, IpcError> {
+    Ok(resume::ResumeArgs {
+        key: args
+            .key
+            .clone()
+            .ok_or_else(|| IpcError::new(codes::E_INVALID, "resume needs key"))?,
+        mode: args.mode.clone().unwrap_or_else(|| "last".into()),
+        link_id: args.link_id,
+        host_alias: args.host_alias.clone(),
+        brief: args.brief.clone(),
+    })
 }
 
 /// `{session_id}` → that session's live links (confirmed and rejected,
@@ -60,6 +202,18 @@ pub fn work(args: &WorkArgs, store: &Mutex<Store>) -> Result<Vec<WorkLinkRow>, I
 /// Apply one link decision and return the session's updated row (its `work`
 /// is the new primary link, or none).
 pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow, IpcError> {
+    if args.action == "resume" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "resume is asynchronous; use work_resume",
+        ));
+    }
+    let session_id = args.session_id.ok_or_else(|| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!("{} needs session_id", args.action),
+        )
+    })?;
     let s = lock(store)?;
     let target = || -> Result<WorkTarget<'_>, IpcError> {
         match (args.item_id, args.key.as_deref()) {
@@ -74,38 +228,31 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
     match args.action.as_str() {
         "link" => {
             let source = args.source.as_deref().unwrap_or("manual");
-            s.link_session_work(args.session_id, target()?, source)?;
+            s.link_session_work(session_id, target()?, source)?;
         }
         "reject" => {
-            s.reject_session_work(args.session_id, target()?)?;
+            s.reject_session_work(session_id, target()?)?;
         }
         "unlink" => {
             let link_id = args
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "unlink needs link_id"))?;
-            if !s.unlink_session_work(args.session_id, link_id)? {
+            if !s.unlink_session_work(session_id, link_id)? {
                 return Err(IpcError::new(
                     codes::E_NOTFOUND,
-                    format!(
-                        "session {} has no live work link {link_id}",
-                        args.session_id
-                    ),
+                    format!("session {session_id} has no live work link {link_id}"),
                 ));
             }
         }
         other => {
             return Err(IpcError::new(
                 codes::E_INVALID,
-                format!("unknown work_link action {other:?}; one of link, reject, unlink"),
+                format!("unknown work_link action {other:?}; one of link, reject, unlink, resume"),
             ))
         }
     }
-    s.get_session_by_id(args.session_id)?.ok_or_else(|| {
-        IpcError::new(
-            codes::E_NOTFOUND,
-            format!("session {} not found", args.session_id),
-        )
-    })
+    s.get_session_by_id(session_id)?
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
 }
 
 #[cfg(test)]
@@ -123,7 +270,7 @@ mod tests {
 
     fn link(sid: i64, action: &str) -> WorkLinkArgs {
         WorkLinkArgs {
-            session_id: sid,
+            session_id: Some(sid),
             action: action.into(),
             ..Default::default()
         }
@@ -150,7 +297,7 @@ mod tests {
         let links = work(
             &WorkArgs {
                 session_id: Some(sid),
-                key: None,
+                ..Default::default()
             },
             &st,
         )
@@ -188,7 +335,7 @@ mod tests {
         let links = work(
             &WorkArgs {
                 session_id: Some(sid),
-                key: None,
+                ..Default::default()
             },
             &st,
         )
@@ -225,6 +372,7 @@ mod tests {
             WorkArgs {
                 session_id: Some(sid),
                 key: Some("A-1".into()),
+                ..Default::default()
             },
         ] {
             assert_eq!(work(&args, &st).unwrap_err().code, codes::E_INVALID);
