@@ -107,7 +107,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 151
+  verdict is written down once, in `backend/verdicts.rs`, for all 159
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -188,7 +188,15 @@ current, rejections are final), `detect.rs` wiring the prompt / Stop / PR
 probe / sync triggers, migration 049, `SessionRow.work_suggested` (a guess
 never groups a session), and the chip / popover / batch review UI. The
 SessionStart context (M4.5) is built but OFF behind
-`work.session_start_context` (decision D5); M4.6 is not done.
+`work.session_start_context` (decision D5); M4.6 is not done. Work graph
+M7 (self-cleaning lifecycle) is landed: the pure planner
+`service/gc/tidy.rs` (reasons, hard-coded protections), migration 050
+(UI-only archive, snooze / never per link, `sessions.last_touch_at`,
+`work_items.reopened_at`), `work { tidy | reopened }` and `work_link {
+archive | unarchive | snooze | never | dismiss | tidy_apply }`, and
+auto-tidy in the GC sweep behind `work.auto_tidy` (OFF; safe kill only).
+Tidy-up suggests; it never kills a dirty tree except through safe kill. The
+per-org override waits for M5.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

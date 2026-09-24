@@ -403,6 +403,35 @@ The order serves the user's real setup. Decision D1 below may reorder it.
 
 **Value:** the sidebar stays clean, and nothing useful is lost.
 
+**Status (2026-09-24): landed** on `claude/cloud-fleet-work-graph-m7`
+(stacked on M4), per `plans/2026-09-24-work-graph-m7-self-cleaning-lifecycle.md`
+(its *Revisions* list every deviation). Verified with `cargo fmt`, `clippy -D
+warnings` (workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub;
+only the four chmod tests that fail as root fail), `pnpm check` / `pnpm
+test` and `scripts/hub-e2e.sh` (102/102); the manual acceptance on a real
+fleet is still to do.
+
+- **M7.1** (1c9c2e2, the pure planner): `plan_tidy` in `service/gc/tidy.rs` — five
+  reasons, ranked secondary reasons, hard-coded protections each with its
+  own test, snooze / never, and what auto-tidy may act on.
+- **M7.2** (6932b72, storage and API): migration 050 (`work_links.archived_at` /
+  `tidy_snoozed_until` / `tidy_never`, `sessions.last_touch_at`,
+  `work_items.reopened_at`); archive UI-only and undone by the next prompt
+  or attach; reopen as an event (`reopened` journal row); `state` in the PR
+  probe; four `work.*` settings; `work { tidy | reopened }` and `work_link {
+  archive | unarchive | snooze | never | dismiss | tidy_apply }` (+639 B, no
+  new tool, `work_link` confirm-gated for tidy_apply's kills); auto-tidy in
+  the GC sweep behind `work.auto_tidy` (off); eight Routed commands (159).
+- **M7.3** (e7b4be9, UI): "Tidy up · n" and "Reopened · n" in the attention strip,
+  the Tidy-up sheet, archived sessions in their group's Done, the reopened
+  badge and Resume, Settings → Work → Lifecycle with a dry run.
+- **M7.4**: `docs/concepts.md` → *Lifecycle*, `docs/hub.md` → *Tidy-up and
+  auto-tidy*, `docs/control-api.md`.
+- **Not done:** the per-org override (`orgs.auto_tidy`) and org-scoped
+  candidates — M5 had not landed when M7 was finished; `idle_unlinked`
+  (an unlinked session has no link to archive under); the phone (M8); the
+  manual acceptance.
+
 ### M8: phone
 
 - **Hub side:** `SessionRow.work` in `PHONE_SESSION_FIELDS`.
@@ -508,3 +537,9 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   off). The tool budget grew by 172 B for `work_link`'s confirm / reject by
   id / trust_project; no new tool, no contract bump. M4.6 is not done.
   Deviations are in the M4 plan's *Revisions*.
+- 2026-09-24: M7 landed on `claude/cloud-fleet-work-graph-m7` (stacked on
+  M4; built in parallel with M5 and M6): tidy-up suggestions, UI-only
+  archive, snooze / never, reopened work, auto-tidy off by default. The tool
+  budget grew by 639 B (three parameters on `work_link`, two read actions on
+  `work`); no new tool, no contract bump. The per-org auto-tidy override
+  waits for M5. Deviations are in the M7 plan's *Revisions*.

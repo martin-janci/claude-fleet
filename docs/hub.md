@@ -696,6 +696,34 @@ What to know:
   trackers and a stored token. Re-enter the token on the hub (or rotate it
   and use a `--ref`) rather than keep one that lived on another machine.
 
+## Tidy-up and auto-tidy
+
+The hub (or a standalone desktop) plans tidy-up on every GC sweep
+(`gc.sweep_interval_secs`) and on request (`work { action: "tidy" }`, the
+desktop's "Tidy up · n"). Suggestions only, by default. The settings, all
+under Settings → Work → Lifecycle or `set_fleet_setting`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `work.tidy_done_days` | `2` | a linked ticket must have been done this many days (from the tracker transition) |
+| `work.tidy_idle_hours` | `4` | a session must have been idle this long before any reason suggests it |
+| `work.auto_tidy` | `false` | the sweep acts on the allowed reasons by itself |
+| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | comma list of `done_idle`, `pr_merged_idle`, `not_planned` |
+
+With `work.auto_tidy` on, the sweep **safe-kills** (or, for a session with
+no worktree fleet can inspect, archives) the candidates whose primary reason
+is allowed — never a plain kill, so a duplicate worktree and a lost session
+stay suggestions. Every action is written to the session's timeline
+(`gc_tidied`, or `gc_failed`) and to its work journal (`tidy`). The
+protections apply to auto-tidy exactly as to a person's confirm: working,
+blocked, stuck or dialog-waiting sessions, sessions linked to in-progress
+work, the controller and the operator, anything prompted or attached to in
+the last hour, and background agents with open tasks are never touched. The
+idle killer (`gc.enabled`, `gc.*_idle_secs`) is separate and unchanged.
+
+Per-organisation auto-tidy (`orgs.auto_tidy`) arrives with organisations
+(roadmap M5); until then the setting is fleet-wide.
+
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
 `POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
