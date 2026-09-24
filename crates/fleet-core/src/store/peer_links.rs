@@ -415,6 +415,28 @@ impl Store {
         })
     }
 
+    /// Start a new `peer_exchange` generation for link `link_id` and return
+    /// it. A parked handler holding an older one is superseded.
+    pub fn bump_peer_generation(&self, link_id: i64) -> u64 {
+        let mut g = self
+            .peer_generations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let next = g.get(&link_id).copied().unwrap_or(0) + 1;
+        g.insert(link_id, next);
+        next
+    }
+
+    /// The current `peer_exchange` generation of link `link_id`.
+    pub fn peer_generation(&self, link_id: i64) -> u64 {
+        self.peer_generations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&link_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn ensure_remote_participant(&self, link_id: i64, address: &str) -> Result<i64, IpcError> {
         if let Some(id) = self
             .conn

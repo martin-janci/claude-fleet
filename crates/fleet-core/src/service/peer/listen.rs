@@ -47,6 +47,15 @@ pub async fn exchange(
         ));
     }
     let link = lock(store)?.ensure_listener_link(client_id, &req.fleet_id)?;
+    // This exchange supersedes any handler still parked on the link (a
+    // dialer drops its parked call to send, and a dropped request need not
+    // cancel its handler): bump the generation and wake the parked ones.
+    let generation = {
+        let s = lock(store)?;
+        let g = s.bump_peer_generation(link.id);
+        s.message_notify().notify_waiters();
+        g
+    };
     // Rejections first, then the watermark: a rejected id must not be swept
     // into `accepted` by the handover. Only the rejections apply here — the
     // listener hands rows over by `after` alone, so an `accepted` entry past
@@ -71,6 +80,18 @@ pub async fn exchange(
         let notified = notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
+        if lock(store)?.peer_generation(link.id) != generation {
+            // Superseded: the newer exchange hands over whatever is pending,
+            // so this one answers with an empty page and leaves the link's
+            // state to it.
+            return Ok(ExchangeResponse {
+                proto: PROTO,
+                fleet_id: own,
+                results,
+                messages: vec![],
+                more: false,
+            });
+        }
         let (messages, more) = {
             let s = lock(store)?;
             let mut rows = s.pending_outbox(link.id, req.after, PEER_BATCH_MAX as i64 + 1)?;
@@ -385,6 +406,117 @@ mod tests {
         assert_eq!(
             resp.messages.iter().map(|w| w.id).collect::<Vec<_>>(),
             vec![m]
+        );
+    }
+
+    /// I4: a dialer drops its parked call whenever it has something to send,
+    /// and a dropped request may not cancel its handler. A newer exchange on
+    /// the same link releases the parked one at once (empty page), so parked
+    /// handlers never pile up against the caller's long-poll permits.
+    #[tokio::test]
+    async fn a_newer_exchange_releases_a_parked_one_on_the_same_link() {
+        let (store, ssh) = hub("fleet-b");
+        let c = peer_client(&store, "hub-a");
+        exchange(&store, &ssh, c, req("fleet-a")).await.unwrap();
+        let (st, ss) = (store.clone(), ssh.clone());
+        let parked = tokio::spawn(async move {
+            let mut poll = req("fleet-a");
+            poll.wait_ms = 5_000;
+            let t0 = std::time::Instant::now();
+            let resp = exchange(&st, &ss, c, poll).await.unwrap();
+            (resp, t0.elapsed())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        exchange(&store, &ssh, c, req("fleet-a")).await.unwrap();
+        let (resp, took) = parked.await.unwrap();
+        assert!(resp.messages.is_empty());
+        assert!(!resp.more);
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    /// M4: a page is capped at PEER_BATCH_MAX and `more` says rows were held.
+    #[tokio::test]
+    async fn a_full_page_sets_more() {
+        let (store, ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        let c = peer_client(&store, "hub-a");
+        exchange(&store, &ssh, c, req("fleet-a")).await.unwrap();
+        {
+            let s = store.lock().unwrap();
+            let link = s.live_peer_link_for_fleet("fleet-a").unwrap().unwrap();
+            let to = s
+                .ensure_remote_participant(link.id, "fleet-a/session/h/a1")
+                .unwrap();
+            for i in 0..=PEER_BATCH_MAX {
+                s.insert_outbound_remote(
+                    b1,
+                    "fleet-b/session/local/b1",
+                    to,
+                    &format!("m{i}"),
+                    "message",
+                    None,
+                    false,
+                )
+                .unwrap();
+            }
+        }
+        let resp = exchange(&store, &ssh, c, req("fleet-a")).await.unwrap();
+        assert_eq!(resp.messages.len(), PEER_BATCH_MAX);
+        assert!(resp.more);
+    }
+
+    /// M4: a recipient whose participant is tombstoned is refused as retired.
+    #[tokio::test]
+    async fn a_retired_recipient_is_rejected_as_retired() {
+        let (store, ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        {
+            let s = store.lock().unwrap();
+            s.ensure_participant_for_session(b1).unwrap();
+            // The defence-in-depth shape `send_message` guards too: a
+            // tombstone still pointing at a live session row.
+            s.conn_ref()
+                .execute(
+                    "UPDATE participants SET retired_at = 1 WHERE session_id = ?1",
+                    [b1],
+                )
+                .unwrap();
+        }
+        let c = peer_client(&store, "hub-a");
+        let mut r = req("fleet-a");
+        r.send = vec![item(1, "hi")];
+        let resp = exchange(&store, &ssh, c, r).await.unwrap();
+        assert_eq!(
+            resp.results[0].code.as_deref(),
+            Some("E_PARTICIPANT_RETIRED")
+        );
+    }
+
+    /// M4: a resend of a delivered item stays `accepted` after its recipient
+    /// is gone — it must not turn into an `undeliverable` for its sender.
+    #[tokio::test]
+    async fn a_resend_is_accepted_after_the_recipient_is_gone() {
+        let (store, ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        let c = peer_client(&store, "hub-a");
+        let mut r = req("fleet-a");
+        r.send = vec![item(1, "hi")];
+        exchange(&store, &ssh, c, r.clone()).await.unwrap();
+        let first = store
+            .lock()
+            .unwrap()
+            .local_id_for_remote("fleet-a", 1)
+            .unwrap();
+        store.lock().unwrap().delete_session(b1).unwrap();
+        let again = exchange(&store, &ssh, c, r).await.unwrap();
+        assert_eq!(again.results, vec![WireResult::accepted(1)]);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .local_id_for_remote("fleet-a", 1)
+                .unwrap(),
+            first
         );
     }
 
