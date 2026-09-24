@@ -61,6 +61,10 @@ const SUBSCHEMA_MAP: &[&str] = &["properties", "definitions", "$defs", "patternP
 /// in spirit: if either gate changes, this must change with it, and
 /// `tools::tests` checks the two agree for every router tool.
 pub(super) fn visible_to(caller: &Caller, tool: &str) -> bool {
+    let peer_tool = tool == crate::mcp::auth::PEER_TOOL;
+    if caller.mode == TokenMode::Peer || peer_tool {
+        return caller.mode == TokenMode::Peer && peer_tool;
+    }
     if caller.mode == TokenMode::Readonly && !guard::is_readonly_tool(tool) {
         return false;
     }

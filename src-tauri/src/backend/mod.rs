@@ -22,7 +22,9 @@
 pub mod connection;
 pub mod contract;
 pub mod events;
-mod http1;
+// Moved to fleet-core (federation, cycle 3). Imported (not re-declared) so
+// `super::http1::…` in events.rs still resolves.
+use fleet_core::http_client::http1;
 pub mod pairing;
 pub mod remote;
 pub mod report;

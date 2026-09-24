@@ -54,10 +54,14 @@ pub struct Packed {
 /// PURE: render `messages` (oldest first) into one `additionalContext` value,
 /// against the [`CTX_MAX_CHARS`] / [`CTX_MAX_LINES`] budget.
 ///
-/// `sender_label` turns a sender's session id into something human — normally
-/// `"<tmux_name>@<host_alias>"`. Taken as a closure so this stays pure and
-/// testable without a store.
-pub fn pack(messages: &[SessionMessage], sender_label: &dyn Fn(i64) -> String) -> Packed {
+/// `sender_label` turns a message into something human to name its sender —
+/// normally `"<tmux_name>@<host_alias>"` for a local sender, or the remote
+/// address (migration 045) for one on another fleet. Taken as a closure so
+/// this stays pure and testable without a store.
+pub fn pack(
+    messages: &[SessionMessage],
+    sender_label: &dyn Fn(&SessionMessage) -> String,
+) -> Packed {
     pack_within(messages, sender_label, CTX_MAX_CHARS, CTX_MAX_LINES)
 }
 
@@ -72,7 +76,7 @@ pub fn pack(messages: &[SessionMessage], sender_label: &dyn Fn(i64) -> String) -
 /// the tail's count is the truth for what actually rode.
 pub fn pack_within(
     messages: &[SessionMessage],
-    sender_label: &dyn Fn(i64) -> String,
+    sender_label: &dyn Fn(&SessionMessage) -> String,
     max_chars: usize,
     max_lines: usize,
 ) -> Packed {
@@ -85,7 +89,7 @@ pub fn pack_within(
     let mut lines = 0usize;
 
     for m in messages {
-        let who = sender_label(m.from_session_id);
+        let who = sender_label(m);
         let block = format!(
             "[fleet msg #{id} from {who}]: {body}",
             id = m.id,
@@ -118,12 +122,26 @@ pub fn pack_within(
         // filled batch is a different case (below): that one still breaks,
         // to preserve order and avoid starving it by smaller later ones.
         if block_chars > budget_chars || block_lines > budget_lines {
-            let stub = format!(
+            let mut stub = format!(
                 "[fleet msg #{id} from {who}]: (message too large to inline — {chars} chars; read it with the fleet `inbox` tool)",
                 id = m.id,
                 who = who,
                 chars = block_chars,
             );
+            // The stub carries the sender label, and a label can itself be
+            // too large (a peer's address is capped at `PEER_ADDR_MAX`, but
+            // nothing here may rely on that). As the FIRST block such a stub
+            // would stall the queue exactly like the unstubbed body did, so
+            // it drops the label: a bare stub naming only the id always fits
+            // either budget, and `included` is empty only when `messages` is.
+            if blocks.is_empty()
+                && (stub.chars().count() > budget_chars || stub.lines().count() > budget_lines)
+            {
+                stub = format!(
+                    "[fleet msg #{id}]: (message too large to inline; read it with the fleet `inbox` tool)",
+                    id = m.id,
+                );
+            }
             let c = stub.chars().count() + joiner_c;
             let l = stub.lines().count() + joiner_l;
             if chars + c > budget_chars || lines + l > budget_lines {
@@ -212,10 +230,27 @@ mod tests {
             sent_at: 1_700_000_000 + id,
             read_at: None,
             reply_to: None,
+            from_addr: None,
+            to_addr: None,
         }
     }
-    fn label(_: i64) -> String {
+    fn label(_: &SessionMessage) -> String {
         "alpha@local".into()
+    }
+
+    #[test]
+    fn a_remote_sender_is_labelled_by_its_address() {
+        let mut m = msg(1, "hello");
+        m.from_session_id = 0;
+        m.from_addr = Some("fleet-a/session/h/a1".into());
+        let label = |m: &SessionMessage| {
+            m.from_addr
+                .clone()
+                .unwrap_or_else(|| format!("session {}", m.from_session_id))
+        };
+        let p = pack(&[m], &label);
+        assert!(p.text.contains("from fleet-a/session/h/a1"), "{}", p.text);
+        assert!(!p.text.contains("session 0"), "{}", p.text);
     }
 
     #[test]
@@ -368,6 +403,40 @@ mod tests {
             p.text.lines().count()
         );
         assert_eq!(p.included.len() + p.remaining, messages.len());
+    }
+
+    /// I3: a message whose SENDER LABEL alone is too long for its stub to
+    /// fit still makes progress — it rides as a bare stub naming its id, is
+    /// stamped delivered, and the ones behind it follow. `included` is empty
+    /// only when the input is, on both budgets.
+    #[test]
+    fn a_message_whose_stub_cannot_fit_still_makes_progress() {
+        let huge_label = |m: &SessionMessage| {
+            if m.id == 1 {
+                format!("fleet-a/session/h/{}", "n".repeat(8 * 1024))
+            } else {
+                "alpha@local".into()
+            }
+        };
+        for (max_chars, max_lines) in [
+            (CTX_MAX_CHARS, CTX_MAX_LINES),
+            (REASON_MAX_CHARS, REASON_MAX_LINES),
+        ] {
+            let p = pack_within(
+                &[msg(1, "short"), msg(2, "second")],
+                &huge_label,
+                max_chars,
+                max_lines,
+            );
+            assert_eq!(p.included, vec![1, 2], "budget {max_chars}");
+            assert!(p.text.contains("#1"), "{}", p.text);
+            assert!(
+                !p.text.contains(&"n".repeat(300)),
+                "the label is not inlined"
+            );
+            assert!(p.text.chars().count() <= max_chars);
+            assert!(p.text.lines().count() <= max_lines);
+        }
     }
 
     #[test]

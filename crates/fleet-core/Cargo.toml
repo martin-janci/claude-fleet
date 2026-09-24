@@ -24,6 +24,11 @@ tokio-util = { version = "0.7", features = ["rt"] }
 dashmap = "6"
 async-trait = "0.1"
 
+# The hub dials another hub (federation, cycle 3) with the client the desktop
+# already used to reach a hub: `ring` only, the platform trust store.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+
 # The hub/agent wire types, shared with the `fleet-agent` binary (which never
 # depends on this crate). See crates/fleet-proto/src/lib.rs.
 fleet-proto = { path = "../fleet-proto" }

@@ -30,13 +30,30 @@ pub enum TokenMode {
     Full,
     /// Only tools that observe the fleet; mutating tools get `E_FORBIDDEN`.
     Readonly,
+    /// Another fleet's hub (federation): `peer_exchange` and nothing else.
+    /// Only a paired client row can hold it (see `parse_client`).
+    Peer,
 }
 
+/// The one tool a `Peer` token may call, and that only a `Peer` token may
+/// call.
+pub(crate) const PEER_TOOL: &str = "peer_exchange";
+
 impl TokenMode {
+    /// A host token row's mode. `peer` is NOT recognised here: a host's
+    /// token can never become a hub link, whatever string its row holds.
     pub fn parse(s: &str) -> TokenMode {
         match s {
             "full" => TokenMode::Full,
             _ => TokenMode::Readonly,
+        }
+    }
+
+    /// A paired client row's mode: `full`, `peer`, else `readonly`.
+    pub fn parse_client(s: &str) -> TokenMode {
+        match s {
+            "peer" => TokenMode::Peer,
+            other => TokenMode::parse(other),
         }
     }
 }
@@ -188,7 +205,7 @@ pub fn resolve_token(
                     name: row.name.clone(),
                     trusted: row.trusted_at.is_some(),
                 }),
-                mode: TokenMode::parse(&row.mode),
+                mode: TokenMode::parse_client(&row.mode),
             });
         }
     }
@@ -305,6 +322,30 @@ pub fn check_request(
         bearer_token(headers.get(header::AUTHORIZATION)).ok_or(StatusCode::UNAUTHORIZED)?;
     resolve_token(presented, master_token, host_tokens, client_tokens)
         .ok_or(StatusCode::UNAUTHORIZED)
+}
+
+/// The `Peer` gate shared by `/events` and `/report`: neither route is
+/// `peer_exchange`, so a hub link's token must be refused before either does
+/// any work. `/mcp`'s own gate is `enforce_mode` in `tools/support.rs`; this
+/// is the same rule for the two routes that sit outside the tool router but
+/// still take a `Caller` from the request extensions. A shared fn rather than
+/// the check inlined twice, since the two routes disagreeing about who is a
+/// peer is exactly the kind of drift this exists to prevent.
+///
+/// Returns the `403` to send when the caller must be refused, or `None` when
+/// it may proceed.
+pub(crate) fn refuses_peer(caller: &Caller) -> Option<axum::response::Response> {
+    use axum::response::IntoResponse;
+    if caller.mode != TokenMode::Peer {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            "a hub link may call peer_exchange only\n",
+        )
+            .into_response(),
+    )
 }
 
 #[cfg(test)]
@@ -491,6 +532,40 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn only_a_client_row_can_be_a_peer() {
+        assert_eq!(TokenMode::parse_client("peer"), TokenMode::Peer);
+        assert_eq!(TokenMode::parse_client("full"), TokenMode::Full);
+        assert_eq!(TokenMode::parse_client("readonly"), TokenMode::Readonly);
+        assert_eq!(
+            TokenMode::parse_client("anything-else"),
+            TokenMode::Readonly
+        );
+        // A host token row is parsed with `parse`: `peer` there is unknown and
+        // fails closed, so an agent's token can never reach `peer_exchange`.
+        assert_eq!(TokenMode::parse("peer"), TokenMode::Readonly);
+    }
+
+    #[test]
+    fn a_peer_mode_row_resolves_only_through_a_client_row() {
+        // A host token row whose `mode` column somehow holds "peer" still
+        // resolves as `Readonly` — `resolve_token`'s host loop uses `parse`,
+        // not `parse_client`.
+        let hosts = [host_row("hub-a", "tok-hub", "peer")];
+        assert_eq!(
+            resolve_token("tok-hub", "master-tok", &hosts, &[])
+                .unwrap()
+                .mode,
+            TokenMode::Readonly
+        );
+        // A client row with mode "peer" resolves to `TokenMode::Peer`.
+        let clients = vec![client_row(9, "hub-b", "tok-client", "peer")];
+        let c = resolve_token("tok-client", "master-tok", &[], &clients).unwrap();
+        assert_eq!(c.mode, TokenMode::Peer);
+        assert!(c.is_client());
+        assert!(!c.is_master());
     }
 
     #[test]

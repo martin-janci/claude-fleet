@@ -249,6 +249,7 @@ fn sample_health() -> Health {
             },
         )]),
         tunnels_flapping: 1,
+        peer_links_down: 1,
     }
 }
 

@@ -735,6 +735,28 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // Hub↔hub federation: the one tool a `peer` token reaches, and only a
+    // peer token reaches (gated in `enforce_mode`). Client access so a
+    // paired client row passes `enforce_admin`; not readonly (it writes the
+    // inbox); Quick: the long-poll is capped at 25 s by the tool itself.
+    ToolPolicy {
+        name: "peer_exchange",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Names other fleets: master-only, like list_clients — a paired client
+    // or per-host token must not enumerate what this hub is linked to.
+    // Read-only, so it gets the same two-flags-answer-different-questions
+    // treatment as `list_clients` above.
+    ToolPolicy {
+        name: "list_peer_links",
+        access: Access::Master,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
 ];
 
 /// This tool's full policy row, or `None` for a name the router does not

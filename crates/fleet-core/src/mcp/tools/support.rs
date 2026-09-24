@@ -150,8 +150,30 @@ pub(super) fn caller_from_context(ctx: &RequestContext<RoleServer>) -> Option<Ca
         .and_then(|parts| parts.extensions.get::<Caller>().cloned())
 }
 
-/// Readonly-mode gate: pure so it can be unit-tested without a transport.
+/// Mode gate: pure so it can be unit-tested without a transport. A `Peer`
+/// token (a linked hub) may call `peer_exchange` and nothing else, and
+/// `peer_exchange` is reachable only by a `Peer` token — this is the one
+/// place that rule is enforced for `/mcp`; `auth::refuses_peer` is the same
+/// rule for `/events` and `/report`.
 pub(super) fn enforce_mode(caller: &Caller, tool: &str) -> Result<(), McpError> {
+    let peer_tool = tool == crate::mcp::auth::PEER_TOOL;
+    if caller.mode == TokenMode::Peer && !peer_tool {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            format!("{tool} is not available to a hub link ({})", caller.label()),
+            None,
+        ));
+    }
+    if peer_tool && caller.mode != TokenMode::Peer {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            format!(
+                "{tool} is for a linked hub's peer token only ({} refused)",
+                caller.label()
+            ),
+            None,
+        ));
+    }
     if caller.mode == TokenMode::Readonly && !guard::is_readonly_tool(tool) {
         return Err(mcp_err(
             "E_FORBIDDEN",
@@ -482,6 +504,13 @@ pub(super) fn persist_audit(
     args: Option<&JsonObject>,
     caller: &Caller,
 ) {
+    // `peer_exchange` carries a linked hub's message bodies inside its `send`
+    // array, which `redact_args` (top-level keys only) would render as raw
+    // JSON onto the controller's timeline — once per long-poll. It writes no
+    // row; its own `audit` log line carries counts only.
+    if tool == crate::mcp::auth::PEER_TOOL {
+        return;
+    }
     let Ok(s) = store.lock() else { return };
     let Some(session_id) = find_audit_session(&s, args) else {
         return;
@@ -823,6 +852,12 @@ pub(super) struct InboxSummary {
     pub(super) reply_to: Option<i64>,
     pub(super) body_chars: usize,
     pub(super) body_preview: String,
+    /// The remote sender's address (migration 045) when `from_session_id`
+    /// is `0`; absent for a local message, matching `SessionMessage`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) from_addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) to_addr: Option<String>,
 }
 
 pub(super) const INBOX_PREVIEW_CHARS: usize = 80;
@@ -841,6 +876,8 @@ impl From<crate::store::SessionMessage> for InboxSummary {
             reply_to: m.reply_to,
             body_chars,
             body_preview,
+            from_addr: m.from_addr,
+            to_addr: m.to_addr,
         }
     }
 }

@@ -13,6 +13,7 @@ pub mod claude_cli;
 pub mod events;
 #[cfg(test)]
 mod fleet_e2e_tests;
+pub mod http_client;
 pub mod humanize;
 pub mod ipc_error;
 pub mod json;

@@ -58,6 +58,10 @@ pub struct Health {
     /// the last `usage::HEALTH_DAYS` days — from the durable daily roll-up,
     /// so killed sessions still count.
     pub usage_by_day: Vec<usage::DayUsage>,
+    /// Live hub↔hub links outside `connected` (retrying, refused,
+    /// incompatible). Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub peer_links_down: u32,
 }
 
 /// Pure fleet aggregates derived from cached session + host rows.
@@ -150,6 +154,12 @@ pub fn health_from_store(s: &Store) -> Health {
         stuck: summary.stuck,
         usage_by_host: summary.usage_by_host,
         usage_by_day: usage::recent_days(s, now_unix(), usage::HEALTH_DAYS, None),
+        peer_links_down: s
+            .peer_link_summaries()
+            .unwrap_or_default()
+            .iter()
+            .filter(|l| l.revoked_at.is_none() && l.state != crate::store::LINK_CONNECTED)
+            .count() as u32,
     }
 }
 
@@ -188,6 +198,7 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
             stuck: 0,
             usage_by_host: BTreeMap::new(),
             usage_by_day: Vec::new(),
+            peer_links_down: 0,
         },
     }
 }
@@ -530,10 +541,46 @@ mod tests {
             stuck: 6,
             usage_by_host: BTreeMap::new(),
             usage_by_day: Vec::new(),
+            peer_links_down: 0,
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");
         assert_eq!(back.stuck, 6);
+    }
+
+    /// A link outside `connected` (retrying, refused, incompatible) is a hub
+    /// federation problem an operator wants surfaced the same way a stuck
+    /// tunnel is — `peer_links_down` counts them, ignoring `connected` links
+    /// and revoked ones (neither is "down": one is fine, the other is gone).
+    #[test]
+    fn health_from_store_counts_peer_links_not_connected() {
+        let store = Store::open_in_memory().unwrap();
+        let ok = store.insert_dialer_link("https://b.example", "t1").unwrap();
+        store.adopt_dialer_fleet(ok, "fleet-b").unwrap();
+        store
+            .set_peer_link_state(ok, crate::store::LINK_CONNECTED, None, 1)
+            .unwrap();
+        let bad = store.insert_dialer_link("https://c.example", "t2").unwrap();
+        store.adopt_dialer_fleet(bad, "fleet-c").unwrap();
+        store
+            .set_peer_link_state(bad, crate::store::LINK_REFUSED, Some("401"), 1)
+            .unwrap();
+        let h = health_from_store(&store);
+        assert_eq!(h.peer_links_down, 1);
+    }
+
+    /// The pin on `#[serde(default)]` for this ONE field (unlike the rest of
+    /// `Health`, deliberately not container-default — see the struct doc): an
+    /// older hub's JSON, minted before this field existed, must still parse,
+    /// reading as `peer_links_down: 0` rather than failing the whole `Health`.
+    #[test]
+    fn an_older_healths_json_without_peer_links_down_still_parses_as_zero() {
+        let body = r#"{"version":"1","db_ready":true,"schema_version":32,
+            "hosts_reachable":1,"hosts_total":1,"sessions_total":3,
+            "by_status":{},"ghosts":0,"context_red":0,"stuck":2,
+            "usage_by_host":{},"usage_by_day":[]}"#;
+        let h: Health = serde_json::from_str(body).expect("an older Health still parses");
+        assert_eq!(h.peer_links_down, 0);
     }
 
     #[test]

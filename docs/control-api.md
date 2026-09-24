@@ -333,6 +333,14 @@ Index by area (names only; see the reference for details):
   `fleet-hub pair`, `fleet-hub client list`, `fleet-hub client revoke` and
   `fleet-hub client trust|untrust` commands are thin wrappers around these
   four.
+- **Hub links** — `peer_exchange` (hub-to-hub federation: a linked hub's
+  `peer` token long-polls it to trade messages and acknowledgements; the one
+  tool a peer token reaches, and no other token reaches it, so it is listed
+  to peer tokens only), `list_peer_links` (this hub's links to other fleets'
+  hubs — fleet, role, state, pending count, last exchange and error, never a
+  token; a read, but master token only, since it names other fleets — the
+  `fleet-hub peer add|list|remove` commands drive the same links straight on
+  `state.db`).
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →
@@ -679,6 +687,24 @@ discipline as `send_prompt`. `wait_for_reply` (`{ session_id,
 after_message_id?, timeout_s? }`) long-polls the inbox for the next message
 newer than `after_message_id`, the same bounded-wait budget as
 `wait_for_session`.
+
+**Across a hub link.** When `to_addr` names another fleet
+(`<fleet>/session/<host>/<name>`) and this hub has a live peer link to it,
+`send_message` queues the message on the link's outbox and returns at once —
+delivery happens on the dialer's next exchange, typically within a few
+seconds. `deliver: true` is refused (`E_UNSUPPORTED`: "deliver types into a
+pane; a hub never types into another fleet's panes") — there is no pane on
+the other side of a link to type into. So is `kind: "question"`
+(`E_VALIDATE`: a message from another fleet cannot hold a session's stop), a
+recipient address over 256 bytes, and a `reply_to` whose parent came from a
+third fleet (`E_INVALID`). The reply, once the remote session
+sends one, arrives through the normal `wait_for_reply` / `inbox` path like
+any other message, with `from_addr` set to the sender's
+`<fleet>/session/<host>/<name>` and marked as untrusted input. If the peer
+never takes the message — the link is refused, removed, or the message
+outlives the link's 7-day retention — the sender's session timeline gets a
+`message_undeliverable` event instead of a reply. See `docs/hub.md` →
+*Link two hubs*.
 
 ## Provisioning hosts
 
