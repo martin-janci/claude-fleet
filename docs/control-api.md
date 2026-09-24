@@ -348,6 +348,26 @@ Index by area (names only; see the reference for details):
   the keys a purge would leave without resumable conversations. A per-host
   token reads context and plans only for work that ran on its host, and
   resumes only onto it.
+  Detection and explanations (roadmap M4): fleet proposes links by itself
+  from the session's current branch, its PR (head branch, closing issues,
+  keys in the title / body and in commit trailers) and the references in
+  submitted prompts (keys, Jira / Linear / Asana / GitHub ticket URLs,
+  `#n` against the session's own repo). Each link carries `state`
+  (`confirmed` | `suggested` | `rejected`), `strength` (`explicit` |
+  `strong` | `weak`), `rule` (the resolver rule, R2–R8 of design §0.3) and
+  `evidence` (what was seen: signal, matched text, a ±40-character redacted
+  prompt snippet unless `work.evidence_snippets` is off, when, which
+  conversation) — `work { session_id }` returns it all. A session row's
+  `work` stays the primary CONFIRMED link; `work_suggested` is its top
+  suggestion (with `suggestions`, the count), kept apart so a guess never
+  groups a session. A branch or PR change ends the automatic link it made
+  (`end_reason` `branch_changed` | `pr_changed`, snapshotted as past work);
+  manual, `started` and `agent` links are never ended by it, and a rejected
+  (session, target) pair is never proposed again. Decide with `work_link
+  { session_id, action: "confirm", link_id }` or `{ action: "reject",
+  link_id }`; `work_link { action: "trust_project", project_id, on }` lets a
+  sole branch key in that project link by itself (master or client token;
+  refused to a per-host token). Prompts are never stored — only matches.
   Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
   on a paired desktop the Settings → Work section says "configure on the
   hub") manages them: `list`, `add { site_url }` (the site, or any ticket URL

@@ -324,6 +324,28 @@ Jira Cloud site is still to do.
   `additionalContext`, using the session's own model. At most once per
   conversation, and only with at most five candidates in scope.
 
+**Status (2026-09-24): landed** on `claude/cloud-fleet-work-graph-m4`
+(stacked on M3), per `plans/2026-09-24-work-graph-m4-detection.md` (its
+*Revisions* list every deviation). Verified with `cargo fmt`, `clippy -D
+warnings` (workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub),
+`pnpm check` / `pnpm test` and `scripts/hub-e2e.sh` (102/102); the manual
+acceptance on a real fleet is still to do.
+
+- **M4.1** (01a1a90): one recogniser, `service/work/recognize.rs`, and its
+  TypeScript twin `extractTicketRefs`, both over one shared fixture.
+- **M4.2 + M4.3** (d5f28a9): migration 049; the live branch from the
+  transcript, PR fields and commit trailers from the probe, prompt matches
+  behind the loop and dump guards; the pure resolver (R1–R9), applied only
+  on a real change; `SessionRow.work_suggested`.
+- **M4.4** (ea1dc5e): `work_link` confirm / reject by `link_id` /
+  `trust_project` (+172 B), two Routed commands; chip states, the evidence
+  popover, `y` / `n` / `l`, the batch review sheet, the Undo toast.
+- **M4.5** (51fc47b): SessionStart work context behind
+  `work.session_start_context`, **off**; measured and recorded (D5 stays
+  the user's).
+- **Not done:** M4.6 (the classification nudge), suggestions on the phone
+  (M8), the remote-host SessionStart measurement.
+
 **Value:** most sessions are linked correctly without touching anything, and
 every link says why. **Tests:** the resolver table (conflicts, a sticky reject,
 a branch change, two trackers sharing a key, a late-known key), the guards,
@@ -481,3 +503,8 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   (relative JQL windows instead of timezone formatting, locally evaluated
   views, `tracker_views.enabled`, and more) are in the M3 plan's
   *Revisions*.
+- 2026-09-24: M4 landed on `claude/cloud-fleet-work-graph-m4` (detection,
+  the resolver, explanations and correction; SessionStart context built but
+  off). The tool budget grew by 172 B for `work_link`'s confirm / reject by
+  id / trust_project; no new tool, no contract bump. M4.6 is not done.
+  Deviations are in the M4 plan's *Revisions*.

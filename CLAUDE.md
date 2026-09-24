@@ -107,7 +107,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 145
+  verdict is written down once, in `backend/verdicts.rs`, for all 151
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -181,6 +181,14 @@ lookup / start — `service/trackers/`, `store/trackers.rs`,
 `store/tracker_items.rs`); read
 `docs/superpowers/2026-09-24-work-graph-roadmap.md` before touching them.
 Tracker secrets are read ONLY by `Store::resolve_tracker_credential`.
+Work graph M4 (detection) is landed: one recogniser in Rust and TS over a
+shared fixture (`service/work/recognize.rs`, `src/lib/work_keys.ts`), the
+pure resolver (`service/work/resolve.rs`, rules R1–R9; state signals are
+current, rejections are final), `detect.rs` wiring the prompt / Stop / PR
+probe / sync triggers, migration 049, `SessionRow.work_suggested` (a guess
+never groups a session), and the chip / popover / batch review UI. The
+SessionStart context (M4.5) is built but OFF behind
+`work.session_start_context` (decision D5); M4.6 is not done.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

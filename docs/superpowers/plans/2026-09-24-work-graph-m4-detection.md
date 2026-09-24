@@ -208,6 +208,24 @@ checks apply, plus `REGEN_*` whenever tools or verdicts change.
   `work.session_start_context`, default **off** until measured.
 - **Tests:** a hooks_install golden, a hook response shape test, and
   source-by-source behaviour.
+- **Measured (2026-09-24, D5).** The exact synchronous command
+  (`curl -sf --connect-timeout 1 -m 2 -X POST … || true`, curl 8.5.0), five
+  runs each, on the hub's own machine:
+
+  | Hub | Time per SessionStart |
+  |---|---|
+  | up, answering (800-char context) | 8–13 ms |
+  | down, port refused | 7 ms |
+  | host unreachable (packets dropped) | ~1,010 ms (the connect timeout) |
+  | up but not answering | ~2,012 ms (the total cap) |
+
+  A remote host behind the reverse tunnel was **not** measured (no remote
+  host in the build environment): its hook posts to the tunnel's loopback
+  end, so a dead tunnel should look like "refused" and a wedged hub like
+  "not answering". Claude Code **2.1.281** was verified to read a
+  synchronous SessionStart command hook's `additionalContext` (the model
+  quoted a key only the hook's answer contained). The setting stays **off**:
+  whether ~1–2 s on a bad day is acceptable is decision D5, the user's.
 
 ### M4.6 Opt-in classification nudge (optional, last)
 
@@ -274,3 +292,92 @@ checks apply, plus `REGEN_*` whenever tools or verdicts change.
 | roadmap 5 | Auto-confirm a single strong branch key? | Yes, but only in trusted projects. A project becomes trusted by the popover checkbox, or automatically after 3 confirmed branch links in it (visible, reversible) |
 | new | Store prompt evidence snippets? | Yes, ±40 chars, with a setting to turn them off |
 | new | Classification nudge? | Off; opt-in per fleet |
+
+## Revisions
+
+- **2026-09-24, M4 landed** on `claude/cloud-fleet-work-graph-m4` (stacked on
+  M3): M4.1 (01a1a90), M4.2 + M4.3 (d5f28a9), M4.4 (ea1dc5e), M4.5 (51fc47b,
+  off), M4.7 (docs). Verified with `cargo fmt`, `clippy -D warnings`
+  (workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub; only the
+  four chmod tests that fail as root on `main` fail) and `pnpm check` /
+  `pnpm test`, and `scripts/hub-e2e.sh` (102/102). Deviations from the tasks
+  above, and why:
+  1. **Where the code lives.** The recogniser is
+     `service/work/recognize.rs` with its fixture in
+     `service/work/testdata/recognize_cases.json`, the resolver
+     `service/work/resolve.rs` (+ `resolve/tests.rs`), the glue
+     `service/work/detect.rs` and the storage `store/work_detect.rs` — next
+     to M2's `service/work/`, rather than a new `crates/fleet-core/src/work/`.
+  2. **Recognition.** A `.` after a key means a version only when a digit
+     follows (`lodash-4.17`); a sentence's full stop no longer hides
+     `see ABC-12.` (both languages changed together; the fixture has the
+     case). With any tracker, EVERY key (upper-case too) must carry a
+     tracker's prefix, so `GPT-4` and `COVID-19` are not keys; with no
+     tracker a prompt key counts only when fleet already knows it (a local
+     item or a link), per design §0.3 ("unknown keys from branch names
+     only"). A key-shaped token that fails the case rules is consumed whole
+     in Rust as TypeScript's `matchAll` does, so the twins cannot drift on
+     `snake_prefix_ABC-1`; a test keeps the two deny lists equal.
+  3. **Migration 049 is wider.** Besides `current_branch` / `_at` and the
+     link columns it adds `sessions.pr_signals` / `pr_signals_at` (the PR
+     probe's reduced answer, so PR state is re-derived from a column like
+     the branch — principle 6 — and every trigger sees it) and
+     `work_links.preselected` / `end_reason`. All outside reconcile's
+     `ON CONFLICT` list; the probe writes `pr_signals` only for the ≤12
+     sessions it probed, after the host write.
+  4. **Suggestions ride `SessionRow.work_suggested`**, not `work`. `work`
+     stays the primary CONFIRMED link and gains `state`, `strength`, `rule`,
+     `preselected` and `suggestions` (all `serde(default)`); an older peer
+     reads only `work`, so it can never group a session by a guess. Cost:
+     one more correlated subselect per row over `idx_work_links_live`
+     (bounded by the participant's live links). The contract golden gained
+     the new keys; no revision bump. `PHONE_SESSION_FIELDS` is unchanged
+     (M8).
+  5. **Decay covers every EVENT suggestion** (prompt, URL, trailer) of an
+     earlier conversation, not only weak ones: a guess belongs to its
+     window. State suggestions follow R7 (withdrawn when the value moves).
+  6. **PR details.** Title / body keys are weak events (`pr` source) that
+     live while the PR does; trailers are `trailer` events that decay. A
+     closed PR withdraws the PR's suggestions and ends its auto link. A
+     GitHub closing ref with no GitHub tracker (M6) stays a bare
+     `owner/repo#n` reference — suggested, or auto-linked when it is the
+     sole strong candidate of a trusted project. `#n` uses the project's
+     repo, else the PR URL's. An older `gh` without the new fields (or
+     `--jq`) falls back to the basic fields and leaves the stored signals
+     alone.
+  7. **The primary moves only for a reason**: when a run loses the primary
+     or confirms a link. Ranking is (decided in the current conversation,
+     explicit > strong > weak, most recent). Without that, a carry or an old
+     manual decision would be re-ranked on every run (R1).
+  8. **Loop guard** = a `[claude-fleet` marker in the prompt, the first 200
+     chars equal to the fleet-sent `last_prompt`, or the prompt (≥16 chars)
+     inside one of the last five handover briefs.
+  9. **Agent declaration:** no `work_item` on `set_friendly_name` (budget);
+     the friendly-name skill's step 5 calls `work_link { source: agent }`
+     when the request is for a known ticket (hosts get it on re-provision).
+  10. **API.** `work_link { confirm | reject } { link_id }` and
+      `trust_project { project_id, on }` (one new parameter, `on`; refused to
+      a per-host token). The tool surface grew 172 B (measured 68,385;
+      `BUDGET_BYTES` 68,485). Tauri `confirm_session_work` and
+      `set_work_project_trust`, both Routed; `reject_session_work` takes an
+      optional `link_id` (151 commands in the verdict table).
+  11. **Auto-trust** counts links a person confirmed from R3b / R4
+      suggestions in the project (any session, live or ended); the third
+      trusts the project. Settings → Limits shows how many projects are
+      trusted with a "Trust none" button; the popover checkbox reverses one.
+  12. **UI.** "Pick another…" focuses the popover's key / URL field rather
+      than opening ⌘K (⌘K's Enter starts work; it does not link this row).
+      Batch review is a pill plus an inline sheet under the sidebar filters:
+      `Attention.svelte` is a watcher with no entries to add one to. ↵ / ⌫
+      decide in the sheet; the row popover uses its buttons and the row's
+      `y` / `n` / `l`. The desktop's own key recognition stands aside for a
+      row that has a suggestion.
+  13. **M4.5** is installed through `HubBase.session_start_context`, read
+      when a host is provisioned (and for the local hook when the control
+      API is enabled): toggling the setting takes effect on the next
+      provision. The SessionStart answer also delivers undelivered handover
+      briefs, whole, when they fit the 4,000 chars.
+  14. **Not done:** M4.6 (the opt-in classification nudge, skipped by
+      design of this pass); the phone does not show suggestions (M8); the
+      remote-host SessionStart measurement; the manual acceptance on a real
+      fleet.
