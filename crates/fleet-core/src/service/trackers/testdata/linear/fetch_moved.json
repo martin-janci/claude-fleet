@@ -1,0 +1,28 @@
+{
+  "data": {
+    "i0": {
+      "id": "iss-0006",
+      "identifier": "ENG-110",
+      "title": "Flaky login test",
+      "url": "https://linear.app/acme/issue/ENG-110/flaky-login-test",
+      "updatedAt": "2026-09-18T09:00:00.000Z",
+      "description": null,
+      "previousIdentifiers": [
+        "OPS-3"
+      ],
+      "state": {
+        "name": "Triage",
+        "type": "triage"
+      },
+      "team": {
+        "key": "ENG"
+      },
+      "assignee": {
+        "id": "user-0001",
+        "name": "Dana Dev"
+      },
+      "parent": null,
+      "cycle": null
+    }
+  }
+}

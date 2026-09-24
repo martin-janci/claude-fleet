@@ -14,6 +14,7 @@ pub mod asana;
 pub mod conformance;
 pub mod github;
 pub mod jira;
+pub mod linear;
 pub mod sync;
 pub mod tickets;
 
@@ -355,6 +356,12 @@ pub fn provider_for(
             cred,
             transport,
         )),
+        "linear" => Box::new(linear::Linear::new(
+            &row.site_url,
+            row.config.clone(),
+            cred,
+            transport,
+        )),
         // Through `gh` the host's own login is used: never a token.
         "github" => Box::new(github::GitHub::new(
             &row.site_url,
@@ -498,6 +505,7 @@ pub fn host_policy(row: &TrackerRow) -> HostPolicy {
     match row.provider.as_str() {
         "github" => Arc::new(|h: &str| h == crate::net::via_host::GITHUB_API_HOST),
         "asana" => Arc::new(|h: &str| h == asana::API_HOST),
+        "linear" => Arc::new(|h: &str| h == linear::API_HOST),
         _ => Arc::new(crate::store::is_allowed_tracker_host),
     }
 }

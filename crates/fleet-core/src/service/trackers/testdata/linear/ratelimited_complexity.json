@@ -1,0 +1,11 @@
+{
+  "errors": [
+    {
+      "message": "Query too complex - query complexity 12500 exceeds the limit of 10000",
+      "extensions": {
+        "code": "RATELIMITED",
+        "type": "ratelimited"
+      }
+    }
+  ]
+}

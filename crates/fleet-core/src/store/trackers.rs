@@ -29,7 +29,7 @@ use std::fmt;
 
 /// Providers a tracker may be (M6 adds GitHub, Asana, Linear and Jira Data
 /// Center, one at a time).
-pub const TRACKER_PROVIDERS: &[&str] = &["jira", "github", "asana"];
+pub const TRACKER_PROVIDERS: &[&str] = &["jira", "github", "asana", "linear"];
 
 /// `trackers.state`.
 pub const TRACKER_STATES: &[&str] = &[
@@ -404,6 +404,33 @@ fn normalize_asana_site(raw: &str) -> Result<String, IpcError> {
     })
 }
 
+/// `https://linear.app/<workspace urlKey>`; a pasted issue URL names its
+/// workspace. Lower case.
+fn normalize_linear_site(raw: &str) -> Result<String, IpcError> {
+    let invalid = |why: &str| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!("{why}: a Linear tracker is https://linear.app/<workspace>"),
+        )
+    };
+    let (host, segs) = split_https(raw).map_err(invalid)?;
+    if host != "linear.app" {
+        return Err(invalid("not linear.app"));
+    }
+    match segs.first() {
+        Some(ws)
+            if !ws.is_empty()
+                && ws.len() <= 64
+                && ws
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') =>
+        {
+            Ok(format!("https://linear.app/{}", ws.to_ascii_lowercase()))
+        }
+        _ => Err(invalid("no workspace in the URL")),
+    }
+}
+
 /// Normalise and fence a site URL for `provider` (see each provider's
 /// fence). `E_INVALID` for an unknown provider.
 pub fn normalize_provider_site(provider: &str, raw: &str) -> Result<String, IpcError> {
@@ -411,6 +438,7 @@ pub fn normalize_provider_site(provider: &str, raw: &str) -> Result<String, IpcE
         "jira" => normalize_site_url(raw),
         "github" => normalize_github_site(raw),
         "asana" => normalize_asana_site(raw),
+        "linear" => normalize_linear_site(raw),
         other => Err(IpcError::new(
             codes::E_INVALID,
             format!(

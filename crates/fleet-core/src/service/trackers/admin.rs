@@ -25,7 +25,7 @@ pub struct WorkAdminArgs {
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker_id: Option<i64>,
-    /// jira|github|asana (default: from the URL)
+    /// jira|github|asana|linear (default: from the URL)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// Display name.
@@ -161,7 +161,7 @@ pub struct TestReport {
 
 /// The provider a pasted URL names, by its host (M6.6's "paste any ticket
 /// URL"): `*.atlassian.net` Jira Cloud, `github.com` GitHub,
-/// `app.asana.com` Asana.
+/// `app.asana.com` Asana, `linear.app` Linear.
 pub fn infer_provider(raw: &str) -> Option<&'static str> {
     let rest = raw.trim().split_once("://")?.1;
     let host = rest
@@ -174,6 +174,7 @@ pub fn infer_provider(raw: &str) -> Option<&'static str> {
         h if h.ends_with(".atlassian.net") => Some("jira"),
         "github.com" | "www.github.com" => Some("github"),
         "app.asana.com" => Some("asana"),
+        "linear.app" => Some("linear"),
         _ => None,
     }
 }
@@ -198,6 +199,10 @@ fn default_name(provider: &str, site: &str) -> String {
             .map(|o| format!("{o} (GitHub)"))
             .unwrap_or_else(|| "GitHub".into()),
         "asana" => "Asana".into(),
+        "linear" => host_path
+            .strip_prefix("linear.app/")
+            .map(|w| format!("{w} (Linear)"))
+            .unwrap_or_else(|| "Linear".into()),
         _ => host_path.to_string(),
     }
 }
