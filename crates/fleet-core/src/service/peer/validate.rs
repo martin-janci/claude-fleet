@@ -17,6 +17,10 @@ fn reject(code: &'static str, message: impl Into<String>) -> Rejection {
     }
 }
 
+/// The longest `kind` a peer may send. Cycle 1's kinds (`message`,
+/// `task_result`) are well under it.
+const PEER_KIND_MAX: usize = 32;
+
 /// An item that passed: the recipient in our fleet, the sender's address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checked {
@@ -80,6 +84,18 @@ pub fn check_inbound(
             ))
         }
     };
+    if m.kind.is_empty()
+        || m.kind.len() > PEER_KIND_MAX
+        || !m
+            .kind
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        return Err(reject(
+            "E_VALIDATE",
+            format!("kind must be 1 to {PEER_KIND_MAX} of [a-z0-9_-]"),
+        ));
+    }
     if m.body.is_empty() {
         return Err(reject("E_VALIDATE", "body is empty"));
     }
@@ -174,6 +190,22 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(e.code, "E_VALIDATE");
+        }
+    }
+
+    /// M1: `kind` is short, non-empty and `[a-z0-9_-]` — it is stored and
+    /// rendered as-is, so a peer cannot stuff text or a line break into it.
+    #[test]
+    fn the_kind_must_be_a_short_token() {
+        let mut ok = m("fleet-a/session/h/a1", "fleet-b/session/h/b1", "hi");
+        for kind in ["message", "task_result", "a-b", &"k".repeat(32)] {
+            ok.kind = kind.to_string();
+            assert!(check_inbound(&ok, "fleet-a", "fleet-b").is_ok(), "{kind}");
+        }
+        for kind in ["", "Message", "a b", "kind\nx", "é", &"k".repeat(33)] {
+            ok.kind = kind.to_string();
+            let e = check_inbound(&ok, "fleet-a", "fleet-b").unwrap_err();
+            assert_eq!(e.code, "E_VALIDATE", "{kind:?}");
         }
     }
 
