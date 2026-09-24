@@ -19,7 +19,9 @@ use crate::ipc_error::{codes, lock, IpcError};
 use crate::mcp::guard;
 use crate::service::messages::timeline_detail;
 use crate::ssh::SshClient;
-use crate::store::{PeerLinkRow, Store, LINK_INCOMPATIBLE, LINK_REFUSED, LINK_RETRYING};
+use crate::store::{
+    PeerLinkRow, Store, LINK_CONNECTED, LINK_INCOMPATIBLE, LINK_REFUSED, LINK_RETRYING,
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +31,10 @@ const CALL_MARGIN: Duration = Duration::from_secs(10);
 /// How often a parked dialer re-reads its outbox (and its link row) when no
 /// notify arrives — a row written by another process (the CLI) has none.
 const POLL_FLOOR: Duration = Duration::from_millis(500);
+/// A parked call answered empty sooner than this was not a long-poll: a
+/// peer or proxy answering at once, or a second dialer on the same link
+/// releasing this one. The next call waits out the backoff instead (G3).
+const EMPTY_POLL_FLOOR: Duration = Duration::from_secs(1);
 
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -131,18 +137,18 @@ impl HttpPeerCall {
 fn read_answer(status: u16, body: &str) -> Result<ExchangeResponse, CallError> {
     match status {
         200 => {}
+        // The hub's auth layer answers 401 for a revoked or unknown token:
+        // terminal.
         401 => {
             return Err(CallError::Refused {
                 code: codes::E_UNAUTHORIZED.into(),
                 message: "the peer refused this token".into(),
             })
         }
-        403 => {
-            return Err(CallError::Refused {
-                code: codes::E_FORBIDDEN.into(),
-                message: "the peer refused this link".into(),
-            })
-        }
+        // A bare 403 included (G20): the hub answers it only for an
+        // Origin/Host mismatch, and a proxy in between may answer it for
+        // anything. The hub refuses a LINK with a structured tool error
+        // (below), never a bare status, so this is retried.
         s => return Err(CallError::Transport(format!("HTTP {s}"))),
     }
     let payload = crate::mcp::wire::last_event_payload(body);
@@ -196,9 +202,9 @@ fn read_answer(status: u16, body: &str) -> Result<ExchangeResponse, CallError> {
 enum Settled {
     /// Applied; reset the backoff.
     Ok,
-    /// Applied, but the peer answered no result for something sent: back
-    /// off rather than resend at full speed.
-    Short,
+    /// Applied, but the peer answered no result for this many of the
+    /// messages sent: back off rather than resend at full speed.
+    Short(usize),
     Exit(LinkExit),
 }
 
@@ -262,6 +268,7 @@ pub async fn run_link(
             wait_ms,
         };
         let timeout = Duration::from_millis(wait_ms) + CALL_MARGIN;
+        let started = tokio::time::Instant::now();
         let outcome = tokio::select! {
             biased;
             _ = cancel.cancelled() => return LinkExit::Cancelled,
@@ -272,32 +279,59 @@ pub async fn run_link(
         // did not move, so whatever it would have carried comes again).
         let Some(result) = outcome else { continue };
         match result {
-            Ok(resp) => match settle(&fence, &ssh, &link, &own, &req, resp).await {
-                Ok(Settled::Ok) => {
-                    first = false;
-                    backoff.reset();
-                }
-                Ok(Settled::Short) => {
-                    first = false;
-                    tracing::warn!(
-                        link_id,
-                        "[peer] the peer answered no result for a sent message; backing off"
-                    );
-                    if sleep_or_cancel(&cancel, backoff.next()).await {
-                        return LinkExit::Cancelled;
+            Ok(resp) => {
+                // G3: a parked call that came back empty before the floor did
+                // not wait at all — whoever answered it will answer the next
+                // one the same way. Only the backoff breaks that spin.
+                let empty_at_once = parks
+                    && resp.messages.is_empty()
+                    && resp.results.is_empty()
+                    && started.elapsed() < EMPTY_POLL_FLOOR;
+                match settle(&fence, &ssh, &link, &own, &req, resp).await {
+                    Ok(Settled::Ok) if empty_at_once => {
+                        first = false;
+                        tracing::debug!(
+                            link_id,
+                            "[peer] a parked poll came back empty at once; backing off"
+                        );
+                        if sleep_or_cancel(&cancel, backoff.next()).await {
+                            return LinkExit::Cancelled;
+                        }
+                    }
+                    Ok(Settled::Ok) => {
+                        first = false;
+                        backoff.reset();
+                    }
+                    Ok(Settled::Short(unanswered)) => {
+                        first = false;
+                        tracing::warn!(
+                            link_id,
+                            unanswered,
+                            "[peer] the peer answered no result for a sent message; backing off"
+                        );
+                        // G14(b): still exchanging, so still `connected` —
+                        // but the operator sees why nothing is settling.
+                        let why =
+                            format!("the peer did not answer for {unanswered} sent message(s)");
+                        if !fence.state(LINK_CONNECTED, &why) {
+                            return LinkExit::Superseded;
+                        }
+                        if sleep_or_cancel(&cancel, backoff.next()).await {
+                            return LinkExit::Cancelled;
+                        }
+                    }
+                    Ok(Settled::Exit(exit)) => return exit,
+                    Err(e) => {
+                        tracing::warn!(link_id, error = %e.message, "[peer] applying an exchange failed; retrying");
+                        if !fence.state(LINK_RETRYING, &format!("{}: {}", e.code, e.message)) {
+                            return LinkExit::Superseded;
+                        }
+                        if sleep_or_cancel(&cancel, backoff.next()).await {
+                            return LinkExit::Cancelled;
+                        }
                     }
                 }
-                Ok(Settled::Exit(exit)) => return exit,
-                Err(e) => {
-                    tracing::warn!(link_id, error = %e.message, "[peer] applying an exchange failed; retrying");
-                    if !fence.state(LINK_RETRYING, &format!("{}: {}", e.code, e.message)) {
-                        return LinkExit::Superseded;
-                    }
-                    if sleep_or_cancel(&cancel, backoff.next()).await {
-                        return LinkExit::Cancelled;
-                    }
-                }
-            },
+            }
             Err(CallError::Transport(why)) => {
                 tracing::debug!(link_id, error = %why, "[peer] exchange failed; backing off");
                 if !fence.state(LINK_RETRYING, &why) {
@@ -462,7 +496,10 @@ async fn settle(
         .filter(|r| sent.contains(&r.id))
         .cloned()
         .collect();
-    let short = sent.iter().any(|id| !results.iter().any(|r| r.id == *id));
+    let unanswered = sent
+        .iter()
+        .filter(|id| !results.iter().any(|r| r.id == **id))
+        .count();
     apply_results(store, link.id, &results)?;
     // A store fault here is `Err`: nothing below runs, `after` stays put and
     // the page is handed over again.
@@ -502,7 +539,11 @@ async fn settle(
     if !wrote {
         return Ok(Settled::Exit(LinkExit::Superseded));
     }
-    Ok(if short { Settled::Short } else { Settled::Ok })
+    Ok(if unanswered > 0 {
+        Settled::Short(unanswered)
+    } else {
+        Settled::Ok
+    })
 }
 
 /// Resolves when a parked poll should be dropped: the outbox got a row, or
@@ -588,7 +629,6 @@ mod tests {
             other => panic!("not a transport failure: {:?}", other.map(|_| ())),
         };
         assert_eq!(refused(read_answer(401, "")), "E_UNAUTHORIZED");
-        assert_eq!(refused(read_answer(403, "")), "E_FORBIDDEN");
         assert_eq!(
             refused(read_answer(200, &tool_error("E_FORBIDDEN", "removed"))),
             "E_FORBIDDEN"
@@ -618,6 +658,31 @@ mod tests {
             "result": {"isError": true, "content": [{"type": "text", "text": "E_FORBIDDEN: no"}]},
         }));
         assert_eq!(refused(read_answer(200, &text_only)), "E_FORBIDDEN");
+    }
+
+    /// G20: HTTP 401 is the hub's own answer for a revoked or unknown token —
+    /// terminal. A bare HTTP 403 is not a refusal the hub makes of a link
+    /// (it answers 403 only for an Origin/Host mismatch, and a proxy may
+    /// answer it for anything): a transport failure, retried. The hub's own
+    /// refusal is the structured tool error, which stays terminal.
+    #[test]
+    fn a_401_is_terminal_a_bare_403_is_retried_and_a_structured_refusal_is_terminal() {
+        match read_answer(401, "") {
+            Err(CallError::Refused { code, .. }) => assert_eq!(code, "E_UNAUTHORIZED"),
+            other => panic!("401: not a refusal: {:?}", other.map(|_| ())),
+        }
+        for body in ["", "<html>Forbidden</html>"] {
+            match read_answer(403, body) {
+                Err(CallError::Transport(why)) => assert_eq!(why, "HTTP 403"),
+                other => panic!("403 {body:?}: not retried: {:?}", other.map(|_| ())),
+            }
+        }
+        for code in ["E_FORBIDDEN", "E_UNAUTHORIZED"] {
+            match read_answer(200, &tool_error(code, "no")) {
+                Err(CallError::Refused { code: got, .. }) => assert_eq!(got, code),
+                other => panic!("{code}: not a refusal: {:?}", other.map(|_| ())),
+            }
+        }
     }
 
     /// M2: only rmcp's unknown-method / unknown-tool shapes mean an older
@@ -776,6 +841,14 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+        // G14(b): the operator sees it. The link still exchanges, so it
+        // stays `connected`, but not silently.
+        let row = store.lock().unwrap().peer_link(link).unwrap().unwrap();
+        assert_eq!(row.state, "connected");
+        assert_eq!(
+            row.last_error.as_deref(),
+            Some("the peer did not answer for 1 sent message(s)")
         );
         cancel.cancel();
         assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
