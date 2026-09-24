@@ -384,6 +384,10 @@ const MIGRATIONS: &[Migration] = &[
         45,
         include_str!("../../migrations/045_session_participants.sql"),
     ),
+    // Work graph M1b: `work_items`, `work_links` and the trigger that ends a
+    // link (with its snapshot) when the session's participant retires. All
+    // `IF NOT EXISTS`, so re-running it is a no-op.
+    Migration::plain(46, include_str!("../../migrations/046_work_graph.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
