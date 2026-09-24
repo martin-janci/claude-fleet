@@ -125,15 +125,30 @@ by key, and names stop being "yes". **Tests:**
 - **M1b.1 (storage):**
   - Migration 046 (`work_items`, `work_links`, and the end-with-snapshot
     trigger on participant retirement) plus `store/work.rs`.
-  - The SQL was exercised in SQLite 3.45. The Rust awaits `cargo test` in the
-    Worker environment.
-- **M1b.2 (next; needs cargo for `REGEN_DOCS` and `REGEN_HUB_VERDICTS`):**
-  - `SessionRow.work` (`#[serde(default)]`, from `primary_work_by_session`)
-    and a `work` event kind.
-  - MCP `work` (read) and `work_link` (link / reject / unlink / declare),
-    with guard rows and a budget check.
-  - Tauri commands with Routed verdicts, and the frontend store.
-  - Row chip actions: set key, *Not this*, clear.
+  - Verified with `cargo fmt`, `clippy -D warnings` and `cargo test`: it
+    needed no fix.
+- **M1b.2 (landed, 2026-09-24):**
+  - `SessionRow.work` (`#[serde(default)]`): the primary confirmed live link,
+    read by one correlated subselect in `SESSION_COLUMNS`, so listed and
+    emitted rows both carry it. Also `SessionRow.work_rejected` (the row's
+    sticky rejections): without it the frontend's own recognition showed a
+    rejected branch key again on the next render.
+  - A link write bumps `row_version` and emits `session_updated`. No separate
+    `work` event kind yet: nothing but the row changes in this slice.
+  - `work` is in `PHONE_SESSION_FIELDS` (18 columns).
+  - MCP `work` (read) and `work_link` (link / reject / unlink; `source`
+    manual | agent), `require_host`-gated, one `service::work` entry for
+    both transports. `BUDGET_BYTES` raised 64,832 → 65,787 (measured
+    65,687): two tools do not fit in 100 B. M0.6 is where it is paid back.
+    `declare`, `primary`, `start` and `resume` are not actions yet.
+  - Tauri `session_work_links` / `link_session_work` / `reject_session_work`
+    / `unlink_session_work`, all `Routed` (137 commands).
+  - Frontend: `workKeyFor` prefers the link (source `link`), skips rejected
+    keys; `work.ts`; a `#` work menu on each row (set, *Not KEY*, *Clear*).
+  - Not done here: "Name this work…" on a group header (local items with a
+    title — the store has `create_local_work_item`, no tool or command
+    exposes it yet), the New session dialog does not link with
+    `source: started` yet, and the phone app does not read `work`.
 
 ### M2: resume and work memory
 
@@ -382,3 +397,6 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-24: first version, from design revision 2 and the round-1 review.
 - 2026-09-24: M0 written, not yet compiled (see M0 status). Migration 045 is
   now the participant trigger, so the work graph schema is 046.
+- 2026-09-24: M1b.1 verified by the compiler; M1b.2 landed (SessionRow.work
+  and work_rejected, `work` / `work_link`, four Routed commands, the row's
+  work menu). The tool budget was raised by 955 B for the two tools.
