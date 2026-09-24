@@ -403,8 +403,10 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             let task = tasks::create_task(&s, p.requester_session_id, Some(worker.id), &p.prompt)
                 .map_err(to_mcp_err)?;
-            if p.requester_session_id.is_some() {
-                let _ = s.set_parent_session_id(worker.id, p.requester_session_id);
+            if let Some(req) = p.requester_session_id {
+                let _ = s.set_parent_session_id(worker.id, Some(req));
+                // The worker does the requester's work (work graph M2.2).
+                let _ = s.inherit_worker_work(worker.id, req);
             }
             if let Some(cid) = worker.claude_session_id.as_deref() {
                 let _ = s.set_task_worker_claude_id(task.id, cid);

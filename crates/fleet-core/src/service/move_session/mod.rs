@@ -4513,6 +4513,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_work_follows_a_move_and_is_copied_to_a_fork() {
+        for keep_source in [false, true] {
+            let f = fixture();
+            let link = f
+                .store
+                .lock()
+                .unwrap()
+                .link_session_work(
+                    f.source_id,
+                    crate::store::WorkTarget::Key("ABC-1"),
+                    "manual",
+                )
+                .unwrap();
+            let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            let rep = run(&f, &hooks, keep_source).await.expect("move");
+            let s = f.store.lock().unwrap();
+            let links = s.session_work_links(rep.target_session_id).unwrap();
+            assert_eq!(links.len(), 1, "{keep_source}");
+            assert_eq!(links[0].ref_key.as_deref(), Some("ABC-1"));
+            if keep_source {
+                assert_eq!(links[0].source, "forked");
+                assert_eq!(s.session_work_links(f.source_id).unwrap()[0].id, link.id);
+            } else {
+                assert_eq!(links[0].id, link.id, "the same link, re-pointed");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn happy_path_copies_the_transcript_resumes_on_target_and_kills_the_source() {
         let f = fixture();
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);

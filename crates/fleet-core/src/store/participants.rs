@@ -141,6 +141,20 @@ impl Store {
                     "UPDATE session_messages SET from_participant_id = ?1 WHERE from_participant_id = ?2",
                     rusqlite::params![participant_id, existing.id],
                 )?;
+                // Review C8: the collision's live work links move to the
+                // survivor too (never as a second primary, never a duplicate
+                // of a target the survivor already links); what is left ends
+                // with the retire below, as history.
+                self.conn.execute(
+                    "UPDATE work_links SET participant_id = ?1, is_primary = is_primary AND NOT \
+                       EXISTS(SELECT 1 FROM work_links s WHERE s.participant_id = ?1 \
+                              AND s.ended_at IS NULL AND s.is_primary = 1) \
+                     WHERE participant_id = ?2 AND ended_at IS NULL AND NOT EXISTS( \
+                       SELECT 1 FROM work_links s WHERE s.participant_id = ?1 \
+                         AND s.ended_at IS NULL AND s.item_id IS work_links.item_id \
+                         AND s.ref_key IS work_links.ref_key)",
+                    rusqlite::params![participant_id, existing.id],
+                )?;
                 self.retire_participant(existing.id)?;
             }
         }

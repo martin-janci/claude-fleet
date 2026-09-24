@@ -589,6 +589,12 @@ impl Store {
             "UPDATE sessions SET kind = ?1, reviews_session_id = ?2 WHERE id = ?3",
             rusqlite::params![kind, reviews_session_id, id],
         )?;
+        // A review inherits the reviewed session's primary work (M2.2).
+        if let Some(parent) = reviews_session_id {
+            if let Err(e) = self.inherit_work(id, parent, "review") {
+                tracing::warn!(session_id = id, error = %e.message, "[work] review inherit failed");
+            }
+        }
         self.emit_session(id)?;
         Ok(())
     }

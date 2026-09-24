@@ -87,6 +87,21 @@ pub struct WorkLinkRow {
     /// JSON array of every Claude conversation id the session ran.
     #[serde(default)]
     pub snap_claude_ids: Option<String>,
+    /// `work` | `review` | `worker` (a link inherited from a parent).
+    #[serde(default = "default_role")]
+    pub role: String,
+    /// `false` once `purge_project` removed the transcripts the link's
+    /// conversations would resume from.
+    #[serde(default = "default_true")]
+    pub resumable: bool,
+}
+
+fn default_role() -> String {
+    "work".into()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A live session's primary work, for the session row and the sidebar.
@@ -163,7 +178,7 @@ fn is_ticket_key(s: &str) -> bool {
 
 const LINK_COLUMNS: &str = "id, item_id, ref_key, participant_id, state, source, is_primary, \
      created_at, decided_at, ended_at, snap_host, snap_tmux, snap_name, snap_project_id, \
-     snap_worktree, snap_branch, snap_pr_url, snap_claude_ids";
+     snap_worktree, snap_branch, snap_pr_url, snap_claude_ids, role, resumable";
 
 fn map_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkLinkRow> {
     Ok(WorkLinkRow {
@@ -185,6 +200,8 @@ fn map_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkLinkRow> {
         snap_branch: r.get(15)?,
         snap_pr_url: r.get(16)?,
         snap_claude_ids: r.get(17)?,
+        role: r.get(18)?,
+        resumable: r.get::<_, i64>(19)? != 0,
     })
 }
 
@@ -494,6 +511,222 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Give `participant` a live confirmed link to `(item_id, ref_key)`
+    /// because of something fleet did (`resumed`, `forked`, `inherited`),
+    /// unless it already has a live link to that target — a confirmed one
+    /// means the work is carried already, a rejected one is sticky. It
+    /// becomes primary only when the participant has no primary work yet.
+    /// `true` when a link was written.
+    fn carry_link(
+        &self,
+        participant: i64,
+        item_id: Option<i64>,
+        ref_key: Option<&str>,
+        source: &str,
+        role: &str,
+    ) -> Result<bool, IpcError> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
+               AND ended_at IS NULL AND item_id IS ?2 AND ref_key IS ?3)",
+            rusqlite::params![participant, item_id, ref_key],
+            |r| r.get(0),
+        )?;
+        if exists {
+            return Ok(false);
+        }
+        let has_primary: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
+               AND ended_at IS NULL AND is_primary = 1)",
+            rusqlite::params![participant],
+            |r| r.get(0),
+        )?;
+        let now = now_unix();
+        self.conn.execute(
+            "INSERT INTO work_links (item_id, ref_key, participant_id, state, source, role, \
+                                     is_primary, created_at, decided_at) \
+             VALUES (?1, ?2, ?3, 'confirmed', ?4, ?5, ?6, ?7, ?7)",
+            rusqlite::params![
+                item_id,
+                ref_key,
+                participant,
+                source,
+                role,
+                (!has_primary) as i64,
+                now
+            ],
+        )?;
+        Ok(true)
+    }
+
+    /// Resume auto-carry (review C7): `session_id` now runs Claude
+    /// conversation `claude_session_id`; every ENDED confirmed link whose
+    /// snapshot names that conversation is carried onto the session with
+    /// source `resumed`. Called by the rebind (the one writer of a row's
+    /// conversation id) inside its transaction; the caller emits the row.
+    /// Returns how many links were written.
+    pub(crate) fn carry_resumed_work(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+    ) -> Result<usize, IpcError> {
+        let targets: Vec<(Option<i64>, Option<String>, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT l.item_id, l.ref_key, l.role FROM work_links l, \
+                        json_each(l.snap_claude_ids) j \
+                 WHERE l.ended_at IS NOT NULL AND l.state = 'confirmed' \
+                   AND l.snap_claude_ids IS NOT NULL AND j.value = ?1 \
+                 GROUP BY l.item_id, l.ref_key ORDER BY MAX(l.ended_at) DESC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![claude_session_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        let participant = self.ensure_participant_for_session(session_id)?;
+        let mut n = 0;
+        for (item_id, ref_key, role) in targets {
+            if self.carry_link(participant, item_id, ref_key.as_deref(), "resumed", &role)? {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.bump_session_for_work(session_id)?;
+        }
+        Ok(n)
+    }
+
+    /// `move_session { keep_source }` forks the session: copy the source's
+    /// live confirmed links onto the target with source `forked`. Emits the
+    /// target's row when anything was copied.
+    pub fn copy_work_links(&self, from_session: i64, to_session: i64) -> Result<usize, IpcError> {
+        let links: Vec<WorkLinkRow> = self
+            .session_work_links(from_session)?
+            .into_iter()
+            .filter(|l| l.state == "confirmed")
+            .collect();
+        if links.is_empty() {
+            return Ok(0);
+        }
+        let participant = self.work_participant(to_session)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0;
+        // Primary first, so the fork's primary is the source's.
+        for l in &links {
+            if self.carry_link(
+                participant,
+                l.item_id,
+                l.ref_key.as_deref(),
+                "forked",
+                &l.role,
+            )? {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.bump_session_for_work(to_session)?;
+        }
+        tx.commit()?;
+        if n > 0 {
+            self.emit_session(to_session)?;
+        }
+        Ok(n)
+    }
+
+    /// [`Self::inherit_work`] for a task worker (`dispatch_task`, a
+    /// background agent's requester), emitting the worker's row when it
+    /// gained a link. Not part of `set_parent_session_id`: a move also sets
+    /// that column (to its source), and a move carries work its own way.
+    pub fn inherit_worker_work(&self, worker: i64, requester: i64) -> Result<bool, IpcError> {
+        let wrote = self.inherit_work(worker, requester, "worker")?;
+        if wrote {
+            self.emit_session(worker)?;
+        }
+        Ok(wrote)
+    }
+
+    /// A review session (`role` `review`) or a task worker (`worker`)
+    /// inherits its parent's primary work, source `inherited` — only when it
+    /// has no live link of its own. The caller emits the child's row.
+    pub(crate) fn inherit_work(
+        &self,
+        child_session: i64,
+        parent_session: i64,
+        role: &str,
+    ) -> Result<bool, IpcError> {
+        let Some(primary) = self
+            .session_work_links(parent_session)?
+            .into_iter()
+            .find(|l| l.is_primary && l.state == "confirmed")
+        else {
+            return Ok(false);
+        };
+        if !self.session_work_links(child_session)?.is_empty() {
+            return Ok(false);
+        }
+        let participant = self.work_participant(child_session)?;
+        let wrote = self.carry_link(
+            participant,
+            primary.item_id,
+            primary.ref_key.as_deref(),
+            "inherited",
+            role,
+        )?;
+        if wrote {
+            self.bump_session_for_work(child_session)?;
+        }
+        Ok(wrote)
+    }
+
+    /// Work keys whose links would lose resumable conversations when
+    /// `project_id` is purged on `hosts`: ended links snapshotted there, and
+    /// live links of that project's sessions there. Sorted, distinct.
+    pub fn work_keys_for_purge(
+        &self,
+        project_id: i64,
+        hosts: &[String],
+    ) -> Result<Vec<String>, IpcError> {
+        let hosts = serde_json::to_string(hosts)
+            .map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT COALESCE(i.key, l.ref_key, i.title) AS k FROM work_links l \
+             LEFT JOIN work_items i ON i.id = l.item_id \
+             LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             LEFT JOIN sessions s ON s.id = p.session_id \
+             WHERE l.state = 'confirmed' AND l.resumable = 1 AND ( \
+               (l.ended_at IS NOT NULL AND l.snap_project_id = ?1 \
+                  AND l.snap_host IN (SELECT value FROM json_each(?2))) \
+               OR (l.ended_at IS NULL AND s.project_id = ?1 \
+                  AND s.host_alias IN (SELECT value FROM json_each(?2)))) \
+               AND k IS NOT NULL \
+             ORDER BY k",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![project_id, hosts], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// After a purge of `project_id` on `hosts`: mark the ended links
+    /// snapshotted there `resumable = 0` (their transcripts are gone), so
+    /// *continue* is disabled with a reason and *fresh with brief* remains.
+    /// Live links end with the project's sessions right after, and are
+    /// marked by the same rule once they have.
+    pub fn mark_purged_work_unresumable(
+        &self,
+        project_id: i64,
+        hosts: &[String],
+    ) -> Result<usize, IpcError> {
+        let hosts = serde_json::to_string(hosts)
+            .map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))?;
+        Ok(self.conn.execute(
+            "UPDATE work_links SET resumable = 0 \
+             WHERE ended_at IS NOT NULL AND resumable = 1 AND snap_project_id = ?1 \
+               AND snap_host IN (SELECT value FROM json_each(?2))",
+            rusqlite::params![project_id, hosts],
+        )?)
+    }
+
     /// session id → its primary work, for every live session that has one.
     pub fn primary_work_by_session(&self) -> Result<HashMap<i64, WorkSummary>, IpcError> {
         let mut stmt = self.conn.prepare(
@@ -759,5 +992,220 @@ mod tests {
         // A no-op unlink emits nothing.
         assert!(!s.unlink_session_work(sid, bare.id).unwrap());
         assert!(bus.take().is_empty());
+    }
+
+    fn with_conversation(s: &Store, name: &str, claude: &str) -> i64 {
+        let id = seed(s, name);
+        s.rebind_conversation(id, claude, crate::store::StartSource::Startup, None, None)
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn a_resumed_conversation_carries_its_ended_work() {
+        let (s, bus) = super::super::test_support::store_with_recorder();
+        let old = with_conversation(&s, "old", "c-1");
+        s.link_session_work(old, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.delete_session(old).unwrap();
+
+        let new = with_conversation(&s, "new", "c-fresh");
+        assert!(
+            s.session_work_links(new).unwrap().is_empty(),
+            "a fresh id carries nothing"
+        );
+        bus.take();
+        s.rebind_conversation(new, "c-1", crate::store::StartSource::Resume, None, None)
+            .unwrap();
+        let links = s.session_work_links(new).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            (
+                links[0].ref_key.as_deref(),
+                links[0].source.as_str(),
+                links[0].is_primary
+            ),
+            (Some("ABC-1"), "resumed", true)
+        );
+        let row = s.get_session_by_id(new).unwrap().unwrap();
+        assert_eq!(row.work.unwrap().key.as_deref(), Some("ABC-1"));
+        assert!(bus.take().contains(&format!("session:updated:{new}")));
+
+        // Resuming again (a /resume back) adds nothing.
+        s.rebind_conversation(new, "c-2", crate::store::StartSource::Clear, None, None)
+            .unwrap();
+        s.rebind_conversation(new, "c-1", crate::store::StartSource::Resume, None, None)
+            .unwrap();
+        assert_eq!(s.session_work_links(new).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_rejection_or_other_primary_is_respected_by_the_carry() {
+        let s = Store::open_in_memory().unwrap();
+        let old = with_conversation(&s, "old", "c-1");
+        s.link_session_work(old, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.delete_session(old).unwrap();
+        let rejecting = with_conversation(&s, "rej", "c-x");
+        s.reject_session_work(rejecting, WorkTarget::Key("ABC-1"))
+            .unwrap();
+        s.rebind_conversation(
+            rejecting,
+            "c-1",
+            crate::store::StartSource::Resume,
+            None,
+            None,
+        )
+        .unwrap();
+        let links = s.session_work_links(rejecting).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].state, "rejected", "sticky");
+
+        let busy = with_conversation(&s, "busy", "c-y");
+        s.link_session_work(busy, WorkTarget::Key("DEF-2"), "manual")
+            .unwrap();
+        s.rebind_conversation(busy, "c-1", crate::store::StartSource::Resume, None, None)
+            .unwrap();
+        let links = s.session_work_links(busy).unwrap();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].ref_key.as_deref(), Some("DEF-2"), "primary stays");
+        assert!(!links[1].is_primary);
+    }
+
+    #[test]
+    fn a_fork_copies_confirmed_links_only() {
+        let s = Store::open_in_memory().unwrap();
+        let src = seed(&s, "src");
+        let dst = seed(&s, "dst");
+        s.link_session_work(src, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.reject_session_work(src, WorkTarget::Key("NOPE-1"))
+            .unwrap();
+        s.link_session_work(src, WorkTarget::Key("DEF-2"), "manual")
+            .unwrap();
+        assert_eq!(s.copy_work_links(src, dst).unwrap(), 2);
+        let links = s.session_work_links(dst).unwrap();
+        assert_eq!(links.len(), 2);
+        assert!(links
+            .iter()
+            .all(|l| l.source == "forked" && l.state == "confirmed"));
+        assert_eq!(
+            links[0].ref_key.as_deref(),
+            Some("DEF-2"),
+            "the source's primary"
+        );
+        assert_eq!(s.copy_work_links(src, dst).unwrap(), 0, "idempotent");
+        assert_eq!(
+            s.session_work_links(src).unwrap().len(),
+            3,
+            "source untouched"
+        );
+    }
+
+    #[test]
+    fn reviews_and_workers_inherit_the_parents_primary_work() {
+        let s = Store::open_in_memory().unwrap();
+        let parent = seed(&s, "parent");
+        let review = seed(&s, "review");
+        let worker = seed(&s, "worker");
+        let own = seed(&s, "own");
+        s.link_session_work(parent, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.link_session_work(own, WorkTarget::Key("XYZ-9"), "manual")
+            .unwrap();
+        s.set_session_kind(review, "review", Some(parent)).unwrap();
+        s.inherit_worker_work(worker, parent).unwrap();
+        s.inherit_worker_work(own, parent).unwrap();
+        for (sid, role) in [(review, "review"), (worker, "worker")] {
+            let links = s.session_work_links(sid).unwrap();
+            assert_eq!(links.len(), 1, "{role}");
+            assert_eq!(
+                (
+                    links[0].ref_key.as_deref(),
+                    links[0].source.as_str(),
+                    links[0].role.as_str()
+                ),
+                (Some("ABC-1"), "inherited", role)
+            );
+            assert!(links[0].is_primary);
+        }
+        let own_links = s.session_work_links(own).unwrap();
+        assert_eq!(own_links.len(), 1, "a session with its own work keeps it");
+        assert_eq!(own_links[0].ref_key.as_deref(), Some("XYZ-9"));
+        // A parent without work gives nothing.
+        let orphan = seed(&s, "orphan");
+        let lone = seed(&s, "lone");
+        assert!(!s.inherit_worker_work(orphan, lone).unwrap());
+        assert!(s.session_work_links(orphan).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_purge_names_and_marks_the_work_that_loses_its_transcripts() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_host("g").unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let mk = |name: &str, host: &str| {
+            let id = s
+                .upsert_session(name, host, None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn
+                .execute(
+                    "UPDATE sessions SET project_id = ?1 WHERE id = ?2",
+                    rusqlite::params![pid, id],
+                )
+                .unwrap();
+            id
+        };
+        let ended = mk("ended", "h");
+        let live = mk("live", "h");
+        let elsewhere = mk("elsewhere", "g");
+        s.link_session_work(ended, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.link_session_work(live, WorkTarget::Key("DEF-2"), "manual")
+            .unwrap();
+        s.link_session_work(elsewhere, WorkTarget::Key("GHI-3"), "manual")
+            .unwrap();
+        s.delete_session(ended).unwrap();
+        let hosts = vec!["h".to_string()];
+        assert_eq!(
+            s.work_keys_for_purge(pid, &hosts).unwrap(),
+            vec!["ABC-1".to_string(), "DEF-2".to_string()]
+        );
+        s.delete_session(live).unwrap();
+        assert_eq!(s.mark_purged_work_unresumable(pid, &hosts).unwrap(), 2);
+        assert!(s
+            .ended_work_links_for_key("ABC-1")
+            .unwrap()
+            .iter()
+            .all(|l| !l.resumable));
+        assert!(s.session_work_links(elsewhere).unwrap()[0].resumable);
+        assert!(s.work_keys_for_purge(pid, &hosts).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_repoint_collision_moves_the_targets_live_links_to_the_survivor() {
+        let s = Store::open_in_memory().unwrap();
+        let src = seed(&s, "src");
+        let dst = seed(&s, "dst");
+        s.link_session_work(src, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.link_session_work(dst, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.link_session_work(dst, WorkTarget::Key("DEF-2"), "manual")
+            .unwrap();
+        let p = s.participant_for_session(src).unwrap().unwrap().id;
+        s.repoint_participant(p, dst).unwrap();
+        s.delete_session(src).unwrap();
+        let links = s.session_work_links(dst).unwrap();
+        let keys: Vec<_> = links.iter().map(|l| l.ref_key.clone().unwrap()).collect();
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(keys.contains(&"ABC-1".to_string()) && keys.contains(&"DEF-2".to_string()));
+        assert_eq!(links.iter().filter(|l| l.is_primary).count(), 1);
+        assert_eq!(
+            links[0].ref_key.as_deref(),
+            Some("ABC-1"),
+            "the survivor's primary"
+        );
     }
 }

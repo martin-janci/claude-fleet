@@ -29,6 +29,12 @@ export interface WorkLink {
   snap_branch?: string | null;
   snap_pr_url?: string | null;
   snap_claude_ids?: string | null;
+  /** `work` | `review` | `worker` (inherited from a parent). Absent from an
+   *  older hub. */
+  role?: string;
+  /** `false` once a purge removed the transcripts this link would resume
+   *  from. Absent (= resumable) from an older hub. */
+  resumable?: boolean;
 }
 
 /** What a decision is about: a key / free-form name, or a work item. */

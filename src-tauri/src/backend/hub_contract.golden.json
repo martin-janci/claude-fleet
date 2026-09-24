@@ -308,6 +308,8 @@
       "item_id",
       "participant_id",
       "ref_key",
+      "resumable",
+      "role",
       "snap_branch",
       "snap_claude_ids",
       "snap_host",

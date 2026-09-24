@@ -277,8 +277,10 @@ fn stamp_bg_row(
     );
     // Parentage is how the requester's Conversations tab finds this row
     // again; `dispatch_task` stamps its worker the same way.
-    if requester.is_some() {
+    if let Some(req) = requester {
         let _ = s.set_parent_session_id(row.id, requester);
+        // The worker does the requester's work (work graph M2.2).
+        let _ = s.inherit_worker_work(row.id, req);
     }
     s.get_session_by_id(row.id).ok().flatten()
 }
@@ -375,6 +377,11 @@ where
     let fp_keys = Store::fingerprint_keys_of_project(store, args.project_id);
     let s = lock(store)?;
     s.delete_project(args.project_id, &fp_keys)?;
+    // The transcripts are gone: the work those conversations belonged to
+    // can no longer be *continued*, only restarted with a brief (M2.2).
+    if let Err(e) = s.mark_purged_work_unresumable(args.project_id, &args.host_aliases) {
+        tracing::warn!(error = %e.message, "[work] marking purged work failed");
+    }
     Ok(reports)
 }
 

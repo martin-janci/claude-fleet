@@ -351,6 +351,8 @@ fn sample_work_link() -> WorkLinkRow {
         snap_branch: Some("abc-123-login".into()),
         snap_pr_url: Some("https://example.com/pr/1".into()),
         snap_claude_ids: Some("[\"c1\"]".into()),
+        role: "work".into(),
+        resumable: true,
     }
 }
 
