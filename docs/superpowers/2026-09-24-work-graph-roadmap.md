@@ -424,8 +424,11 @@ The order serves the user's real setup. Decision D1 below may reorder it.
 `PHONE_SESSION_FIELDS`; `work` / `work_link` `action` served as a schema
 `enum` from the parsers' own tables (+66 B); a test pinning that a readonly
 client token sees `work` but not `work_link`, and no client `work_admin`. No
-contract bump. M8.1–M8.5 (fleet-mobile) are not started; note the plan's
-Revisions item 4 (an absent `work` on a row means none).
+contract bump. **M8.1** (fleet-mobile's model, `tools/list` discovery,
+work transport and the `work` event kind) landed on fleet-mobile's
+`claude/cloud-fleet-work-graph-m8`; M8.2–M8.5 (the screens and docs) are not
+started. Note the plan's Revisions item 4 (an absent `work` on a row means
+none).
 
 ### M9: beyond
 
