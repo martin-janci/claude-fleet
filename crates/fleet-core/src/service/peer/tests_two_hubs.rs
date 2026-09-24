@@ -462,9 +462,10 @@ async fn a_dialer_that_crashed_before_its_watermark_stores_the_batch_once() {
     p.cancel.cancel();
     assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
     // The crash: A's watermark never committed, so B never saw it.
+    let token = p.token_of(p.link);
     p.a.lock()
         .unwrap()
-        .set_peer_link_progress(p.link, 0, None, 0)
+        .set_dialer_link_progress(p.link, &token, 0, None, 0)
         .unwrap();
     p.b.lock()
         .unwrap()

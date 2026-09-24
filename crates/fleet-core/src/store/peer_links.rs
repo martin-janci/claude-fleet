@@ -3,7 +3,7 @@
 //! idempotent inbound insert. See
 //! `docs/superpowers/specs/2026-09-24-hub-federation-design.md`.
 
-use super::{now_unix, Store};
+use super::{now_unix, Store, PARTICIPANT_REMOTE};
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 
@@ -15,6 +15,12 @@ pub const LINK_REFUSED: &str = "refused";
 pub const LINK_INCOMPATIBLE: &str = "incompatible";
 /// A message waiting for a peer this long is failed back to its sender.
 pub const PEER_PENDING_MAX_SECS: i64 = 7 * 24 * 60 * 60;
+/// A live LISTENER link counts as down in [`Store::peer_links_down`] once its
+/// last served exchange is older than this (or it has none yet) — a dialer
+/// link's own state already says so, but a listener has no "state" of its
+/// own to go stale: it only ever moves when a handshake or an exchange
+/// writes it (G14c).
+pub const LISTENER_STALE_SECS: i64 = 120;
 
 const LINK_COLUMNS: &str = "id, fleet_id, role, url, token, client_id, after, \
     pending_rejects, state, last_exchange_at, last_error, created_at, revoked_at";
@@ -147,11 +153,52 @@ fn map_live_fleet_conflict(e: rusqlite::Error) -> IpcError {
     }
 }
 
+/// Like [`map_live_fleet_conflict`], but for `ensure_listener_link`'s
+/// create-on-first-sight insert (G10). A dialer's own handshake retries on
+/// `E_EXISTS` until the operator resolves it (the dialer's `is_terminal`
+/// excludes that code), which is fine when the conflict is the dialer's OWN
+/// row to fix. A LISTENER conflict here means "fleet X already dials this
+/// hub" — nothing the listener side does will ever make that go away by
+/// retrying, so the same collision is `E_FORBIDDEN` instead: terminal for
+/// whichever dialer hits it.
+fn map_listener_live_fleet_conflict(e: rusqlite::Error) -> IpcError {
+    if is_unique_violation(&e) {
+        IpcError::new(
+            codes::E_FORBIDDEN,
+            "this fleet is already linked the other way",
+        )
+    } else {
+        IpcError::from(e)
+    }
+}
+
+/// The `message_undeliverable` reason `sweep_peer_outbox` gives a stale
+/// outbox row (G24): derived from `older_than_secs` rather than the
+/// hard-coded "7 days" the sweep's default happens to be today, so the text
+/// stays honest if that default (or a test, or a future settable one) ever
+/// differs. Whole days when it divides evenly, else whole hours, else plain
+/// seconds — the coarsest unit that describes the window exactly.
+fn stale_outbox_reason(older_than_secs: i64) -> String {
+    const DAY: i64 = 24 * 60 * 60;
+    const HOUR: i64 = 60 * 60;
+    let (n, unit) = if older_than_secs > 0 && older_than_secs % DAY == 0 {
+        (older_than_secs / DAY, "day")
+    } else if older_than_secs > 0 && older_than_secs % HOUR == 0 {
+        (older_than_secs / HOUR, "hour")
+    } else {
+        (older_than_secs, "second")
+    };
+    let plural = if n == 1 { "" } else { "s" };
+    format!("no answer from the peer hub within {n} {unit}{plural}")
+}
+
 impl Store {
     pub fn insert_dialer_link(&self, url: &str, token: &str) -> Result<i64, IpcError> {
         self.conn.execute(
-            "INSERT INTO peer_links (role, url, token, state, created_at) \
-             VALUES ('dialer', ?1, ?2, 'retrying', ?3)",
+            &format!(
+                "INSERT INTO peer_links (role, url, token, state, created_at) \
+                 VALUES ('{LINK_ROLE_DIALER}', ?1, ?2, '{LINK_RETRYING}', ?3)"
+            ),
             rusqlite::params![url, token, now_unix()],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -170,8 +217,10 @@ impl Store {
             let other: Option<(i64, String)> = s
                 .conn
                 .query_row(
-                    "SELECT id, state FROM peer_links WHERE fleet_id = ?1 AND revoked_at IS NULL \
-                     AND role = 'dialer' AND id != ?2",
+                    &format!(
+                        "SELECT id, state FROM peer_links WHERE fleet_id = ?1 \
+                         AND revoked_at IS NULL AND role = '{LINK_ROLE_DIALER}' AND id != ?2"
+                    ),
                     rusqlite::params![fleet_id, id],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
@@ -206,11 +255,13 @@ impl Store {
                 }
                 Some((keep, _)) => {
                     s.conn.execute(
-                        "UPDATE peer_links SET \
-                           url = (SELECT url FROM peer_links WHERE id = ?1), \
-                           token = (SELECT token FROM peer_links WHERE id = ?1), \
-                           state = 'retrying', last_error = NULL \
-                         WHERE id = ?2",
+                        &format!(
+                            "UPDATE peer_links SET \
+                               url = (SELECT url FROM peer_links WHERE id = ?1), \
+                               token = (SELECT token FROM peer_links WHERE id = ?1), \
+                               state = '{LINK_RETRYING}', last_error = NULL \
+                             WHERE id = ?2"
+                        ),
                         rusqlite::params![id, keep],
                     )?;
                     s.conn
@@ -261,8 +312,10 @@ impl Store {
             let live: Option<(i64, Option<i64>)> = s
                 .conn
                 .query_row(
-                    "SELECT id, client_id FROM peer_links \
-                     WHERE fleet_id = ?1 AND role = 'listener' AND revoked_at IS NULL",
+                    &format!(
+                        "SELECT id, client_id FROM peer_links \
+                         WHERE fleet_id = ?1 AND role = '{LINK_ROLE_LISTENER}' AND revoked_at IS NULL"
+                    ),
                     [fleet_id],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
@@ -281,19 +334,29 @@ impl Store {
                     }
                 }
                 n = s.conn.execute(
-                    "UPDATE peer_links SET client_id = ?1, state = 'connected', last_error = NULL \
-                     WHERE id = ?2",
+                    &format!(
+                        "UPDATE peer_links SET client_id = ?1, state = '{LINK_CONNECTED}', \
+                                               last_error = NULL WHERE id = ?2"
+                    ),
                     rusqlite::params![client_id, link_id],
                 )?;
             }
             if n == 0 {
                 s.conn
                     .execute(
-                        "INSERT INTO peer_links (fleet_id, role, client_id, state, created_at) \
-                         VALUES (?1, 'listener', ?2, 'connected', ?3)",
+                        &format!(
+                            "INSERT INTO peer_links (fleet_id, role, client_id, state, created_at) \
+                             VALUES (?1, '{LINK_ROLE_LISTENER}', ?2, '{LINK_CONNECTED}', ?3)"
+                        ),
                         rusqlite::params![fleet_id, client_id, now_unix()],
                     )
-                    .map_err(map_live_fleet_conflict)?;
+                    // G10: a listener-side "already linked the other way"
+                    // conflict is terminal (E_FORBIDDEN), not E_EXISTS — the
+                    // dialer's own handshake keeps E_EXISTS (see
+                    // `map_live_fleet_conflict`, used above and in
+                    // `adopt_dialer_fleet`), which its retry loop can work
+                    // through; a listener conflict never resolves itself.
+                    .map_err(map_listener_live_fleet_conflict)?;
             }
             s.conn
                 .query_row(
@@ -336,7 +399,8 @@ impl Store {
 
     pub fn live_dialer_links(&self) -> Result<Vec<PeerLinkRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {LINK_COLUMNS} FROM peer_links WHERE role = 'dialer' AND revoked_at IS NULL"
+            "SELECT {LINK_COLUMNS} FROM peer_links \
+             WHERE role = '{LINK_ROLE_DIALER}' AND revoked_at IS NULL"
         ))?;
         let rows = stmt.query_map([], map_link)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -366,6 +430,37 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Live links this hub should worry about (G14c), for `fleet_health`'s
+    /// `peer_links_down`: a DIALER counts as down whenever its `state` isn't
+    /// `connected` (its retry loop already tracks this — `retrying`,
+    /// `refused`, `incompatible`). A LISTENER has no such state of its own
+    /// (`ensure_listener_link` only ever writes `connected`), so it counts as
+    /// down instead when its client token has been revoked, or it has never
+    /// served an exchange, or its last one is older than
+    /// [`LISTENER_STALE_SECS`] — the only signals a listener has that its
+    /// dialer stopped showing up. A revoked link is not "down": it is gone,
+    /// and already excluded everywhere else in this module.
+    pub fn peer_links_down(&self, now: i64) -> Result<u32, IpcError> {
+        let stale_before = now - LISTENER_STALE_SECS;
+        let n: i64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM peer_links l WHERE l.revoked_at IS NULL AND ( \
+                   (l.role = '{LINK_ROLE_DIALER}' AND l.state != '{LINK_CONNECTED}') \
+                   OR (l.role = '{LINK_ROLE_LISTENER}' AND ( \
+                     l.client_id IS NULL \
+                     OR EXISTS (SELECT 1 FROM client_tokens c \
+                                 WHERE c.id = l.client_id AND c.revoked_at IS NOT NULL) \
+                     OR l.last_exchange_at IS NULL \
+                     OR l.last_exchange_at < ?1 \
+                   )) \
+                 )"
+            ),
+            [stale_before],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
     pub fn set_peer_link_state(
         &self,
         id: i64,
@@ -383,44 +478,36 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_peer_link_progress(
-        &self,
-        id: i64,
-        after: i64,
-        pending_rejects: Option<&str>,
-        now: i64,
-    ) -> Result<(), IpcError> {
-        self.conn.execute(
-            "UPDATE peer_links SET after = ?1, pending_rejects = ?2, state = 'connected', \
-                                   last_error = NULL, last_exchange_at = ?3 \
-             WHERE id = ?4 AND revoked_at IS NULL",
-            rusqlite::params![after, pending_rejects, now, id],
-        )?;
-        Ok(())
-    }
-
     /// [`Self::set_peer_link_state`] for a dialer loop: applies only while the
     /// row still carries `token`, the credentials the loop was started with.
     /// A loop outlived by a re-pair (new token moved onto its row) cannot
     /// write over the row. Returns whether the row was written.
+    ///
+    /// Does NOT stamp `last_exchange_at` (G14a): the dialer loop calls this
+    /// only on a failed or refused exchange (`Fence::state` in `dial.rs`), so
+    /// stamping it here made a link that has not actually talked to its peer
+    /// in a while look freshly exchanged to an operator reading
+    /// `last_exchange_at`, the moment it started failing. A SUCCESSFUL
+    /// exchange stamps it instead — [`Self::set_dialer_link_progress`] on the
+    /// dialer side, `set_peer_link_state` on a served listener exchange.
     pub fn set_dialer_link_state(
         &self,
         id: i64,
         token: &str,
         state: &str,
         last_error: Option<&str>,
-        now: i64,
+        _now: i64,
     ) -> Result<bool, IpcError> {
         let n = self.conn.execute(
-            "UPDATE peer_links SET state = ?1, last_error = ?2, last_exchange_at = ?3 \
-             WHERE id = ?4 AND token = ?5 AND revoked_at IS NULL",
-            rusqlite::params![state, last_error, now, id, token],
+            "UPDATE peer_links SET state = ?1, last_error = ?2 \
+             WHERE id = ?3 AND token = ?4 AND revoked_at IS NULL",
+            rusqlite::params![state, last_error, id, token],
         )?;
         Ok(n > 0)
     }
 
-    /// [`Self::set_peer_link_progress`], fenced on `token` like
-    /// [`Self::set_dialer_link_state`].
+    /// The dialer-side success path: stamps `last_exchange_at`, fenced on
+    /// `token` like [`Self::set_dialer_link_state`].
     pub fn set_dialer_link_progress(
         &self,
         id: i64,
@@ -520,13 +607,32 @@ impl Store {
             return Ok(id);
         }
         self.conn.execute(
-            "INSERT INTO participants (kind, address, peer_link_id, created_at) \
-             VALUES ('remote', ?1, ?2, ?3)",
+            &format!(
+                "INSERT INTO participants (kind, address, peer_link_id, created_at) \
+                 VALUES ('{PARTICIPANT_REMOTE}', ?1, ?2, ?3)"
+            ),
             rusqlite::params![address, link_id, now_unix()],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Insert a `pending` row addressed to a remote participant.
+    ///
+    /// INVARIANT (G18): once inserted, a row addressed to a remote
+    /// participant (`to_participant_id` a `remote`-kind participant) is
+    /// NEVER DELETED — only ever moved `pending` → `accepted` /
+    /// `undeliverable` in place. Two things depend on that id staying put
+    /// forever: the LISTENER side's `after` watermark on this row's peer
+    /// link (a dialer hands over "everything through id N"; a deleted row
+    /// under that id would make a later `handover_upto` silently skip
+    /// nothing being wrong, or — worse — a REUSED id under N mean something
+    /// never actually delivered), and the peer's own dedup key
+    /// (`remote_message_id`, which the far end derives from this row's id —
+    /// see `insert_inbound_remote`'s `(remote_fleet_id, remote_message_id)`
+    /// uniqueness). Neither `sweep_retired_participants` nor
+    /// `sweep_peer_outbox` (nor anything else in this module) may delete an
+    /// outbound-remote `session_messages` row; both are pinned by
+    /// `sweep_never_deletes_an_outbound_remote_row` below.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_outbound_remote(
         &self,
@@ -660,6 +766,14 @@ impl Store {
     /// The shared body behind `mark_peer_undeliverable` and `revoke_peer_link`
     /// — the latter must not re-enter `atomically`, so it calls this directly
     /// from inside its own closure.
+    ///
+    /// G16: the sender is told at its participant's CURRENT `session_id`, not
+    /// the raw `from_session_id` this row was written with — the sender may
+    /// have moved since (a new `sessions` row, the participant re-pointed at
+    /// it) or that id reused by an unrelated session. `from_participant_id`
+    /// is the stable identity; a NULL or retired participant has nowhere
+    /// live to deliver the notice, so it is skipped rather than posted to a
+    /// stale or reused id.
     fn fail_pending_locked(&self, id: i64, reason: &str) -> Result<bool, IpcError> {
         let n = self.conn.execute(
             "UPDATE session_messages SET peer_state = 'undeliverable' \
@@ -669,17 +783,28 @@ impl Store {
         if n == 0 {
             return Ok(false);
         }
-        let sender: i64 = self.conn.query_row(
-            "SELECT from_session_id FROM session_messages WHERE id = ?1",
+        let from_participant_id: Option<i64> = self.conn.query_row(
+            "SELECT from_participant_id FROM session_messages WHERE id = ?1",
             [id],
             |r| r.get(0),
         )?;
-        if sender != 0 {
-            self.insert_session_event(
-                sender,
-                "message_undeliverable",
-                Some(&format!("message {id} could not be delivered: {reason}")),
-            )?;
+        if let Some(pid) = from_participant_id {
+            let current_session: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT session_id FROM participants WHERE id = ?1 AND retired_at IS NULL",
+                    [pid],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            if let Some(sid) = current_session {
+                self.insert_session_event(
+                    sid,
+                    "message_undeliverable",
+                    Some(&format!("message {id} could not be delivered: {reason}")),
+                )?;
+            }
         }
         Ok(true)
     }
@@ -750,6 +875,24 @@ impl Store {
             .map_err(IpcError::from)
     }
 
+    /// Whether message `id` went OUTBOUND on link `link_id`: it carries a
+    /// `peer_state` (only ever set by `insert_outbound_remote`, never on a
+    /// local or inbound row) and its recipient participant belongs to that
+    /// link. For G12: `apply.rs`'s `map_reply_to` uses this to restrict its
+    /// own-fleet `{own_fleet, id}` branch to rows THIS link actually sent,
+    /// so a peer cannot thread a reply onto a local-only message or another
+    /// fleet's exchange just by naming a local id.
+    pub fn is_outbound_on_link(&self, message_id: i64, link_id: i64) -> Result<bool, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_messages m \
+                             JOIN participants p ON p.id = m.to_participant_id \
+                            WHERE m.id = ?1 AND m.peer_state IS NOT NULL \
+                              AND p.peer_link_id = ?2)",
+            rusqlite::params![message_id, link_id],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Fails outbox rows that have been pending too long, or that sit on a
     /// revoked link; then drops any `remote` participant left with no
     /// messages at all. Returns how many rows were failed.
@@ -764,8 +907,9 @@ impl Store {
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             let mut failed = 0;
+            let reason = stale_outbox_reason(older_than_secs);
             for id in stale {
-                if s.fail_pending_locked(id, "no answer from the peer hub within 7 days")? {
+                if s.fail_pending_locked(id, &reason)? {
                     failed += 1;
                 }
             }
@@ -787,12 +931,14 @@ impl Store {
             }
 
             s.conn.execute(
-                "DELETE FROM participants WHERE kind = 'remote' AND id NOT IN ( \
-                    SELECT from_participant_id FROM session_messages \
-                     WHERE from_participant_id IS NOT NULL \
-                    UNION \
-                    SELECT to_participant_id FROM session_messages \
-                     WHERE to_participant_id IS NOT NULL)",
+                &format!(
+                    "DELETE FROM participants WHERE kind = '{PARTICIPANT_REMOTE}' AND id NOT IN ( \
+                        SELECT from_participant_id FROM session_messages \
+                         WHERE from_participant_id IS NOT NULL \
+                        UNION \
+                        SELECT to_participant_id FROM session_messages \
+                         WHERE to_participant_id IS NOT NULL)"
+                ),
                 [],
             )?;
 
@@ -954,7 +1100,7 @@ mod tests {
         s.revoke_peer_link(link, 2).unwrap();
         s.set_peer_link_state(link, LINK_CONNECTED, None, 9)
             .unwrap();
-        s.set_peer_link_progress(link, 5, None, 9).unwrap();
+        assert!(!s.set_dialer_link_progress(link, "t", 5, None, 9).unwrap());
         let row = s.peer_link(link).unwrap().unwrap();
         assert_eq!(row.state, LINK_RETRYING);
         assert_eq!(row.last_exchange_at, Some(1));
@@ -1001,7 +1147,7 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         let live = s.insert_dialer_link("https://b.example", "t-b").unwrap();
         assert_eq!(s.adopt_dialer_fleet(live, B).unwrap(), live);
-        s.set_peer_link_progress(live, 3, None, 1).unwrap();
+        assert!(s.set_dialer_link_progress(live, "t-b", 3, None, 1).unwrap());
         for state in [LINK_CONNECTED, LINK_RETRYING] {
             s.set_peer_link_state(live, state, None, 2).unwrap();
             let claimant = s.insert_dialer_link("https://evil.example", "t-c").unwrap();
@@ -1051,7 +1197,12 @@ mod tests {
 
         let c = client(&s, "hub-b");
         let err = s.ensure_listener_link(c, B).unwrap_err();
-        assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+        // G10: terminal for the dialer on the other end (E_FORBIDDEN), not
+        // E_EXISTS — a listener-side "already linked the other way" never
+        // resolves itself by retrying, unlike a dialer's own handshake
+        // conflict (`adopt_dialer_fleet_refuses_a_fleet_already_linked_the_other_way`
+        // below keeps E_EXISTS for that path).
+        assert_eq!(err.code, crate::ipc_error::codes::E_FORBIDDEN);
         assert!(
             err.message.contains("already linked the other way"),
             "{}",
@@ -1302,5 +1453,281 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// G14a: the dialer loop calls `set_dialer_link_state` only on a failed
+    /// or refused exchange (`Fence::state` in `dial.rs`), so it must not
+    /// stamp `last_exchange_at` — that would make a link that has not
+    /// talked to its peer in a while look freshly exchanged the moment it
+    /// started failing. A SUCCESSFUL exchange (`set_dialer_link_progress`)
+    /// still stamps it.
+    #[test]
+    fn set_dialer_link_state_does_not_stamp_last_exchange_at_but_progress_does() {
+        let s = Store::open_in_memory().unwrap();
+        let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+        assert!(s
+            .set_dialer_link_state(link, "t", LINK_RETRYING, Some("HTTP 502"), 5)
+            .unwrap());
+        let row = s.peer_link(link).unwrap().unwrap();
+        assert_eq!(row.state, LINK_RETRYING);
+        assert_eq!(row.last_error.as_deref(), Some("HTTP 502"));
+        assert_eq!(
+            row.last_exchange_at, None,
+            "a failed exchange must not look like a recent one"
+        );
+
+        assert!(s.set_dialer_link_progress(link, "t", 9, None, 7).unwrap());
+        let row = s.peer_link(link).unwrap().unwrap();
+        assert_eq!(
+            row.last_exchange_at,
+            Some(7),
+            "a SUCCESSFUL exchange stamps it"
+        );
+    }
+
+    /// G14c: a live LISTENER link has no `state` of its own that can go
+    /// stale (`ensure_listener_link` only ever writes `connected`), so
+    /// `peer_links_down` watches its client token and its last served
+    /// exchange instead.
+    #[test]
+    fn peer_links_down_counts_a_stale_or_revoked_listener() {
+        let s = Store::open_in_memory().unwrap();
+        let c = client(&s, "hub-a");
+        let link = s.ensure_listener_link(c, "fleet-a").unwrap();
+        // Never served an exchange yet: down.
+        assert_eq!(s.peer_links_down(1_000).unwrap(), 1);
+
+        // A served exchange (as `listen.rs` stamps on success) — fresh, not
+        // down.
+        s.set_peer_link_state(link.id, LINK_CONNECTED, None, 1_000)
+            .unwrap();
+        assert_eq!(
+            s.peer_links_down(1_000 + LISTENER_STALE_SECS - 1).unwrap(),
+            0
+        );
+        // Past the staleness window: down again.
+        assert_eq!(
+            s.peer_links_down(1_000 + LISTENER_STALE_SECS + 1).unwrap(),
+            1
+        );
+
+        // Fresh again, but its client token was revoked: still down —
+        // revoking the token does not revoke the link itself (G8 Ruling 6).
+        let now = 1_000 + LISTENER_STALE_SECS + 1;
+        s.set_peer_link_state(link.id, LINK_CONNECTED, None, now)
+            .unwrap();
+        s.revoke_client_token("hub-a").unwrap();
+        assert_eq!(s.peer_links_down(now).unwrap(), 1);
+        assert!(
+            s.peer_link(link.id).unwrap().unwrap().revoked_at.is_none(),
+            "the link itself is not revoked, only its token"
+        );
+    }
+
+    /// G16: `fail_pending_locked` must tell the sender wherever it CURRENTLY
+    /// lives, not the raw `from_session_id` baked into the row at send
+    /// time — the sender may have moved since (a fresh `sessions` row, the
+    /// participant re-pointed at it, as a session move does).
+    #[test]
+    fn fail_pending_locked_notifies_the_senders_current_session_after_a_move() {
+        let s = Store::open_in_memory().unwrap();
+        let old = seed(&s, "old");
+        let moved_to = seed(&s, "moved-to");
+        let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+        let to = s.ensure_remote_participant(link, ADDR).unwrap();
+        let m = s
+            .insert_outbound_remote(
+                old,
+                "fleet-a/session/local/old",
+                to,
+                "x",
+                "message",
+                None,
+                false,
+            )
+            .unwrap();
+        let sender_p = s.participant_for_session(old).unwrap().unwrap().id;
+        s.repoint_participant(sender_p, moved_to).unwrap();
+
+        assert!(s.mark_peer_undeliverable(link, m, "gone").unwrap());
+
+        let stale = s.list_session_events(old, 10).unwrap();
+        assert!(
+            !stale.iter().any(|e| e.kind == "message_undeliverable"),
+            "nothing lands on the id the sender left behind: {stale:?}"
+        );
+        let moved = s.list_session_events(moved_to, 10).unwrap();
+        assert!(
+            moved.iter().any(|e| e.kind == "message_undeliverable"),
+            "the notice follows the sender to where it lives now: {moved:?}"
+        );
+    }
+
+    /// G18: an outbound-remote `session_messages` row's id must never
+    /// disappear — the listener's `after` watermark and the peer's own
+    /// dedup key both depend on it. Neither sweep may delete it, however far
+    /// past its own window it is. See the invariant doc on
+    /// `insert_outbound_remote`.
+    #[test]
+    fn sweep_never_deletes_an_outbound_remote_row() {
+        let s = Store::open_in_memory().unwrap();
+        let a1 = seed(&s, "a1");
+        let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+        let to = s.ensure_remote_participant(link, ADDR).unwrap();
+        let m = s
+            .insert_outbound_remote(
+                a1,
+                "fleet-a/session/local/a1",
+                to,
+                "x",
+                "message",
+                None,
+                false,
+            )
+            .unwrap();
+        // Well past both sweeps' windows, the way the existing "week-old
+        // pending row" test ages a row: force `sent_at` back rather than
+        // trying to outrun the real wall clock with `now`.
+        s.conn_ref()
+            .execute("UPDATE session_messages SET sent_at = 0 WHERE id = ?1", [m])
+            .unwrap();
+        let far_future = PEER_PENDING_MAX_SECS + 1;
+        s.sweep_peer_outbox(far_future, PEER_PENDING_MAX_SECS)
+            .unwrap();
+        s.sweep_retired_participants(far_future, crate::store::RETIRED_RETENTION_SECS)
+            .unwrap();
+
+        let still_there: i64 = s
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM session_messages WHERE id = ?1",
+                [m],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_there, 1, "an outbound-remote row is never deleted");
+        let state: String = s
+            .conn_ref()
+            .query_row(
+                "SELECT peer_state FROM session_messages WHERE id = ?1",
+                [m],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            state, "undeliverable",
+            "it was failed in place, not dropped"
+        );
+    }
+
+    /// G24: the reason text is derived from `older_than_secs`, not a
+    /// hard-coded "7 days" — the coarsest unit (days, then hours, then
+    /// plain seconds) that describes the window exactly.
+    #[test]
+    fn stale_outbox_reason_reads_the_coarsest_exact_unit() {
+        assert_eq!(
+            stale_outbox_reason(7 * 24 * 60 * 60),
+            "no answer from the peer hub within 7 days"
+        );
+        assert_eq!(
+            stale_outbox_reason(24 * 60 * 60),
+            "no answer from the peer hub within 1 day"
+        );
+        assert_eq!(
+            stale_outbox_reason(2 * 60 * 60),
+            "no answer from the peer hub within 2 hours"
+        );
+        assert_eq!(
+            stale_outbox_reason(90),
+            "no answer from the peer hub within 90 seconds"
+        );
+        assert_eq!(
+            stale_outbox_reason(1),
+            "no answer from the peer hub within 1 second"
+        );
+    }
+
+    /// G24: the sweep's own event text reflects whatever `older_than_secs`
+    /// it was actually called with, not the module's 7-day default.
+    #[test]
+    fn the_sweep_writes_a_reason_that_matches_its_own_older_than_secs() {
+        let s = Store::open_in_memory().unwrap();
+        let a1 = seed(&s, "a1");
+        let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+        let to = s.ensure_remote_participant(link, ADDR).unwrap();
+        let m = s
+            .insert_outbound_remote(
+                a1,
+                "fleet-a/session/local/a1",
+                to,
+                "x",
+                "message",
+                None,
+                false,
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute("UPDATE session_messages SET sent_at = 0 WHERE id = ?1", [m])
+            .unwrap();
+        s.sweep_peer_outbox(3600, 3600).unwrap();
+        let ev = s.list_session_events(a1, 10).unwrap();
+        let hit = ev
+            .iter()
+            .find(|e| e.kind == "message_undeliverable")
+            .expect("event");
+        assert!(
+            hit.detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("within 1 hour"),
+            "{:?}",
+            hit.detail
+        );
+    }
+
+    /// The store half of G12: `apply.rs`'s `map_reply_to` (L3) restricts its
+    /// own-fleet branch to rows this link actually sent, so a peer cannot
+    /// thread onto a local-only message or another link's exchange.
+    #[test]
+    fn is_outbound_on_link_is_true_only_for_that_links_own_outbound_row() {
+        let s = Store::open_in_memory().unwrap();
+        let a1 = seed(&s, "a1");
+        let b1 = seed(&s, "b1");
+        let l1 = s.insert_dialer_link("https://b.example", "t1").unwrap();
+        let l2 = s.insert_dialer_link("https://c.example", "t2").unwrap();
+        let to1 = s.ensure_remote_participant(l1, ADDR).unwrap();
+        let out = s
+            .insert_outbound_remote(
+                a1,
+                "fleet-a/session/local/a1",
+                to1,
+                "x",
+                "message",
+                None,
+                false,
+            )
+            .unwrap();
+        assert!(s.is_outbound_on_link(out, l1).unwrap());
+        assert!(
+            !s.is_outbound_on_link(out, l2).unwrap(),
+            "another link's own-fleet id must not match"
+        );
+
+        // A purely local message is not outbound on any link.
+        let local = s.insert_message(a1, b1, "hi", "message", None).unwrap();
+        assert!(!s.is_outbound_on_link(local, l1).unwrap());
+
+        // An inbound (peer-originated) row is not "outbound" either.
+        let from = s
+            .ensure_remote_participant(l1, "fleet-a/session/h/a2")
+            .unwrap();
+        let inbound = match s
+            .insert_inbound_remote("fleet-a", 1, from, b1, "hi", "message", None)
+            .unwrap()
+        {
+            Inbound::Inserted(id) => id,
+            other => panic!("{other:?}"),
+        };
+        assert!(!s.is_outbound_on_link(inbound, l1).unwrap());
     }
 }
