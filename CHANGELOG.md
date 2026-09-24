@@ -8,6 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.37] - 2026-09-24
+
+### Added
+- **gc:** sweep orphan read cursors; document fresh_for
+- **mcp:** repo_diff and list_sessions answer unchanged
+- **hub:** the phone keeps the hub's needs_attention, and its view covers the pager
+- **mcp:** session_history and inbox page only what is new
+- **mcp:** session_transcript answers only what is new
+- **mcp:** fresh_for on five fetch tools (inert), one budget raise
+- **service:** the pure fresh-read decision
+- **store:** id-ordered stream reads after a watermark, and the conversation generation
+- **store:** migration 044 — remembered read cursors
+- **mcp:** the phone view carries the answer, not the columns to re-derive it
+- **mcp:** the phone view carries the dialog a blocked session is waiting on
+- **hub:** the fleet knows which sessions need a person
+
+### Changed
+- **fakes:** route every exec'd stub through fake_exec::write_exec
+- **mcp:** list_projects can answer only the projects a session names
+- **mcp:** let a pager ask list_sessions for the columns it draws
+
+### Fixed
+- **mcp:** no endless more loop for an unknown reader or an unanchorable turn
+- **store:** a session's read cursors die with its row
+- **mcp:** row-order-stable list_sessions unchanged, honest snapshot hashing
+- **mcp:** grown-tier search direction, and a spurious reset after an empty-only read
+- **mcp:** four session_transcript/history/inbox correctness gaps (round 2)
+- **mcp:** close three history/inbox fresh_for correctness gaps
+- **mcp:** position session_transcript's fresh_for delta by anchor, not turn_seq
+
+### Documentation
+- **cursors:** control-api and spec match the build
+- **mcp:** keep ok_json_compact_view's contract on ok_json_compact_view
+- implementation plan for remembered read cursors
+- smart caching design — remembered read cursors (cycle 2 of 3)
 ## [0.2.36] - 2026-09-23
 
 ### Added
@@ -1323,6 +1358,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.37]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.37
 [0.2.36]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.36
 [0.2.35]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.35
 [0.2.34]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.34

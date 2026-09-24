@@ -406,14 +406,23 @@ async fn probe_with_token(
         .map_err(|e| IpcError::new(codes::E_PROBE, format!("ssh {host}: {}", e.message)))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(IpcError::new(
+        let failure = crate::ssh_diag::classify(host, out.status.code(), &stderr);
+        let summary = failure
+            .as_ref()
+            .map(|f| format!("{}; ", f.kind.summary()))
+            .unwrap_or_default();
+        let err = IpcError::new(
             codes::E_PROBE,
             format!(
-                "ssh {host} exited {:?}: {}",
+                "ssh {host}: {summary}exited {:?}: {}",
                 out.status.code(),
                 stderr.trim()
             ),
-        ));
+        );
+        return Err(match failure {
+            Some(f) => err.with_details(serde_json::json!({ "ssh_failure": f })),
+            None => err,
+        });
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut parts = stdout.split("---");
@@ -1371,6 +1380,42 @@ mod tests {
             "no row for a host we can't reach"
         );
         assert!(store.lock().unwrap().list_accounts().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_host_host_key_failure_carries_the_classified_kind() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        fake.on_host(
+            "hk.example",
+            Match::Any,
+            Reply::fail(255, "Host key verification failed.\r\n"),
+        );
+        let err = add_host(
+            AddHostArgs {
+                alias: "hk".into(),
+                ssh_alias: "hk.example".into(),
+                transport: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "E_PROBE");
+        assert!(
+            err.message.contains("host key not in known_hosts"),
+            "summary in the message: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("Host key verification failed."),
+            "ssh's own line survives: {}",
+            err.message
+        );
+        let failure = &err.details.as_ref().expect("details")["ssh_failure"];
+        assert_eq!(failure["kind"], "host_key_unknown");
+        assert_eq!(failure["ssh_alias"], "hk.example");
     }
 
     #[tokio::test]

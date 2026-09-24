@@ -966,6 +966,8 @@ fn first_line(s: &str) -> String {
 ///   isolation lines, so its presence proves the script ran), and
 /// - the LAST non-empty stderr line is one of ssh's own connect-failure
 ///   messages (matched as a prefix, not anywhere in the text).
+///
+/// The ssh wording lives in `ssh_diag::classify`.
 fn connection_never_established(stdout: &str, stderr: &str) -> bool {
     if stdout
         .lines()
@@ -973,22 +975,7 @@ fn connection_never_established(stdout: &str, stderr: &str) -> bool {
     {
         return false;
     }
-    let Some(last) = stderr
-        .lines()
-        .map(|l| l.trim_matches(|c: char| c == '\r' || c.is_whitespace()))
-        .rfind(|l| !l.is_empty())
-    else {
-        return false;
-    };
-    const PREFIXES: &[&str] = &[
-        "ssh: connect to host ",
-        "ssh: Could not resolve hostname",
-        "Permission denied (",
-        "Host key verification failed.",
-        "kex_exchange_identification:",
-    ];
-    PREFIXES.iter().any(|p| last.starts_with(p))
-        || (last.starts_with("Connection closed by ") && last.contains(" port "))
+    crate::ssh_diag::classify::connect_failure_kind(stderr).is_some()
 }
 
 /// How one host's run ended, for the fallback decision.
@@ -1774,15 +1761,19 @@ curl() { echo HIJACKED; }
         /// `None` when a needed tool is missing on this machine: the test
         /// skips, except under CI where it must fail loudly.
         fn new(json_tool: &str) -> Option<Self> {
-            use std::os::unix::fs::PermissionsExt;
+            use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
             let dir = tempfile::tempdir().unwrap();
             let bin = dir.path().join("bin");
             for d in ["bin", "cfg", "tmp", "log", "home"] {
                 std::fs::create_dir(dir.path().join(d)).unwrap();
             }
-            let exe = |p: &Path, body: &str| {
-                std::fs::write(p, body).unwrap();
-                std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // The probe guard goes straight after the shebang, so the
+            // probe exec inside `write_exec` never reaches a body's own
+            // side effects (these shims append to `$FAKE_LOG`, and tests
+            // assert on exactly what landed there).
+            let exe = |name: &str, body: &str| {
+                let (shebang, rest) = body.split_once('\n').expect("a shim starts with a shebang");
+                write_exec(&bin, name, &format!("{shebang}\n{PROBE_GUARD}{rest}"));
             };
             let needed = [
                 "cat", "sed", "grep", "head", "tail", "tr", "date", "rm", "dirname", "cksum",
@@ -1800,14 +1791,14 @@ curl() { echo HIJACKED; }
                 return missing(json_tool);
             };
             exe(
-                &bin.join(json_tool),
+                json_tool,
                 &SHIM.replace("@@REAL@@", &quote(&real.to_string_lossy())),
             );
-            exe(&bin.join("curl"), FAKE_CURL);
+            exe("curl", FAKE_CURL);
             // Some `mktemp`s (macOS) ignore $TMPDIR; pin the script's temp
             // dir inside the sandbox so the leak scan covers it.
             exe(
-                &bin.join("mktemp"),
+                "mktemp",
                 &format!(
                     "#!/bin/sh\n[ \"$1\" = -d ] || exit 1\nexec {} -d \"$TMPDIR/tmp.XXXXXXXX\"\n",
                     quote(&find_tool("mktemp").unwrap().to_string_lossy())
@@ -2623,6 +2614,7 @@ curl() { echo HIJACKED; }
                 "ssh: Could not resolve hostname h: nodename nor servname provided",
             ),
             ("", "Permission denied (publickey)."),
+            ("", "martin@h: Permission denied (publickey)."),
             ("", "Host key verification failed."),
             (
                 "",
