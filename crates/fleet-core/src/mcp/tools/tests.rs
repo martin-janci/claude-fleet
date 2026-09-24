@@ -2432,6 +2432,61 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
     assert!(!client.iter().any(|n| n == "provision_hosts"));
 }
 
+/// The phone gates its work UI on `tools/list` rather than on the contract
+/// revision (work graph M8, review C19): `work` present → chips and
+/// grouping, `work_link` present → Confirm / Not this / Start / Resume. So a
+/// readonly paired token must be served `work` and not `work_link`, a full
+/// one both, and neither ever `work_admin` (master only). The served
+/// `action` enums are what the phone reads for per-action buttons.
+#[test]
+fn a_client_token_is_served_work_and_work_link_by_mode_and_never_work_admin() {
+    let all = FleetTools::tool_router_for_doc().list_all();
+    let served = |caller: &Caller| -> Vec<rmcp::model::Tool> {
+        all.iter()
+            .filter(|t| present::visible_to(caller, &t.name))
+            .cloned()
+            .map(present::present)
+            .collect()
+    };
+    let has = |tools: &[rmcp::model::Tool], name: &str| tools.iter().any(|t| t.name == name);
+
+    let ro = served(&client_caller("phone", TokenMode::Readonly));
+    assert!(has(&ro, "work"), "a readonly phone must see work");
+    assert!(
+        !has(&ro, "work_link"),
+        "a readonly phone must not see work_link"
+    );
+    assert!(!has(&ro, "work_admin"));
+
+    let full = served(&client_caller("phone", TokenMode::Full));
+    assert!(has(&full, "work") && has(&full, "work_link"));
+    assert!(!has(&full, "work_admin"), "work_admin is master only");
+
+    for (tool, table) in [
+        (
+            "work",
+            crate::service::work::WORK_ACTIONS
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "work_link",
+            crate::service::work::WORK_LINK_ACTIONS
+                .iter()
+                .map(|(n, _)| *n)
+                .collect(),
+        ),
+    ] {
+        let t = full.iter().find(|t| t.name == tool).expect(tool);
+        assert_eq!(
+            t.input_schema["properties"]["action"]["enum"],
+            serde_json::json!(table),
+            "{tool}'s served action enum"
+        );
+    }
+}
+
 #[test]
 fn presented_tools_drop_schema_noise_and_keep_the_contract() {
     let tool = FleetTools::tool_router_for_doc()
@@ -2912,7 +2967,13 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M4.4: `work_link` gains confirm / reject-by-link_id /
     // trust_project (one new parameter, `on`, and a longer description);
     // no new tool. Measured at 68,385 on 2026-09-24 (+172); plus 100.
-    const BUDGET_BYTES: usize = 68_485;
+    // Work graph M8.0: `work` / `work_link` `action` became a schema `enum`
+    // generated from the parsers' own tables (`WORK_ACTIONS`,
+    // `WORK_LINK_ACTIONS`), so the phone gates each button on the actions
+    // the hub serves; the two doc lines that listed them by hand were cut
+    // to "Default links." / "The decision.". Measured at 68,451 on
+    // 2026-09-24 (+66); plus 100.
+    const BUDGET_BYTES: usize = 68_551;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3966,6 +4027,17 @@ fn one_full_row() -> serde_json::Value {
     // pinning test pass by that field never being there — which is the thing
     // it exists to catch.
     row.claude_status = Some("blocked".to_string());
+    // With a suggestion, for the same reason: `work_suggested` is skipped
+    // when there is none, so without one the pinning tests could not tell
+    // the field from a misspelling.
+    row.work_suggested = Some(crate::store::WorkSummary {
+        link_id: 7,
+        key: Some("ABC-1".to_string()),
+        source: "prompt".to_string(),
+        state: "suggested".to_string(),
+        suggestions: 1,
+        ..Default::default()
+    });
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -4007,6 +4079,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "usage_cost_micros",
             "usage_model",
             "work",
+            "work_suggested",
         ]
     );
 }

@@ -418,6 +418,15 @@ The order serves the user's real setup. Decision D1 below may reorder it.
 
 **Value:** triage and start work from the phone.
 
+**Status (2026-09-24): M8.0 (hub side) landed** on
+`claude/cloud-fleet-work-graph-m8` (stacked on M4), per
+`plans/2026-09-24-work-graph-m8-phone.md`: `work_suggested` in
+`PHONE_SESSION_FIELDS`; `work` / `work_link` `action` served as a schema
+`enum` from the parsers' own tables (+66 B); a test pinning that a readonly
+client token sees `work` but not `work_link`, and no client `work_admin`. No
+contract bump. M8.1–M8.5 (fleet-mobile) are not started; note the plan's
+Revisions item 4 (an absent `work` on a row means none).
+
 ### M9: beyond
 
 The ideas the review ranked, for when M1–M8 have settled.
@@ -508,3 +517,6 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   off). The tool budget grew by 172 B for `work_link`'s confirm / reject by
   id / trust_project; no new tool, no contract bump. M4.6 is not done.
   Deviations are in the M4 plan's *Revisions*.
+- 2026-09-24: M8.0 (hub side) landed on `claude/cloud-fleet-work-graph-m8`:
+  `work_suggested` on the phone view, the `work` / `work_link` action enums
+  (+66 B), the client tool-list gate test. No new tool, no contract bump.

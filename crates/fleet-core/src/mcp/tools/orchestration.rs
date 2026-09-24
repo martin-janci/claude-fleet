@@ -660,7 +660,9 @@ impl FleetTools {
                 args.host_alias
             ),
         );
-        if args.action == "resume" {
+        use crate::service::work::WorkLinkAction;
+        let action = args.parsed_action().map_err(to_mcp_err)?;
+        if action == WorkLinkAction::Resume {
             let ra = crate::service::work::resume_args(&args).map_err(to_mcp_err)?;
             // A per-host token resumes only onto its own host.
             if caller.host_alias.is_some() {
@@ -683,7 +685,7 @@ impl FleetTools {
                     .map_err(to_mcp_err)?;
             return ok_json(&row);
         }
-        if args.action == "trust_project" {
+        if action == WorkLinkAction::TrustProject {
             // Trust is fleet configuration, not one host's to change.
             if caller.host_alias.is_some() {
                 return Err(mcp_err(
@@ -696,7 +698,7 @@ impl FleetTools {
                 &crate::service::work::trust_project(&args, &self.store).map_err(to_mcp_err)?,
             );
         }
-        if args.action == "start" {
+        if action == WorkLinkAction::Start {
             // The host fence (a per-host token starts only its own host's
             // tickets, on its own host) is inside `start_work`'s scope.
             let row = crate::service::trackers::tickets::start_work(

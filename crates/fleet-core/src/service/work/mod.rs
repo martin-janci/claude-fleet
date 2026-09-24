@@ -24,8 +24,9 @@ pub struct WorkArgs {
     /// Or: ended (past) links to this key.
     #[serde(default)]
     pub key: Option<String>,
-    /// links|context|resume_plan|purge_impact|tickets|lookup|trackers
+    /// Default links.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "work_action_schema")]
     pub action: Option<String>,
     /// Ended link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,7 +66,8 @@ pub struct WorkLinkArgs {
     /// Fleet session id.
     #[serde(default)]
     pub session_id: Option<i64>,
-    /// link|reject|unlink|confirm|trust_project|resume|start
+    /// The decision.
+    #[schemars(schema_with = "work_link_action_schema")]
     pub action: String,
     /// Work key, e.g. ABC-123, or a free-form name.
     #[serde(default)]
@@ -106,6 +108,12 @@ pub struct WorkLinkArgs {
     /// trust_project: on/off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<bool>,
+}
+
+impl WorkLinkArgs {
+    pub fn parsed_action(&self) -> Result<WorkLinkAction, IpcError> {
+        parse_action("work_link", WORK_LINK_ACTIONS, &self.action)
+    }
 }
 
 /// `work_link { action: trust_project }`: the projects whose branch keys
@@ -162,24 +170,82 @@ pub enum WorkAction {
     Trackers,
 }
 
-impl WorkArgs {
-    pub fn parsed_action(&self) -> Result<WorkAction, IpcError> {
-        match self.action.as_deref().unwrap_or("links") {
-            "links" => Ok(WorkAction::Links),
-            "context" => Ok(WorkAction::Context),
-            "resume_plan" => Ok(WorkAction::ResumePlan),
-            "purge_impact" => Ok(WorkAction::PurgeImpact),
-            "tickets" => Ok(WorkAction::Tickets),
-            "lookup" => Ok(WorkAction::Lookup),
-            "trackers" => Ok(WorkAction::Trackers),
-            other => Err(IpcError::new(
+/// Every `work` action by its wire name. [`WorkArgs::parsed_action`] reads
+/// this table and the tool schema's `action` enum is generated from it, so a
+/// client that reads the enum (the phone, work graph M8) is offered exactly
+/// what the parser accepts.
+pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
+    ("links", WorkAction::Links),
+    ("context", WorkAction::Context),
+    ("resume_plan", WorkAction::ResumePlan),
+    ("purge_impact", WorkAction::PurgeImpact),
+    ("tickets", WorkAction::Tickets),
+    ("lookup", WorkAction::Lookup),
+    ("trackers", WorkAction::Trackers),
+];
+
+/// The `work_link` actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkLinkAction {
+    Link,
+    Reject,
+    Unlink,
+    Confirm,
+    TrustProject,
+    Resume,
+    Start,
+}
+
+/// Every `work_link` action by its wire name; see [`WORK_ACTIONS`].
+pub const WORK_LINK_ACTIONS: &[(&str, WorkLinkAction)] = &[
+    ("link", WorkLinkAction::Link),
+    ("reject", WorkLinkAction::Reject),
+    ("unlink", WorkLinkAction::Unlink),
+    ("confirm", WorkLinkAction::Confirm),
+    ("trust_project", WorkLinkAction::TrustProject),
+    ("resume", WorkLinkAction::Resume),
+    ("start", WorkLinkAction::Start),
+];
+
+/// Look `name` up in an action table; the refusal names every action.
+fn parse_action<A: Copy>(tool: &str, table: &[(&str, A)], name: &str) -> Result<A, IpcError> {
+    table
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, a)| *a)
+        .ok_or_else(|| {
+            let names: Vec<&str> = table.iter().map(|(n, _)| *n).collect();
+            IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "unknown work action {other:?}; one of links, context, resume_plan, \
-                     purge_impact, tickets, lookup, trackers"
+                    "unknown {tool} action {name:?}; one of {}",
+                    names.join(", ")
                 ),
-            )),
-        }
+            )
+        })
+}
+
+/// A string schema whose `enum` is an action table's names.
+fn action_schema<A>(table: &[(&str, A)]) -> rmcp::schemars::Schema {
+    let names: Vec<&str> = table.iter().map(|(n, _)| *n).collect();
+    rmcp::schemars::json_schema!({ "type": "string", "enum": names })
+}
+
+fn work_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    action_schema(WORK_ACTIONS)
+}
+
+fn work_link_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    action_schema(WORK_LINK_ACTIONS)
+}
+
+impl WorkArgs {
+    pub fn parsed_action(&self) -> Result<WorkAction, IpcError> {
+        parse_action(
+            "work",
+            WORK_ACTIONS,
+            self.action.as_deref().unwrap_or("links"),
+        )
     }
 
     fn required_key(&self) -> Result<&str, IpcError> {
@@ -312,11 +378,18 @@ pub fn work(args: &WorkArgs, store: &Mutex<Store>) -> Result<Vec<WorkLinkRow>, I
 /// Apply one link decision and return the session's updated row (its `work`
 /// is the new primary link, or none).
 pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow, IpcError> {
-    if matches!(args.action.as_str(), "resume" | "start" | "trust_project") {
-        return Err(IpcError::new(
+    let action = args.parsed_action()?;
+    let own_entry_point = || {
+        IpcError::new(
             codes::E_INVALID,
             format!("{} has its own entry point", args.action),
-        ));
+        )
+    };
+    if matches!(
+        action,
+        WorkLinkAction::Resume | WorkLinkAction::Start | WorkLinkAction::TrustProject
+    ) {
+        return Err(own_entry_point());
     }
     let session_id = args.session_id.ok_or_else(|| {
         IpcError::new(
@@ -335,26 +408,28 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
             )),
         }
     };
-    match args.action.as_str() {
-        "link" => {
+    match action {
+        WorkLinkAction::Link => {
             let source = args.source.as_deref().unwrap_or("manual");
             s.link_session_work(session_id, target()?, source)?;
         }
         // `reject { link_id }` decides one suggestion (work graph M4.4);
         // `reject { key | item_id }` any target.
-        "reject" if args.link_id.is_some() && args.key.is_none() && args.item_id.is_none() => {
+        WorkLinkAction::Reject
+            if args.link_id.is_some() && args.key.is_none() && args.item_id.is_none() =>
+        {
             detect::decide(&s, session_id, args.link_id.unwrap_or_default(), false)?;
         }
-        "reject" => {
+        WorkLinkAction::Reject => {
             s.reject_session_work(session_id, target()?)?;
         }
-        "confirm" => {
+        WorkLinkAction::Confirm => {
             let link_id = args
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "confirm needs link_id"))?;
             detect::decide(&s, session_id, link_id, true)?;
         }
-        "unlink" => {
+        WorkLinkAction::Unlink => {
             let link_id = args
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "unlink needs link_id"))?;
@@ -365,14 +440,8 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
                 ));
             }
         }
-        other => {
-            return Err(IpcError::new(
-                codes::E_INVALID,
-                format!(
-                    "unknown work_link action {other:?}; one of link, reject, unlink, confirm, \
-                     trust_project, resume, start"
-                ),
-            ))
+        WorkLinkAction::Resume | WorkLinkAction::Start | WorkLinkAction::TrustProject => {
+            return Err(own_entry_point());
         }
     }
     // A decision can leave a sole candidate or free a primary (M4.3).
@@ -394,6 +463,115 @@ mod tests {
             .upsert_session("dev", "h", None, None, 1, 1, "running", None)
             .unwrap();
         (Mutex::new(s), id)
+    }
+
+    /// A variant's position, by an exhaustive match: a new action fails to
+    /// compile here, and then fails the table test below until the table
+    /// names it — so the parser, the schema enum and the dispatch cannot
+    /// disagree on which actions exist.
+    fn work_ordinal(a: WorkAction) -> usize {
+        match a {
+            WorkAction::Links => 0,
+            WorkAction::Context => 1,
+            WorkAction::ResumePlan => 2,
+            WorkAction::PurgeImpact => 3,
+            WorkAction::Tickets => 4,
+            WorkAction::Lookup => 5,
+            WorkAction::Trackers => 6,
+        }
+    }
+
+    fn work_link_ordinal(a: WorkLinkAction) -> usize {
+        match a {
+            WorkLinkAction::Link => 0,
+            WorkLinkAction::Reject => 1,
+            WorkLinkAction::Unlink => 2,
+            WorkLinkAction::Confirm => 3,
+            WorkLinkAction::TrustProject => 4,
+            WorkLinkAction::Resume => 5,
+            WorkLinkAction::Start => 6,
+        }
+    }
+
+    fn assert_table_is_exact<A: Copy + std::fmt::Debug>(
+        table: &[(&str, A)],
+        ordinal: fn(A) -> usize,
+        parse: impl Fn(&str) -> Result<A, IpcError>,
+    ) {
+        let mut seen = vec![false; table.len()];
+        for (name, action) in table {
+            let parsed = parse(name).unwrap_or_else(|e| panic!("{name}: {}", e.message));
+            assert_eq!(ordinal(parsed), ordinal(*action), "{name}");
+            let i = ordinal(*action);
+            assert!(i < seen.len(), "{action:?} is missing from the table");
+            assert!(!seen[i], "{action:?} is named twice");
+            seen[i] = true;
+        }
+        assert!(seen.iter().all(|s| *s), "every variant has a wire name");
+    }
+
+    #[test]
+    fn every_work_action_is_in_the_table_and_parses() {
+        assert_table_is_exact(WORK_ACTIONS, work_ordinal, |n| {
+            WorkArgs {
+                action: Some(n.into()),
+                ..Default::default()
+            }
+            .parsed_action()
+        });
+        assert_eq!(
+            WorkArgs::default().parsed_action().unwrap(),
+            WorkAction::Links
+        );
+        let err = WorkArgs {
+            action: Some("nope".into()),
+            ..Default::default()
+        }
+        .parsed_action()
+        .unwrap_err();
+        assert!(
+            err.message.contains("\"nope\"; one of links, context"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn every_work_link_action_is_in_the_table_and_parses() {
+        assert_table_is_exact(WORK_LINK_ACTIONS, work_link_ordinal, |n| {
+            WorkLinkArgs {
+                action: n.into(),
+                ..Default::default()
+            }
+            .parsed_action()
+        });
+        let err = link(1, "nope").parsed_action().unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(
+            err.message.contains("trust_project, resume, start"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// The served schema's `enum` is the table, in order — what the phone
+    /// reads to decide which buttons to draw (work graph M8.0).
+    #[test]
+    fn the_action_schemas_enumerate_the_tables() {
+        fn names<A>(t: &[(&str, A)]) -> Vec<serde_json::Value> {
+            t.iter().map(|(n, _)| serde_json::json!(n)).collect()
+        }
+        let w = serde_json::to_value(rmcp::schemars::schema_for!(WorkArgs)).unwrap();
+        assert_eq!(
+            w["properties"]["action"]["enum"],
+            serde_json::Value::Array(names(WORK_ACTIONS))
+        );
+        let l = serde_json::to_value(rmcp::schemars::schema_for!(WorkLinkArgs)).unwrap();
+        assert_eq!(
+            l["properties"]["action"]["enum"],
+            serde_json::Value::Array(names(WORK_LINK_ACTIONS))
+        );
+        assert_eq!(l["required"], serde_json::json!(["action"]));
     }
 
     fn link(sid: i64, action: &str) -> WorkLinkArgs {
