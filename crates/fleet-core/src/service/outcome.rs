@@ -26,6 +26,16 @@ const NO_GH_MARKER: &str = "__FLEET_NO_GH__";
 const NO_AUTH_MARKER: &str = "__FLEET_NO_AUTH__";
 /// Exit code the script reports when the session's cwd no longer exists.
 const RC_NO_CWD: &str = "97";
+/// Line prefix of a session's commit messages since its upstream (work
+/// graph M4.2: commit trailers). Lines are joined with `\x1f`.
+const TRAILERS_PREFIX: &str = "__FLEET_TRAILERS__\t";
+/// The `gh pr view` fields fleet reads. The last four are work detection's
+/// (M4.2): read, parsed and dropped — the body is capped at 4k by `--jq`
+/// and never stored.
+const PR_FIELDS: &str = "url,statusCheckRollup,headRefName,title,body,closingIssuesReferences";
+/// The fields an older `gh` without `closingIssuesReferences` (or `--jq`)
+/// still answers: the probe falls back to them.
+const PR_FIELDS_BASIC: &str = "url,statusCheckRollup";
 
 /// One session's probe result. `pr_url == None` means "no open PR for this
 /// branch" (gh exited non-zero) — the caller clears a stale link.
@@ -34,6 +44,9 @@ pub struct PrInfo {
     pub pr_url: Option<String>,
     /// `passing` | `failing` | `pending`, or `None` when the PR has no checks.
     pub ci_status: Option<String>,
+    /// What work detection reads from the PR (M4.2), `None` without a PR or
+    /// when the host's `gh` answered only the basic fields.
+    pub signals: Option<crate::service::work::detect::PrSignals>,
 }
 
 /// Build the per-host probe script. `targets` is `(tmux_name, cwd)` for every
@@ -52,15 +65,26 @@ pub fn build_pr_probe_script(targets: &[(String, String)]) -> String {
         // printf (builtin and /usr/bin) expands `\t` in the FORMAT string on
         // every platform, so the tab-separated record is built with it. The
         // payload has tabs/newlines squeezed out so one record is one line.
+        // The full field list first; an older `gh` that refuses a field or
+        // `--jq` gets the basic list (a "no pull requests found" answer is
+        // already final). Then the commit messages since the upstream, for
+        // their trailers: no extra round trip, at most 200 lines / 8k.
         script.push_str(&format!(
             "if cd {cwd} 2>/dev/null; then \
-             out=\"$(gh pr view --json url,statusCheckRollup 2>&1)\"; rc=$?; \
-             else out=''; rc={rc_no_cwd}; fi; \
-             printf '{prefix}%s\\t%s\\t%s\\n' {name} \"$rc\" \"$(printf '%s' \"$out\" | tr -d '\\n\\t')\"\n",
+             out=\"$(gh pr view --json {fields} --jq '.body |= ((. // \"\")[0:4000])' 2>&1)\"; rc=$?; \
+             if [ \"$rc\" -ne 0 ] && ! printf '%s' \"$out\" | grep -qi 'no pull requests found'; then \
+             out=\"$(gh pr view --json {basic} 2>&1)\"; rc=$?; fi; \
+             msgs=\"$(git log --format=%B '@{{u}}..HEAD' 2>/dev/null | head -n 200 | head -c 8000 | tr '\\n\\t' '\\037 ')\"; \
+             else out=''; rc={rc_no_cwd}; msgs=''; fi; \
+             printf '{prefix}%s\\t%s\\t%s\\n' {name} \"$rc\" \"$(printf '%s' \"$out\" | tr -d '\\n\\t')\"; \
+             printf '{tprefix}%s\\t%s\\n' {name} \"$msgs\"\n",
             name = quote(name),
             cwd = quote(cwd),
+            fields = PR_FIELDS,
+            basic = PR_FIELDS_BASIC,
             rc_no_cwd = RC_NO_CWD,
             prefix = RESULT_PREFIX.replace('\t', "\\t"),
+            tprefix = TRAILERS_PREFIX.replace('\t', "\\t"),
         ));
     }
     script
@@ -85,11 +109,18 @@ pub enum ProbeOutput {
 /// malformed JSON blob counts as "no PR" rather than aborting the pass.
 pub fn parse_pr_probe_output(stdout: &str) -> ProbeOutput {
     let mut out = HashMap::new();
+    let mut trailers: HashMap<String, String> = HashMap::new();
     for line in stdout.lines() {
         match line.trim() {
             NO_GH_MARKER => return ProbeOutput::NoGh,
             NO_AUTH_MARKER => return ProbeOutput::NoAuth,
             _ => {}
+        }
+        if let Some(rest) = line.strip_prefix(TRAILERS_PREFIX) {
+            if let Some((name, msgs)) = rest.split_once('\t') {
+                trailers.insert(name.to_string(), msgs.replace('\u{1f}', "\n"));
+            }
+            continue;
         }
         let Some(rest) = line.strip_prefix(RESULT_PREFIX) else {
             continue;
@@ -101,6 +132,14 @@ pub fn parse_pr_probe_output(stdout: &str) -> ProbeOutput {
         let payload = payload.unwrap_or("");
         if let Some(info) = classify_probe_record(rc, payload) {
             out.insert(name.to_string(), info);
+        }
+    }
+    // Trailers ride only a PR fleet read the other fields of: without them
+    // they would be the one PR signal left, and a branch with no PR has no
+    // PR to explain.
+    for (name, msgs) in trailers {
+        if let Some(sig) = out.get_mut(&name).and_then(|i| i.signals.as_mut()) {
+            sig.add_trailers(&msgs);
         }
     }
     ProbeOutput::Results(out)
@@ -144,7 +183,17 @@ pub fn pr_info_from_json(json: &str) -> PrInfo {
         .get("statusCheckRollup")
         .and_then(|r| r.as_array())
         .and_then(|checks| reduce_ci_status(checks));
-    PrInfo { pr_url, ci_status }
+    // Only a `gh` that answered the detection fields gives signals; the
+    // basic fallback's answer leaves the stored ones alone.
+    let signals = v
+        .get("headRefName")
+        .is_some()
+        .then(|| crate::service::work::detect::PrSignals::from_gh_json(&v));
+    PrInfo {
+        pr_url,
+        ci_status,
+        signals,
+    }
 }
 
 /// Collapse a PR's check rollup to one badge: any failure wins, then any
@@ -293,6 +342,41 @@ mod tests {
         // The single quote in the path is escaped by `quote`.
         assert!(script.contains("it'\\''s"));
         assert!(script.contains("gh pr view --json url,statusCheckRollup"));
+    }
+
+    /// Work detection (M4.2): the probe asks for the detection fields with
+    /// the body capped, falls back to the basic fields for an older `gh`,
+    /// and reads the commit messages since the upstream in the same script.
+    #[test]
+    fn script_reads_detection_fields_and_trailers_in_the_same_round_trip() {
+        let script = build_pr_probe_script(&[("dev".into(), "/w/x".into())]);
+        assert!(script.contains(&format!("gh pr view --json {PR_FIELDS} --jq")));
+        assert!(
+            script.contains("[0:4000]"),
+            "the body is capped by gh itself"
+        );
+        assert!(script.contains(&format!("gh pr view --json {PR_FIELDS_BASIC} 2>&1")));
+        assert!(script.contains("git log --format=%B '@{u}..HEAD'"));
+        assert!(script.contains("head -n 200"));
+    }
+
+    #[test]
+    fn parse_attaches_signals_and_trailers_to_an_observed_pr() {
+        let stdout = "__FLEET_PR__\tdev\t0\t{\"url\":\"https://github.com/o/r/pull/7\",\
+             \"statusCheckRollup\":[],\"headRefName\":\"abc-1-x\",\"title\":\"t\",\
+             \"body\":null,\"closingIssuesReferences\":[]}\n\
+             __FLEET_TRAILERS__\tdev\tfix it\u{1f}\u{1f}Refs: ABC-2\u{1f}\n\
+             __FLEET_PR__\told\t0\t{\"url\":\"https://github.com/o/r/pull/8\",\"statusCheckRollup\":[]}\n\
+             __FLEET_TRAILERS__\told\tRefs: ABC-3\n\
+             __FLEET_TRAILERS__\tnopr\tRefs: ABC-4\n";
+        let ProbeOutput::Results(map) = parse_pr_probe_output(stdout) else {
+            panic!("results");
+        };
+        let sig = map["dev"].signals.as_ref().expect("signals");
+        assert_eq!(sig.head.as_deref(), Some("abc-1-x"));
+        assert_eq!(sig.trailers, vec!["ABC-2"]);
+        assert_eq!(map["old"].signals, None, "basic fields only: no signals");
+        assert!(!map.contains_key("nopr"));
     }
 
     #[test]

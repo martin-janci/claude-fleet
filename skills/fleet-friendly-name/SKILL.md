@@ -69,6 +69,20 @@ claude-fleet host picker, not derivable from `hostname`), so never guess it.
    Remember the `id` for later fires in this conversation (heartbeat,
    after `/clear`): then only step 4 is needed.
 
+5. **If you know the ticket, declare it.** When the user's request names
+   the ticket this work is for (a key such as `ABC-123` or a ticket URL),
+   declare it once with the same id — fleet shows it as the session's work
+   and never asks again:
+
+   ```
+   mcp__claude-fleet__work_link {
+     session_id: <id>, action: "link", key: "<ABC-123>", source: "agent"
+   }
+   ```
+
+   Only a ticket the request is FOR; not one it merely mentions. Skip it
+   when unsure: fleet also detects keys and suggests them to the user.
+
 Three tool calls on the first fire: Bash + whoami + set_friendly_name. Later
 fires in the same conversation need one. A heartbeat that confirms the
 current label is still right costs zero MCP calls — the decision is read-only

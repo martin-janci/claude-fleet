@@ -318,6 +318,7 @@
       "usage_updated_at",
       "work",
       "work_rejected",
+      "work_suggested",
       "worktree_id",
       "worktree_key"
     ],
@@ -341,9 +342,12 @@
       "output_tokens"
     ],
     "WorkLinkRow": [
+      "claude_session_id",
       "created_at",
       "decided_at",
+      "end_reason",
       "ended_at",
+      "evidence",
       "id",
       "is_primary",
       "item_id",
@@ -351,6 +355,7 @@
       "ref_key",
       "resumable",
       "role",
+      "rule",
       "snap_branch",
       "snap_claude_ids",
       "snap_host",
@@ -360,7 +365,8 @@
       "snap_tmux",
       "snap_worktree",
       "source",
-      "state"
+      "state",
+      "strength"
     ],
     "WorktreeOccupancy": [
       "occupants",

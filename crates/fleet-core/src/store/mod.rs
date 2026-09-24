@@ -29,6 +29,7 @@ mod tracker_items;
 mod trackers;
 mod usage;
 mod work;
+mod work_detect;
 mod work_journal;
 
 pub use clients::{
@@ -52,6 +53,7 @@ pub use trackers::{
 pub use work::{
     normalize_work_ref, WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, WORK_LINK_SOURCES,
 };
+pub use work_detect::DetectionState;
 pub use work_journal::{
     JournalRow, COMPACT_SUMMARY_CAP, COMPACT_SUMMARY_MAX_CHARS, JOURNAL_KINDS, PROGRESS_CAP,
 };

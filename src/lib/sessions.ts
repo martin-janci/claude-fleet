@@ -131,6 +131,9 @@ export interface SessionRow {
   /** Keys the user said this session does NOT work on (sticky "Not this").
    *  Key recognition (`work_keys.ts`) must not show them. */
   work_rejected?: string[];
+  /** The session's top link SUGGESTION (work graph M4): a guess nobody has
+   *  decided. Never a work group — only `work` groups a session. */
+  work_suggested?: SessionWork | null;
 }
 
 /** `SessionRow.work`: the primary link's summary. `key` is the item's key or
@@ -150,6 +153,16 @@ export interface SessionWork {
   url?: string | null;
   /** The tracker no longer answers for the item (deleted or not visible). */
   unavailable?: boolean;
+  /** Work graph M4: `confirmed` | `suggested` (absent from older hubs). */
+  state?: string;
+  /** `explicit` | `strong` | `weak`. */
+  strength?: string | null;
+  /** The detection rule that made it (`R3`, `R5` …). */
+  rule?: string | null;
+  /** A suggestion shown pre-selected. */
+  preselected?: boolean;
+  /** Live suggestions still to decide. */
+  suggestions?: number;
 }
 
 type UsageFields = Partial<

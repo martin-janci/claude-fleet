@@ -142,6 +142,18 @@ fn work_items_has_aliases(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 049: `work_links` already has its
+/// `evidence` column, and `ALTER TABLE ... ADD COLUMN` would fail again. See
+/// [`Migration`].
+fn work_links_has_evidence(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'evidence'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -425,6 +437,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 48,
         sql: include_str!("../../migrations/048_trackers.sql"),
         already_applied: Some(work_items_has_aliases),
+    },
+    // Work graph M4: the live branch and PR signals on `sessions`, and the
+    // explanation columns of `work_links` — ADD COLUMNs, so the same guard.
+    Migration {
+        version: 49,
+        sql: include_str!("../../migrations/049_work_detection.sql"),
+        already_applied: Some(work_links_has_evidence),
     },
 ];
 
@@ -2134,5 +2153,54 @@ mod tests {
         let item = old.work_item_by_key("ABC-1").unwrap().unwrap();
         assert_eq!(item.aliases, vec!["OLD-1"]);
         assert_eq!(item.status_name.as_deref(), Some("In Review"));
+    }
+
+    /// Migration 049 (work graph M4): the detection columns land on a
+    /// database with links, old links read with no strength / evidence, and a
+    /// re-run (the guard) keeps what was written since.
+    #[test]
+    fn migration_049_adds_detection_columns_and_reruns_safely() {
+        let old = store_at_version(48);
+        // Raw SQL: the store's own session reads already expect 049.
+        old.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h'); \
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status) \
+                 VALUES ('dev', 'h', 1, 1, 'running');",
+            )
+            .unwrap();
+        let sid: i64 = old
+            .conn
+            .query_row("SELECT id FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "INSERT INTO work_links (ref_key, participant_id, state, source, is_primary, created_at) \
+                 SELECT 'ABC-1', id, 'confirmed', 'manual', 1, 1 FROM participants;",
+            )
+            .unwrap();
+        old.migrate().expect("049 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let links = old.session_work_links(sid).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].strength, None);
+        assert!(links[0].evidence.is_empty());
+        old.conn
+            .execute_batch("UPDATE sessions SET current_branch = 'abc-2-x';")
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 49;")
+            .unwrap();
+        old.migrate().expect("re-running 049 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let branch: Option<String> = old
+            .conn
+            .query_row(
+                "SELECT current_branch FROM sessions WHERE id = ?1",
+                [sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(branch.as_deref(), Some("abc-2-x"));
     }
 }

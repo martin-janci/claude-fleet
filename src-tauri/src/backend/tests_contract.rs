@@ -107,6 +107,16 @@ pub(crate) fn sample_session() -> SessionRow {
             ..Default::default()
         }),
         work_rejected: vec!["XYZ-9".into()],
+        work_suggested: Some(WorkSummary {
+            link_id: 7,
+            key: Some("ABC-99".into()),
+            source: "prompt".into(),
+            state: "suggested".into(),
+            rule: Some("R5".into()),
+            preselected: true,
+            suggestions: 1,
+            ..Default::default()
+        }),
     }
 }
 
@@ -356,6 +366,14 @@ fn sample_work_link() -> WorkLinkRow {
         snap_claude_ids: Some("[\"c1\"]".into()),
         role: "work".into(),
         resumable: true,
+        claude_session_id: Some("c1".into()),
+        strength: Some("strong".into()),
+        rule: Some("R3".into()),
+        evidence: vec![serde_json::json!({
+            "signal": "branch", "rule": "R3", "text": "abc-123-login", "at": 1
+        })],
+        preselected: false,
+        end_reason: Some("branch_changed".into()),
     }
 }
 
@@ -739,7 +757,7 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_fifty_six() {
+fn a_session_rows_wire_names_are_these_exact_fifty_seven() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -795,11 +813,12 @@ fn a_session_rows_wire_names_are_these_exact_fifty_six() {
         "usage_updated_at",
         "work",
         "work_rejected",
+        "work_suggested",
         "worktree_id",
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 56, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 57, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

@@ -668,6 +668,11 @@ fn apply_session_start_hook(
             Some(source.as_str()),
         );
     }
+    // A new conversation is a window boundary (M4.3): event suggestions of
+    // the last one decay unless seen again.
+    if let Err(e) = crate::service::work::detect::resolve_session(&s, row.id) {
+        tracing::debug!(error = %e.message, "[work] boundary resolve failed");
+    }
     Ok(())
 }
 
@@ -847,7 +852,16 @@ fn apply_prompt_submit_hook(
     }
     s.record_prompt_submit_hook_for_row(row.id)?;
     if let Some(p) = payload.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+        let first = s
+            .get_conversation(row.id, session_id)?
+            .is_none_or(|c| c.first_prompt.is_none());
         s.conversation_set_first_prompt(row.id, session_id, p)?;
+        // Work detection (M4.2): references in the full prompt become
+        // suggestions with evidence; the prompt itself is never stored.
+        // Best-effort: a detection failure never fails the hook.
+        if let Err(e) = crate::service::work::detect::on_prompt(&s, row.id, p, first) {
+            tracing::debug!(error = %e.message, "[work] prompt detection failed");
+        }
     }
     Ok(())
 }
@@ -1362,6 +1376,35 @@ mod tests {
             assert_eq!(row.last_stop_at, row.last_turn_at);
             assert_eq!(row.claude_status.as_deref(), Some("idle"));
         }
+    }
+
+    /// Work detection through the real hook (M4.2): the prompt's reference
+    /// becomes a suggestion with evidence, and the prompt is not stored
+    /// beyond the conversation's usual 200-char first prompt.
+    #[test]
+    fn user_prompt_submit_turns_a_ticket_reference_into_a_suggestion() {
+        let store = make_store();
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            let id = s
+                .upsert_session("sess", "h", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-w").unwrap();
+            s.create_local_work_item(Some("PAY-7"), "Retry").unwrap();
+            id
+        };
+        let mut p = make_payload("UserPromptSubmit", "uuid-w");
+        p.prompt = Some(format!("please look at PAY-7 {}", "x".repeat(500)));
+        apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None)).unwrap();
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        let sg = row.work_suggested.expect("a suggestion");
+        assert_eq!(sg.key.as_deref(), Some("PAY-7"));
+        assert_eq!(row.work, None);
+        let l = &s.session_work_links(id).unwrap()[0];
+        let snip = l.evidence[0]["snippet"].as_str().unwrap();
+        assert!(snip.chars().count() <= 40 + 5 + 40, "{snip}");
     }
 
     #[test]
