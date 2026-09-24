@@ -3,11 +3,11 @@
 //
 // This is the day-1 half of the work graph (roadmap M1): a key such as
 // `ABC-123` found in the session's tags, its worktree's branch, or its
-// worktree directory groups sessions by work in the sidebar. The backend
-// will later send a resolved `SessionRow.work` (explicit links, trackers,
-// the live branch from the transcript); this module stays as the fallback
-// for rows that do not carry it — an older hub, a phone-less build — so the
-// grouping degrades instead of disappearing.
+// worktree directory groups sessions by work in the sidebar. A row whose
+// `SessionRow.work` carries an explicit link (M1b) uses that instead; this
+// recognition stays as the fallback for rows without one — and for an older
+// hub that sends none — so the grouping degrades instead of disappearing.
+// A key the user rejected for the row (`work_rejected`) is never recognised.
 //
 // Recognition is deliberately conservative, because a wrong group is worse
 // than no group:
@@ -20,14 +20,16 @@
 import type { CiStatus, SessionRow } from './sessions';
 import type { ProjectTreeRow } from './projects';
 
-/** Where a session's key was found, strongest first. */
-export type WorkKeySource = 'tag' | 'branch' | 'worktree';
+/** Where a session's key was found, strongest first: an explicit link
+ *  (`SessionRow.work`), then recognition. */
+export type WorkKeySource = 'link' | 'tag' | 'branch' | 'worktree';
 
 export interface WorkKey {
   /** Normalised upper-case key, e.g. `ABC-123`. */
   key: string;
   source: WorkKeySource;
-  /** The text the key was found in (a tag, branch or worktree name). */
+  /** The text the key was found in (a tag, branch or worktree name); for a
+   *  link, the work item's title (may be empty). */
   from: string;
 }
 
@@ -95,24 +97,33 @@ export function worktreeBranchById(projects: readonly ProjectTreeRow[]): Map<num
 }
 
 /** The session's work key, or null when nothing it carries names one.
- *  Tags win (a person or the in-session agent set them on purpose), then the
- *  worktree's branch, then the worktree directory name (the only hint for a
- *  remote session whose worktree row the project tree does not list). */
+ *  An explicit link wins (a person or the in-session agent decided it); then
+ *  tags (set on purpose), then the worktree's branch, then the worktree
+ *  directory name (the only hint for a remote session whose worktree row the
+ *  project tree does not list). A recognised key the user rejected for this
+ *  session is skipped, so "Not this" sticks. */
 export function workKeyFor(
   s: SessionRow,
   branchById: ReadonlyMap<number, string>,
 ): WorkKey | null {
+  const linked = s.work?.key || s.work?.title;
+  if (s.work && linked) return { key: linked, source: 'link', from: s.work.title };
+  const rejected = new Set(s.work_rejected ?? []);
+  const recognise = (text: string): string | null => {
+    const key = extractWorkKey(text);
+    return key && !rejected.has(key) ? key : null;
+  };
   for (const tag of s.tags ?? []) {
-    const key = extractWorkKey(tag);
+    const key = recognise(tag);
     if (key) return { key, source: 'tag', from: tag };
   }
   const branch = s.worktree_id != null ? branchById.get(s.worktree_id) : undefined;
   if (branch) {
-    const key = extractWorkKey(branch);
+    const key = recognise(branch);
     if (key) return { key, source: 'branch', from: branch };
   }
   if (s.worktree_key && s.worktree_key !== 'main') {
-    const key = extractWorkKey(s.worktree_key);
+    const key = recognise(s.worktree_key);
     if (key) return { key, source: 'worktree', from: s.worktree_key };
   }
   return null;
@@ -121,6 +132,10 @@ export function workKeyFor(
 /** One-line explanation of why a session is in its work group. */
 export function describeWorkKey(w: WorkKey): string {
   switch (w.source) {
+    case 'link':
+      return w.from && w.from !== w.key
+        ? `${w.key} — ${w.from} (linked)`
+        : `${w.key} — linked to this session`;
     case 'tag':
       return `${w.key} — from the session tag "${w.from}"`;
     case 'branch':

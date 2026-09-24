@@ -125,6 +125,23 @@ export interface SessionRow {
     question: string | null;
     options: { n: number; label: string; selected: boolean }[];
   } | null;
+  /** The session's primary work link (migration 046), set through the work
+   *  commands (`work.ts`). Absent from a hub older than the work graph. */
+  work?: SessionWork | null;
+  /** Keys the user said this session does NOT work on (sticky "Not this").
+   *  Key recognition (`work_keys.ts`) must not show them. */
+  work_rejected?: string[];
+}
+
+/** `SessionRow.work`: the primary link's summary. `key` is the item's key or
+ *  the link's own reference; null for an item named by title only. */
+export interface SessionWork {
+  link_id: number;
+  item_id: number | null;
+  key: string | null;
+  title: string;
+  /** `manual` | `started` | `agent` — tolerant: a newer hub may add more. */
+  source: string;
 }
 
 type UsageFields = Partial<
@@ -533,7 +550,7 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
 /** Apply a row returned by a mutation command (rename/restart/new). Unlike an
  *  event, a command result is the authoritative response to a request the
  *  user just made, so it clears any tombstone for that id before merging. */
-function acceptCommandRow(row: SessionRow | null | undefined): void {
+export function acceptCommandRow(row: SessionRow | null | undefined): void {
   rows.accept(row);
 }
 

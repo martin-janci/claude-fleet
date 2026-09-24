@@ -96,6 +96,42 @@ describe('workKeyFor', () => {
     expect(w).toEqual({ key: 'ENG-5', source: 'worktree', from: 'eng-5-search' });
   });
 
+  it('prefers an explicit link over tags, branch and worktree', () => {
+    const w = workKeyFor(
+      sess({
+        tags: ['PAY-7'],
+        worktree_id: 10,
+        work: { link_id: 3, item_id: 4, key: 'OPS-9', title: 'Rotate keys', source: 'manual' },
+      }),
+      branches,
+    );
+    expect(w).toEqual({ key: 'OPS-9', source: 'link', from: 'Rotate keys' });
+    expect(describeWorkKey(w!)).toBe('OPS-9 — Rotate keys (linked)');
+  });
+
+  it('uses a linked item\'s title when it has no key', () => {
+    const w = workKeyFor(
+      sess({ work: { link_id: 3, item_id: 4, key: null, title: 'Billing migration', source: 'manual' } }),
+      branches,
+    );
+    expect(w).toEqual({ key: 'Billing migration', source: 'link', from: 'Billing migration' });
+    expect(describeWorkKey(w!)).toBe('Billing migration — linked to this session');
+  });
+
+  it('never recognises a key the user rejected for the row', () => {
+    // The branch names ABC-123, the user said "Not this": the next source
+    // down is used, and with none the row has no key.
+    expect(
+      workKeyFor(sess({ worktree_id: 10, work_rejected: ['ABC-123'] }), branches),
+    ).toBeNull();
+    expect(
+      workKeyFor(
+        sess({ tags: ['ABC-123'], worktree_id: 99, worktree_key: 'eng-5-x', work_rejected: ['ABC-123'] }),
+        branches,
+      ),
+    ).toEqual({ key: 'ENG-5', source: 'worktree', from: 'eng-5-x' });
+  });
+
   it('is null when nothing names a key', () => {
     expect(workKeyFor(sess({ worktree_id: 11, worktree_key: 'main' }), branches)).toBeNull();
   });

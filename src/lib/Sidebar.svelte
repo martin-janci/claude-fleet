@@ -796,6 +796,7 @@
     <SessionRowItem
       {sess}
       workKey={inWorkGroup || readOnly ? null : workKeyFor(sess, branchById)}
+      workOf={readOnly ? null : workKeyFor(sess, branchById)}
       {selectMode}
       isChecked={selectedIds.has(sess.id)}
       isRenaming={renaming !== null && renaming.id === sess.id}
