@@ -31,7 +31,7 @@ overridden by this section wherever they disagree.
 5. **Nothing is a separate app.** No Work tab: tickets live in ⌘K, context in
    Details, the overview in a Today view, grouping in the sidebar.
 
-### 0.2 Schema (migration `045_work_graph.sql`, re-runnable)
+### 0.2 Schema (migration `046_work_graph.sql`, re-runnable; 045 is M0.3's participant trigger)
 
 ```sql
 CREATE TABLE IF NOT EXISTS orgs(id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,8 +94,8 @@ END;
 ```
 
 Plus `hosts.org_id` (guarded `ALTER`, `already_applied` fn, `schema.rs`
-043 pattern) when orgs ship, and **eager participant minting** on the
-reconcile INSERT path (C1). No `projects.org_id`, no `work_observations`.
+043 pattern) when orgs ship. **Eager participant minting** (C1) landed
+separately as migration 045's `AFTER INSERT` trigger (roadmap M0.3). No `projects.org_id`, no `work_observations`.
 
 ### 0.3 Resolution (replaces §G rules)
 

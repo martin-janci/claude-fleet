@@ -55,13 +55,29 @@ Bugs the review found that hurt today and that the work graph builds on.
 | M0.5 | `fleet-friendly-name` skill: `whoami` instead of `list_sessions`; fix the hook-spec drift note | review §3 | — |
 | M0.6 | Tool-description budget: tighten the existing descriptions to recover headroom **before** the work tools land | C21 | `BUDGET_BYTES` test |
 
+**Status (2026-09-24):**
+
+- M0.1, M0.2, M0.4 and M0.5 are written on `claude/cloud-fleet-work-graph-0x0l5k`.
+- M0.3 is written as migration **045** (`045_session_participants.sql`):
+  an `AFTER INSERT` trigger plus a backfill.
+- The repoint-collision half of M0.3 moves to M1, because there are no
+  `work_links` to reassign yet.
+- **None of it has been compiled or tested yet.** The session that wrote it
+  had no access to `static.crates.io`. Run `cargo test --workspace` and
+  `cargo clippy` before a PR.
+- M0.6 is still open: it needs `REGEN_DOCS` and a byte measurement.
+- Found on the way, **not changed**:
+  - `whoami` has `readonly: false` in `TOOL_POLICIES` (`mcp/guard.rs:244`),
+    although its own code comment says a readonly token may call it.
+  - Decide which one is right. The skill now tolerates both.
+
 **Value:** phone tags stop disappearing; renames stop orphaning mail and
 history. **Exit:** everything the graph anchors on (participants) is present
 and durable for every session kind.
 
 ### M1: work without a tracker (value on day 1, no setup)
 
-- **Storage:** migration 045 with the full §0.2 schema. The tables not yet in
+- **Storage:** migration 046 (045 went to M0.3) with the full §0.2 schema. The tables not yet in
   use stay empty. The migration includes the end-snapshot trigger, the FKs and
   the re-run guard.
 - **Signals:**
@@ -341,3 +357,5 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 ## Revisions
 
 - 2026-09-24: first version, from design revision 2 and the round-1 review.
+- 2026-09-24: M0 written, not yet compiled (see M0 status). Migration 045 is
+  now the participant trigger, so the work graph schema is 046.
