@@ -18,6 +18,21 @@ Each host has a **projects base**, the directory that holds its repositories, se
 
 An embedded MCP server (disabled by default, bound to `localhost`, protected by a bearer token, default port 4180) exposes the full fleet API so an AI assistant can drive sessions programmatically — creating sessions, sending prompts, reading output. When the control API is enabled, **reverse SSH tunnels** (`ssh -R`) forward that localhost port to each remote host's localhost, allowing remote agents to call back to the central server. Each tunnel is supervised: if the `ssh` process exits it restarts with capped exponential backoff. The same fleet can instead be run headless as the `fleet-hub` daemon, with the control API always on and bound to a configurable address; a hub given a public URL is reached directly by every host, and reverse tunnels exist only for a hub left on loopback. The desktop can also be paired with a hub as an ordinary client (Settings → Hub), and it then becomes a live window onto the hub's fleet rather than a second owner of it, decided once at startup. See [control-api.md](control-api.md) for the full tool reference and [hub.md](hub.md) for the daemon and for pointing a desktop at it.
 
+## Work
+
+A session can say **what work** it is doing: a ticket key (`ABC-123`) or a
+free-form workstream, linked to the session's identity so it survives moves
+and restarts. Keys found in branch names group sessions in the sidebar with
+no setup; an explicit link (from the UI, or the in-session agent) wins over
+recognition, and "Not this" is sticky. When a session ends its link ends
+with a snapshot, and the work journal keeps what its conversations did, so
+the work can be resumed later — continued, or started fresh with a handover
+brief. A **tracker** (Jira Cloud today, configured on the hub) only enriches
+this: titles and status on the chips, tickets in ⌘K, and starting a session
+from a ticket in one step. Trackers are polled, read-only, and never gate
+anything. See [control-api.md](control-api.md) (`work`, `work_link`,
+`work_admin`) and [hub.md](hub.md) → *Trackers*.
+
 ## Asset catalog
 
 Skills, subagents, hooks, MCP servers and plugin references can be kept in a

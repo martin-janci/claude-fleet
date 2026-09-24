@@ -392,3 +392,62 @@ CREATE TABLE IF NOT EXISTS tracker_views(
   caps the body (4 MiB) and bounds the whole exchange (20 s; 5 s connect and
   handshake). The hub image already installs `ca-certificates`
   (`crates/fleet-hub/Dockerfile`), which `rustls-native-certs` reads.
+- **2026-09-24, M3 landed** (commits 7260779 … d147523 on
+  `claude/cloud-fleet-work-graph-m3`). Deviations from the tasks above, and
+  why:
+  1. **Order.** M3.1's store, secrets and hardening landed first (b44a5e4);
+     its admin surface (`work_admin`, the CLI, the desktop commands) landed
+     after M3.2 (98debf2), because `test` is a probe and needs the adapter.
+  2. **Incremental windows are relative** (`updated >= -Nm`, rounded up,
+     from the watermark minus the 2-minute overlap) instead of a watermark
+     formatted in `/myself`'s timezone: Jira evaluates a relative window in
+     its own clock and the API user's zone, so no timezone database enters
+     the tree (C27 allows either). `tz` is still recorded. The residual risk
+     is a local clock running more than the overlap behind Jira's; the
+     hourly whole listing of every view bounds it.
+  3. **Views are evaluated locally for reads.** An incremental listing never
+     says an item *left* a view, so `tickets { view }` evaluates `mine`
+     (assignee is the API account, not done), `sprint` (in an active sprint)
+     and `recent` (14 days) from the cached attributes; a favourite filter
+     uses membership recorded in `meta.views`, exact after each hourly
+     whole listing. `tracker_views` gained an `enabled` column so a 403
+     disables one view persistently.
+  4. **Sprints per project** are found with one bounded probe search
+     (`sprint in openSprints()`, the projects of its results) rather than a
+     board lookup per project. The sprint field is found by
+     `schema.custom`, never by name.
+  5. **Credential precedence:** the reference wins while it reads; the
+     stored value is the fallback when it cannot be read (the plan's "ref
+     first, then the stored value").
+  6. **`work_admin` actions** are `list | add | update | set_credential |
+     test | remove`; the plan's `*_tracker` spellings are accepted as
+     aliases. `remove` keeps the items (and their `tracker_id`, which
+     AUTOINCREMENT never reuses) marked unavailable (`tracker_removed`).
+  7. **A newly set credential is `unconfigured`** until a `test`: the sync
+     does not poll it (nor `auth_failed` / `captcha`). The Settings Connect
+     flow tests right away; the CLI prints the `test` line.
+  8. **Events.** `work:item`, `work:tracker` and `work:tracker_removed`,
+     only on a real change; a tracker's first sync is announced once (the
+     retro-link reveal). `last_sync_at` otherwise moves without a frame, so
+     the desktop refreshes trackers every two minutes. Status reaches the
+     sidebar through `SessionRow.work` (`status_category`, `status_name`,
+     `url`, `unavailable`; all skipped when absent) and `session:updated`
+     for the sessions whose primary work changed — no separate item store.
+  9. **`start`** queues the ticket's context (title, status, URL, branch,
+     and the description inside `mark_untrusted` / `UNTRUSTED_END`) as the
+     `handover` row; M2's journal-built handover stays with `resume`. It
+     also takes the dialog's edited `name` and `worktree`. A key no tracker
+     knows still starts (trackers never gate).
+  10. **Linking a key resolves to a tracker item** (the one tracker owning
+      it, by key or alias) before a local item, keeping `ref_key` on the
+      link for history; an existing link to the same item is reused rather
+      than duplicated.
+  11. **Tool budget:** +891 B (`work_admin`), +754 B (tickets / lookup /
+      start parameters), +147 B (`name` / `worktree`), each measured and
+      recorded at `BUDGET_BYTES`.
+  12. **Not done in M3:** `/metrics` has no tracker series yet (logs carry
+      only `tracker_id` and the result state); the chip's stale clock uses
+      the tracker that owns the key's prefix; an unbound key chip explains
+      where to connect Jira in its tooltip rather than with an inline
+      button; the manual acceptance on a real Jira Cloud site.
+

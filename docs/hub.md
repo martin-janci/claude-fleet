@@ -628,6 +628,74 @@ free to pair again:
 revoked phone (paired 2026-09-17 09:12Z); its next request is refused and the name is free again
 ```
 
+## Trackers (Jira Cloud)
+
+A hub can read tickets from Jira Cloud, read-only: sessions then show their
+ticket's title and status, ⌘K lists *My work* (and *Current sprint* where a
+project has sprints), and work can be started from a ticket. Nothing needs a
+tracker — keys in branch names group sessions without one — and nothing
+waits on it: with Jira down or the token expired, everything answers from
+the cache.
+
+Trackers are fleet administration, so they are configured **on the hub**
+(`work_admin` is master-only; a paired desktop shows them read-only and says
+so). From the hub machine:
+
+```sh
+fleet-hub tracker add https://acme.atlassian.net/browse/ABC-123   # any ticket URL, or the site
+fleet-hub tracker set-credential 1 --email you@acme.com < jira-token.txt
+fleet-hub tracker test 1          # probe: account, key prefixes, sprints, views
+fleet-hub tracker list
+fleet-hub tracker remove 1        # its items stay, marked unavailable
+```
+
+The API token (id.atlassian.com → Security → API tokens) is read from
+**stdin**, from an environment variable of that command (`--from-env
+JIRA_TOKEN`), or not read at all: `--ref env:NAME` or `--ref
+file:/run/secrets/jira` stores a *reference* the hub resolves each time it
+syncs. It is never an argument, so it never lands in `ps` or shell history.
+With Docker, put the token in a secret and point the tracker at it:
+
+```yaml
+services:
+  fleet-hub:
+    secrets: [jira]
+secrets:
+  jira:
+    file: ./jira-token.txt     # mounted at /run/secrets/jira
+```
+
+```sh
+docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
+  --email you@acme.com --ref file:/run/secrets/jira
+```
+
+What to know:
+
+- **Only `https://<name>.atlassian.net` is accepted** (no other host, port,
+  path or userinfo), and redirects are never followed: a tracker's URL is
+  where the hub sends a credential from its own network position. Data
+  Center is not supported yet.
+- **Atlassian API tokens expire** (at most a year). An expired one sets the
+  tracker to `auth_failed` and polling stops until you set a new one and
+  `test` it; a CAPTCHA (`captcha`) needs one browser login to the site.
+  `rate_limited` and `unreachable` retry on their own.
+- **Sync** runs every `work.sync_interval_secs` (default 300; `0` turns it
+  off, read at start): each view from its watermark with a 2-minute overlap,
+  every linked ticket by id, and keys typed before the tracker was connected
+  (which then bind to their tickets on their own). A ticket that vanishes is
+  marked *unavailable* — deleted or no longer visible, Jira cannot say which
+  — never deleted, and its links stay.
+- **Secrets** never leave `tracker_secrets`: no answer, event, log line,
+  diagnostics bundle or error report carries the token (a row shows only
+  `…abcd`), and `last_error` is redacted before it is stored.
+- **Isolation, until organisations exist:** a per-host token (an in-session
+  Claude) sees only tickets linked to sessions on its own host, and never
+  receives `work:*` frames on `/events`. Master and paired clients see all.
+- **Migrating from the desktop:** a copied `state.db` carries the desktop's
+  trackers and a stored token. Re-enter the token on the hub (or rotate it
+  and use a `--ref`) rather than keep one that lived on another machine.
+
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
 `POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
@@ -1114,6 +1182,10 @@ the next press retries.
    `curl … /hook?token=` command hooks, which carry the desktop's token; a
    hub with a public URL refuses that `?token=` form outright, so such a
    host reports no hooks until it is re-provisioned.
+
+If the desktop had a Jira tracker, its token came along in `state.db`:
+set it again on the hub (`fleet-hub tracker set-credential`), ideally a
+rotated one, and see *Trackers* above.
 
 The desktop's `state.db` carries a `local` host row for the machine it ran
 on. Since the hub defaults `hub.local_host` to `false`, that copied `local`
