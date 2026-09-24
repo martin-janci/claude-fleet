@@ -471,6 +471,18 @@ Find your own fleet row from your tmux session name (`tmux display-message -p '#
 
 Parameters: `tmux_name`
 
+### `work`
+
+Work links: {session_id} → its live links; {key} → ended (past) links to that key.
+
+Parameters: `key`, `session_id`
+
+### `work_link`
+
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'), unlink (link_id). Returns the updated row.
+
+Parameters: `action`, `item_id`, `key`, `link_id`, `session_id`, `source`
+
 ## Tauri IPC commands
 
 Frontend commands registered in `src/lib.rs`:

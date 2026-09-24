@@ -64,6 +64,7 @@ steer     send_prompt run_prompt wait_for_session capture_session
           session_transcript session_conversation(s) broadcast_prompt
 coordinate send_message inbox dispatch_task wait_for_task list_tasks
           cancel_task set_session_tags session_history register_self
+          work work_link
 recover   restart_session recreate_session repair_session move_session
           dismiss_ghost_session safe_kill_session kill_session
 review    repo_changes repo_diff repo_file repo_tree repo_log
@@ -243,6 +244,11 @@ outcome — nothing else after it.
 
 Label sessions for triage with `set_session_tags { session_id, tags }` (up to
 16 short tags) and find them again with `list_sessions { tag }`.
+
+Say which ticket or workstream you are on with `work_link { session_id,
+action: "link", key: "ABC-123", source: "agent" }` (your row's `work` then
+shows it; `work { session_id }` lists the links). A user's `reject` is sticky:
+do not re-link a key they rejected.
 
 `session_history { session_id, limit? }` is the per-session event log
 (`status_change`, `prompt_sent`, `keys_sent`, `stuck`, `killed`, `recreated`,

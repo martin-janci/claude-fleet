@@ -66,7 +66,9 @@ use serde_json::Value;
 /// * `tags` — the session screen's tags editor starts from them, and
 ///   `set_session_tags` REPLACES the whole list. Projected away, a phone
 ///   re-list held `[]`, so adding one tag from the phone silently deleted
-///   every other tag the session had.
+///   every other tag the session had;
+/// * `work` — the session's primary work link (key, title): the row's key
+///   chip and the grouping by work. Small, and null for most rows.
 ///
 /// [`super::tests`] pins this set against the serialized row so a renamed
 /// column cannot quietly fall out of the view, and pins the list itself so
@@ -90,6 +92,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "stuck_kind",
     "tags",
     "tmux_name",
+    "work",
 ];
 
 /// A named projection a caller may ask `list_sessions` for.

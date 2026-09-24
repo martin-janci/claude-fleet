@@ -53,5 +53,6 @@ pub mod tick;
 pub mod transcript;
 pub mod tunnel;
 pub mod usage;
+pub mod work;
 pub mod worktree_prune;
 pub mod worktrees;

@@ -428,6 +428,7 @@ fn sample_session_row() -> SessionRow {
         },
         context: fleet_core::store::SessionContext::default(),
         pending_input: None,
+        work: None,
     }
 }
 

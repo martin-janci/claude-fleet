@@ -671,12 +671,12 @@ compression.
 Compression makes the same answer cheaper; these two parameters make the
 answer smaller, and they stack with it.
 
-`list_sessions { view: "phone" }` returns each row projected to the 17
+`list_sessions { view: "phone" }` returns each row projected to the 18
 columns a phone-sized session list draws — `id`, `tmux_name`,
 `friendly_name`, `last_prompt`, `host_alias`, `project_id`, `status`,
 `kind`, `claude_status`, `stuck_kind`, `current_activity`, `context_pct`,
 `last_activity_at`, `ci_status`, `pending_input`, `needs_attention`,
-`tags`. On the
+`tags`, `work`. On the
 same 44-session fleet that is
 **46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped**. The view is
 *named*, not a caller-supplied field list, so the hub keeps the definition of
@@ -692,7 +692,8 @@ is there for the mirror of that reason: projected away, the view would hand a
 phone the columns to re-derive the answer instead of the answer. `tags`
 is there because the phone's tag editor starts from them and
 `set_session_tags` replaces the whole list: without them a phone that added
-one tag deleted the rest.
+one tag deleted the rest. `work` (the primary work link: key, title) is the
+row's key chip and what the list groups by work on.
 
 `list_projects { has_sessions: true }` keeps only the projects that hold a
 live session — the rows a client needs to turn a session's `project_id` into

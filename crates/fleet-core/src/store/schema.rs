@@ -1950,13 +1950,26 @@ mod tests {
     /// ...)` is itself idempotent: re-running just that statement, and
     /// separately a full guarded second pass through `migrate()`, must not
     /// duplicate the row.
+    /// Insert a bare `sessions` row with raw SQL. For a store held at an old
+    /// schema version: `upsert_session` reads the row back through
+    /// `SESSION_COLUMNS`, which names tables (participants, work_links) that
+    /// an old version does not have yet.
+    fn raw_session(s: &Store, name: &str) -> i64 {
+        s.conn
+            .execute(
+                "INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status) \
+                 VALUES (?1, 'h', 1, 1, 'running')",
+                rusqlite::params![name],
+            )
+            .unwrap();
+        s.conn.last_insert_rowid()
+    }
+
     #[test]
     fn migration_043_backfills_existing_sessions() {
         let old = store_at_version(42);
         old.upsert_host("h").unwrap();
-        let sid = old
-            .upsert_session("sess", "h", None, None, 1, 1, "running", None)
-            .unwrap();
+        let sid = raw_session(&old, "sess");
 
         old.migrate().expect("043 backfill");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
@@ -2025,9 +2038,7 @@ mod tests {
     fn migration_045_gives_every_session_a_participant() {
         let old = store_at_version(44);
         old.upsert_host("h").unwrap();
-        let quiet = old
-            .upsert_session("quiet", "h", None, None, 1, 1, "running", None)
-            .unwrap();
+        let quiet = raw_session(&old, "quiet");
         let count = |s: &Store, sid: i64| -> i64 {
             s.conn
                 .query_row(

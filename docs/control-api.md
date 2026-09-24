@@ -321,6 +321,14 @@ Index by area (names only; see the reference for details):
 - **Orchestration** — `wait_for_session`, `session_transcript`,
   `session_conversation`, `run_prompt`, `dispatch_task`, `wait_for_task`,
   `list_tasks`, `cancel_task`, `set_session_tags`.
+- **Work** — `work` (read: `{session_id}` → that session's live work links,
+  primary first; `{key}` → ended links to the key, each with the snapshot of
+  the session that did it), `work_link` (`{session_id, action}`: `link` a key
+  or `item_id` — it becomes the session's primary work, `source` `manual` by
+  default or `agent` from the in-session agent; `reject` — a sticky "not
+  this"; `unlink` a `link_id`). Returns the updated row; a session row's
+  `work` carries its primary link. A per-host token reads and decides only
+  its own host's sessions.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never
@@ -388,7 +396,7 @@ dialog — derived alongside `current_activity` on the same reconcile pass.
 
 Responses are sized for MCP token limits: `list_sessions` and `list_projects`
 return slim summary rows by default and accept `limit` (`list_sessions` also
-takes `view: "phone"`, a named projection to the 17 columns a phone's session
+takes `view: "phone"`, a named projection to the 18 columns a phone's session
 list draws, and `list_projects` takes `has_sessions: true`, which keeps only
 the projects a live session can name — see *Asking for fewer columns* in
 `docs/hub.md`); `list_worktrees`

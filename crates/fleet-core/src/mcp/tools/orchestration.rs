@@ -552,4 +552,46 @@ impl FleetTools {
             .ok_or_else(|| mcp_err("E_NOTFOUND", format!("session {} vanished", row.id), None))?;
         ok_json(&updated)
     }
+
+    #[tool(description = "Work links: {session_id} → its live links; \
+        {key} → ended (past) links to that key.")]
+    pub(super) async fn work(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::work::WorkArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "work",
+            &format!("session_id={:?} key={:?}", args.session_id, args.key),
+        );
+        if let Some(id) = args.session_id {
+            self.resolve_target_row(&caller, Some(id), None, None, "the session")?;
+        }
+        let mut links = crate::service::work::work(&args, &self.store).map_err(to_mcp_err)?;
+        // Past work of other hosts is not a per-host token's to read.
+        if let Some(h) = &caller.host_alias {
+            links.retain(|l| l.ended_at.is_none() || l.snap_host.as_deref() == Some(h));
+        }
+        ok_json_compact(&links)
+    }
+
+    #[tool(description = "Decide a session's work: action link (becomes its \
+        primary; key or item_id), reject (sticky 'not this'), unlink \
+        (link_id). Returns the updated row.")]
+    pub(super) async fn work_link(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::work::WorkLinkArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "work_link",
+            &format!(
+                "session_id={} action={} key={:?} item_id={:?} link_id={:?} source={:?}",
+                args.session_id, args.action, args.key, args.item_id, args.link_id, args.source
+            ),
+        );
+        self.resolve_target_row(&caller, Some(args.session_id), None, None, "the session")?;
+        let row = crate::service::work::work_link(&args, &self.store).map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
 }

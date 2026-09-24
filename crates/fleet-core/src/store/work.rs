@@ -325,7 +325,8 @@ impl Store {
     /// Write a decision about `target` for `session_id`: `confirmed` (the
     /// link becomes the session's primary work) or `rejected` (sticky, never
     /// primary). Idempotent per (session, target): re-deciding updates the
-    /// one live link instead of adding another.
+    /// one live link instead of adding another. Emits `session_updated`, so
+    /// the row's `work` follows.
     fn decide_session_work(
         &self,
         session_id: i64,
@@ -392,7 +393,9 @@ impl Store {
                 self.conn.last_insert_rowid()
             }
         };
+        self.bump_session_for_work(session_id)?;
         tx.commit()?;
+        self.emit_session(session_id)?;
         self.get_work_link(id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished after write"))
     }
@@ -429,7 +432,22 @@ impl Store {
                (SELECT id FROM participants WHERE session_id = ?2 AND retired_at IS NULL)",
             rusqlite::params![link_id, session_id],
         )?;
+        if n > 0 {
+            self.bump_session_for_work(session_id)?;
+            self.emit_session(session_id)?;
+        }
         Ok(n > 0)
+    }
+
+    /// A link write changes the row's `work` without touching `sessions`, so
+    /// bump `row_version` by hand: the frontend's merge guard then orders the
+    /// `session_updated` this emits after any older payload of the row.
+    fn bump_session_for_work(&self, session_id: i64) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        Ok(())
     }
 
     pub fn get_work_link(&self, id: i64) -> Result<Option<WorkLinkRow>, IpcError> {
@@ -691,5 +709,51 @@ mod tests {
         assert!(s.unlink_session_work(a, la.id).unwrap());
         assert!(s.session_work_links(a).unwrap().is_empty());
         assert!(!s.unlink_session_work(a, la.id).unwrap(), "already gone");
+    }
+
+    #[test]
+    fn the_session_row_carries_its_primary_work_and_every_change_is_emitted() {
+        let (s, bus) = super::super::test_support::store_with_recorder();
+        let sid = seed(&s, "dev");
+        let before = s.get_session("dev", "h").unwrap().unwrap();
+        assert_eq!(before.work, None);
+        bus.take();
+
+        let item = s.create_local_work_item(Some("abc-9"), "Login").unwrap();
+        let link = s
+            .link_session_work(sid, WorkTarget::Key("ABC-9"), "manual")
+            .unwrap();
+        let row = s.get_session("dev", "h").unwrap().unwrap();
+        assert_eq!(
+            row.work,
+            Some(WorkSummary {
+                link_id: link.id,
+                item_id: Some(item.id),
+                key: Some("ABC-9".into()),
+                title: "Login".into(),
+                source: "manual".into(),
+            })
+        );
+        assert!(row.row_version > before.row_version);
+        assert_eq!(bus.take(), vec![format!("session:updated:{sid}")]);
+
+        // A rejection of the primary leaves the row without work.
+        s.reject_session_work(sid, WorkTarget::Item(item.id))
+            .unwrap();
+        assert_eq!(s.get_session("dev", "h").unwrap().unwrap().work, None);
+        assert_eq!(bus.take().len(), 1);
+
+        let bare = s
+            .link_session_work(sid, WorkTarget::Key("billing"), "agent")
+            .unwrap();
+        let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+        assert_eq!((w.key.as_deref(), w.title.as_str()), (Some("billing"), ""));
+        bus.take();
+        assert!(s.unlink_session_work(sid, bare.id).unwrap());
+        assert_eq!(s.get_session("dev", "h").unwrap().unwrap().work, None);
+        assert_eq!(bus.take().len(), 1);
+        // A no-op unlink emits nothing.
+        assert!(!s.unlink_session_work(sid, bare.id).unwrap());
+        assert!(bus.take().is_empty());
     }
 }

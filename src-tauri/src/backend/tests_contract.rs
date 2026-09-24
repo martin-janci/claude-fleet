@@ -12,7 +12,7 @@ use fleet_core::service::usage::DayUsage;
 use fleet_core::service::worktrees::{HostWorktrees, WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
     AccountRow, ConversationRow, HostRow, PendingInput, PendingOption, ProjectRow, SessionContext,
-    SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorktreeRow,
+    SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorkSummary, WorktreeRow,
 };
 use std::collections::BTreeMap;
 
@@ -94,6 +94,13 @@ pub(crate) fn sample_session() -> SessionRow {
                 label: "Yes".into(),
                 selected: true,
             }],
+        }),
+        work: Some(WorkSummary {
+            link_id: 5,
+            item_id: Some(6),
+            key: Some("ABC-123".into()),
+            title: "Login".into(),
+            source: "manual".into(),
         }),
     }
 }
@@ -652,7 +659,7 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_fifty_three() {
+fn a_session_rows_wire_names_are_these_exact_fifty_five() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -706,11 +713,12 @@ fn a_session_rows_wire_names_are_these_exact_fifty_three() {
         "usage_model",
         "usage_output_tokens",
         "usage_updated_at",
+        "work",
         "worktree_id",
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 54, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 55, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 
