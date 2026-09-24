@@ -479,9 +479,9 @@ Parameters: `action`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `
 
 ### `work_admin`
 
-Trackers (Jira): list, add, update, set_credential, test, remove. Never returns a secret.
+Trackers: list, add, update, set_credential, test, remove. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `confirm_nonce`, `credential_ref`, `name`, `provider`, `secret`, `site_url`, `tracker_id`, `username`
+Parameters: `action`, `auth_kind`, `confirm_nonce`, `credential_ref`, `name`, `provider`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 

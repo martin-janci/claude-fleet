@@ -2912,7 +2912,12 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M4.4: `work_link` gains confirm / reject-by-link_id /
     // trust_project (one new parameter, `on`, and a longer description);
     // no new tool. Measured at 68,385 on 2026-09-24 (+172); plus 100.
-    const BUDGET_BYTES: usize = 68_485;
+    // Work graph M6.1: `work_admin` gains `transport` (direct | via_host |
+    // via_cli, so GitHub is read through `gh` on a host) and `settings`
+    // (the provider's admin settings object); its description drops the
+    // provider list so later providers cost nothing there. No new tool.
+    // Measured at 68,553 on 2026-09-24 (+168); plus 100.
+    const BUDGET_BYTES: usize = 68_653;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

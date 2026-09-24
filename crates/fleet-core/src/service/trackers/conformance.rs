@@ -69,10 +69,14 @@ pub struct Expect {
     /// `(child external_id, parent external_id, child hierarchy_level)`.
     pub hierarchy: Option<(&'static str, &'static str, Option<i64>)>,
     /// A reference under an old key or repo, the id it resolves to, and the
-    /// alias that must be recorded.
-    pub moved: (ItemRef, &'static str, &'static str),
+    /// alias that must be recorded. `None` only for a provider whose
+    /// reference can never change (Asana: `asana:<gid>`).
+    pub moved: Option<(ItemRef, &'static str, &'static str)>,
     /// `(text, the session's repo, what must be recognised)`.
     pub recognize: Vec<(&'static str, Option<&'static str>, Vec<ItemRef>)>,
+    /// A repository in scope, for the bare `#n` check (repo-relative
+    /// providers only).
+    pub bare_repo: &'static str,
     /// The credential's secret literal; `None` for a provider that holds
     /// none (GitHub through `gh`).
     pub secret: Option<&'static str>,
@@ -297,12 +301,11 @@ pub async fn status<H: Harness>(h: &H) {
     let want = h.expect().statuses;
     assert!(
         want.iter()
-            .any(|w| w.1 == "done" && w.2 == Some("not_planned"))
-            && want
-                .iter()
-                .any(|w| w.1 == "done" && w.2 == Some("completed"))
-            && want.iter().any(|w| w.1 == "in_progress"),
-        "{}: the fixture covers in_progress, completed and not_planned",
+            .any(|w| w.1 == "done" && w.2 == Some("completed"))
+            && want.iter().any(|w| w.1 == "in_progress")
+            && want.iter().any(|w| w.1 == "todo"),
+        "{}: the fixture covers todo, in_progress and done / completed (and \
+         not_planned wherever the provider has it)",
         h.name()
     );
     for (id, category, resolution) in want {
@@ -344,10 +347,18 @@ pub async fn hierarchy<H: Harness>(h: &H) {
 
 /// Scenario 7: the item moved (a key or repo changed): same id, old reference aliased.
 pub async fn moved<H: Harness>(h: &H) {
+    let Some((r, id, alias)) = h.expect().moved else {
+        let f = FakeTransport::new();
+        assert!(
+            !h.provider(&f).caps().human_keys && !h.provider(&f).caps().repo_relative,
+            "{}: only a provider without keys or repos may skip the move scenario",
+            h.name()
+        );
+        return;
+    };
     let f = FakeTransport::new();
     h.script_moved(&f);
     let p = h.provider(&f);
-    let (r, id, alias) = h.expect().moved;
     let got = p
         .fetch(std::slice::from_ref(&r))
         .await
@@ -380,11 +391,12 @@ pub async fn recognize<H: Harness>(h: &H) {
         }
     }
     if caps.repo_relative {
-        let bare = p.recognize("fixes #42", RefCtx { repo: Some("o/r") });
+        let repo = h.expect().bare_repo;
+        let bare = p.recognize("fixes #42", RefCtx { repo: Some(repo) });
         assert_eq!(
             bare,
             vec![ItemRef::RepoNumber {
-                repo: "o/r".into(),
+                repo: repo.into(),
                 n: 42
             }],
             "{}",

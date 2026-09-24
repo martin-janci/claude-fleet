@@ -544,7 +544,7 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
                 ("20008", "todo", None),
             ],
             hierarchy: Some(("20008", "20007", Some(-1))),
-            moved: (ItemRef::Key("OLD-5".into()), "30005", "OLD-5"),
+            moved: Some((ItemRef::Key("OLD-5".into()), "30005", "OLD-5")),
             recognize: vec![
                 (
                     "see https://acme.atlassian.net/browse/ABC-101 and team-8",
@@ -560,6 +560,7 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
                     vec![],
                 ),
             ],
+            bare_repo: "",
             secret: Some("ATATT3xFfGF0-test-token-not-real-0000"),
         }
     }

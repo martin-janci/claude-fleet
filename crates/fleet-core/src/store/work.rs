@@ -252,11 +252,37 @@ pub fn normalize_work_ref(raw: &str) -> Result<String, IpcError> {
             "work key must not contain control characters",
         ));
     }
-    Ok(if is_ticket_key(t) {
+    Ok(canonical_key(t))
+}
+
+/// The one spelling of a reference, as items and links store it: a ticket
+/// key upper-cased (`ABC-12`), a GitHub `owner/repo#n` lower-cased, anything
+/// else (`asana:<gid>`, free text) as trimmed.
+pub fn canonical_key(raw: &str) -> String {
+    let t = raw.trim();
+    if is_ticket_key(t) {
         t.to_ascii_uppercase()
+    } else if github_ref(t).is_some() {
+        t.to_ascii_lowercase()
     } else {
         t.to_string()
-    })
+    }
+}
+
+/// `owner/repo#n` → `(owner/repo, n)`, both names `[A-Za-z0-9_.-]`.
+pub fn github_ref(s: &str) -> Option<(&str, u64)> {
+    let (repo, n) = s.rsplit_once('#')?;
+    let (o, r) = repo.split_once('/')?;
+    let name_ok = |x: &str| {
+        !x.is_empty()
+            && !x.starts_with(['.', '-'])
+            && x.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    };
+    if !(name_ok(o) && name_ok(r)) || n.is_empty() || n.len() > 9 {
+        return None;
+    }
+    Some((repo, n.parse().ok()?))
 }
 
 /// `PREFIX-123`: a letter, then 1–9 of `[A-Za-z0-9_]`, a dash, 1–7 digits —

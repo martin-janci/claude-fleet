@@ -28,12 +28,26 @@ pub struct AddTrackerArgs {
     pub url: String,
     #[serde(default)]
     pub name: Option<String>,
+    /// jira | github | …; inferred from `url` when absent (M6).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// direct | via_host:<host> | via_cli:<host> (M6).
+    #[serde(default)]
+    pub transport: Option<String>,
+    /// The provider's admin settings (M6).
+    #[serde(default)]
+    pub settings: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateTrackerArgs {
     pub tracker_id: i64,
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
+    pub settings: Option<serde_json::Value>,
 }
 
 /// The credential. No `Debug`, no `Serialize`: the secret goes to the store
@@ -41,7 +55,10 @@ pub struct UpdateTrackerArgs {
 #[derive(Deserialize)]
 pub struct SetTrackerCredentialArgs {
     pub tracker_id: i64,
-    pub username: String,
+    /// The account email for Jira Cloud's basic auth; absent for a token
+    /// that is the whole credential (Asana, Linear, a Data Center PAT).
+    #[serde(default)]
+    pub username: Option<String>,
     #[serde(default)]
     pub secret: Option<String>,
     #[serde(default)]
@@ -70,6 +87,9 @@ pub fn add_tracker(
             action: "add".into(),
             site_url: Some(args.url),
             name: args.name,
+            provider: args.provider,
+            transport: args.transport,
+            settings: args.settings,
             ..Default::default()
         },
         &store,
@@ -87,7 +107,9 @@ pub fn update_tracker(
         &WorkAdminArgs {
             action: "update".into(),
             tracker_id: Some(args.tracker_id),
-            name: Some(args.name),
+            name: args.name,
+            transport: args.transport,
+            settings: args.settings,
             ..Default::default()
         },
         &store,
@@ -105,8 +127,19 @@ pub fn set_tracker_credential(
         &WorkAdminArgs {
             action: "set_credential".into(),
             tracker_id: Some(args.tracker_id),
-            auth_kind: Some("basic".into()),
-            username: Some(args.username),
+            auth_kind: Some(
+                if args
+                    .username
+                    .as_deref()
+                    .is_some_and(|u| !u.trim().is_empty())
+                {
+                    "basic"
+                } else {
+                    "bearer"
+                }
+                .into(),
+            ),
+            username: args.username,
             secret: args.secret,
             credential_ref: args.credential_ref,
             ..Default::default()

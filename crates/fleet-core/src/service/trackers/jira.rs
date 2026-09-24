@@ -527,6 +527,7 @@ impl TrackerProvider for JiraCloud {
                 key_prefixes,
                 sprint_projects,
                 sprint_field,
+                ..Default::default()
             },
         })
     }

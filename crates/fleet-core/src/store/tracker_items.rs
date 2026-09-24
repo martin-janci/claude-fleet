@@ -21,7 +21,7 @@ use super::{now_unix, Store, WorkItemRow};
 use crate::events::EventBus as _;
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 /// One tracker item as a provider normalised it, ready to store.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -108,6 +108,76 @@ struct Visible {
     meta: Option<String>,
 }
 
+/// The trackers that may answer `key` (M6): a GitHub `owner/repo#n` the
+/// GitHub trackers whose scope covers the repository; an `asana:<gid>` every
+/// Asana tracker (the gid is global, the tracker that has it answers); a
+/// ticket key the trackers that own its prefix (Jira projects, Linear
+/// teams).
+pub fn tracker_claims(trackers: &[super::TrackerRow], key: &str) -> Vec<i64> {
+    let key = key.trim();
+    if let Some((repo, _)) = super::work::github_ref(key) {
+        let repo = repo.to_ascii_lowercase();
+        return trackers
+            .iter()
+            .filter(|t| t.provider == "github" && github_covers(t, &repo))
+            .map(|t| t.id)
+            .collect();
+    }
+    if key.starts_with("asana:") {
+        return trackers
+            .iter()
+            .filter(|t| t.provider == "asana")
+            .map(|t| t.id)
+            .collect();
+    }
+    let Some((prefix, _)) = key.split_once('-') else {
+        return Vec::new();
+    };
+    trackers
+        .iter()
+        .filter(|t| {
+            t.config
+                .key_prefixes
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(prefix))
+        })
+        .map(|t| t.id)
+        .collect()
+}
+
+/// A GitHub tracker's scope covers `repo` (`owner/repo`, lower case): its
+/// `settings.repos` when set, else the site's owner, else everything.
+pub fn github_covers(t: &super::TrackerRow, repo: &str) -> bool {
+    if !t.settings.repos.is_empty() {
+        return t
+            .settings
+            .repos
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(repo));
+    }
+    match t
+        .site_url
+        .trim_end_matches('/')
+        .strip_prefix("https://github.com/")
+        .filter(|o| !o.is_empty())
+    {
+        Some(owner) => repo
+            .split_once('/')
+            .is_some_and(|(o, _)| o.eq_ignore_ascii_case(owner)),
+        None => true,
+    }
+}
+
+/// `tracker_id` may answer `key`: it claims it, and — for a ticket key,
+/// whose prefix is the only evidence — no other tracker does (C28 / §0.3: a
+/// prefix two trackers claim is never bound). A GitHub or Asana reference
+/// names its tracker by more than a prefix, so every claimant may ask.
+fn may_answer(trackers: &[super::TrackerRow], tracker_id: i64, key: &str) -> bool {
+    let claims = tracker_claims(trackers, key);
+    let by_prefix = super::work::github_ref(key).is_none() && !key.starts_with("asana:");
+    claims.contains(&tracker_id) && (!by_prefix || claims.len() == 1)
+}
+
 impl Store {
     fn tracker_item_id(&self, tracker_id: i64, external_id: &str) -> Result<Option<i64>, IpcError> {
         Ok(self
@@ -169,7 +239,7 @@ impl Store {
             ));
         }
         let now = now_unix();
-        let key = w.key.as_deref().map(str::to_ascii_uppercase);
+        let key = w.key.as_deref().map(super::work::canonical_key);
         let parent_id = match &w.parent_external_id {
             Some(p) => self.tracker_item_id(tracker_id, p)?,
             None => None,
@@ -179,8 +249,11 @@ impl Store {
 
         // Aliases: the provider's, every one already known, and the old key
         // when the key moved (C24). Never the current key itself.
-        let mut aliases: BTreeSet<String> =
-            w.aliases.iter().map(|a| a.to_ascii_uppercase()).collect();
+        let mut aliases: BTreeSet<String> = w
+            .aliases
+            .iter()
+            .map(|a| super::work::canonical_key(a))
+            .collect();
         if let Some((v, _)) = &before {
             if let Some(old) = &v.aliases {
                 aliases.extend(serde_json::from_str::<Vec<String>>(old).unwrap_or_default());
@@ -384,23 +457,12 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Every tracker's key prefixes, for telling a prefix one tracker owns
-    /// from one two trackers claim.
-    fn prefix_owners(&self) -> Result<HashMap<String, Vec<i64>>, IpcError> {
-        let mut owners: HashMap<String, Vec<i64>> = HashMap::new();
-        for t in self.list_trackers()? {
-            for p in &t.config.key_prefixes {
-                owners.entry(p.to_ascii_uppercase()).or_default().push(t.id);
-            }
-        }
-        Ok(owners)
-    }
-
-    /// Bare `ref_key`s (links with no item) whose prefix belongs to this
-    /// tracker alone and that no item of it carries yet: the keys a sync
-    /// fetches so they can be bound. Newest link first, at most `limit`.
+    /// Bare `ref_key`s (links with no item) this tracker may answer and
+    /// that no item of it carries yet: the keys a sync fetches so they can be
+    /// bound. Newest link first, at most `limit`. See [`tracker_claims`] for
+    /// which tracker may answer which reference.
     pub fn unbound_ref_keys(&self, tracker_id: i64, limit: usize) -> Result<Vec<String>, IpcError> {
-        let owners = self.prefix_owners()?;
+        let trackers = self.list_trackers()?;
         let mut stmt = self.conn.prepare(
             "SELECT ref_key FROM work_links WHERE item_id IS NULL AND ref_key IS NOT NULL \
              GROUP BY ref_key ORDER BY MAX(COALESCE(decided_at, created_at)) DESC",
@@ -410,11 +472,7 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(keys
             .into_iter()
-            .filter(|k| {
-                k.split_once('-')
-                    .and_then(|(p, _)| owners.get(&p.to_ascii_uppercase()))
-                    .is_some_and(|o| o.as_slice() == [tracker_id])
-            })
+            .filter(|k| may_answer(&trackers, tracker_id, k))
             .take(limit)
             .collect())
     }
@@ -423,7 +481,7 @@ impl Store {
     /// module docs). Returns the live sessions whose row changed; each gets
     /// `session:updated`.
     pub fn bind_tracker_refs(&self, tracker_id: i64) -> Result<Vec<i64>, IpcError> {
-        let owners = self.prefix_owners()?;
+        let trackers = self.list_trackers()?;
         let candidates: Vec<(i64, String)> = {
             let mut stmt = self.conn.prepare(
                 "SELECT id, ref_key FROM work_links WHERE item_id IS NULL AND ref_key IS NOT NULL",
@@ -434,13 +492,10 @@ impl Store {
         let mut touched = Vec::new();
         let tx = self.conn.unchecked_transaction()?;
         for (link, key) in candidates {
-            let owned = key
-                .split_once('-')
-                .and_then(|(p, _)| owners.get(&p.to_ascii_uppercase()))
-                .is_some_and(|o| o.as_slice() == [tracker_id]);
-            if !owned {
+            if !may_answer(&trackers, tracker_id, &key) {
                 continue;
             }
+            let key = super::work::canonical_key(&key);
             let item: Option<i64> = self
                 .conn
                 .query_row(
@@ -608,6 +663,23 @@ impl Store {
                  LIMIT 1",
                 rusqlite::params![prefix.to_ascii_uppercase()],
                 |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// The project whose repository is `repo` (`owner/repo`, any case):
+    /// where a GitHub issue's work starts by default.
+    pub fn project_for_repo(&self, repo: &str) -> Result<Option<i64>, IpcError> {
+        let Some((owner, name)) = repo.split_once('/') else {
+            return Ok(None);
+        };
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM projects WHERE LOWER(owner) = LOWER(?1) AND LOWER(repo) = LOWER(?2) \
+                 ORDER BY id LIMIT 1",
+                rusqlite::params![owner, name],
+                |r| r.get(0),
             )
             .optional()?)
     }

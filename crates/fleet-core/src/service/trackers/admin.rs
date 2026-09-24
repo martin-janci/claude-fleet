@@ -25,7 +25,7 @@ pub struct WorkAdminArgs {
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker_id: Option<i64>,
-    /// jira
+    /// jira|github|asana (default: from the URL)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// Display name.
@@ -46,6 +46,12 @@ pub struct WorkAdminArgs {
     /// env:NAME|file:/path
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
+    /// direct|via_host:HOST|via_cli:HOST
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// Provider settings object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Value>,
     /// For remove.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
@@ -66,6 +72,8 @@ impl fmt::Debug for WorkAdminArgs {
                 &self.secret.as_ref().map(|_| crate::logging::REDACTED),
             )
             .field("credential_ref", &self.credential_ref)
+            .field("transport", &self.transport)
+            .field("settings", &self.settings)
             .finish()
     }
 }
@@ -75,13 +83,19 @@ impl WorkAdminArgs {
     pub fn audit_summary(&self) -> String {
         format!(
             "action={} tracker_id={:?} provider={:?} site_url={:?} auth_kind={:?} \
-             credential_ref={:?} secret={}",
+             credential_ref={:?} transport={:?} settings={} secret={}",
             self.action,
             self.tracker_id,
             self.provider,
             self.site_url,
             self.auth_kind,
             self.credential_ref,
+            self.transport,
+            if self.settings.is_some() {
+                "set"
+            } else {
+                "unset"
+            },
             if self.secret.is_some() {
                 "set"
             } else {
@@ -145,12 +159,76 @@ pub struct TestReport {
     pub views: Vec<String>,
 }
 
-/// A site URL, or any ticket URL on the site ("connect by paste").
-pub fn site_from_input(raw: &str) -> Result<String, IpcError> {
-    if let Some((site, _)) = super::jira::parse_ticket_url(raw) {
-        return Ok(site);
+/// The provider a pasted URL names, by its host (M6.6's "paste any ticket
+/// URL"): `*.atlassian.net` Jira Cloud, `github.com` GitHub,
+/// `app.asana.com` Asana.
+pub fn infer_provider(raw: &str) -> Option<&'static str> {
+    let rest = raw.trim().split_once("://")?.1;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()?
+        .rsplit('@')
+        .next()?
+        .to_ascii_lowercase();
+    match host.as_str() {
+        h if h.ends_with(".atlassian.net") => Some("jira"),
+        "github.com" | "www.github.com" => Some("github"),
+        "app.asana.com" => Some("asana"),
+        _ => None,
     }
-    crate::store::normalize_site_url(raw)
+}
+
+/// A site URL, or any ticket URL on the site ("connect by paste").
+pub fn site_from_input(provider: &str, raw: &str) -> Result<String, IpcError> {
+    if provider == "jira" {
+        if let Some((site, _)) = super::jira::parse_ticket_url(raw) {
+            return Ok(site);
+        }
+    }
+    crate::store::normalize_provider_site(provider, raw)
+}
+
+/// The name a new tracker gets when none is given.
+fn default_name(provider: &str, site: &str) -> String {
+    let host_path = site.trim_start_matches("https://");
+    match provider {
+        "jira" => host_path.trim_end_matches(".atlassian.net").to_string(),
+        "github" => host_path
+            .strip_prefix("github.com/")
+            .map(|o| format!("{o} (GitHub)"))
+            .unwrap_or_else(|| "GitHub".into()),
+        "asana" => "Asana".into(),
+        _ => host_path.to_string(),
+    }
+}
+
+/// What a provider may be reached through: GitHub only through `gh` on a
+/// host (fleet never holds a GitHub token); a CLI only where one is known.
+fn check_transport(provider: &str, transport: &str) -> Result<(), IpcError> {
+    let cli = transport.starts_with("via_cli:");
+    match provider {
+        "github" if !cli => Err(IpcError::new(
+            codes::E_INVALID,
+            "GitHub is read through gh on a host with its own login: \
+             pass transport via_cli:<host with gh>",
+        )),
+        "github" => Ok(()),
+        p if cli => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("no trusted CLI is known for {p} trackers; use direct or via_host:<host>"),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// `settings` as a person sent it → validated for `provider`.
+fn parse_settings(
+    provider: &str,
+    v: &serde_json::Value,
+) -> Result<crate::store::TrackerSettings, IpcError> {
+    let s: crate::store::TrackerSettings = serde_json::from_value(v.clone())
+        .map_err(|e| IpcError::new(codes::E_INVALID, format!("settings: {e}")))?;
+    crate::store::validate_tracker_settings(provider, s)
 }
 
 /// The non-network actions. `Test` is [`test_tracker`]; `Remove` is here
@@ -163,30 +241,67 @@ pub fn admin_sync(
     match AdminAction::parse(&args.action)? {
         AdminAction::List => json(&s.list_trackers()?),
         AdminAction::Add => {
-            let site = site_from_input(
-                args.site_url
-                    .as_deref()
-                    .ok_or_else(|| IpcError::new(codes::E_INVALID, "add needs site_url"))?,
-            )?;
-            let provider = args.provider.as_deref().unwrap_or("jira");
-            let default_name = site
-                .trim_start_matches("https://")
-                .trim_end_matches(".atlassian.net")
-                .to_string();
-            let name = args.name.as_deref().unwrap_or(&default_name);
-            let row = s.add_tracker(provider, name, &site)?;
+            let raw = args
+                .site_url
+                .as_deref()
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "add needs site_url"))?;
+            let provider = match args.provider.as_deref() {
+                Some(p) => p,
+                None => infer_provider(raw).unwrap_or("jira"),
+            };
+            let site = site_from_input(provider, raw)?;
+            let transport = args
+                .transport
+                .as_deref()
+                .map(crate::store::validate_tracker_transport)
+                .transpose()?;
+            check_transport(provider, transport.as_deref().unwrap_or("direct"))?;
+            let settings = args
+                .settings
+                .as_ref()
+                .map(|v| parse_settings(provider, v))
+                .transpose()?;
+            let name = args
+                .name
+                .clone()
+                .unwrap_or_else(|| default_name(provider, &site));
+            let mut row = s.add_tracker(provider, &name, &site)?;
+            if let Some(t) = transport {
+                row = s.set_tracker_transport(row.id, &t)?;
+            }
+            if let Some(st) = settings {
+                s.set_tracker_settings(row.id, &st)?;
+                row = s.require_tracker(row.id)?;
+            }
             s.emit_tracker(row.id)?;
             json(&row)
         }
         AdminAction::Update => {
             let id = args.tracker()?;
-            let name = args
-                .name
-                .as_deref()
-                .ok_or_else(|| IpcError::new(codes::E_INVALID, "update needs name"))?;
-            let row = s.rename_tracker(id, name)?;
+            let row = s.require_tracker(id)?;
+            if args.name.is_none() && args.transport.is_none() && args.settings.is_none() {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "update needs name, transport or settings",
+                ));
+            }
+            let settings = args
+                .settings
+                .as_ref()
+                .map(|v| parse_settings(&row.provider, v))
+                .transpose()?;
+            if let Some(n) = args.name.as_deref() {
+                s.rename_tracker(id, n)?;
+            }
+            if let Some(t) = args.transport.as_deref() {
+                check_transport(&row.provider, &crate::store::validate_tracker_transport(t)?)?;
+                s.set_tracker_transport(id, t)?;
+            }
+            if let Some(st) = settings {
+                s.set_tracker_settings(id, &st)?;
+            }
             s.emit_tracker(id)?;
-            json(&row)
+            json(&s.require_tracker(id)?)
         }
         AdminAction::SetCredential => {
             let id = args.tracker()?;

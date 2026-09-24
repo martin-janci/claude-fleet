@@ -723,7 +723,7 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Trackers (Jira): list, add, update, \
+    #[tool(description = "Trackers: list, add, update, \
         set_credential, test, remove. Never returns a secret.")]
     pub(super) async fn work_admin(
         &self,

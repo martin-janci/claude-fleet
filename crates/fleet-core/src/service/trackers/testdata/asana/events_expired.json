@@ -1,0 +1,8 @@
+{
+  "errors": [
+    {
+      "message": "Sync token invalid or too old. If you are attempting to keep resources in sync, you must fetch the full dataset for this query now and use the new sync token for the next sync."
+    }
+  ],
+  "sync": "a1b2c3d4e5f60718293a4b5c6d7e8f90:0"
+}

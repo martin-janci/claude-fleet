@@ -9,8 +9,10 @@
 //! falls through the cache. Nothing in M1/M2 waits on a tracker.
 
 pub mod admin;
+pub mod asana;
 #[cfg(test)]
 pub mod conformance;
+pub mod github;
 pub mod jira;
 pub mod sync;
 pub mod tickets;
@@ -346,6 +348,20 @@ pub fn provider_for(
             cred,
             transport,
         )),
+        "asana" => Box::new(asana::Asana::new(
+            &row.site_url,
+            row.config.clone(),
+            row.settings.clone(),
+            cred,
+            transport,
+        )),
+        // Through `gh` the host's own login is used: never a token.
+        "github" => Box::new(github::GitHub::new(
+            &row.site_url,
+            row.config.clone(),
+            row.settings.clone(),
+            transport,
+        )),
         other => {
             return Err(TrackerError::Refused(format!(
                 "this build has no {other:?} tracker provider"
@@ -436,14 +452,25 @@ impl TrackerNet {
             return Ok(Arc::clone(f));
         }
         let policy = host_policy(row);
+        let ssh = |h: &str| {
+            self.ssh.clone().ok_or_else(|| {
+                TrackerError::Unreachable(format!("this process has no SSH to reach {h} with"))
+            })
+        };
         match TransportKind::parse(&row.transport)? {
             TransportKind::Direct => Ok(Arc::new(DirectTransport::new(policy))),
-            TransportKind::ViaHost(h) | TransportKind::ViaCli(h) => {
-                Err(TrackerError::Refused(match &self.ssh {
-                    None => format!("this process has no SSH to reach {h} with"),
-                    Some(_) => format!("this build cannot reach a tracker through {h} yet"),
-                }))
-            }
+            TransportKind::ViaCli(h) => match row.provider.as_str() {
+                "github" => Ok(Arc::new(crate::net::via_host::GhCliTransport::new(
+                    ssh(&h)?,
+                    h,
+                ))),
+                p => Err(TrackerError::Refused(format!(
+                    "no trusted CLI is known for {p} trackers"
+                ))),
+            },
+            TransportKind::ViaHost(h) => Err(TrackerError::Refused(format!(
+                "this build cannot reach a tracker through {h} yet"
+            ))),
         }
     }
 }
@@ -465,8 +492,117 @@ pub fn default_net() -> TrackerNet {
 
 /// The hosts a tracker's requests may go to: its provider's API only (the
 /// SSRF fence, enforced by every transport before anything is sent).
-pub fn host_policy(_row: &TrackerRow) -> HostPolicy {
-    Arc::new(crate::store::is_allowed_tracker_host)
+pub fn host_policy(row: &TrackerRow) -> HostPolicy {
+    match row.provider.as_str() {
+        "github" => Arc::new(|h: &str| h == crate::net::via_host::GITHUB_API_HOST),
+        "asana" => Arc::new(|h: &str| h == asana::API_HOST),
+        _ => Arc::new(crate::store::is_allowed_tracker_host),
+    }
+}
+
+/// Which call a response answers; decides what a 403 means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallKind {
+    /// Who am I: a 403 here is an auth failure.
+    Identity,
+    /// A view's query: a 403 disables that view only.
+    View,
+    Other,
+}
+
+/// A transport failure → the tracker error it means.
+pub(crate) fn map_transport(e: crate::net::https::TransportError) -> TrackerError {
+    use crate::net::https::TransportError as T;
+    match e {
+        T::Refused(m) => TrackerError::Refused(m),
+        T::Connect(m) => TrackerError::Unreachable(m),
+        T::Timeout => TrackerError::Unreachable("timed out".into()),
+        T::TooLarge(m) | T::Protocol(m) => TrackerError::Invalid(m),
+    }
+}
+
+/// `Retry-After` in seconds, else the seconds until `X-RateLimit-Reset`
+/// (a unix time: GitHub, Linear) when the quota is spent.
+pub(crate) fn retry_after(resp: &crate::net::https::Response) -> Option<u64> {
+    if let Some(s) = resp
+        .header("Retry-After")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        return Some(s);
+    }
+    let spent = resp
+        .header("X-RateLimit-Remaining")
+        .or_else(|| resp.header("X-RateLimit-Requests-Remaining"))
+        .is_some_and(|v| v.trim() == "0");
+    if !spent {
+        return None;
+    }
+    let reset = resp
+        .header("X-RateLimit-Reset")
+        .or_else(|| resp.header("X-RateLimit-Requests-Reset"))
+        .and_then(|v| v.trim().parse::<i64>().ok())?;
+    // Linear sends milliseconds.
+    let reset = if reset > 10_000_000_000 {
+        reset / 1000
+    } else {
+        reset
+    };
+    Some((reset - crate::service::catalog::now_secs()).clamp(1, 3600) as u64)
+}
+
+/// Map a non-2xx answer for the providers after Jira (GitHub, Asana,
+/// Linear, Jira DC): the same table as Jira's, plus a 403 that is really a
+/// spent rate limit.
+pub(crate) fn check_http(
+    resp: &crate::net::https::Response,
+    call: CallKind,
+) -> Result<(), TrackerError> {
+    if resp.is_success() {
+        return Ok(());
+    }
+    let wait = retry_after(resp);
+    Err(match resp.status {
+        401 => TrackerError::Auth("401 Unauthorized".into()),
+        403 | 429 if wait.is_some() => TrackerError::RateLimited {
+            retry_after_secs: wait,
+        },
+        429 => TrackerError::RateLimited {
+            retry_after_secs: None,
+        },
+        403 if call == CallKind::Identity => TrackerError::Auth("403 on the identity call".into()),
+        403 if call == CallKind::View => TrackerError::Forbidden("403 on this view's query".into()),
+        403 => TrackerError::Forbidden("403".into()),
+        404 => TrackerError::NotFound,
+        503 if wait.is_some() => TrackerError::RateLimited {
+            retry_after_secs: wait,
+        },
+        300..=399 => TrackerError::Invalid(format!("{} redirect (not followed)", resp.status)),
+        s => TrackerError::Invalid(format!("HTTP {s}")),
+    })
+}
+
+/// Unix seconds → `YYYY-MM-DDTHH:MM:SSZ` (the inverse of
+/// [`parse_timestamp`] for UTC).
+pub fn format_timestamp(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 /// Most pages one view listing reads in one pass.
@@ -567,6 +703,14 @@ mod tests {
         ] {
             assert_eq!(parse_timestamp(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn timestamps_format_back() {
+        for t in [0, 1_789_892_130, 1_709_208_000, 951_782_400] {
+            assert_eq!(parse_timestamp(&format_timestamp(t)), Some(t));
+        }
+        assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");
     }
 
     #[test]

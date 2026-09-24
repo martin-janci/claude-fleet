@@ -1,0 +1,92 @@
+{
+  "data": {
+    "search": {
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      },
+      "nodes": [
+        {
+          "id": "I_kwDOAcme0003",
+          "number": 7,
+          "title": "Dark mode toggle",
+          "url": "https://github.com/acme/web/issues/7",
+          "state": "CLOSED",
+          "stateReason": "COMPLETED",
+          "updatedAt": "2026-09-19T10:00:00Z",
+          "body": "",
+          "repository": {
+            "nameWithOwner": "acme/web"
+          },
+          "assignees": {
+            "nodes": [
+              {
+                "login": "dana-dev"
+              }
+            ]
+          },
+          "issueType": null,
+          "parent": null,
+          "linkedBranches": {
+            "totalCount": 0
+          },
+          "closedByPullRequestsReferences": {
+            "totalCount": 0
+          }
+        },
+        {
+          "id": "I_kwDOAcme0004",
+          "number": 8,
+          "title": "IE11 support",
+          "url": "https://github.com/acme/web/issues/8",
+          "state": "CLOSED",
+          "stateReason": "NOT_PLANNED",
+          "updatedAt": "2026-09-18T10:00:00Z",
+          "body": "",
+          "repository": {
+            "nameWithOwner": "acme/web"
+          },
+          "assignees": {
+            "nodes": []
+          },
+          "issueType": null,
+          "parent": null,
+          "linkedBranches": {
+            "totalCount": 0
+          },
+          "closedByPullRequestsReferences": {
+            "totalCount": 0
+          }
+        },
+        {
+          "id": "I_kwDOAcme0005",
+          "number": 9,
+          "title": "Dark theme",
+          "url": "https://github.com/acme/web/issues/9",
+          "state": "CLOSED",
+          "stateReason": "DUPLICATE",
+          "updatedAt": "2026-09-18T09:00:00Z",
+          "body": "",
+          "repository": {
+            "nameWithOwner": "acme/web"
+          },
+          "assignees": {
+            "nodes": [
+              {
+                "login": "dana-dev"
+              }
+            ]
+          },
+          "issueType": null,
+          "parent": null,
+          "linkedBranches": {
+            "totalCount": 0
+          },
+          "closedByPullRequestsReferences": {
+            "totalCount": 0
+          }
+        }
+      ]
+    }
+  }
+}

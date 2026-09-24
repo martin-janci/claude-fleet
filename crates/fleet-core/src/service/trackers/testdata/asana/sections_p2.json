@@ -1,0 +1,16 @@
+{
+  "data": [
+    {
+      "gid": "5",
+      "name": "Backlog"
+    },
+    {
+      "gid": "6",
+      "name": "Shipped"
+    },
+    {
+      "gid": "7",
+      "name": "Untitled section"
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "data": {
+    "nodes": [
+      {
+        "id": "I_kwDOAcme0001",
+        "number": 42,
+        "title": "Login fails after token refresh",
+        "url": "https://github.com/Acme/api/issues/42",
+        "state": "OPEN",
+        "stateReason": null,
+        "updatedAt": "2026-09-21T09:30:00Z",
+        "body": "Login fails after the token refresh.\r\n\r\nSteps: \u2026",
+        "repository": {
+          "nameWithOwner": "Acme/api"
+        },
+        "assignees": {
+          "nodes": [
+            {
+              "login": "pat-ops"
+            },
+            {
+              "login": "dana-dev"
+            }
+          ]
+        },
+        "issueType": {
+          "name": "Bug"
+        },
+        "parent": null,
+        "linkedBranches": {
+          "totalCount": 1
+        },
+        "closedByPullRequestsReferences": {
+          "totalCount": 0
+        }
+      },
+      {
+        "id": "I_kwDOAcme0003",
+        "number": 7,
+        "title": "Dark mode toggle",
+        "url": "https://github.com/acme/web/issues/7",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "updatedAt": "2026-09-19T10:00:00Z",
+        "body": "",
+        "repository": {
+          "nameWithOwner": "acme/web"
+        },
+        "assignees": {
+          "nodes": [
+            {
+              "login": "dana-dev"
+            }
+          ]
+        },
+        "issueType": null,
+        "parent": null,
+        "linkedBranches": {
+          "totalCount": 0
+        },
+        "closedByPullRequestsReferences": {
+          "totalCount": 0
+        }
+      },
+      null
+    ]
+  },
+  "errors": [
+    {
+      "type": "NOT_FOUND",
+      "path": [
+        "nodes",
+        2
+      ],
+      "locations": [
+        {
+          "line": 1,
+          "column": 24
+        }
+      ],
+      "message": "Could not resolve to a node with the global id of 'I_kwDOAcme9999'."
+    }
+  ]
+}

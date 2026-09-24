@@ -266,7 +266,9 @@ impl TrackerSync {
                 if let Some(w) = newest {
                     let _ = s.set_tracker_view_watermark(t.id, &v.view_id, w);
                 }
-                if v.view_id.starts_with("filter:") {
+                // Favourite filters and containers (Asana projects) keep
+                // their membership: nothing local can evaluate them.
+                if v.view_id.starts_with("filter:") || v.view_id.starts_with("project:") {
                     let _ = s.set_view_members(t.id, &v.view_id, &ids, full);
                 }
             }
@@ -307,7 +309,7 @@ impl TrackerSync {
                 .collect()
         };
         if !unbound.is_empty() {
-            let refs: Vec<ItemRef> = unbound.iter().cloned().map(ItemRef::Key).collect();
+            let refs: Vec<ItemRef> = unbound.iter().map(|k| ItemRef::parse(k)).collect();
             let fetched = provider.fetch(&refs).await?;
             let mut found = Vec::new();
             for f in fetched {
