@@ -1102,6 +1102,14 @@ pub async fn rename_session(
     // The session now answers to `new_name`, which may be a name fleet killed
     // a moment ago; the reconcile below must be free to insert it.
     record_tmux_created(store, &args.host_alias, &args.new_name);
+    // Carry the row over to the new name BEFORE the reconcile: that pass
+    // keys rows on the tmux name, and left alone it would insert a new row
+    // and reap this one — its id, participant (inbox, address), timeline
+    // and conversations with it.
+    {
+        let s = lock(store)?;
+        s.rename_session_row(&args.host_alias, &args.old_name, &args.new_name, now_unix())?;
+    }
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = lock(store)?;
     // `new_name` is validated verbatim (no padding), so look it up as-is —

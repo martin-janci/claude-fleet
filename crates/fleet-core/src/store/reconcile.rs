@@ -3060,4 +3060,122 @@ mod tests {
         );
         assert!(store.get_session("dev-o-r", "alpha").unwrap().is_none());
     }
+
+    /// The live row under `name`, observed by a pass that started at `at`.
+    fn observed_row(
+        store: &mut Store,
+        bus: &crate::events::RecordingEventBus,
+        name: &'static str,
+        at: i64,
+    ) -> SessionRow {
+        pass_observing(store, bus, "alpha", name, at);
+        store.get_session(name, "alpha").unwrap().expect("row")
+    }
+
+    #[test]
+    fn a_renamed_session_keeps_its_row_participant_and_timeline() {
+        // M0.2: reconcile keys rows on the tmux name, so a rename used to
+        // insert a fresh row under the new name and reap the old one — the
+        // session's id, participant (inbox, address) and timeline with it.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let t = now_unix();
+        let before = observed_row(&mut store, &bus, "dev-old", t - 100);
+        let participant = store.ensure_participant_for_session(before.id).unwrap();
+        store
+            .insert_session_event(before.id, "prompt_sent", Some("hi"))
+            .unwrap();
+
+        let renamed = store
+            .rename_session_row("alpha", "dev-old", "dev-new", t)
+            .unwrap()
+            .expect("the row is carried over");
+        assert_eq!(renamed.id, before.id);
+        assert_eq!(renamed.tmux_name, "dev-new");
+
+        // The rename's own reconcile now sees only the new name.
+        let after = observed_row(&mut store, &bus, "dev-new", t + 1);
+        assert_eq!(after.id, before.id, "same row, not a re-insert");
+        assert_eq!(after.status, "running");
+        assert!(store.get_session("dev-old", "alpha").unwrap().is_none());
+        let p = store
+            .participant_for_session(before.id)
+            .unwrap()
+            .expect("participant still bound");
+        assert_eq!(p.id, participant);
+        let events: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session_id=?1 AND kind='prompt_sent'",
+                [before.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1, "the timeline survives the rename");
+    }
+
+    #[test]
+    fn a_pass_that_listed_tmux_before_the_rename_neither_ghosts_nor_duplicates_it() {
+        // A full pass whose probe started BEFORE the rename still lists the
+        // old name and lacks the new one. It must not ghost the renamed row
+        // (BE-3 via last_reconciled_at) nor insert the old name again (kill
+        // memory).
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let t = now_unix();
+        let before = observed_row(&mut store, &bus, "dev-old", t - 100);
+        store
+            .rename_session_row("alpha", "dev-old", "dev-new", t)
+            .unwrap()
+            .expect("renamed");
+
+        pass_observing(&mut store, &bus, "alpha", "dev-old", t - 50);
+
+        assert!(
+            store.get_session("dev-old", "alpha").unwrap().is_none(),
+            "the stale pass must not resurrect the old name"
+        );
+        let row = store
+            .get_session("dev-new", "alpha")
+            .unwrap()
+            .expect("kept");
+        assert_eq!(row.id, before.id);
+        assert_eq!(row.status, "running", "the stale pass must not ghost it");
+    }
+
+    #[test]
+    fn renaming_onto_a_ghosts_name_replaces_the_ghost() {
+        // tmux only lets a rename take a name no live session holds, so a row
+        // still carrying it is a ghost; it gives way instead of tripping the
+        // (host_alias, tmux_name) unique key.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let t = now_unix();
+        let keep = observed_row(&mut store, &bus, "dev-a", t - 100);
+        let ghost = store
+            .upsert_session("dev-b", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store.mark_session_killed(ghost, t - 50).unwrap();
+
+        let renamed = store
+            .rename_session_row("alpha", "dev-a", "dev-b", t)
+            .unwrap()
+            .expect("renamed");
+        assert_eq!(renamed.id, keep.id);
+        assert_eq!(
+            store.get_session("dev-b", "alpha").unwrap().unwrap().id,
+            keep.id
+        );
+    }
+
+    #[test]
+    fn renaming_a_name_with_no_row_is_a_no_op() {
+        let (store, _bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        assert!(store
+            .rename_session_row("alpha", "nobody", "somebody", now_unix())
+            .unwrap()
+            .is_none());
+        assert!(store.get_session("somebody", "alpha").unwrap().is_none());
+    }
 }
