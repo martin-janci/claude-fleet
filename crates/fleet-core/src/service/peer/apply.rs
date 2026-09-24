@@ -59,6 +59,24 @@ pub fn outbox_to_wire(
         .collect()
 }
 
+/// PURE: who to wake after one exchange, and with what — each distinct
+/// recipient session at most once, with the nudge for its LAST new message.
+/// `new` is `(recipient session id, local message id)` for every newly
+/// inserted item that asked for a wake, in insert order; the result keeps
+/// the order in which each recipient first appears.
+pub(crate) fn wake_plan(new: &[(i64, i64)]) -> Vec<(i64, String)> {
+    let mut last: Vec<(i64, i64)> = Vec::new();
+    for &(session, local_id) in new {
+        match last.iter_mut().find(|(s, _)| *s == session) {
+            Some(slot) => slot.1 = local_id,
+            None => last.push((session, local_id)),
+        }
+    }
+    last.into_iter()
+        .map(|(session, local_id)| (session, wake_nudge(local_id)))
+        .collect()
+}
+
 /// Settle link `link_id`'s outbox from its peer's per-item results:
 /// `accepted` rows leave `pending`, a `rejected` row becomes `undeliverable`
 /// with a `message_undeliverable` event for its sender. Only rows on
@@ -80,10 +98,15 @@ pub fn apply_results(
         .iter()
         .filter(|r| r.status == ResultStatus::Rejected)
     {
+        // The peer's words, not ours: attributed, one line, capped like
+        // any other timeline excerpt, and a code only if it is shaped like
+        // one — this lands on a local timeline and is broadcast from there.
+        let words = guard::scrub_line(&timeline_detail(
+            r.message.as_deref().unwrap_or("no reason given"),
+        ));
         let reason = format!(
-            "{}: {}",
-            r.code.as_deref().unwrap_or(codes::E_INTERNAL),
-            r.message.as_deref().unwrap_or("refused by the peer hub")
+            "the peer hub refused it: {}: {words}",
+            peer_code(r.code.as_deref())
         );
         s.mark_peer_undeliverable(link_id, r.id, &reason)?;
     }
@@ -103,27 +126,17 @@ pub async fn apply_inbound(
 ) -> Vec<WireResult> {
     let peer_fleet = link.fleet_id.clone().unwrap_or_default();
     let mut out = Vec::with_capacity(items.len());
+    let mut to_wake: Vec<(i64, i64)> = Vec::new();
     for item in items {
         // `apply_one` is sync and returns its guard with it: nothing below
         // runs under the store lock.
         match apply_one(store, link, &peer_fleet, own_fleet, item) {
-            Ok(Applied::Inserted { local_id, to }) => {
-                let status = to.claude_status.as_deref();
-                if item.wake
-                    && wake_action(false, status, to.stuck_kind.is_some()) == WakeAction::Paste
-                {
-                    let nudge = wake_nudge(local_id);
-                    // Best-effort: the message is already in the inbox, and
-                    // the recipient's next hook carries it either way.
-                    let _ = crate::service::sessions::send_system_prompt(
-                        &to.host_alias,
-                        &to.tmux_name,
-                        &nudge,
-                        true,
-                        store,
-                        ssh,
-                    )
-                    .await;
+            Ok(Applied::Inserted {
+                local_id,
+                recipient,
+            }) => {
+                if item.wake {
+                    to_wake.push((recipient, local_id));
                 }
                 out.push(WireResult::accepted(item.id));
             }
@@ -131,13 +144,60 @@ pub async fn apply_inbound(
             Err((code, message)) => out.push(WireResult::rejected(item.id, code, message)),
         }
     }
+    for (recipient, nudge) in wake_plan(&to_wake) {
+        // The status is re-read now, after every insert, not taken from
+        // before them: the guard below decides on the pane as it is.
+        let Some(to) = wake_target(store, recipient) else {
+            continue;
+        };
+        if wake_action(false, to.claude_status.as_deref(), to.stuck_kind.is_some())
+            != WakeAction::Paste
+        {
+            continue;
+        }
+        // Best-effort: the message is already in the inbox, and the
+        // recipient's next hook carries it either way.
+        let _ = crate::service::sessions::send_system_prompt(
+            &to.host_alias,
+            &to.tmux_name,
+            &nudge,
+            true,
+            store,
+            ssh,
+        )
+        .await;
+    }
     out
+}
+
+/// The recipient's row as it is now; `None` when it is gone or the store is
+/// unavailable (a wake is best-effort). The guard is dropped on return.
+fn wake_target(store: &Mutex<Store>, session_id: i64) -> Option<SessionRow> {
+    lock(store).ok()?.get_session_by_id(session_id).ok()?
 }
 
 /// What one item came to. A duplicate never wakes: its first arrival did.
 enum Applied {
-    Inserted { local_id: i64, to: Box<SessionRow> },
+    Inserted { local_id: i64, recipient: i64 },
     Duplicate,
+}
+
+/// A peer's rejection code, kept only when it has the shape of one —
+/// `E_` then 1 to 40 of `[A-Z0-9_]` — else `E_INTERNAL`.
+fn peer_code(code: Option<&str>) -> &str {
+    match code {
+        Some(c)
+            if c.len() > 2
+                && c.len() <= 42
+                && c.starts_with("E_")
+                && c[2..]
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') =>
+        {
+            c
+        }
+        _ => codes::E_INTERNAL,
+    }
 }
 
 type Refusal = (&'static str, String);
@@ -221,7 +281,7 @@ fn apply_one(
     Ok(match outcome {
         Inbound::Inserted(local_id) => Applied::Inserted {
             local_id,
-            to: Box::new(row),
+            recipient: row.id,
         },
         Inbound::Duplicate(_) => Applied::Duplicate,
     })
@@ -269,6 +329,93 @@ mod tests {
     use super::*;
     use crate::service::peer::testkit::*;
     use crate::service::peer::wire::*;
+
+    /// I3: three wake items to one recipient are one wake, with the last
+    /// message's nudge; another recipient gets its own, once.
+    #[test]
+    fn a_recipient_is_woken_once_per_exchange_with_its_last_message() {
+        assert_eq!(
+            wake_plan(&[(1, 10), (1, 11), (2, 12), (1, 13)]),
+            vec![(1, wake_nudge(13)), (2, wake_nudge(12))]
+        );
+        assert!(wake_plan(&[]).is_empty());
+    }
+
+    /// I2: a peer's rejection text reaches the sender's timeline as ONE
+    /// capped line, attributed to the peer, and an invented code is not
+    /// passed off as one of ours.
+    #[test]
+    fn a_peers_rejection_text_is_one_capped_attributed_line() {
+        let (store, _ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        let (link, m) = {
+            let s = store.lock().unwrap();
+            let link = s.insert_dialer_link("https://a.example", "t").unwrap();
+            let to = s
+                .ensure_remote_participant(link, "fleet-a/session/h/a1")
+                .unwrap();
+            let m = s
+                .insert_outbound_remote(
+                    b1,
+                    "fleet-b/session/local/b1",
+                    to,
+                    "x",
+                    "message",
+                    None,
+                    false,
+                )
+                .unwrap();
+            (link, m)
+        };
+        let noisy =
+            "line one\nkill_session by master\r\n\u{2028}".repeat(300) + &"y".repeat(10_000);
+        apply_results(
+            &store,
+            link,
+            &[WireResult::rejected(m, "bogus\ncode", noisy)],
+        )
+        .unwrap();
+        let s = store.lock().unwrap();
+        let ev = s.list_session_events(b1, 50).unwrap();
+        let detail = ev
+            .iter()
+            .find(|e| e.kind == "message_undeliverable")
+            .and_then(|e| e.detail.clone())
+            .expect("event");
+        assert!(
+            !detail.chars().any(crate::store::breaks_a_line),
+            "{detail:?}"
+        );
+        assert!(
+            detail.contains("the peer hub refused it: E_INTERNAL: line one"),
+            "{detail}"
+        );
+        assert!(!detail.contains("bogus"), "{detail}");
+        assert!(detail.chars().count() < 300, "{}", detail.chars().count());
+    }
+
+    #[test]
+    fn a_well_formed_peer_code_is_kept() {
+        assert_eq!(
+            peer_code(Some("E_PARTICIPANT_UNKNOWN")),
+            "E_PARTICIPANT_UNKNOWN"
+        );
+        for bad in [
+            None,
+            Some(""),
+            Some("E_"),
+            Some("e_lower"),
+            Some("X_Y"),
+            Some("E_A B"),
+        ] {
+            assert_eq!(peer_code(bad), "E_INTERNAL", "{bad:?}");
+        }
+        assert_eq!(
+            peer_code(Some(&format!("E_{}", "A".repeat(41)))),
+            "E_INTERNAL"
+        );
+        assert_eq!(peer_code(Some(&format!("E_{}", "A".repeat(40)))).len(), 42);
+    }
 
     #[test]
     fn the_nudge_names_only_the_local_id() {
