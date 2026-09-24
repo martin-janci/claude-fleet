@@ -473,21 +473,21 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; tidy (tidy-up candidates); reopened.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; tidy; reopened.
 
 Parameters: `action`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `project_id`, `query`, `session_id`, `tracker_id`, `url`, `view`, `with_brief`
 
 ### `work_admin`
 
-Trackers (Jira): list, add, update, set_credential, test, remove. Never returns a secret.
+Trackers (Jira) and orgs; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `confirm_nonce`, `credential_ref`, `name`, `provider`, `secret`, `site_url`, `tracker_id`, `username`
+Parameters: `action`, `auth_kind`, `auto_tidy`, `color`, `confirm_nonce`, `credential_ref`, `host_alias`, `isolate_sessions`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `site_url`, `tracker_id`, `username`
 
 ### `work_link`
 
 Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty).
 
-Parameters: `action`, `brief`, `confirm_nonce`, `days`, `host_alias`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `confirm_nonce`, `days`, `force_cross_org`, `host_alias`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -539,6 +539,16 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::work_tickets`
 - `commands::trackers::work_lookup`
 - `commands::trackers::start_work`
+- `commands::orgs::add_org`
+- `commands::orgs::update_org`
+- `commands::orgs::remove_org`
+- `commands::orgs::add_org_rule`
+- `commands::orgs::remove_org_rule`
+- `commands::orgs::assign_host_org`
+- `commands::orgs::assign_tracker_org`
+- `commands::orgs::work_scopes`
+- `commands::orgs::list_orgs`
+- `commands::orgs::org_suggestions`
 - `commands::sessions::session_history`
 - `commands::sessions::session_conversations`
 - `commands::sessions::session_conversation`

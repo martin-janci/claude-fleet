@@ -491,11 +491,18 @@ pub fn session_start_context(
     ) {
         return None;
     }
-    let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
-    let current = row.claude_session_id.as_deref()?;
+    let (mut row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
+    let current = row.claude_session_id.clone()?;
+    let current = current.as_str();
     if payload.session_id.as_deref() != Some(current) {
         return None;
     }
+    // The org boundary (work graph M5): the context is read by the Claude
+    // on the row's host, so it carries only work inside that host's scope —
+    // never a ticket of another org a person force-linked here.
+    crate::service::orgs::OrgScope::for_host(&s, &row.host_alias)
+        .ok()?
+        .redact_row(&mut row);
     let w = row.work.as_ref()?;
     let key = w.key.as_deref().unwrap_or(w.title.as_str());
     let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");

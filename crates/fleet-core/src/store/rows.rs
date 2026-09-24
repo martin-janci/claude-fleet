@@ -251,6 +251,12 @@ pub struct SessionRow {
     /// never moves a session into a work group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_suggested: Option<WorkSummary>,
+    /// The session's org (work graph M5): the most specific `org_rules`
+    /// match (path > owner/repo > owner > host rule), else its host's org;
+    /// `None` = unassigned. Computed in SQL (`session_org_sql!`), so listed
+    /// and emitted rows agree. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
 }
 
 impl SessionRow {
@@ -280,7 +286,7 @@ impl SessionRow {
 /// The `sessions` column list every `SessionRow` read shares, in the order
 /// `map_session_row` consumes it. One definition so a new column is added in
 /// exactly two places (here and the mapper) instead of six.
-pub(super) const SESSION_COLUMNS: &str =
+pub(super) const SESSION_COLUMNS: &str = concat!(
     "id, tmux_name, host_alias, project_id, worktree_id, created_at, \
      last_activity_at, status, notes, account_uuid, kind, reviews_session_id, \
      worktree_key, lost_at, \
@@ -302,7 +308,8 @@ pub(super) const SESSION_COLUMNS: &str =
                          'unavailable', json(CASE WHEN i.unavailable_at IS NOT NULL \
                                                   THEN 'true' ELSE 'false' END), \
                          'state', l.state, 'strength', l.strength, 'rule', l.rule, \
-                         'archived_at', l.archived_at) \
+                         'archived_at', l.archived_at, \
+                         'org_id', (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id)) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.is_primary = 1 AND l.state = 'confirmed' \
@@ -327,7 +334,8 @@ pub(super) const SESSION_COLUMNS: &str =
                          'suggestions', (SELECT COUNT(*) FROM work_links s2 \
                                           WHERE s2.participant_id = p.id \
                                             AND s2.ended_at IS NULL \
-                                            AND s2.state = 'suggested')) \
+                                            AND s2.state = 'suggested'), \
+                         'org_id', (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id)) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.state = 'suggested' \
@@ -336,7 +344,10 @@ pub(super) const SESSION_COLUMNS: &str =
        ORDER BY l.preselected DESC, \
                 CASE l.strength WHEN 'strong' THEN 0 ELSE 1 END, \
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
-       LIMIT 1) AS work_suggested";
+       LIMIT 1) AS work_suggested, ",
+    crate::session_org_sql!("sessions"),
+    " AS org_id"
+);
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -425,8 +436,18 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         }),
         work_rejected: decode_tags(row.get(55)?),
         work_suggested: decode_work(row.get(56)?),
+        org_id: row.get(57)?,
     })
     .map(|mut r| {
+        // A link's org is its tracker item's, else the session's (M5).
+        for w in [r.work.as_mut(), r.work_suggested.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            if w.org_id.is_none() {
+                w.org_id = r.org_id;
+            }
+        }
         // The primary's `suggestions` counts what is still to decide, which
         // only the suggestion subselect reads.
         if let (Some(w), Some(sg)) = (r.work.as_mut(), r.work_suggested.as_ref()) {
@@ -630,6 +651,10 @@ pub struct HostRow {
     pub provisioned: bool,
     /// `"ssh"` | `"agent"` (migration 034). See `Store::set_host_transport`.
     pub transport: String,
+    /// The host's org (work graph M5, migration 050): the boundary of its
+    /// per-host token. `None` = no org (the token sees only unassigned work).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
 }
 
 /// The only values `hosts.transport` may hold (migration 034). The single
@@ -640,7 +665,7 @@ pub const HOST_TRANSPORTS: [&str; 2] = ["ssh", "agent"];
 /// Columns every `HostRow` query selects, in [`map_host_row`] order.
 pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
-     last_pinged_at, account_uuid, provisioned, transport";
+     last_pinged_at, account_uuid, provisioned, transport, org_id";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -655,6 +680,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         account_uuid: row.get(7)?,
         provisioned: row.get::<_, i64>(8)? != 0,
         transport: row.get(9)?,
+        org_id: row.get(10)?,
     })
 }
 

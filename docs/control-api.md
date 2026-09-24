@@ -405,6 +405,30 @@ Index by area (names only; see the reference for details):
   `work:tracker_removed` — emitted only when something a reader sees
   changed; a session's `work` carries its item's `status_category`,
   `status_name`, `url` and `unavailable`.
+  Organisations (roadmap M5): `work { action: "scopes" }` lists the scope
+  selector's entries (named orgs, then GitHub owners no org covers, then
+  the unassigned rest, each with `session_count` and `needs_you`), `work
+  { action: "orgs" }` the orgs with their rules, hosts and trackers, and
+  `work { action: "org_suggestions" }` proposed orgs (from owners of live
+  sessions and tracker sites; never applied, empty for a per-host token).
+  `work_admin` adds `list_orgs`, `add_org { name, color?, isolate_sessions? }`,
+  `update_org { org_id, … }`, `remove_org { org_id }` (confirm-gated;
+  refused while a tracker belongs to it, naming it), `add_rule { org_id,
+  owner?, repo?, path_prefix?, host_alias? }`, `remove_rule { rule_id }`,
+  `assign_host` / `unassign_host { host_alias, org_id }` and `assign_tracker
+  { tracker_id, org_id? }` — master only, so a host can never move itself.
+  Rows gain `org_id` (session, host, tracker, link, `work` summaries). For a
+  **per-host token** the host's org is a boundary on everything above: it
+  reads links, tickets, trackers, context and briefs only inside its org or
+  unassigned (a host in no org: unassigned only), an id outside answers as
+  an unknown id, a key outside links as the bare key it typed, and every
+  session row it receives has other orgs' work taken out. Linking,
+  confirming, starting or resuming work of one org on a session of another
+  is `E_FORBIDDEN` for every caller (details `cross_org: true`) unless
+  `force_cross_org: true`. An org with `isolate_sessions` also hides its
+  sessions from other orgs' hosts (lists, `whoami`, `peer_status`,
+  `session_history`, repo reads, messages, `session:*` frames). See
+  [hub.md](hub.md) → *Organisations and isolation*.
   Lifecycle (roadmap M7): `work { action: "tidy" }` returns the tidy-up
   candidates — each with `session_id`, `link_id`, a primary `reason`
   (`done_idle` | `pr_merged_idle` | `not_planned` | `duplicate_worktree` |
@@ -427,8 +451,11 @@ Index by area (names only; see the reference for details):
   (default 7) and `{ action: "never" }` flag the session's primary link (or
   `link_id`); `{ action: "dismiss", item_id }` clears a reopened entry
   (refused to a per-host token). A per-host token sees and applies only its
-  own host's candidates, and reads reopened work only when its newest past
-  session ran there.
+  own host's candidates of its org (a session outside answers as an unknown
+  one), and reads reopened work only when its newest past session ran there
+  and its item is in the token's org. `work_admin { add_org | update_org,
+  auto_tidy: "on" | "off" | "inherit" }` overrides `work.auto_tidy` for one
+  org (master only).
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never

@@ -19,6 +19,7 @@ use crate::service::gc::tidy::{
     self as planner, TidyAction, TidyCandidate, TidyConfig, TidyContext, TidyReason, TidySession,
 };
 use crate::service::gc::{needs_safe_remove, GcExec};
+use crate::service::orgs::OrgScope;
 use crate::service::settings;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -95,6 +96,7 @@ pub fn tidy_config(s: &Store) -> TidyConfig {
         lost_ttl_secs: int(settings::SESSIONS_LOST_TTL_SECS, 14 * 86_400),
         auto: settings::get_bool(s, settings::WORK_AUTO_TIDY),
         auto_reasons: reasons.split(',').filter_map(TidyReason::parse).collect(),
+        org_auto: s.org_auto_tidy_overrides().unwrap_or_default(),
     }
 }
 
@@ -155,17 +157,32 @@ impl Snapshot {
     }
 }
 
-/// `work { action: tidy }`. `host` narrows the candidates to one host (a
-/// per-host token sees only its own).
-pub fn work_tidy(
-    store: &Mutex<Store>,
-    host: Option<&str>,
-    now: i64,
-) -> Result<TidyReport, IpcError> {
+/// A per-host token's view of a session: its own host only, and only a
+/// session of an org it sees (work graph M5). Everyone else sees all.
+fn in_scope(scope: &OrgScope, host_alias: &str, org: Option<i64>) -> bool {
+    scope.host().is_none_or(|h| h == host_alias) && scope.sees_org(org)
+}
+
+/// A per-host token flags only the primary link, and only one of an org it
+/// sees; another org's link reads as one that does not exist.
+fn link_visible(scope: &OrgScope, s: &TidySession, link_id: Option<i64>) -> bool {
+    s.link
+        .as_ref()
+        .is_some_and(|l| link_id.is_none_or(|id| id == l.link_id) && scope.sees_org(l.org_id))
+}
+
+/// `work { action: tidy }`. A per-host token sees only its own host's
+/// candidates, and never another org's.
+pub fn work_tidy(store: &Mutex<Store>, scope: &OrgScope, now: i64) -> Result<TidyReport, IpcError> {
     let snap = Snapshot::take(store)?;
     let mut candidates = snap.plan(now);
-    if let Some(h) = host {
-        candidates.retain(|c| c.host_alias == h);
+    candidates.retain(|c| in_scope(scope, &c.host_alias, c.org_id));
+    // A session of the caller's org can carry another org's ticket (a
+    // forced cross-org link): the session is the caller's, the ticket not.
+    for c in &mut candidates {
+        if !scope.sees_org(c.link_org_id) {
+            c.redact_link();
+        }
     }
     Ok(TidyReport {
         candidates,
@@ -174,6 +191,19 @@ pub fn work_tidy(
         done_days: snap.cfg.done_secs / 86_400,
         idle_hours: snap.cfg.idle_secs / 3600,
     })
+}
+
+/// `work { action: reopened }`. A per-host token reads only work whose
+/// newest past session ran on its host and whose item its org sees.
+pub fn reopened(
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+) -> Result<Vec<crate::store::ReopenedWork>, IpcError> {
+    let mut rows = lock(store)?.reopened_work()?;
+    if let Some(h) = scope.host() {
+        rows.retain(|r| r.last_host.as_deref() == Some(h) && scope.sees_org(r.org_id));
+    }
+    Ok(rows)
 }
 
 /// Record a tidy action on the session's timeline (`gc_tidied`) and in its
@@ -249,26 +279,23 @@ async fn apply_one(
     exec: &dyn GcExec,
     snap: &Snapshot,
     item: &TidyApplyItem,
-    host: Option<&str>,
+    scope: &OrgScope,
     source: &str,
     now: i64,
 ) -> Result<&'static str, IpcError> {
+    // Outside the caller's scope reads exactly as a session that does not
+    // exist (no existence oracle, as M5's fence).
     let s = snap
         .sessions
         .iter()
         .find(|s| s.row.id == item.session_id)
+        .filter(|s| in_scope(scope, &s.row.host_alias, s.row.org_id))
         .ok_or_else(|| {
             IpcError::new(
                 codes::E_NOTFOUND,
                 format!("session {} not found", item.session_id),
             )
         })?;
-    if host.is_some_and(|h| h != s.row.host_alias) {
-        return Err(IpcError::new(
-            codes::E_FORBIDDEN,
-            "the session is on another host than this token's",
-        ));
-    }
     let action = item.action.as_str();
     let destructive = matches!(action, "safe_kill" | "kill" | "archive");
     if destructive {
@@ -287,6 +314,12 @@ async fn apply_one(
             record(store, s, &format!("{source}:archive:archived"));
             lock(store)?.archive_session_work(s.row.id)?;
             Ok("archived")
+        }
+        "snooze" | "never" if !scope.is_all() && !link_visible(scope, s, item.link_id) => {
+            Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {} has no such live work link", s.row.id),
+            ))
         }
         "snooze" => {
             let days = item.days.unwrap_or(SNOOZE_DEFAULT_DAYS);
@@ -318,7 +351,7 @@ pub async fn tidy_apply(
     store: &Mutex<Store>,
     exec: &dyn GcExec,
     items: &[TidyApplyItem],
-    host: Option<&str>,
+    scope: &OrgScope,
     now: i64,
 ) -> Result<TidyApplyReport, IpcError> {
     if items.is_empty() || items.len() > APPLY_MAX_ITEMS {
@@ -330,7 +363,7 @@ pub async fn tidy_apply(
     let snap = Snapshot::take(store)?;
     let mut report = TidyApplyReport::default();
     for item in items {
-        let result = apply_one(store, exec, &snap, item, host, "manual", now).await;
+        let result = apply_one(store, exec, &snap, item, scope, "manual", now).await;
         if let Err(e) = &result {
             tracing::info!(session_id = item.session_id, action = %item.action, error = %e.message, "[tidy] item failed");
             if let Ok(s) = store.lock() {
@@ -359,8 +392,10 @@ pub async fn auto_tidy(
     skip: &HashSet<i64>,
     now: i64,
 ) -> usize {
+    // On globally, or for some org (`orgs.auto_tidy`); the planner decides
+    // per session which applies.
     let auto_on = match store.lock() {
-        Ok(s) => settings::get_bool(&s, settings::WORK_AUTO_TIDY),
+        Ok(s) => tidy_config(&s).auto_anywhere(),
         Err(_) => false,
     };
     if !auto_on {
@@ -390,7 +425,7 @@ pub async fn auto_tidy(
             days: None,
         };
         let source = format!("auto:{}", c.reason.as_str());
-        match apply_one(store, exec, &snap, &item, None, &source, now).await {
+        match apply_one(store, exec, &snap, &item, &OrgScope::All, &source, now).await {
             Ok(_) => acted += 1,
             Err(e) => {
                 tracing::warn!(session_id = c.session_id, error = %e.message, "[tidy] auto-tidy failed");

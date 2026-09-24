@@ -366,6 +366,39 @@ and hook/probe integration via `FakeSsh`.
 company's hosts can read. **Tests:** isolation matrix per caller kind
 (master, client full, client readonly, host A, host B).
 
+**Status (2026-09-24): landed** on `claude/cloud-fleet-work-graph-m5`
+(stacked on M4), per `plans/2026-09-24-work-graph-m5-orgs-and-isolation.md`
+(its *Revisions* list every deviation). Verified with `cargo fmt`, `clippy
+-D warnings` (workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub;
+only the four chmod tests that fail as root on `main` fail), `cargo deny
+check`, `pnpm check` / `pnpm test` and `scripts/hub-e2e.sh` (102/102). An
+independent security review of M5.3 ran before it was pushed; its findings
+are fixed and covered. The manual acceptance on a hub with two orgs is still
+to do.
+
+- **M5.1 + M5.2** (bb9e44a): migration 050 (`orgs`, text-keyed `org_rules`,
+  `hosts.org_id`, `work_links.snap_org_id` + its retirement trigger);
+  `SessionRow.org_id` computed in SQL and held equal to the pure resolver;
+  `org_id` on hosts, trackers, links and `work` summaries; `work { scopes |
+  orgs | org_suggestions }`; `work_admin`'s org actions (Master-only,
+  removals confirm-gated); `fleet-hub org …`; seven LocalOnly and three
+  Routed desktop commands (161).
+- **M5.3** (5515199): `OrgScope` + `Caller::org_scope`, applied in the work
+  service layer; M3's per-host ticket fence kept and composed with the org
+  fence; no existence oracle; the cross-org integrity rule with
+  `force_cross_org`; readers-scoped briefs and SessionStart context; the
+  `call_tool` redaction backstop and per-frame `/events` fencing; D7
+  `isolate_sessions`; the isolation matrix.
+- **M5.4 + M5.5** (74a29c3): the scope selector (⌘⇧O), needs-you across
+  scopes, Settings → Work → Organisations (read-only when paired), colour
+  bars, the cross-org "Link anyway"; one `rowMatches` for the sidebar's
+  two modes, past work and ⌘K.
+- **Not done:** a Today view to scope (M9 does not exist yet); tracker /
+  status / assignee / has-session / archived filters have no chrome of
+  their own yet (the predicate composes them; only scope, host, bg and
+  needs-you are wired to controls); the phone does not show orgs (M8); the
+  manual acceptance.
+
 ### M6: more providers
 
 The order serves the user's real setup. Decision D1 below may reorder it.
@@ -414,7 +447,7 @@ fleet is still to do.
 - **M7.1** (1c9c2e2, the pure planner): `plan_tidy` in `service/gc/tidy.rs` — five
   reasons, ranked secondary reasons, hard-coded protections each with its
   own test, snooze / never, and what auto-tidy may act on.
-- **M7.2** (6932b72, storage and API): migration 050 (`work_links.archived_at` /
+- **M7.2** (6932b72, storage and API): migration 051 after the M5 merge (`work_links.archived_at` /
   `tidy_snoozed_until` / `tidy_never`, `sessions.last_touch_at`,
   `work_items.reopened_at`); archive UI-only and undone by the next prompt
   or attach; reopen as an event (`reopened` journal row); `state` in the PR
@@ -427,8 +460,10 @@ fleet is still to do.
   badge and Resume, Settings → Work → Lifecycle with a dry run.
 - **M7.4**: `docs/concepts.md` → *Lifecycle*, `docs/hub.md` → *Tidy-up and
   auto-tidy*, `docs/control-api.md`.
-- **Not done:** the per-org override (`orgs.auto_tidy`) and org-scoped
-  candidates — M5 had not landed when M7 was finished; `idle_unlinked`
+- **After M5 merged:** migration 051 (M5 took 050), the per-org override
+  `orgs.auto_tidy` (migration 052), and org-scoped candidates / apply / reopened for a
+  per-host token.
+- **Not done:** `idle_unlinked`
   (an unlinked session has no link to archive under); the phone (M8); the
   manual acceptance.
 
@@ -543,3 +578,14 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   budget grew by 639 B (three parameters on `work_link`, two read actions on
   `work`); no new tool, no contract bump. The per-org auto-tidy override
   waits for M5. Deviations are in the M7 plan's *Revisions*.
+- 2026-09-24: M5 landed on `claude/cloud-fleet-work-graph-m5` (orgs, the
+  org boundary for per-host tokens, D7 `isolate_sessions` per org, default
+  off, the scope selector and Organisations settings, one `rowMatches`).
+  Migration 050. The tool budget grew by 714 B (627 for `work_admin`'s org
+  actions, 87 for `force_cross_org`); no new tool, no contract bump. M3's
+  per-host ticket fence was kept and composed with the org fence rather
+  than removed. Deviations are in the M5 plan's *Revisions*.
+- 2026-09-24: M5 merged into M7 (no rebase). M7's migration became 051, plus 052;
+  `orgs.auto_tidy` (on / off / inherit) overrides `work.auto_tidy` per org,
+  and tidy candidates, tidy_apply and reopened work respect the org scope
+  of a per-host token. Details in the M7 plan's *Revisions*.

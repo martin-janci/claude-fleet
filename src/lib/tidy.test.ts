@@ -137,3 +137,14 @@ describe('archived and reopened work', () => {
     expect(newlyReopened(new Set([1]), w).map((x) => x.item_id)).toEqual([2]);
   });
 });
+
+describe('the sidebar scope (work graph M5)', () => {
+  it('keeps only candidates whose session is in the chosen scope', async () => {
+    const { inScope } = await import('./tidy');
+    const rows = [{ id: 1 }, { id: 2 }] as unknown as import('./sessions').SessionRow[];
+    const scopeOf = (r: { id: number }) => (r.id === 1 ? 'org:1' : 'org:2');
+    const cands = [cand(1), cand(2), cand(3)];
+    expect(inScope(cands, rows, 'all', scopeOf).map((c) => c.session_id)).toEqual([1, 2, 3]);
+    expect(inScope(cands, rows, 'org:1', scopeOf).map((c) => c.session_id)).toEqual([1, 3]);
+  });
+});

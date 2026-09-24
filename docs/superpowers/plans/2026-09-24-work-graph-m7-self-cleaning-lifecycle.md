@@ -319,9 +319,38 @@ checks.
       ahead of the inspection; each safe-kill row says "commits & pushes
       first" instead. `selectedIds` / the bulk bar were not reused: the
       sheet's rows are candidates, not sidebar rows.
-  15. **Not done:** the per-org override (`orgs.auto_tidy`) and org-scoped
-      candidates (`tidy { org? }`): M5 had not landed on
-      `claude/cloud-fleet-work-graph-m5` when M7 was finished (only M5.1 /
-      M5.2 were written, its roadmap still open), so the setting is
-      fleet-wide and a per-host token's host fence is the only scope. Also
-      the phone (M8) and the manual acceptance on a real fleet.
+  15. **Not done:** the phone (M8) and the manual acceptance on a real
+      fleet. (The per-org override landed after M5, below.)
+- **2026-09-24, M5 merged into M7** (a merge, no rebase; the user's call:
+  "add the per-org override once M5 lands"). Changes:
+  1. **Migrations renumbered.** M5 took 050 (`050_orgs.sql`), so M7's is
+     `051_work_lifecycle.sql` (same content, same guard), and the org column
+     is its own `052_org_auto_tidy.sql` with its own guard: a database
+     that already has 051's columns but an `orgs` table made later (M5's
+     own "existing rows" test rebuilds it) still gets the column.
+  2. **Per-org override.** `orgs.auto_tidy` (NULL inherit, 0 off, 1 on),
+     set by `work_admin { add_org | update_org, auto_tidy: on | off |
+     inherit }` (master only), `fleet-hub org set <id> --auto-tidy …`, and
+     the Organisations settings' select (read-only when paired). The
+     planner decides per session (`TidyConfig::auto_for(row.org_id)`); the
+     sweep runs when auto-tidy is on globally or for any org. Reasons and
+     thresholds stay fleet-wide. `BUDGET_BYTES` 69,859 (measured 69,759:
+     M5's 69,099 plus M7's 639 plus the `auto_tidy` parameter).
+  3. **Org scope.** `work { tidy }`, `work_link { tidy_apply }` and
+     `work { reopened }` run under M5's `OrgScope`: a per-host token sees
+     and applies only its own host's candidates of an org it sees (a
+     session outside reads as `session N not found`, per item); a
+     candidate of its own session linked to another org's ticket loses its
+     key, item status and link id; snooze / never cannot reach another
+     org's link (through `tidy_apply` or `work_link`); reopened work needs
+     its newest past session on the token's host and its item in the
+     token's org. The eight actions have isolation-matrix rows (M5's rule),
+     and `WORK_ACTIONS` / `WORK_LINK_ACTIONS` / `ROUTED_WORK_COMMANDS` list
+     them. `SessionRow.work` carries both `org_id` and `archived_at`.
+  4. **UI.** The Tidy-up pill and sheet follow the sidebar's scope
+     selector (a candidate shows when its session is in the chosen scope);
+     169 commands in the verdict table.
+  Verified again: `cargo fmt`, `clippy -D warnings` (workspace), `cargo
+  test` (fleet-core, claude-fleet, fleet-hub; only the four root chmod
+  tests fail), `pnpm check` / `pnpm test` (2779), `scripts/hub-e2e.sh`
+  (102/102).

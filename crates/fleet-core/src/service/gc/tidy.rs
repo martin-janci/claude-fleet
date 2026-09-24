@@ -139,6 +139,22 @@ pub struct TidyConfig {
     pub auto: bool,
     /// `work.auto_tidy_reasons`: the reasons auto-tidy may act on.
     pub auto_reasons: Vec<TidyReason>,
+    /// Per-org overrides of [`Self::auto`] (`orgs.auto_tidy`, work graph M5):
+    /// a session of an org listed here follows its org, the rest `auto`.
+    pub org_auto: HashMap<i64, bool>,
+}
+
+impl TidyConfig {
+    /// Whether auto-tidy is on for a session of `org`.
+    pub fn auto_for(&self, org: Option<i64>) -> bool {
+        org.and_then(|o| self.org_auto.get(&o).copied())
+            .unwrap_or(self.auto)
+    }
+
+    /// Whether auto-tidy is on anywhere (globally or for some org).
+    pub fn auto_anywhere(&self) -> bool {
+        self.auto || self.org_auto.values().any(|on| *on)
+    }
 }
 
 impl Default for TidyConfig {
@@ -149,6 +165,7 @@ impl Default for TidyConfig {
             lost_ttl_secs: 14 * 86_400,
             auto: false,
             auto_reasons: vec![TidyReason::DoneIdle, TidyReason::PrMergedIdle],
+            org_auto: HashMap::new(),
         }
     }
 }
@@ -168,6 +185,8 @@ pub struct TidyLink {
     pub archived_at: Option<i64>,
     pub snoozed_until: Option<i64>,
     pub never: bool,
+    /// The linked item's org (its tracker's, work graph M5).
+    pub org_id: Option<i64>,
 }
 
 /// One session and everything the planner reads about it.
@@ -209,6 +228,9 @@ pub struct TidyCandidate {
     pub tmux_name: String,
     #[serde(default)]
     pub kind: String,
+    /// The session's org (work graph M5); `None` = unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
     pub reason: TidyReason,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secondary: Vec<TidyReason>,
@@ -237,6 +259,19 @@ pub struct TidyCandidate {
     /// Auto-tidy (when on) would act on it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto: bool,
+    /// The linked item's org, for scoping the link's details (never sent).
+    #[serde(skip)]
+    pub link_org_id: Option<i64>,
+}
+
+impl TidyCandidate {
+    /// Drop what names the linked work (a per-host token outside the link's
+    /// org): the key, the item's status and the link itself.
+    pub fn redact_link(&mut self) {
+        self.key = None;
+        self.item_status = None;
+        self.link_id = None;
+    }
 }
 
 /// Why a session is never a candidate, or `None`. Hard-coded: no setting
@@ -414,7 +449,7 @@ pub fn plan_tidy(
         if action == TidyAction::Archive && s.link.is_none() {
             continue;
         }
-        let auto = cfg.auto
+        let auto = cfg.auto_for(r.org_id)
             && matches!(action, TidyAction::SafeKill | TidyAction::Archive)
             && cfg.auto_reasons.contains(&reason);
         out.push(TidyCandidate {
@@ -423,6 +458,7 @@ pub fn plan_tidy(
             host_alias: r.host_alias.clone(),
             tmux_name: r.tmux_name.clone(),
             kind: r.kind.clone(),
+            org_id: r.org_id,
             reason,
             secondary: reasons[1..].iter().map(|(r, _)| *r).collect(),
             action,
@@ -439,6 +475,7 @@ pub fn plan_tidy(
             expires_at,
             archived: s.link.as_ref().is_some_and(|l| l.archived_at.is_some()),
             auto,
+            link_org_id: s.link.as_ref().and_then(|l| l.org_id),
         });
     }
     out.sort_by_key(|c| (c.reason.rank(), c.session_id));

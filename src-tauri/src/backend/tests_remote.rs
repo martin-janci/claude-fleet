@@ -431,6 +431,7 @@ fn sample_session_row() -> SessionRow {
         work: None,
         work_rejected: vec![],
         work_suggested: None,
+        org_id: None,
     }
 }
 

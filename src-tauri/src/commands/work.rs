@@ -31,6 +31,10 @@ pub struct LinkSessionWorkArgs {
     pub key: Option<String>,
     #[serde(default)]
     pub item_id: Option<i64>,
+    /// Link work of another org anyway (work graph M5): a person saw the
+    /// refusal and meant it.
+    #[serde(default)]
+    pub force_cross_org: bool,
 }
 
 /// Say a session does NOT work on a key or item (sticky) — or, with
@@ -51,6 +55,9 @@ pub struct RejectSessionWorkArgs {
 pub struct ConfirmSessionWorkArgs {
     pub session_id: i64,
     pub link_id: i64,
+    /// Confirm a suggestion of another org anyway (work graph M5).
+    #[serde(default)]
+    pub force_cross_org: bool,
 }
 
 /// Trust (or stop trusting) branch keys in a project (rule R3).
@@ -92,6 +99,9 @@ pub struct ResumeWorkArgs {
     /// The brief as the person edited it in the preview.
     #[serde(default)]
     pub brief: Option<String>,
+    /// Resume another org's work here anyway (work graph M5).
+    #[serde(default)]
+    pub force_cross_org: bool,
 }
 
 /// The work keys a purge of `project_id` on `host_aliases` strands.
@@ -308,7 +318,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_tidy", &args).await,
-            None => work::tidy::work_tidy(store, None, now()),
+            None => work::tidy::work_tidy(store, &fleet_core::service::orgs::OrgScope::All, now()),
         }
     }
 
@@ -342,7 +352,7 @@ pub(crate) mod routed {
         let args = lifecycle("archive", args.session_id);
         match backend.hub() {
             Some(hub) => hub.route("archive_session_work", &args).await,
-            None => work::work_link(&args, store),
+            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -354,7 +364,7 @@ pub(crate) mod routed {
         let args = lifecycle("unarchive", args.session_id);
         match backend.hub() {
             Some(hub) => hub.route("unarchive_session_work", &args).await,
-            None => work::work_link(&args, store),
+            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -370,7 +380,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("snooze_tidy", &args).await,
-            None => work::work_link(&args, store),
+            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -385,7 +395,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("never_tidy", &args).await,
-            None => work::work_link(&args, store),
+            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -411,7 +421,7 @@ pub(crate) mod routed {
                     store,
                     &exec,
                     wire.items.as_deref().unwrap_or_default(),
-                    None,
+                    &fleet_core::service::orgs::OrgScope::All,
                     now(),
                 )
                 .await
@@ -442,7 +452,7 @@ pub(crate) mod routed {
     ) -> Result<Vec<WorkLinkRow>, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("session_work_links", &args).await,
-            None => work::work(&args, store),
+            None => work::work(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -458,11 +468,12 @@ pub(crate) mod routed {
             item_id: args.item_id,
             link_id: None,
             source: Some("manual".into()),
+            force_cross_org: args.force_cross_org.then_some(true),
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("link_session_work", &args).await,
-            None => work::work_link(&args, store),
+            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -482,7 +493,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("reject_session_work", &args).await,
-            None => work::work_link(&args, store),
+            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -495,11 +506,12 @@ pub(crate) mod routed {
             session_id: Some(args.session_id),
             action: "confirm".into(),
             link_id: Some(args.link_id),
+            force_cross_org: args.force_cross_org.then_some(true),
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("confirm_session_work", &args).await,
-            None => work::work_link(&args, store),
+            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -536,7 +548,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("unlink_session_work", &args).await,
-            None => work::work_link(&args, store),
+            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -556,7 +568,10 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_resume_plan", &args).await,
-            None => work::work_resume_plan(&args, store, ssh).await,
+            None => {
+                work::work_resume_plan(&args, store, ssh, &fleet_core::service::orgs::OrgScope::All)
+                    .await
+            }
         }
     }
 
@@ -574,11 +589,21 @@ pub(crate) mod routed {
             mode: Some(args.mode),
             host_alias: args.host_alias,
             brief: args.brief,
+            force_cross_org: args.force_cross_org.then_some(true),
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("resume_work", &args).await,
-            None => work::work_resume(&args, store, ssh, reg).await,
+            None => {
+                work::work_resume(
+                    &args,
+                    store,
+                    ssh,
+                    reg,
+                    &fleet_core::service::orgs::OrgScope::All,
+                )
+                .await
+            }
         }
     }
 
@@ -595,7 +620,9 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_purge_impact", &args).await,
-            None => work::work_purge_impact(&args, store),
+            None => {
+                work::work_purge_impact(&args, store, &fleet_core::service::orgs::OrgScope::All)
+            }
         }
     }
 }

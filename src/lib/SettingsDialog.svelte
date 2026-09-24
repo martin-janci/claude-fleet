@@ -1131,6 +1131,7 @@
         Off, Tidy up only suggests. On, the sweep safe-kills finished sessions without asking:
         Claude is asked to commit and push first, and a session that is working, waiting on you,
         linked to in-progress work or used in the last hour is never touched.
+        An organisation can turn it on or off for its own sessions (Organisations).
       </p>
       <div class="mcp-field" data-testid="work-auto-tidy-reasons">
         <span class="lbl">auto-tidy reasons</span>

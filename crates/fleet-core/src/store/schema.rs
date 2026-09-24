@@ -154,12 +154,34 @@ fn work_links_has_evidence(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 050: `work_links` already has its
+/// `already_applied` guard of migration 050 (work graph M5): its last ADD
+/// COLUMN (`work_links.snap_org_id`) present means the whole migration is.
+fn work_links_has_snap_org(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'snap_org_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 051: `work_links` already has its
 /// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
 fn work_links_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'archived_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 052: `orgs` already has its
+/// `auto_tidy` column.
+fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'auto_tidy'",
         [],
         |r| r.get(0),
     )?;
@@ -457,13 +479,27 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/049_work_detection.sql"),
         already_applied: Some(work_links_has_evidence),
     },
+    // Work graph M5: `orgs`, `org_rules`, `hosts.org_id`,
+    // `work_links.snap_org_id` and its retirement trigger — ADD COLUMNs, so
+    // the same guard.
+    Migration {
+        version: 50,
+        sql: include_str!("../../migrations/050_orgs.sql"),
+        already_applied: Some(work_links_has_snap_org),
+    },
     // Work graph M7: archive / snooze / never on `work_links`, the last
     // touch on `sessions`, `work_items.reopened_at` — ADD COLUMNs, so the
     // same guard.
     Migration {
-        version: 50,
-        sql: include_str!("../../migrations/050_work_lifecycle.sql"),
+        version: 51,
+        sql: include_str!("../../migrations/051_work_lifecycle.sql"),
         already_applied: Some(work_links_has_archived_at),
+    },
+    // Work graph M7 on M5: `orgs.auto_tidy` — one ADD COLUMN, its own guard.
+    Migration {
+        version: 52,
+        sql: include_str!("../../migrations/052_org_auto_tidy.sql"),
+        already_applied: Some(orgs_has_auto_tidy),
     },
 ];
 
@@ -2045,7 +2081,9 @@ mod tests {
     #[test]
     fn migration_043_backfills_existing_sessions() {
         let old = store_at_version(42);
-        old.upsert_host("h").unwrap();
+        old.conn
+            .execute("INSERT INTO hosts (alias) VALUES ('h')", [])
+            .unwrap();
         let sid = raw_session(&old, "sess");
 
         old.migrate().expect("043 backfill");
@@ -2114,7 +2152,9 @@ mod tests {
     #[test]
     fn migration_045_gives_every_session_a_participant() {
         let old = store_at_version(44);
-        old.upsert_host("h").unwrap();
+        old.conn
+            .execute("INSERT INTO hosts (alias) VALUES ('h')", [])
+            .unwrap();
         let quiet = raw_session(&old, "quiet");
         let count = |s: &Store, sid: i64| -> i64 {
             s.conn
@@ -2224,13 +2264,13 @@ mod tests {
         assert_eq!(branch.as_deref(), Some("abc-2-x"));
     }
 
-    /// Migration 050 (work graph M7): the lifecycle columns land on a
+    /// Migration 051 (work graph M7): the lifecycle columns land on a
     /// database with a live link and a done item, nothing is archived,
     /// snoozed or reopened by the migration itself, and a re-run (the guard)
     /// keeps what was written since.
     #[test]
-    fn migration_050_adds_lifecycle_columns_and_reruns_safely() {
-        let old = store_at_version(49);
+    fn migration_051_adds_lifecycle_columns_and_reruns_safely() {
+        let old = store_at_version(50);
         old.conn
             .execute_batch(
                 "INSERT INTO hosts (alias) VALUES ('h'); \
@@ -2246,7 +2286,7 @@ mod tests {
             .conn
             .query_row("SELECT id FROM sessions", [], |r| r.get(0))
             .unwrap();
-        old.migrate().expect("050 on an existing DB");
+        old.migrate().expect("051 on an existing DB");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let (archived, snoozed, never): (Option<i64>, Option<i64>, i64) = old
             .conn
@@ -2265,9 +2305,9 @@ mod tests {
             )
             .unwrap();
         old.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 50;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 51;")
             .unwrap();
-        old.migrate().expect("re-running 050 is safe");
+        old.migrate().expect("re-running 051 is safe");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let row = old.get_session_by_id(sid).unwrap().unwrap();
         assert_eq!(row.work.unwrap().archived_at, Some(7));
@@ -2276,5 +2316,14 @@ mod tests {
             .query_row("SELECT reopened_at FROM work_items", [], |r| r.get(0))
             .unwrap();
         assert_eq!(reopened, None);
+        // 052: an org's override, NULL (inherit) on existing orgs.
+        old.conn
+            .execute_batch(
+                "INSERT INTO orgs (name, created_at) VALUES ('A', 1); \
+                 DELETE FROM schema_version WHERE version >= 52;",
+            )
+            .unwrap();
+        old.migrate().expect("re-running 052 is safe");
+        assert_eq!(old.list_orgs().unwrap()[0].auto_tidy, None);
     }
 }

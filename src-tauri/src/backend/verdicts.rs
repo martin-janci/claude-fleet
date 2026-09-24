@@ -87,6 +87,12 @@ pub fn verdict(command: &str) -> Option<&'static Verdict> {
 }
 
 /// The twenty Assets commands that all refuse for the same reason.
+/// Organisations (work graph M5.2): the hub's `work_admin` is master-only.
+const ORGS_ARE_ADMIN: &str = "organisations, their rules and which org a host or tracker belongs \
+     to are the hosts' security boundary and fleet administration: the hub's work_admin is \
+     master-only, and a paired client is never the fleet's administrator; configure them on the \
+     hub with `fleet-hub org add|rule add|assign-host|assign-tracker`";
+
 /// Trackers (work graph M3.1): the hub's `work_admin` is master-only.
 const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet administration: the \
      hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
@@ -324,6 +330,54 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("work_tickets", Verdict::Routed { tool: "work" }),
     ("work_lookup", Verdict::Routed { tool: "work" }),
     ("start_work", Verdict::Routed { tool: "work_link" }),
+    // Work graph M5: orgs are the per-host tokens' security boundary, so
+    // changing them is fleet administration (the hub's `work_admin`,
+    // master-only); reading them routes like every other work read.
+    (
+        "add_org",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "update_org",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "remove_org",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "add_org_rule",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "remove_org_rule",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "assign_host_org",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "assign_tracker_org",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    ("work_scopes", Verdict::Routed { tool: "work" }),
+    ("list_orgs", Verdict::Routed { tool: "work" }),
+    ("org_suggestions", Verdict::Routed { tool: "work" }),
     (
         "session_conversation",
         Verdict::Routed {

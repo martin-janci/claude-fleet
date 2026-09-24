@@ -134,6 +134,9 @@ export interface SessionRow {
   /** The session's top link SUGGESTION (work graph M4): a guess nobody has
    *  decided. Never a work group — only `work` groups a session. */
   work_suggested?: SessionWork | null;
+  /** The session's org (work graph M5): the most specific org rule, else
+   *  its host's org. Absent = unassigned (or a hub older than M5). */
+  org_id?: number | null;
 }
 
 /** `SessionRow.work`: the primary link's summary. `key` is the item's key or
@@ -163,6 +166,8 @@ export interface SessionWork {
   preselected?: boolean;
   /** Live suggestions still to decide. */
   suggestions?: number;
+  /** The link's org (work graph M5): its tracker's, else the session's. */
+  org_id?: number | null;
   /** Work graph M7: archived from the UI at this unix second — the session
    *  collapses into its group's Done while tmux keeps running. */
   archived_at?: number | null;

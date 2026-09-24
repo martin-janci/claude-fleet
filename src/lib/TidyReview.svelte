@@ -35,11 +35,18 @@
   import { push, pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { sessions } from './sessions';
+  import { effectiveScope, scopeOf } from './orgs';
+  import { inScope } from './tidy';
 
   /** How often the candidates are re-read (they change on the scale of hours). */
   const REFRESH_MS = 60_000;
 
-  const candidates = $derived($tidyReport.candidates);
+  // The sidebar's scope (work graph M5) narrows the view, like every other
+  // list: a candidate shows when its session is in the chosen scope.
+  const candidates = $derived(
+    inScope($tidyReport.candidates, $sessions, $effectiveScope, $scopeOf),
+  );
   const groups = $derived(groupByReason(candidates));
   /** Sheet order, flattened: what j/k walk. */
   const ordered = $derived(groups.flatMap((g) => g.items));

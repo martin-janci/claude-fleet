@@ -33,6 +33,15 @@ from a ticket in one step. Trackers are polled, read-only, and never gate
 anything. See [control-api.md](control-api.md) (`work`, `work_link`,
 `work_admin`) and [hub.md](hub.md) → *Trackers*.
 
+**Organisations** are optional. A session belongs to at most one: the most
+specific text rule (path, `owner/repo`, owner, host) else its host's org; a
+ticket belongs to its tracker's. For people an org is a view — the
+sidebar's scope selector, shown only when there are two or more scopes
+(named orgs, or GitHub owners when none are named). For the Claude on a host
+it is a boundary: a host placed in an org reads only that org's work and
+unassigned work, and `isolate_sessions` can fence the sessions themselves.
+See [hub.md](hub.md) → *Organisations and isolation*.
+
 ## Lifecycle
 
 Fleet keeps the sidebar about current work without destroying anything

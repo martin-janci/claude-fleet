@@ -107,7 +107,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 159
+  verdict is written down once, in `backend/verdicts.rs`, for all 169
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -188,15 +188,26 @@ current, rejections are final), `detect.rs` wiring the prompt / Stop / PR
 probe / sync triggers, migration 049, `SessionRow.work_suggested` (a guess
 never groups a session), and the chip / popover / batch review UI. The
 SessionStart context (M4.5) is built but OFF behind
-`work.session_start_context` (decision D5); M4.6 is not done. Work graph
-M7 (self-cleaning lifecycle) is landed: the pure planner
-`service/gc/tidy.rs` (reasons, hard-coded protections), migration 050
+`work.session_start_context` (decision D5); M4.6 is not done.
+Work graph M5 (organisations) is landed: migration 050 (`orgs`, text-keyed
+`org_rules`, `hosts.org_id`, `work_links.snap_org_id`), `SessionRow.org_id`
+(SQL, `session_org_sql!`, held equal to `store::org_of_session`), and the
+org BOUNDARY for per-host tokens — `service::orgs::OrgScope`, made only by
+`Caller::org_scope`, filters every work read in the service layer, and
+`call_tool` redacts session rows' work in everything a host receives. M3's
+per-host ticket fence is kept (composed with the org). Cross-org links need
+`force_cross_org` for every caller; `isolate_sessions` (D7) is per org, off.
+Any new `work` / `work_link` / `work_admin` action needs a row in the
+isolation matrix (`mcp/tools/tests_isolation.rs`), which fails otherwise.
+Work graph M7 (self-cleaning lifecycle) is landed: the pure planner
+`service/gc/tidy.rs` (reasons, hard-coded protections), migrations 051
 (UI-only archive, snooze / never per link, `sessions.last_touch_at`,
-`work_items.reopened_at`), `work { tidy | reopened }` and `work_link {
-archive | unarchive | snooze | never | dismiss | tidy_apply }`, and
-auto-tidy in the GC sweep behind `work.auto_tidy` (OFF; safe kill only).
-Tidy-up suggests; it never kills a dirty tree except through safe kill. The
-per-org override waits for M5.
+`work_items.reopened_at`) and 052 (`orgs.auto_tidy`), `work { tidy | reopened }` and
+`work_link { archive | unarchive | snooze | never | dismiss | tidy_apply }`,
+and auto-tidy in the GC sweep behind `work.auto_tidy` (OFF; safe kill only),
+overridable per org. Tidy-up suggests; it never kills a dirty tree except
+through safe kill, and a per-host token sees only its host's and org's
+candidates.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

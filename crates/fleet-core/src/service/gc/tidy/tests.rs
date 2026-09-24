@@ -411,3 +411,33 @@ fn reasons_round_trip_and_unknown_values_read() {
     let action: TidyAction = serde_json::from_str("\"hibernate\"").unwrap();
     assert_eq!(action, TidyAction::Unknown);
 }
+
+#[test]
+fn an_org_override_decides_auto_tidy_for_its_sessions() {
+    let org = |id: i64, org: Option<i64>| {
+        let mut s = done_session(id);
+        s.row.org_id = org;
+        s
+    };
+    let sessions = [org(1, Some(7)), org(2, Some(8)), org(3, None)];
+    let auto_ids = |cfg: &TidyConfig| -> Vec<i64> {
+        auto_selection(&run(&sessions, cfg))
+            .iter()
+            .map(|c| c.session_id)
+            .collect()
+    };
+    let off_but_7 = TidyConfig {
+        org_auto: HashMap::from([(7, true)]),
+        ..cfg()
+    };
+    assert_eq!(auto_ids(&off_but_7), vec![1]);
+    assert!(off_but_7.auto_anywhere());
+    let on_but_8 = TidyConfig {
+        auto: true,
+        org_auto: HashMap::from([(8, false)]),
+        ..cfg()
+    };
+    assert_eq!(auto_ids(&on_but_8), vec![1, 3]);
+    assert!(!cfg().auto_anywhere());
+    assert_eq!(run(&sessions, &cfg())[0].org_id, Some(7));
+}

@@ -9,6 +9,7 @@
 import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
+import { ALL_SCOPES } from './orgs';
 
 /** `service::gc::tidy::TidyReason` — tolerant of values a newer hub adds. */
 export type TidyReason =
@@ -285,4 +286,20 @@ export function reopenedBadge(w: ReopenedWork): string {
  *  allowed"). Safe kill or archive only, never a plain kill. */
 export function autoTidyPreview(cands: TidyCandidate[], reasons: ReadonlySet<string>): TidyCandidate[] {
   return cands.filter((c) => (c.action === 'safe_kill' || c.action === 'archive') && reasons.has(c.reason));
+}
+
+/** Candidates whose session is in `scope` (`all` keeps every one; a
+ *  candidate whose row is not loaded is kept). */
+export function inScope(
+  cands: TidyCandidate[],
+  rows: readonly SessionRow[],
+  scope: string,
+  scopeOf: (s: SessionRow) => string,
+): TidyCandidate[] {
+  if (scope === ALL_SCOPES) return cands;
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return cands.filter((c) => {
+    const r = byId.get(c.session_id);
+    return !r || scopeOf(r) === scope;
+  });
 }

@@ -34,6 +34,9 @@ pub struct ReopenedWork {
     /// The host of the newest past session, for the preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_host: Option<String>,
+    /// The item's org: its tracker's (work graph M5); `None` = unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
 }
 
 /// `sessions` columns only the tidy planner reads: the last touch, the PR
@@ -50,7 +53,8 @@ impl Store {
             let mut stmt = self.conn.prepare(
                 "SELECT p.session_id, l.id, COALESCE(i.key, l.ref_key), i.status_category, \
                         i.status_name, i.resolution, i.status_changed_at, l.archived_at, \
-                        l.tidy_snoozed_until, l.tidy_never \
+                        l.tidy_snoozed_until, l.tidy_never, \
+                        (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id) \
                  FROM work_links l \
                  JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
                  LEFT JOIN work_items i ON i.id = l.item_id \
@@ -70,6 +74,7 @@ impl Store {
                         archived_at: r.get(7)?,
                         snoozed_until: r.get(8)?,
                         never: r.get::<_, i64>(9)? != 0,
+                        org_id: r.get(10)?,
                     },
                 ))
             })?;
@@ -386,7 +391,8 @@ impl Store {
                        AND l.ended_at IS NULL AND l.state = 'confirmed') AS live, \
                     (SELECT l.snap_host FROM work_links l WHERE l.item_id = i.id \
                        AND l.ended_at IS NOT NULL AND l.state = 'confirmed' \
-                     ORDER BY l.ended_at DESC, l.id DESC LIMIT 1) \
+                     ORDER BY l.ended_at DESC, l.id DESC LIMIT 1), \
+                    (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id) \
              FROM work_items i \
              WHERE i.reopened_at IS NOT NULL AND i.status_category <> 'done' \
                AND NOT EXISTS (SELECT 1 FROM work_links l WHERE l.item_id = i.id \
@@ -406,6 +412,7 @@ impl Store {
                 past_sessions: r.get::<_, i64>(6)?.max(0) as u32,
                 live_sessions: r.get::<_, i64>(7)?.max(0) as u32,
                 last_host: r.get(8)?,
+                org_id: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

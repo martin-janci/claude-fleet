@@ -256,3 +256,132 @@ M5.4 (`/security-review`) before they are pushed.
 | D7 (new) | Isolate sessions (list, message, dispatch) across orgs? | Off per org; the user turns it on per org |
 | new | May a host with no org see org data? | No, only unassigned |
 | new | Cross-org link from the desktop? | Refused unless `force_cross_org` (data integrity) |
+
+## Revisions
+
+- **2026-09-24, M5 landed** on `claude/cloud-fleet-work-graph-m5` (stacked on
+  M4): M5.1 + M5.2 (bb9e44a), M5.3 (5515199), M5.4 + M5.5 (74a29c3), M5.6
+  (docs). Verified with `cargo fmt`, `clippy -D warnings` (workspace), `cargo
+  test` (fleet-core, claude-fleet, fleet-hub; only the four chmod tests that
+  fail as root on `main` fail), `cargo deny check`, `pnpm check` / `pnpm
+  test`, and `scripts/hub-e2e.sh` (102/102). Deviations from the tasks
+  above, and why:
+  1. **M3's interim fence is kept, not removed** (M5.3 said "removed in the
+     same PR"). The org scope alone is WIDER than the per-host fence: every
+     host of org A would read every ticket any A host works on. The fence
+     is therefore composed with the org one — a per-host token reads an
+     item only when it is linked on its own host AND inside its org or
+     unassigned — and a test (`a_per_host_token_still_cannot_read_another_
+     hosts_tickets_in_its_org`) pins it. The same holds for past links
+     (only its own host's) and for context / resume plans (some of the work
+     ran on its host). Relaxing tickets to org-wide reads is an open
+     decision below.
+  2. **The scope type.** `OrgScope::{All, Host { alias, org, isolated }}`
+     rather than `Scope::{All, Org(Option<id>)}`: the host fence and D7 need
+     the alias and the isolating orgs. It lives in `service::orgs` (the
+     service layer filters with it; Tauri commands pass `All`), and
+     `Caller::org_scope` is the one place a caller becomes one.
+  3. **Two enforcement layers, one decision.** The service layer filters
+     what it reads (links, items, trackers, journal) with the scope's
+     predicates; `call_tool` then redacts every result AND error a per-host
+     token receives (`redact_work_for`: each session row's work fields,
+     the row's org looked up by id, failing closed). The backstop exists
+     because session rows reach a host through ~20 tools
+     (`new_session`, `whoami`, `work_link`'s own answer …); `list_sessions`
+     also redacts typed rows before `fresh_for` hashes the page.
+  4. **`work_rejected` never reaches a per-host token.** It is a list of
+     bare keys with no org of their own, read only by the sidebar's fallback
+     recognition; the matrix found an A session carrying B's rejected key.
+  5. **No existence oracle, two shapes.** An item / link / tracker id
+     outside the scope answers exactly as an unknown id (`E_NOTFOUND`, same
+     sentence). A key or URL outside it: `lookup`, `context`, `resume_plan`
+     and `resume` answer one `E_FORBIDDEN` sentence whether or not the key
+     exists (the plan's acceptance 3); `work_link { link | reject, key }`
+     links it as the BARE key the host typed (`WorkTarget::Ref`) — exactly
+     what an unknown key does — instead of refusing, because refusing only
+     keys that exist was an oracle (security review, finding M3).
+  6. **Cross-org integrity reaches further than `link`.** `confirm` (a
+     suggestion becoming a link), `start` and `resume` apply the same rule
+     with the same `force_cross_org`; detection never creates or promotes a
+     cross-org link; the sync never binds a bare key to another org's
+     tracker item, nor fetches one on behalf of another org's session
+     (review finding M4). The desktop offers "Link anyway" for link and
+     confirm; start and resume accept the flag but have no UI for it yet.
+  7. **Briefs are written for their reader.** `work { context }` under the
+     caller's scope; a resume brief under the landing host's (a per-host
+     token is always its own reader, so it cannot borrow another host's
+     scope — review finding H1); a start's ticket brief is dropped when the
+     ticket is not visible to the landing host (a forced cross-org start);
+     the SessionStart context (M4.5) under the row's host.
+  8. **D7 covers more than list / message / dispatch**: `whoami`,
+     `peer_status`, `related_sessions`, `session_history`, the eight repo
+     reads, `send_message` (both addressing forms, before the "retired"
+     check), `broadcast_prompt`, `plan_start`'s `E_EXISTS` details, a
+     ticket's `live_session_ids`, and `session:*` frames including
+     `session:event` / `session:conversations` (review finding H2).
+     `dispatch_task` needed nothing: a per-host token already reaches only
+     its own host's workers. D7 is symmetric: an isolating org's sessions
+     are hidden from other orgs' hosts, and its hosts see only its own and
+     unassigned sessions; a host always sees its own host's sessions.
+  9. **`/events`.** `work:*` frames stay off host-bound streams entirely
+     (M3's rule, stricter than an org filter). Session frames are fenced
+     per frame from the row's own `org_id`; a stream re-reads its scope when
+     an org change bumps a process-wide generation (checked per frame), and
+     on the keep-alive beat, and ENDS when the scope moved — the client
+     reconnects under the new one.
+  10. **Resolution details.** Path rules match the worktree's path, else the
+      project's `base_path`, on a directory boundary; fleet stores no cwd, so
+      a session with no project resolves by host rules and the host's org
+      only. A host-only rule ranks below owner rules and above
+      `hosts.org_id`. Owner / repo match ASCII case-insensitively (SQL
+      `lower()`); ties go to the lower rule id. `repo` requires `owner`
+      (a CHECK the plan did not have), and `path_prefix = "/"` is refused.
+  11. **Past links keep their org.** `work_links.snap_org_id` is written by a
+      second retirement trigger (the 046 snapshot's companion, independent of
+      trigger order); links that ended before 050 fall back to the rules over
+      their snapshot (host, project).
+  12. **Existing data lands in no org** ("the default org" is *unassigned*):
+      a fleet with no named org has no boundary and no new chrome, exactly as
+      before; a test migrates an M4 database and reads it back unchanged.
+  13. **Admin surface.** `work_admin` actions `list_orgs`, `add_org`,
+      `update_org`, `remove_org` (`E_INVALID_STATE` naming the trackers),
+      `add_rule`, `remove_rule`, `assign_host`, `unassign_host`,
+      `assign_tracker` (no `org_id` = unassign). Desktop: seven LocalOnly
+      commands with REASONS (`add_org`, `update_org`, `remove_org`,
+      `add_org_rule`, `remove_org_rule`, `assign_host_org`,
+      `assign_tracker_org`) and three Routed reads (`work_scopes`,
+      `list_orgs`, `org_suggestions`). CLI: `fleet-hub org list | add | set |
+      rm | rule add | rule rm | assign-host | assign-tracker` (`set` and
+      `rm` in place of the plan's unnamed update / remove). An org change
+      that moves sessions bumps their `row_version` and emits
+      `session:updated` for each — no new event kind.
+  14. **Suggestions** pair a tracker site with the GitHub owner of the same
+      name (`acme.atlassian.net` + `acme/*`), and are empty for a single-owner
+      fleet with no tracker (nothing to separate).
+  15. **UI.** The needs-you line lives in a new `ScopeAttention.svelte` next
+      to `Attention.svelte` (which is a screen-reader announcer with no
+      visible entries). "Unassigned" is offered by the selector but never
+      counts towards the two scopes that show it. ⌘K scopes sessions by
+      their scope and tickets by their tracker's org; an unassigned
+      tracker's tickets show in every scope. The Today view does not exist
+      yet (M9).
+  16. **M5.5's `rowMatches`** takes a normalised `FilterRow` (session,
+      ticket or past link) so one function serves all three; tracker,
+      status category, assignee, has-session and archived compose and are
+      truth-table tested, but only scope, host, bg and needs-you have
+      controls today.
+  17. **Tool budget:** +627 B (`work_admin`'s eight org parameters; its
+      description cut to "see action") and +87 B (`force_cross_org`),
+      measured and recorded at `BUDGET_BYTES` (69,199). No new tool, no
+      contract revision bump; the contract golden gained `org_id` on
+      `SessionRow`, `HostRow` and `WorkLinkRow`.
+  18. **Accepted trade-off (review finding M5):** with `isolate_sessions`
+      off, a session's own fields — friendly name, branch, worktree, last
+      prompt, its timeline — stay readable by other orgs' hosts, and a start
+      names the worktree after the ticket. These are session data, which the
+      plan fences only under D7; the docs say so.
+- **Open decisions (the user's):**
+  - Should a per-host token read its whole org's tickets (not only those
+    linked on its own host)? Default kept: own host AND own org.
+  - Should `isolate_sessions` also redact session names / branches of
+    other orgs' sessions when off, rather than being all-or-nothing?

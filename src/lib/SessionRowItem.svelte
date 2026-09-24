@@ -47,10 +47,13 @@
     setWorkProjectTrust,
     unlinkSessionWork,
     workWhy,
+    crossOrgOf,
+    crossOrgSentence,
     type WorkLink,
   } from './work';
   import { fleetSettings, SETTING_KEYS } from './fleet_settings';
   import type { Result } from './result';
+  import { orgs } from './orgs';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -78,6 +81,7 @@
     askRecreate,
     askRestart,
     askKill,
+    orgColor = null,
   }: {
     sess: SessionRow;
     selectMode: boolean;
@@ -117,6 +121,9 @@
     askRecreate: (sess: SessionRow, e?: Event) => void;
     askRestart: (sess: SessionRow, e?: Event) => void;
     askKill: (sess: SessionRow, e?: Event) => void;
+    /** Work graph M5: the org's colour, drawn as a thin bar at the row's
+     *  left edge — only when two or more orgs exist (the caller decides). */
+    orgColor?: string | null;
   } = $props();
 
   const sessSelected = $derived($selectedSession?.id === sess.id);
@@ -206,27 +213,50 @@
     workDraft = '';
   }
 
+  // Work graph M5: a link across orgs is refused with a reason; the menu
+  // explains it and offers "Link anyway", which retries with the override.
+  let crossOrg = $state<{ sentence: string; retry: () => Promise<Result<unknown>> } | null>(null);
+
   async function workAction(
     run: () => Promise<Result<unknown>>,
     failure: string,
+    forced?: { what: string; retry: () => Promise<Result<unknown>> },
   ) {
     if (workBusy) return;
     workBusy = true;
     const r = await run();
     workBusy = false;
     if (!r.ok) {
+      const c = forced ? crossOrgOf(r.error) : null;
+      if (c && forced) {
+        const names = new Map($orgs.map((o) => [o.id, o.name]));
+        crossOrg = { sentence: crossOrgSentence(forced.what, c, (id) => names.get(id)), retry: forced.retry };
+        return;
+      }
       pushError(r.error, failure);
       return;
     }
+    crossOrg = null;
     workMenuOpen = false;
     workDraft = '';
+  }
+
+  function linkAnyway(e?: Event) {
+    e?.stopPropagation();
+    const c = crossOrg;
+    if (!c) return;
+    crossOrg = null;
+    void workAction(c.retry, 'Set work failed');
   }
 
   function setWork(e?: Event) {
     e?.stopPropagation();
     const key = workDraft.trim();
     if (!key) return;
-    void workAction(() => linkSessionWork(sess.id, { key }), 'Set work failed');
+    void workAction(() => linkSessionWork(sess.id, { key }), 'Set work failed', {
+      what: key.toUpperCase(),
+      retry: () => linkSessionWork(sess.id, { key }, { forceCrossOrg: true }),
+    });
   }
 
   function rejectWork(e: Event) {
@@ -297,7 +327,10 @@
 
   function confirmLink(linkId: number, e?: Event) {
     e?.stopPropagation();
-    void workAction(() => confirmSessionWork(sess.id, linkId), 'Confirm failed');
+    void workAction(() => confirmSessionWork(sess.id, linkId), 'Confirm failed', {
+      what: 'That suggestion',
+      retry: () => confirmSessionWork(sess.id, linkId, { forceCrossOrg: true }),
+    });
   }
 
   function rejectLink(linkId: number, e?: Event) {
@@ -361,6 +394,8 @@
   class:stuck={sess.stuck_kind !== null}
   data-testid="sess-row"
   data-session-id={sess.id}
+  data-org-color={orgColor ?? undefined}
+  style:box-shadow={orgColor ? `inset 3px 0 0 ${orgColor}` : undefined}
   data-stuck={sess.stuck_kind ?? undefined}
   data-bucket={triage.bucket}
   role="button"
@@ -612,6 +647,22 @@
                     Trust branch keys in this repo
                   </label>
                 {/if}
+              </div>
+            {/if}
+            {#if crossOrg}
+              <div class="cross-org" data-testid="cross-org" role="alert">
+                <span>{crossOrg.sentence}</span>
+                <button class="work-btn" data-testid="cross-org-force" disabled={workBusy} onclick={linkAnyway}
+                  >Link anyway</button
+                >
+                <button
+                  class="work-btn"
+                  data-testid="cross-org-cancel"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    crossOrg = null;
+                  }}>Cancel</button
+                >
               </div>
             {/if}
             <input
@@ -974,6 +1025,14 @@
     gap: 0.3rem;
     align-items: center;
     color: var(--fg-muted);
+  }
+  .cross-org {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    align-items: center;
+    font-size: 0.72rem;
+    color: var(--warn, #f59e0b);
   }
   .work-menu {
     display: flex;

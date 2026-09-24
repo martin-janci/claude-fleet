@@ -250,6 +250,31 @@ const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[(
 
 /// The other half of the tool check in [`check`]: a wrong tool must not be
 /// able to hide by having no case at all.
+/// Work graph M5: every Routed work command is one fleet-core's isolation
+/// matrix knows (`ROUTED_WORK_COMMANDS`, whose actions the matrix runs for
+/// every caller), and the list names nothing this table does not route.
+#[test]
+fn every_routed_work_command_is_in_the_isolation_matrix() {
+    let table: BTreeSet<(&str, &str)> = VERDICTS
+        .iter()
+        .filter_map(|(cmd, v)| match v {
+            Verdict::Routed { tool } if matches!(*tool, "work" | "work_link" | "work_admin") => {
+                Some((*cmd, *tool))
+            }
+            _ => None,
+        })
+        .collect();
+    let listed: BTreeSet<(&str, &str)> = fleet_core::service::work::ROUTED_WORK_COMMANDS
+        .iter()
+        .map(|(cmd, tool, _)| (*cmd, *tool))
+        .collect();
+    assert_eq!(
+        table, listed,
+        "a Routed work command without an isolation-matrix entry (or a stale entry): add it \
+         to fleet_core::service::work::ROUTED_WORK_COMMANDS"
+    );
+}
+
 #[test]
 fn every_routed_row_is_driven_by_a_case() {
     let driven: BTreeSet<&str> = routed_read_cases()
@@ -491,6 +516,27 @@ fn routed_read_cases() -> Vec<Case> {
             Box::new(|b, s, _| {
                 block_on(commands::trackers::routed::list_trackers(b, s)).map(|_| ())
             }),
+        ),
+        (
+            "work_scopes",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "scopes" }),
+            r#"[{"id":1,"label":"Company A","session_count":2,"needs_you":1}]"#,
+            Box::new(|b, s, _| block_on(commands::orgs::routed::work_scopes(b, s)).map(|_| ())),
+        ),
+        (
+            "list_orgs",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "orgs" }),
+            r#"[{"id":1,"name":"Company A","created_at":1,"rules":[{"id":2,"org_id":1,"owner":"acme"}],"hosts":["h"],"trackers":[]}]"#,
+            Box::new(|b, s, _| block_on(commands::orgs::routed::list_orgs(b, s)).map(|_| ())),
+        ),
+        (
+            "org_suggestions",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "org_suggestions" }),
+            r#"[{"name":"acme","owner":"acme","sessions":2,"reason":"2 live sessions under acme/*"}]"#,
+            Box::new(|b, s, _| block_on(commands::orgs::routed::org_suggestions(b, s)).map(|_| ())),
         ),
         (
             "work_tickets",
@@ -968,6 +1014,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         session_id: 7,
                         key: Some("ABC-1".into()),
                         item_id: None,
+                        force_cross_org: false,
                     },
                     s,
                 ))
@@ -1016,6 +1063,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         link_id: Some(4),
                         host_alias: None,
                         brief: Some("edited".into()),
+                        force_cross_org: false,
                     },
                     s,
                     &ssh(),
@@ -1074,6 +1122,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                     commands::work::ConfirmSessionWorkArgs {
                         session_id: 7,
                         link_id: 5,
+                        force_cross_org: false,
                     },
                     s,
                 ))
@@ -1872,6 +1921,7 @@ fn standalone_work_links_are_decided_in_the_local_store() {
                 session_id: 99,
                 key: Some("ABC-1".into()),
                 item_id: None,
+                force_cross_org: false,
             },
             &st,
         )),
@@ -3217,6 +3267,7 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/trackers.rs",
         include_str!("../commands/trackers.rs"),
     ),
+    ("commands/orgs.rs", include_str!("../commands/orgs.rs")),
     (
         "commands/worktrees.rs",
         include_str!("../commands/worktrees.rs"),
