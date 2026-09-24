@@ -761,6 +761,89 @@ fn peer_exchange_bodies_never_reach_the_persisted_audit_trail() {
     );
 }
 
+/// G1 (review): `persist_audit` runs BEFORE `enforce_mode` in `call_tool`
+/// ("audit first so refused calls are on the timeline too"), so a peer
+/// token's call to any tool OTHER than `peer_exchange` — refused a moment
+/// later — used to still write the peer-chosen tool name and its (redacted)
+/// args onto the controller's session, `find_audit_session` falling back to
+/// the controller. `tool` there is entirely peer-chosen and never
+/// truncated. A `Peer` caller must never persist an audit row, whatever tool
+/// it names.
+#[test]
+fn a_refused_peer_call_writes_no_audit_row() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let args = serde_json::json!({ "host_alias": "local" });
+    persist_audit(
+        &store,
+        "list_sessions",
+        args.as_object(),
+        &client_caller("hub-a", TokenMode::Peer),
+    );
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    assert!(
+        !events.iter().any(|e| e.kind == "mcp_call"),
+        "a peer caller's refused tool call must not persist an audit row: {events:?}"
+    );
+}
+
+/// G19 (review): a remote message's stored `body` is already wrapped in the
+/// untrusted-content marker (`apply.rs`'s `mark_untrusted`) — for a marker
+/// naming a realistic sender address, that line alone runs past
+/// `INBOX_PREVIEW_CHARS` (80), so the unstripped preview used to be all
+/// marker and no message, even though the row is already flagged foreign
+/// via `from_addr` regardless.
+#[test]
+fn a_remote_messages_inbox_preview_strips_the_untrusted_marker() {
+    let body = guard::mark_untrusted("short reply", "fleet-b/session/h/b1 over a hub link");
+    assert!(
+        body.lines().next().unwrap().len() > INBOX_PREVIEW_CHARS,
+        "fixture marker must itself exceed the preview cap for this test to mean anything"
+    );
+    let m = crate::store::SessionMessage {
+        id: 1,
+        from_session_id: 0,
+        to_session_id: 5,
+        body,
+        kind: "message".into(),
+        sent_at: 0,
+        read_at: None,
+        reply_to: None,
+        from_addr: Some("fleet-b/session/h/b1".into()),
+        to_addr: Some("/session/local/alpha".into()),
+    };
+    let summary = InboxSummary::from(m);
+    assert_eq!(summary.body_preview, "short reply");
+}
+
+/// A local message's `body` carries no marker, so the preview is untouched.
+#[test]
+fn a_local_messages_inbox_preview_is_the_raw_body() {
+    let m = crate::store::SessionMessage {
+        id: 1,
+        from_session_id: 3,
+        to_session_id: 5,
+        body: "hi there".into(),
+        kind: "message".into(),
+        sent_at: 0,
+        read_at: None,
+        reply_to: None,
+        from_addr: None,
+        to_addr: None,
+    };
+    let summary = InboxSummary::from(m);
+    assert_eq!(summary.body_preview, "hi there");
+}
+
 #[test]
 fn ok_json_never_emits_an_empty_text_block() {
     // Even degenerate values must serialize to a non-empty text block, so a

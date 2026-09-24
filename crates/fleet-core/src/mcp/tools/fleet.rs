@@ -183,8 +183,9 @@ impl FleetTools {
         access log ever sees it; the device posts it to the hub's /pair once \
         and gets a token of its own back. name must be 1-64 characters with no \
         control characters and must not be one a live client already holds. \
-        mode is full (drive sessions fleet-wide) or readonly (observe only); \
-        fleet-admin tools are out of a client's reach either way. Codes live \
+        mode is full (drive sessions fleet-wide), readonly (observe only), or \
+        peer (another hub's link — see peer_exchange); fleet-admin tools are \
+        out of a client's reach either way. Codes live \
         in memory only, so a hub restart invalidates every outstanding one. \
         Master token only. Returns JSON { url, code, expires_in_s, name, mode, \
         trusted }.")]

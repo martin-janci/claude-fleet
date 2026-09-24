@@ -491,48 +491,74 @@ fn send_remote(
     let detail = timeline_detail(&args.body);
     let s = lock(store)?;
     let id = s.atomically(|s| {
+        // G8(b) (review): `client revoke` revokes only the `client_tokens`
+        // row, never the link itself (a re-pair keeps pending rows
+        // attached — Ruling 6), so a listener whose paired hub was revoked
+        // kept queuing new outbound rows for that fleet indefinitely; a
+        // parked exchange handler on the other side would keep serving them
+        // for up to its own 25s window, and every message after that piled
+        // up undeliverable. Refuse up front instead.
+        if let Some(link) = s.peer_link(link_id)? {
+            let listener_revoked = link.role == crate::store::LINK_ROLE_LISTENER
+                && match link.client_id {
+                    Some(client_id) => !s.client_token_is_live(client_id)?,
+                    None => true,
+                };
+            if listener_revoked {
+                return Err(IpcError::new(
+                    codes::E_UNSUPPORTED,
+                    format!("the link to fleet {peer_fleet} has been revoked on this hub"),
+                ));
+            }
+        }
         let from = s.get_session_by_id(args.from_session_id)?.ok_or_else(|| {
             IpcError::new(
                 codes::E_NOTFOUND,
                 format!("from session {} not found", args.from_session_id),
             )
         })?;
-        if let Some(parent_id) = args.reply_to {
-            let mine = s.participant_for_session(args.from_session_id)?;
-            let involved = match mine {
-                Some(p) => s.message_involves_participant(parent_id, p.id)?,
-                None => false,
-            };
-            if !involved {
-                return Err(IpcError::new(
-                    codes::E_INVALID,
-                    format!(
-                        "reply_to message {parent_id} does not involve session {}",
-                        args.from_session_id
-                    ),
-                ));
-            }
-            // A parent from a third fleet would hand this peer that fleet's
-            // id and message id — and the peer refuses it anyway.
-            if let Some((parent_fleet, _)) = s.remote_ref_of(parent_id)? {
-                if parent_fleet != peer_fleet {
-                    return Err(IpcError::new(
-                        codes::E_INVALID,
-                        format!(
-                            "reply_to message {parent_id} came from another fleet; \
-                             a reply across a link threads only onto a local message \
-                             or one from {peer_fleet}"
-                        ),
-                    ));
-                }
-            }
-        }
         let from_addr = crate::service::address::render(&crate::service::address::Addr::Session {
             fleet: Some(fleet.clone()),
             host: from.host_alias.clone(),
             name: from.tmux_name.clone(),
         });
+        // G4 (review): only `to_addr` was capped here; an oversized
+        // `from_addr` (an overlong host/tmux name) would queue fine and
+        // only be refused a round trip later, at the peer's own
+        // `check_addr_len` on receipt — this becomes the recipient's
+        // hook-delivery sender label, which has the same hard budget.
+        crate::service::peer::validate::check_addr_len("the sender address", &from_addr)
+            .map_err(|r| IpcError::new(r.code, format!("to another fleet, {}", r.message)))?;
         let to_p = s.ensure_remote_participant(link_id, to_addr)?;
+        if let Some(parent_id) = args.reply_to {
+            // G2 (review): the OLD check asked only whether the parent
+            // involved the SENDER's own participant, and separately refused
+            // a parent from a third fleet — neither of which is what the
+            // RECEIVING peer actually validates. `wire_ref_for` sends a
+            // local parent as `{own_fleet, id}`; the peer's own
+            // `map_reply_to` accepts that shape only when the parent
+            // involves ITS OWN recipient participant on this link. A parent
+            // the sender took part in but never exchanged with `to_addr`
+            // (e.g. a purely local thread) sailed past the old check,
+            // queued, and only came back a round trip later as
+            // `message_undeliverable`.
+            //
+            // Accept only what the peer will recognise: a parent it sent us
+            // (it will recognise its own `{peer_fleet, id}`), or a parent we
+            // already exchanged with the SAME remote participant (the peer
+            // will recognise `{own_fleet, id}` against a row it sent onto
+            // this link).
+            let from_target_fleet = s
+                .remote_ref_of(parent_id)?
+                .is_some_and(|(origin_fleet, _)| origin_fleet == peer_fleet);
+            let exchanged_with_recipient = s.message_involves_participant(parent_id, to_p)?;
+            if !from_target_fleet && !exchanged_with_recipient {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("reply_to must be a message exchanged with {to_addr}"),
+                ));
+            }
+        }
         let id = s.insert_outbound_remote(
             args.from_session_id,
             &from_addr,
@@ -1113,6 +1139,167 @@ mod tests {
             .unwrap()
             .is_empty());
         send_message(reply(from_b), &store, &ssh).await.unwrap();
+    }
+
+    /// G2 (review): the OLD check asked only whether the parent involved the
+    /// SENDER's own participant — never whether it was ever exchanged with
+    /// `to_addr`, which is what the RECEIVING peer actually validates
+    /// (`map_reply_to`). A purely local parent (sender's own thread, never
+    /// touching the target fleet) sailed past that check, queued, and only
+    /// bounced back a round trip later as `message_undeliverable`. It must
+    /// now be refused before anything is queued.
+    #[tokio::test]
+    async fn a_reply_to_a_purely_local_parent_is_refused_before_it_queues() {
+        let (store, ssh, a, b) = fixture();
+        let parent = send_message(args(a, b, "purely local"), &store, &ssh)
+            .await
+            .unwrap()
+            .id;
+        let link = {
+            let s = store.lock().unwrap();
+            let id = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+        };
+        let mut reply = args(a, 0, "re");
+        reply.to_addr = Some("fleet-b/session/h/b1".into());
+        reply.reply_to = Some(parent);
+        let e = send_message(reply, &store, &ssh).await.unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{}", e.message);
+        assert!(
+            e.message
+                .contains("reply_to must be a message exchanged with"),
+            "{}",
+            e.message
+        );
+        assert!(store
+            .lock()
+            .unwrap()
+            .pending_outbox(link, 0, 50)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A parent this hub RECEIVED from the target fleet is accepted: the
+    /// peer will recognise its own `{peer_fleet, id}` on the wire.
+    #[tokio::test]
+    async fn a_reply_to_a_parent_received_from_the_target_fleet_is_accepted() {
+        let (store, ssh, a, _b) = fixture();
+        let (link, from_b) = {
+            let s = store.lock().unwrap();
+            let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(link, "fleet-b").unwrap();
+            let pb = s
+                .ensure_remote_participant(link, "fleet-b/session/h/b1")
+                .unwrap();
+            let crate::store::Inbound::Inserted(from_b) = s
+                .insert_inbound_remote("fleet-b", 1, pb, a, "from b", "message", None)
+                .unwrap()
+            else {
+                panic!("inserted")
+            };
+            (link, from_b)
+        };
+        let mut reply = args(a, 0, "re");
+        reply.to_addr = Some("fleet-b/session/h/b1".into());
+        reply.reply_to = Some(from_b);
+        send_message(reply, &store, &ssh).await.unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .pending_outbox(link, 0, 50)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// A parent this hub already SENT to the same remote recipient is
+    /// accepted too — the peer will recognise its own `{own_fleet, id}`
+    /// against a row it received on this link, whoever locally sends the
+    /// follow-up.
+    #[tokio::test]
+    async fn a_reply_to_a_parent_previously_sent_to_the_same_remote_recipient_is_accepted() {
+        let (store, ssh, a, _b) = fixture();
+        let link = {
+            let s = store.lock().unwrap();
+            let id = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+        };
+        let mut first = args(a, 0, "hi b");
+        first.to_addr = Some("fleet-b/session/h/b1".into());
+        let parent = send_message(first, &store, &ssh).await.unwrap().id;
+        let mut reply = args(a, 0, "re");
+        reply.to_addr = Some("fleet-b/session/h/b1".into());
+        reply.reply_to = Some(parent);
+        send_message(reply, &store, &ssh).await.unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .pending_outbox(link, 0, 50)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// G4 (review): only `to_addr` was capped; an oversized `from_addr` (an
+    /// overlong tmux name) queued fine and would only be refused a round
+    /// trip later, at the peer's own `check_addr_len` on receipt.
+    #[tokio::test]
+    async fn an_oversized_from_addr_is_refused_before_it_queues() {
+        let (store, ssh, _a, _b) = fixture();
+        let long_name = "n".repeat(crate::service::peer::wire::PEER_ADDR_MAX);
+        let long_sender = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_session(&long_name, "local", None, None, 0, 0, "running", None)
+                .unwrap()
+        };
+        let link = {
+            let s = store.lock().unwrap();
+            let id = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+        };
+        let mut m = args(long_sender, 0, "hi");
+        m.to_addr = Some("fleet-b/session/h/b1".into());
+        let e = send_message(m, &store, &ssh).await.unwrap_err();
+        assert_eq!(e.code, codes::E_VALIDATE, "{}", e.message);
+        assert!(store
+            .lock()
+            .unwrap()
+            .pending_outbox(link, 0, 50)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// G8(b) (review): a listener link survives `client revoke` — only the
+    /// `client_tokens` row is revoked, never the link itself, because a
+    /// re-pair keeps pending rows attached. Without this check a send
+    /// through the now-revoked link would keep queuing forever, with no way
+    /// for the far end (which will never poll again) to ever see it.
+    #[tokio::test]
+    async fn a_send_through_a_revoked_listener_link_is_refused() {
+        let (store, ssh, a, _b) = fixture();
+        let link = {
+            let s = store.lock().unwrap();
+            let client = s.insert_client_token("hub-b", "sha-hub-b", "peer").unwrap();
+            let row = s.ensure_listener_link(client.id, "fleet-b").unwrap();
+            s.revoke_client_token("hub-b").unwrap();
+            row.id
+        };
+        let mut m = args(a, 0, "hi");
+        m.to_addr = Some("fleet-b/session/h/b1".into());
+        let e = send_message(m, &store, &ssh).await.unwrap_err();
+        assert_eq!(e.code, codes::E_UNSUPPORTED, "{}", e.message);
+        assert!(e.message.contains("revoked"), "{}", e.message);
+        assert!(store
+            .lock()
+            .unwrap()
+            .pending_outbox(link, 0, 50)
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

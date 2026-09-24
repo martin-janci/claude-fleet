@@ -511,6 +511,16 @@ pub(super) fn persist_audit(
     if tool == crate::mcp::auth::PEER_TOOL {
         return;
     }
+    // G1 (review): this runs BEFORE `enforce_mode` in `call_tool`, so a
+    // `Peer` token's call to any OTHER tool — refused a moment later — would
+    // otherwise still land on the controller's timeline: `tool` is entirely
+    // peer-chosen and never truncated, and `find_audit_session` falls back
+    // to the controller when the peer-supplied args name no real session. A
+    // hub link may only ever reach `peer_exchange` (handled above), so any
+    // other tool it names is refused and must leave no trace.
+    if caller.mode == TokenMode::Peer {
+        return;
+    }
     let Ok(s) = store.lock() else { return };
     let Some(session_id) = find_audit_session(&s, args) else {
         return;
@@ -865,7 +875,19 @@ pub(super) const INBOX_PREVIEW_CHARS: usize = 80;
 impl From<crate::store::SessionMessage> for InboxSummary {
     fn from(m: crate::store::SessionMessage) -> Self {
         let body_chars = m.body.chars().count();
-        let body_preview: String = m.body.chars().take(INBOX_PREVIEW_CHARS).collect();
+        // G19 (review): a remote message's stored `body` is already wrapped
+        // in the untrusted-content marker (`apply.rs`'s `mark_untrusted`) —
+        // for a marker sized like a typical fleet id and address, that alone
+        // can run well past `INBOX_PREVIEW_CHARS`, so an unstripped preview
+        // is all marker and no message. `from_addr` is set only for a
+        // remote row, and the row is still flagged foreign via that same
+        // field either way, so stripping the marker here loses no signal.
+        let preview_source: &str = if m.from_addr.is_some() {
+            guard::strip_marker(&m.body)
+        } else {
+            &m.body
+        };
+        let body_preview: String = preview_source.chars().take(INBOX_PREVIEW_CHARS).collect();
         Self {
             id: m.id,
             from_session_id: m.from_session_id,
